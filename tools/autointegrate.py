@@ -113,7 +113,10 @@ def bisect_first_bad(merged, failed_jobs_):
     return lo
 
 
-def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=25):
+SUSPECT = None
+
+
+def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=180):
     """THE PIECE-FIX RULE. A red batch is usually a handful of small, customary breakages where many branches meet (a
     half-applied conflict resolution, a helper renamed in one branch and still called by its old name in another, an
     unregistered test file, a stale marker or hard-coded count, two fixes of one thing). An agent working on the MERGED tree fixes
@@ -131,16 +134,21 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=25):
         name = "%s-a%d" % (base, attempt)
         task = ("The integrator merged %d finished branches onto master in ONE batch and the full gate is RED. You start on branch %s: "
                 "EXACTLY that merged tree. Jobs failing (confirmed by re-running them alone, so not load): %s.\n\nFailure excerpt:\n%s\n\n"
-                "Make each of them pass with the SMALLEST edits. The usual and customary breakages when many branches meet: a conflict "
-                "resolved wrongly or left half-applied; a helper renamed or moved by one branch and still called by its old name from "
-                "another; a registration or estate entry missing for a new test file; a stale expected-failure marker, hard-coded count or "
-                "table row; two branches fixing the same thing two ways (consolidate to one, CLAUDE.md); an index/doc conflict. Use "
-                "`git log --merges --oneline master..HEAD` to see which branch each file came from. You may run EXACTLY the failing jobs "
-                "to verify: python3 tools/suite.py %s (they reserve their own memory; one at a time). Do NOT revert or disable a branch's "
-                "behaviour, and do NOT delete or skip a test to get green. Commit each fix on its own, with a message naming the branch it "
-                "repairs. If a problem is bigger than ~50 lines, or you cannot find the cause with a reasonable effort, STOP and say which "
-                "branch appears responsible and why: finish with CONTROL-STATUS: BLOCKED and a QUESTION: line naming it (that triggers a "
-                "bisect). Otherwise finish with the REPORT block and CONTROL-STATUS: DONE once ALL of those jobs pass."
+                "Make each of them pass. Fixes of ANY size are fine: thousands of lines is normal when many branches meet, so do not hold back "
+                "or bail out because a repair is big. The usual and customary breakages: a conflict resolved wrongly or left half-applied; a "
+                "helper renamed or moved by one branch and still called by its old name from another; a registration or estate entry missing "
+                "for a new test file; a stale expected-failure marker, hard-coded count or table row; two branches fixing the same thing two "
+                "ways (consolidate to one, CLAUDE.md); an index/doc conflict. Use `git log --merges --oneline master..HEAD` to see which "
+                "branch each file came from. HARD problems you SHOULD debug yourself, properly: a crash or SIGSEGV, a wrong value, a hang. "
+                "Use HOW-TO-DEBUG.html (the iota + rolling-hash bisection, section 8b) and tools/gdbtool (persistent lldb) and the "
+                "failing job's own test case: find the root cause, do not paper over it. You may run EXACTLY the failing jobs to verify: "
+                "python3 tools/suite.py %s (they reserve their own memory; one at a time). Do NOT revert or disable a branch's behaviour, and "
+                "do NOT delete or skip a test to get green. Commit each fix on its own with a message naming the branch it repairs. "
+                "ONLY if there is ONE hard issue that you cannot crack after a real, sustained effort: ISOLATE it, do not abandon the rest. "
+                "Finish the other repairs, then finish with CONTROL-STATUS: BLOCKED and a QUESTION: line that names the single failing test "
+                "case and the ONE branch (use its exact task name) or commit responsible and what you established; the integrator will "
+                "split that branch off and land everything else. Otherwise finish with the REPORT block and CONTROL-STATUS: DONE once ALL "
+                "of those jobs pass."
                 % (len(merged), base if attempt == 1 else prev, ", ".join(failed), excerpt, " ".join(failed)))
         ns = _ap.Namespace(name=name, claim=["task:" + name], task=task, task_file=None, file=[], base=(base if attempt == 1 else prev), model=None)
         try:
@@ -148,20 +156,20 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=25):
         except SystemExit as e:
             log("could not start the batch fixer: %s" % e); return False
         log("PIECE-FIX attempt %d: %s started on the merged tree (failing: %s)" % (attempt, name, ",".join(failed)))
-        t0 = time.time()
-        while time.time() - t0 < timeout_min * 60:
-            time.sleep(20)
-            tasks = C.load()
-            family = [n for n in tasks if n == name or n.startswith(name + "-r")]       # unstick restarts it as NAME-rN
-            if not any(C.state_of(tasks[n]) == "running" for n in family):
-                break
+        wait_family(name)                                      # unstick restarts a stalled one as NAME-rN; no wall-clock cap
         tasks = C.load()
         family = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
-        done = [n for n in family if C.ahead(tasks[n]) > 0 and tasks[n].get("state") != "abandoned"]
-        for n in family:                                       # timed out: stop it
+        for n in family:
             if C.state_of(tasks[n]) == "running":
                 try: os.killpg(tasks[n]["pid"], 15)
                 except OSError: pass
+            snapshot_tree(tasks[n], "the fixer exited with uncommitted work")
+        done = [n for n in family if C.ahead(tasks[n]) > 0 and tasks[n].get("state") != "abandoned"]
+        qtext = " ".join(q for n in family for q in C.questions(tasks[n]))
+        global SUSPECT
+        SUSPECT = next((m for m in merged if m in qtext), None)
+        if SUSPECT:
+            log("PIECE-FIX attempt %d isolated ONE hard issue; suspect branch: %s (%s)" % (attempt, SUSPECT, qtext[:160]))
         if not done:
             log("PIECE-FIX attempt %d produced no commits (%s)" % (attempt, "BLOCKED" if any(C.verdict(tasks[n]) == "BLOCKED" for n in family) else "timeout/none"))
             return False
@@ -179,7 +187,65 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=25):
     return False
 
 
-def merge_conflicts(M, X, timeout_min=45):
+def snapshot_tree(t, why):
+    """Commit whatever a worker left uncommitted, so its branch is integrable (the integrator refuses a dirty tree)."""
+    wt = t["worktree"]
+    C.git("add", "-A", cwd=wt, check=False)
+    if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=wt).returncode != 0:
+        C.git("commit", "-q", "-m", "WIP snapshot by controller: " + why, cwd=wt, check=False)
+
+
+def family_running(name):
+    tasks = C.load()
+    return any(C.state_of(tasks[n]) == "running" for n in tasks if n == name or n.startswith(name + "-r"))
+
+
+def wait_family(name, cap_h=12):
+    """Wait for a worker (and any -rN restart of it) while it is alive. NOT a time-box: the cap is a 12 h backstop only; a
+    stalled or network-killed worker is restarted by `unstick`. (A 3 h cap once killed a merger 13 of 27 merges in.)"""
+    t0 = time.time()
+    while time.time() - t0 < cap_h * 3600 and family_running(name):
+        time.sleep(20)
+
+
+def settle(st, red, merged, failed, rc, out):
+    """Everything after a batch's gate: green lands; red -> piece-fix on the merged tree -> (only then) isolate and bisect.
+    Returns True if the integrator was busy."""
+    tail = [l for l in out.splitlines() if l.startswith(("GREEN", "RED", "CONFLICT", "the red did NOT"))]
+    log("batch result rc=%d merged=%d failed jobs=%s %s" % (rc, len(merged), failed or "-", " | ".join(tail)[:200]))
+    if "another integrator" in out:
+        return True
+    if "nothing to integrate" in out:
+        log("ERROR: the integrator refused what it was given (nothing to integrate): not treating that as success")
+        for n in merged: red[n] = head_sha(n)
+        json.dump(st, open(STATE, "w"))
+        return False
+    if rc != 0 and merged:
+        if not failed:
+            log("red but no failing job could be named: setting the whole batch aside for a human")
+            for n in merged: red[n] = head_sha(n)
+        elif fix_forward(merged, failed, os.path.join(I.INTEG, "gate.log")):
+            log("PIECE-FIX landed the whole batch (%d branches + the fixes)" % len(merged))
+        else:
+            log("piece-fix did not get it green: isolating the one hard issue")
+            if SUSPECT and SUSPECT in merged and probe([n for n in merged if n != SUSPECT], failed):
+                k = merged.index(SUSPECT)
+                log("confirmed: without %s the failing jobs pass" % SUSPECT)
+            else:
+                k = bisect_first_bad(merged, failed)
+            culprit = merged[k]
+            log("first bad branch: %s (the %d before it pass %s)" % (culprit, k, ",".join(failed)))
+            red[culprit] = head_sha(culprit)
+            why = "breaks " + ",".join(failed) + " when merged after " + (merged[k - 1] if k else "master")
+            try:
+                enqueue_fixer(culprit, why + "\n" + failed_jobs(os.path.join(I.INTEG, "gate.log")))
+            except Exception as e:
+                log("could not queue a fixer for %s: %s" % (culprit, e))
+        json.dump(st, open(STATE, "w"))
+    return False
+
+
+def merge_conflicts(M, X, timeout_min=180):
     """Conflicts BETWEEN branches belong in ONE place: an agent on the merged tree merges the branches that conflicted, one after
     another, so each resolution sees the ones before it. (Resolving each against master separately, one fixer per branch, makes
     results that conflict with each other all over again: 25 fixers for 25 conflicts, none of them able to land.)"""
@@ -198,7 +264,7 @@ def merge_conflicts(M, X, timeout_min=45):
             "edit. After each merge make the tree COHERENT, not just textually merged: two branches fixing one thing two ways -> "
             "consolidate to one (CLAUDE.md); a helper renamed by one and called by the old name from another -> fix the call. After each "
             "merge run the narrow tests for the files involved (under python3 tools/memslot.py --gb 8 --label x --); commit. A branch whose "
-            "conflict is bigger than ~100 lines or that you cannot reconcile: skip it (git merge --abort), say which and why, and go on. "
+            "conflict is a genuine DESIGN conflict you cannot reconcile after a real effort (not merely large: thousands of lines is fine): skip just that one (git merge --abort), say which and why, and go on. "
             "Never use git stash. At the end run python3 test_suite.py, python3 test_memslot.py and python3 tools/suite.py smoke -j2 and "
             "report. Finish with the REPORT block and CONTROL-STATUS: DONE (or PARTIAL naming what you skipped)."
             % (base, len(M), len(X), lines))
@@ -208,19 +274,14 @@ def merge_conflicts(M, X, timeout_min=45):
     except SystemExit as e:
         log("could not start the conflict merger: %s" % e); return None
     log("CONFLICT-MERGE: %s started on the merged tree to merge %d conflicting branches: %s" % (name, len(X), ", ".join(X)[:200]))
-    t0 = time.time()
-    while time.time() - t0 < timeout_min * 60:
-        time.sleep(20)
-        tasks = C.load()
-        family = [n for n in tasks if n == name or n.startswith(name + "-r")]
-        if not any(C.state_of(tasks[n]) == "running" for n in family):
-            break
+    wait_family(name)
     tasks = C.load()
     family = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
     for n in family:
         if C.state_of(tasks[n]) == "running":
             try: os.killpg(tasks[n]["pid"], 15)
             except OSError: pass
+        snapshot_tree(tasks[n], "the merger exited with uncommitted work")
     done = [n for n in family if C.ahead(tasks[n]) > 0]
     if not done:
         log("CONFLICT-MERGE produced no commits"); return None
@@ -247,6 +308,23 @@ def main():
                     busy = True; break
         did = False
         if not busy:
+            # ADOPT: a merger/fixer that is still working (or finished) when this loop (re)starts is NOT thrown away and redone.
+            pend = [n for n, t in sorted(C.load().items(), key=lambda kv: kv[1]["slot"])
+                    if re.match(r"batchmerge-\d+(-r\d+)*$", n) and t.get("state") not in ("integrated", "abandoned", "superseded")
+                    and (C.state_of(t) == "running" or C.ahead(t) > 0) and red.get(n) != head_sha(n)]
+            if pend:
+                name = pend[-1]; did = True
+                log("ADOPT: merger %s (%s)" % (name, "still working: waiting for it" if family_running(name) else "finished"))
+                wait_family(name)
+                for n in [x for x in C.load() if x == name or x.startswith(name + "-r")]:
+                    snapshot_tree(C.load()[n], "the merger exited with uncommitted work")
+                fam = sorted((x for x in C.load() if x == name or x.startswith(name + "-r")), key=lambda x: C.load()[x]["slot"])
+                tgt = [x for x in fam if C.ahead(C.load()[x]) > 0][-1:]
+                if tgt:
+                    rc, out = run_integrate("--only", *tgt)
+                    if settle(st, red, parse(out, "MERGED"), parse(out, "FAILED_JOBS"), rc, out):
+                        busy = True
+                    continue
             # THE ALGORITHM: merge EVERY finished branch (priority order), run the gate ONCE, land everything if it is green.
             batch = [n for n in sorted(I.pick_candidates(quiet=True), key=C.priority_key)
                      if not I.infra_only(C.load()[n]["branch"]) and red.get(n) != head_sha(n)]
@@ -277,30 +355,8 @@ def main():
                     else:
                         rc, out = run_integrate("--only", *target)
                         merged, failed = (parse(out, "MERGED"), parse(out, "FAILED_JOBS"))
-                tail = [l for l in out.splitlines() if l.startswith(("GREEN", "RED", "CONFLICT", "the red did NOT"))]
-                log("batch result rc=%d merged=%d failed jobs=%s %s" % (rc, len(merged), failed or "-", " | ".join(tail)[:200]))
-                if "another integrator" in out:
+                if settle(st, red, merged, failed, rc, out):
                     busy = True
-                elif rc != 0 and merged:
-                    # Only if it goes wrong: step back and BISECT. The failing jobs ARE the test case: probe halves with just them.
-                    if not failed:
-                        log("red but no failing job could be named: setting the whole batch aside for a human"); 
-                        for n in merged: red[n] = head_sha(n)
-                    elif fix_forward(merged, failed, os.path.join(I.INTEG, "gate.log")):
-                        log("PIECE-FIX landed the whole batch (%d branches + the fixes)" % len(merged))
-                    else:
-                        log("piece-fix did not get it green: falling back to a BISECT")
-                        k = bisect_first_bad(merged, failed)
-                        culprit = merged[k]
-                        log("first bad branch: %s (the %d before it pass %s)" % (culprit, k, ",".join(failed)))
-                        red[culprit] = head_sha(culprit)
-                        why = "breaks " + ",".join(failed) + " when merged after " + (merged[k - 1] if k else "master")
-                        try:
-                            enqueue_fixer(culprit, why + "\n" + failed_jobs(os.path.join(I.INTEG, "gate.log")))
-                        except Exception as e:
-                            log("could not queue a fixer for %s: %s" % (culprit, e))
-                    json.dump(st, open(STATE, "w"))
-                    # the next iteration re-batches everything except the culprit: one gate lands the rest
         if a.once:
             return
         if busy or not did:

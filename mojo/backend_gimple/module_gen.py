@@ -1143,12 +1143,34 @@ def gen_module_impl(self, stmts):
     # The synthesised functions are added AFTER the classifier has run and
     # then the classification is refreshed, because a synthesised function is
     # not in `stmts` when classify_functions sees it.
-    _synth_names = _gmi_offload.synthesise_module(stmts)
+    #
+    # `--no-gpu` (`self.auto_gpu` False) skips the synthesis entirely. It
+    # does NOT change `_device_kinds`: a marked or registrar-reached function
+    # is still DEVICE, because that was an explicit request and the flag is
+    # about inference.
+    # BOTH halves: the synthesised kernels AND the host rewrite that calls
+    # them. The kernel alone is unreachable, which would make the whole
+    # feature dead code that compiles and never runs.
+    if getattr(self, 'auto_gpu', True):
+        stmts, _synth_names = _gmi_offload.offload_module(stmts)
+    else:
+        _synth_names = []
     if _synth_names:
         stmts = list(stmts) + list(_synth_names)
         _device_kinds = _gmi_device_select.classify_functions(stmts)
 
     _device_parts: list[str] = []
+    # A shared SET, not a bool, because this has to be shared by REFERENCE
+    # with every temp_gen the closure creates -- exactly like
+    # `_emitted_ptr_helpers` and `_module_stmts` (see the share block in
+    # emit_resolve._compile_imported_module, which is where the flag has to be
+    # wired in). A bool assigned across would copy its value, so an inner
+    # module's "I emitted it" would not reach the outer one and every module
+    # would emit its own copy -- which is the bug this fixes: a single-TU
+    # closure carries ~160 modules, and 18 redefinitions of
+    # `_mojo_gpu_kernel_count` failed `mojoc` and `selfhost` outright.
+    _mg_introspected = self.__dict__.setdefault(
+        '_mg_introspection_emitted', set())
     _device_names = sorted(n for n, k in _device_kinds.items()
                            if k == _gmi_device_select.DEVICE)
     # The host-side marshalling signature of every device kernel, computed
@@ -1198,9 +1220,9 @@ def gen_module_impl(self, stmts):
             # need the pack/unpack pair, whether or not any call site in this
             # module has been reached yet. The call-site pass adds to the
             # same set, so the preamble emits whichever is larger.
-            for _pn, _ct, _isb, _w in _tys:
-                if _isb:
-                    self._list_marshalling_needed.add(_ct[:-2])
+            for _a in _tys:
+                if _a.is_buffer:
+                    self._list_marshalling_needed.add(_a.ctype[:-2])
             # (name, c_type, is_buffer) triples, plus the element-count
             # index. The wrapper generator needs to tell a buffer from a
             # scalar; emit_calls.py reads only the c_types, from
@@ -7394,7 +7416,10 @@ def gen_module_impl(self, stmts):
         # is the same shape as the coroutine shim just below.
         *(['#include <fire_metal.h>',
            _gmi_device_glue.emit_launch_prototypes(_device_kernels_meta)]
-          if _device_kernels_meta else []),
+          if _device_kernels_meta
+          # The introspection prototypes are unconditional; the launch
+          # prototypes and the Metal include are not (see device_glue).
+          else [_gmi_device_glue.emit_introspection_prototypes()]),
         '#include <fire_sqlite3.h>',
         '#include <fire_zlib.h>',
         '#include <fire_ssl.h>',
@@ -7704,7 +7729,11 @@ def gen_module_impl(self, stmts):
         '',
         '',
         'char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename);',
-        'char *compile_to_gimple(char *mojo_src, int do_imports, char *filename);',
+        # The self-host forward declaration must match the definition's
+        # arity or the closure fails with "conflicting types for
+        # 'compile_to_gimple'". `auto_gpu` is keyword-with-default at every
+        # call site, but a 4th PARAMETER still changes the type.
+        'char *compile_to_gimple(char *mojo_src, int do_imports, char *filename, int auto_gpu);',
         'int64_t mojo_open_file(char *path);',
         *([] if ('open' in self.func_return_types or 'open' in self.imported_symbols) else ['void *mojo_open(char *filename, char *mode);']),
         'int64_t int_write (int64_t, char *);',
@@ -7887,7 +7916,13 @@ def gen_module_impl(self, stmts):
         _lm_s = _as_str(_lm)
         if _lm_s and _lm_s not in _lmn:
             _lmn.append(_lm_s)
-    _emitted_list_marshalling: set = set()
+    # SHARED, like _emitted_ptr_helpers: a pack/unpack pair is per-TU (one
+    # definition serves every module and every kernel), so a LOCAL set here
+    # emitted one per module and two GPU modules in one translation unit
+    # collided -- `redefinition of '_mg_pack_float'`, six such errors, from a
+    # two-module program. Same wrong-scope mistake as the introspection
+    # sidecar: state whose scope is the translation unit, tracked per module.
+    _emitted_list_marshalling = self._emitted_list_marshalling
     for _lm_s in sorted(_lmn):
         if _lm_s in _emitted_list_marshalling:
             continue
@@ -9449,7 +9484,13 @@ def gen_module_impl(self, stmts):
         parts.append("int64_t _compute_exc_descendants (MojoList *);")
         parts.append(f"void {_interp_init} (Interpreter *, char *, MojoList *);")
         parts.append(f"int64_t {_interp_exec} (Interpreter *, int64_t);")
-        parts.append("_Bool jit_compile_and_execute (char *, char *, int64_t, int64_t, int64_t);  /* from fire.py */")
+        # Arity AND width must match fire.jit's definition, or the closure gets
+        # "conflicting types for 'jit_compile_and_execute'". `auto_gpu` is the
+        # 6th parameter, and the self-host lowers a DEFAULTED parameter to
+        # int64_t, not int -- measured: declaring it `int` gave
+        # "have '_Bool(char *, char *, int64_t, int64_t, int64_t, int64_t)'"
+        # against the declaration's `int`.
+        parts.append("_Bool jit_compile_and_execute (char *, char *, int64_t, int64_t, int64_t, int64_t);  /* from fire.py */")
     parts.append("static int64_t _mojo_dispatch_getattr (void *, char *);")
     parts.append("static void _mojo_dispatch_setattr (void *, char *, int64_t);")
     parts.append("static MojoList * _mojo_dispatch_fields (void *);")
@@ -10055,7 +10096,25 @@ def gen_module_impl(self, stmts):
         # declaration of `float *` vs `int64_t` is a "conflicting types"
         # error reported against the wrong line.
         parts.append(_gmi_device_glue.emit_device_sidecar(
-            _device_parts, sorted(self._device_kernels), _device_kernels_meta))
+            _device_parts, sorted(self._device_kernels), _device_kernels_meta,
+            module_name=_as_str(self.module_name)))
+        # The full sidecar defines the same four introspection entry points
+        # as EMPTY_SIDECAR does, so mark them here too -- otherwise a
+        # kernel-free module later in the closure emits EMPTY_SIDECAR and the
+        # two collide. Measured: 2 definitions, `mojoc` and `selfhost` red.
+        _mg_introspected.add('definitions')
+    elif not _mg_introspected:
+        # No device code in this module -- an ordinary module, or one compiled
+        # with `--no-gpu` and no marked kernels. Emit the introspection entry
+        # points anyway, reporting 0. Without them a program that ASKS whether
+        # anything offloaded cannot be linked at all, which makes the question
+        # unaskable exactly where it is most worth asking. No Metal include and
+        # no device initialisation, so a kernel-free module still does not
+        # depend on the GPU runtime and still runs on a machine without one.
+        # ONCE PER TRANSLATION UNIT, not once per module -- see the flag's own
+        # note at its initialisation above.
+        _mg_introspected.add('definitions')
+        parts.append(_gmi_device_glue.EMPTY_SIDECAR)
 
     return self._dedup_variadic_externs(parts)
 

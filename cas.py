@@ -474,7 +474,7 @@ def formal_fingerprint() -> str:
 # ── Compile-to-GIMPLE keys ─────────────────────────────────────────────
 
 def compile_key(source: str, do_imports: bool, filename: str = "",
-                deps_digest: str = "") -> str:
+                deps_digest: str = "", auto_gpu: bool = True) -> str:
     """Key (`compile/<hash>`) for caching compile_to_gimple output (.ci).
 
     Folds in the entry source, do_imports mode, filename, ABI_VERSION, the
@@ -482,11 +482,18 @@ def compile_key(source: str, do_imports: bool, filename: str = "",
     against stdlib sources even when not inlined). `deps_digest` must cover
     every non-stdlib source the compile can read — the sibling-import closure
     (see gimple_codegen._dep_sources_digest) — so editing an imported file
-    invalidates the cached .ci."""
+    invalidates the cached .ci.
+
+    `auto_gpu` is in the key because it changes the OUTPUT, not just how it
+    is produced: with it False, a recognised parallel loop nest gets no
+    synthesised device kernel, so the .ci has a different function set and a
+    different MSL sidecar. Leaving it out would serve a cached GPU build to a
+    `--no-gpu` request, which is exactly the silent-wrong-output class this
+    cache exists to avoid."""
     return 'compile/' + _hash(
         'mojo-compile-v1', ABI_VERSION, compiler_fingerprint(),
         stdlib_fingerprint(), source, 't' if do_imports else 'f',
-        filename, deps_digest,
+        filename, deps_digest, 'gpu' if auto_gpu else 'nogpu',
     )
 
 

@@ -85,12 +85,16 @@ class ARM64JIT:
     """JIT compiler for ARM64 architecture with SHA256-based caching."""
 
     def __init__(self, opt_flag: str = _DEFAULT_OPT_FLAG,
-                 debug_flag: str | None = _DEFAULT_DEBUG_FLAG):
+                 debug_flag: str | None = _DEFAULT_DEBUG_FLAG,
+                 auto_gpu: bool = True):
         self.temp_dir = None
         self.loaded_libs = []
         # Codegen flags forwarded to gcc and mixed into the cache key.
         self.opt_flag = opt_flag or _DEFAULT_OPT_FLAG
         self.debug_flag = debug_flag
+        # `--no-gpu`. Kept on the instance because it belongs in the BINARY
+        # CACHE KEY below, which is computed from instance state.
+        self.auto_gpu = auto_gpu
         # Initialize cache directory
         self.cache_dir = os.path.expanduser("~/.gmojo/jit")
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -118,6 +122,11 @@ class ARM64JIT:
             f"opt={self.opt_flag}",
             f"debug={self.debug_flag or ''}",
             f"coro={os.environ.get('MOJO_CORO', 'stackswitch')}",
+            # auto_gpu changes the produced BINARY, so it belongs in the key
+            # exactly as -O* does. Without it a --no-gpu run executes the
+            # cached GPU binary: measured, `--no-gpu --jit` still reported
+            # `d 1` because the flag reached no part of this path.
+            f"autogpu={'1' if self.auto_gpu else '0'}",
             _toolchain_id(),
             f"compiler={_compiler_id()}",   # codegen-source fingerprint + version
         ])
@@ -230,7 +239,8 @@ int main() {{
                 if not build_executable(
                         filename, mojo_src, output=exe_file,
                         opt_flag=self.opt_flag, debug_flag=self.debug_flag or '-g0',
-                        work_dir=build_dir, quiet=True):
+                        work_dir=build_dir, quiet=True,
+                        auto_gpu=self.auto_gpu):
                     print('JIT compilation failed: executable build failed', file=sys.stderr)
                     return False
                 os.replace(exe_file, cache_file)
