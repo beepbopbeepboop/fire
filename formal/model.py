@@ -4871,6 +4871,17 @@ FRAME_C_VALUE_CALLS = {
 # on every run because the address moves.  A silently wrong answer, which is
 # the outcome this whole family exists to prevent.
 #
+# THE MESSAGE SAYS "frame address is passed to" — lowercase, and not "receiver
+# is passed to" — and that is load-bearing in the same way the fifth branch's
+# opening clause is.  Those two are the sweep's markers for row 7 and for the
+# position family, and this refusal is about the argument's CATEGORY (row 7),
+# not about there being no callee.  Written as "receiver", the one stdlib file
+# that reaches it (`test/builtin/test_default_writable_compile_fail.mojo`) was
+# counted in the position family; written as "frame ADDRESS", it fell into
+# `other refusal`, which is the bucket this taxonomy exists to empty.  Both were
+# numbers in the wrong column, with no test failing either time, so the marker is
+# quoted in the comment above rather than left to be rediscovered.
+#
 # ONE name, and deliberately a set rather than a general rule: a builtin the
 # backend does not compile must NOT be answered from here, and the only honest
 # test for "the backend compiles this" today is a name someone wrote down after
@@ -4935,8 +4946,8 @@ def frame_receiver_escape_refusal(callee: str, struct_names,
         # neither: this name IS compiled, so it cannot fall through to case 5
         # ("no definition in hand"), and it is not a C symbol, so the C
         # sentences are false of it.  Measured consequence in the set's comment.
-        return (f"a {who} receiver is passed to {callee}(), which is a builtin "
-                f"of the language rather than a C entry point, and it is "
+        return (f"a {who} frame address is passed to {callee}(), which is a "
+                f"builtin of the language rather than a C entry point, and it is "
                 f"VARIADIC over conversions: whatever it is handed, it formats. "
                 f"A frame address is a word, so what it formats is the ADDRESS, "
                 f"and a decimal rendering of it is indistinguishable from a "

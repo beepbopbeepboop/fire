@@ -202,7 +202,14 @@ are now fixed:
   on every run because the address moves. It now has its own refusal
   (`FRAME_VARIADIC_BUILTIN_CALLS`), deliberately NOT in `FRAME_C_VALUE_CALLS`,
   whose sentence says "a C library entry point" and `print` is Mojo's builtin
-  lowered through `_emit_print` in each backend's call emitter.
+  lowered through `_emit_print` in each backend's call emitter. It says
+  **"frame address is passed to"**, lowercase and not "receiver is passed to",
+  because those are the two sweep markers either side of it: written as
+  "receiver" this file counted in the position family, and written as
+  "frame ADDRESS" it fell into `other refusal` — the bucket this taxonomy
+  exists to empty. Both were numbers in the wrong column with no test failing,
+  so the one file it moves (`test/builtin/test_default_writable_compile_fail.mojo`,
+  out of the sweep's default scope) is counted in row 7 and not in this row:
 * **`type_of(x)` is not implemented on this path at all** (no occurrence of the
   name in `formal/`), so for it the generic sentence is true and it stays there.
 * `getattr`, `hasattr`, `iter` are host builtins with no Mojo source anywhere,
