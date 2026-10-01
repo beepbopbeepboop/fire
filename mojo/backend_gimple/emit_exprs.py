@@ -722,7 +722,10 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             gen._emit(f"  {zero} = (int64_t)0;")
             gen._emit(f"  {t} = {ip} == {zero};")
         elif ot == 'int64_t':
-            zero = gen._new_val('int64_t', "(int64_t)0")
+            # `0LL`, not `(int64_t)0`: it becomes a COMPARISON OPERAND below,
+            # and a C-style cast is not a legal gimple operand. See
+            # emit_infra.py's range()-bound note for the full rationale.
+            zero = gen._new_val('int64_t', "0LL")
             gen._emit(f"  {t} = {ov} == {zero};")
         elif ot == '_Bool':
             # GIMPLE: both operands of comparison must have same type
@@ -1253,7 +1256,19 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             if _cattrs and node.member in _cattrs:
                 gname = _cattrs[node.member]
                 gtype = gen._global_var_types.get(gname, 'int64_t')
-                return gtype, gen._new_val(gtype, f'{gname}')
+                _gv = gen._new_val(gtype, f'{gname}')
+                # Carry the attribute's recorded ELEMENT type onto the read
+                # value, so iterating or subscripting it downstream uses
+                # the right accessor. A class-level container is stored as
+                # one `_classattr_<Cls>__<name>` global; without this the
+                # element type recorded against that global (seeded in
+                # module_gen, and by the first `.append()` through
+                # `_lower_list_method`) stayed invisible to every reader.
+                _ge = gen._elem_types.get(gname)
+                if _ge and _ge != 'int64_t':
+                    gen._elem_types[_gv] = _ge
+                    gen._actual_types[_gv] = 'MojoList *'
+                return gtype, _gv
             # Not a comptime alias — a genuine class-level access this
             # compiler doesn't yet resolve statically (unimplemented,
             # not merely unreached); stub with a clearly-marked value.
@@ -2530,6 +2545,176 @@ def _lower_binary_set_op(gen, _fn: str, _la: str, _lb: str,
     return 'MojoSet *', _res
 
 
+# ── `==` / `!=` between containers: Python VALUE equality ───────────────────
+# `a == b` with both operands the same container kind used to fall through
+# `_lower_binary_tail`'s generic numeric tail, which emits the C pointer
+# comparison `_t3 = a == b;` on two `MojoSet *`. That is False for every pair
+# of containers that are equal but not the SAME object -- which is every
+# `while nxt != proven:` / `if cache == proven:` convergence test, since each
+# round builds a fresh one. With no GC the loop never ends and leaks a set per
+# round (the 43 GB two-line compile in
+# bugs/CODEGEN_container_eq_is_pointer_identity.md). `is` / `is not` keep
+# pointer identity below, which is what they are for.
+
+# The C type a container operand has, or its `_actual_types` recovery of it,
+# mapped to the runtime predicate that compares that kind. No tuple entry: a
+# tuple lowers to a MojoList with a marker, and the runtime decides that one
+# from the marker (mojo_list_eq), so both spellings land on the list entry.
+_EQ_CTYPE_KIND = {
+    'MojoList *': 'list',
+    'MojoDict *': 'dict',
+    'MojoSet *': 'set',
+}
+
+# `list()` / `set()` / `dict()` / `tuple()` / `frozenset()` spelled as a call
+# rather than a literal -- evidence that an erased int64_t operand really is a
+# container, which is what a container literal on the other side needs.
+_EQ_CTOR_KIND = {
+    'list': 'list',
+    'tuple': 'list',
+    'set': 'set',
+    'frozenset': 'set',
+    'dict': 'dict',
+}
+
+
+def _eq_operand_kind(gen, node, ctype: str, val: str) -> str | None:
+    """'list' / 'dict' / 'set' when this operand statically IS a container of
+    that kind, else None -- meaning "no evidence", which leaves the comparison
+    exactly where it was. Deliberately evidence-based rather than
+    universal: routing EVERY `int == int` through the runtime dispatcher would
+    cost three registry probes on the compiler's own hottest comparison and
+    buy nothing, and a wrong guess here is a wrong ANSWER, not a slow one."""
+    t = _as_str(ctype)
+    if t in _EQ_CTYPE_KIND:
+        return _EQ_CTYPE_KIND[t]
+    at = _as_str(gen._actual_types.get(_as_str(val)))
+    if at in _EQ_CTYPE_KIND:
+        return _EQ_CTYPE_KIND[at]
+    if isinstance(node, gimple_ctypes.DictExpr):
+        return 'dict'
+    if isinstance(node, gimple_ctypes.SetExpr):
+        return 'set'
+    if isinstance(node, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr,
+                         gimple_ctypes.Comprehension)):
+        return 'list'
+    if (isinstance(node, gimple_ctypes.CallExpr)
+            and isinstance(node.func, gimple_ctypes.IdentExpr)):
+        nm = _as_str(node.func.name)
+        # `_locally_binds_name`, not a bare name test: a local named `set` is
+        # not the builtin (same guard _lower_percent uses for its `dict` RHS).
+        if nm in _EQ_CTOR_KIND and not gen._locally_binds_name(nm):
+            return _EQ_CTOR_KIND[nm]
+    # A PARAMETER that every unambiguous literal call site agrees is a
+    # container (`_container_param_kinds`, filled by
+    # `_gmi_apply_call_site_param_evidence`). This is the erased cross-function
+    # case, and the one the documented 43 GB non-terminating compile was: a
+    # fixed point written `while nxt != proven:` inside a function whose
+    # containers arrive as opaque int64_t handles, where nothing else here has
+    # any evidence to offer.
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        _cf = _as_str(getattr(gen, 'current_func_name', '') or '')
+        _k = gen._container_param_kinds.get(_cf)
+        if _k is not None:
+            _pk = _k.get(_as_str(node.name))
+            if _pk is not None:
+                return _as_str(_pk)
+    return None
+
+
+def _eq_elem_code(gen, kind: str, val: str) -> int:
+    """The runtime MOJO_EQ_* code for one operand's elements, or
+    MOJO_EQ_UNKNOWN (0) when the codegen has no element type for it.
+
+    MOJO_EQ_UNKNOWN is also the answer for a list that carries PER-SLOT kinds
+    (`_maybe_kinds_vals`, filled by `_lower_list_literal` for every
+    heterogeneous literal), and those kinds are strictly more precise than the
+    single list-wide ctype `_elem_types` holds: for `[1, "a"]` that ctype is
+    `char *`, and taking it at face value strcmp'd the integer slot against a
+    pointer. Preferring the runtime's own record fixes that, and costs a
+    per-slot kind probe that only a list which HAS one pays anything."""
+    _v = _as_str(val)
+    if kind != 'dict' and _v in getattr(gen, '_maybe_kinds_vals', ()):
+        return 0
+    if kind == 'dict':
+        et = _as_str(gen._dict_val_types.get(_v))
+    else:
+        et = _as_str(gen._elem_types.get(_v))
+    if not et:
+        return 0
+    if et in gimple_ctypes._TYPE_FLOAT:
+        return 2
+    if et in ('char *', 'MojoStr *'):
+        return 3
+    if et == 'MojoBytes *':
+        return 4
+    if et in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+        return 5
+    return 1
+
+
+def _eq_call_args(gen, ctype: str, kind: str, lv: str, lt: str,
+                  rv: str, rt: str, two_codes: bool) -> list:
+    """The arguments of a container `==`: both operands coerced to `ctype`
+    (the kind's own pointer type, or `int64_t` for the erased-handle
+    dispatcher) and the element code to compare them with.
+
+    `two_codes` is the per-kind predicates' shape: ONE PER SIDE, because
+    `[1.0] == [1]` is a legitimate program and one code cannot describe both
+    halves of it. Each side's own code is read by the side it describes, so a
+    disagreement between two `_elem_types` entries is information rather than
+    a contradiction. `mojo_value_eq` takes a single code and applies it to
+    both: the erased operand has no static type by definition, and in the
+    shape that reaches it (`an_erased_handle == ["a", "b"]`) it really does
+    hold the same elements."""
+    _cl = gen._coerce_to_type(_as_str(lt), ctype, _as_str(lv))
+    _cr = gen._coerce_to_type(_as_str(rt), ctype, _as_str(rv))
+    _args = [(ctype, _as_str(_cl)), (ctype, _as_str(_cr))]
+    _ca = _eq_elem_code(gen, kind, lv)
+    if two_codes:
+        _args.append(('int64_t', _as_str(gen._new_val('int64_t', str(int(_ca))))))
+        _cb = _eq_elem_code(gen, kind, rv)
+    else:
+        _cb = _ca
+    _args.append(('int64_t', _as_str(gen._new_val('int64_t', str(int(_cb))))))
+    return _args
+
+
+def _lower_container_eq(gen, op: str, lkind: str | None, lnode, lt: str, lv: str,
+                        rkind: str | None, rnode, rt: str, rv: str) -> tuple[str, str]:
+    """`a == b` / `a != b` where at least one operand is statically a
+    container.
+
+    Same kind on both sides (the statically-typed case, and the one the
+    documented 43 GB compile hit) calls that kind's own predicate with its own
+    pointer type and element code, so a list of strings compares by CONTENT.
+    Every other pairing -- one operand erased to int64_t, or two different
+    kinds -- goes through `mojo_value_eq`, whose operands are int64_t words
+    because one of them may be a handle whose kind only the registry knows.
+    That case is deliberately NOT folded at compile time to a constant False
+    when the two static kinds differ: `_actual_types` is an inference table
+    and a wrong guess there is a wrong ANSWER, whereas the registry is what
+    the rest of this runtime already treats as the truth."""
+    if lkind is not None and lkind == rkind:
+        _kind = lkind
+        _ctype = 'MojoList *' if lkind == 'list' else (
+            'MojoDict *' if lkind == 'dict' else 'MojoSet *')
+        _fn = 'mojo_list_eq' if lkind == 'list' else (
+            'mojo_dict_eq' if lkind == 'dict' else 'mojo_set_eq')
+        _two = True
+    else:
+        _kind = lkind if lkind is not None else rkind
+        _ctype = 'int64_t'
+        _fn = 'mojo_value_eq'
+        _two = False
+    _args = _eq_call_args(gen, _ctype, _kind, lv, lt, rv, rt, _two)
+    _r = _as_str(gen._call_expr('int', _fn, _args))
+    _t = gen._new_temp('_Bool')
+    _cmp = '!= 0' if op == '==' else '== 0'
+    gen._emit(f"  {_t} = {_r} {_cmp};")
+    return '_Bool', _t
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -2781,6 +2966,23 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if op == '*' and lt == 'MojoList *' and rt in ('int', 'int64_t', 'uint64_t'):
         cnt = gen._new_val('int64_t', f"(int64_t){rv}")
         t = gen._call_expr('MojoList *', 'mojo_list_repeat', [('MojoList *', lv), ('int64_t', cnt)])
+        # The repeat copies the source's ELEMENTS, so the result's element
+        # type is the source's — but the result is a FRESH temp, and every
+        # consumer keys element type off the value name. Without this copy
+        # `[0.0] * n` produced an untyped list: a field assigned that
+        # recorded no element type (emit_stmts' self.<f> = <list>
+        # propagation keys on `_elem_types[v]`), so a later
+        # `for g in self.field:` bound `g` as int64_t and read the doubles'
+        # raw IEEE-754 bits as integers — silently wrong, exit 0 (real:
+        # g*g in an accumulator over such a field). It is also what makes
+        # `mojo_list_get_double` vs `mojo_list_get_int` pick correctly on
+        # every later subscript/iteration of the repeated list.
+        if lv in gen._elem_types:
+            gen._elem_types[t] = gen._elem_types[lv]
+        if lv in gen._nested_elem_types:
+            gen._nested_elem_types[t] = gen._nested_elem_types[lv]
+        if lv in gen._dict_val_types:
+            gen._dict_val_types[t] = gen._dict_val_types[lv]
         return 'MojoList *', t
 
     # MojoBytes + MojoBytes → concat ; MojoBytes * int → repeat
@@ -2856,6 +3058,20 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")
         return '_Bool', t
+
+    # Container `==` / `!=` → Python VALUE equality, not the C pointer
+    # comparison the generic tail would emit. Placed BEFORE the string
+    # equality block below because that block claims any comparison with a
+    # string literal on one side: `some_list == "abc"` reached it and strcmp'd
+    # the list's address (a garbage answer, never False), where the runtime's
+    # answer is the honest one. `is` / `is not` are NOT here — pointer identity
+    # is exactly what they mean.
+    if op in ('==', '!='):
+        _lk = _eq_operand_kind(gen, left_node, lt, lv)
+        _rk = _eq_operand_kind(gen, right_node, rt, rv)
+        if _lk is not None or _rk is not None:
+            return _lower_container_eq(gen, op, _lk, left_node, lt, lv,
+                                       _rk, right_node, rt, rv)
 
     # String equality: char*, int64_t-stored-char*, or string literals → strcmp
     rv_is_str_lit = isinstance(right_node, gimple_ctypes.StringLiteral)
@@ -4470,7 +4686,16 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # e.g. (Float64, Span*) both look like non-str, but list_suffix maps
     # Float64 -> 'double' and Span* -> 'int' (its generic pointer bucket), so a
     # single list-wide suffix would append-cast the pointer as a double.
-    per_element = len(scalar_sufs) > 1
+    # Two DISTINCT slot ctypes also need per-slot recording even when both
+    # slots use the same accessor: `(cfg, model)` appends both as plain
+    # ints, so `scalar_sufs` is a single 'int' and `per_element` was False —
+    # yet each slot's real type (`Config *` vs `Model *`) is exactly what
+    # the caller's destructuring needs to read them back as. Keyed on the
+    # CTYPES, not the accessor, which is the same question asked properly.
+    _slot_cts = [_as_str(_slt[1]) for _slt in lowered
+                 if not (isinstance(_slt[0], gimple_ctypes.UnaryOp)
+                         and _slt[0].op in ('*', '**'))]
+    per_element = len(scalar_sufs) > 1 or len(set(_slot_cts)) > 1
     # Record per-slot element types when elements are stored by their own
     # type — a later `for a, b in <list of these tuples>:` needs each
     # slot's real accessor (get_str vs get_int). The joined `elem` is
@@ -4632,6 +4857,21 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
                 gen._generator_var_api[it_val] = gen._generator_var_api[_old_it_val]
         it_type = _resolved_type
 
+    # Park the remaining `for` clauses for `_gen_compr_append` to consume from
+    # inside the clause-0 loop body. See its comment there for why the extra
+    # clauses used to vanish and why extending is the right lowering.
+    # Only list/generator: both are list-backed ('generator' is initialised
+    # "as a list for simplicity", per `_gen_compr_append`), so they share
+    # `mojo_list_extend`. A set/dict comprehension with 2+ clauses is still
+    # dropped -- those need per-kind insert/merge, not a list extend, and
+    # guessing at it is how this bug got in.
+    if len(node.generators) > 1 and node.kind in ('list', 'generator'):
+        gen._compr_pending_inner = gimple_ctypes.Comprehension(
+            kind=node.kind, element=node.element, key=node.key,
+            generators=list(node.generators[1:]))
+    else:
+        gen._compr_pending_inner = None
+
     if is_range:
         gen._compr_range_loop(node, gen0, res, res_type)
     elif it_type == 'MojoList *':
@@ -4649,6 +4889,10 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     else:
         gen._emit(f"  /* TODO: comprehension over {it_type} */")
 
+    # Nothing below may inherit this: the loop body consumed it (above), and
+    # leaving it set would make the NEXT comprehension in the same function
+    # extend with a stale remainder.
+    gen._compr_pending_inner = None
     gen._note_fresh_result(res)
     return res_type, res
 

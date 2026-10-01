@@ -18,8 +18,26 @@ already-filed, not-yet-fixed defect at its CURRENT (broken) behavior —
 see each one's own docstring for the filed bug doc — so this suite still
 gives `make check` a meaningful, non-flaky pass/fail signal without
 either hiding a known gap or re-discovering it every run.
+
+WHERE the fixture packages are written must not change any verdict. Every
+case below except one uses `tempfile.TemporaryDirectory()`, so its location
+follows `$TMPDIR` — which on some machines is a directory INSIDE this
+checkout and on others is the system temp dir. That used to be enough to
+flip `bare_submodule_import_call` from pass to fail, because
+`_lower_method_call`'s generic module-qualified-call branch was gated on
+"is this file under the compiler's own source directory", so a fixture
+written there was refused the resolution and answered a literal `0`. The
+gate is now `_is_selfhost_source_file`, which asks whether the file is one
+of the compiler's OWN modules rather than merely under its install
+directory — but "the other cases happen to run in whichever location
+`$TMPDIR` names" is not a guarantee, so
+`test_bare_submodule_import_call_inside_source_tree` pins the hard case
+explicitly: it builds the same package at a path under this checkout, so
+the invariant is tested in BOTH locations no matter how the suite is
+invoked.
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -55,7 +73,7 @@ def _build_and_run(pkg_files: dict, entry: str, td: str) -> tuple[int | None, st
         os.chdir(cwd)
 
 
-def _cpython_run(td: str, entry: str) -> tuple[int, str]:
+def _cpython_run(td: str, entry: str, as_module: bool = False) -> tuple[int, str]:
     """CPython's OWN exit code and stdout for the same file. Every case below
     asserts the compiled program matches THIS, not a hand-written literal — a
     literal here would just be the bug's current wrong answer frozen into the
@@ -66,11 +84,20 @@ def _cpython_run(td: str, entry: str) -> tuple[int, str]:
     `pkg/__init__.py`-style layouts the compiled pipeline resolves through
     the package root would fail under CPython with `ModuleNotFoundError` and
     the baseline would be empty for exactly the cases that need it. With both
-    set, `from p.sub import tri` means the same thing to the two engines."""
+    set, `from p.sub import tri` means the same thing to the two engines.
+
+    `as_module=True` runs `python3 -m <entry>` instead of `python3 <path>`,
+    which is the only way a `from . import SUB` baseline can work at all: run
+    as a plain script, a relative import has no parent package and CPython
+    exits 1 before executing a single statement (`ImportError: attempted
+    relative import with no known parent package`). `-m` gives the file the
+    package context the compiled pipeline gives it."""
     env = dict(os.environ)
     env['PYTHONPATH'] = (td + os.pathsep + env['PYTHONPATH']
                          if env.get('PYTHONPATH') else td)
-    result = subprocess.run([sys.executable, os.path.join(td, entry)],
+    argv = ([sys.executable, '-m', entry[:-3].replace('/', '.')]
+            if as_module else [sys.executable, os.path.join(td, entry)])
+    result = subprocess.run(argv,
                             capture_output=True, text=True, timeout=60,
                             cwd=td, env=env)
     return result.returncode, result.stdout
@@ -142,6 +169,56 @@ def test_bare_submodule_import_call() -> bool:
     return ok
 
 
+def test_bare_submodule_import_call_inside_source_tree() -> bool:
+    """`test_bare_submodule_import_call`'s exact package, built at a path
+    INSIDE this checkout instead of in `$TMPDIR`.
+
+    This is the case that pinned the flake. `_lower_method_call`'s generic
+    module-qualified-call branch was gated on "does the file being compiled
+    sit under the compiler's own source directory", so a fixture written
+    inside the checkout was denied the resolution and
+    `base2.doubleval(21)` fell through to the generic scalar-receiver stub
+    as a literal `0` — silently, exit 0, no diagnostic — while the very same
+    source built in `/tmp` called the real definition. Every other case in
+    this file takes its location from `tempfile.TemporaryDirectory()`, i.e.
+    from `$TMPDIR`, so whether the registered `linkmode` step passed was
+    decided by the caller's environment rather than by the compiler; two
+    workers saw it red in their own fresh worktrees while every integrator
+    round was green, with no source difference at all.
+
+    Duplicating the package rather than parameterising the case above is
+    deliberate: `_build_and_run` takes the fixture directory as an argument
+    already, so a shared helper would hide the one thing this case exists to
+    state, which is the directory it runs in.
+    """
+    pkg = {
+        'pkg2/__init__.py': '',
+        'pkg2/base2.py': 'def doubleval(x):\n    return x * 2\n',
+        'pkg2/main.py': (
+            'from . import base2\n'
+            'print(base2.doubleval(21))\n'
+        ),
+    }
+    # `build/` is git-ignored; a fixture left behind would be an untracked
+    # file in the tree, and `checked_run`'s cache key is content-addressed
+    # over `extra` (not over the tree), so a stale directory is exactly the
+    # kind of state this case must not depend on. Removed either way.
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='inside_source_tree_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'pkg2/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'pkg2/main.py', as_module=True)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '42')
+    if not ok:
+        print(f"  ✗ bare_submodule_import_call_inside_source_tree: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_from_submodule_import_symbol_value_read() -> bool:
     """`from SUBMODULE import SYMBOL` (not a bare submodule marker), the
     symbol bound to a new local, then called through that local
@@ -184,7 +261,7 @@ def test_from_submodule_import_symbol_value_read() -> bool:
 # ── A LOCAL SIBLING that no dylib can satisfy ───────────────────────────────
 #
 # The three cases above all go through a `pkg/__init__.py` package, which
-# `imports.resolve` can find. These four do not: a bare top-level `.py`
+# `imports.resolve` can find. These do not: a bare top-level `.py`
 # sibling, the shape this compiler's OWN sources are written in, and the
 # shape `imports.resolve` returns `(dylib=None, source=None, exports={})`
 # for. Nothing about them is function-scoped-only — each one covers both
@@ -202,6 +279,21 @@ _INSP_PY = (
     '    def __init__(self, name, kind=0):\n'
     '        self.name = name\n'
     '        self.kind = kind\n'
+)
+
+# The `import insp` sibling of `_INSP_PY`, with a METHOD so the
+# module-qualified-constructor case below also exercises a method call
+# through a free-function parameter — the shape of
+# bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md's last
+# remaining row (that doc is deleted as of this fix; see the 2026-09-30
+# section of bugs/hard/README.md).
+_LABEL_PY = (
+    'class Parameter:\n'
+    '    def __init__(self, v, n):\n'
+    '        self.v = v\n'
+    '        self.n = n\n'
+    '    def label(self):\n'
+    '        return self.v\n'
 )
 
 
@@ -350,6 +442,99 @@ def test_sibling_class_constructor_field_function_scoped() -> bool:
     return ok
 
 
+def test_bare_import_sibling_struct_ctor_through_module() -> bool:
+    """`import insp` + `insp.Parameter(...)` — a struct constructed through
+    its OWNING MODULE object rather than its bare name — then handed to a
+    free function that calls a METHOD on it.
+
+    `_register_link_imports` (mojo/backend_gimple/emit_resolve.py) scanned
+    only `FromImportStmt`, so a module reached this way was never a
+    candidate for `_link_inline_modules` and never appeared in this
+    translation unit at all: the struct had no field table here,
+    `_lower_method_call`'s qualified-constructor check had nothing to
+    resolve against, and `insp.Parameter('v', 7)` lowered to
+    `_t7 = _t2;  /* int64_t.Parameter() stubbed */` — the module HANDLE
+    echoed back as the constructed object. `show` then received a literal
+    `0` and printed `0`, exit 0, where CPython prints `v`.
+
+    The single sharpest thing about this shape is that the `from` spelling
+    of the SAME import already worked: `_compile_two_files_...` aside, the
+    byte-for-byte same program with `from insp import Parameter` printed `v`
+    through this very pipeline. One mechanism (`_link_inline_modules` +
+    `_classify_unresolved_export`), two spellings of one import, one of them
+    not wired up. `f3.py` below is the control for exactly that, and it is
+    here so this case cannot be "fixed" by regressing the other one.
+    """
+    pkg = {
+        'insp.py': _LABEL_PY,
+        'f3.py': (
+            'import insp\n'
+            '\n'
+            'def show(p):\n'
+            '    return p.label()\n'
+            '\n'
+            'def main():\n'
+            '    print(show(insp.Parameter(\'v\', 7)))\n'
+            '\n'
+            'main()\n'
+        ),
+        'f3b.py': (
+            'from insp import Parameter\n'
+            '\n'
+            'def show(p):\n'
+            '    return p.label()\n'
+            '\n'
+            'def main():\n'
+            '    print(show(Parameter(\'v\', 7)))\n'
+            '\n'
+            'main()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'f3.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'f3.py')
+        rc2, stdout2 = _build_and_run(pkg, 'f3b.py', td)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == 'v'
+          and rc2 == 0 and stdout2.strip() == 'v')
+    if not ok:
+        print(f"  ✗ bare_import_sibling_struct_ctor_through_module: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r}) "
+              f"| from-import control rc={rc2} stdout={stdout2!r}")
+    return ok
+
+
+def test_bare_import_sibling_struct_field_through_module() -> bool:
+    """The same module-qualified construction, but the field is read off
+    the result directly instead of through a parameter. A louder symptom
+    for the same single cause, and worth its own case because a fix that
+    only repaired the parameter-typing half would leave it red: `x.v`
+    lowered to `_mojo_dispatch_getattr` on the module handle and raised
+    `AttributeError: v`, exit 1.
+    """
+    pkg = {
+        'insp2.py': _LABEL_PY,
+        'f4.py': (
+            'import insp2\n'
+            '\n'
+            'def main():\n'
+            '    x = insp2.Parameter(\'v\', 7)\n'
+            '    print(x.v)\n'
+            '\n'
+            'main()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'f4.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'f4.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == 'v')
+    if not ok:
+        print(f"  ✗ bare_import_sibling_struct_field_through_module: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_dotted_sibling_import_qualifier_agrees() -> bool:
     """`from p.sub import tri` — a DOTTED module name — at MODULE scope, and
     again from inside a function. The mangled symbol's two halves come from
@@ -403,11 +588,14 @@ def test_dotted_sibling_import_qualifier_agrees() -> bool:
 CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
+    test_bare_submodule_import_call_inside_source_tree,
     test_from_submodule_import_symbol_value_read,
     test_sibling_function_import_call_is_inlined,
     test_sibling_class_attribute_function_scoped,
     test_sibling_class_attribute_module_scoped,
     test_sibling_class_constructor_field_function_scoped,
+    test_bare_import_sibling_struct_ctor_through_module,
+    test_bare_import_sibling_struct_field_through_module,
     test_dotted_sibling_import_qualifier_agrees,
 ]
 

@@ -21,7 +21,7 @@ distinct opcodes over the `index`, `pop`, `kgen`, `lit`, `co`, `nvvm`, `rocdl`,
   * what lowers to plain C now      → the op/type/attr tables below
   * what is value-preserving glue   → NOOP_OPS (identity / drop)
   * what we cannot honestly do on    → DEFERRED_OPS, with a reason.  These are
-    the CPU yet (GPU, coroutines,      GPU kernels (Metal/CUDA — see METAL.md),
+    the CPU yet (GPU, coroutines,      GPU kernels (Metal/CUDA — see METAL.html),
     atomics, vector SIMD, compiler     coroutine lowering, atomics, true vector
     intrinsics)                        SIMD, and compiler-internal kgen ops.
 
@@ -205,8 +205,8 @@ NOOP_OPS: set[str] = {
 # deferral_reason() explains why, so the backend can emit a clear stub.
 
 _DEFERRED_PREFIXES: dict[str, str] = {
-    'nvvm.':  'GPU (NVIDIA) — see METAL.md / CUDA path',
-    'rocdl.': 'GPU (AMD) — see METAL.md / ROCm path',
+    'nvvm.':  'GPU (NVIDIA) — see METAL.html / CUDA path',
+    'rocdl.': 'GPU (AMD) — see METAL.html / ROCm path',
     'co.':    'coroutine lowering not modeled',
 }
 

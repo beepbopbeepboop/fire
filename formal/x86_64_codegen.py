@@ -443,16 +443,15 @@ class X86_64Codegen:
         # rule) and by module identity, which is what makes `mod.f(...)` — the
         # spelling `import mod` binds — resolve. The entry carries the declared
         # signature, so a call's result can be classified instead of guessed.
-        # The same two tables, and the same `model.dylib_export_lookup`, as the
-        # arm64 backend: one contract, two emitters.
-        self._dylib_by_name: dict = {}
-        self._dylib_by_module: dict = {}
-        for _lib in (dylib_exports or []):
-            for _entry in (_lib.get("exports") or []):
-                self._dylib_by_name.setdefault(_entry.get("name"), _entry)
-                _owner = self._dylib_by_module.setdefault(
-                    _entry.get("module") or "", {})
-                _owner.setdefault(_entry.get("name"), _entry)
+        # The same three tables, and the same `model.dylib_export_lookup`, as
+        # the arm64 backend: one contract, two emitters. The third is the
+        # names a module publishes by RE-EXPORT rather than by definition, and
+        # all three come from `model.dylib_export_tables` — the one builder,
+        # because the indexing was two copies of the same three questions,
+        # which is two places for them to disagree about which library owns a
+        # name.
+        (self._dylib_by_name, self._dylib_by_module,
+         self._dylib_forwarded) = M.dylib_export_tables(dylib_exports)
         self._comptime_hook = comptime_hook
         self._module_source = module_source
         self.asm = Assembler()
@@ -465,6 +464,14 @@ class X86_64Codegen:
         # arm64's `_emit_function`.
         self._cur_fn = None
         self._if_counter = 0
+        # The element width the subscript being emitted reads and writes at, in
+        # bytes.  `_emit_subscript_addr` sets it on every path — a container
+        # element is 8, a string byte is 1, a declared pointee is its own — and
+        # the load and the store read it, so the address computation and the
+        # instruction that uses it cannot disagree.  Same rule and same reason as
+        # the arm64 backend's `_sub_width`, and the decision is
+        # `model.subscript_base_lowering` so the two cannot drift.
+        self._sub_width = 8
         self._while_counter = 0
         self._var_regs = {}
         self._var_spills = {}
@@ -1773,6 +1780,31 @@ class X86_64Codegen:
         the function returns."""
         self.asm.emit(encode_lea_r64_rm64(reg, Reg.RBP, offset))
 
+    def _emit_empty_blob(self) -> None:
+        """The empty container: eight bytes with a zero count, base in RAX.
+
+        `List()`, `List[Int]()`, `Dict()` and the rest of
+        `model.EMPTY_BLOB_CTORS`, and it is `_emit_list` with `n == 0` — the
+        same eight bytes, the same `[count][elements]` layout and the same
+        reservation, because an empty container IS the zero-element literal.
+        The instruction sequence is `_emit_list`'s with its loop deleted, and
+        the shared parts (`_reserve_blob`, `_emit_blob_base`, `_emit_mov_imm`,
+        the store) are the same calls in the same order, so the two layouts and
+        the two architectures cannot drift.
+
+        Its own method rather than a call into `_emit_list` with a synthesised
+        `ListExpr`, for the reason arm64's `_emit_empty_blob` gives at length:
+        `_emit_list` also handles a star-unpack and reserves CAPACITY slots
+        when the function appends to the literal, and neither applies to a
+        constructor's result — appending to an empty container built by
+        `List()` is a different question that `_scan_list_caps` does not answer.
+        """
+        offset = self._reserve_blob(8, "empty containers")
+        self._emit_blob_base(offset, Reg.R11)
+        self._emit_mov_imm(Reg.R10, 0)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        self._emit_blob_base(offset, Reg.RAX)
+
     def _emit_list(self, expr) -> None:
         """A list/tuple/set literal → its blob address in RAX.
 
@@ -2794,12 +2826,20 @@ class X86_64Codegen:
 
     def _is_string_subscript(self, obj) -> bool:
         """True when `obj` is known to hold a string (char*) address, so a
-        subscript is a byte load rather than a list index."""
+        subscript is a byte load rather than a list index.
+
+        The same one-authority rule as the arm64 backend's, and for the same
+        reason: the flow-sensitive `_string_vars` map only ever sees a BINDING
+        statement, so a `String`-annotated PARAMETER was missing from it while
+        the whole-function `ValueKinds` — which `_expr_str_kind` falls back to —
+        knows. The same name was then a `char *` to `len` and a list blob to
+        this predicate, and the blob path bounds-checks against the first eight
+        CHARACTERS of the string. See
+        bugs/CODEGEN_string_parameter_subscript_reads_count_field.md.
+        """
         if isinstance(obj, F.StringLiteral):
             return True
-        if isinstance(obj, F.IdentExpr):
-            return obj.name in self._string_vars
-        return False
+        return self._expr_str_kind(obj) == M.STR_KIND
 
     def _refuse_frame_container_operand(self, op: str, obj) -> None:
         """Raise if `obj` is a BARE NAME holding a frame address.
@@ -2843,6 +2883,7 @@ class X86_64Codegen:
         confidently wrong. `model.multi_index_refusal_for` is the shared text,
         so the two cannot drift again."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        self._sub_width = 8
         if e.attrs is not None:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
@@ -2880,6 +2921,30 @@ class X86_64Codegen:
             # addr = base + index. RAX still holds the INDEX here and R11
             # the base, so this is a plain add — copying the base into RAX
             # first would compute base+base.
+            self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
+            self._sub_width = 1
+            return
+        shape, width, signed, sub_why = M.subscript_base_lowering(
+            self._cur_fn, e.obj, self._structs, self._functions, self._structs)
+        if shape is None:
+            raise CodegenError(sub_why)
+        if shape == "load":
+            # A POINTER subscript is `base + index*width`, with NO count header
+            # and no bounds check — the same question `p.value()` asks, routed
+            # through the same reader, and the reason the two spellings of it
+            # now agree.  Before the route existed this fell through to the blob
+            # walk, whose first word of the base is a COUNT, so `p[0]` read the
+            # byte at offset 0 as the element count and loaded
+            # `base + 8 + 8*count`.  See
+            # bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md.
+            self._sub_width = width
+            if width != 1:
+                # The scale is emitted rather than assumed: `base + i` is right
+                # for a one-byte element and is the SECOND element for any
+                # other width, the same trap `model._offset_scale` refuses on
+                # the dereference path.
+                self.asm.emit(encode_imul_r64_r64_imm(Reg.RAX, Reg.RAX,
+                                                           width))
             self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
             return
         self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
@@ -2933,11 +2998,15 @@ class X86_64Codegen:
                                    e.index.step)
             return
         self._emit_subscript_addr(e)
-        # The address is in RAX; a string's element is a BYTE at it, so the
-        # load has to happen before the zero-extension — MOVZX of the address
-        # itself would yield the low byte of a pointer.
+        # The address is in RAX; the element has to be LOADED before any
+        # extension — MOVZX of the address itself would yield the low byte of a
+        # pointer.
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))
-        if self._is_string_subscript(e.obj):
+        if self._sub_width == 1:
+            # Unsigned: a `UInt8` element is a byte, and a formal value is one
+            # 64-bit word holding an integer, so `200` has to read back as 200.
+            # The signed form is the same two-instruction pair with a different
+            # mnemonic, chosen from the pointee the model established.
             self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
 
     def _blob_est(self, e) -> int:
@@ -3644,7 +3713,9 @@ class X86_64Codegen:
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
         reason = M.string_binary_refusal(
-            op, self._expr_str_kind(e.left), self._expr_str_kind(e.right))
+            op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
+            left=e.left, right=e.right, fn=self._cur_fn,
+            untyped_callee=self._untyped_callee)
         if reason is not None:
             raise CodegenError(reason)
         if op in _CMP_CONDS:
@@ -3739,8 +3810,8 @@ class X86_64Codegen:
         answer, which is the same trap `_emit_str_affix` documents.
         """
         if M.string_comparison_lowering(
-                op, self._expr_str_kind(l), self._expr_str_kind(r)) \
-                != M.STRING_COMPARE_CONTENT:
+                op, self._expr_str_kind(l), self._expr_str_kind(r),
+                l, r) != M.STRING_COMPARE_CONTENT:
             return False
         # push l, then r  =>  [rsp] = r, [rsp+16] = l. The same two-slot shape
         # `_emit_str_affix` uses, and for the same reason: an expression leaves
@@ -4077,8 +4148,18 @@ class X86_64Codegen:
         self._push_slot(Reg.RAX)                   # value
         self._emit_subscript_addr(target)          # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
-        if self._is_string_subscript(target.obj):
-            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
+        if self._sub_width == 1:
+            # A BYTE store, and this used to be a full 64-bit store into a
+            # one-byte element: both branches of the old `if` were the same
+            # instruction, so `p[0] = 65` on a `Pointer[UInt8]` overwrote the
+            # seven bytes after it. It was unreachable over a POINTER (the
+            # subscript took the blob path and exited 1 first) and reachable
+            # over a `char *` in a string literal, which is a read-only
+            # __TEXT page, so nothing noticed. Widening `_sub_width` to the
+            # pointee made it reachable over a `malloc`'d buffer, where the
+            # overwrite is a silent corruption rather than a fault, so the two
+            # branches have to differ.
+            self.asm.emit(encode_mov_rm8_r8(Reg.RAX, 0, Reg.R11))
         else:
             self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
 
@@ -4623,45 +4704,52 @@ class X86_64Codegen:
     def _extern_symbol(self, name: str) -> str:
         """The boundary symbol an unbound callee `name` is emitted against.
 
-        A BARE name — what `from mod import f` binds — is answered by the flat
-        `{name: symbol}` map, first library on the line winning. A DOTTED name
-        — what `import mod` binds, spelled `mod.f` — is answered ONLY by the
-        export table of the library built for `mod`, so `mod.f` can never bind
-        some other library's `f`; and a dotted name whose module IS linked but
-        which that module does not export is refused here, naming both halves,
-        rather than emitted as a BL against a symbol nothing defines. Same
-        decision and the same words as the arm64 backend's `_extern_symbol`.
-
-        The module is identified by `model.dylib_export_module`, which knows
-        that a manifest keys a package submodule by its ABI prefix
-        (`os.path` → `os_path`) — which is what makes `os.path.join(...)`, the
-        spelling 532 measured call sites in this tree are written with, resolve
-        at all.
+        The DECISION and the words are `model.dylib_extern_symbol`'s, shared
+        with the arm64 emitter: a bare name (`from mod import f`) is answered by
+        the flat map and a dotted one (`import mod`, spelled `mod.f`) only by
+        the library built for that module or by what that module forwards, so
+        `mod.f` can never bind some other library's `f`; and a dotted name whose
+        module IS linked but does not publish it is refused here, naming both
+        halves, rather than emitted as a BL against a symbol nothing defines.
         """
-        if "." not in name:
-            return self._dylib_syms.get(name, name)
+        return M.dylib_extern_symbol(name, self._dylib_syms,
+                                     self._dylib_by_name,
+                                     self._dylib_by_module,
+                                     self._dylib_forwarded)
+
+    def _untyped_callee(self, name) -> bool:
+        """Is `name` a MOJO function that does not say what it returns?
+
+        The question `string_compare_word_refusal` needs and `ValueKinds` cannot
+        answer: an unannotated call's result and an `-> int` call's result are
+        both `INT_KIND` on this path, because a word is an integer, and the two
+        are not the same thing — one of them may be a `char *`, and `f() == g()`
+        on two of those compares two addresses.
+
+        Two sources, because there are two kinds of Mojo callee, and the third
+        kind is the one that must NOT be in this set:
+
+          * a function of THIS image — the parser recorded its `return_type`,
+            and `None` is the answer when the source has no `->`;
+          * an export of a LINKED MODULE — its manifest signature carries the
+            return type, and `reflect._c_signature` spells an unannotated
+            function's as `void`, so `void` here is the same fact as `None`
+            above. `dylib_export_return_kind` reads the `char *` case out of
+            the same string, which is how a cross-image `-> str` classifies;
+          * and an UNBOUND EXTERN is NOT in this set at all. `memcmp(a, b, n)
+            == 0` is in every `os` function on this path and is correct on
+            every one of them; `getenv(name) == 0` is a NULL check. A C
+            library function has no Mojo return annotation to be missing.
+        """
+        fn = self._functions.get(name)
+        if fn is not None:
+            return getattr(fn, "return_type", None) is None
         entry = M.dylib_export_lookup(self._dylib_by_name,
                                       self._dylib_by_module, name)
-        if entry is not None:
-            return entry.get("symbol") or name
-        module, _, leaf = name.rpartition(".")
-        table = M.dylib_export_module(self._dylib_by_module, module)
-        if table:
-            have = sorted(table)
-            shown = ", ".join(have[:8]) + (", …" if len(have) > 8 else "")
-            raise CodegenError(
-                f"{name}(): `{module}` is a linked module but it exports no "
-                f"`{leaf}`, so the call has no symbol to bind. What it does "
-                f"export: {shown}. A name `doc/ABI.md`'s export rule excludes "
-                f"(a leading `_`, a generic template, an overload, or a C "
-                f"library symbol such as `exit` or `write`) is not advertised, "
-                f"so a module that defines one cannot be called by that name. "
-                f"The exclusion is measured and settled in "
-                f"bugs/FORMAL_known_limits.md 1.1; a module that needs to "
-                f"publish mutable state rather than functions is a different "
-                f"gap, written down in "
-                f"bugs/FORMAL_module_state_no_storage.md")
-        return self._dylib_syms.get(name, name)
+        if entry is None:
+            return False
+        return M.signature_return_type(
+            entry.get("signature") or "").strip() == "void"
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
@@ -4675,7 +4763,8 @@ class X86_64Codegen:
             # an integer — the pointer's own value.
             return M.dylib_export_return_kind(
                 M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name))
+                                      self._dylib_by_module, name,
+                                      self._dylib_forwarded))
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:
@@ -4796,6 +4885,32 @@ class X86_64Codegen:
     def _emit_call(self, e: F.CallExpr) -> None:
         name = _callee_symbol(e.func)
         if name is None:
+            # A SUBSCRIPT callee, `List[Int]()`. arm64's `_callee_symbol` has
+            # carried a `SubscriptExpr` arm for a long time and this copy has
+            # not, so a bracketed call target reaches the refusal below on this
+            # architecture alone — a pre-existing x86-64 gap, listed in
+            # `bugs/FORMAL_wide_receiver_by_reference.md` §5.1 among the
+            # architecture gaps, and NOT closed here: closing it means teaching
+            # this backend a comptime-specialization call convention it does not
+            # have, which is a change of far more than this construct.
+            #
+            # What IS closed here is the one bracketed callee this path can
+            # answer, and it is closed by asking the SAME two shared predicates
+            # arm64 asks rather than by copying its decision: the base name
+            # (`model.subscript_callee_name`) and whether that name has an
+            # empty form (`model.empty_blob_constructor`). So the two
+            # architectures reach the same answer for `List[Int]()` by the same
+            # rule, and the residual gap stays a gap instead of becoming a
+            # third private copy of the flattening.
+            base = M.subscript_callee_name(e)
+            if base is not None and M.empty_blob_constructor(base):
+                operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
+                if operands:
+                    raise CodegenError(
+                        M.blob_constructor_with_operands_refusal(
+                            base, len(operands)))
+                self._emit_empty_blob()
+                return
             raise CodegenError(
                 "unsupported call target on the formal x86-64 path "
                 f"(got {type(e.func).__name__})")
@@ -4957,6 +5072,30 @@ class X86_64Codegen:
         not the program's."""
         kind, info = tkind
         if kind == "unsupported":
+            operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
+            if M.empty_blob_constructor(name):
+                # The EMPTY container, which is a different question from the
+                # one this arm was written for and the one `List[Int]()` was
+                # refused for.  A container's value is a pointer to a blob laid
+                # out `[count:i64][element 0]…`, so the empty one is eight
+                # bytes with a zero count in them — the same eight bytes and the
+                # same layout `_emit_list` builds for `[]`, and the same one
+                # `LEN_FROM_BLOB_FIELD` reads a length from.  arm64 does this in
+                # its own `_emit_type_constructor` with the same wording, and
+                # `model.empty_blob_constructor` is the one predicate both ask,
+                # so the two cannot answer differently about which names have
+                # an empty form.
+                #
+                # With ARGUMENTS it is a genuinely different problem and keeps
+                # its own diagnostic: a blob's size is fixed when the function
+                # is laid out, so one that has to hold n elements needs a frame
+                # reservation sized by a value this compiler does not have.
+                if operands:
+                    raise CodegenError(
+                        M.blob_constructor_with_operands_refusal(
+                            name, len(operands)))
+                self._emit_empty_blob()
+                return
             raise CodegenError(
                 f"constructing {name} has no representation on this path: this "
                 f"image has no declaration of {name} to construct — it is not a "

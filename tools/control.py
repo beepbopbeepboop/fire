@@ -11,6 +11,8 @@
     control.py refill [--target 8] # start queued tasks (deps integrated, claims free) up to N running
     control.py priority [NAME...]  # set/show the order finished branches are integrated in (most important first)
     control.py queue               # what is waiting
+    control.py restart NAME        # snapshot, stop and continue a worker as NAME-rN from its own branch
+    control.py unstick [--idle-min 25]   # restart workers that are stalled (idle log AND no CPU in their tree)
     control.py ps                  # our live workers (not the user's own opencode sessions)
     control.py reap [--dry-run]    # kill leftovers (lean, gcc, ...) in finished workers' trees
     control.py digest NAME         # verdict, commits, diffstat, the worker's REPORT block
@@ -419,6 +421,93 @@ def cmd_memtrim(a):
         time.sleep(a.interval)
 
 
+def _task_text(t):
+    """The original task, pulled back out of the worker's TASK.md (between '## The task' and '## Rules')."""
+    try:
+        txt = open(os.path.join(t["worktree"], "TASK.md")).read()
+    except OSError:
+        return t["summary"]
+    m = re.search(r"## The task\n\n(.*?)\n\n## Rules", txt, re.S)
+    return m.group(1) if m else t["summary"]
+
+
+def restart(name, why):
+    """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch."""
+    t = load()[name]
+    wt = t["worktree"]
+    git("add", "-A", cwd=wt, check=False)
+    git("commit", "-q", "-m", "WIP snapshot by controller: %s's uncommitted edits when it was restarted (%s)" % (name, why),
+        cwd=wt, check=False)
+    try:
+        os.killpg(t["pid"], 15)
+    except OSError:
+        pass
+    n = 2
+    while "%s-r%d" % (name, n) in load():
+        n += 1
+    new = "%s-r%d" % (name, n)
+    with registry() as reg:
+        reg[name]["state"] = "superseded"
+    task = ("You CONTINUE task '%s': the previous instance stopped (%s). Everything it had done is on your branch (its last "
+            "commit is 'WIP snapshot by controller'); review it, keep what is right, and finish the task. Original task:\n\n%s"
+            % (name, why, _task_text(t)))
+    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"], model=t["model"])
+    cmd_spawn(ns)
+    return new
+
+
+def cmd_restart(a):
+    print("restarted as", restart(a.name, a.why))
+
+
+def cmd_unstick(a):
+    """Restart workers that have stalled: log idle for --idle-min AND nothing in their process tree using CPU.
+
+    A network error (or a dropped model request) leaves opencode alive but waiting forever; a long compile or test
+    also leaves the log quiet, which is why the CPU of the tree is part of the test, not just the silence."""
+    ppid, rss = None, None
+    out = subprocess.run(["ps", "-axo", "pid=,ppid=,pcpu="], capture_output=True, text=True).stdout
+    kids, cpu = {}, {}
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) == 3:
+            kids.setdefault(int(f[1]), []).append(int(f[0])); cpu[int(f[0])] = float(f[2])
+    for name, t in list(load().items()):
+        if state_of(t) != "running":
+            continue
+        lp = os.path.join(t["worktree"], "work.log")
+        idle = (time.time() - os.path.getmtime(lp)) / 60 if os.path.exists(lp) else 0
+        stack, busy = [t["pid"]], 0.0
+        while stack:
+            pid = stack.pop()
+            busy += cpu.get(pid, 0.0)
+            stack.extend(kids.get(pid, ()))
+        print("%-32s idle %5.1f min, tree cpu %5.1f%%%s" % (name, idle, busy, "  <- STALLED" if idle >= a.idle_min and busy < 3.0 else ""))
+        if idle >= a.idle_min and busy < 3.0 and not a.dry_run:
+            print("   restarted as", restart(name, "stalled %.0f min with no CPU (a network error?)" % idle))
+    cmd_unstick_dead(a)
+
+
+NET_ERR = re.compile(r"Cannot connect to API|Unable to connect|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|socket hang up|"
+                     r"network error|Is the computer able to access the url", re.I)
+
+
+def cmd_unstick_dead(a):
+    """Restart workers that DIED of a network error: exited non-zero, said no CONTROL-STATUS, and the tail of the log
+    shows an API connection failure (2026-09-30: 'Error: Cannot connect to API: Unable to connect')."""
+    for name, t in list(load().items()):
+        if state_of(t) != "exited-err" or verdict(t):
+            continue
+        lp = os.path.join(t["worktree"], "work.log")
+        if not os.path.exists(lp):
+            continue
+        tail = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:])
+        if NET_ERR.search(tail):
+            print("%-32s died of a network error: " % name + tail.strip().splitlines()[-1][:80])
+            if not a.dry_run:
+                print("   restarted as", restart(name, "died of a network error"))
+
+
 def cmd_reap(a):
     """Kill processes still running with their cwd inside the worktree of a task whose worker has exited.
 
@@ -488,6 +577,8 @@ def main():
     sub.add_parser("queue").set_defaults(f=cmd_queue)
     s = sub.add_parser("memtrim"); s.add_argument("--floor", type=float, default=4.0)
     s.add_argument("--interval", type=float, default=3.0); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_memtrim)
+    s = sub.add_parser("restart"); s.add_argument("name"); s.add_argument("--why", default="restarted by the controller"); s.set_defaults(f=cmd_restart)
+    s = sub.add_parser("unstick"); s.add_argument("--idle-min", type=float, default=25); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_unstick)
     sub.add_parser("ps").set_defaults(f=cmd_ps)
     s = sub.add_parser("reap"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_reap)
     sub.add_parser("report").set_defaults(f=cmd_report)

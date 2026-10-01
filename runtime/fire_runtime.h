@@ -429,6 +429,19 @@ int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
 char *mojo_platform_system(void);
 char *mojo_platform_machine(void);
 char *mojo_stdin_read(void);
+/* `sys.stdout.write(s)` / `sys.stderr.write(s)` / `sys.stdin.write(s)`.
+ * `sys.stdout` is a POSIX fd (1) boxed as an opaque handle — see
+ * emit_exprs.py's sys-stream case for why that representation was chosen
+ * — so a `.write()` on it has to be resolved against the fd, not against
+ * a FILE*. Lowered by ast_rewriter.py's `sys_stdout_write` /
+ * `sys_stderr_write` / `sys_stdin_write` rules, which is what the
+ * `sys.stdin.read()` rule above already does for reads: there is no
+ * Python file-object model here, and without these the call fell through
+ * to the generic unknown-method stub, which emitted `int_write(1, s)` —
+ * treating the integer 1 as a `FILE *` and faulting inside fputs.
+ * `fd` is validated, so a handle that is not 0/1/2 is a no-op rather
+ * than a wild write(2). */
+void mojo_stream_write(int64_t fd, char *s);
 
 /* ── bytes ──────────────────────────────────────────────────────────────
  * Immutable byte string.  Heap value passed as `MojoBytes *` across the C
@@ -938,6 +951,37 @@ char *mojo_set_iter_val_str(MojoSetIter *it);
 void         mojo_set_iter_free(MojoSetIter *it);
 
 void     mojo_set_print(MojoSet *s);
+
+/* ── Value equality ─────────────────────────────────────────────────────────
+ * `a == b` / `a != b` between two VALUES, as Python defines it — not as C
+ * does, where comparing two `MojoList *` is a pointer comparison that answers
+ * True only for one object compared with itself. Every convergence test the
+ * compiler's own source writes over containers is `while nxt != proven:` with
+ * `nxt` and `proven` two separate allocations, so the pointer comparison
+ * never fired and the loop never ended
+ * (bugs/CODEGEN_container_eq_is_pointer_identity.md). See fire_runtime.c's
+ * "`==` / `!=` between values" block for the whole story.
+ *
+ * `elem` is the element code the CODEGEN knows statically for the container
+ * it built — MOJO_EQ_UNKNOWN asks the container's own per-slot kinds instead,
+ * which is the only evidence available for an operand erased to int64_t. It is
+ * PER SIDE (`ea`, `eb`) because `[1.0] == [1]` is a legitimate program and one
+ * code cannot describe both halves of it.
+ * Declared here, after all three container types, because unlike every other
+ * comparison primitive these three need all of them. */
+#define MOJO_EQ_UNKNOWN 0
+#define MOJO_EQ_INT     1
+#define MOJO_EQ_DOUBLE  2
+#define MOJO_EQ_STR     3
+#define MOJO_EQ_BYTES   4
+#define MOJO_EQ_GENERIC 5
+int mojo_list_eq(MojoList *a, MojoList *b, int ea, int eb);
+int mojo_dict_eq(MojoDict *a, MojoDict *b, int va, int vb);
+int mojo_set_eq(MojoSet *a, MojoSet *b, int ea, int eb);
+/* `a == b` for two operands whose static types the codegen could not BOTH
+ * resolve — the shape a container handed to an unannotated parameter takes.
+ * `elem` describes the side the codegen knew and is applied to both. */
+int mojo_value_eq(int64_t a, int64_t b, int elem);
 
 /* ── Python integration ─────────────────────────────────────────────────*/
 void mojo_print(char *str);

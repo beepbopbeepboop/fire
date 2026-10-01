@@ -1426,7 +1426,10 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     val_var = parts[1] if len(parts) >= 2 else '_enum_val'
 
     gen._declare_var(idx_var, 'int64_t')
-    gen._declare_var(val_var, 'char')
+    # Same rule as _gen_for_cstr (see its comment): iterating a str yields
+    # 1-char STRINGS, so the value slot is `char *` too. It was `char`,
+    # which made `for i, c in enumerate(s)` hand out character codes.
+    gen._declare_var(val_var, 'char *')
     cidx_var = gen._cname(idx_var)
     cval_var = gen._cname(val_var)
 
@@ -1450,8 +1453,11 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     else:
         gen._emit(f"  {cidx_var} = {idx_t};")
     gen._ptr_helpers_needed.add('char')
-    addr = gen._new_val('char *', f"_mojo_at_char ({s_val}, {idx_t})")
-    gen._emit(f"  {cval_var} = *{addr};")
+    # See _gen_for_cstr for why this is a cstr_slice and not a
+    # `char`-taking helper: gimple rejects a `char` argument outright.
+    _one_c2 = gen._new_val('int64_t', "(int64_t)1")
+    _end_c2 = gen._new_val('int64_t', f"{idx_t} + {_one_c2}")
+    gen._emit(f"  {cval_var} = mojo_cstr_slice ({s_val}, {idx_t}, {_end_c2});")
     gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
@@ -2040,7 +2046,21 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     Mirrors _gen_for_str's identical index-loop shape, just over
     mojo_strlen/_mojo_at_char instead of mojo_str_len/mojo_str_char_at.
     """
-    gen._declare_var(var, 'char')
+    # The target is a ONE-CHARACTER STRING, not a character code. Python
+    # iterates a str into strs, so `for c in s` binds `c` to `'a'`, and
+    # every real use of it treats it as one: `c in "aeiou"`, `c == " "`,
+    # `d[c] = i`, `"".join(...)`, `c.upper()`. Declaring the target `char`
+    # and assigning the raw code made all of those compare/print a NUMBER
+    # — `set("hello world")` came back as [32, 100, 101, ...] and a
+    # `sorted(set(text))` vocab keyed by integer codes stopped matching the
+    # strings a later `text` iteration produced, so `c not in stoi` raised
+    # KeyError for characters that were demonstrably in the vocab.
+    # `mojo_char_to_str` is the existing 1-char-C-string helper; using it
+    # also fixes the f-string-prefix case this loop was added for
+    # (`any(c in ('t','T','f','F') for c in prefix)`), which compares the
+    # target against 1-char STRING literals and so could never match a
+    # code.
+    gen._declare_var(var, 'char *')
     len_t = gen._new_val('int64_t', f"mojo_strlen ({it_val})")
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -2055,8 +2075,16 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     gen._ptr_helpers_needed.add('char')
-    addr = gen._new_val('char *', f"_mojo_at_char ({it_val}, {idx_t})")
-    gen._emit(f"  {gen._cname(var)} = *{addr};")
+    # `mojo_cstr_slice(s, i, i+1)` rather than
+    # `mojo_char_to_str(*_mojo_at_char(s, i))`: both produce a fresh
+    # NUL-terminated 1-char C string, but gimple REFUSES a `char`-typed
+    # argument ("invalid argument to gimple call" / "non-trivial
+    # conversion in 'integer_cst'") because a char is promoted to
+    # int64_t and the conversion is not trivial to it. The slice takes
+    # only a pointer and two int64 bounds, so it lowers cleanly.
+    _one_c = gen._new_val('int64_t', "(int64_t)1")
+    _end_c = gen._new_val('int64_t', f"{idx_t} + {_one_c}")
+    gen._emit(f"  {gen._cname(var)} = mojo_cstr_slice ({it_val}, {idx_t}, {_end_c});")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()

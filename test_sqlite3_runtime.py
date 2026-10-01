@@ -184,6 +184,16 @@ def test_probe_distinguishes_calls_from_mentions():
          'a string literal that merely contains the name'),
         ('static char *s = "we mention mojo_ncurses_getch in prose";', [],
          'a docstring, which reaches the generated C as a _slit initializer'),
+        # A call-shaped fragment INSIDE a literal. The quote is at the start of
+        # the literal, so "is the name preceded by a quote" says no, and the
+        # name is followed by `(` -- which is exactly how the compiler's own
+        # closure used to match `metal`: a code generator that emits C from
+        # Python string templates has those templates in its own source, and
+        # compiling the compiler inlines them as _slit initializers.
+        ('static char *s = "  x = (int64_t) mojo_metal_init(src);";', [],
+         'a call-shaped fragment inside a string literal'),
+        ('/* real code: mojo_zlib_crc32(a, b, c) */',  [],
+         'a call-shaped fragment inside a comment'),
         ('int main(void) { return 0; }',             [], 'nothing at all'),
     )
     for code, want, why in cases:

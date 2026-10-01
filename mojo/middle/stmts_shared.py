@@ -204,7 +204,19 @@ def _assign_target(gen, tgt, et, ev):
             # the EMPTY type produced `a = ()_t5;` (an empty cast — not even
             # valid C) at the later assignment. Repro:
             # std/test/builtin/test_int.mojo's `var a, b = divmod(7, 3)`.
-            gen._declare_var(tgt.name, hint or et or 'int64_t')
+            #
+            # The hint is a FALLBACK, not an override. `_inferred_var_types`
+            # says int64_t for any local whose type nothing proved, and it
+            # used to beat the slot read's real answer: `cfg, m = build(...)`
+            # declared `int64_t cfg`, so the correctly-typed `Config *` slot
+            # value was immediately coerced back through `(void *)` to
+            # int64_t, and the next `cfg.d_model` assigned a bit pattern into
+            # a `Config *` — which GIMPLE rejects outright ("internal
+            # compiler error: in build2, at tree.cc:5208"). The hint's own
+            # purpose is upgrading a target off the int64_t default, so it
+            # must yield to any type that is not the default itself.
+            _decl_t = et if et and et not in ('int64_t', 'int') else (hint or et or 'int64_t')
+            gen._declare_var(tgt.name, _decl_t)
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
         # A `MojoBoundMethod *` value stored into a local whose declared C

@@ -187,17 +187,46 @@ HOST_MODELLED = frozenset((
     #     cross a dylib boundary — so each digest is one function, and the
     #     seven absent names (SHA-3, SHAKE, blake2s) are named with the
     #     measurements in `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md`.
+    #   `re`  — `formal/hostmods/re.mojo`, a backtracking regex engine in the
+    #     subset `regex_compile.py` says it exists for plus `\b`, `^`/`$`
+    #     under MULTILINE, DOTALL and `(?P<name>…)` — the four things the
+    #     thirteen sweep files and `fire_compiler.py` actually spell — checked
+    #     span for span against CPython's own `re` by `test_re_formal.py`
+    #     (112 patterns, every integer compared). It matters for the same
+    #     reason `struct` does: thirteen files of the arm64 sweep stopped on
+    #     this one import. What it cannot answer is written at the top of the
+    #     file, and the three absences are refusals rather than wrong answers
+    #     — lookaround and backreferences return `STATUS_UNSUPPORTED`, a
+    #     pattern bigger than the module compiles returns `STATUS_LIMIT`, and
+    #     the compiled-pattern and match OBJECTS are functions taking a
+    #     caller-allocated span list, because an object is more than one
+    #     64-bit word and a compiled pattern has nowhere to live between
+    #     calls.
     #
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "json", "re", "math", "random", "decimal", "fractions",
+    "json", "math", "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     # A shape over the source language rather than a runtime facility: the
-    # parser, the type lattice, the dataclass transform.
-    "ast", "typing", "dataclasses",
+    # parser, the type lattice. Neither of the two that USED to be named here
+    # is: `dataclasses` is a front-end transform and `argparse` has a file, and
+    # a name on this list alongside a paragraph saying it is written is a lie
+    # this list is not allowed to tell.
+    #
+    #   `dataclasses` — a COMPILE-TIME transform in
+    #     `formal/dataclass_transform.py`, and it has LEFT this list, which is
+    #     what `FRONTEND_PROVIDED_MODULES` below exists to say. The
+    #     measurement that decided the layer is in that file's docstring; the
+    #     short of it: `@dataclass` decorates a CLASS, a formal value is one
+    #     64-bit word with no type tag, and a decorator applied to a class is
+    #     DROPPED by both backends before the front end looks at it (measured:
+    #     a decorator whose body prints, applied to a class, produces an image
+    #     that runs without printing). So a `formal/hostmods/dataclasses.mojo`
+    #     would export a symbol nothing calls.
+    "ast", "typing",
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same
@@ -232,6 +261,64 @@ HOST_MODELLED = frozenset((
 # about module RESOLUTION and is simply false of a CPython standard-library
 # module with no Mojo source.
 HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED
+
+
+# A module the formal FRONT END implements at COMPILE TIME, so the import is
+# legal and nothing goes on the link line.
+#
+# This is a third answer, and neither of the two above is it. A HOST module is
+# CPython's, and the build refuses it because there is no source to compile. A
+# WRITTEN module has a `formal/hostmods/*.mojo` and is compiled into a dylib the
+# image links. A FRONT-END-PROVIDED module is a shape over the SOURCE LANGUAGE
+# — a decorator transform — and it is consumed by the front end while the
+# statement list is still AST, so there is no symbol for a dylib to export and
+# no `BL` for the codegen to emit.
+#
+# `dataclasses` is the first and only member. The measurement that put it here
+# rather than in `formal/hostmods/` is in `formal/dataclass_transform.py`'s
+# docstring, and it is the reason a Mojo module would have been wrong: a
+# decorator applied to a CLASS is dropped by both backends before the front end
+# looks at it, so a `def dataclass(cls)` in a Mojo module would be a symbol
+# nothing calls, and the transform would silently do nothing — which is the
+# outcome this backend exists to prevent, because `@dataclass` changes what a
+# class MEANS and a dropped decorator is a program that runs and prints numbers
+# the source never wrote.
+#
+# It is separate from `INERT_MODULES` below, and the difference is load-bearing
+# rather than tidiness. `__future__` binds NOTHING and emits nothing, so there
+# is no name in the file for anything to answer about. `dataclasses` binds
+# NAMES the program uses — `dataclass`, `field`, `is_dataclass` — and every one
+# of them is answered by the front end: the decorator by
+# `dataclass_transform.dataclass_classes`, `field(default=…)` by
+# `lower_field_defaults`, and the runtime reflection names by
+# `check_reflection_calls`, which refuses each of them BY NAME with the reason
+# the capability is missing. So a name from this module is never silently
+# dropped — it is either lowered or refused, and the file says which.
+FRONTEND_PROVIDED_MODULES = frozenset(("dataclasses",))
+
+
+def is_frontend_provided(name: str) -> bool:
+    """True when the FRONT END implements this module at compile time.
+
+    The accessor the resolver asks before it looks for a file, and the reason
+    `dataclasses` resolves: pass 1 of `resolve_module_path` searches for Mojo
+    source (there is none, and there must not be — see
+    `dataclass_transform.py`), and pass 2 refuses a host module. This is the
+    answer in between: the import is satisfied by the front end, so
+    `resolve_module_path` returns None — the same `None` a host module returns,
+    meaning "nothing to compile" — and `_resolve_imports` skips it because
+    `imported_modules` does not list it at all.
+
+    Dotted, and on the FIRST component: `dataclasses.something` is the same
+    module, exactly as `_is_host_module` treats it. A member access into it is
+    refused by `dataclass_transform.check_reflection_calls` when the member is
+    one of the reflection names, and by `check_module_symbols` when it is not —
+    so an unknown member of a front-end-provided module is an unresolved name
+    in the file that uses it, which names the file."""
+    if not name:
+        return False
+    return name in FRONTEND_PROVIDED_MODULES \
+        or name.split(".")[0] in FRONTEND_PROVIDED_MODULES
 
 
 def host_module_tier(name: str) -> str:
@@ -335,12 +422,14 @@ def imported_modules(stmts) -> list:
                 names.append(mod)
             for m in names:
                 if (isinstance(m, str) and m and m not in out
-                        and not _is_inert_module(m)):
+                        and not _is_inert_module(m)
+                        and not is_frontend_provided(m)):
                     out.append(m)
         elif isinstance(st, F.FromImportStmt):
             m = st.module
             if (isinstance(m, str) and m and m not in out
-                    and not _is_inert_module(m)):
+                    and not _is_inert_module(m)
+                    and not is_frontend_provided(m)):
                 out.append(m)
     return out
 
@@ -593,6 +682,16 @@ def resolve_module_path(module_name: str, relative_to: str = None,
             for cand in _candidates(module_name, base, ext):
                 if os.path.isfile(cand):
                     return cand
+    if is_frontend_provided(module_name):        # pass 1b
+        # The front end implements it, at compile time, so there is no source
+        # to compile and no dylib to link — the same answer a host module
+        # gives, and the same `None`, for a different reason. Placed HERE,
+        # between pass 1 and pass 2 and not inside pass 2, because pass 2 is the
+        # HOST MODULE rule and this is not one: a name that left
+        # `HOST_MODLED` to become front-end-provided would otherwise fall
+        # through to pass 3, where this repository's own `dataclasses.py`-like
+        # siblings would capture it.
+        return None
     if _is_host_module(module_name):              # pass 2
         return None
     for ext in (".py",):                         # pass 3
@@ -620,10 +719,23 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     reasons applies, so the wording cannot drift from the resolution it
     describes.
     """
-    kind = ("a host module (CPython standard library), which has no Mojo "
-            "source for this backend to compile"
-            if _is_host_module(module_name)
-            else "not a stdlib or sibling module, and no such file exists")
+    # THREE reasons now, not two, and the order is the order
+    # `resolve_module_path` tries them in: Mojo source (which returns, so it is
+    # never this function), then front-end-provided, then host module, then
+    # plain unresolvable. A front-end-provided name is listed for completeness
+    # rather than because a caller reaches it — `imported_modules` filters those
+    # out before anything asks — so that the set of answers this function can
+    # give is the set `resolve_module_path` can return, and a future caller
+    # that bypasses the filter says the right thing.
+    if is_frontend_provided(module_name):
+        kind = ("provided by this backend's front end as a compile-time "
+                "transform, so there is no source to compile and nothing for "
+                "the link step to provide")
+    elif _is_host_module(module_name):
+        kind = ("a host module (CPython standard library), which has no Mojo "
+                "source for this backend to compile")
+    else:
+        kind = "not a stdlib or sibling module, and no such file exists"
     return (f"{os.path.basename(source_path)} imports {module_name!r}, which "
             f"is {kind}")
 
@@ -784,6 +896,23 @@ def _module_identity(module_name: str, parent: str = None) -> str:
     if parent.endswith(".__init__"):
         parent = parent[: -len(".__init__")]
     return parent + module_name
+
+
+def _qualified_reexports(reexports: dict, parent: str) -> dict:
+    """`reexported_names`' table with every module spelling made ABSOLUTE.
+
+    `reexported_names` records the module as the source SPELLS it, which for a
+    relative import is `.sub` — a name that means nothing outside the file that
+    wrote it, and this table is published in the manifest, which is read by
+    builds that have never seen this file. Qualifying it here, with the same
+    `_module_identity` the library's own NAME is derived with, is what makes
+    the record say `pkg.sub` where the source said `.sub`, so a reader of the
+    manifest can tell which module actually defines the forwarded name.
+
+    Same function, same parent, so the record and the file name cannot disagree
+    about which module a relative name resolved to."""
+    return {name: (_module_identity(module, parent), kind)
+            for name, (module, kind) in (reexports or {}).items()}
 
 
 def _dylib_lock(out: str):
@@ -960,8 +1089,10 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
                 [source_path], output=out, prove=False, check=False,
                 module_prefixes={source_path: prefix},
                 link_dylibs=dep_dylibs, arch=arch, fmt="macho",
-                reexports=reexported_names(
-                    stmts, {m: declared_kinds(p) for m, p in depends}))
+                reexports=_qualified_reexports(
+                    reexported_names(
+                        stmts, {m: declared_kinds(p) for m, p in depends}),
+                    module_identity))
         except (FormalBuildError, CodegenError) as e:
             raise ImportBuildError(f"{os.path.basename(source_path)}: {e}")
         # Record the dependencies in the manifest so a program can link them

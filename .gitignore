@@ -39,6 +39,17 @@ _*.nc
 _*.py.orig
 mojoc.dbg
 
+# test_ab_native.py's scratch: sources and their collected .ci/.tok/.ast/.pyi
+# live under .tmp/ (in the worktree, which `_is_selfhost_source_dir` requires),
+# but the compiler writes its output artifacts into the CWD it is handed — the
+# repo root — so these can appear beside the sources while a run is in flight.
+# The `abt<pid>_<hex>_` prefix is this run's; the tag is what makes a
+# concurrent run's artifacts distinguishable (see test_ab_native.py).
+abt*_*.ci
+abt*_*.tok
+abt*_*.ast
+abt*_*.pyi
+
 # tools/codeindex.py derived artifact -- rebuild with `python3 tools/codeindex.py build`
 .codeindex.sqlite3
 

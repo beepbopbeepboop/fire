@@ -134,12 +134,13 @@ def cases():
     # opcode and a pair of fields; a base that carries stray bits in `immr`
     # corrupts the shift AMOUNT while leaving `Rn`/`Rd` correct, which is why
     # the one broken encoder here was correct for a run of amounts and wrong
-    # for every other one (bugs/FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md:
-    # `1 << 12` returned `16`, and only amounts 1-8 — the ones whose intended
-    # `immr` already had the stray bits set — were right). Sweeping the whole
-    # 0..63 range per instruction is what distinguishes that from a working
-    # encoder: no single amount picks it out, and a hand-picked amount picks
-    # out one of the eight that were already fine.
+    # for every other one (`encode_lsl_xd_xn_imm` carried base `0xd3780000`
+    # where its own docstring said `0xd3400000`: `1 << 12` returned `16`, and
+    # only amounts 1-8 — the ones whose intended `immr` already had the stray
+    # bits set — were right). Sweeping the whole 0..63 range per instruction is
+    # what distinguishes that from a working encoder: no single amount picks it
+    # out, and a hand-picked amount picks out one of the eight that were
+    # already fine.
     #
     # Registered as a separate list so the sweep is one loop rather than three,
     # and so a new shift encoder is added here rather than left untested — this

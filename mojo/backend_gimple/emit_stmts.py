@@ -347,6 +347,16 @@ def _gen_stmt_VarDecl(gen, node):
             # char*-tuple VarDecl declares real char* locals instead of
             # storing pointer decimals in int64_t ones.
             et, ev = gen._tuple_elem_value(vtype, v, i)
+            # A target already registered as the int64_t DEFAULT is not a
+            # decision — it is the absence of one, and this slot read is
+            # real evidence about what the name holds. Re-declaring it is
+            # safe precisely because the old type carries no information:
+            # `_declare_var` is first-decl-wins, so without this the real
+            # slot type was thrown away and the value was immediately
+            # coerced BACK to int64_t on the store (a `Config *` slot read
+            # through `(Config *)` then `(void *)` then `(int64_t)`).
+            if gen.var_types.get(n) in ('int64_t', 'int') and et not in ('int64_t', 'int'):
+                _redecl_upgrade_default(gen, n, et)
             gen._declare_var(n, et)
             gen._safe_coerce_emit(et, gen.var_types[n], ev, gen._write_dest(n))
             gen._track_pointer_actual_type(n, gen.var_types[n], ev, et)
@@ -948,6 +958,22 @@ def _gen_stmt_AssignStmt(gen, node):
             # type is a dict/list/set), trust ground truth so a later
             # .get()/subscript dispatches on the right container.
             if ctype == 'int' and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                ctype = vtype
+            # Same rule, one step further: the pre-pass hint is a POINTER
+            # that disagrees with a container value. `int` is the
+            # hallucination marker, but `char *` becomes one by the same
+            # route whenever a subscript-of-a-slice makes the pre-pass read
+            # the name as string-shaped, so the "int only" form of the rule
+            # above let it win. A `MojoList *` / `MojoDict *` / `MojoSet *`
+            # VALUE is ground truth about which container this is, and a
+            # string hint cannot express that; the disagreement is the
+            # pre-pass being wrong, not a refinement. Real: `ids =
+            # VOCAB.encode(CORPUS)[:5]` declared `char * ids` for a list of
+            # ints, so `ids[1:]` lowered to `mojo_cstr_slice` and `ids[1]`
+            # to `_mojo_at_char` dereferenced as a `char` — the
+            # int+list concat on the next line became `char * + MojoList *`
+            # and gimple died with "internal compiler error: in build2".
+            if vtype in ('MojoDict *', 'MojoList *', 'MojoSet *') and ctype != vtype:
                 ctype = vtype
             # Same "trust ground truth" principle, generalized to ANY pointer
             # type (not just Mojo containers) — this pre-pass hint
@@ -1891,6 +1917,36 @@ def _gen_stmt_AugAssignStmt(gen, node):
         pass  # complex aug-assign target: no-op
 
 
+def _redecl_upgrade_default(gen, name: str, ctype: str) -> None:
+    """Re-type a local already declared as the int64_t DEFAULT, when a
+    later read proves what it really holds.
+
+    `_declare_var` is deliberately first-decl-wins (see its docstring) and
+    that guard is load-bearing for the case it was written for — two sibling
+    `for` loops reusing a target name with different element types, where
+    the FIRST declaration is the intended one. This is the other case: the
+    first declaration was not a decision at all but the "no evidence" box,
+    and the multi-value-destructuring slot read that follows is exactly the
+    evidence that was missing.
+
+    So the upgrade is gated on the old type being the default box, which no
+    inference path ever chooses deliberately, and the already-emitted C
+    declaration is rewritten in place rather than appended (the decls list
+    is C text, and a second declaration of the same name would not compile).
+    The C identifier is reused — `_declare_var` will see the name present
+    and no-op, so `var_types` is what actually carries the new type.
+    """
+    c_name = gen._c_names.get(name, name)
+    gen.var_types[name] = ctype
+    gen._elem_types.pop(name, None)
+    for _di in range(len(gen.decls)):
+        _d = gen.decls[_di]
+        if _d.strip() == f"int64_t {c_name};" or _d.strip() == f"int {c_name};":
+            _ind = _d[:len(_d) - len(_d.lstrip())]
+            gen.decls[_di] = f"{_ind}{ctype} {c_name};"
+            return
+
+
 def _gen_stmt_ReturnStmt(gen, node):
     # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
     # gimple_gen_infra.py's "Public entry points" section for the whole
@@ -1971,6 +2027,15 @@ def _gen_stmt_ReturnStmt(gen, node):
         # matters, regardless of how the value's own C type reads.
         if v in gen._elem_types:
             gen._return_elem_types[gen.current_func_name] = gen._elem_types[v]
+        # Same for a multi-value return's PER-SLOT types: `return cfg, Model(cfg)`
+        # is a heterogeneous tuple (two different struct pointers) whose
+        # single joined element type is the useless int64_t, so a caller's
+        # `cfg, m = build(...)` read both slots as int64_t and assigned
+        # them into `Config *` / `Model *` locals — which GIMPLE rejects
+        # outright ("internal compiler error: in build2, at tree.cc:5208"),
+        # since unlike plain C it does not implicitly convert.
+        if gen.current_func_name and v in gen._tuple_slot_types:
+            gen._return_slot_types[gen.current_func_name] = gen._tuple_slot_types[v]
         ret = gen.func_ret_type
         if ret == 'void':
             gen._emit(gimple_codegen._RETURN)
@@ -2843,6 +2908,14 @@ def _gen_stmt_ContinueStmt(gen, node):
 def _gen_stmt_ExprStmt(gen, node):
     if isinstance(node.value, gimple_ctypes.CallExpr) and isinstance(node.value.func, gimple_ctypes.IdentExpr):
         raw_name = gen._ident_call_name(node.value.func)
+        # A bare, value-discarding call to an offloaded DEVICE function.
+        # This handler has its own fast path for statement-position calls and
+        # never reaches _lower_call, so without this the launch hook only
+        # fired for calls in value position and the ordinary
+        # `kernel(a, b, out, n)` line silently became a weak stub call.
+        if raw_name in getattr(gen, '_device_kernels', ()):
+            ggc._lower_device_launch(gen, node.value)
+            return
         if raw_name == 'print':
             gen._gen_print(node.value.args, node.value.kwargs)
             return

@@ -1467,6 +1467,213 @@ def test_fanout_aggregates():
     check('fanout: one bad item fails the test', rc == 1, f'got {rc}')
 
 
+def _scratch_git_tree(tmp, tracked, untracked):
+    """A throwaway git repo holding `tracked` (staged) and `untracked` (on disk
+    only) files. Staged rather than committed, so it is milliseconds and needs
+    no identity config."""
+    os.makedirs(tmp, exist_ok=True)
+    subprocess.run(['git', 'init', '-q', tmp], check=True,
+                   capture_output=True)
+    for rel in tracked:
+        full = os.path.join(tmp, rel)
+        os.makedirs(os.path.dirname(full) or tmp, exist_ok=True)
+        with open(full, 'w') as f:
+            f.write('def main() -> Int:\n    return 0\n')
+    for rel in untracked:
+        full = os.path.join(tmp, rel)
+        os.makedirs(os.path.dirname(full) or tmp, exist_ok=True)
+        with open(full, 'w') as f:
+            f.write('def main() -> Int:\n    return 0\n')
+    subprocess.run(['git', '-C', tmp, 'add', '--'] + list(tracked),
+                   check=True, capture_output=True)
+    return tmp
+
+
+def test_fanout_enumeration_ignores_untracked_scratch():
+    """A transient `.mojo` in the tree must never become a fan-out item.
+
+    This is the 2026-09-29 round-6 flake, pinned at the enumeration. The repo
+    root is a shared scratch surface: `test_ab_native.py` used to write
+    `_abt_<case>.mojo` there for the length of a run, `MOJO_FILES` was a
+    `glob.glob` over that directory, and a `bootstrap-stage1-dumps` plan built
+    during the window listed one of those transients as an item. When
+    `ab-native` finished (or was SIGKILLed by memcap at its 8 GB ceiling) and
+    deleted it, that item failed with `Error reading ../_abt_minimal_main.mojo:
+    [Errno 2]` and took the entire bootstrap chain behind it with it — eight
+    SKIPs, with the one real cause buried in a sub-job's stderr.
+
+    A scratch git tree rather than a mock, because the property under test is
+    git's, not the runner's: `git ls-files` reports the index, and the whole
+    argument for choosing it over a denylist (`_abt*.mojo`, `abt*_*`) is that
+    "is this tracked source?" needs no maintenance and cannot be defeated by a
+    transient nobody named. A fake `git` on PATH would test the fake.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = _scratch_git_tree(
+            os.path.join(td, 'tree'),
+            tracked=['real.mojo', 'mojo/nested.mojo', 'notes.txt'],
+            # Exactly the shape the flake produced: an untracked `_abt_*`
+            # source sitting in the directory being enumerated.
+            untracked=['_abt_minimal_main.mojo', 'abt999_deadbeef_case.mojo'])
+
+        found = suite.tracked_mojo_files(root)
+        check('enumeration: a transient .mojo is not an item',
+              not any('minimal_main' in f or 'deadbeef' in f for f in found),
+              f'the enumeration picked up a transient: {found}')
+        check('enumeration: the tracked .mojo files ARE items',
+              'real.mojo' in found,
+              f'expected real.mojo in {found}')
+        check('enumeration: it is not a bare top-level glob',
+              'notes.txt' not in found,
+              f'a non-.mojo file became an item: {found}')
+        check('enumeration: it is restricted to the top level and mojo/',
+              not any(f.startswith('sub/') for f in found)
+              and all('/' not in f or f.startswith('mojo/') for f in found),
+              f'items from outside the enumerated roots: {found}')
+
+        # The glob this replaced would have listed the transient. Asserting
+        # that directly is what makes the first check falsifiable: if the
+        # scratch file stopped being globbable for an unrelated reason, the
+        # enumeration check would pass for the wrong reason.
+        globbed = suite._glob_mojo_files(root)
+        check('enumeration: the old glob WOULD have picked the transient up',
+              any('minimal_main' in f for f in globbed),
+              f'the control is broken — the glob found {globbed}, so the '
+              f'first check is not evidence of anything')
+
+        # Determinism: the plan's job order is this list's order, so a
+        # re-enumeration that differs is a plan that differs run to run.
+        check('enumeration: it is deterministic across calls',
+              suite.tracked_mojo_files(root) == found,
+              'two enumerations of an unchanged tree disagreed')
+
+    # And the real thing, not just a synthetic tree: the live registry's item
+    # list must contain no transient and no file absent from the worktree.
+    items = suite.BOOTSTRAP_INPUTS
+    check('enumeration: the live bootstrap item list is sorted-then-stable',
+          suite.MOJO_FILES == sorted(suite.MOJO_FILES)
+          and len(suite.MOJO_FILES) > 20,
+          f'{len(suite.MOJO_FILES)} .mojo items; every check above would be '
+          f'vacuous if the real list were empty')
+    check('enumeration: the live item list is every tracked .mojo and no more',
+          set(items) == set(suite.MOJO_FILES) | set(suite.PY_FILES),
+          'the live BOOTSTRAP_INPUTS is not MOJO_FILES + PY_FILES')
+    missing = [f for f in items if not os.path.exists(os.path.join(HERE, f))]
+    check('enumeration: every live item exists in this worktree', not missing,
+          f'enumerated but absent: {missing}')
+
+
+def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
+    """The WRITER half of the round-6 flake, executed rather than described.
+
+    `test_fanout_enumeration_ignores_untracked_scratch` above pins the
+    enumeration: a transient in the repo root is not an item. That is only half
+    the fix, and the half that is cheap. The other half is that
+    `test_ab_native.py` no longer PUTS one there — it writes each case's source
+    into a private per-process directory under `.tmp/` and tags every name with
+    its pid, so a concurrent fan-out has nothing to enumerate and two concurrent
+    runs cannot collide.
+
+    It is checked HERE, and not left to `ab-native`, because `ab-native` cannot
+    check it: that spec needs the self-hosted binary, is capped at 55 GB, and is
+    `expect=`-marked red because the binary segfaults on any input. So the code
+    that decides where this test writes had no executing coverage at all — the
+    exact hole `coro` sat in after the `mojo_*` rename, one level down. The
+    self-test is pure Python and needs no compiler, so it runs in a tenth of a
+    second here, in the `smoke` bucket, on every run.
+
+    The invariant asserted is the whole directory, not the files this happened
+    to write: a check that only looked for its own leftovers would pass on a
+    version that leaked under a different name.
+    """
+    p = subprocess.run([PY, os.path.join(HERE, 'test_ab_native.py'),
+                        '--scratch-selftest'],
+                       capture_output=True, text=True, timeout=120, cwd=HERE)
+    out = p.stdout + p.stderr
+    check('ab-native scratch: the self-test runs and passes', p.returncode == 0,
+          out.strip()[-400:])
+    m = re.search(r'scratch isolation: (\d+) passed, (\d+) failed', out)
+    check('ab-native scratch: it reported a real count, not an empty run',
+          m is not None and int(m.group(1)) > 15,
+          f'no count line, or too few checks to mean anything: {out.strip()[-200:]}')
+    # The two properties the flake turned on, read out of the module rather
+    # than trusted, because they are what a future edit could undo silently.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'ab_native_scratch', os.path.join(HERE, 'test_ab_native.py'))
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)          # runs the atexit registration
+    except SystemExit:                        # pragma: no cover
+        pass
+    tagged = mod._tagged('abfulltest_leaf.mojo')
+    check('ab-native scratch: a source name is tagged, so two runs differ',
+          tagged.startswith(mod.SRC_PREFIX) and tagged.endswith('.mojo'),
+          tagged)
+    check('ab-native scratch: the scratch root is under .tmp/, not the root',
+          os.path.abspath(mod.SCRATCH_ROOT)
+          == os.path.join(HERE, '.tmp'),
+          mod.SCRATCH_ROOT)
+    check('ab-native scratch: a bare stem gets exactly one .mojo',
+          mod._tagged('minimal_main').count('.mojo') == 1,
+          mod._tagged('minimal_main'))
+    # And the module left the directory as it found it — the property that
+    # makes the self-test safe to run from a gate at all.
+    stray = [n for n in os.listdir(HERE)
+             if n.startswith(mod.SRC_PREFIX) or n.startswith('abt999999_')]
+    check('ab-native scratch: the self-test left nothing in the repo root',
+          not stray, f'{stray}')
+
+
+def test_missing_fanout_item_is_a_named_failure():
+    """A missing item file is a FAIL naming that item — not a skipped chain.
+
+    The second half of the same flake, and the half that decides how long the
+    first half takes to diagnose. With the glob, a vanished item surfaced only
+    as the compiler's `Error reading ...: [Errno 2]` inside one sub-job's
+    output, and what the run *reported* was eight SKIPs: `bootstrap-stage1-
+    dumps` failed, so everything downstream of it was skipped, and the screen
+    read like the bootstrap was unavailable rather than like one file in a
+    41-file sweep had moved.
+
+    So: `items_are_files` items are checked for existence before the process
+    is launched, and the verdict names the item and says what is wrong. The
+    other half of the property is that it stays LOCAL — one bad item must not
+    stop the other items, or "loud" has just been traded for "the sweep no
+    longer covers anything".
+    """
+    # A real tracked file so the sweep has something that must still run, and
+    # a name that is deliberately not a file.
+    present = 'fire.py'
+    absent = 'definitely_not_a_real_source_file_xyz.mojo'
+    with Sandbox(sweep=suite.Fanout(
+            name='sweep', cmd=[PY, '-c', 'pass', '{file}'],
+            items=[present, absent], mem='program', items_are_files=True)):
+        log = os.path.join(HERE, 'build', 'test-suite-missing-item.log')
+        rc, _ = run(['sweep'], jobs=2, log=log)
+    text = open(log).read() if os.path.exists(log) else ''
+    check('missing item: it fails the test', rc == 1, f'got rc={rc}')
+    check('missing item: the verdict NAMES the item',
+          absent in text,
+          'the report does not identify which item was missing')
+    check('missing item: the verdict says the file is absent',
+          'does not exist' in text,
+          'the detail does not distinguish "missing file" from "compiler error"')
+    check('missing item: the present item still ran',
+          present in text,
+          'the sweep stopped at the bad item instead of covering the rest')
+
+    # The control: with no item declared to be a file, a missing name is just
+    # a string and must NOT be failed by this check. Otherwise the guard would
+    # be unusable for a sweep over bare labels.
+    with Sandbox(sweep=suite.Fanout(
+            name='sweep', cmd=[PY, '-c', 'pass', '{file}'],
+            items=['a', 'b'], mem='program')):
+        rc, _ = run(['sweep'], jobs=2)
+    check('missing item: items_are_files=False is unaffected by the check',
+          rc == 0, f'got rc={rc}; the guard fired on a non-file sweep')
+
+
 # ── the tally ────────────────────────────────────────────────────────────────
 def tally_of(out):
     """The summary line's counters as {wording: count}, and the test count it
@@ -2208,6 +2415,13 @@ UNREGISTERED = {
         'takes.',
 
     # ── the rest, one reason each ──
+    'test_container_equality.py': 'Container ==/!= on the compiled path, each '
+        'case a whole program run BOTH ways and required to agree with CPython '
+        'on stdout and exit status. Not registered because the work that added '
+        'it was told not to touch tools/suite.py; it needs a `check`-bucket '
+        'entry beside `gimple`/`gimplerunner` (a `cmd` step, memclass small: '
+        '24 programs, ~25 s, peak 0.1 GB) and `extra` naming this file so '
+        'checked_run.py\'s content-addressed cache invalidates when it changes.',
     'test_imports.py': 'That import statements generate extern declarations. '
         'A missing extern is a link failure attributed to something else.',
     'test_kwargs_stmt.py': 'kwargs in statement-level calls, a shape the '
@@ -2618,8 +2832,11 @@ def test_no_test_preflights_on_an_unbuildable_artifact():
 
 def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
-               test_make_driver, test_j_forwarded, test_deps_order_and_skip,
+               test_make_driver, test_j_forwarded,                test_deps_order_and_skip,
                test_exclusive_is_alone, test_fanout_aggregates,
+               test_fanout_enumeration_ignores_untracked_scratch,
+               test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root,
+               test_missing_fanout_item_is_a_named_failure,
                test_timeout_is_a_failure_not_a_vanished_job,
                test_tally_accounts_for_every_test,
                test_a_status_with_no_counter_stops_the_runner,
