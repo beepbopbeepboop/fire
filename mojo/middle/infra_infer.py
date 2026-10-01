@@ -1468,6 +1468,97 @@ _CONTAINER_LITERAL_CTYPES: dict = {
     'TupleExpr': 'MojoList *',   # a tuple lowers to a real MojoList
 }
 
+def _each_binding(body: list):
+    """Every statement in `body` that can BIND a local, recursing through
+    control flow and never into a nested `FunctionDef` (which has its own
+    locals and its own return inference -- the same boundary
+    `mutated_free_names` uses).
+
+    ONE walker for the three local-type overlays below. Each of them used to
+    carry its own copy, and they had already drifted: the container copy
+    walked `elif` bodies and the dict copy did not. The unified walk takes
+    the superset (every branch that can bind is walked), which for the dict
+    overlay is strictly more evidence of the same kind -- it exists to give
+    `_quick_type` a better type for a local, and a binding inside an `elif`
+    is exactly as real as one inside the `else`.
+    """
+    def walk(stmts):
+        for s in (stmts or []):
+            if isinstance(s, gimple_ctypes.FunctionDef):
+                continue
+            yield s
+            if isinstance(s, gimple_ctypes.IfStmt):
+                yield from walk(s.then_body)
+                yield from walk(getattr(s, 'else_body', None))
+                for _cond, eb in (getattr(s, 'elifs', None) or []):
+                    yield from walk(eb)
+            elif isinstance(s, (gimple_ctypes.WhileStmt,
+                                gimple_ctypes.ForStmt)):
+                yield from walk(getattr(s, 'body', None))
+                yield from walk(getattr(s, 'else_body', None))
+            elif isinstance(s, gimple_ctypes.WithStmt):
+                yield from walk(s.body)
+            elif isinstance(s, gimple_ctypes.TryStmt):
+                yield from walk(s.body)
+                for h in (getattr(s, 'handlers', None) or []):
+                    yield from walk(getattr(h, 'body', None))
+                yield from walk(getattr(s, 'else_body', None))
+                yield from walk(getattr(s, 'finally_body', None))
+    yield from walk(body)
+
+
+def _struct_constructor_locals(gen, body: list) -> dict:
+    """`{local name: ctype}` for every local in `body` whose FIRST binding
+    is a call to a REGISTERED STRUCT's constructor -- `p = P("a")` gives
+    `{'p': 'P *'}` -- so a later `p.<method>(...)` can be typed.
+
+    The same authority and the same rule `module_shared.py`'s pre-pass uses
+    for a field of the same shape (`cn in self.struct_field_types` ->
+    `cn + ' *'`): the ctype is asserted only for a name this compile emitted
+    a struct definition for, which is what makes it evidence rather than a
+    guess. First-binding-wins, like its two siblings.
+
+    Why it exists: `_collect_return_types` types each `return` expression
+    with `_quick_type`, and `_quick_type`'s method-call branch is gated on
+    the RECEIVER's type naming a registered struct -- it has to be, because a
+    user class is free to define a method called `items` or `read`. During
+    return inference this function's locals are not in `gen.var_types` yet
+    (their own statements declare them later, during body codegen), so that
+    gate never opened and every `return p.<method>(...)` fell to the int64_t
+    default. Measured, on `class P: def __repr__(self): return "R<" + self.x +
+    ">"`:
+
+        def g(): p = P("a"); return p.__repr__()   CPython R<a>
+                                                          compiled 4380508000
+
+    while `return repr(p)` and `return p.x` -- the two spellings whose
+    `_quick_type` rows answer without a receiver -- were already right. One
+    wrong declaration turned the `char *` into a pointer decimal by the time
+    `print` saw it. The call site was correct throughout; only the enclosing
+    declaration was not."""
+    out: dict = {}
+
+    def note(n):
+        if not isinstance(n, gimple_ctypes.AssignStmt):
+            return
+        if not isinstance(n.target, gimple_ctypes.IdentExpr):
+            return
+        name = _as_str(n.target.name)
+        if name in out:
+            return
+        v = n.value
+        if not (isinstance(v, gimple_ctypes.CallExpr)
+                and isinstance(v.func, gimple_ctypes.IdentExpr)):
+            return
+        cname = _as_str(v.func.name)
+        if cname in gen.struct_field_types:
+            out[name] = cname + ' *'
+
+    for n in _each_binding(body):
+        note(n)
+    return out
+
+
 def _container_literal_locals(body: list) -> dict:
     """`{local name: ctype}` for every local in `body` whose FIRST binding
     is a container literal, recursing through control flow but never into
@@ -1502,32 +1593,8 @@ def _container_literal_locals(body: list) -> dict:
         t = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
         if t:
             out[name] = t
-    def walk(stmts):
-        for s in (stmts or []):
-            if isinstance(s, gimple_ctypes.FunctionDef):
-                continue
-            note(s)
-            if isinstance(s, gimple_ctypes.IfStmt):
-                walk(s.then_body)
-                if s.else_body:
-                    walk(s.else_body)
-                for _cond, _eb in (getattr(s, 'elifs', None) or []):
-                    walk(_eb)
-            elif isinstance(s, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
-                walk(s.body)
-                if getattr(s, 'else_body', None):
-                    walk(s.else_body)
-            elif isinstance(s, gimple_ctypes.WithStmt):
-                walk(s.body)
-            elif isinstance(s, gimple_ctypes.TryStmt):
-                walk(s.body)
-                for h in (getattr(s, 'handlers', None) or []):
-                    walk(getattr(h, 'body', None))
-                if s.else_body:
-                    walk(s.else_body)
-                if getattr(s, 'finally_body', None):
-                    walk(s.finally_body)
-    walk(body)
+    for n in _each_binding(body):
+        note(n)
     return out
 
 def _dict_value_locals(gen, body: list) -> dict:
@@ -1577,30 +1644,8 @@ def _dict_value_locals(gen, body: list) -> dict:
                    or vt.endswith(' *')):
             out[name] = vt
 
-    def walk(stmts):
-        for n in (stmts or []):
-            note(n)
-            if isinstance(n, gimple_ctypes.FunctionDef):
-                continue
-            if isinstance(n, gimple_ctypes.IfStmt):
-                walk(n.then_body)
-                if isinstance(getattr(n, 'else_body', None), list):
-                    walk(n.else_body)
-            elif isinstance(n, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
-                walk(n.body)
-                if getattr(n, 'else_body', None):
-                    walk(n.else_body)
-            elif isinstance(n, gimple_ctypes.WithStmt):
-                walk(n.body)
-            elif isinstance(n, gimple_ctypes.TryStmt):
-                walk(n.body)
-                for h in (getattr(n, 'handlers', None) or []):
-                    walk(getattr(h, 'body', None))
-                if n.else_body:
-                    walk(n.else_body)
-                if getattr(n, 'finally_body', None):
-                    walk(n.finally_body)
-    walk(body)
+    for n in _each_binding(body):
+        note(n)
     return out
 
 
@@ -1626,14 +1671,20 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     The overlay is temporary and additive: a name already in `var_types`
     keeps the type an earlier pass decided for it."""
     _locals = _container_literal_locals(body)
+    _structs = _struct_constructor_locals(gen, body)
     _dict_vals = _dict_value_locals(gen, body)
-    if not _locals and not _dict_vals:
+    if not _locals and not _structs and not _dict_vals:
         return _infer_return_type_core(gen, body)
     _saved = gen.var_types
     _merged = dict(_saved)
-    for _n, _t in _locals.items():
-        if _n not in _merged:
-            _merged[_n] = _t
+    # The struct-constructor types are MERGED, not merely appended after the
+    # container ones: a name cannot be both, and first-binding-wins is
+    # decided by each overlay's own scan of the body (which walks the
+    # statements in source order), so the two agree by construction.
+    for _src in (_locals, _structs):
+        for _n, _t in _src.items():
+            if _n not in _merged:
+                _merged[_n] = _t
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
     # `_dict_val_types` to type a `return d[k]`. Additive, and a name already
