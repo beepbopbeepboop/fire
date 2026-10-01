@@ -113,7 +113,10 @@ def bisect_first_bad(merged, failed_jobs_):
     return lo
 
 
-def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=25):
+SUSPECT = None
+
+
+def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=180):
     """THE PIECE-FIX RULE. A red batch is usually a handful of small, customary breakages where many branches meet (a
     half-applied conflict resolution, a helper renamed in one branch and still called by its old name in another, an
     unregistered test file, a stale marker or hard-coded count, two fixes of one thing). An agent working on the MERGED tree fixes
@@ -131,16 +134,21 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=25):
         name = "%s-a%d" % (base, attempt)
         task = ("The integrator merged %d finished branches onto master in ONE batch and the full gate is RED. You start on branch %s: "
                 "EXACTLY that merged tree. Jobs failing (confirmed by re-running them alone, so not load): %s.\n\nFailure excerpt:\n%s\n\n"
-                "Make each of them pass with the SMALLEST edits. The usual and customary breakages when many branches meet: a conflict "
-                "resolved wrongly or left half-applied; a helper renamed or moved by one branch and still called by its old name from "
-                "another; a registration or estate entry missing for a new test file; a stale expected-failure marker, hard-coded count or "
-                "table row; two branches fixing the same thing two ways (consolidate to one, CLAUDE.md); an index/doc conflict. Use "
-                "`git log --merges --oneline master..HEAD` to see which branch each file came from. You may run EXACTLY the failing jobs "
-                "to verify: python3 tools/suite.py %s (they reserve their own memory; one at a time). Do NOT revert or disable a branch's "
-                "behaviour, and do NOT delete or skip a test to get green. Commit each fix on its own, with a message naming the branch it "
-                "repairs. If a problem is bigger than ~50 lines, or you cannot find the cause with a reasonable effort, STOP and say which "
-                "branch appears responsible and why: finish with CONTROL-STATUS: BLOCKED and a QUESTION: line naming it (that triggers a "
-                "bisect). Otherwise finish with the REPORT block and CONTROL-STATUS: DONE once ALL of those jobs pass."
+                "Make each of them pass. Fixes of ANY size are fine: thousands of lines is normal when many branches meet, so do not hold back "
+                "or bail out because a repair is big. The usual and customary breakages: a conflict resolved wrongly or left half-applied; a "
+                "helper renamed or moved by one branch and still called by its old name from another; a registration or estate entry missing "
+                "for a new test file; a stale expected-failure marker, hard-coded count or table row; two branches fixing the same thing two "
+                "ways (consolidate to one, CLAUDE.md); an index/doc conflict. Use `git log --merges --oneline master..HEAD` to see which "
+                "branch each file came from. HARD problems you SHOULD debug yourself, properly: a crash or SIGSEGV, a wrong value, a hang. "
+                "Use HOW-TO-DEBUG.html (the iota + rolling-hash bisection, section 8b) and tools/gdbtool (persistent lldb) and the "
+                "failing job's own test case: find the root cause, do not paper over it. You may run EXACTLY the failing jobs to verify: "
+                "python3 tools/suite.py %s (they reserve their own memory; one at a time). Do NOT revert or disable a branch's behaviour, and "
+                "do NOT delete or skip a test to get green. Commit each fix on its own with a message naming the branch it repairs. "
+                "ONLY if there is ONE hard issue that you cannot crack after a real, sustained effort: ISOLATE it, do not abandon the rest. "
+                "Finish the other repairs, then finish with CONTROL-STATUS: BLOCKED and a QUESTION: line that names the single failing test "
+                "case and the ONE branch (use its exact task name) or commit responsible and what you established; the integrator will "
+                "split that branch off and land everything else. Otherwise finish with the REPORT block and CONTROL-STATUS: DONE once ALL "
+                "of those jobs pass."
                 % (len(merged), base if attempt == 1 else prev, ", ".join(failed), excerpt, " ".join(failed)))
         ns = _ap.Namespace(name=name, claim=["task:" + name], task=task, task_file=None, file=[], base=(base if attempt == 1 else prev), model=None)
         try:
@@ -162,6 +170,11 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=25):
             if C.state_of(tasks[n]) == "running":
                 try: os.killpg(tasks[n]["pid"], 15)
                 except OSError: pass
+        qtext = " ".join(q for n in family for q in C.questions(tasks[n]))
+        global SUSPECT
+        SUSPECT = next((m for m in merged if m in qtext), None)
+        if SUSPECT:
+            log("PIECE-FIX attempt %d isolated ONE hard issue; suspect branch: %s (%s)" % (attempt, SUSPECT, qtext[:160]))
         if not done:
             log("PIECE-FIX attempt %d produced no commits (%s)" % (attempt, "BLOCKED" if any(C.verdict(tasks[n]) == "BLOCKED" for n in family) else "timeout/none"))
             return False
@@ -179,7 +192,7 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=25):
     return False
 
 
-def merge_conflicts(M, X, timeout_min=45):
+def merge_conflicts(M, X, timeout_min=180):
     """Conflicts BETWEEN branches belong in ONE place: an agent on the merged tree merges the branches that conflicted, one after
     another, so each resolution sees the ones before it. (Resolving each against master separately, one fixer per branch, makes
     results that conflict with each other all over again: 25 fixers for 25 conflicts, none of them able to land.)"""
@@ -198,7 +211,7 @@ def merge_conflicts(M, X, timeout_min=45):
             "edit. After each merge make the tree COHERENT, not just textually merged: two branches fixing one thing two ways -> "
             "consolidate to one (CLAUDE.md); a helper renamed by one and called by the old name from another -> fix the call. After each "
             "merge run the narrow tests for the files involved (under python3 tools/memslot.py --gb 8 --label x --); commit. A branch whose "
-            "conflict is bigger than ~100 lines or that you cannot reconcile: skip it (git merge --abort), say which and why, and go on. "
+            "conflict is a genuine DESIGN conflict you cannot reconcile after a real effort (not merely large: thousands of lines is fine): skip just that one (git merge --abort), say which and why, and go on. "
             "Never use git stash. At the end run python3 test_suite.py, python3 test_memslot.py and python3 tools/suite.py smoke -j2 and "
             "report. Finish with the REPORT block and CONTROL-STATUS: DONE (or PARTIAL naming what you skipped)."
             % (base, len(M), len(X), lines))
@@ -289,8 +302,12 @@ def main():
                     elif fix_forward(merged, failed, os.path.join(I.INTEG, "gate.log")):
                         log("PIECE-FIX landed the whole batch (%d branches + the fixes)" % len(merged))
                     else:
-                        log("piece-fix did not get it green: falling back to a BISECT")
-                        k = bisect_first_bad(merged, failed)
+                        log("piece-fix did not get it green: isolating the one hard issue")
+                        if SUSPECT and SUSPECT in merged and probe([n for n in merged if n != SUSPECT], failed):
+                            k = merged.index(SUSPECT)     # the fixer named it and the failing jobs pass without it: one probe, no bisect
+                            log("confirmed: without %s the failing jobs pass" % SUSPECT)
+                        else:
+                            k = bisect_first_bad(merged, failed)
                         culprit = merged[k]
                         log("first bad branch: %s (the %d before it pass %s)" % (culprit, k, ",".join(failed)))
                         red[culprit] = head_sha(culprit)
