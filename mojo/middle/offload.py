@@ -68,6 +68,7 @@ is a kernel that computes a wrong answer at exit 0.
 from __future__ import annotations
 
 import fire_compiler as gctypes
+from typing import NamedTuple
 
 #: Statements that make a loop body something other than a parallel map.
 #: ``IfStmt`` is here because a conditional STORE is a compaction, which needs
@@ -1019,7 +1020,339 @@ def rewrite_to_dispatch(fdef, info: 'Offloadable') -> 'object | None':
         line=getattr(fdef, 'line', 0), col=getattr(fdef, 'col', 0))
 
 
-def offload_module(stmts: list) -> tuple:
+# ── the matmul nest ─────────────────────────────────────────────────────────
+#
+# A GEMM is the second recognised shape, and it is NOT a special case of the
+# first. The existing recogniser requires a single loop whose body is a single
+# assignment, and reuses that body VERBATIM in the kernel. A GEMM is a triple
+# nest with a scalar accumulator and affine indices, and its kernel is a
+# completely different computation -- one thread per OUTPUT element, indexing
+# (i, j) from a flat grid coordinate. Nothing about it can be reused verbatim,
+# so this is a second synthesis path rather than a widening of the first.
+#
+# It is here because the naive triple loop is what people actually write, and
+# the win is real: a synthesised parallel GEMM against the scalar path is the
+# same 20x the hand-written tensor-core kernel already measures. The tensor
+# cores themselves are a further step (see the module docstring).
+
+
+class GemmInfo(NamedTuple):
+    """A recognised `C[i*n + j] = sum_p A[i*k + p] * B[p*n + j]`.
+
+    The names are the SOURCE's. `lengths` maps each of A, B, C to the C
+    expression giving its element count, which is what the launch marshalling
+    needs and what a single count parameter cannot express: A is M*K, B is K*N,
+    C is M*N.
+    """
+
+    a: str
+    b: str
+    c: str
+    m: str
+    k: str
+    n: str
+    acc: str
+    elem: str
+    lengths: dict
+
+
+def _affine_index(node, want: dict) -> bool:
+    """Does `node` spell out the product/sum of `want`?
+
+    `want` maps a variable name to its coefficient, e.g. {'i': 1, 'k': 1, 'p': 1}
+    for `i*k + p`. Matching by STRUCTURE rather than by printing the source and
+    comparing text, because multiplication is commutative and `k*i + p` is the
+    same index. Every term must be accounted for exactly once, so a duplicated or
+    dropped factor is a refusal rather than a silent wrong address.
+    """
+    remaining = dict(want)
+    terms: list = []
+
+    def walk(nd) -> bool:
+        nm = type(nd).__name__
+        if nm == 'BinaryOp':
+            if nd.op in ('+', '-'):
+                return walk(nd.left) and walk(nd.right)
+            if nd.op == '*':
+                # only single-variable products are matched; a product of two
+                # compound terms would need distributing and is refused
+                lv, rv = nd.left, nd.right
+                if isinstance(lv, gctypes.IdentExpr):
+                    terms.append(_as_str(lv.name))
+                elif isinstance(rv, gctypes.IdentExpr):
+                    terms.append(_as_str(rv.name))
+                else:
+                    return False
+                return walk(lv if not isinstance(lv, gctypes.IdentExpr) else rv)
+            return False
+        if nm == 'IdentExpr':
+            terms.append(_as_str(nd.name))
+            return True
+        if nm == 'IntLiteral' and nd.value == 1:
+            return True          # an explicit *1 is a no-op
+        return False
+
+    if not walk(node):
+        return False
+    return sorted(terms) == sorted(remaining)
+
+
+def _subscript_name(node):
+    parts = _subscript_parts(node)
+    return parts[0] if parts else None
+
+
+def recognise_gemm(fdef) -> 'GemmInfo | None':
+    """The textbook GEMM nest in `fdef`, or None.
+
+        for i in range(m):
+            for j in range(n):
+                acc: T = 0.0
+                for p in range(k):
+                    acc = acc + A[i*k + p] * B[p*n + j]
+                C[i*n + j] = acc
+
+    Every clause is checked against the AST rather than assumed: the bounds are
+    the right parameters, the accumulator is initialised to a literal zero and
+    updated as `acc + (A * B)`, and all three indices are the expected affine
+    forms. A nest that is nearly this -- a transposed B, a max() in the
+    accumulator, a strided store -- is refused, because each of those computes
+    something the kernel does not.
+    """
+    body = list(getattr(fdef, 'body', None) or ())
+    if len(body) != 1 or not isinstance(body[0], gctypes.ForStmt):
+        return None
+    outer = body[0]
+    m = _trip_count_param(outer.iterable)
+    if m is None or not isinstance(outer.target, str):
+        return None
+    i = outer.target
+
+    jbody = list(outer.body or ())
+    if len(jbody) != 1 or not isinstance(jbody[0], gctypes.ForStmt):
+        return None
+    inner_outer = jbody[0]
+    n = _trip_count_param(inner_outer.iterable)
+    if n is None or not isinstance(inner_outer.target, str):
+        return None
+    j = inner_outer.target
+
+    kbody = list(inner_outer.body or ())
+    if len(kbody) != 3:
+        return None
+    init, kloop, store = kbody
+    if not isinstance(init, gctypes.AssignStmt) or not isinstance(kloop, gctypes.ForStmt) \
+            or not isinstance(store, gctypes.AssignStmt):
+        return None
+    k = _trip_count_param(kloop.iterable)
+    if k is None or not isinstance(kloop.target, str):
+        return None
+    p = kloop.target
+
+    # acc := 0.0
+    if not isinstance(init.target, gctypes.IdentExpr):
+        return None
+    acc = _as_str(init.target.name)
+    if not isinstance(init.value, (gctypes.FloatLiteral, gctypes.IntLiteral)):
+        return None
+    if getattr(init.value, 'value', 1) != 0.0:
+        return None
+
+    # acc := acc + (A[..] * B[..]), as the sole statement of the k loop
+    kloop_body = list(kloop.body or ())
+    if len(kloop_body) != 1 or not isinstance(kloop_body[0], gctypes.AssignStmt):
+        return None
+    upd = kloop_body[0]
+    if not isinstance(upd.target, gctypes.IdentExpr) or _as_str(upd.target.name) != acc:
+        return None
+    add = upd.value
+    if not isinstance(add, gctypes.BinaryOp) or add.op != '+':
+        return None
+    if not (isinstance(add.left, gctypes.IdentExpr) and _as_str(add.left.name) == acc):
+        return None
+    mul = add.right
+    if not isinstance(mul, gctypes.BinaryOp) or mul.op != '*':
+        return None
+    a_sub, b_sub = mul.left, mul.right
+    if _subscript_name(a_sub) is None or _subscript_name(b_sub) is None:
+        return None
+    if not (_affine_index(a_sub.index, {i: 1, k: 1, p: 1})
+            and _affine_index(b_sub.index, {p: 1, n: 1, j: 1})):
+        return None
+    a_name, b_name = _subscript_name(a_sub), _subscript_name(b_sub)
+
+    # C[i*n + j] := acc
+    if _subscript_name(store.target) is None:
+        return None
+    c_name = _subscript_name(store.target)
+    if not _affine_index(store.target.index, {i: 1, n: 1, j: 1}):
+        return None
+    if not (isinstance(store.value, gctypes.IdentExpr)
+            and _as_str(store.value.name) == acc):
+        return None
+
+    # annotations: three same-element lists, three Int extents
+    anns = {}
+    for prm in (getattr(fdef, 'params', None) or ()):
+        nm, ann = (prm[0], prm[1]) if isinstance(prm, tuple) else (prm, '')
+        anns[_as_str(nm)] = _as_str(ann or '')
+    for nm in (a_name, b_name, c_name):
+        if not anns.get(nm, '').startswith('List['):
+            return None
+    elems = {anns[nm].split('[', 1)[1].rstrip(']') for nm in (a_name, b_name, c_name)}
+    if len(elems) != 1:
+        return None
+    elem = elems.pop()
+    if elem not in _ALLOWED_PARAM_TYPES:
+        return None
+    for nm in (m, k, n):
+        if anns.get(nm) not in ('Int', 'Int64'):
+            return None
+    if len({a_name, b_name, c_name, m, k, n, acc}) != 7:
+        return None
+    return GemmInfo(a=a_name, b=b_name, c=c_name, m=m, k=k, n=n, acc=acc,
+                    elem=elem,
+                    lengths={a_name: f'{m} * {k}', b_name: f'{k} * {n}',
+                             c_name: f'{m} * {n}'})
+
+
+def _gemm_kernel_source(info: 'GemmInfo') -> str:
+    """The synthesised kernel as Mojo source, for the record.
+
+    Documentation only -- the AST below is what is actually emitted, and this
+    is the shortest honest description of it. Kept because the emitted MSL is
+    the thing worth reading and a reader should not have to reconstruct the
+    source from the AST builder.
+    """
+    L = [
+        '@gpu',
+        'def _mg_offload_gemm(A: UnsafePointer[%s, ImmutAnyOrigin],' % info.elem,
+        '                     B: UnsafePointer[%s, ImmutAnyOrigin],' % info.elem,
+        '                     C: UnsafePointer[%s, MutAnyOrigin],' % info.elem,
+        '                     m: Int, k: Int, n: Int):',
+        '    idx = global_idx.x',
+        '    i = idx / n',
+        '    j = idx - i * n',
+        '    acc: %s = 0.0' % info.elem,
+        '    for p in range(k):',
+        '        acc = acc + A[i * k + p] * B[p * n + j]',
+        '    C[i * n + j] = acc',
+    ]
+    return '\n'.join(L)
+
+
+def synthesise_gemm(info: 'GemmInfo'):
+    """A `@gpu` FunctionDef computing the same product, one thread per output.
+
+    The grid is 1-D and sized by the runtime from the OUTPUT buffer's element
+    count (fire_metal.m: `use = nthreads > 0 ? nthreads : tptg`, and the
+    threadgroup count comes from the output size), so thread `idx` covers
+    exactly one C element and `i`/`j` fall out of a division. That division is
+    why the index is derived rather than carried: a 2-D grid would avoid it,
+    and the launch path is 1-D.
+
+    Verified emitted MSL for this shape, from the existing backend with no
+    changes to it:
+
+        idx = __gid;  i = (idx / n);  j = (idx - (i * n));  acc = 0.0;
+        for (p = 0; p < k; p += 1) { acc = (acc + (A[((i*k)+p)] * B[((p*n)+j)])); }
+        C[((i * n) + j)] = acc;
+    """
+    I = gctypes.IdentExpr
+    Lit = gctypes.IntLiteral
+    FLit = gctypes.FloatLiteral
+
+    def bin(op, l, r):
+        return gctypes.BinaryOp(left=l, op=op, right=r, line=0, col=0)
+
+    def assign(t, v):
+        return gctypes.AssignStmt(target=t, value=v, line=0, col=0)
+
+    idx, i, j, p = (I(name=x, line=0, col=0) for x in ('_mg_idx', 'i', 'j', 'p'))
+    acc = I(name='_mg_acc', line=0, col=0)
+    body = [
+        assign(idx, gctypes.MemberExpr(
+            obj=I(name='global_idx', line=0, col=0), member='x', line=0, col=0)),
+        assign(i, bin('/', idx, I(name=info.n, line=0, col=0))),
+        assign(j, bin('-', idx, bin('*', i, I(name=info.n, line=0, col=0)))),
+        gctypes.AssignStmt(target=acc,
+                           value=FLit(value=0.0, line=0, col=0),
+                           line=0, col=0),
+        gctypes.ForStmt(
+            target='p',
+            iterable=gctypes.CallExpr(func=I(name='range', line=0, col=0),
+                                     args=[I(name=info.k, line=0, col=0)],
+                                     line=0, col=0),
+            body=[assign(acc, bin('+', acc, bin('*',
+                    gctypes.SubscriptExpr(
+                        obj=I(name=info.a, line=0, col=0),
+                        index=bin('+', bin('*', i, I(name=info.k, line=0, col=0)), p),
+                        attrs=None, line=0, col=0),
+                    gctypes.SubscriptExpr(
+                        obj=I(name=info.b, line=0, col=0),
+                        index=bin('+', bin('*', p, I(name=info.n, line=0, col=0)), j),
+                        attrs=None, line=0, col=0))))],
+            else_body=None, is_async=False, line=0, col=0),
+        assign(gctypes.SubscriptExpr(
+            obj=I(name=info.c, line=0, col=0),
+            index=bin('+', bin('*', i, I(name=info.n, line=0, col=0)), j),
+            attrs=None, line=0, col=0), acc),
+    ]
+    params = [
+        (info.a, f'UnsafePointer[{info.elem}, ImmutAnyOrigin]'),
+        (info.b, f'UnsafePointer[{info.elem}, ImmutAnyOrigin]'),
+        (info.c, f'UnsafePointer[{info.elem}, MutAnyOrigin]'),
+        (info.m, 'Int'), (info.k, 'Int'), (info.n, 'Int'),
+    ]
+    return gctypes.FunctionDef(
+        name='_mg_offload_gemm', params=params, return_type=None, body=body,
+        decorators=[I(name='gpu', line=0, col=0)], param_convs={},
+        param_has_default={}, param_defaults={}, kwonly=[],
+        comptime_params=[], is_generator=False, is_async=False,
+        line=0, col=0)
+
+
+def rewrite_gemm(fdef, info: 'GemmInfo', kernel):
+    """`fdef` with the whole nest replaced by a guarded call to `kernel`.
+
+    The guard is on `m * n`, the OUTPUT element count, because that is the grid
+    the dispatch will be sized from -- so it is the trip count that decides
+    whether a dispatch is worth its fixed cost, exactly as the single-loop path
+    guards on its own `n`.
+    """
+    I = gctypes.IdentExpr
+    Lit = gctypes.IntLiteral
+
+    def bin(op, l, r):
+        return gctypes.BinaryOp(left=l, op=op, right=r, line=0, col=0)
+
+    count = bin('*', I(name=info.m, line=0, col=0), I(name=info.n, line=0, col=0))
+    args = [I(name=x, line=0, col=0)
+            for x in (info.a, info.b, info.c, info.m, info.k, info.n)]
+    call = gctypes.CallExpr(func=I(name=_as_str(kernel.name), line=0, col=0),
+                            args=args, line=0, col=0)
+    guarded = gctypes.IfStmt(
+        condition=gctypes.CompareChain(
+            operands=[count, Lit(value=_min_profitable_elements(), line=0, col=0)],
+            ops=['>='], line=0, col=0),
+        then_body=[gctypes.ExprStmt(value=call, line=0, col=0)],
+        elifs=[],
+        else_body=list(getattr(fdef, 'body', None) or ()),
+        line=0, col=0)
+    return gctypes.FunctionDef(
+        name=_as_str(fdef.name), params=list(fdef.params or ()),
+        return_type=fdef.return_type, body=[guarded],
+        decorators=list(fdef.decorators or ()),
+        param_convs=dict(fdef.param_convs or {}),
+        param_has_default=dict(fdef.param_has_default or {}),
+        param_defaults=dict(fdef.param_defaults or {}),
+        kwonly=list(fdef.kwonly or ()), comptime_params=list(fdef.comptime_params or ()),
+        is_generator=bool(getattr(fdef, 'is_generator', False)),
+        is_async=bool(getattr(fdef, 'is_async', False)),
+        line=getattr(fdef, 'line', 0), col=getattr(fdef, 'col', 0))
+
+
+def offload_module(stmts: list, lengths_sink: dict | None = None) -> tuple:
     """Both halves of increment 3, over a whole module.
 
     Returns `(new_stmts, synthesised_kernels)`.
@@ -1051,7 +1384,27 @@ def offload_module(stmts: list) -> tuple:
             continue
         info = recognise(s)
         if info is None:
-            out.append(s)
+            # The GEMM nest, as a FALLBACK within this same pass rather than a
+            # second one. A second pass over the original statements appended
+            # every statement twice -- measured, `main` appeared twice, its
+            # prints vanished, and the program exited 0 printing NOTHING, which
+            # is the worst possible symptom to debug. One pass, one append.
+            ginfo = recognise_gemm(s)
+            if ginfo is None:
+                out.append(s)
+                continue
+            try:
+                gkernel = synthesise_gemm(ginfo)
+            except (SynthesisRefused, AttributeError, TypeError):
+                out.append(s)
+                continue
+            # The per-buffer lengths must be in place BEFORE the classification
+            # pass builds the LaunchArgs, which is why this is a sink the
+            # caller owns rather than something computed here and returned.
+            if lengths_sink is not None:
+                lengths_sink[_as_str(gkernel.name)] = dict(ginfo.lengths)
+            out.append(rewrite_gemm(s, ginfo, gkernel))
+            kernels.append(gkernel)
             continue
         try:
             kernel = synthesise(s, info)
@@ -1064,4 +1417,5 @@ def offload_module(stmts: list) -> tuple:
             continue
         out.append(rewritten)
         kernels.append(kernel)
+
     return out, kernels

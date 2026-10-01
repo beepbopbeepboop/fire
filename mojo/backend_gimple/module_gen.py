@@ -1152,7 +1152,15 @@ def gen_module_impl(self, stmts):
     # them. The kernel alone is unreachable, which would make the whole
     # feature dead code that compiles and never runs.
     if getattr(self, 'auto_gpu', True):
-        stmts, _synth_names = _gmi_offload.offload_module(stmts)
+        # The synthesiser needs somewhere to record per-buffer element counts
+        # (a GEMM's A is M*K, B is K*N, C is M*N, and one count cannot say
+        # that). Created HERE, before the synthesis, and read by the
+        # classification pass below -- which is why that pass creates it only if
+        # absent rather than re-initialising it.
+        if not hasattr(self, '_device_launch_lengths'):
+            self._device_launch_lengths = {}
+        stmts, _synth_names = _gmi_offload.offload_module(
+            stmts, lengths_sink=self._device_launch_lengths)
     else:
         _synth_names = []
     if _synth_names:
