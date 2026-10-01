@@ -263,7 +263,6 @@ HOST_MODELLED = frozenset((
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
     "weakref", "pprint", "reprlib", "pickle",
-    "ast",
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same
