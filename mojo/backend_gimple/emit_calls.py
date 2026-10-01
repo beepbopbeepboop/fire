@@ -1336,7 +1336,24 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _seen = gen._dict_callable_ret.get(node.func.obj.name)
                 _vt = 'int64_t'
                 if _seen is not None and len(_seen) == 1:
-                    _vt = next(iter(_seen))
+                    # `for k in _seen: _vt = k; break`, NOT `next(iter(_seen))`.
+                    # The compiled `.c` backend lowers `next()` for exactly
+                    # three shapes — a comprehension argument, a tracked
+                    # list-iterator local, and a `MojoGenerator *` handle —
+                    # and a `next(iter(a_set))` matches none of them, so it
+                    # falls through to the declared-but-never-defined variadic
+                    # `next (...)` stub. That compiles clean and fails at LINK
+                    # with "Undefined symbols ... _next", referenced from this
+                    # very function's `.part.0` — which is what took the
+                    # self-host build down once the C errors ahead of it were
+                    # fixed. The C++ coroutine backend does implement `next()`
+                    # (cpp_core.py), which is exactly why the shape looks
+                    # supported from the Python side. The `for`/`break` is the
+                    # subset-legal spelling and reads the same single element
+                    # out of the one-element container, allocation-free.
+                    for _k in _seen:
+                        _vt = _k
+                        break
                 return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
