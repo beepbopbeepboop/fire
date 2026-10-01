@@ -99,10 +99,120 @@ _STMT_NAMES = {
 #: re-synthesising it would duplicate it under a second name.
 _EXPLICIT = frozenset({'gpu', 'kernel'})
 
+#: `info.param` is a trip-count PARAMETER NAME. A `range(len(x))` bound
+#: is not a name at all, so it is carried with this prefix and decoded
+#: where the bound is needed. Prefixed rather than stored in a second
+#: field because every existing consumer reads `.param` as a name, and a
+#: silent second representation is how those would diverge.
+_LEN_PREFIX = 'len:'
+
+
+def _trip_is_len(param) -> bool:
+    return isinstance(param, str) and param.startswith(_LEN_PREFIX)
+
+
+def _trip_arg_name(param) -> str:
+    """The HOST name of the trip-count argument, whatever form the bound took.
+
+    A `len:`-prefixed bound is spelled `len(a)` in the source but reaches the
+    call site as the plain identifier `a` -- the same list the kernel already
+    reads, so it is already packed and needs no separate argument. Passing the
+    literal string `len:a` instead would emit an undeclared identifier.
+    """
+    return param[len(_LEN_PREFIX):] if _trip_is_len(param) else param
+
+
+#: Name of the host local a `len(x)` trip count is bound to. Prefixed so it
+#: cannot collide with a user identifier, and named once here because the
+#: rewrite introduces it and `host_call` names it -- two spellings of one
+#: fact is how those drift.
+_TRIP_LOCAL = '_mg_trip'
+
+
+def _trip_local(param) -> str:
+    return _TRIP_LOCAL if _trip_is_len(param) else param
+
+
+def _trip_expr(param):
+    """An AST expression for the trip count, as the source spelled it.
+
+    Used for the profitability guard, which has to compare against the value
+    the loop actually iterates: `len(a)` for a `range(len(a))` bound, and a
+    bare name otherwise. Comparing against the name `a` would guard on a
+    POINTER, which is not a trip count and would always pass.
+    """
+    if _trip_is_len(param):
+        return gctypes.CallExpr(
+            func=gctypes.IdentExpr(name='len', line=0, col=0),
+            args=[gctypes.IdentExpr(name=_trip_arg_name(param), line=0, col=0)],
+            line=0, col=0)
+    return gctypes.IdentExpr(name=param, line=0, col=0)
+
 _ALLOWED_EXPR_NODES = (
     'IdentExpr', 'IntLiteral', 'FloatLiteral', 'BoolLiteral', 'StringLiteral',
     'BinaryOp', 'UnaryOp', 'SubscriptExpr', 'CompareChain', 'ParenExpr',
 )
+
+
+#: Smallest trip count worth a dispatch, and WHY that number.
+#:
+#: Every number here is measured on the machine this was written on (M5 Max,
+#: macOS 26, a virtualised GPU), with `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`
+#: in-language -- `CLOCK_MONOTONIC` ticks at 1000 ns and is too coarse to time a
+#: dispatch honestly. A single parallel-map loop, GPU vs the same loop with
+#: `--no-gpu`:
+#:
+#:     n            GPU us/iter    CPU us/iter
+#:     1024             195.6           3.6
+#:     16384            299.6          37.0
+#:     262144          1561.6         740.6
+#:     4194304        22373.7        9354.5
+#:
+#: which fits `GPU = 190 us + 5.29 ns/elem` against `CPU = 2.23 ns/elem`.
+#:
+#: Read honestly, that fit says the synthesised kernel is 2.4x slower PER ELEMENT
+#: than the CPU loop as well as carrying a 190 us fixed cost, so on this machine
+#: the elementwise shape does not cross over AT ANY SIZE -- it asymptotes to
+#: 0.42x, which is what the 4194304 row measures. A threshold cannot repair
+#: that; it can only stop the pathological case, which is the one that actually
+#: bites:
+#:
+#: `test_llm.py`'s `dot()` is 30.5% of that model's runtime and is called
+#: 3,481,968 times per six steps, on 128-element slices, at 2.44 us a call.
+#: Offloading it would spend ~195 us per call -- 80x slower -- and turn a 27.9 s
+#: profile into roughly 700 s. A loop nest called in the millions is the case
+#: where a fixed per-dispatch cost is fatal, and nothing about the loop's SHAPE
+#: reveals it; only the trip count does.
+#:
+#: So this is a floor on the trip count, chosen as the point where the CPU loop's
+#: own time reaches the dispatch's fixed cost:
+#:
+#:     2.23 ns/elem * n  >  190 us   =>   n > 85,200
+#:
+#: rounded to 90_000. It is a floor, not a promise: above it the GPU may still
+#: lose, and on a machine with a real (not virtualised) GPU, or with MTL4's
+#: low-overhead dispatch queue, the crossover moves left by more than an order of
+#: magnitude. `MOJO_OFFLOAD_MIN_ELEMENTS` overrides it for exactly that reason --
+#: this constant is a measurement of ONE machine, and hardcoding a machine's
+#: dispatch latency as a universal truth is how it goes stale.
+_MIN_PROFITABLE_ELEMENTS = 90_000
+
+
+def _min_profitable_elements() -> int:
+    """`_MIN_PROFITABLE_ELEMENTS`, overridable from the environment.
+
+    Read at CALL time rather than import time so a test (or a user on a faster
+    dispatch path) can change it without reimporting, and so the override is
+    visible in `explain` output as the number actually in force.
+    """
+    import os
+    raw = os.environ.get('MOJO_OFFLOAD_MIN_ELEMENTS')
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return _MIN_PROFITABLE_ELEMENTS
 
 
 class Offloadable:
@@ -169,9 +279,26 @@ def _trip_count_param(iterable):
         # bounds, and a wrong one is a wrong grid. Not yet.
         return None
     bound = args[0]
-    if not isinstance(bound, gctypes.IdentExpr):
-        return None
-    return _as_str(bound.name)
+    if isinstance(bound, gctypes.IdentExpr):
+        return _as_str(bound.name)
+    # `range(len(a))`: the trip count is a CONTAINER'S OWN LENGTH, which is
+    # safe where a general expression would not be, and for a reason worth
+    # stating. The host marshals by packing each buffer to the trip count, so
+    # a trip count that IS a buffer length cannot under-pack the buffer the
+    # length came from -- the failure the offset-index case has. `len(b) <
+    # len(a)` reads past `b` here exactly as it would in the original loop, so
+    # the offloaded semantics are the loop's own, not a new hazard.
+    #
+    # `range(self.cols)` is still refused: `self` is a host struct with a heap
+    # header and cannot cross to the device at all, and admitting the
+    # attribute would mean synthesising a local binding for it, which rewrites
+    # the loop rather than reusing its body. `CallExpr` here is specifically
+    # `len`, and `_check_expr`'s scope check still governs the body.
+    if isinstance(bound, gctypes.CallExpr) and _is_name(bound.func, 'len'):
+        largs = list(bound.args or ())
+        if len(largs) == 1 and isinstance(largs[0], gctypes.IdentExpr):
+            return _LEN_PREFIX + _as_str(largs[0].name)
+    return None
 
 
 def _check_expr(node, index_name: str, reads: set, why: list,
@@ -202,6 +329,37 @@ def _check_expr(node, index_name: str, reads: set, why: list,
             return False
         container, idx = parts
         if not _is_name(idx, index_name):
+            # An OFFSET index -- `gr[base + j]`, which is how
+            # `test_llm.py`'s `add_grad_row` addresses its row -- is refused
+            # HERE, deliberately, even though the arithmetic works. It was
+            # implemented, measured, and reverted; the reason is the host
+            # marshalling, and it is not fixable in the recogniser.
+            #
+            # `synthesise` reuses the loop body verbatim, so `gr[base + j]`
+            # becomes `gr[base + i]` in MSL for free and `base` arrives as an
+            # ordinary scalar parameter. The kernel is then correct AS A KERNEL
+            # and wrong in the program: the host packs each buffer to the TRIP
+            # COUNT, so for `base=1024, cols=262144` the kernel indexes up to
+            # 263167 while the packed buffer ends at 262143.
+            #
+            # Measured, with a discriminating test (buffers that cannot tell
+            # an honoured offset from a dropped one):
+            #
+            #     row[0]     expect 2024    got 2024.0   (correct)
+            #     row[last]  expect 264167  got 1000.0   (CPU oracle: 264167.0)
+            #
+            # so the offset is silently dropped and the answer is wrong for
+            # every element except the first. `base == 0` happens to work,
+            # which is the worst kind of bug: it passes the obvious test.
+            #
+            # Making it correct means the host must pack each buffer to
+            # `offset + trip` for the buffers an offset index reaches, which
+            # needs the offset to be part of the marshalling contract --
+            # `device_glue.launch_arg_types` currently takes the FIRST Int
+            # parameter as THE element count, and that single rule is what the
+            # whole launch path is built on. That is a change to the launch
+            # ABI, not to this recogniser, and it is not worth making for a
+            # shape that is 12.1% of one model.
             why.append(f'read of {container!r} at an index that is not the '
                        f'loop variable')
             return False
@@ -298,6 +456,8 @@ def recognise(fdef) -> 'Offloadable | None':
         return None
     written, target_index = parts
     if not _is_name(target_index, index):
+        # Same offset-index refusal as in `_check_expr`, and for the same
+        # measured reason.
         return None
 
     why: list = []
@@ -522,7 +682,12 @@ def synthesise(fdef, info: 'Offloadable') -> 'object':
                 f'container {nm!r} has element type {elem!r}, which has no '
                 f'device signature here (allowed: {sorted(_ALLOWED_PARAM_TYPES)})')
         anns[nm] = elem
-    scalar_ann = _param_annotation(fdef, info.param)
+    # A `len(a)` bound names no parameter, so there is no annotation to check;
+    # its type is the container's element count, which the launch path already
+    # narrows. Checking it as if it were a parameter would look up `len:a` and
+    # find nothing.
+    scalar_ann = (None if _trip_is_len(info.param)
+                  else _param_annotation(fdef, info.param))
     if scalar_ann is not None and scalar_ann not in _ALLOWED_PARAM_TYPES:
         raise SynthesisRefused(
             f'trip-count parameter {info.param!r} has type {scalar_ann!r}, '
@@ -756,7 +921,14 @@ def host_call(fdef, info: 'Offloadable') -> 'object':
     # So: read buffers, written buffer, the trip count under its OWN name,
     # then the scalars -- the same order `synthesise` gave the parameters,
     # which is what makes the two agree by construction.
-    host_args = list(info.reads) + [info.writes, info.param] + list(info.scalars)
+    # For a `len(x)` bound the trip-count argument is the HOST LOCAL the
+    # rewrite introduced, not `x` itself. Passing `x` hands the marshaller a
+    # MojoList* where it expects an int, and it narrows the pointer's low bits
+    # into the element count -- measured, a SIGBUS on the oversized allocation.
+    # The local is an ordinary identifier, so everything downstream (the guard,
+    # the packing, the signature) is unchanged.
+    host_args = (list(info.reads) + [info.writes, _trip_local(info.param)]
+                 + list(info.scalars))
     kernel_names = [_as_str(p[0]) for p in (kernel.params or ())]
     expected = (list(info.reads) + [info.writes, _LENGTH_PARAM]
                 + sorted(info.scalars))
@@ -795,13 +967,40 @@ def rewrite_to_dispatch(fdef, info: 'Offloadable') -> 'object | None':
     except (SynthesisRefused, AttributeError, TypeError):
         return None
 
+    # The PROFITABILITY GUARD. The trip count is a runtime value, so whether a
+    # dispatch is worth it cannot be decided here -- it has to be a branch the
+    # program takes, with the original loop kept as the other arm. Emitting the
+    # dispatch unconditionally is the footgun `_MIN_PROFITABLE_ELEMENTS`
+    # documents: a nest called in the millions spends a fixed ~190 us per call
+    # and gets slower by two orders of magnitude, with no diagnostic, because a
+    # correct answer and a slow one look identical from the outside.
+    #
+    # The comparison is against the trip count EXPRESSION as written
+    # (`info.param`), not the parameter name, so a future `range(len(a))` bound
+    # guards on the length rather than on nothing.
+    trip = gctypes.IdentExpr(name=_trip_local(info.param), line=0, col=0)
+    floor = gctypes.IntLiteral(value=_min_profitable_elements(), line=0, col=0)
+    guarded = gctypes.IfStmt(
+        condition=gctypes.CompareChain(operands=[trip, floor], ops=['>='],
+                                       line=0, col=0),
+        then_body=[gctypes.ExprStmt(value=call, line=0, col=0)],
+        elifs=[],
+        else_body=[loop],
+        line=0, col=0)
+
     new_body = []
     for st in body:
         if st is loop:
-            # The call result is void; it is a statement here, so it is
-            # wrapped as one rather than left as a bare expression, which the
-            # statement lowering would treat as a value to print or discard.
-            new_body.append(gctypes.ExprStmt(value=call, line=0, col=0))
+            if _trip_is_len(info.param):
+                # `for i in range(len(x))` -> bind the length to a host local
+                # first, so the trip count reaching the launch is an
+                # IDENTIFIER like every other launch argument. The kernel body
+                # is untouched: only the host gains a line, and the loop the
+                # user wrote still means the same thing.
+                new_body.append(gctypes.AssignStmt(
+                    target=gctypes.IdentExpr(name=_TRIP_LOCAL, line=0, col=0),
+                    value=_trip_expr(info.param), line=0, col=0))
+            new_body.append(guarded)
             continue
         new_body.append(st)
     return gctypes.FunctionDef(

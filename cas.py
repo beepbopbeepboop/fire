@@ -490,10 +490,18 @@ def compile_key(source: str, do_imports: bool, filename: str = "",
     different MSL sidecar. Leaving it out would serve a cached GPU build to a
     `--no-gpu` request, which is exactly the silent-wrong-output class this
     cache exists to avoid."""
+    # The auto-offload trip-count floor is in the key for the same reason
+    # `auto_gpu` is: it changes the OUTPUT, because it decides whether the
+    # host keeps its loop or gains a dispatch. Measured, not reasoned about --
+    # with the floor at 0 a two-call program dispatched twice, and re-running
+    # it with the floor at 90000 served the CACHED floor-0 binary and still
+    # dispatched twice, because nothing in the key had moved. An override that
+    # silently does nothing is worse than no override.
     return 'compile/' + _hash(
         'mojo-compile-v1', ABI_VERSION, compiler_fingerprint(),
         stdlib_fingerprint(), source, 't' if do_imports else 'f',
         filename, deps_digest, 'gpu' if auto_gpu else 'nogpu',
+        'minel:' + os.environ.get('MOJO_OFFLOAD_MIN_ELEMENTS', ''),
     )
 
 

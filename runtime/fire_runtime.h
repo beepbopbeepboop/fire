@@ -1152,6 +1152,27 @@ static ssize_t _mojo_getline(void *lp, void *n, void *f) {
     return getline((char **)lp, (size_t *)n, (FILE *)f);
 }
 #include <stdarg.h>
+/* <time.h> for the C CLOCKS, and it is load-bearing rather than tidy.
+ *
+ * This header included only stdint/stdio/setjmp/stdlib, so EVERY C
+ * function compiled Mojo can call -- `time`, `clock`, `strftime` and the
+ * rest of _C_RESERVED_FUNCS -- reached its definition with NO PROTOTYPE
+ * in scope. Verified by preprocessing this header alone: zero
+ * declarations of `time_t time(` or `clock_t clock(`. The backend mints a
+ * weak stub for an unregistered name and lets the linker prefer the real
+ * libSystem symbol, so the LINK is fine and the CALL is not: an
+ * unprototyped call is assumed to return int, which truncates a 64-bit
+ * time_t. `time()` still looks right because whole seconds fit in 32 bits
+ * until 2038.
+ *
+ * It also makes the nanosecond counters reachable and TYPED, which is what
+ * a benchmark needs: `clock_gettime_nsec_np(CLOCK_MONOTONIC)` is a real
+ * libSystem call, and without this include it was reached unprototyped --
+ * measured, two consecutive reads returning 0 and then a plausible epoch
+ * value, because the 64-bit return was being read through an implicit
+ * `int`. There is still no usable clock in compiled Mojo after this, in
+ * the sense that `time.time_ns` is a separate gap; this is the C route. */
+#include <time.h>
 static int _mojo_vprintf(char *fmt, void *ap) {
     /* va_list is passed as void* from GIMPLE code; cast is implementation-defined
        but safe on all targets where va_list is a pointer type. */

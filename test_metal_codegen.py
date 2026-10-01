@@ -1088,6 +1088,122 @@ def _fn(src: str, name: str = None):
     raise AssertionError('no such function')
 
 
+class TestOffloadRefusals(unittest.TestCase):
+    """Shapes that LOOK offloadable and are not, each for a measured reason.
+
+    Every one of these was implemented at some point, or would pass the obvious
+    test, which is what makes them dangerous. Pinned so the next attempt reads
+    the measurement instead of rediscovering a silent wrong answer.
+    """
+
+    def _offloads(self, src):
+        return ofl.recognise(_fn(src)) is not None
+
+    def test_a_len_bound_is_accepted_and_becomes_a_host_local(self):
+        """`range(len(x))` -- the one widened bound, and why it is safe.
+
+        The trip count is a CONTAINER'S OWN LENGTH, so the buffer it came from
+        cannot be under-packed by it. That is exactly what the offset-index
+        case gets wrong, and it is why this bound is admitted while an
+        arbitrary expression is not.
+
+        The bound reaches the launch as a host LOCAL, because the marshalling
+        takes identifier arguments: passing `x` itself hands it a MojoList*
+        where it expects an int, and it narrows the pointer's low bits into the
+        element count -- measured, a SIGBUS on the oversized allocation.
+        """
+        f = _fn('def f(x: List[Float32], y: List[Float32]):\n'
+                '    for i in range(len(x)):\n'
+                '        y[i] = x[i] * 2.0\n')
+        info = ofl.recognise(f)
+        self.assertIsNotNone(info)
+        self.assertEqual(info.param, 'len:x')
+        self.assertEqual(ofl._trip_arg_name(info.param), 'x')
+        r = ofl.rewrite_to_dispatch(f, info)
+        kinds = [type(s).__name__ for s in r.body]
+        # The binding is a host statement the rewrite ADDS; the loop itself is
+        # still a guarded IfStmt, and the binding precedes it.
+        self.assertEqual(kinds, ['AssignStmt', 'IfStmt'])
+        self.assertEqual(str(r.body[0].target.name), ofl._TRIP_LOCAL)
+        call = r.body[1].then_body[0].value
+        self.assertIn(ofl._TRIP_LOCAL, [str(a.name) for a in call.args],
+                      'the launch must be handed the local, not `x`')
+        # And the guard compares the local too, so it is a real trip count and
+        # not a pointer.
+        self.assertEqual(str(r.body[1].condition.operands[0].name),
+                         ofl._TRIP_LOCAL)
+
+    def test_an_offset_index_is_refused(self):
+        """`gr[base + j]` -- the kernel would be RIGHT and the program WRONG.
+
+        `synthesise` reuses the loop body verbatim, so `gr[base + j]` becomes
+        `gr[base + i]` in MSL for free and `base` arrives as an ordinary scalar
+        parameter. The KERNEL is correct. The PROGRAM is not: the host packs
+        each buffer to the TRIP COUNT, so for `base=1024, cols=262144` the
+        kernel indexes to 263167 while the packed buffer ends at 262143, and
+        the offset is silently dropped.
+
+        Measured with a discriminating program (gr[k] = k, so a dropped offset
+        changes every element but the first):
+
+            row[0]     expect 2024    got 2024.0
+            row[last]  expect 264167  got 1000.0    (CPU oracle: 264167.0)
+
+        and `base == 0` happens to work, which is the worst case: it passes the
+        obvious test.
+        """
+        self.assertFalse(self._offloads(
+            'def f(gr: List[Float32], g: List[Float32], base: Int,\n'
+            '        cols: Int, row: List[Float32]):\n'
+            '    for j in range(cols):\n'
+            '        row[j] = gr[base + j] + g[j]\n'))
+
+    def test_a_read_write_output_is_refused(self):
+        """`c[i] = a[i]*b[i] + c[i]` -- the aliasing case.
+
+        This is the shape most numeric loops actually have, including
+        test_llm's gradient accumulation, so refusing it is precisely why
+        auto-offload misses most of a real model. Pinned as a deliberate
+        boundary rather than an oversight.
+        """
+        self.assertFalse(self._offloads(
+            'def f(a: List[Float32], b: List[Float32], c: List[Float32],\n'
+            '        n: Int):\n'
+            '    for i in range(n):\n'
+            '        c[i] = a[i] * b[i] + c[i]\n'))
+        # The write-only form of the same expression IS accepted, so this is a
+        # boundary and not a blanket refusal.
+        self.assertTrue(self._offloads(
+            'def f(a: List[Float32], b: List[Float32], c: List[Float32],\n'
+            '        n: Int):\n'
+            '    for i in range(n):\n'
+            '        c[i] = a[i] * b[i] + a[i]\n'))
+
+    def test_a_nested_loop_is_refused(self):
+        """Hoisting one loop out of a nest is a control-flow rewrite; this does
+        loop-to-kernel rewrites. The result is correct either way."""
+        self.assertFalse(self._offloads(
+            'def f(a: List[Float32], c: List[Float32], n: Int, reps: Int):\n'
+            '    for r in range(reps):\n'
+            '        for i in range(n):\n'
+            '            c[i] = a[i] * 2.0\n'))
+
+    def test_a_self_attribute_bound_is_refused(self):
+        """`range(self.cols)` -- `self` is a host struct with a heap header and
+        cannot cross to the device at all. Admitting the attribute would mean
+        synthesising a local binding, which rewrites the loop."""
+        self.assertFalse(self._offloads(
+            'def f(self, a: List[Float32], c: List[Float32]):\n'
+            '    for i in range(self.cols):\n'
+            '        c[i] = a[i] * 2.0\n'))
+        # The parameter-bound form of the same loop IS accepted, so this is
+        # the boundary and not a blanket refusal.
+        self.assertTrue(self._offloads(
+            'def f(a: List[Float32], c: List[Float32], n: Int):\n'
+            '    for i in range(n):\n'
+            '        c[i] = a[i] * 2.0\n'))
+
+
 class TestOffloadRecognition(unittest.TestCase):
     """What is accepted, and -- mostly -- what is refused.
 
@@ -1619,11 +1735,30 @@ class TestOffloadHostRewrite(unittest.TestCase):
         self.info = ofl.recognise(self.fn)
 
     def test_the_loop_becomes_a_call_to_the_synthesised_kernel(self):
+        # The loop becomes a GUARDED dispatch, not a bare call: whether a
+        # dispatch is worth its fixed cost depends on the trip count, which is
+        # a runtime value, so the decision has to be a branch the program
+        # takes. The original loop is the other arm -- dropping it would leave
+        # small n with no computation at all.
         r = ofl.rewrite_to_dispatch(self.fn, self.info)
         self.assertIsNotNone(r)
         self.assertEqual(len(r.body), 1)
-        self.assertIsInstance(r.body[0], gctypes.ExprStmt)
-        self.assertEqual(str(r.body[0].value.func.name), '_mg_offload_saxpy')
+        guard = r.body[0]
+        self.assertIsInstance(guard, gctypes.IfStmt)
+        # The left operand is the trip-count NAME, the right the measured floor.
+        # An IntLiteral has no `.name`, which is how this test caught itself
+        # asserting one shape for both operands.
+        left, right = guard.condition.operands
+        self.assertEqual(str(left.name), self.info.param)
+        self.assertEqual(right.value, ofl._min_profitable_elements())
+        self.assertEqual(guard.condition.ops, ['>='])
+        self.assertEqual(len(guard.then_body), 1)
+        self.assertIsInstance(guard.then_body[0], gctypes.ExprStmt)
+        self.assertEqual(str(guard.then_body[0].value.func.name),
+                         '_mg_offload_saxpy')
+        # The CPU arm is the ORIGINAL loop, not a copy that could drift.
+        self.assertEqual(len(guard.else_body), 1)
+        self.assertIsInstance(guard.else_body[0], gctypes.ForStmt)
 
     def test_the_call_arguments_are_named_in_the_HOST_namespace(self):
         """The bug this replaced, and it was silent-then-fatal.
@@ -1640,7 +1775,7 @@ class TestOffloadHostRewrite(unittest.TestCase):
         argument being the trip count `n`.
         """
         r = ofl.rewrite_to_dispatch(self.fn, self.info)
-        names = [str(a.name) for a in r.body[0].value.args]
+        names = [str(a.name) for a in r.body[0].then_body[0].value.args]
         self.assertEqual(names, ['x', 'y', 'out', 'n', 'a'],
                          'call args must be host names, kernel names would be '
                          'undeclared identifiers at the call site')
@@ -1660,8 +1795,12 @@ class TestOffloadHostRewrite(unittest.TestCase):
                 '        out[i] = x[i] * 2.0\n'
                 '    return out\n')
         r = ofl.rewrite_to_dispatch(f, ofl.recognise(f))
+        # The loop became a guarded IfStmt; the trailing return is untouched
+        # and still LAST, which is the part that matters -- a return before the
+        # dispatch would compute over an unprepared buffer.
         self.assertEqual([type(s).__name__ for s in r.body],
-                         ['ExprStmt', 'ReturnStmt'])
+                         ['IfStmt', 'ReturnStmt'])
+        self.assertIsInstance(r.body[1], gctypes.ReturnStmt)
 
     def test_generated_c_packs_dispatches_and_unpacks(self):
         gen = gctypes.GimpleGen(None)
@@ -1741,18 +1880,25 @@ class TestAutoOffloadRunsOnGpu(unittest.TestCase):
     the source, computes the right answer on the real GPU and writes the
     result back into ordinary Python lists."""
 
+    # n must clear `offload._min_profitable_elements()`. It was 4, which is
+    # now correctly BELOW the floor: a 4-element loop spends ~190 us of
+    # dispatch to save ~9 ns of arithmetic, and the guard declines it. The
+    # values are unchanged (2*x + y elementwise), only the size moved, and
+    # `test_a_loop_below_the_floor_stays_on_the_cpu` covers the other arm.
+    N = 262144
     PROG = ('def saxpy(a: Float32, x: List[Float32], y: List[Float32],\n'
             '          out: List[Float32], n: Int):\n'
             '    for i in range(n):\n'
             '        out[i] = a * x[i] + y[i]\n'
             '\n'
             'def main():\n'
-            '    a = [1.0, 2.0, 3.0, 4.0]\n'
-            '    b = [5.0, 6.0, 7.0, 8.0]\n'
-            '    o = [0.0, 0.0, 0.0, 0.0]\n'
-            '    saxpy(2.0, a, b, o, 4)\n'
-            '    for v in o:\n'
-            '        print(v)\n'
+            f'    n = {N}\n'
+            '    x = [1.0] * n\n'
+            '    y = [5.0] * n\n'
+            '    o = [0.0] * n\n'
+            '    saxpy(2.0, x, y, o, n)\n'
+            '    print(o[0])\n'
+            '    print(o[n - 1])\n'
             '    print("kernels", _mojo_gpu_kernel_count())\n'
             '    print("d", _mojo_gpu_dispatch_count())\n'
             '    print("f", _mojo_gpu_failure_count())\n')
@@ -1768,14 +1914,76 @@ class TestAutoOffloadRunsOnGpu(unittest.TestCase):
                 capture_output=True, text=True, timeout=900, cwd=HERE)
             return r.stdout.strip().splitlines(), r.stderr
 
+    def test_a_loop_below_the_floor_stays_on_the_cpu(self):
+        """The guard, end to end, and the reason it exists.
+
+        `test_llm.py`'s `dot()` is 30.5% of that model's runtime, is called
+        3,481,968 times per six steps, and works on 128-element slices at
+        2.44 us a call. Offloading it spends ~195 us per call -- 80x slower --
+        and turns a 27.9 s profile into roughly 700 s. Nothing about the
+        loop's SHAPE reveals that; only the trip count does, so the floor is
+        a runtime branch rather than a compile-time decision.
+
+        The answer must still be RIGHT on this arm. A guard that skipped the
+        work would be the worst possible outcome: faster, and wrong.
+        """
+        small = self.PROG.replace(f'n = {self.N}', 'n = 4')
+        with tempfile.TemporaryDirectory() as wd:
+            path = os.path.join(wd, 'small.mojo')
+            with open(path, 'w') as f:
+                f.write(small)
+            r = subprocess.run(
+                [sys.executable, os.path.join(HERE, 'fire.py'), '--jit', path],
+                capture_output=True, text=True, timeout=900, cwd=HERE)
+        out = r.stdout.strip().splitlines()
+        if not out:
+            self.skipTest(f'no JIT build here: {r.stderr[-400:]}')
+        # Same values as the dispatched run...
+        self.assertEqual(out[:2], ['7.0', '7.0'],
+                         f'wrong answer on the CPU arm\n{out}\n{r.stderr[-600:]}')
+        # ...but no dispatch, which is the entire point.
+        self.assertIn('d 0', out,
+                      'a trip count below the floor was dispatched anyway')
+        self.assertIn('f 0', out)
+        # The kernel is still synthesised; only the CALL is guarded. That is
+        # what lets a program that is small once and large later use the GPU
+        # without being recompiled.
+        self.assertIn('kernels 1', out)
+
+    def test_the_floor_is_overridable_and_reaches_both_cache_keys(self):
+        """An override that silently does nothing is worse than no override.
+
+        Found by measuring: with the floor at 0 a two-call program dispatched
+        twice, and re-running it with the floor at 90000 still dispatched
+        twice, because neither `cas.compile_key` nor the JIT binary key had
+        the value in them and both served the floor-0 artifact.
+        """
+        import cas as _cas
+        from jit.arm64 import ARM64JIT
+        jit = ARM64JIT()
+        compile_keys, binary_keys = set(), set()
+        for env in ('0', '90000'):
+            os.environ['MOJO_OFFLOAD_MIN_ELEMENTS'] = env
+            try:
+                self.assertEqual(ofl._min_profitable_elements(), int(env))
+                compile_keys.add(_cas.compile_key('src', True, 'f.mojo',
+                                                  auto_gpu=True))
+                binary_keys.add(jit._get_cache_filename('src', 'f.mojo')[0])
+            finally:
+                os.environ.pop('MOJO_OFFLOAD_MIN_ELEMENTS', None)
+        self.assertEqual(len(compile_keys), 2,
+                         'the floor is not in the .ci compile cache key')
+        self.assertEqual(len(binary_keys), 2,
+                         'the floor is not in the JIT binary cache key')
+
     def test_an_unmarked_loop_computes_on_the_gpu(self):
         out, err = self._run([])
         if not out:
             self.skipTest(f'no JIT build here: {err[-400:]}')
-        # saXPY: 2*[1,2,3,4] + [5,6,7,8] = [7,10,13,16]. The interpreter
-        # produces exactly this, so it is a real oracle rather than a
-        # hand-computed hope.
-        self.assertEqual(out[:4], ['7.0', '10.0', '13.0', '16.0'],
+        # saXPY: 2*x + y with x all 1.0 and y all 5.0, so 7.0 at both ends.
+        # Uniform arrays so the answer is checkable at n=262144 without
+        # printing a quarter of a million values.
+        self.assertEqual(out[:2], ['7.0', '7.0'],
                          f'wrong answer\n{out}\n{err[-600:]}')
         self.assertIn('kernels 1', out)
         self.assertIn('d 1', out, 'the loop did not reach the GPU')
@@ -1788,7 +1996,7 @@ class TestAutoOffloadRunsOnGpu(unittest.TestCase):
         out, err = self._run(['--no-gpu'])
         if not out:
             self.skipTest(f'no JIT build here: {err[-400:]}')
-        self.assertEqual(out[:4], ['7.0', '10.0', '13.0', '16.0'],
+        self.assertEqual(out[:2], ['7.0', '7.0'],
                          f'--no-gpu changed the answer\n{out}\n{err[-600:]}')
         self.assertIn('kernels 0', out)
         self.assertIn('d 0', out)
