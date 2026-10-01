@@ -41,7 +41,8 @@ const char *mojo_metal_last_error(void) { return g_error; }
 
 static int mojo_metal_dispatch_impl(const char *, int64_t, void *const *,
                           const int64_t *, int64_t, void *const *,
-                          const uint8_t *, int64_t, int64_t);
+                          const uint8_t *, const uint8_t *, int64_t,
+                          int64_t);
 int64_t mojo_metal_dispatch_count(void) { return g_dispatches; }
 int64_t mojo_metal_failure_count(void) { return g_failures; }
 int64_t mojo_metal_have_device(void) { return g_have_device; }
@@ -93,6 +94,7 @@ static int mojo_metal_dispatch_impl(const char *kernel_name,
                         const int64_t *sizes,
                         int64_t n_scalars, void *const *scalars,
                         const uint8_t *widths,
+                        const uint8_t *writable,
                         int64_t nthreads, int64_t ngroups) {
     if (!g_have_device || !g_lib) {
         _set_error("no Metal device");
@@ -202,10 +204,23 @@ static int mojo_metal_dispatch_impl(const char *kernel_name,
                        cb.error.description.UTF8String);
             return 0;
         }
-        /* Copy every buffer back, so the caller's arrays hold the result. */
+        /* Copy back only the buffers the kernel could have WRITTEN, so the
+         * caller's arrays hold the result.
+         *
+         * This used to copy every buffer back, including the ones bound as
+         * read-only inputs. For the GEMM that is A and B -- 16 of the 17 MB
+         * moved per call at 512x512x512 -- copied from device to host and
+         * then thrown away, because the caller already has those bytes and
+         * the kernel did not touch them.
+         *
+         * The mask is per buffer, from the pointer's address space at the
+         * call site (ImmutAnyOrigin vs MutAnyOrigin), so it is the TYPE's
+         * claim, not a heuristic. A NULL mask means "copy everything", which
+         * is what every pre-existing caller gets.
+         */
         for (int64_t i = 0; i < n_bufs; i++) {
             int64_t n = sizes ? sizes[i] : 0;
-            if (devbufs[i])
+            if (devbufs[i] && (!writable || writable[i]))
                 memcpy(bufs[i], [devbufs[i] contents],
                        (size_t)(n * (int64_t)sizeof(float)));
         }
@@ -247,9 +262,10 @@ int mojo_metal_dispatch(const char *kernel_name,
                         const int64_t *sizes,
                         int64_t n_scalars, void *const *scalars,
                         const uint8_t *widths,
+                        const uint8_t *writable,
                         int64_t nthreads, int64_t ngroups) {
     int rc = mojo_metal_dispatch_impl(kernel_name, n_bufs, bufs, sizes,
-                                      n_scalars, scalars, widths,
+                                      n_scalars, scalars, widths, writable,
                                       nthreads, ngroups);
     if (rc) g_dispatches++; else g_failures++;
     return rc;

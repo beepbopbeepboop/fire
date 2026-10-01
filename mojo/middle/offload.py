@@ -1261,91 +1261,105 @@ def _msl(x: str) -> str:
 def gemm_tensor_core_msl(info: 'GemmInfo') -> str:
     """The whole tensor-core kernel body, as MSL text.
 
-    One SIMDGROUP per 8x8 OUTPUT TILE, not one thread per output element --
-    that is the whole point, and it is why the grid is not the runtime's
-    inferred one. 32 lanes cooperate on 64 outputs.
+    A 32x32 output tile per threadgroup, as a 4x4 grid of 8x8 MMAs, one
+    SIMDGROUP wide, stepping K 8 at a time. This is the configuration measured
+    at 0.96 TFLOPS and verified bit-exact in test_llm/gemm_tensorcore.m, and it
+    is transcribed rather than redesigned -- the only adaptation is that `lane`
+    comes from __lid and the tile index from __tgid, because the grid is one
+    SIMDGROUP wide.
 
-    There is deliberately NO threadgroup staging here. test_llm/gemm_tiled.m
-    measured the staged, double-buffered 64x64 kernel at 2-4% SLOWER than the
-    unstaged one, so staging would be code that exists to be slower. Fragments
-    are read straight from global memory into registers.
+    THE TILE IS THE WHOLE DIFFERENCE from the 8x8 version, which was correct
+    and no faster than scalar code. One 8x8 tile loads 64 A-elements and 64
+    B-elements to do 1024 FLOP: 2 FLOP/byte, memory-bound, so the MMA was
+    never the thing being waited on. A 32x32 tile loads 32 A-elements and 32
+    B-elements to do 8192 FLOP: 128 FLOP/byte. Same intrinsic, same fragment
+    layout, same instruction -- 16 accumulators instead of 1, so each loaded
+    element is used 16 times instead of once.
 
-    Reads past the edge of a partial tile are replaced by 0.0 rather than
-    predicated off, because a zeroed A or B row contributes exactly nothing to
-    the product, so the stores below can be the only place bounds are checked.
+    One SIMDGROUP rather than four: 16 accumulators is 32 registers of acc,
+    and four SIMDGROUPS of them would want 128 registers before any operands,
+    which is the register-pressure cliff. The reuse comes from the TILE, not
+    from the SIMDGROUP count, so there is nothing to buy by widening it.
 
-    `lane` is __lid directly: the grid is one SIMDGROUP wide, so the
-    thread's position in the threadgroup IS its lane. No division to recover it.
+    There is no threadgroup staging. test_llm/gemm_tiled.m measured the staged,
+    double-buffered version at 2-4% SLOWER, so staging would be code that
+    exists to be slower. Fragments are read straight from global memory into
+    registers.
+
+    Out-of-range reads are 0.0 rather than predicated, because a zeroed A or B
+    row contributes exactly nothing to the product; the stores below are then
+    the only place bounds are checked.
     """
     m, k, n = info.m, info.k, info.n
     A, B, C = info.a, info.b, info.c
     return f"""\
-    int ntn = ({n} + 7) / 8;
-    int tm = (__tgid / ntn) * 8;
-    int tn = (__tgid - (__tgid / ntn) * ntn) * 8;
+    int nn = ({n} + 31) / 32;
+    int m0 = (__tgid - (__tgid / nn) * nn) * 32;
+    int n0 = (__tgid / nn) * 32;
     int lane = int(__lid);
-    int fr = {_MMA_ROW};
-    int fc = {_MMA_COL};
-    simdgroup_matrix<float, 8, 8> acc;
-    reinterpret_cast<thread float2&>(acc.thread_elements()) = float2(0.0f);
-    for (int k0 = 0; k0 < {k}; k0 += 8) {{
-        simdgroup_matrix<float, 8, 8> Am;
-        simdgroup_matrix<float, 8, 8> Bm;
-        float2 av = float2(0.0f);
-        float2 bv = float2(0.0f);
-        if (tm + fr < {m} && k0 + fc < {k}) {{
-            av.x = {A}[(tm + fr) * {k} + (k0 + fc)];
-            if (k0 + fc + 1 < {k}) {{ av.y = {A}[(tm + fr) * {k} + (k0 + fc + 1)]; }}
+    int fr = ((lane / 4) & 4) + ((lane / 2) % 4);
+    int fcol = ((lane / 4) & 2) * 2 + (lane % 2) * 2;
+    simdgroup_matrix<float, 8, 8> acc[4][4];
+    for (int i = 0; i < 4; ++i) {{
+        for (int j = 0; j < 4; ++j) {{
+            reinterpret_cast<thread float2&>(acc[i][j].thread_elements()) = float2(0.0f);
         }}
-        if (k0 + fr < {k} && tn + fc < {n}) {{
-            bv.x = {B}[(k0 + fr) * {n} + (tn + fc)];
-            if (tn + fc + 1 < {n}) {{ bv.y = {B}[(k0 + fr) * {n} + (tn + fc + 1)]; }}
-        }}
-        reinterpret_cast<thread float2&>(Am.thread_elements()) = av;
-        reinterpret_cast<thread float2&>(Bm.thread_elements()) = bv;
-        simdgroup_multiply_accumulate(acc, Am, Bm, acc);
     }}
-    float2 r = reinterpret_cast<thread float2&>(acc.thread_elements());
-    if (tm + fr < {m} && tn + fc < {n}) {{ {C}[(tm + fr) * {n} + (tn + fc)] = r.x; }}
-    if (tm + fr < {m} && tn + fc + 1 < {n}) {{ {C}[(tm + fr) * {n} + (tn + fc + 1)] = r.y; }}"""
+    for (int k0 = 0; k0 < {k}; k0 += 8) {{
+        simdgroup_matrix<float, 8, 8> af[4];
+        simdgroup_matrix<float, 8, 8> bf[4];
+        for (int i = 0; i < 4; ++i) {{
+            int r = m0 + i * 8 + fr;
+            int c = k0 + fcol;
+            float2 v = float2(0.0f);
+            if (r < {m} && c < {k})         v.x = {A}[r * {k} + c];
+            if (r < {m} && c + 1 < {k})     v.y = {A}[r * {k} + (c + 1)];
+            reinterpret_cast<thread float2&>(af[i].thread_elements()) = v;
+        }}
+        for (int j = 0; j < 4; ++j) {{
+            int r = k0 + fr;
+            int c = n0 + j * 8 + fcol;
+            float2 v = float2(0.0f);
+            if (r < {k} && c < {n})         v.x = {B}[r * {n} + c];
+            if (r < {k} && c + 1 < {n})     v.y = {B}[r * {n} + (c + 1)];
+            reinterpret_cast<thread float2&>(bf[j].thread_elements()) = v;
+        }}
+        for (int i = 0; i < 4; ++i) {{
+            for (int j = 0; j < 4; ++j) {{
+                simdgroup_multiply_accumulate(acc[i][j], af[i], bf[j], acc[i][j]);
+            }}
+        }}
+    }}
+    for (int i = 0; i < 4; ++i) {{
+        for (int j = 0; j < 4; ++j) {{
+            int r = m0 + i * 8 + fr;
+            int c = n0 + j * 8 + fcol;
+            float2 v = reinterpret_cast<thread float2&>(acc[i][j].thread_elements());
+            if (r < {m} && c < {n})         {C}[r * {n} + c] = v.x;
+            if (r < {m} && c + 1 < {n})     {C}[r * {n} + (c + 1)] = v.y;
+        }}
+    }}"""
 
 
-#: Grid for a tensor-core GEMM: one threadgroup per 8x8 output tile, one
-#: SIMDGROUP wide. (nthreads, ngroups) as C expressions, because m/k/n are
-#: runtime scalars in the wrapper's scope.
 def gemm_tensor_core_grid(info: 'GemmInfo') -> tuple:
-    return ('32', f'(({info.m} + 7) / 8) * (({info.n} + 7) / 8)')
+    """One threadgroup per 32x32 output tile, one SIMDGROUP wide.
+
+    32 threads, not 128: the tile does the reuse and four SIMDGROUPS would
+    spend 128 registers on accumulators before any operands. (nthreads,
+    ngroups) as C expressions because m/k/n are runtime scalars in the wrapper.
+    """
+    return ('32', f'(({info.m} + 31) / 32) * (({info.n} + 31) / 32)')
 
 
-#: Choose the tensor-core body. OFF by default, and that is a MEASUREMENT, not
-#: caution. The MMA kernel is correct -- bit-exact, same checksum and elements
-#: as the naive one on the same source -- and it is exactly as FAST as the
-#: naive one, which is to say not fast:
-#:
-#:     512x512x512      ms/iter   TFLOPS
-#:     tensor-core          2     0.134
-#:     naive-parallel       2     0.134
-#:     cpu (--no-gpu)     138       0.002
-#:
-#: One SIMDGROUP per 8x8 tile loads 64 A-elements and 64 B-elements to do
-#: 1024 FLOP: an arithmetic intensity of 2 FLOP/byte. That is memory-bound by
-#: a wide margin, so the MMA is never the thing being waited on and replacing
-#: the scalar FMA with it buys nothing. The tile is too small to reuse anything.
-#:
-#: What the C kernel that reaches 0.96 TFLOPS does instead is a 64x64 tile
-#: across 4 SIMDGROUPS, so each loaded element is reused 64 times and the
-#: intensity is ~128 FLOP/byte. That is the change worth making, and it is
-#: register pressure and an smem tile, not a better intrinsic. Until then the
-#: AST-expressed naive kernel is the better default: same speed, and it is
-#: Mojo rather than a raw MSL string.
+#: Choose the tensor-core body. OFF by default, because the AST-expressed
+#: naive kernel measures the same and is Mojo rather than a raw MSL string.
+#: MOJO_GEMM_TENSOR_CORES=1 A/Bs the two on one source.
 TENSOR_CORES = os.environ.get('MOJO_GEMM_TENSOR_CORES', '') not in ('0', '')
 
 
 def _raw_msl(text: str):
     """RawMslStmt, imported here so the parser/AST tier has no edge to the
-    backend. `offload` already reaches the backend for the launch
-    marshalling, so this is not a new dependency -- it just keeps the
-    textual node out of the module that builds AST nodes."""
+    backend's textual node."""
     from mojo.backend_gimple.emit_metal import RawMslStmt
     return RawMslStmt(text)
 

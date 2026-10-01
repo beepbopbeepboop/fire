@@ -279,10 +279,20 @@ def emit_launch_wrappers(kernels: dict, grids: dict | None = None) -> str:
         # 31 of every 32 would exit immediately. Both values are overridable in
         # the runtime already, so this needs no ABI change -- only for a kernel
         # to ask.
+        # Which buffers the kernel can WRITE. These are the MSL-side params,
+        # so the address space has already been lowered: `device const float *`
+        # is read-only and `device float *` is writable. That is the type's own
+        # claim rather than a guess about intent, and it is why this keys on
+        # `const` -- the Mojo spelling (ImmutAnyOrigin vs MutAnyOrigin) is not
+        # present here, and matching on it silently produced an all-zero mask
+        # and a result of 0.0 rather than an error.
+        _wr = [0 if 'const' in str(_t) else 1 for _n, _t in _bufs]
+        lines.append('    static const uint8_t _mg_writable[] = {%s};'
+                     % ', '.join(str(x) for x in _wr))
         _grid = _GRID.get(_kn)
         _nthr, _ngrp = _grid if _grid else (0, 0)
         lines.append('    _mg_run("%s", %d, _mg_bufs, _mg_sizes, %d, _mg_scalars,'
-                     ' _mg_widths, %s, %s);'
+                     ' _mg_widths, _mg_writable, %s, %s);'
                      % (_kn, len(_bufs), len(_scals), _nthr, _ngrp))
         lines.append('}')
         lines.append('')
@@ -463,6 +473,7 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('                          void *const *bufs, const int64_t *sizes,')
     lines.append('                          int64_t n_scalars, void *const *scalars,')
     lines.append('                          const uint8_t *widths,')
+    lines.append('                          const uint8_t *writable,')
     lines.append('                          int64_t nthreads, int64_t ngroups) {')
     lines.append('    _mg_init{sfx}();')
     lines.append('    if (!_mg_have_device{sfx}) {')
@@ -483,7 +494,7 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('    }')
     lines.append('    return (int64_t) mojo_metal_dispatch(name, n_bufs, bufs, sizes,')
     lines.append('                                    n_scalars, scalars, widths,')
-    lines.append('                                    nthreads, ngroups);')
+    lines.append('                                    writable, nthreads, ngroups);')
     lines.append('}')
     lines.append('')
     if kernels:
