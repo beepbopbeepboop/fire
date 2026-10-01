@@ -6924,16 +6924,20 @@ def cross_image_contract_absent_refusal(callee: str, position,
     contract is missing rather than asserting a mechanism that is not
     operating.  `why_absent` is which of the four it is:
 
-      * `not-exported` — the callee is not in the module's export table, so
-        there is no contract to publish.  Usually an arity or a naming
-        disagreement, which the link audit will say about separately.
-      * `not-a-callee` — the name resolves to a library that carries no
-        per-parameter contract at all: a library built before this field
-        existed, or one whose manifest was written by something else.
+      * `not-exported` — the callee is in the export table but the contract is
+        shorter than the argument index, so this argument lands on no
+        parameter.  Usually an arity or a naming disagreement, which the link
+        audit will say about separately.
+      * `not-a-callee` — the library carries no per-parameter contract (built
+        before the field existed, or written by something that does not), or has
+        a contract with no entry for this position.
       * `no-manifest` — no manifest on this image's link line mentions the
         callee at all, so the question cannot even be asked of it.
-      * `ambiguous` — two libraries on the line publish a contract for the name
-        and they disagree, so which one the call binds is itself undecided.
+
+    `why_absent` is one of `CONTRACT_ABSENT_REASONS`' sentences, and that
+    constant is the enumeration of them; there is no fourth and none is
+    unreachable, which is why the list lives in one place rather than at three
+    call sites.
     """
     return (
         f"a {_who(argument_structs)} receiver is passed to {callee}() at "
@@ -6951,25 +6955,31 @@ def cross_image_contract_absent_refusal(callee: str, position,
         f"bugs/FORMAL_callee_no_def_ceiling_zero.md records the measurement")
 
 
-# The four reasons a contract can be missing, as SENTENCES. A named constant
-# each rather than a bare string at the one call site, so the four are
+# The THREE reasons a contract can be missing, as SENTENCES. A named constant
+# each rather than a bare string at the one call site, so the three are
 # enumerable — a reader can see the whole set of "why not" answers at once —
-# and so `test_formal_run.py`'s refusal cases can name one without spelling the
-# prose and being broken by a reword.
+# and every one of them is emitted by `resolve_frame_parameter_contract` below.
+#
+# Three and not four. A fourth — "two libraries on the line publish a contract
+# for it and they disagree" — was drafted here and deleted, because it is not a
+# thing that can happen: `dylib_export_lookup` resolves a bare callee through
+# the flat `by_name` table with `setdefault` in LINK ORDER, so two libraries
+# exporting the same name is decided, and it is decided the same way the emitted
+# call binds. Publishing a reason nothing can reach would be a fourth "why not"
+# a reader could look for and never find, which is the defect this whole family
+# of messages exists to stop.
 CONTRACT_ABSENT_REASONS = {
     "not-exported": (
         f"the manifest for the module it came from does not list it as an "
         f"export, so its compilation never published a contract for it"),
     "not-a-callee": (
-        f"no library on this image's link line carries a per-parameter "
-        f"contract at all — either built before the manifest carried one, or "
-        f"written by something that does not"),
+        f"the library it resolves to carries no per-parameter contract — "
+        f"either built before the manifest carried one, written by something "
+        f"that does not, or holding a contract with no entry for this "
+        f"argument's position"),
     "no-manifest": (
         f"no manifest on this image's link line mentions it, so the question "
         f"cannot be asked of anything"),
-    "ambiguous": (
-        f"two libraries on the line publish a contract for it and they "
-        f"disagree, so which one the call binds is itself undecided"),
 }
 
 
@@ -6985,13 +6995,19 @@ def resolve_frame_parameter_contract(candidates, position, argument_structs,
     flag that says "decided but unsure".
 
     `candidates` is what the link line offers for this callee, and it is a LIST
-    because "which library does this bind to" is itself a question with more
-    than one possible answer on a link line carrying two libraries that export
-    the same bare name — `load_dylib_manifests`'s `map` resolves that by
-    first-wins, and the resolver that binds the CALL is the one that has to win
-    here too, or the contract compared is not the contract the call uses. The
-    caller passes what it resolved, and passes an empty list when it resolved
-    nothing, which is `no-manifest`.
+    rather than a single entry so that "which library does this bind to" is
+    visibly a question this function does NOT answer: the caller passes what
+    the resolver that binds the CALL found, in link order, and this function
+    reads element 0 — the same first-wins precedence `load_dylib_manifests`'
+    `map` and `dylib_syms` use. Taking one here would be a second resolution
+    that could pick a different library's `f` from the one the emitted call
+    binds, which is the silently-wrong binding the module-identity mechanism
+    exists to prevent. An empty list is `no-manifest`.
+
+    The list is a list and not a single entry for the same reason, and it is why
+    there is no "ambiguous" answer in `CONTRACT_ABSENT_REASONS`: the ambiguity
+    is settled by that precedence before this function is called, which is why it
+    is not a state this function can be in.
 
     `argument_structs` is the SET of struct NAMES the caller's own argument is
     a frame of, and it is compared against the contract's names rather than
