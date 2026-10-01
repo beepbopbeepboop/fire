@@ -1780,7 +1780,8 @@ def _callee_wants_a_value(callee: str) -> bool:
 
 
 def _check_holder_agreements(functions, holders, hstruct, params_of,
-                             declared=None, structs_by_name=None) -> None:
+                             declared=None, structs_by_name=None,
+                             name_defs=None) -> None:
     """Refuse a parameter reached with a frame address at one call site and
     with something else at another.  A WHOLE-IMAGE pass, and that is the whole
     content of where it runs.
@@ -1830,68 +1831,109 @@ def _check_holder_agreements(functions, holders, hstruct, params_of,
     a refusal naming the declaration and every site.
     """
     declared = declared or {}
+    name_defs = name_defs if name_defs is not None else {}
     for fn in functions:
-        hs = holders.get(fn.name) or ()
-        by_name = hstruct.get(fn.name) or {}
+        hs = holders.get(_fn_key(fn)) or ()
+        by_name = hstruct.get(_fn_key(fn)) or {}
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.CallExpr):
                 continue
             callee = M.call_callee_name(node.func)
             if callee is None:
                 continue
-            params = params_of.get(callee)
-            if not params:
-                continue
-            by_decl = declared.get(callee) or {}
-            for position, arg, _kw in _frame_argument_slots(node, params):
-                pname = params[position] if position < len(params) else None
-                if not pname:
+            # A by-NAME read of a per-function table, and this loop runs ONCE
+            # PER DEFINITION of the name rather than skipping the name when it
+            # has several. That is the whole of what keeps this sound against an
+            # OVERLOADED callee, and it is the reason the fixpoint's hand-off
+            # edge declining to guess was not enough on its own.
+            #
+            # The reason is what the emitters do with an overloaded name: both
+            # backends register functions in one table keyed by name
+            # (`self._functions[f.name] = f`), so a name with two definitions
+            # is ONE function in the image and a call to it reaches whichever
+            # body was registered last. There is no resolution here to appeal
+            # to — the image genuinely has one `pick` — so "does every call site
+            # agree with what `pick`'s parameter was compiled to expect" has to
+            # be asked of EVERY definition, because any of them is the one that
+            # runs. Skipping the ambiguous name instead (which is what the
+            # hand-off edge does, correctly, since it must pick one) drops the
+            # check exactly where it is needed, and the program builds and
+            # returns a number the source never wrote: measured on
+            # `def pick(ref value: A)` / `def pick[K](ref value: B)` called once
+            # with each, keying the tables per definition lifted the refusal and
+            # the image read `A.pad` where the source says `A.src` (7 for 42).
+            #
+            # Asking per definition rather than per name also means the two
+            # `pick` bodies are each measured against the call sites that could
+            # reach them, which is the only reading under which "every call site
+            # agrees" is a statement about the program.
+            for def_fn in (name_defs.get(callee) or ()):
+                params = params_of.get(_fn_key(def_fn))
+                if not params:
                     continue
-                here = isinstance(arg, F.IdentExpr) and arg.name in hs
-                there = pname in holders.get(callee, ())
-                if pname in by_decl:
-                    _check_declared_parameter(
-                        functions, callee, position, pname, by_decl[pname],
-                        holders, hstruct, structs_by_name or {}, params)
+                _check_one_callee(functions, fn, callee, def_fn, params, node,
+                                  hs, holders, hstruct, declared,
+                                  structs_by_name or {})
+
+
+def _check_one_callee(functions, fn, callee, def_fn, params, node, hs,
+                      holders, hstruct, declared, structs_by_name) -> None:
+    """One definition's worth of the holder-agreement check, for one call site.
+
+    The body of `_check_holder_agreements`'s per-callee loop, split out so it
+    can run once per DEFINITION of an overloaded name rather than once per name
+    — which is what the call there explains and what keeps it sound when both
+    backends register one function per NAME.
+    """
+    by_decl = declared.get(_fn_key(def_fn)) or {}
+    for position, arg, _kw in _frame_argument_slots(node, params):
+        pname = params[position] if position < len(params) else None
+        if not pname:
+            continue
+        here = isinstance(arg, F.IdentExpr) and arg.name in hs
+        there = pname in (holders.get(_fn_key(def_fn)) or ())
+        if pname in by_decl:
+            _check_declared_parameter(
+                functions, callee, position, pname, by_decl[pname],
+                holders, hstruct, structs_by_name, params)
+            continue
+        if here == there:
+            # Both frame addresses, or neither.  A parameter reached one
+            # way at every call site is the case the by-reference
+            # design exists for, and it says nothing here.
+            continue
+        # Every call site of this parameter, sorted into the two kinds
+        # and spelled as the source spells it.  BOTH lists go into the
+        # message rather than "this one and the others", because either
+        # site can be the one the reader is standing at and a message
+        # that names the wrong one of the pair is the same defect as a
+        # message that names the wrong reason: it sends the reader to a
+        # call that is fine.
+        holder_spellings, plain_spellings, structs = [], [], []
+        for site_fn in functions:
+            for site in M.iter_nodes(site_fn.body):
+                if not isinstance(site, F.CallExpr) \
+                        or M.call_callee_name(site.func) != callee:
                     continue
-                if here == there:
-                    # Both frame addresses, or neither.  A parameter reached one
-                    # way at every call site is the case the by-reference
-                    # design exists for, and it says nothing here.
-                    continue
-                # Every call site of this parameter, sorted into the two kinds
-                # and spelled as the source spells it.  BOTH lists go into the
-                # message rather than "this one and the others", because either
-                # site can be the one the reader is standing at and a message
-                # that names the wrong one of the pair is the same defect as a
-                # message that names the wrong reason: it sends the reader to a
-                # call that is fine.
-                holder_spellings, plain_spellings, structs = [], [], []
-                for site_fn in functions:
-                    for site in M.iter_nodes(site_fn.body):
-                        if not isinstance(site, F.CallExpr) \
-                                or M.call_callee_name(site.func) != callee:
-                            continue
-                        for i, a, _k in _frame_argument_slots(site, params):
-                            if i != position:
-                                continue
-                            site_holder = isinstance(a, F.IdentExpr) \
-                                and a.name in holders.get(site_fn.name, ())
-                            spelling = _call_spelling(site, a, position, pname)
-                            bucket = (holder_spellings if site_holder
-                                      else plain_spellings)
-                            if spelling not in bucket:
-                                bucket.append(spelling)
-                            for st in (hstruct.get(site_fn.name, {})
-                                       .get(a.name) or ()) if site_holder \
-                                    else ():
-                                if st.name not in structs:
-                                    structs.append(st.name)
-                if not holder_spellings or not plain_spellings:
-                    continue
-                raise CodegenError(M.frame_holder_disagreement_refusal(
-                    callee, position, pname, structs, holder_spellings,
-                    plain_spellings))
+                for i, a, _k in _frame_argument_slots(site, params):
+                    if i != position:
+                        continue
+                    site_holder = isinstance(a, F.IdentExpr) \
+                        and a.name in holders.get(_fn_key(site_fn), ())
+                    spelling = _call_spelling(site, a, position, pname)
+                    bucket = (holder_spellings if site_holder
+                              else plain_spellings)
+                    if spelling not in bucket:
+                        bucket.append(spelling)
+                    for st in (hstruct.get(_fn_key(site_fn), {})
+                               .get(a.name) or ()) if site_holder else ():
+                        if st.name not in structs:
+                            structs.append(st.name)
+        if not holder_spellings or not plain_spellings:
+            continue
+        raise CodegenError(M.frame_holder_disagreement_refusal(
+            callee, position, pname, structs, holder_spellings,
+            plain_spellings))
 
 
 def _argument_frames(site_fn, arg, holders, hstruct, structs_by_name):
@@ -1922,17 +1964,17 @@ def _argument_frames(site_fn, arg, holders, hstruct, structs_by_name):
     answer rather than a failure.
     """
     if isinstance(arg, F.IdentExpr):
-        if arg.name not in (holders.get(site_fn.name) or ()):
+        if arg.name not in (holders.get(_fn_key(site_fn)) or ()):
             return ([], _describe_value(arg))
         names = [st.name for st in
-                 ((hstruct.get(site_fn.name) or {}).get(arg.name) or ())]
+                 ((hstruct.get(_fn_key(site_fn)) or {}).get(arg.name) or ())]
         why = f"a {'/'.join(names)} frame" if names else "an unplaced one"
         return (names, why)
     key = _root_ident(arg)
     if key is not None and key[1] == 1 and isinstance(arg, F.MemberExpr) \
-            and key[0] in (holders.get(site_fn.name) or ()):
+            and key[0] in (holders.get(_fn_key(site_fn)) or ()):
         nested = _typed_nested_frame(key[0], arg.member,
-                                     ((hstruct.get(site_fn.name) or {})
+                                     ((hstruct.get(_fn_key(site_fn)) or {})
                                       .get(key[0]) or ()),
                                      structs_by_name, None)
         if isinstance(nested, F.StructDef):
@@ -2132,6 +2174,79 @@ def _call_receivers(fn):
 _HOLDER_FIXPOINT_ROUNDS = 4
 
 
+def _fn_key(fn):
+    """The key every PER-FUNCTION table in the frame analysis is filed under.
+
+    `id(fn)`, and the reason it is identity rather than `fn.name` is that these
+    tables answer "what does THIS body do with its own names" — a question one
+    definition answers and a second definition of the same name answers
+    differently. Mojo overloads make that ordinary: `std/builtin/reversed.mojo`
+    declares `reversed` eight times with a different receiver type each time,
+    and 53 of the 1595 files in the two sweep roots declare some name more than
+    once (measured, `tools/` probe over both roots).
+
+    Keying by name made the first definition's answer stand for all of them,
+    which is the wrong answer rather than a refusal: the member read
+    `value.src` in `reversed`'s `_DictEntryIter` overload was resolved against
+    the `List` overload's candidate struct, so the refusal named a struct the
+    program never passed and a field the struct does have. `id` is the right
+    identity here because a `FunctionDef` is a plain mutable dataclass (no
+    `__hash__`, `eq=True`) that is never copied or re-parsed between the
+    fixpoint and the codegen that reads the published attributes — the tables
+    are built and consumed within one `_frame_receivers` call.
+
+    A NAME-keyed table is still right where the question is about the name, and
+    `param0`/`returns_frame` are those: a call site carries a name and nothing
+    else. `_name_defs` is what tells those readers the name is overloaded.
+    """
+    return id(fn)
+
+
+def _name_is_overloaded(name_defs: dict, name) -> bool:
+    """Whether `name` has more than one definition in this image.
+
+    The question every BY-NAME reader of the frame tables has to ask before it
+    answers, and it is asked here rather than at each site because the answer
+    is the same fact and one place that reads it is one place to fix.
+
+    A name with two definitions is not a name with one answer: the caller's
+    `f(x)` could mean either body, so "is `f`'s first parameter a frame holder"
+    is only answerable when both definitions agree. Measured: `reversed` has
+    eight, and `pick`-shaped pairs in this repository's own sources differ in
+    their receiver's struct, so treating the first as the answer produced a
+    refusal against the wrong layout.
+    """
+    return len(name_defs.get(name) or ()) > 1
+
+
+def _by_name_holder(name_defs: dict, holders: dict, hstruct: dict, name):
+    """`(holder_set, struct_map)` for a NAME, only when its definitions agree.
+
+    The cross-function readers of the holder tables — the hand-off fixpoint's
+    edge into a callee, `_check_holder_agreements`, `_argument_frames` — reach
+    a callee by NAME, because that is all a call site carries. When the name has
+    ONE definition this is that definition's own table and the answer is
+    exactly as before.
+
+    When it has SEVERAL it is `(None, None)`, and that is a refusal rather than a
+    guess: the call `f(r)` may reach any of them, so "the parameter at position
+    0 is a frame address of struct S" is only true of the definition the call
+    actually selected, and nothing in this analysis selects one. Returning
+    `None` says "this call site's frame-ness cannot be resolved to a
+    definition", which every caller already treats as "do not take this edge" —
+    so the effect is that an overloaded callee is not claimed to be a holder
+    rather than being claimed on behalf of whichever definition sorted first.
+    The alternative, keeping today's behaviour, is the defect: it attributes
+    one definition's layout to a body that may be a different one, which is
+    how `reversed`'s `_DictEntryIter` overload was refused against `List`'s.
+    """
+    defs = name_defs.get(name) or ()
+    if len(defs) != 1:
+        return (None, None)
+    key = _fn_key(defs[0])
+    return (holders.get(key), hstruct.get(key))
+
+
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
                      star_imports: tuple = ()) -> None:
@@ -2207,13 +2322,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # `model.function_param_shape`, so the variadic table has ONE reader.
         # A `*rest` / `**kw` entry used to land in this list as a name spelled
         # with its star, which made `f(1, 2, r)` against `def f(x, *rest)`
-        # bind `rest` to argument 1 and leave argument 2 with no parameter at
+        # bind `r` to argument 1 and leave argument 2 with no parameter at
         # all — and this table is what the hand-off fixpoint reads to decide
         # whether a CALLEE's parameter is a frame holder, so a wrong entry here
         # is a frame address followed into the wrong slot.
         shape = M.function_param_shape(fn)
         names = list(shape.names)
-        params_of[fn.name] = names
+        params_of[_fn_key(fn)] = names
         if names and names[0]:
             param0[fn.name] = names[0]
     # `holders[fn]` is the set of names in `fn` holding a frame address, and
@@ -2223,8 +2338,37 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # from. A candidate set that is EMPTY means the name was bound from a
     # constructor this path does not frame, so it holds a plain word and its
     # `.<field>` accesses are not frame accesses at all.
-    holders = {fn.name: set() for fn in functions}
-    hstruct = {fn.name: {} for fn in functions}
+    #
+    # KEYED BY FUNCTION IDENTITY (`_fn_key`), not by name, and that is the fix
+    # rather than a refinement. Every one of these tables says what ONE
+    # function's body does with its own names, so two definitions of one name
+    # are two answers — but Mojo overloads are ordinary (`def reversed[...]`
+    # appears eight times in std/builtin/reversed.mojo alone, with a different
+    # receiver type in each), and keying by name made the FIRST definition's
+    # answer stand for all of them. The measured consequence is a member read
+    # resolved against the WRONG struct's layout: `reversed`'s `_DictEntryIter`
+    # overload reads `value.src`, `_DictEntryIter` declares `src`, and the
+    # refusal said `List has no field 'src'` — because the `List` overload was
+    # declared first and its `hstruct['reversed']['value']` entry was the one
+    # the `_DictEntryIter` body's read was checked against. That is a refusal
+    # whose every clause is false about the program.
+    #
+    # The tables that answer a question ABOUT A NAME — `param0`, and
+    # `returns_frame` below — stay name-keyed, because a CALL SITE only
+    # carries a name and that is the whole of what it can ask. Where a name is
+    # overloaded, `_name_defs` below is what says so at the point of use, so a
+    # by-name lookup answers "these definitions agree" rather than silently
+    # reading whichever one landed last.
+    holders = {_fn_key(fn): set() for fn in functions}
+    hstruct = {_fn_key(fn): {} for fn in functions}
+    # `{name: [FunctionDef, …]}` — every definition of every name in the image.
+    # The by-name readers need it to tell "one function called `f`" from "four
+    # functions called `f`", which is the same agree-or-refuse discipline
+    # `struct_frame_slot_candidates` applies to a field's slot and for the same
+    # reason: a name that means several bodies answers no single question.
+    _name_defs = {}
+    for fn in functions:
+        _name_defs.setdefault(fn.name, []).append(fn)
     # The declared return annotations, read ONCE for the whole unit and handed
     # to the construction decision below.  They are the evidence that tells a
     # construction argument that is an ordinary value from one that is a
@@ -2243,7 +2387,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # method nothing in the image calls — so that test has to be able to say
     # "no call site agrees", which is a refusal the pre-existing rule does not
     # make.
-    declared_holders = {fn.name: {} for fn in functions}
+    declared_holders = {_fn_key(fn): {} for fn in functions}
     # `{function name: struct}` — the functions that RETURN a frame address, and
     # the struct whose layout that frame has.  It is the other half of the
     # holder fixpoint below and is computed inside the same loop, because the
@@ -2258,8 +2402,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         owner = owners.get(fn.name)
         if owner is not None and owner.name in framed:
             for recv in M.struct_receivers(owner):
-                holders[fn.name].add(recv)
-                hstruct[fn.name][recv] = [owner]
+                holders[_fn_key(fn)].add(recv)
+                hstruct[_fn_key(fn)][recv] = [owner]
         # Every parameter of every function, not only a method's: a free
         # function's `def f(r: S)` is the same construct as `def __eq__(self,
         # other: Self)`, the declaration is the same kind of evidence, and
@@ -2273,25 +2417,25 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             # the receiver seeding above is the method's own declaration, so
             # adding a second opinion here would put two structs in a candidate
             # list where one layout is the truth.
-            if pname in holders[fn.name]:
+            if pname in holders[_fn_key(fn)]:
                 continue
             if M.struct_is_framed(pst):
-                holders[fn.name].add(pname)
-                hstruct[fn.name][pname] = [pst]
+                holders[_fn_key(fn)].add(pname)
+                hstruct[_fn_key(fn)][pname] = [pst]
             elif not M.struct_is_one_field(pst):
                 continue
-            declared_holders[fn.name][pname] = pst
+            declared_holders[_fn_key(fn)][pname] = pst
         for name, sts in _constructor_bindings(
                 fn, framed, [f.name for f in functions]).items():
-            holders[fn.name].add(name)
-            hstruct[fn.name].setdefault(name, []).extend(sts)
+            holders[_fn_key(fn)].add(name)
+            hstruct[_fn_key(fn)].setdefault(name, []).extend(sts)
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
         grew = False
         changed = True
         while changed:
             changed = False
             for fn in functions:
-                hs = holders[fn.name]
+                hs = holders[_fn_key(fn)]
                 for node in M.iter_nodes(fn.body):
                     target = value = None
                     if isinstance(node, F.VarDecl):
@@ -2303,7 +2447,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             and value.name in hs and target not in hs:
                         # a copy: the same frame under a second name
                         hs.add(target)
-                        hstruct[fn.name][target] = list(hstruct[fn.name][value.name])
+                        hstruct[_fn_key(fn)][target] = \
+                            list(hstruct[_fn_key(fn)][value.name])
                         changed = grew = True
                     # A call to a function that RETURNS A FRAME binds a frame
                     # address, and this is the edge that makes the returned-frame
@@ -2331,7 +2476,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         st = returns_frame.get(frame_fn) if frame_fn else None
                         if st is not None and target not in hs:
                             hs.add(target)
-                            hstruct[fn.name].setdefault(target, []).append(st)
+                            hstruct[_fn_key(fn)].setdefault(target, []).append(st)
                             changed = grew = True
                     if not isinstance(node, F.CallExpr):
                         continue
@@ -2389,7 +2534,26 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                     # parameters in order and a comptime parameter is not in it —
                     # which is right, because the brackets are passed ahead of these
                     # (`model.incoming_args`) and so occupy no call-time position.
-                    plist = params_of.get(target_fn)
+                    # The callee is reached BY NAME — all a call site carries —
+                    # so the name has to be resolved to the definition it
+                    # denotes before its parameter list means anything. Both
+                    # halves come from `_by_name_holder`, which returns
+                    # `(None, None)` for a name with SEVERAL definitions: that
+                    # is the same "this edge cannot be taken" the `if not plist`
+                    # produces for a callee this image does not have, except
+                    # this one is a real answer about a real image rather than a
+                    # missing definition. See its docstring for why picking one
+                    # of several is the defect. `plist` is read HERE, from the
+                    # resolved definition, rather than by name from `params_of`
+                    # — a by-name read of a table keyed by identity is a miss on
+                    # every call, which is how this edge went silently dead
+                    # when the tables were re-keyed.
+                    callee_holders, callee_hstruct = _by_name_holder(
+                        _name_defs, holders, hstruct, target_fn)
+                    if callee_holders is None:
+                        continue
+                    _defs = _name_defs.get(target_fn) or ()
+                    plist = params_of.get(_fn_key(_defs[0]))
                     if not plist:
                         continue
                     for pos, pname, _kw in _frame_argument_slots(node, plist):
@@ -2399,11 +2563,11 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         if not (r and r[0] in hs and r[1] == 0):
                             continue
                         callee = plist[pos]
-                        if not callee or callee in holders.get(target_fn, ()):
+                        if not callee or callee in callee_holders:
                             continue
-                        holders[target_fn].add(callee)
-                        hstruct[target_fn][callee] = \
-                            list(hstruct[fn.name][r[0]])
+                        callee_holders.add(callee)
+                        callee_hstruct[callee] = \
+                            list(hstruct[_fn_key(fn)][r[0]])
                         changed = grew = True
             # The OTHER half of the same fixpoint: which functions RETURN a frame.
             # It has to be here and not after the loop because the edge above reads
@@ -2415,8 +2579,9 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             # holder table, monotone) or because it is a call to a function already
             # known to return one (also monotone).
             for fn in functions:
-                status, st = _frame_return_status(fn, holders[fn.name],
-                                                  hstruct[fn.name], returns_frame)
+                status, st = _frame_return_status(fn, holders[_fn_key(fn)],
+                                                  hstruct[_fn_key(fn)],
+                                                  returns_frame)
                 fn._frame_return_status = status
                 if status == _RETURN_FRAME and returns_frame.get(fn.name) is not st:
                     changed = grew = True
@@ -2479,10 +2644,10 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # otherwise have said the parameter is not a holder, by name, at the call
     # site.
     for fn in functions:
-        hs = holders[fn.name]
+        hs = holders[_fn_key(fn)]
         if not hs:
             continue
-        by_name = hstruct[fn.name]
+        by_name = hstruct[_fn_key(fn)]
         call_recv = _call_receivers(fn)
         # `{"h.a": struct}` — the fields of a HOLDER in this function whose
         # agreed declared type is a framed struct of this module, so the slot
@@ -2711,6 +2876,34 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                     )
                 inner = M.struct_frame_slot(nested, node.member)
                 if inner is None:
+                    # The METHOD check `member_read_without_a_field` makes for a
+                    # depth-1 read, applied here too, and it is the same defect
+                    # this site had: `self.strong.fetch_add` is a read of a
+                    # member `Atomic` does not have as a FIELD — it is one of
+                    # its METHODS, and the sentence below said so in a way that
+                    # sent the reader to the layout ("and that struct's 3
+                    # field(s): T, scope, _value has no such field") when the
+                    # answer is that the name is not a field at all.
+                    #
+                    # Measured on `std/memory/arc_pointer.mojo`, whose
+                    # `self.strong.fetch_add[ordering=…](1)` is that call.
+                    # One recogniser (`model.structs_declaring_method`) so the
+                    # two sites cannot drift, which is the property the depth-1
+                    # message was written to have.
+                    owners = M.structs_declaring_method([nested], node.member)
+                    if owners:
+                        raise CodegenError(
+                            f"{chain} names {node.member!r}, which is a METHOD "
+                            f"of the nested {owners[0].name} frame rather than "
+                            f"one of its fields: a value-position method "
+                            f"reference is a bound method, and a method is not "
+                            f"a word — there is no slot to read it out of and "
+                            f"nothing to store it in, so this path has no "
+                            f"representation for it. Call it "
+                            f"(`{chain}(...)`), which is a receiver and a call "
+                            f"and lowers, or write the operation out where it "
+                            f"was used"
+                        )
                     raise CodegenError(
                         f"{chain} reads {node.member!r} out of a nested "
                         f"{nested.name} frame, and that struct's "
@@ -2767,7 +2960,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                                  [f.name for f in functions])), rets,
                              holders, hstruct, params_of,
                              _callee_defs(functions), imported,
-                             star_imports)
+                             star_imports, _name_defs)
         _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
         fn._frame_holders = hs
         fn._frame_nested_slots = nested_slots
@@ -2828,7 +3021,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # the call site that disagrees with it can be in a function the loop above
     # skipped — see `_check_holder_agreements` for the program that measures it.
     _check_holder_agreements(functions, holders, hstruct, params_of,
-                             declared_holders, structs_by_name)
+                             declared_holders, structs_by_name,
+                             _name_defs)
     _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
                             returns_frame)
     _park_construction_mismatches(functions, framed)
@@ -3098,10 +3292,10 @@ def _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
     """
     owners = M.method_owner_names(list((structs_by_name or {}).values()))
     for fn in functions:
-        hs = holders.get(fn.name) or ()
+        hs = holders.get(_fn_key(fn)) or ()
         if not hs:
             continue
-        by_name = hstruct.get(fn.name) or {}
+        by_name = hstruct.get(_fn_key(fn)) or {}
         owner = owners.get(fn.name)
         receivers = set(M.struct_receivers(owner)) if owner is not None else set()
         findings = []
@@ -3352,8 +3546,8 @@ def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> int:
     """
     moved = 0
     for fn in functions:
-        hs = holders.get(fn.name) or ()
-        by_name = hstruct.get(fn.name) or {}
+        hs = holders.get(_fn_key(fn)) or ()
+        by_name = hstruct.get(_fn_key(fn)) or {}
         if not hs:
             continue
         # Collected first and mutated after, for the reason
@@ -3531,8 +3725,8 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct) -> int:
     """
     moved = 0
     for fn in functions:
-        hs = holders.get(fn.name) or ()
-        by_name = hstruct.get(fn.name) or {}
+        hs = holders.get(_fn_key(fn)) or ()
+        by_name = hstruct.get(_fn_key(fn)) or {}
         if not hs:
             continue
         pending = []
@@ -4207,7 +4401,7 @@ def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
     for fn in functions or ():
         if fn.name not in returns_frame:
             continue
-        names = params_of.get(fn.name) or []
+        names = params_of.get(_fn_key(fn)) or []
         n = len(M.incoming_args(fn))
         if n < len(names):
             n = len(names)
@@ -4357,7 +4551,8 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                          structs_by_name=None, created_here=frozenset(),
                          rets=None, all_holders=None, all_hstruct=None,
                          params_of=None, callee_defs=None,
-                         imported=None, star_imports=()) -> None:
+                         imported=None, star_imports=(),
+                         name_defs=None) -> None:
     """Refuse every construct a frame ADDRESS may not take part in.
 
     A frame belongs to the function that created it and is reclaimed when that
@@ -4417,6 +4612,33 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     all_holders = all_holders if all_holders is not None else {}
     all_hstruct = all_hstruct if all_hstruct is not None else {}
     params_of = params_of if params_of is not None else {}
+    # `name_defs` is `{name: [FunctionDef, …]}`. `all_holders` and `params_of`
+    # are keyed by FUNCTION IDENTITY (`_fn_key`), and the reads of them below
+    # ask about a NAME, so both go through this table rather than indexing by
+    # name — see `_by_name_holder` for why a name with two definitions is not a
+    # name with one answer.
+    name_defs = name_defs if name_defs is not None else {}
+    # The membership question — "does any definition of this callee take a
+    # frame?" — is a UNION over the name's definitions, which is the honest
+    # reading of "any": a call site that named an overloaded function could have
+    # reached any of them, so every holder any of them has is one this call site
+    # might have handed a frame to. Narrowing it to one definition is what made
+    # `reversed`'s `_DictEntryIter` overload's receiver look like `List`'s.
+    holders_by_name = {}
+    for _name, _defs in name_defs.items():
+        _u = set()
+        for _fn in _defs:
+            _u.update(all_holders.get(_fn_key(_fn)) or ())
+        if _u:
+            holders_by_name[_name] = _u
+    # …and the parameter-list half of the same question, which is NOT a union:
+    # a name's definitions spell their parameters differently (`reversed`'s do,
+    # eight ways), so there is no list to merge. It answers for a name with ONE
+    # definition, which is what `_frame_argument_slots` needs — the positions it
+    # walks are that definition's.
+    def _by_name_params(name):
+        _defs = name_defs.get(name) or ()
+        return params_of.get(_fn_key(_defs[0])) if len(_defs) == 1 else None
 
     def _names(node):
         return [st.name for st in (by_name.get(node.name) or [])] \
@@ -4612,7 +4834,7 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
             # back as "a R receiver is passed to (), which is a name with no
             # definition in hand".
             for i, a, kwname in _frame_argument_slots(
-                    node, params_of.get(callee) if callee in all_holders
+                    node, _by_name_params(callee) or () if callee in all_holders
                     else ()):
                 if callee is None:
                     # 0. A callee this pass cannot NAME.  Two shapes, and they
@@ -4745,7 +4967,7 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                             f"frame holder is a fact about that module's "
                             f"compilation, which this pass has not read"))
                     continue
-                if callee not in known and callee not in all_holders:
+                if callee not in known and callee not in holders_by_name:
                     # 2. Not in this image, whatever position.  Saying so is
                     #    true at every position; the old loop only said it at
                     #    position 0 and let the position sentence cover the
