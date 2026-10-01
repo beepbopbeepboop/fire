@@ -287,6 +287,7 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "io": "test_formal_small_hosts.py",
     "typing": "test_formal_small_hosts.py",
     "platform": "test_formal_platform.py",
+    "fnmatch": "test_formal_fnmatch.py",
 }
 
 
