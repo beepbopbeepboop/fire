@@ -3383,6 +3383,47 @@ def string_compare_number_refusal(op: str, left_kind, right_kind,
         f"`{spelled(txt)}.startswith(\".\")`")
 
 
+def frame_blob_refusal(what: str, wanted: int, available: int) -> str:
+    """The ONE message for "this container does not fit in the frame", for both
+    backends and every container shape.
+
+    Containers on this path are frame-allocated: a list, tuple, dict or string
+    blob is a run of 8-byte slots below the frame pointer, out of a budget the
+    function's whole body shares, and a literal reserves its whole blob before
+    any element is evaluated (so a nested container lands above its parent
+    rather than inside the region the parent is still filling). The limit is
+    therefore real and architectural, and the two backends have DIFFERENT
+    budgets — arm64's scratch is 128 KB, x86-64's blob region is 16 KB — which
+    is exactly why the number has to be computed and printed by one place
+    instead of formatted at each call site.
+
+    What each backend used to print was the two sides of its own comparison, and
+    on x86-64 those are negative FRAME OFFSETS, not sizes: a 4095-element list
+    literal read "list literals exceed the formal frame (16368 > -16 bytes)",
+    which is a true statement about two numbers and no help at all to a reader.
+    So the callers pass SIZES, and this prints sizes, plus the one number a
+    caller can act on: how many elements would fit, derived from the budget the
+    same way the emitters derive the blob size (a word-element blob is
+    `[count][element...]`, so eight bytes of the budget are the count).
+
+    The remedy sentence names the two things that actually work, because the
+    obvious one does not: the frame is not something a caller can enlarge from
+    the source, and a per-element store loop would still need the blob to exist.
+    Splitting the literal across two functions gives each its own budget;
+    building the container at run time (appending to a list literal sized for
+    what the program needs) does not put the whole thing in the frame at once.
+    """
+    words = max(0, (available - 8) // 8) if available > 8 else 0
+    return (f"{what} does not fit in the frame: it needs {wanted} bytes and "
+            f"this function has {available} left for containers. A blob of "
+            f"8-byte elements is [count][element...], so at most {words} "
+            f"element(s) fit in what is left here — and the budget is shared "
+            f"with every other list, dict, string and receiver frame in the same "
+            f"body. Build the container at run time (append into a list literal "
+            f"sized for what the program needs), or split it across two "
+            f"functions so each gets its own budget.")
+
+
 def string_binary_refusal(op: str, left_kind, right_kind,
                           spelled_op: str | None = None,
                           left=None, right=None, fn=None,
@@ -13299,6 +13340,39 @@ DEFAULT_INT = "int"
 DEFAULT_STRING = "string"      # a formal string is a bare `char *`: one word
 DEFAULT_OPAQUE = "opaque"      # a real default this path cannot bring up
 
+# ── `None`, and the word it is ──────────────────────────────────────────────
+#
+# `None` is a NAME on this front end, not a literal:
+#
+#     Parser(py_tokenize("b: int = None")).parse_module()[0]
+#     AssignStmt(target=IdentExpr(name='b'), value=IdentExpr(name='None'), …)
+#
+# so neither `fold_literal_expr` nor `literal_default_word` had an arm for it,
+# and the single most common class-level default in this repository's own
+# dataclasses (`Type.bit_width: Optional[int] = None`, and nine more on the same
+# class) was refused as "not a literal" — a message that sends a reader looking
+# for a call, where there is no call.
+#
+# It is a value this target represents exactly: the word 0, which is what an
+# unwritten frame slot already is. Folding it is the representation, not an
+# approximation, and because both backends and `formal/build.py` read these two
+# functions it is one edit rather than three.
+#
+# What it is NOT is the integer 0, and the one-word model cannot tell them
+# apart. `None == 0` is False in Python and True here. So the fold is confined
+# to MATERIALIZING a value, and the one construct that can observe the
+# difference — a comparison against a folded `None` — is refused by name in
+# `refuse_none_comparisons` rather than answered. A distinguishable null is not
+# available and is not attempted: the model is one untagged word, so there is
+# nowhere for a second bit of "this zero is a None" to live.
+NONE_NAME = "None"
+NONE_WORD = 0
+
+
+def is_none_expr(node) -> bool:
+    """True when `node` is the NAME `None` (see the note above)."""
+    return isinstance(node, F.IdentExpr) and node.name == NONE_NAME
+
 
 def struct_default_word(struct_def) -> tuple:
     """`(kind, payload)` — what `S()` must leave in the word for this struct.
@@ -13346,6 +13420,12 @@ def literal_default_word(value) -> tuple:
     defaults are representable."""
     if value is None:
         return (DEFAULT_NONE, None)
+    if is_none_expr(value):
+        # `None` is the word 0 on this target (see NONE_WORD). Folded here, not
+        # refused: `x: T = None` is the default for an optional field and is the
+        # single most common class-level default in this repository's own
+        # dataclasses, and both backends materialize an int word exactly.
+        return (DEFAULT_INT, NONE_WORD)
     if isinstance(value, F.IntLiteral):
         return (DEFAULT_INT, int(value.value))
     if isinstance(value, F.BoolLiteral):
@@ -13616,17 +13696,26 @@ class GlobalSymbol:
     spelling for a diagnostic ("assigned at module level", "re-bound at module
     level", "declared at module level with no value", "imported from `m`"),
     because the four are different mistakes with different repairs and one
-    generic message sends the reader to the wrong line."""
+    generic message sends the reader to the wrong line.
 
-    __slots__ = ("name", "literal", "site", "module", "line")
+    `none_valued` says the folded word is the word `None` is spelled as, which
+    `literal` cannot: the fold represents `None` as `IntLiteral(0)` (NONE_WORD),
+    so the fact that this zero is a `None` and not the integer 0 is gone by the
+    time the node exists. It is kept here rather than re-derived at each use
+    site because the one construct that can observe the difference is a
+    comparison, and a comparison that answered "0 == 0 is True" for a `None`
+    would be a wrong answer rather than a refusal."""
+
+    __slots__ = ("name", "literal", "site", "module", "line", "none_valued")
 
     def __init__(self, name, literal=None, site="assigned", module=None,
-                 line=0):
+                 line=0, none_valued=False):
         self.name = name
         self.literal = literal
         self.site = site
         self.module = module
         self.line = line
+        self.none_valued = none_valued
 
     def __repr__(self):
         return (f"GlobalSymbol({self.name!r}, literal="
@@ -13689,12 +13778,19 @@ def fold_literal_expr(node):
 
     None means "the build does not know this", which is a refusal and not a
     zero — the distinction `literal_default_word` already draws, and the reason
-    this returns None rather than 0 for an opaque expression."""
+    this returns None rather than 0 for an opaque expression.
+
+    `None` folds to the word 0, which is the representation rather than an
+    approximation (see NONE_WORD), and it is the one folded value that is not
+    interchangeable with the integer 0 it is spelled as —
+    `refuse_none_comparisons` is what keeps the two apart."""
     if isinstance(node, F.IntLiteral):
         try:
             return int(node.value)
         except (TypeError, ValueError):
             return None
+    if is_none_expr(node):
+        return NONE_WORD
     if isinstance(node, F.BoolLiteral):
         return 1 if node.value else 0
     if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0) \
@@ -13834,7 +13930,8 @@ def collect_module_symbols(stmts: list) -> dict:
             continue
         table[name] = GlobalSymbol(name, folded_literal_node(folded, value),
                                    "assigned", None,
-                                   getattr(stmt, "line", 0) or 0)
+                                   getattr(stmt, "line", 0) or 0,
+                                   is_none_expr(value))
     return table
 
 
@@ -14236,6 +14333,95 @@ def name_resolves_without_a_local(name: str) -> bool:
     whole point: the arm64 X19 fall-through and the x86-64 zero fall-through
     were the two architectures' answers to a question neither of them had."""
     return name in _UNRESOLVED_NAME_ALLOWED
+
+
+def is_type_name(name: str) -> bool:
+    """True when `name` spells a TYPE on this path — not a value.
+
+    The union of the four tables that already know type names, and the union is
+    the point: each answers a different question, so a name in only one of them
+    is still a type.
+
+      * `POINTEE_WIDTHS` — types with a known width, and the only table
+        `NoneType` is in;
+      * `INT_TYPE_CTORS` / `IDENTITY_TYPE_CTORS` — what a bare call `T(x)`
+        means, read through `type_constructor_kind`;
+      * `UNREPRESENTABLE_TYPE_CTORS` — real types this path cannot build a
+        value of (`DType`, `Optional`, `SIMD`, …), which is a statement about
+        the VALUE and not about whether the name is a type;
+      * `Self`, which is a type and appears in no table.
+
+    A struct this unit compiles is deliberately NOT here: `check_module_symbols`
+    already places those names, and its own docstring says why — "a struct is
+    not a value and has no register" — which is the same fact stated for the
+    case that reaches it.
+
+    Read this only to decide which WORD a refusal uses. It must never be used to
+    answer "can this name be read", because the answer to that is always no, and
+    `name_resolves_without_a_local` is the list of the ones that can."""
+    if name == "Self":
+        return True
+    if name in POINTEE_WIDTHS or name in UNREPRESENTABLE_TYPE_CTORS:
+        return True
+    return type_constructor_kind(name) is not None
+
+
+def type_as_value_refusal(name: str, fn_name: str) -> str:
+    """A TYPE read where a value is required.
+
+    `unresolved_name_refusal` enumerates the four places a NAME can live on this
+    path — a register, a spill slot, a receiver field's frame, a folded
+    module-level constant. That enumeration is right for a value and it is
+    wrong here in a way worth naming: a type is in none of the four because a
+    type is not a value and never was. The reader is sent to the register
+    allocator for a fact about the language.
+
+    The measured cost of that: `check_module_symbols` over the 664 stdlib
+    `.mojo` files reported 93 files as "'<name>' has no home", and 52 of those
+    names are types — `NoneType`, `DType`, `Int`, `Self`, `String`, `Byte`,
+    `UInt8`, `UInt64`. The other 41 are unchanged and correct: they name values
+    (`debug_assert`, `rebind`, `__is_run_in_comptime_interpreter`, …) that
+    really are read where there is no storage, and for those the storage
+    enumeration is the right story. `std/sys/_assembly.mojo:94`'s
+    `comptime if result_type == NoneType:` is one of the 52.
+
+    A COMPARISON of two types is the common shape, and it is the one this
+    message is really about: `t == NoneType` with `t` a `comptime` type
+    parameter compares two types, which needs a type to BE a value — a tag per
+    type, interned, and the SAME on both sides of a dylib boundary, so it
+    cannot be a per-unit small integer. That is reflection-table work and it
+    belongs to whoever owns the type table; this message says so rather than
+    implying the reader could fix it by naming a variable differently.
+
+    What a caller CAN do is branch on something the one-word model can
+    distinguish, and the message says that too, because a refusal with no
+    repair is the other half of a useless diagnostic.
+    """
+    return type_as_value_fact(name, fn_name)
+
+
+def type_as_value_fact(name: str, fn_name: str = "") -> str:
+    """The type-is-not-a-value SENTENCE, on its own.
+
+    Split from `type_as_value_refusal` because a name can be a type AND have a
+    more specific story — a module symbol imported from another module, whose
+    message `tools/formal_sweep.py` parses — and in that case the two facts are
+    both true and both worth saying. `fn_name` is optional here because this
+    half is also appended to a message that already carries it."""
+    who = f"{fn_name}: " if fn_name else ""
+    return (f"{who}{name!r} is a TYPE, and a type is not a value on this path: "
+            f"a value here is one 64-bit word, and a type is not one thing a "
+            f"word can hold. So there is no register, spill slot, frame field "
+            f"or folded constant this could live in — the question those four "
+            f"places answer is the wrong question for a type. Comparing a "
+            f"`comptime` type parameter against a type name (`t == {name}`), "
+            f"testing one with `is`, or passing one as an argument all need "
+            f"types to be values: an interned tag per type, identical on both "
+            f"sides of a dylib boundary, which is reflection-table work this "
+            f"path does not have. Branch on something the word model can tell "
+            f"apart — a flag or an extra parameter the caller passes, a "
+            f"separate function per case, or a property of the value itself "
+            f"rather than of its type.")
 
 
 def comptime_fold_refusal(name: str) -> str:

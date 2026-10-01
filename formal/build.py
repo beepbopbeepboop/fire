@@ -80,7 +80,7 @@ def _ad_hoc_sign(path: str) -> None:
 
 def parse_module(source: str, filename: str = "<input>") -> list:
     from fire_compiler import py_tokenize, Parser
-    stmts = Parser(py_tokenize(source)).with_filename(filename).parse_module()
+    stmts = Parser(py_tokenize(source, filename)).with_filename(filename).parse_module()
     # One census of what this unit writes into a field, attached to every struct
     # it declares. It is what lets formal.model tell a class-level CONSTANT from
     # per-instance state (see the rule above struct_class_constants), and it has
@@ -5149,12 +5149,30 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
     and a call's callee — are only identifiable from the parent, and replacing
     them would be the two wrong answers this whole change exists to remove
     (a store turned into a value is a dropped store; a callee turned into a
-    literal is a call to a number)."""
-    if isinstance(node, list):
-        for i, child in enumerate(node):
+    literal is a call to a number).
+
+    A TUPLE is descended into, and that is not a generalization — it is the
+    `elif` arm. `IfStmt.elifs` is a list of `(condition, body)` pairs, and a
+    condition is an ordinary expression position in every respect, so the
+    substitution covered `if x == K:` and skipped `elif x == K:`. The skipped
+    name then reached the emitter as a bare `IdentExpr` with no home and was
+    REFUSED ("'K' has no home") on both architectures, for a construct the
+    build answers everywhere else — measured in
+    bugs/CODEGEN_elif_arm_reading_a_module_constant_has_no_home.md, whose
+    diagnosis blamed the emitter's phi/web slot. It was this walk: the same
+    shape of mistake as the assignment case in that file, one position over.
+    The other walks over this tree already knew `elifs` was pairs and spelled
+    it out (`strip_body`, `walk_body`); this one did not, and a walk that has
+    to be re-derived per consumer is exactly how they drift.
+
+    A tuple has no assignable slots, so the walk RETURNS a new one for it and
+    the caller puts it back; a list is still rewritten in place."""
+    if isinstance(node, (list, tuple)):
+        out_items = []
+        for child in node:
             if isinstance(child, F.IdentExpr) and child.name in sites \
                     and child.name not in stores:
-                node[i] = copy.deepcopy(sites[child.name])
+                out_items.append(copy.deepcopy(sites[child.name]))
                 continue
             if isinstance(child, F.CallExpr) and isinstance(child.func,
                                                            F.IdentExpr) \
@@ -5164,8 +5182,18 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
                     _apply_module_constant_sites(a, sites, stores)
                 for _k, v in (child.kwargs or []):
                     _apply_module_constant_sites(v, sites, stores)
+                out_items.append(child)
                 continue
-            _apply_module_constant_sites(child, sites, stores)
+            # This walk rewrites a child's own slots IN PLACE and returns None
+            # for anything that is not itself a list or a tuple, so the
+            # original child is what goes back in the sequence — unless the
+            # recursion handed back a rebuilt sequence, which is the one case
+            # where the child itself is the container.
+            rebuilt = _apply_module_constant_sites(child, sites, stores)
+            out_items.append(child if rebuilt is None else rebuilt)
+        if isinstance(node, tuple):
+            return tuple(out_items)
+        node[:] = out_items
         return node
     if isinstance(node, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
         # The target is a store: leave it, and walk the value side only.
@@ -5200,7 +5228,12 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
 
 
 def _rewrite_child(child, sites: dict, stores: set):
-    """One non-list child: replace an `IdentExpr` read, else recurse."""
+    """One non-list child: replace an `IdentExpr` read, else recurse.
+
+    A TUPLE is the one child that cannot be rewritten where it lies — the walk
+    rebuilds it and returns it, so the caller has to put it back. An `elif` PAIR
+    arrives here because `IfStmt.elifs` is a LIST of tuples, so the list branch
+    hands each one over rather than descending into it itself."""
     if child is None or isinstance(child, (str, int, float, bool)):
         return child
     if isinstance(child, F.IdentExpr):
@@ -5215,6 +5248,8 @@ def _rewrite_child(child, sites: dict, stores: set):
             for _k, v in (child.kwargs or []):
                 _apply_module_constant_sites(v, sites, stores)
             return child
+    if isinstance(child, tuple):
+        return _apply_module_constant_sites(child, sites, stores)
     _apply_module_constant_sites(child, sites, stores)
     return child
 
@@ -6131,6 +6166,35 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         M.global_value_refusal(name, fn.name, why))
                 continue
             sym = M.module_symbol(name)
+            # A TYPE read as a value is the same kind of misdirection as the
+            # MLIR dialect above, and it is asked in the same place for the same
+            # ordering reason: `unresolved_name_refusal` enumerates where a NAME
+            # lives — a register, a spill slot, a receiver field's frame, a folded
+            # module constant — and a type is in none of those because a type is
+            # not a value, so that sentence is false about the file and sends
+            # the reader to the register allocator for a fact about the
+            # language. The census behind this is in
+            # bugs/FORMAL_type_name_as_a_value.md.
+            #
+            # Asked AFTER the module-symbol question, not before, and the
+            # ordering is not a compromise — it is what the measurement forced.
+            # Asking it first moved two stdlib files off the module message:
+            # `bench_set.mojo` (`Set`) and `list_strategy.mojo` (`List`), both
+            # `from std.collections import …`. Their message is not a symptom,
+            # it is MORE specific, and it carries a backtick-quoted module name
+            # that `tools/formal_sweep.py` reads to file the verdict as
+            # `not-answerable/unresolved-import` — so pre-empting it with a
+            # message that has no module name in it silently reclassifies those
+            # two files in the sweep's own accounting. So for a name that is
+            # BOTH, both facts are said.
+            if sym is not None and M.is_type_name(name):
+                # The construct first, then the module fact, indented so the
+                # two read as two sentences rather than one run-on — and with
+                # the module message's own `fn:` prefix suppressed, since this
+                # half already carries it.
+                raise CodegenError(
+                    M.type_as_value_fact(name, fn.name) + "  "
+                    + M.module_global_refusal(name, sym, ""))
             if sym is not None:
                 if id(node) in bracket_callees \
                         and getattr(sym, "site", None) == "imported":
@@ -6376,11 +6440,19 @@ def _apply_constant_sites(node, sites: dict):
 
     Split from `_rewrite_class_constants` so the sites can be computed once per
     function: they are a census of the whole body, and recomputing them at every
-    node would be quadratic in the size of the function."""
+    node would be quadratic in the size of the function.
 
-    if isinstance(node, list):
-        for i, x in enumerate(node):
-            node[i] = _apply_constant_sites(x, sites)
+    A TUPLE is descended into and REBUILT, for the reason
+    `_apply_module_constant_sites` gives at length: `IfStmt.elifs` is a list of
+    `(condition, body)` pairs, so without this the class-constant rewrite covered
+    `if p.B == 1:` and skipped `elif p.B == 1:` — the same one-position gap, in
+    the second of the two walks that share it."""
+
+    if isinstance(node, (list, tuple)):
+        items = [_apply_constant_sites(x, sites) for x in node]
+        if isinstance(node, tuple):
+            return tuple(items)
+        node[:] = items
         return node
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
         st = sites.get(f"{node.obj.name}.{node.member}")
@@ -6400,6 +6472,88 @@ def _apply_constant_sites(node, sites: dict):
     for name in getattr(node, "__dataclass_fields__", {}):
         setattr(node, name, _apply_constant_sites(getattr(node, name), sites))
     return node
+
+
+def _constant_read_spelling(node) -> str:
+    """The `S.NAME` access path `node` spells, or None.
+
+    The two spellings `_constant_read_sites` recognizes as a read of a CLASS's
+    own value, and nothing else — the same restriction, so this cannot name a
+    path that table does not have an answer for."""
+    if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
+        return f"{node.obj.name}.{node.member}"
+    return None
+
+
+def refuse_none_comparisons(functions: list, structs_by_name: dict) -> None:
+    """Refuse `==` / `!=` whose operand is a read of a `None`-valued constant.
+
+    Asked BEFORE either substitution, and that ordering is the whole reason this
+    function exists at all: `None` folds to the word 0 (`model.NONE_WORD`), which
+    is the representation and not an approximation, but the fold is lossy in
+    exactly one direction — after it, `p.b == 0` and `p.b is None` are the same
+    expression, and CPython says one is False and the other True. Answering
+    either from the folded word is a wrong answer rather than a refusal, and this
+    backend's rule is that a wrong answer is the one outcome it may not produce.
+
+    So the fold stands for every use that cannot observe the difference —
+    materializing the value, passing it, printing it, arithmeticking on it — and
+    the one construct that can is refused by name. A distinguishable null is not
+    offered as an alternative because the model is one untagged 64-bit word: there
+    is nowhere for a second bit of "this zero is a None" to live, which is the
+    same limit `model.pointer_value_model` records for pointers.
+
+    Both spellings of a read are covered, and each is covered by asking the
+    question the substitution would have answered:
+      * a CLASS-level constant (`S.NONE_FIELD`, or a local aliased from `S()`),
+        via the same `_constant_read_sites` census the rewrite uses;
+      * a MODULE-level `G = None`, via the published symbol table's
+        `none_valued` — which is the fact the folded `IntLiteral(0)` no longer
+        carries.
+    A function that BINDS the name shadows it, so a read of a local called `G`
+    is not this check's business, exactly as in `_substitute_module_constants`."""
+    none_names = {name for name, sym in M.module_symbols().items()
+                  if getattr(sym, "none_valued", False)}
+    none_consts = {(st.name, cname)
+                   for st in (structs_by_name or {}).values()
+                   for cname, default in M.struct_class_constants(st)
+                   if M.is_none_expr(default)}
+    if not none_names and not none_consts:
+        return
+    for fn in functions:
+        # The alias census is PER FUNCTION, because `p = Plain(1)` is a fact
+        # about one body: `p.b` is a read of the class's own value in the
+        # function that wrote that `p` and not in any other.
+        none_paths = {path for path, st in _constant_read_sites(
+            fn.body, structs_by_name).items()
+            if (st.name, path.partition(".")[2]) in none_consts}
+        if not none_names and not none_paths:
+            continue
+        bound = _names_bound_in(fn)
+        for node in M.iter_nodes(fn.body):
+            if not isinstance(node, F.BinaryOp) or node.op not in ("==", "!="):
+                continue
+            for operand in (node.left, node.right):
+                if isinstance(operand, F.IdentExpr) \
+                        and operand.name in none_names \
+                        and operand.name not in bound:
+                    spelling, kind = operand.name, "module-level name"
+                else:
+                    spelling = _constant_read_spelling(operand)
+                    kind = "class-level constant"
+                    if spelling is None or spelling not in none_paths:
+                        continue
+                raise CodegenError(
+                    f"{spelling} is {kind} holding `None`, and `{node.op}` cannot "
+                    f"be answered for it: `None` is this target's word 0 (which is "
+                    f"why the value itself is representable and is substituted), "
+                    f"and one untagged word cannot say whether that 0 arrived as "
+                    f"a `None` or as the integer 0 — where Python says `None == 0` "
+                    f"is False and `x is None` is not `x == 0`. Compare against a "
+                    f"value the model can tell apart (a field the function "
+                    f"assigns), or branch on the value being set some other way, "
+                    f"rather than on a comparison this path cannot answer")
+    return None
 
 
 def _prepare_functions(stmts: list, synthetic: bool = True,
@@ -6596,6 +6750,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # bound a name with no home.  The call rewriting below skips the receiver
     # for exactly those, which is the language's rule and not a special case.
     receiverless = _receiverless_methods(owners, structs_by_name)
+    # A comparison against a `None`-valued constant is refused HERE, before the
+    # two rewrites below materialize the value: after them the fact is gone,
+    # because `None` is folded to the word 0 and the fold cannot say that this
+    # zero was a `None`. See `refuse_none_comparisons` for why the fold stands
+    # and only the comparison is refused.
+    refuse_none_comparisons(functions, structs_by_name)
     for fn in functions:
         _rewrite_method_calls(fn.body, owners, wide, receiverless)
         # A method's `self` IS the field; a local initialised from a one-word

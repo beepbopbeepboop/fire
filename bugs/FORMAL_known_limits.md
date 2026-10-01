@@ -1147,3 +1147,40 @@ made the pre-emption worth landing; they are not what the build says now.
 that changed: 305 files were refused as an imported module-level name, 269 are
 after; 10 files are no longer refused by it at all; 612 of 664 verdicts are
 byte-identical.
+
+---
+
+## Container size: the one number that is an architectural limit, not a gap
+
+**Added 2026-09-30. True, measured on this tree, and TRUE OF BOTH BACKENDS —
+which is what makes it a limit and not a finding.**
+
+A container blob on this path is a run of 8-byte slots in the function's own
+frame, out of a budget the whole body shares, and a literal reserves its whole
+blob before any element is evaluated. So a container literal has a size at which
+it cannot fit, and that size is set by the frame, not by the backend's ability
+to lower it:
+
+| backend | frame budget for containers | largest word-element list literal | bytes needed at the boundary |
+|---|---|---|---|
+| arm64 | 131072 (`_SCRATCH`) | **16383** words | `8*(1+16383)` = 131064 |
+| x86-64 | 16384 (`_BLOB_BYTES`), less any receiver frames the function reserves | **2047** words | `8*(1+2047)` = 16360 |
+
+Measured by building `[1] * n` for n at and either side of each boundary, on
+both architectures, and running the image. Over the limit, both refuse with the
+same sentence from `model.frame_blob_refusal`, differing only in the two byte
+counts, which is the whole point: the ceilings differ because the frames do,
+and saying so is what a reader comparing the architectures needs.
+
+**What this replaced.** A bare `AssertionError` out of
+`encode_str_xt_xn_imm` on arm64 at 4095 words — the 12-bit-scaled STR-immediate
+offset field's reach, not a frame limit at all — so arm64 used to crash at a
+quarter of the size it can actually hold, and to crash rather than refuse. A
+blob element is now stored and loaded through a register offset past that
+reach (`_emit_blob_store` / `_emit_blob_load`).
+
+**One measurement that is NOT a limit and looks like one:** `len(range(0, n))` is
+refused, on both backends, for every `n`, with "`len(a)` is `len()` of a value
+classified as `'int'`". The `range()` result is not classified as a list for
+`len`, which is a gap in the result's classification and not a size question.
+Index a `range()` result rather than measuring it, until that is fixed.

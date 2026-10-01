@@ -1049,12 +1049,91 @@ def _split_on_separators(s: str) -> list[str]:
     parts.append("".join(buf))
     return parts
 
-def py_tokenize(src: str) -> list[Token]:
+def _scan_string_end(src: str, i: int, quote: str, triple: bool) -> int:
+    r"""Index just PAST the closing delimiter of the string literal that OPENS at
+    `i`, or -1 when that literal is unterminated.
+
+    This is the one place in the front end that answers "where does this string
+    literal end", shared by `py_tokenize`'s triple-quote collapse and its
+    ordinary-quote skip (CLAUDE.md: consolidate duplicates — the two used to be
+    separate inline loops that could disagree, and the disagreement is silent).
+
+    The rule is CPython's, and it is worth stating exactly because getting it
+    wrong is the bug this function exists to make impossible
+    (bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md).
+    (That doc's examples spell quote runs out longhand from here on: a literal
+    triple quote inside this docstring would close it.)
+
+        A backslash consumes the NEXT CHARACTER, whatever it is.
+
+    That is what makes a backslash-quote not close a non-raw literal, in a
+    triple-quoted one as much as in a single-quoted one. Written with D for a
+    double quote, the source `DDDa\DD"bDDD` is a triple-quoted literal whose
+    content is `a\"bDD` — emphatically NOT "a literal that ends one quote
+    early". It is also what makes a backslash immediately before the closing run
+    UNTERMINATED rather than closed. CPython says so too — "unterminated
+    triple-quoted string literal" for `DDD\DDD`, "unterminated string literal"
+    for `"abc\"` — and refusing is what this path does now.
+
+    The alternative rule proposed in that bug's original report — "an escape
+    consumes the next byte only when it is a backslash or the quote character" —
+    is the same rule for every input that can END a literal, because only a
+    backslash or a quote can be both "the byte after a backslash" and "a
+    delimiter". It therefore changes nothing about where literals end, and it
+    cannot make the reported case parse, because CPython does not parse it
+    either. (What it does change is the VALUE, and this path's value is already
+    byte-exact: no escape is processed at all, which is a separate, documented
+    divergence from CPython and not this function's business.)
+
+    A single-quoted literal may not cross a bare newline (CPython: "EOL while
+    scanning string literal"); a backslash-continued one may, and a
+    triple-quoted one obviously may. Unterminated is returned as -1, never as
+    "the rest of the file": a literal that ran off the end used to swallow
+    every remaining line into its own value, which is a silent miscompile, and
+    the alternative — pretending the delimiters were not there — is worse
+    still, because it turns the literal's text into ordinary code
+    (`x = "abc` used to parse as `x = abc`, and `x = it's` as `x = it`
+    followed by a bare `s`).
+    """
+    n = len(src)
+    delim = quote * 3 if triple else quote
+    dlen = len(delim)
+    j = i + dlen
+    while j < n:
+        c = src[j]
+        if c == '\\' and j + 1 < n:
+            j += 2
+            continue
+        if src.startswith(delim, j):
+            return j + dlen
+        if c == '\n' and not triple:
+            return -1
+        j += 1
+    return -1
+
+def _src_loc(src: str, pos: int, filename: str = "") -> str:
+    """gcc-style `file:line:col: ` prefix for a diagnostic about `src[pos]`.
+
+    Same shape as `Parser._loc` (which can only name a token, and the string
+    scan runs before any token exists), so a lexer refusal reads exactly like
+    the parser's own. `filename` is empty when the caller has none.
+    """
+    line = src.count('\n', 0, pos) + 1
+    nl = src.rfind('\n', 0, pos)
+    col = pos - nl
+    if filename:
+        return f"{filename}:{line}:{col}: "
+    return f"{line}:{col}: "
+
+def py_tokenize(src: str, filename: str = "") -> list[Token]:
     """Tokenize with layout rules derived from the .md spec:
         - Indentation (4 spaces) → INDENT/DEDENT
         - ';' → statement separator
         - '#' → end-of-line comment
-        - Multi-line statements use indentation (no backslash continuation)"""
+        - Multi-line statements use indentation (no backslash continuation)
+
+    `filename` is used only to prefix an "unterminated string literal"
+    diagnostic; omit it and the message carries `line:col:` alone."""
     import re
     string_cache = {}
     string_idx = [0]
@@ -1106,6 +1185,35 @@ def py_tokenize(src: str) -> list[Token]:
                 j = src.find('\n', i)
                 i = n if j == -1 else j
                 continue
+            if c == '`':
+                # A backtick string is a Mojo extension with no CPython
+                # counterpart, but it is a STRING, and the two quote checks
+                # below must not see a delimiter that is inside one. Two real
+                # silent misparses came from its not being skipped as a whole
+                # unit, and the second is the reason the unterminated-string
+                # refusal below is safe to add at all:
+                #
+                #   x = `it's fine`   the `'` opened a phantom string, so the
+                #                       apostrophe in an English word was
+                #                       scanned as a delimiter — the new
+                #                       "unterminated string literal" refusal
+                #                       would have named a line with no
+                #                       unterminated literal on it.
+                #   x = `a"""b`       the `"""` was taken as a triple-quote
+                #                       OPENER, so the backtick string was
+                #                       split in two and the second half
+                #                       swallowed the rest of the file.
+                #
+                # No backslash escape: a backtick string ends at the next
+                # backtick, which is what `_TOKEN_RE`'s `` `[^`]*` `` arm and
+                # `_strip_inline_comment`'s `in_str != '`'` special case both
+                # already assume. `find` is the whole rule.
+                j = src.find('`', i + 1)
+                if j < 0:
+                    loc = _src_loc(src, i, filename)
+                    raise SyntaxError(f"{loc}unterminated backtick string literal")
+                i = j + 1
+                continue
             if c in ('"', "'"):
                 # Recognize an optional string prefix (f/r/b/u/t, up to two
                 # letters) immediately before this quote, but only if those
@@ -1132,10 +1240,11 @@ def py_tokenize(src: str) -> list[Token]:
                 start = _string_prefix_start(src, i)
                 quote3 = c * 3
                 if src[i:i + 3] == quote3:
-                    j = i + 3
-                    while j < n and src[j:j + 3] != quote3:
-                        j += 2 if src[j] == '\\' and j + 1 < n else 1
-                    end = j + 3 if j < n else n
+                    end = _scan_string_end(src, i, c, True)
+                    if end < 0:
+                        loc = _src_loc(src, i, filename)
+                        raise SyntaxError(
+                            f"{loc}unterminated triple-quoted string literal")
                     seg = src[last:start]
                     if pending_pad and '\n' in seg:
                         nl_idx = seg.index('\n')
@@ -1170,12 +1279,11 @@ def py_tokenize(src: str) -> list[Token]:
                     # opaque unit so its contents can never be misread as a
                     # triple-quote delimiter. Left in the output untouched —
                     # only real triple-quoted spans get placeholder-ed.
-                    j = i + 1
-                    while j < n and src[j] != c:
-                        if src[j] == '\\' and j + 1 < n: j += 2
-                        elif src[j] == '\n': break
-                        else: j += 1
-                    i = j + 1 if j < n and src[j] == c else j
+                    end = _scan_string_end(src, i, c, False)
+                    if end < 0:
+                        loc = _src_loc(src, i, filename)
+                        raise SyntaxError(f"{loc}unterminated string literal")
+                    i = end
                     continue
             i += 1
         tail = src[last:i]

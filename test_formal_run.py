@@ -6970,18 +6970,339 @@ WAVE7_G2_CASES = [
     # default is a different program (the slot holds 0) and is the refusal
     # above, so this pair is what stops "every declared field is answered"
     # from being a way of making that one print 0.
-    ("int_literal_default_field_prints_its_value",
+     ("int_literal_default_field_prints_its_value",
+      "struct R:\n"
+      "    var n: Int = 7\n"
+      "    var m: Int\n"
+      "    def show(self) -> Int:\n"
+      "        printf(\"%d\\n\", self.n)\n"
+      "        return 0\n"
+      "def main(k: Int) -> Int:\n"
+      "    var r = R()\n"
+      "    r.show()\n"
+      "    return 0\n",
+      0, "7"),
+    # ── `None` as a value: the word 0, and the one comparison it cannot answer ──
+    #
+    # `x: T = None` is the default for an optional field and is the single most
+    # common class-level default in this repository's own dataclasses
+    # (`type_system.py`'s `Type` has ten of them on one class). It was REFUSED
+    # as "not a literal", because `None` parses to a bare `IdentExpr` on this
+    # front end and neither `fold_literal_expr` nor `literal_default_word` had
+    # an arm for it — a message that sends a reader looking for a call, where
+    # there is no call. It is a value this target represents exactly: the word
+    # 0, which is what an unwritten frame slot already is.
+    #
+    # There is deliberately no CPython comparison for this case. `printf("%d",
+    # None)` is a TypeError there, so the oracle does not exist; what the image
+    # must produce is the REPRESENTATION, and the two rows below pin it from
+    # both sides — a class-level constant, materialized at the read, and a
+    # module-level one, folded at the read. Both were refusals before.
+    ("none_class_default_is_the_word_zero",
      "struct R:\n"
-     "    var n: Int = 7\n"
-     "    var m: Int\n"
+     "    var a: Int = 1\n"
+     "    var b: Int = None\n"
      "    def show(self) -> Int:\n"
-     "        printf(\"%d\\n\", self.n)\n"
+     "        printf(\"a=%d b=%d\\n\", self.a, self.b)\n"
      "        return 0\n"
      "def main(k: Int) -> Int:\n"
      "    var r = R()\n"
      "    r.show()\n"
      "    return 0\n",
-     0, "7"),
+     0, "a=1 b=0"),
+    ("none_module_constant_is_the_word_zero",
+     "G = None\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    printf(\"g=%d\", G)\n"
+     "    return 0\n",
+     0, "g=0"),
+    # …and arithmetic on it is arithmetic on the word, which is the other half
+    # of "representable": the fold is not confined to being printed.
+    ("none_module_constant_arithmetics_as_zero",
+     "G = None\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return G + 5\n",
+     5, None),
+    # THE LIMIT, and the reason this is a refusal and not a wrong answer.
+    # `None` is the word 0 and the model is ONE UNTAGGED WORD, so after the
+    # fold `p.b == 0` and `p.b is None` are the same expression — and CPython
+    # says one is False and the other True. Answering either from the folded
+    # word is the outcome this backend exists to prevent, so the comparison is
+    # refused BY NAME and the message says which construct and why. Checked on
+    # both backends by the `refuse:` machinery, because a wrong answer here is
+    # the shape where the two architectures would each be confidently wrong.
+    #
+    # Before the fold landed these three built and answered: the class-level
+    # one returned 7 for a `None`, where CPython returns 0.
+    ("refuse_none_compared_with_a_class_constant",
+     "struct R:\n"
+     "    var b: Int = None\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    if r.b == 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is class-level constant holding `None`", None),
+    ("refuse_none_compared_as_the_class_itself",
+     "struct R:\n"
+     "    var b: Int = None\n"
+     "def main(k: Int) -> Int:\n"
+     "    if R.b != 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is class-level constant holding `None`", None),
+    ("refuse_none_compared_as_a_module_constant",
+     "G = None\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    if G == 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is module-level name holding `None`", None),
+    # GUARD (passes before and after, and it is here because it is the case
+    # that would catch an over-correction in the other direction): an INTEGER
+    # class-level constant compared with a literal is ordinary, representable
+    # code and must keep building. If the refusal above were written as "any
+    # comparison against a constant", this row is what it would break.
+    ("int_class_constant_comparison_still_builds",
+     "struct R:\n"
+     "    var b: Int = 3\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    if r.b == 3:\n"
+     "        return 7\n"
+     "    return 0\n",
+     7, None),
+    # ── a module-level constant read in an `elif` ARM ──
+    #
+    # `elif x == K:` was REFUSED with "'K' has no home: the register allocator
+    # collected no home for it" on BOTH architectures, while `if x == K:` in the
+    # same function built. The message blamed the emitter's phi/web slot, and
+    # the emitter was innocent: `IfStmt.elifs` is a list of `(condition, body)`
+    # pairs, and the module-constant substitution walked lists but not tuples, so
+    # an `elif` condition was the one expression position in the tree the walk
+    # never reached. The unsubstituted `IdentExpr` then reached the emitter as a
+    # name with no home.
+    #
+    # Every answer must be 2, and each is 2 for a different reason — the
+    # `if` arm falling through, the `elif` arm matching, and neither matching —
+    # so a wrong answer cannot pass by landing on a neighbouring arm.
+    ("elif_arm_reads_a_module_constant",
+     "K = 7\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == K:\n"
+     "        return 2\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(7)\n",
+     2, None),
+    # …and the same shape when only SOME of the arms name the constant, which is
+    # what makes it a per-position bug rather than "elif is unsupported": a walk
+    # that skipped elif conditions would substitute arm 1 and leave arm 2, so
+    # the first call is right and the second is not. 4 arms here (3 elifs) also
+    # covers the label chain at its longest.
+    ("elif_chain_with_one_named_arm",
+     "K = 7\n"
+     "J = 9\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == K:\n"
+     "        return 2\n"
+     "    elif x == J:\n"
+     "        return 3\n"
+     "    elif x == 100:\n"
+     "        return 4\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    # 2 and 3 name a constant; 1 and 4 do not. 1234 needs all four arms.\n"
+     "    return f(0) * 1000 / 10 + f(7) * 100 / 10 + f(9) * 10 / 10 + f(100) / 100\n",
+     123, None),
+    # The class-constant rewrite is the SECOND walk with the same shape, and it
+    # had the same one-position gap, so both spellings are here: through the
+    # class's own name, and through a local aliased from its constructor (which
+    # is how ordinary code reads one).
+    ("elif_arm_reads_a_class_constant",
+     "struct C:\n"
+     "    var B: Int = 5\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == C.B:\n"
+     "        return 2\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(5)\n",
+     2, None),
+    ("elif_arm_reads_an_aliased_class_constant",
+     "struct C:\n"
+     "    var B: Int = 5\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    var c = C()\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == c.B:\n"
+     "        return 2\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(5)\n",
+     2, None),
+    # GUARD (passed before the change, and it is the case that says the fix is a
+    # POSITION fix and not "elif got more permissive"): an `elif` chain over
+    # plain literals was already correct, and 1234 is every arm. A fix that
+    # rewrote the arm chain would break this row.
+    ("elif_chain_of_literals_is_unchanged",
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == 7:\n"
+     "        return 2\n"
+     "    elif x == 9:\n"
+     "        return 3\n"
+     "    elif x == 100:\n"
+     "        return 4\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(0) * 1000 / 10 + f(7) * 100 / 10 + f(9) * 10 / 10 + f(100) / 100\n",
+     123, None),
+    # ── a list literal longer than one instruction's immediate offset ──
+    #
+    # A blob element `i` is at byte `8*(i+1)` from the blob's base, and
+    # `encode_str_xt_xn_imm`'s offset field is 12 bits SCALED by 8, so element
+    # 4095 is the first one the STR-immediate form cannot name. A list literal
+    # that long used to die inside that function's own
+    # `assert 0 <= imm12 < 0x1000` — a bare AssertionError out of an encoder
+    # three frames below anything that could name a limit, on a program whose
+    # only problem is that it is large. The offset now goes in a REGISTER past
+    # the immediate's reach (`_emit_blob_store`), and the limit that remains is
+    # the frame's, which is stated in a message.
+    #
+    # 5000 is past the old assert and inside arm64's frame, so it is the row
+    # that would have crashed. The `a[-1]` / `a[0]` pair is deliberate: a fix
+    # that moved the far stores but not the far LOADS would build this, run it,
+    # and read the wrong word back — the same function both ways, so the two
+    # halves of the fix cannot be separated. Both expected values are taken
+    # mod 256, which is what a POSIX exit status can carry.
+    ("list_literal_past_the_immediate_offset",
+     "def main(k: Int) -> Int:\n"
+     "    var a = [" + ", ".join(str(i % 97) for i in range(5000)) + "]\n"
+     "    return (a[0] + a[4999]) % 256\n",
+     (0 + 4999 % 97) % 256, None),
+    # GUARD for the same fix on the READ side, and the only way to tell "the
+    # far stores landed" from "the far stores landed AND the far loads read
+    # them": every element summed, through a subscript, on a 16000-element
+    # blob. 16000 is 87% of arm64's frame budget, so it also pins that the
+    # frame reservation and the element loop agree about the size.
+    ("every_element_of_a_16000_element_list_reads_back",
+     "def main(k: Int) -> Int:\n"
+     "    var a = [" + ", ".join(str(i % 97) for i in range(16000)) + "]\n"
+     "    var s: Int = 0\n"
+     "    var i: Int = 0\n"
+     "    while i < 16000:\n"
+     "        s = s + a[i]\n"
+     "        i = i + 1\n"
+     "    return s % 251\n",
+     sum(i % 97 for i in range(16000)) % 251, None),
+    # The `range()` literal goes through the SAME element loop (the static
+    # `range(0, n)` path materialises `n` words and stores them the same way),
+    # so it had the same assert at the same element. This is the realistic way
+    # to reach the limit — nobody writes a 4096-element list literal by hand —
+    # and `a[4095]` is the far read.
+    ("range_literal_past_the_immediate_offset",
+     "def main(k: Int) -> Int:\n"
+     "    var a = range(0, 6000)\n"
+     "    return (a[0] + a[5999]) % 256\n",
+     5999 % 256, None),
+    # And the limit itself, which is the other half of the bug: "a stated limit
+    # reported as a crash". 20000 words is 160008 bytes against a 131072-byte
+    # frame, so this must be a `CodegenError` naming the budget — and BOTH
+    # backends must produce the same shape, since the two have different
+    # budgets (arm64 128 KB of scratch, x86-64 a 16 KB blob region) and a reader
+    # comparing the two needs to see that the difference is the budget and not
+    # the message. `refuse:` checks both, and the needle is the sentence the two
+    # now share.
+    ("refuse_list_literal_over_the_frame_budget",
+     "def main(k: Int) -> Int:\n"
+     "    var a = [" + ", ".join(["1"] * 20000) + "]\n"
+     "    return len(a)\n",
+     "refuse:does not fit in the frame: it needs", None),
+    # ── a TYPE read where a value is required ──
+    #
+    # `t == NoneType` with `t` a `comptime` type parameter was refused as
+    # "'NoneType' has no home: the register allocator collected no home for it …
+    # This path places a name in a register or a spill slot allocated for THIS
+    # function, a receiver field's frame, or a module-level constant the build
+    # folded". That sentence is false about the file: a type is in none of those
+    # four places because a type is not a value, and the reader was sent to the
+    # register allocator for a fact about the language. The refusal itself is
+    # right and stays — every one of these files is refused either way, so this
+    # is a message-accuracy change and not a coverage one (measured: 32 of 664
+    # stdlib files move off the false diagnosis, and the sweep's own class
+    # counts are byte-identical before and after).
+    # SUPERSEDED 2026-10-01, and converted rather than deleted.  These two
+    # asserted the refusal `model.type_as_value_refusal` gave a type name read
+    # as a value, which was the right answer while a type was not a value on
+    # this path.  `formal-type-as-value` then made it one: a type is a word and
+    # the word is a TAG (`model.type_tag`), so `t == NoneType` is an integer
+    # comparison and a bare type read is that same tag.  Both programs are
+    # therefore ANSWERABLE now, and a case left asserting the refusal would be a
+    # test asserting the opposite of the truth — so each keeps its program and
+    # its name and now pins the answer, against CPython running the same text.
+    ("type_compared_with_a_comptime_parameter_compares",
+     "def pick[t: DType](v: Int32) -> Int32:\n"
+     "    if t == NoneType:\n"
+     "        return 0\n"
+     "    return v\n"
+     "\n"
+     "def main(n: Int32) -> Int32:\n"
+     "    return pick[Int32](7)\n",
+     7, None),
+    # The other shape, with no comparison — the one a `from typing import List`
+    # file reaches.  Compared against ITSELF rather than against a typed
+    # constant, because that is the question a bare read can answer without a
+    # hand-written constant: the word the bare read produced is the word the
+    # comparison reads.
+    ("a_bare_type_name_read_is_the_same_word_a_comparison_reads",
+     "def main(n: Int) -> Int:\n"
+     "    x = NoneType\n"
+     "    if x == NoneType:\n"
+     "        return 1\n"
+     "    return 0\n",
+     1, None),
+    # GUARD (passes before and after, and it is the case that would catch the
+    # over-correction): a type used as a CALLEE is a construction, which this
+    # path lowers — `Int32(5)` is ordinary representable code. The new rule is
+    # asked about a bare READ, and a callee is not a read (the same exclusion
+    # `check_module_symbols` already makes for MLIR roots), so this must keep
+    # building. A rule written as "any appearance of a type name" breaks it.
+    ("type_as_a_callee_is_still_a_construction",
+     "def main(n: Int32) -> Int32:\n"
+     "    var x = Int32(5)\n"
+     "    return x + 1\n",
+     6, None),
+    # GUARD (passes before and after): a genuinely unplaced VALUE keeps the
+    # storage enumeration, because for a value that enumeration is the right
+    # story. 41 of the 664 stdlib files are in exactly this position and they
+    # are correct as they are; a rule that swallowed them into the type message
+    # would be the over-correction in the other direction.
+    ("refuse_an_unplaced_value_keeps_the_storage_story",
+     "def main(n: Int) -> Int:\n"
+     "    return rebind\n",
+     "refuse:has no home: the module-level symbol table is empty", None),
+
     # ── (4) the C-library hand-off sets, audited by PROTOTYPE ──
     # `open(const char *, int, ...)` takes a path and a flag word; it does not
     # read the struct's storage, and it never mentions a struct.  This set used
