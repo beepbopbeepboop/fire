@@ -1,6 +1,6 @@
 # FORMAL_arm64_known_proof_gaps: the arm64 examples whose proof is a documented gap
 
-The arm64 formal suite is **39 pass / 6 known-gap / 0 fail** (measured
+The arm64 formal suite is **41 pass / 4 known-gap / 0 fail** (measured
 2026-10-01, `python3 test_formal.py`). The six gaps are listed in
 `EXPECTED_FAILURES` in `test_formal.py`, and that list is the authority on
 whether they are still gaps — a stale entry is reported by the harness's own
@@ -12,28 +12,50 @@ stated reason" — **not** "passing". Nothing is ever stubbed with `sorry` to go
 green, because a `sorry` makes Lean accept the theorem, which would assert
 exactly the semantics these examples exist to check.
 
-## `either` and `both` — short-circuit conditions need a per-path statement
+## `either` and `both` — FIXED 2026-10-01, the per-path statement it needed
 
-`either` is `if n > 10 or n == 0:`; `both` is `if n > 0 and n < 10:`. Same
-shape, and the same missing piece.
+`either` is `if n > 10 or n == 0:`; `both` is `if n > 0 and n < 10:`. Both
+build and typecheck now, and both entries are out of
+`test_formal.py`'s `EXPECTED_FAILURES`. The record of what was wrong is worth
+keeping, because the diagnosis in the original version of this section was
+about the wrong layer.
 
-A short-circuit `and`/`or` lowers to a `CBZ`/`CBNZ` **of its own**, which closes
-a basic block exactly the way the `if`'s own branch does. The merge block
-therefore has **two entry paths carrying different values in the condition
-register** — the left operand on the short-circuit path, the right operand's
-`CSET` on the fallthrough. A single `arm64_reg 0 <state> = 0` statement cannot
-describe that; the entry condition has to be stated **per path**, and the
-generator's per-block `def` chain cannot yet express that.
+The shape: `_emit_truthy_word` recurses into both operands and branches
+between them, so a short-circuit condition lowers to TWO conditional branches
+— the chain's own (CBNZ for `or`, CBZ for `and`), whose taken edge skips the
+right operand, and the `if`'s own, in the merge block that both paths reach.
+That merge block's register holds the LEFT operand's cset on the short-circuit
+path and the RIGHT one's on the fallthrough.
 
-The CFG metadata that identifies the real `if` branch already exists
-(`info["cond_branches"]` in `formal/arm64_codegen.py`, consumed by
-`_gen_universal_e2e_cfg`). **What is missing is only the path-split statement.**
+Three defects, each of which alone was enough to fail the build:
 
-**Done when:** the entry-condition emission can state one proposition per entry
-path of a merge block. The two short-circuit forms deliberately keep their
-`CSET` + `CBZ` lowering — a short circuit genuinely needs a value, because there
-are no flags to read — so this gap is orthogonal to the `B.cond` work and is not
-closed by it.
+  1. The source condition was paired with the i-th CONDITIONAL block. A
+     short-circuit condition puts the chain's own branch first, so
+     `if a or b:` was read as `if a:` — `bv_decide` returned the
+     counterexample, which is `bv_decide` doing its job.
+  2. The `*_entry_cond` seed claimed `arm64_reg r <merge block> = 0 ↔ ¬(…)`
+     for a block containing no cset at all, so no register carried that
+     condition. The theorem is referenced by nothing; its entire effect was
+     the counterexample.
+  3. A CBNZ's step-RESULT lemma was proved by `by_cases … ≠ 0` while the
+     model's `if` is normalised to `= 0` as soon as `arm64_reg` unfolds, so
+     the branch's own `*_sr_N` lemma did not typecheck. That one is not
+     specific to short circuits: it affects every program whose image has a
+     CBNZ.
+
+The fix is `formal/arm64_proof_gen.py`: the pairing is a filter on
+`info["cond_branches"]` (the terminators the codegen recorded as `if`/`while`
+tests), the chain's own branch is found STRUCTURALLY (the conditional block
+whose TAKEN target is the merge block's start), it states a fact about the left
+operand whose sense follows the operator, and the merge block states the
+operand ITS register holds — found by looking back along the path for the block
+whose cset wrote that register — and combines it with the fact the chain's own
+branch handed down.
+
+**Still open and separate:** a chain NESTED in a chain (`(a or b) or c`), where
+the outer merge has four entry paths each with a different cset having written
+the register. See `FORMAL_nested_short_circuit_chain_in_a_condition.md`, and
+`test_formal_short_circuit_cond.py`'s `KNOWN_GAP` entry for it.
 
 ## `fib` — a tree-recursion `FrameOk` window read
 
@@ -91,10 +113,9 @@ distinct problems, and the counts should not be conflated:
 
 | | count | owner |
 |---|---|---|
-| known gaps (fail, documented reason) | 6 | this document (`either`/`both` = 1 shape, `fib` = 1, `countdown`/`wge` = 1, `subscript_var` = 1) |
+| known gaps (fail, documented reason) | 4 | this document (`fib` = 1, `countdown`/`wge` = 1, `subscript_var` = 1); `either`/`both` were 2 more and are fixed |
 | sorries in passing proofs | 2, both in `sum_range` | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` ("Still open 3", item 2: the range loop's `loop_cond_flag` states an UNSIGNED order) |
 | passing proofs carrying no `sorry` at all | 38 of 39 | — |
 
-The `either`/`both` and `fib` entries above are the original three gaps of this
-document; `countdown`, `wge` and `subscript_var` were added later and are
+The `fib` entry above is one of the original three gaps of this document; `countdown`, `wge` and `subscript_var` were added later and are
 recorded in `test_formal.py`'s inline comments with the same contract.
