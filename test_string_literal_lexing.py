@@ -324,7 +324,7 @@ CONTINUATIONS = [
 def our_literal_value(text):
     """The value of the name `text` assigns, as this front end reads it."""
     src = "def main():\n    " + text + "\n    return a\n"
-    stmts = F.Parser(F.py_tokenize(src, "<t>")).with_filename("<t>").parse_module()
+    stmts = F.Parser(F.py_tokenize_named(src, "<t>")).with_filename("<t>").parse_module()
     return _value_of(stmts[0].body[0].value)
 
 
@@ -386,7 +386,7 @@ def check_code_continuation_is_unchanged(verbose):
            "        2\n"
            "    return a\n")
     try:
-        stmts = F.Parser(F.py_tokenize(src, "<t>")).with_filename("<t>").parse_module()
+        stmts = F.Parser(F.py_tokenize_named(src, "<t>")).with_filename("<t>").parse_module()
     except SyntaxError as e:
         return False, f"a backslash continuation in plain code was refused: {e}"
     body = stmts[0].body
@@ -431,10 +431,10 @@ def our_verdict(literal):
     """
     src = "s = " + literal + "\n"
     try:
-        tokens = F.Parser(F.py_tokenize(src, "<t>")).with_filename("<t>").parse_module()
+        tokens = F.Parser(F.py_tokenize_named(src, "<t>")).with_filename("<t>").parse_module()
     except SyntaxError as e:
         return ("refuse", str(e))
-    strings = [(t.kind, t.value) for t in F.py_tokenize(src, "<t>")
+    strings = [(t.kind, t.value) for t in F.py_tokenize_named(src, "<t>")
                if t.kind == "STRING"]
     return ("ok", strings)
 
@@ -460,7 +460,7 @@ def check_literal(name, literal, expected_ours, verbose):
                        f"token(s) {strings!r}; expected exactly one spanning the "
                        f"whole literal, so the boundary matches CPython's")
     # And the value, which is this path's own byte-exact contract.
-    value = F.Parser(F.py_tokenize("s = " + literal + "\n", "<t>")
+    value = F.Parser(F.py_tokenize_named("s = " + literal + "\n", "<t>")
                      ).with_filename("<t>").parse_module()[0].value.value
     if expected_ours is not None and value != expected_ours:
         return False, (f"{name}: the literal {literal!r} parsed to {value!r}, "
@@ -475,7 +475,7 @@ def check_program(name, source, shape, verbose):
     """`shape` is (where, count) or None, meaning "this must be refused"."""
     if shape is None:
         try:
-            F.Parser(F.py_tokenize(source, "<t>")).with_filename("<t>").parse_module()
+            F.Parser(F.py_tokenize_named(source, "<t>")).with_filename("<t>").parse_module()
         except SyntaxError as e:
             if verbose:
                 print(f"  refused     {name:36s} {e}")
@@ -486,7 +486,7 @@ def check_program(name, source, shape, verbose):
 
     where, count = shape
     try:
-        stmts = F.Parser(F.py_tokenize(source, "<t>")).with_filename("<t>").parse_module()
+        stmts = F.Parser(F.py_tokenize_named(source, "<t>")).with_filename("<t>").parse_module()
     except SyntaxError as e:
         return False, f"{name}: refused a program CPython accepts: {e}"
     body = stmts
@@ -512,7 +512,7 @@ def check_refusal_message(verbose):
            '    var a = ' + Q3 + "\\" + Q3 + '\n'
            '    print(a)\n')
     try:
-        F.py_tokenize(src, "some/file.mojo")
+        F.py_tokenize_named(src, "some/file.mojo")
     except SyntaxError as e:
         text = str(e)
         for needle in ("some/file.mojo", ":2:", "unterminated triple-quoted "
