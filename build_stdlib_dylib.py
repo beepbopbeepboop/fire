@@ -20,7 +20,6 @@ import platform
 import argparse
 import tempfile
 import subprocess
-import contextlib
 import fcntl
 from concurrent.futures import ProcessPoolExecutor
 
@@ -636,8 +635,7 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
     return path, name, ofile, exports, None, hit
 
 
-@contextlib.contextmanager
-def _output_lock(out: str):
+class _OutputLock:
     """Exclusive, cross-process, released on exit: an `flock` on a side file
     next to `out`, held across `build`'s whole publish. A SIDE file, because
     `build` replaces the `.dylib` and a lock on the library itself would admit
@@ -687,13 +685,73 @@ def _output_lock(out: str):
     this file is in `mojoc`'s own compile closure — `cas.selfhost_inputs()`
     lists it — and `_is_selfhost_source_dir`'s docstring in
     `mojo/backend_gimple/module_gen.py` records a measured self-host failure
-    for exactly the cross-module function reference sharing one would mean)."""
-    fd = os.open(out + '.lock', os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    for exactly the cross-module function reference sharing one would mean).
+
+    **Why a CLASS and not a `@contextlib.contextmanager` generator.** This was
+    one, and it broke the self-host build at LINK time, so the shape is load-
+    bearing rather than stylistic. Measured, in order:
+
+      * `mojo/middle/coro.py::_eligible` REFUSES a decorated generator
+        outright — this exact function returned `(False, 'decorated')` — so it
+        never reached the A3 stack-switch lowering (the one that emits a
+        generator's `_start`/`_resume`/`_value`/`_destroy` bodies straight
+        into the module's own `.c`, which is why every OTHER generator in the
+        self-host closure is fine).
+      * It therefore fell through to the C++20 coroutine emitter, whose
+        definitions live in a SEPARATE companion translation unit,
+        `GimpleGen.generated_cpp`.
+      * `compile_module_to_c` — this file's own per-module compile, the one
+        every dylib build and therefore every self-host build goes through —
+        returns the `.c` and DISCARDS `generated_cpp`. So the object referenced
+        `_mojogen_build_stdlib_dylib__output_lock_start/_resume` with nothing
+        anywhere defining them, and `mojoc`, `selfhost` and
+        `bootstrap-stage2-cc` all died with
+
+            Undefined symbols for architecture arm64:
+              "__mojogen_build_stdlib_dylib__output_lock_start",
+              "__mojogen_build_stdlib_dylib__output_lock_resume"
+
+        `test_selfhost.py`'s `closure_coroutines_are_lowerable` is the guard
+        that keeps it out; the root cause is filed as
+        `bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md`.
+
+    A plain function pair (`_acquire`/`_release` around an explicit
+    `try`/`finally`) is the other generator-free shape and lowers correctly
+    too (measured: the release is emitted on the normal, the caught and the
+    re-raise paths). The class is preferred because it keeps acquire and
+    release in ONE place, so no future edit can release an fd it never took.
+
+    The `as` binding in `build`'s `with` is load-bearing too, and not for
+    Python's sake: in the compiled path a `with` item with NO `as` target
+    contributes nothing to the teardown list, so `__exit__` is never called at
+    all (measured; filed as
+    `bugs/CODEGEN_with_no_as_target_drops_exit.md`)."""
+
+    fd: int
+
+    def __init__(self, out: str) -> None:
+        # `flock` inside the guarded region, exactly as the generator's
+        # `try: flock; yield; finally: close` had it: a failing `flock` must
+        # still close the descriptor it opened. `with`-block teardown cannot
+        # do that job — `__exit__` is not reached when `__enter__` raises, and
+        # here the raise happens before `__enter__` even runs.
+        _fd = os.open(out + '.lock', os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(_fd, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(_fd)
+            raise
+        self.fd = _fd
+
+    def __enter__(self) -> int:
+        return self.fd
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        # Always False, never a conditional True: the compiled path calls
+        # `__exit__` and then re-raises unconditionally, so a "swallow"
+        # return would hold on `python3 fire.py build` and not in `mojoc`.
+        os.close(self.fd)
+        return False
 
 
 def _publish_bytes(src_path: str, out: str) -> None:
@@ -982,11 +1040,15 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     # still runs in parallel across callers, so the serialised section is only
     # the table compile and the link.
     #
-    # Correctness does NOT rest on that lock; `_output_lock`'s own docstring
+    # Correctness does NOT rest on that lock; `_OutputLock`'s own docstring
     # gives the measurement (a compiled `fcntl.flock` is the extern preamble's
     # weak stub), and the guarantee is the staged link plus `os.replace` below,
     # which hold whether or not the lock did anything.
-    with _output_lock(out):
+    #
+    # `as _lock_fd` is not decoration: it is what makes the compiled path emit
+    # the `__exit__` call at all (see `_OutputLock`'s own note, and
+    # bugs/CODEGEN_with_no_as_target_drops_exit.md).
+    with _OutputLock(out) as _lock_fd:
         if use_cache:
             # Re-checked under the lock: a caller that queued behind another
             # one's fresh link finds the artifact published and returns,
@@ -1016,7 +1078,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         # a fixed path every other job links against: a dylib linked straight
         # to `out` is a partially-written Mach-O at every path a concurrent
         # reader can reach it, which is the silent half of the race
-        # `_output_lock` names. `_dylink` is given the final install name
+        # `_OutputLock` names. `_dylink` is given the final install name
         # explicitly for the reason `runtime_dylib`'s own staged link gives
         # it — the install name is baked into the load command of everything
         # that links this library, so deriving it from a staging path and
