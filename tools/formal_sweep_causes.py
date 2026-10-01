@@ -191,6 +191,21 @@ CAUSES = (
     # ranks the causes rather than the one that summarises them.
     ("multi-index subscript",
      (("is a subscript whose index is a tuple",),)),
+    # ABOVE the two rows below it, and for a reason that is a fact about the
+    # messages rather than about this construct: they are all one family — a
+    # representation the target does not have — and the broad ones end with a
+    # sentence the specific ones also contain. 20 files on BOTH architectures,
+    # every one of them `std/builtin/builtin_slice.mojo`'s `self.step.or_else()`,
+    # and the module docstring's `uses:` column reads 0 of 20 name anything it
+    # declares, because the refusal is about `builtin_slice`'s own line rather
+    # than about the importing file. So this row is one value-model change
+    # (Optional needs a niche, a discriminant or a tag word) whose OWN doc is
+    # `bugs/FORMAL_struct_construction_shapes.md`, and its measured landing is
+    # recorded there: the same line used to refuse with a FALSE reason
+    # ("constructing Slice with 3 argument(s)") and now refuses with a true
+    # one.
+    ("Optional unwrap: `None` and a value are one word, with no tag",
+     (("is an Optional unwrap",),)),
     ("value with no representation on this path",
      (("has no representation on this path",),
       ("has no representation for",))),
@@ -233,6 +248,39 @@ CAUSES = (
      (("did not create the frame",),)),
     ("frame address passed where a value is wanted",
      (("frame address is passed to",),)),
+    # The INVERSE of the row above, and it was unclassified until the
+    # 2026-10-01 b3 sweep: there the CALL wants a frame address and the SLOT
+    # does not establish one, so the walk cannot tell whether the word in the
+    # slot is the address the callee will dereference. `formal/build.py:2731`
+    # says "hands the word in the slot X to M.method(), whose receiver is the
+    # ADDRESS of a frame of 8-byte slots — so the slot would have to hold a
+    # frame address", which shares no substring with the row above's "frame
+    # address is passed to". 3 files, all in-file, on both architectures. The
+    # fix the message names is the same one for all three ("Only a type for
+    # '…' could say so"): every binding of the name has to agree on one type.
+    #
+    # This row also ABSORBS the one it used to be two of. The same site has
+    # reworded its TAIL once — "The declared type of 'scope' is the only thing
+    # here that could say so, and it does not: <reason>" became "Only a type for
+    # 'scope' could say so … and there is no single one: <reason>" — and the
+    # old row's markers were both in that tail, so after the reword it collected
+    # ZERO files while reading as a live cause. The shared first sentence is
+    # what both wordings have, which is why this row's marker is that sentence
+    # and one alternative covers both. The old wording is kept as a sample in
+    # `test_refusal_taxonomy.py` precisely so this cannot happen silently again.
+    ("the slot would have to hold a frame address, and no type says so",
+     (("hands the word in the slot",),)),
+    # A name that holds a frame address and is then REBOUND by an assignment,
+    # so which frame it names depends on which function ran the store. Two
+    # wordings of that one construct, from two different walkers:
+    # `formal/build.py`'s placed-frame analysis ("but a method of SwissTable
+    # ASSIGNS that field") and `formal/model.py:10754` ("atom is assigned … and
+    # atom also holds the address of a Repeat frame"). 3 files on arm64, 3 on
+    # x86-64. Measured, and the reason it is refused rather than lowered: with
+    # nothing lifted the shape builds, runs, and dies with SIGSEGV (exit 139).
+    ("a slot holding a frame address is rebound by a later assignment",
+     (("but a method of", "ASSIGNS that field"),
+      ("also holds the address of a",))),
     ("receiver stored in a container",
      (("receiver is stored in a container",),)),
     # The FIELD sibling of the row above, and it was unclassified until the
@@ -249,9 +297,32 @@ CAUSES = (
      (("reads a field of a field",),)),
     ("a field of a nested frame that the struct does not declare",
      (("out of a nested",),)),
+    # A field the candidate struct does not declare AT ALL, which is a
+    # different refusal from the row above (that one is about a frame the
+    # struct has not been told the layout of; this one is about a name that is
+    # not a field of the struct it is read through). `formal/model.py:14270`
+    # and `:14288` are the two sites and they word it differently, so two
+    # alternatives. 5 files, all in-file, identical on both architectures.
+    #
+    # It gets a row of its own because of what its message says next: "In
+    # Python this is an AttributeError at run time, so the program is very
+    # likely already raising here". These 5 are as likely a stdlib bug as a
+    # backend gap, and a planner who reads them as a backend gap sends someone
+    # to write a lowering for a program CPython rejects — the same trap the
+    # 13-file declared-parameter row sets, and the same reason it is enqueued
+    # with "measure whether CPython raises BEFORE measuring coverage".
+    ("a field the struct does not declare — CPython raises AttributeError too",
+     (("is a field of", "has no field"),
+      ("is a field of", "NO candidate has field"))),
     ("a slot's declared type is not declared by its struct",
      (("is the only thing here that could say so",),
       ("does not declare",))),
+    # ^ ZERO files on the 2026-10-01 r2 sweep, both architectures, and that is
+    # the rot this table's sibling test exists to catch: the site reworded its
+    # tail and both markers went with it. Superseded by the row two above,
+    # which owns the sentence both wordings share. Kept, because the same site
+    # can reword again and a table that forgets the old wording reads an old
+    # log as unclassified — but it is DEAD, and a reader should price it at 0.
     ("a name holds a frame address in more than one shape",
      (("holds a frame address in more than one shape",),)),
     ("one parameter, two kinds of value across call sites",
@@ -316,8 +387,81 @@ CAUSES = (
      (("lowers to the C library's write(2)",),)),
     ("a method on a multi-field struct where a descriptor is meant",
      (("is a method on a Writer",),)),
-    ("too many parameters for the arm64 register ABI",
-     (("exceeds the 8",),)),
+    # TWO wordings of ONE construct, and the second is the largest
+    # per-architecture difference in the whole sweep: 56 files on x86-64 and 0
+    # on arm64, all of them one ABI constant. `formal/arm64_codegen.py`
+    # interpolates `_ABI_ARG_REGS` (AAPCS64's x0..x7, so 8) and
+    # `formal/x86_64_codegen.py:865` interpolates `len(ARG_REGS)` (SysV's
+    # RDI..R9, so 6) into the SAME sentence — which is why this row's markers
+    # quote the ABI NAME and not the number: a table keyed on "exceeds the 8"
+    # cannot see a target that passes six, and reading a 56-file row as part of
+    # `other refusal` is how the previous map had to identify it by hand.
+    # Not a bug — it is the two ABIs. It is still the largest single-file
+    # difference between the backends and it is worth 51 files behind
+    # `re.mojo` alone (see `bugs/FORMAL_x86_64_hostmods_that_do_not_build.md`
+    # §Failure 2, and `formal2-x86-parity`, which holds the claim).
+    ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
+     (("the formal arm64 ABI passes in registers",),
+      ("the formal x86-64 ABI passes in registers",))),
+    # A NUMBER compared with a STRING. Not the `==` row further down: that one
+    # is about a comparison between two values no call site classified, and
+    # this one is about the OPERANDS being of kinds that cannot be compared
+    # here at all — `_v == '1'` would lower to `strcmp`, which dereferences
+    # both operands, so the number would be handed over as an address.
+    # Measured on this tree (in the message): `p[0] != "."` on a
+    # `Pointer[UInt8]` segfaults with no output. 3 files on arm64, 1 on
+    # x86-64; Python has no such comparison at all, which is why the row is
+    # worth naming separately from the `==` one.
+    ("a NUMBER compared with a string (`strcmp` would dereference it)",
+     (("NUMBER with a string",),)),
+    # A module-global container that HAS storage and no initializer, which is
+    # the other half of `a module-global name has no storage` above: there the
+    # slot does not exist, here it exists and nothing can be put in it before
+    # the program runs. 3 files (2 on x86-64), in-file on all of them.
+    ("a module-global container has storage but no initializer",
+     (("has no initializer",),)),
+    # `field(default_factory=F)` — the dataclass transform needs one value per
+    # instance, and this path has nowhere to keep it: not module-global
+    # storage, and a local in the constructor's frame dies with the
+    # constructor. 2 files, in-file, both architectures.
+    ("`field(default_factory=F)`: nowhere to keep a per-instance value",
+     (("calls F once per instance",),)),
+    # A constructor called WITH arguments, whose body is not a bare sequence
+    # of `self.<field> = …` assignments. The inlining this path does can
+    # store the assignments at the construction site; a body that READS `self`
+    # (or branches, loops, or calls a method) needs the block's address
+    # threaded through, which has no lowering here. 2 files, in-file.
+    ("a constructor body that reads `self` is not inlined",
+     (("whose body this path does not inline",),)),
+    # A module whose API IS its top-level statements, imported by another
+    # module: this path compiles an import into a dylib, and a dylib has no
+    # entry point to run a module body at load time, so the module would build,
+    # link, and do nothing — the silent no-op one level down from the
+    # executable path's own. Distinct from `module exports no public
+    # functions` (which is about what a dylib PUBLISHES): this is about
+    # whether it would RUN anything. 2 files + their importers on both arches.
+    ("a module whose API is its top-level statements, imported by another",
+     (("this module's API is its top-level statements",),)),
+    # A local read before anything in the function stores it. `formal/build.py`
+    # enforces this for module-global names and not for locals, which is what
+    # `bugs/FORMAL_a_local_read_before_its_first_assignment.md` measures; 1
+    # file, in-file. Below the bar a cause clears to be worth a row, and here
+    # anyway: a cause with a doc and no marker is a cause nobody can find from
+    # the table.
+    ("a local read before its first assignment",
+     (("before anything in this function stores it",),)),
+    # ── the two x86-64-only refusals, which are arch DRIFT rather than a
+    #    construct. Both are recorded, with this exact wording, in
+    #    `bugs/FORMAL_known_limits.md` §6.5 as the two files whose message
+    #    differs between architectures on an otherwise class-identical sweep —
+    #    and neither had a marker, so the instrument could not show the drift
+    #    the doc had already measured. `swap.mojo` BUILDS on arm64 and is
+    #    refused here; `polynomial.mojo` is refused on both arches for the same
+    #    `comptime` line, under two different names.
+    ("an operator the x86-64 codegen does not lower",
+     (("unsupported unary operator",),)),
+    ("a call target the x86-64 codegen does not lower",
+     (("unsupported call target",),)),
     ("comptime does not fold to a constant",
      (("does not fold to a compile-time constant",),)),
     ("variadic call has no ABI",
@@ -338,6 +482,24 @@ CAUSES = (
     # marker is a cause nobody can find from the table.
     ("a class-level default is the NAME `None`",
      (("is a NAME rather than a literal",),)),
+    # The other half of the row above: the default is a literal-looking
+    # expression whose value is NOT materializable here (a call, a computed
+    # name), rather than the NAME `None`. Both are "a class-level default this
+    # path cannot turn into a word" and a reader who fixed the row above would
+    # reasonably believe the row covers this one. 1 file, in-file, both
+    # architectures (`formal/dataclass_transform.py:530`).
+    ("a class-level default that is not a value this build can materialize",
+     (("is not a value this build can materialize",),)),
+    # A String method that returns a SHORTER string. `formal/model.py:2602`
+    # refuses `strip`/`rstrip`/`upper`/`replace` for one reason: on a bare
+    # `char *` the result means writing a terminator over the receiver's
+    # bytes, and a string literal's bytes are in a read+execute `__TEXT`
+    # section. 1 file (`mlir.py`), in-file, both architectures, and named in
+    # `bugs/FORMAL_string_value_model.md`, which is why it gets a row rather
+    # than staying in the bucket: the doc says `lstrip` is the one method that
+    # does not write, which is the fix's shape.
+    ("a String method that returns a SHORTER string writes the receiver's bytes",
+     (("returns a SHORTER string",),)),
 )
 
 def _check_cause_shape():
