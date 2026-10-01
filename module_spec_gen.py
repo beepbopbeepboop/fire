@@ -152,20 +152,23 @@ def _find_stdlib_path():
         if os.path.isdir(path):
             return path
 
-    abs_path = '/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib'
-    if os.path.isdir(abs_path):
-        return abs_path
+    checkouts = (('new-modular', 'Mojo/stdlib'), ('modular', 'mojo/stdlib'))
+    for checkout, rel in checkouts:
+        abs_path = f'/Users/mrs/net/chatgpt/claude/{{checkout}}/{{rel}}'
+        if os.path.isdir(os.path.join(abs_path, 'std')):
+            return abs_path
 
     cwd = os.path.abspath(os.getcwd())
     for _ in range(10):
-        candidate = os.path.join(cwd, 'modular', 'mojo', 'stdlib')
-        if os.path.isdir(candidate):
-            return candidate
+        for checkout, rel in checkouts:
+            candidate = os.path.join(cwd, checkout, *rel.split('/'))
+            if os.path.isdir(os.path.join(candidate, 'std')):
+                return candidate
         cwd = os.path.dirname(cwd)
         if cwd == '/':
             break
 
-    return abs_path
+    return f'/Users/mrs/net/chatgpt/claude/{{checkouts[0][0]}}/{{checkouts[0][1]}}'
 
 STDLIB_PATH = _find_stdlib_path()
 TEST_PATH = os.path.join(HERE, 'runtime')
