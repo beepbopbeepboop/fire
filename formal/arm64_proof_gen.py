@@ -2094,6 +2094,26 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
     return addrs
 
 
+def _cset_registers(block, words: dict) -> set:
+    """The destination registers of the CSETs in `block`.
+
+    `CSET Xd, cond` puts its `Rd` in bits [4:0] (`_step_rhs` for index 30
+    reads it there), so the set is a plain decode.  It exists because "which
+    condition does this block branch on" (`_cset_cond`, which reads the `cond`
+    field in bits [15:12]) and "which register holds that condition's 0/1"
+    are two different questions: a claim about the register is only true when
+    the block wrote it, and a block can hold a CSET for a different operand of
+    the same condition — or none at all, which is what a merge block after a
+    short-circuit `and`/`or` looks like.
+    """
+    out = set()
+    for pc in block["instrs"]:
+        w = words.get(pc)
+        if w is not None and _step_branch_index(w) == 30:
+            out.add(w & 0x1f)
+    return out
+
+
 def _cset_cond(block, words: dict):
     """Condition code of the last CSET in `block` (the branch's flag test).
 
@@ -4085,11 +4105,30 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # here: the generator was asserting a fact about a register the
             # compiler stopped writing.
             _ent_idx = None
-            for _b in blocks:
-                if _b["kind"] == "cbz" and _b["instrs"]:
-                    _ent_idx = _step_branch_index(words[_b["instrs"][-1]])
-                    break
-            _emittable = _ent_idx in (16, 17)
+            if _entry_bi is not None and blocks[_entry_bi]["instrs"]:
+                _ent_idx = _step_branch_index(
+                    words[blocks[_entry_bi]["instrs"][-1]])
+            # …and only when a `cset` in THIS block wrote the register it
+            # claims a fact about.  The claim is
+            # `arm64_reg r <this block's exit> = 0 ↔ ¬(<source condition>)`,
+            # which is true exactly when the word in `r` at the branch is the
+            # source condition's own 0/1 — and a short-circuit condition breaks
+            # that.  `_emit_truthy_word` lowers `a or b` in a condition to its
+            # own CBNZ plus a merge block, so the `if`'s own branch sits in a
+            # block with NO cset at all and its register holds whichever
+            # operand the path selected: the left one when the short circuit
+            # was taken, the right one's cset otherwise.  Reading the index off
+            # the SELECTED block matters for the same reason — a short-circuit
+            # condition puts a second conditional branch ahead of the `if`'s,
+            # and the two are the two different encodings.
+            #
+            # `formal/examples/either.mojo` measured it: the theorem was emitted
+            # against the merge block and `bv_decide` returned the
+            # counterexample `n = 2^64 - 1`.  Being referenced by nothing, its
+            # only effect is to fail the build.
+            _emittable = (_ent_idx in (16, 17)
+                          and entry_reg in _cset_registers(
+                              blocks[_entry_bi], words))
             if _emittable:
                 A(f"theorem {name}_entry_cond (n : UInt64) :")
                 A(f"    arm64_reg {entry_reg} ({entry_exit}) = 0 ↔ ¬({entry_condition}) := by")
