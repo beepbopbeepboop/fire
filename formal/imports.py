@@ -1268,16 +1268,22 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
 
 
 def _record_depends(manifest_path: str, depends: list) -> None:
-    import json
-    try:
-        with open(manifest_path) as f:
-            payload = json.load(f)
-    except OSError:
-        return
-    payload["depends_on"] = [{"module": m, "source": p} for m, p in depends]
-    with open(manifest_path, "w") as f:
-        json.dump(payload, f, indent=1, sort_keys=True)
-        f.write("\n")
+    """Record this module's resolved imports in its own manifest.
+
+    Through `formal.build.update_dylib_manifest`, like every other manifest
+    write, so the read-modify-write is atomic: this is the fourth of the four
+    that used to truncate the file in place, and a program linking this dylib
+    reads it with no lock at all — a reader in the truncation window gets
+    `json.decoder.JSONDecodeError: … (char 0)`, which is not an `OSError`, so
+    none of the `except OSError` around these reads catches it
+    (`bugs/FORMAL_dylib_manifest_written_in_place.md`).
+    """
+    from formal.build import update_dylib_manifest
+
+    def _record(payload):
+        payload["depends_on"] = [{"module": m, "source": p} for m, p in depends]
+
+    update_dylib_manifest(manifest_path, _record)
 
 
 def dylib_chain(dylib_path: str, _seen=None) -> list:

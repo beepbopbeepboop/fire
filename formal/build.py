@@ -7706,6 +7706,86 @@ def dylib_manifest_path(dylib_path: str) -> str:
     return os.path.abspath(dylib_path) + ".manifest.json"
 
 
+def _write_json_atomic(path: str, payload) -> None:
+    """Write JSON to `path` through a private temp file and `os.replace`.
+
+    The established mechanism in this repository — `cas.publish` does exactly
+    this, and its own comment says why ("Hash-named files are immutable, so a
+    racing identical write is harmless (`os.replace` is atomic)") — applied to
+    the one file here that other processes read WHILE it is being written.
+
+    `open(path, "w")` truncates AT THE OPEN, so between that open and the first
+    byte written the file is 0 bytes, and a reader in that window gets
+    `json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)`.
+    That is not an `OSError`, so none of the `except OSError` around these reads
+    catches it: it propagates out of the build driver and the sweep files the
+    file as `tool: the build driver raised: json.decoder.JSONDecodeError`. The
+    writers are serialised by `formal/imports.py`'s `_dylib_lock`; the READERS
+    take no lock at all, so the pair exists inside one `-j6` sweep — two workers
+    importing the same stdlib module both build its dylib, and one links it
+    while the other rewrites its manifest. Measured on a real 11,668-byte
+    manifest against exactly this code: 357 of 882 concurrent reads (40 %)
+    landed in the 0.21 ms window
+    (`bugs/FORMAL_dylib_manifest_written_in_place.md`).
+
+    fsync before the rename, because the failure this removes is a reader
+    seeing a half-written file; a rename that reaches disk before the data does
+    would trade it for a reader seeing the PREVIOUS content on a power cut,
+    which is a whole-file answer and so harmless. The temp name carries the pid
+    and a random suffix so two writers in one process cannot collide on it.
+    """
+    import json
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = os.path.join(
+        directory, f".{os.path.basename(path)}.tmp.{os.getpid()}."
+                   f"{os.urandom(4).hex()}")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(payload, f, indent=1, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def update_dylib_manifest(manifest_path: str, mutate) -> None:
+    """Read `<dylib>.manifest.json`, apply `mutate(payload)`, write it back.
+
+    ONE read-modify-write for every caller, because there were four of them
+    (`write_dylib_manifest`, `_record_link_deps`, `_record_namespace`,
+    `formal/imports.py`'s `_record_depends`) and four copies of a
+    read-modify-write is four chances to leave one of them truncating. The
+    write goes through `_write_json_atomic`, so a reader sees the whole old
+    file or the whole new one.
+
+    A manifest that is not there yet is not an error here: it is the state
+    before `write_dylib_manifest` has run, and each of these callers is
+    recording something INTO a manifest someone else may not have written yet.
+    So there is nothing to update and nothing to report — which is what the
+    `except OSError` these call sites already had does, and it stays. Widening
+    it to `ValueError` would be the wrong fix: it would convert the race above
+    into a silent "no manifest", which reads downstream as a module that
+    exports nothing — the exact false finding `load_dylib_manifests` warns
+    about — and it would also swallow the half-written file a crashed writer
+    leaves behind.
+    """
+    import json
+    try:
+        with open(manifest_path) as f:
+            payload = json.load(f)
+    except OSError:
+        return
+    mutate(payload)
+    _write_json_atomic(manifest_path, payload)
+
+
 def write_dylib_manifest(dylib_path: str, install_name: str,
                          exports: list, module: str = None,
                          constants: dict = None) -> str:
@@ -7749,7 +7829,6 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     a real global with nowhere to live, and it stays refused, which is what
     keeps `sys.argv` and `os.sep` different answers
     (`bugs/FORMAL_module_state_no_storage.md`)."""
-    import json
     path = dylib_manifest_path(dylib_path)
     payload = {
         "dylib": os.path.abspath(dylib_path),
@@ -7766,9 +7845,11 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
                      "frame_params": e.get("frame_params") or []}
                     for e in exports],
     }
-    with open(path, "w") as f:
-        json.dump(payload, f, indent=1, sort_keys=True)
-        f.write("\n")
+    # Atomic, like every other manifest write: this one truncates a file other
+    # processes read while they link (see `_write_json_atomic`), and it is the
+    # write that makes the file exist at all, so a reader in its window would
+    # read an empty manifest rather than a stale one.
+    _write_json_atomic(path, payload)
     return path
 
 
@@ -8955,17 +9036,12 @@ def _export_frame_contract(fn) -> list:
 
 def _record_link_deps(manifest_path: str, linked: list) -> None:
     """Note the libraries this dylib links, so a program can close the set."""
-    import json
-    try:
-        with open(manifest_path) as f:
-            payload = json.load(f)
-    except OSError:
-        return
-    payload["links"] = [{"install_name": d["install_name"],
-                         "path": d.get("path")} for d in linked]
-    with open(manifest_path, "w") as f:
-        json.dump(payload, f, indent=1, sort_keys=True)
-        f.write("\n")
+
+    def _record(payload):
+        payload["links"] = [{"install_name": d["install_name"],
+                             "path": d.get("path")} for d in linked]
+
+    update_dylib_manifest(manifest_path, _record)
 
 
 def _namespace_library(output: str, install_name: str, arch: str,
@@ -9144,24 +9220,19 @@ def _record_namespace(manifest_path: str, reexports: dict,
     `reexports` and find, for a trait, no symbol to check — which is the true
     fact, but stated in the one field whose contract is "there is a symbol".
     """
-    import json
-    try:
-        with open(manifest_path) as f:
-            payload = json.load(f)
-    except OSError:
-        return
-    payload["kind"] = "namespace"
-    payload["reexports"] = {
-        n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(n)}
-        for n, v in sorted(reexports.items())}
-    if traits:
-        # Absent rather than empty for a pure re-export package: the key means
-        # "this library declares traits", and writing `[]` there would claim a
-        # module with traits and none, which is a different file.
-        payload["traits"] = sorted(set(traits))
-    with open(manifest_path, "w") as f:
-        json.dump(payload, f, indent=1, sort_keys=True)
-        f.write("\n")
+    def _mark(payload):
+        payload["kind"] = "namespace"
+        payload["reexports"] = {
+            n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(n)}
+            for n, v in sorted(reexports.items())}
+        if traits:
+            # Absent rather than empty for a pure re-export package: the key
+            # means "this library declares traits", and writing `[]` there
+            # would claim a module with traits and none, which is a different
+            # file.
+            payload["traits"] = sorted(set(traits))
+
+    update_dylib_manifest(manifest_path, _mark)
 
 
 def compile_formal_dylib(source_paths: list, output: str = None,
