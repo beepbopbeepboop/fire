@@ -2776,16 +2776,25 @@ def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
     gen._emit(f"  if ({cond}) goto {bb_body}; else goto {bb_after};")
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    # The cursor invariant is Python's: `cur` is the index of the next
+    # UNCONSUMED element, and the advance happens as the element is read —
+    # not after the body. `next(it)` inside the body (the
+    # `Tools/cases_generator/analyzer.py::check_escaping_calls` shape) reads
+    # at `cur`, so a post-body advance would make it re-read the element the
+    # loop had just yielded: two elements consumed, each reported twice.
     ev = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
     gen._emit(f"  {gen._cname(var)} = {ev};")
+    nc = gen._inc_val(cur)
+    gen._emit(f"  {cur} = {nc};")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
+    # `bb_post` stays in the loop_stack above so a `continue` still lands
+    # somewhere correct; with the advance already done it is just the jump
+    # back to the condition.
     gen._emit_label(bb_post)
-    nc = gen._inc_val(cur)
-    gen._emit(f"  {cur} = {nc};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
 
