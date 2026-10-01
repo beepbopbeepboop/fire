@@ -5095,13 +5095,15 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
 
     # Park the remaining `for` clauses for `_gen_compr_append` to consume from
     # inside the clause-0 loop body. See its comment there for why the extra
-    # clauses used to vanish and why extending is the right lowering.
-    # Only list/generator: both are list-backed ('generator' is initialised
-    # "as a list for simplicity", per `_gen_compr_append`), so they share
-    # `mojo_list_extend`. A set/dict comprehension with 2+ clauses is still
-    # dropped -- those need per-kind insert/merge, not a list extend, and
-    # guessing at it is how this bug got in.
-    if len(node.generators) > 1 and node.kind in ('list', 'generator'):
+    # clauses used to vanish and why nesting is the right lowering.
+    # The parked remainder keeps THIS comprehension's own `kind`, so each kind
+    # merges into the outer one with its own runtime call: `mojo_list_extend`
+    # for list/generator (both list-backed -- 'generator' is initialised "as a
+    # list for simplicity", per `_gen_compr_append`), `mojo_set_update` for a
+    # set, `mojo_dict_update` for a dict. The latter two are per-element/per-pair
+    # merges, which is what the set and dict cases need and what a list extend
+    # cannot express -- they were dropped here rather than guessed at.
+    if len(node.generators) > 1:
         gen._compr_pending_inner = gimple_ctypes.Comprehension(
             kind=node.kind, element=node.element, key=node.key,
             generators=list(node.generators[1:]))

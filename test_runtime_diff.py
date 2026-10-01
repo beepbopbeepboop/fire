@@ -422,6 +422,35 @@ BUILTIN_PROGRAMS = {
     # because the two maps are recorded per ELEMENT and per RESULT, not per
     # iterable — so the shape of the comprehension does not matter, only that
     # its element is a container.
+    # A set/dict comprehension with MORE THAN ONE `for` clause. `set` and
+    # `dict` were left out of the multi-clause lowering that fixed `list`
+    # (the parked-remainder mechanism in `_gen_compr_append`), so every
+    # clause after the first was silently DROPPED — exit 0, and for a set
+    # that is invisible in the printed result because the outer clause alone
+    # is still a plausible-looking smaller set: `{i + j for i in range(3) for
+    # j in range(3)}` gave `{0, 1, 2}` where CPython gives `{0, 1, 2, 3, 4}`.
+    # Each kind needs its own merge — a list extend concatenates, a set must
+    # re-add per element so it deduplicates, a dict must re-insert per pair
+    # keeping each pair's key/value kinds — so the merge is `mojo_set_update`
+    # / `mojo_dict_update` respectively.
+    #
+    # The value-1 minimum in the element expressions is deliberate and NOT a
+    # dodge: a dict/slot holding the int 0 renders as `None` through the
+    # generic value reader, which is a SEPARATE pre-existing defect (a plain
+    # `{1: 0}` dict literal does it too, no comprehension involved). Using
+    # `i + j + 1` keeps this case measuring the clause count and the merge,
+    # which is what it is for.
+    "comprehension_multi_clause_set_and_dict": textwrap.dedent("""\
+        def main():
+            print({i + j for i in range(3) for j in range(3)})
+            print({i * j + 1 for i in range(3) for j in range(3)})
+            print(len({i + j for i in range(3) for j in range(3)}))
+            print(4 in {i + j for i in range(3) for j in range(3)})
+            print({str(i) + str(j): i + j + 1 for i in range(2) for j in range(2)})
+            print({str(i) + str(j): i + j + 1 for i in range(2) for j in range(2) if j > 0})
+            print(len({str(i) + str(j): i + j + 1 for i in range(3) for j in range(3)}))
+            print({str(i) + str(j): i + j + 1 for i in range(3) for j in range(3) if j > 1})
+    """),
     "comprehension_of_tuples_and_lists": textwrap.dedent("""\
         def main():
             print([[5, j] for j in range(3)])

@@ -5658,14 +5658,26 @@ MojoSet *mojo_set_copy(MojoSet *s) {
     return out;
 }
 
+/* `dst |= src`, and the merge behind a multi-clause set comprehension
+   (`{i + j for i in range(3) for j in range(3)}`, lowered as one
+   `mojo_set_update` per outer element). Walks the SOURCE in INSERTION order
+   (mojo_set_order_indices), not raw hash-slot order: the destination's own
+   order is what a set's iteration and repr report, so a slot-order walk made
+   the merged result's order depend on where the heap put the source's
+   elements. `s |= other` is a merge in the source's order for the same
+   reason. */
 void mojo_set_update(MojoSet *dst, MojoSet *src) {
     if (!dst || !src) return;
-    for (int64_t i = 0; i < src->cap; i++) {
-        if (src->slots[i].tag == 0)
-            mojo_set_add_int(dst, src->slots[i].val_i);
-        else if (src->slots[i].tag == 1)
-            mojo_set_add_str(dst, src->slots[i].val_s);
+    int64_t *order = mojo_set_order_indices(src);
+    int64_t n = order ? src->used : 0;
+    for (int64_t oi = 0; oi < n; oi++) {
+        _SetSlot *s = &src->slots[order[oi]];
+        if (s->tag == 0)
+            mojo_set_add_int(dst, s->val_i);
+        else if (s->tag == 1)
+            mojo_set_add_str(dst, s->val_s);
     }
+    free(order);
 }
 
 /* ── MojoSetIter ─────────────────────────────────────────────────────────*/
@@ -7712,14 +7724,27 @@ MojoList *mojo_dict_items_int(MojoDict *d) {
 
 void mojo_dict_update(MojoDict *dst, MojoDict *src) {
     if (!dst || !src) return;
-    for (int64_t i = 0; i < src->cap; i++)
-        if (src->slots[i].key) {
-            if (src->slots[i].keykind == 2)
-                _dict_set_ik(dst, src->slots[i].ikey, src->slots[i].val, src->slots[i].kind);
-            else
-                _dict_set_raw_seq_kind_k(dst, src->slots[i].key, src->slots[i].val,
-                                         -1, src->slots[i].kind, src->slots[i].keykind);
-        }
+    /* Walks the SOURCE in INSERTION order (mojo_dict_order_indices), not raw
+     * hash-slot order. A dict's iteration order and repr are insertion order,
+     * and each re-inserted pair takes a FRESH sequence number in the
+     * destination (seq = -1 below), so the destination's order became the
+     * source's slot order: `{str(i) + str(j): i for i in range(2) for j in
+     * range(2)}` printed `{'01': 1, '00': 1}` where CPython prints
+     * `{'00': 1, '01': 1}`. `d.update(other)` merges in the source's order for
+     * the same reason. Each pair keeps its own `keykind`/`kind`, so an
+     * integer-keyed pair stays integer-keyed and a string value stays a
+     * string. */
+    int64_t *order = mojo_dict_order_indices(src);
+    int64_t n = order ? src->used : 0;
+    for (int64_t oi = 0; oi < n; oi++) {
+        _DictSlot *s = &src->slots[order[oi]];
+        if (!s->key) continue;
+        if (s->keykind == 2)
+            _dict_set_ik(dst, s->ikey, s->val, s->kind);
+        else
+            _dict_set_raw_seq_kind_k(dst, s->key, s->val, -1, s->kind, s->keykind);
+    }
+    free(order);
 }
 
 /* dict.setdefault(key, default): return the value for `key`, inserting
