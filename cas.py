@@ -527,19 +527,40 @@ def gcc_syntax_key(gcc_variant: str, flags: tuple, c_source: str) -> str:
 
 
 def formal_build_key(source: str, path: str, flags: tuple = (),
-                     criteria: str = '') -> str:
+                     criteria: str = '', imports: str = '') -> str:
     """Key (`formal/<hash>`) for caching one `build --formal` VERDICT.
 
     The same contract as every other key here — ABI version + a compiler-source
     fingerprint + a toolchain + the exact source bytes — specialised for the
-    formal backend, which has no gcc and resolves no imports:
+    formal backend, which has no gcc:
 
       * "compiler" is formal_fingerprint() (formal/**, the parser, mojo/middle);
       * "toolchain" is the Python interpreter that runs the in-process arm64
         emitter, plus the flags, since the emitted code depends on both;
-      * "imported signatures" do not exist here — compile_formal compiles one
-        file and skips its import statements, so a stdlib edit cannot change
-        this artifact and stdlib_fingerprint() is deliberately not folded in.
+      * "imports" is `formal.imports.import_closure_digest(path)` — every source
+        the build reads BESIDES the entry file. `compile_formal` skips an
+        import statement, but it does not skip the IMPORT: `formal/build.py`'s
+        `_resolve_imports` compiles every module in the file's transitive
+        closure into a dylib and links it, so the module's bytes decide which
+        symbols the image binds, whether the build succeeds at all, and the
+        image's whole dependency set. A module that cannot be resolved IS also
+        the verdict (`not-answerable/host-import`), which is why the closure
+        digest records unresolved names too.
+
+        This clause used to say the opposite — "imported signatures do not
+        exist here … a stdlib edit cannot change this artifact" — and that was
+        true when it was written and stopped being true when `formal/imports.py`
+        stopped modelling modules and started COMPILING them. It was the
+        sentence that would be read next time somebody wondered whether an
+        import belongs in this key, which is why it is replaced rather than
+        amended: `stdlib_fingerprint()` is still deliberately NOT folded in
+        (it is the whole stdlib, and a build reads a handful of files out of
+        it), and the closure digest is what replaces it as the honest scope.
+
+        `imports=''` — the default — is the pre-fix behaviour, and callers that
+        cache a verdict MUST pass it. It is a default rather than a required
+        argument so that the few callers which cache something narrower than a
+        verdict (a per-module dylib key, say) keep saying so in one word.
 
     `path` only enters the key through the source it names, but is kept for
     diagnostics in the store. `flags` must carry every build flag that changes
@@ -560,6 +581,7 @@ def formal_build_key(source: str, path: str, flags: tuple = (),
         toolchain_fingerprint(sys.executable, flags),
         source,
         criteria,
+        imports,
     )
 
 

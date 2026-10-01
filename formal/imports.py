@@ -440,6 +440,122 @@ def _manifest_path(dylib_path: str) -> str:
     return dylib_manifest_path(dylib_path)
 
 
+def import_closure_digest(source_path: str, _seen=None) -> str:
+    """A digest of every SOURCE this file's build reads besides itself.
+
+    The question a cache key has to answer before it can decide whether a
+    stored verdict is still true, and for this backend it is not "the entry
+    file": `formal/build.py`'s `_resolve_imports` compiles every module in the
+    file's transitive import closure into a dylib and links it, so a module's
+    bytes decide which symbols the image binds, whether it builds at all, and
+    the image's whole dependency set. A key that folds in the compiler and the
+    entry file but not those sources serves a verdict about the module's OLD
+    contents — and the sweep's output is a CLASSIFICATION derived from the
+    build's message, so the replay is not merely a stale pass/fail: the same
+    file can come back as `not-answerable/host-import` (module not found),
+    `codegen/dependency` (module found, refuses a construct) or `pass`.
+    Measured on `tools/formal_sweep.py`: a fix to `formal/hostmods/re.mojo`
+    left the next run reporting `cas: 4 hit` and "verdict history: unchanged: 4"
+    for four files that now build
+    (`bugs/FORMAL_cas_verdict_key_ignores_the_hostmod_sources_it_compiles.md`,
+    and the import-closure half of
+    `bugs/FORMAL_sweep_cache_ignores_imports.md`).
+
+    It walks with the SAME two functions the build walks with —
+    `imported_modules` for what a statement list imports and
+    `resolve_module_path` for where a name is found, with the same
+    `relative_to`/`project_root` the build passes — so it cannot resolve a
+    module the build would not have compiled, or skip one it would. A second
+    resolution walk written here would be exactly the kind of pair that agrees
+    until the day it does not, and the disagreement would be a stale verdict
+    rather than an error.
+
+    What goes in:
+
+      * the RESOLVED path and its content digest, for every module in the
+        transitive closure — a `.py` sibling, a `formal/hostmods/*.mojo`, or a
+        stdlib source, since all three are compiled;
+      * the module NAME for every name that resolves to nothing. The path being
+        unresolvable is itself an input (it is what makes the verdict
+        `not-answerable/host-import`), and the resolver's own table is in
+        `cas.formal_fingerprint()` already.
+
+    A module that is already on the walk is not walked twice (`_seen`, keyed by
+    resolved path), which is what makes a cyclic import terminate — the same
+    reason `build_module_dylib`'s `_stack` exists, and a key function that hangs
+    on `a` importing `b` importing `a` would take the sweep down with it.
+
+    Returns `''` for a file that imports nothing, and for one that cannot be
+    parsed or read. Neither is a hole: a file with no imports has nothing to
+    fold in, and such a file's verdict is a parse error (or an unreadable-file
+    cause), which depends on nothing else — while raising here would turn a
+    cache key into a second thing that can fail a sweep the build itself would
+    have reported.
+
+    Cost, measured: `''` for a file with no imports, 0.11 s for one importing
+    four modules, and 1.5 s for `std/python/bindings.mojo`'s whole stdlib
+    closure — parsing the modules, not hashing them (a lighter parse that skips
+    the field-evidence census is 0.2 s faster and produces the same digest, so
+    the build's own parse is kept for the reason above).
+    """
+    _seen = {} if _seen is None else _seen
+    key = os.path.abspath(source_path)
+    if key in _seen:
+        return _seen[key]
+    # Set BEFORE the walk, so a cycle sees this entry rather than recursing.
+    _seen[key] = ""
+    try:
+        with open(source_path, "rb") as f:
+            source = f.read()
+    except OSError:
+        return ""
+    try:
+        stmts = parse_module_for_closure(source, source_path)
+    except Exception:  # noqa: BLE001 — a parse error is the build's answer
+        return ""
+    parts = []
+    for mod in imported_modules(stmts):
+        path = resolve_module_path(mod, relative_to=source_path,
+                                   project_root=source_path)
+        if path is None:
+            parts.append(f"{mod}\0unresolved")
+            continue
+        abspath = os.path.abspath(path)
+        if abspath in _seen:
+            parts.append(f"{mod}\0{abspath}\0seen")
+            continue
+        try:
+            with open(path, "rb") as f:
+                parts.append(f"{mod}\0{abspath}\0{cas.hash_parts(f.read())}")
+        except OSError:
+            parts.append(f"{mod}\0{abspath}\0unreadable")
+            continue
+        parts.append(import_closure_digest(path, _seen))
+    # A file that imports NOTHING contributes `''`, not the hash of an empty
+    # list. That is not a micro-optimisation: `''` is the value
+    # `cas.formal_build_key` was already producing for such a file, so adding
+    # this clause to the key leaves every import-free verdict's key — and its
+    # cache entry — exactly where it was, and the invalidation this fixes is
+    # confined to the files that actually reach a module.
+    digest = cas.hash_parts(*parts) if parts else ""
+    _seen[key] = digest
+    return digest
+
+
+def parse_module_for_closure(source: bytes, filename: str):
+    """`formal.build.parse_module` for a source already in hand.
+
+    The build's own parse, deliberately, including the field-evidence census it
+    attaches: a digest computed over a differently-parsed tree would be a
+    digest of something this backend never compiles. Bytes in, statements out —
+    the caller has the bytes because it read them for its own digest.
+    """
+    from formal.build import parse_module
+    if isinstance(source, bytes):
+        source = source.decode("utf-8", "replace")
+    return parse_module(source, filename=filename)
+
+
 def imported_modules(stmts) -> list:
     """The module names a statement list imports, in source order, deduped.
 
