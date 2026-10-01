@@ -88,7 +88,7 @@ belongs to other bugs, not to this one, so it is filed in `bugs/`, not here:
 |---|---|
 | `linkmode` was **already red on master** — a `from . import SUB` + `SUB.f(...)` call prints 0, exit 0 | `bugs/CODEGEN_link_mode_bare_submodule_marker_call_silent_wrong_value.md` |
 | a `from p import f` whose module only RE-EXPORTS `f` names the re-exporting module, not the defining one | `bugs/CODEGEN_reexported_function_import_qualifier_names_the_wrong_module.md` |
-| `import p.sub` + `p.sub.f(14)` exits 1 with no output, on both pipelines | `bugs/CODEGEN_import_dotted_name_two_hop_attribute_call_exits_1.md` |
+| `import p.sub` + `p.sub.f(14)` exits 1 with no output, on both pipelines | `bugs/CODEGEN_import_dotted_name_two_hop_attribute_call_exits_1.md` — itself since fixed and deleted; see the 2026-10-01 section below |
 | an enclosing function's return type is `int64_t` when its only `return` is a method call, so a `char *` prints as a pointer decimal | `bugs/CODEGEN_return_type_not_inferred_from_a_method_call_result.md` |
 | `str()`/`%s` never consult `__str__`; a struct inside a list/tuple reprs as a raw pointer | `bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_container_spellings.md` |
 
@@ -152,6 +152,64 @@ this directory:
 | found while fixing it | filed as |
 |---|---|
 | the same cross-module construction at **module scope** rather than inside a function is mistyped in BOTH import spellings — a pointer decimal, exit 0, on one, a hard `non-trivial conversion` build failure on the other | `bugs/hard/CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md` |
+
+### 2026-10-01: the two-hop row above, and a fourth instance of cause (c) — closed by a MERGE, not by an edit
+
+`CODEGEN_import_dotted_name_two_hop_attribute_call_exits_1.md` (the residue row
+in the 2026-09-29 table) is **fixed and deleted**. `import a.b` binds `a`, so
+`a.b.f(...)` is a two-hop attribute call whose receiver is the SUBMODULE; both
+pipelines now match CPython (`42`), measured in `test_gimple.py`'s
+`dotted_import_two_hop_attribute_call`, which is the doc's own regression.
+
+Worth recording because **nothing was wrong with either fix**. `a0691784`
+landed the two-hop fix, including the link-mode half: it added an
+`elif isinstance(stmt, ImportStmt)` arm to `_register_link_imports`'s `scan`
+ladder (`mojo/backend_gimple/emit_resolve.py`) that registers a dotted plain
+import's submodule for inlining. `1f7717c1` landed later and turned the SAME
+ladder's FIRST arm into `if isinstance(stmt, ImportStmt)` — for `import M` +
+`M.Class`. Two `ImportStmt` arms in one `if`/`elif` chain, and the second one
+became unreachable code: no error, no warning, no test failure in the branch
+that wrote it. The bug was reported fixed and its doc deleted while half of it
+sat dead in the tree.
+
+So this is cause (c) from the list above — *closed on a narrower spelling than
+the one still broken* — with a new mechanism: the narrowness was introduced by
+the SECOND fix, so no single branch's own gate could have caught it. The
+detectable form is mundane and worth writing down: **a regression test that
+lives in the tree is not evidence that the change behind it is live.** Here
+`test_gimple.py` was present, named, and asserting the right answer; it went
+red the moment the batch landed, which is the only reason this was found at
+all. The transferable check for the next `if`/`elif` chain a merge touches:
+grep the function for the type each arm matches and check that no two arms
+match the same node type.
+
+Two smaller things the same pass turned up, both recorded here because both
+were silent:
+
+- `test_gimple.py`'s two-hop case **skipped itself** — counting neither a pass
+  nor a fail, so it vanished from the tally — whenever `$TMPDIR` landed inside
+  the checkout, on the ground that the module-qualified-call fallback is
+  disabled there. That ground went stale when `_lower_method_call`'s
+  `_mgc_is_selfhost` check became
+  `mojo/middle/methods_shared.py::_is_selfhost_source_file`, which asks
+  whether the file is one of the COMPILER'S OWN modules and deliberately not
+  whether it merely sits under the install directory. Verified on this tree: a
+  scratch package at `<checkout>/.tmp/x/q/main.py` is False,
+  `<checkout>/mojo/middle/x.py` and `<checkout>/gimple_codegen.py` are True.
+  The case now runs in both locations, as
+  `test_link_mode.py`'s `test_bare_submodule_import_call_inside_source_tree`
+  already did for the single-hop spelling. A skip that counts nothing is worse
+  than a missing test, because it reads as coverage.
+- The first two rows of the same 2026-09-29 table
+  (`CODEGEN_link_mode_bare_submodule_marker_call_silent_wrong_value.md`,
+  `CODEGEN_reexported_function_import_qualifier_names_the_wrong_module.md`)
+  name docs that no longer exist either, so this table now has three dangling
+  targets rather than one. Their fixes are visible in `test_link_mode.py`
+  (`test_bare_submodule_import_call` and friends all pass), so the rows are
+  stale bookkeeping rather than open work — NOT reconciled here, because they
+  belong to other branches' closures and re-deriving what those docs said
+  needs the history spelunking pass the rot section at the end already
+  describes.
 
 ## Notes for future sessions
 
