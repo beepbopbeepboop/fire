@@ -1125,6 +1125,16 @@ void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
  * makes (mojo_boxed_is_str) is made here — but an integer is looked up directly,
  * with no decimal string built and nothing to release. Emitted by codegen for
  * dict operations whose key is an untracked int64_t. */
+/* A CONTAINER used as a dict key needs a CONTENT key, not its address: a
+ * tuple is the one container Python considers hashable, so `d[(p, mtime)]`
+ * must find the entry a previous equal tuple stored. The returned string is
+ * MALLOC'd and the caller OWNS it — it is NOT a `_int_str_block` pool block
+ * and must not be released through `mojo_cstr_or_int_release`. Every `_kw`
+ * entry point below copies or merely reads it, so free it with
+ * `mojo_dict_key_free` once that one call returns. Raises for a dict / set
+ * key, which Python refuses as unhashable. */
+char       *mojo_dict_key_for(int64_t v);
+void        mojo_dict_key_free(char *s);
 int64_t     mojo_dict_get_int_kw(MojoDict *d, int64_t kw);
 double      mojo_dict_get_double_kw(MojoDict *d, int64_t kw);
 char       *mojo_dict_get_str_kw(MojoDict *d, int64_t kw);

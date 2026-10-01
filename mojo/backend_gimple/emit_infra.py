@@ -2193,6 +2193,32 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         if transient:
             gen._cstr_key_src[key] = '0'
         return 'char *', key
+    if typ in ('MojoList *', 'MojoSet *', 'MojoDict *') and transient and word_ok:
+        # A CONTAINER used as a dict key. This used to fall through to the raw
+        # `(char *)value` below, which makes the key the container's ADDRESS —
+        # so `d[(p, mtime)]` never found the entry an equal tuple stored, every
+        # miss re-inserted, and with no GC the tuple leaked per miss (about 16
+        # of the 19 GB live on `mojoc --dump-full fire.py`; see
+        # bugs/PERF_selfhost_memory_leak_hunt.md).
+        #
+        # The fix is in the runtime (`mojo_dict_key_for` renders a tuple's
+        # CONTENT into a length-delimited key) and this is the half that routes
+        # to it: hand the raw WORD over, exactly as the untracked-int64_t arm
+        # above does, so `_apply_kw_keys` selects the `_kw` twin and the twin
+        # decides between the three kinds a key word can be. A new pair of
+        # `mojo_dict_*_container` entry points would have meant a second
+        # dispatch table to keep in step with this one.
+        #
+        # `word_ok` is the dict-key signal, so this arm is reached ONLY for a
+        # key: a container in any other position keeps the raw cast below,
+        # which is what it wants.
+        # `ipw`, not `val`: `_apply_kw_keys` emits the registered expression
+        # as the `int64_t` argument of the `_kw` twin verbatim, and this
+        # codegen rejects an implicit pointer-to-integer conversion.
+        ipw = gen._new_val('int64_t', f'(int64_t){val}')
+        marker = gen._new_val('char *', f'(char *){ipw}')
+        gen._kw_key_src[marker] = ipw
+        return 'char *', marker
     if typ != 'char *':
         return 'char *', gen._new_val('char *', f'(char *){val}')
     return typ, val
