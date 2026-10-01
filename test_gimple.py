@@ -132,6 +132,62 @@ def test_c_shape(name: str, mojo_src: str, must_have: list, must_not_have: list)
         _FAIL += 1
 
 
+def test_kinds_marker_scope():
+    """The per-slot-kinds marker must not outlive the function that set it.
+
+    A value whose element kinds are recorded on the VALUE (`struct.unpack` of
+    a mixed format, a mixed list literal like `[1, 2.5]`) is marked by NAME, so
+    a read with no compile-time slot index — iteration, a computed subscript —
+    lowers as a boxed read through `mojo_list_get_boxed`. Those names are
+    `_reset_func`-scoped state and `temp_counter` restarts at `_t1` in every
+    function, so a marker that outlives its function is a marker on a name that
+    now belongs to a different value: the collision is invisible in the source
+    and decided entirely by how many temps each function happened to allocate.
+
+    The two functions below are shaped to collide. `s = 'ab'` is the one
+    statement that lands the second function's loop-iterable temp on `_t2`,
+    which is the very name the first function's mixed literal already
+    registered. Asserted as a COUNT, because the count is the whole bug: one
+    boxed read is what the mixed literal earns, two means the bystander loop
+    read through the runtime for kinds its list does not carry.
+
+    On a plain int list the two accessors return the same word, so the program's
+    OUTPUT is right either way and only the emitted C shows the difference —
+    which is why this asserts the C. (In the compiler's own source the same
+    false positive was a hard `-Wint-conversion` error instead, because the
+    runtime-dispatched dict arm had already declared the shared loop target
+    `char *`; see `_reset_func`'s own note in
+    `mojo/backend_gimple/emit_infra.py`.)"""
+    global _PASS, _FAIL
+    ok, c_src, stderr = gimple_compiles("""\
+def packer(i: Int) -> list:
+    return [i]
+
+
+def kinds_owner():
+    var m = [1, 2.5]
+    for x in m:
+        print(x)
+
+
+def kinds_bystander():
+    s = 'ab'
+    for e in packer(1):
+        print(e)
+""")
+    boxed = c_src.count('mojo_list_get_boxed')
+    if ok and boxed == 1:
+        print("PASS  kinds_marker_does_not_leak_into_a_later_function")
+        _PASS += 1
+    else:
+        print(f"FAIL  kinds_marker_does_not_leak_into_a_later_function: "
+              f"compiles={ok} mojo_list_get_boxed={boxed} (want exactly 1)")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
 def run_tests():
     # A vetted struct constructor bound to an owned local is initialised in frame storage.
     test_c_shape("owned_struct_local_is_initialised_in_the_frame", """\
@@ -221,6 +277,11 @@ def main():
     a = [1.0, 2.0]
     print(show(a, 2))
 """, must_have=[], must_not_have=["_mg_pack_char"])
+
+    # The per-slot-kinds marker must not outlive its function; the reasoning
+    # and the hand-reduced collision are in the helper's own docstring.
+    test_kinds_marker_scope()
+
 
     # 1. Empty void function (pass body)
     test("hello_gimple", """\
