@@ -241,9 +241,11 @@ COMPLETE run and a missing file is never reported as a verdict that changed.
 
 Verdicts are cached in the CAS (cas.formal_build_key: source bytes + the
 formal backend's own sources + the interpreter + the build flags + this tool's
-own bytes — see _criteria_id), so a re-run with nothing changed reads a file
-per file instead of recompiling. Editing anything under formal/, the parser,
-or mojo/middle/ invalidates it. The cache stores the raw build verdict; the
+own bytes — see _criteria_id — + the IMPORT CLOSURE the build reads, see
+_imports_digest), so a re-run with nothing changed reads a file per file
+instead of recompiling. Editing anything under formal/, the parser, mojo/middle/,
+or any module in the file's own import closure invalidates it. The cache stores
+the raw build verdict; the
 class is recomputed from it on every run, so a cached entry can never be
 reported under a class the current rules would not assign it — which is the
 half of the contract that matters now that a class is a function of the stored
@@ -322,6 +324,33 @@ def _criteria_id() -> str:
     that would have caught it was added."""
     with open(os.path.abspath(__file__), "rb") as f:
         return cas.hash_parts(f.read())
+
+
+def _imports_digest(path: str) -> str:
+    """The digest of every source this file's build reads BESIDES itself.
+
+    `formal/imports.py`'s, called here rather than reimplemented, because it
+    walks the closure with the SAME `imported_modules` / `resolve_module_path`
+    pair the build walks with and cannot therefore resolve a module the build
+    would not have compiled. `formal_fingerprint()` is a `.py` glob over
+    `formal/**`, so `formal/hostmods/*.mojo` — the one place a module edit
+    lands in practice — was not in the key at all, and a sweep run right after
+    a fix to one of them reported the fix as having done nothing.
+
+    Returned as `''` if the walk itself cannot run, which leaves the key equal
+    to the pre-fix one rather than failing the file: the build is the authority
+    on whether a file is answerable, and this must never be the thing that
+    decides it. (`import_closure_digest` already returns `''` for an unreadable
+    or unparseable file, which is the common case here.)
+    """
+    try:
+        from formal.imports import import_closure_digest
+        return import_closure_digest(path)
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        if os.environ.get("FORMAL_SWEEP_VERBOSE_IMPORTS"):
+            print(f"  (import digest unavailable for {path}: "
+                  f"{type(e).__name__}: {e})", file=sys.stderr)
+        return ""
 
 
 # ── Verdict classes ──────────────────────────────────────────────────────────
@@ -1868,6 +1897,20 @@ def _build_argv(path, out, flags, mem_gb):
             "--label", os.path.basename(path), "--"] + build
 
 
+def _as_text(value) -> str:
+    """`str(value)` for a pipe's output, which may be bytes or str.
+
+    `subprocess`'s timeout path hands back bytes even where the pipes were
+    opened in text mode, so every reader of a `TimeoutExpired` would otherwise
+    have to ask. One place that asks.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
 def _run_build(path, out, flags, timeout, mem_gb):
     """Run one file's build under its memory ceiling. Returns a BuildRun.
 
@@ -1886,10 +1929,45 @@ def _run_build(path, out, flags, timeout, mem_gb):
     itself produces, and procrun.memcap_verdict exists to refuse exactly that
     conflation. The peak travels with it so the report can name the number the
     ceiling was measured against rather than only saying a kill happened.
+
+    `Popen` + `kill_group` rather than `subprocess.run(timeout=…)`, and the
+    difference is the whole of the timeout's reach. `subprocess.run` SIGKILLs
+    the process it started and nothing below it, so a timeout here killed the
+    memcap WRAPPER and left its child — the build — running, unmonitored, still
+    holding the memory the ceiling exists to bound. The child was already in its
+    own session (which is what makes a group kill possible at all); nothing was
+    using it. `procrun.kill_group` is the same call `tools/suite.py` makes on
+    every job it times out, and its docstring is why it walks the tree before
+    killing the group: a group kill aimed at the wrapper stops AT the wrapper,
+    which would recreate the runaway the ceiling exists to prevent.
+
+    stdout and stderr stay SEPARATE (the classifier prefers stderr), so this is
+    `procrun.spawn` — which merges them — plus an explicit `Popen` rather than
+    the shared helper. The `TimeoutExpired` is re-raised rather than returned as
+    a `BuildRun`, because that is the contract `run_one` reports a timeout
+    through (and a timeout is deliberately never published — see there).
     """
     argv = _build_argv(path, out, flags, mem_gb)
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                          cwd=REPO, start_new_session=True)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True,
+                            cwd=REPO, start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        # The tree goes down FIRST, and the wait for its output comes after, so
+        # what the build printed before it died is not lost to the pipe: a file
+        # that refused a construct and then hung should still show the refusal.
+        procrun.kill_group(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        # `communicate(timeout=…)` puts BYTES on the exception even with
+        # text=True on this interpreter, and a caller that concatenates
+        # `.output` with a str gets a TypeError instead of the message.
+        raise subprocess.TimeoutExpired(
+            argv, timeout, output=stdout or _as_text(e.output),
+            stderr=stderr or _as_text(e.stderr)) from None
     mem_killed, peak = False, None
     if mem_gb and mem_gb > 0:
         # memcap's own accounting goes to stdout, where it would otherwise be
@@ -1898,8 +1976,8 @@ def _run_build(path, out, flags, timeout, mem_gb):
         # classifier must not be able to match a `memcap:` line as a build
         # refusal, and the build's real message is the one it should read.
         mem_killed, peak = procrun.memcap_verdict(
-            (proc.stdout or "") + (proc.stderr or ""))
-    return BuildRun(proc.returncode, proc.stdout, proc.stderr, mem_killed, peak)
+            (stdout or "") + (stderr or ""))
+    return BuildRun(proc.returncode, stdout, stderr, mem_killed, peak)
 
 
 def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
@@ -1920,8 +1998,12 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
     default would publish one architecture's verdict under the other's key.
 
     Cached in the CAS under cas.formal_build_key (source bytes + the formal
-    backend's sources + the interpreter + BUILD_FLAGS + _criteria_id()), so a
-    re-run with nothing changed is a file read per file instead of a compile.
+    backend's sources + the interpreter + BUILD_FLAGS + _criteria_id() + this
+    file's IMPORT CLOSURE digest), so a re-run with nothing unchanged is a
+    file read per file instead of a compile — and a change to a module this
+    build COMPILES is a miss rather than a replay of the verdict that module's
+    previous contents produced.
+
     The entry is the RAW build verdict (ok, detail); the class is derived from
     it by classify() on every run, for hits as much as for misses, so no cached
     entry can ever be reported under a class the current rules would not assign
@@ -1955,7 +2037,8 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
         # apart from a differently-built one.
         return verdict(False, f"cannot fingerprint this tool: {e}"[:200],
                        CAUSE_TOOL_ERROR, False)
-    key = cas.formal_build_key(source, path, flags, criteria)
+    key = cas.formal_build_key(source, path, flags, criteria,
+                               imports=_imports_digest(path))
     hit = cas.lookup(key, ".result")
     if hit is not None:
         _bump("hits")

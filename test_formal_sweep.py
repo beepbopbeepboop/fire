@@ -925,9 +925,15 @@ class TestCacheContract(unittest.TestCase):
         cas.reset_stats()
 
     def _key(self):
+        # The key `run_one` will compute, argument for argument — including the
+        # import-closure digest. A stored entry under a DIFFERENT key is not a
+        # cached verdict, it is a miss with an entry beside it, and a test that
+        # published one and asserted a hit would be asserting that the key
+        # function ignores an input it takes.
         with open(self.path) as f:
             return cas.formal_build_key(f.read(), self.path, self.flags,
-                                        S._criteria_id())
+                                        S._criteria_id(),
+                                        imports=S._imports_digest(self.path))
 
     def test_the_stored_bytes_carry_no_class(self):
         # The first half of the contract, structurally: only `ok` and the
@@ -989,11 +995,14 @@ class TestCacheContract(unittest.TestCase):
         # and the crash stays a miss.
         import formal_sweep as mod
         err = "build: 'X' object has no attribute 'y'\n" + TB_BACKEND
-        proc = mod.subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr=err)
+        proc = mod.BuildRun(1, "", err, False, None)
         published = []
-        with mock.patch.object(mod.subprocess, "run",
-                               return_value=proc), \
+        # `_run_build` itself, not `subprocess.run` under it: how the sweep
+        # spawns a build (and kills its tree on a timeout) is the sweep's
+        # business, and a mock of the spawning library underneath it silently
+        # stops intercepting the moment that changes — which is how this test
+        # came to be running a REAL build while believing it had stubbed one.
+        with mock.patch.object(mod, "_run_build", return_value=proc), \
              mock.patch.object(mod.cas, "lookup", return_value=None), \
              mock.patch.object(mod.cas, "publish",
                                side_effect=lambda *a, **k: published.append(a)):

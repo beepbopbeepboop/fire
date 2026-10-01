@@ -824,7 +824,21 @@ class ARM64Codegen:
         # a register of its own would be a second answer to "where does a
         # function keep a word", and the one that has to hold it is the same
         # answer for a spilled local and a register local.
-        self._returns_frame = self._image_returns_frame.get(f.name)
+        # THIS function's own answer, from `formal/build.py`'s per-function
+        # table — not `self._image_returns_frame.get(f.name)`, which is the
+        # by-name JOIN. Two definitions of one name can disagree about whether
+        # they return a frame (a Mojo overload pair where one ends `return
+        # self` and the other `return self.other[…](…)`), and the by-name table
+        # then gives both the same answer, so the hidden trailing block argument
+        # is passed to a definition that does not want it or withheld from one
+        # that does. The join is still what `_emit_call` asks, since a call site
+        # carries a name; the by-name table stays name-keyed for that reason.
+        self._returns_frame = getattr(f, "_returns_frame_struct", None)
+        if self._returns_frame is None:
+            # A function that never went through the frame analysis (a
+            # synthetic one in an emitter unit test) has no per-function answer,
+            # so fall back to the by-name table rather than to nothing.
+            self._returns_frame = self._image_returns_frame.get(f.name)
         if self._returns_frame is not None and f.name == self._entry_name:
             # The ENTRY has no caller to reserve a block, so the convention has
             # nothing to hand it.  Refused here, where which function is the

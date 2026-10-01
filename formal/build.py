@@ -2201,8 +2201,11 @@ def _fn_key(fn):
     are built and consumed within one `_frame_receivers` call.
 
     A NAME-keyed table is still right where the question is about the name, and
-    `param0`/`returns_frame` are those: a call site carries a name and nothing
-    else. `_name_defs` is what tells those readers the name is overloaded.
+    `param0` is the one that is left: it answers "is this a function in this
+    image", which a name answers for every definition of it. The other by-name
+    question — "what does a CALL to `f` give back" — is answered by
+    `_returns_frame_by_name`, which is a JOIN over the definitions rather than
+    one definition's slot, because a call site cannot say which one it reached.
     """
     return id(fn)
 
@@ -2250,6 +2253,94 @@ def _by_name_holder(name_defs: dict, holders: dict, hstruct: dict, name):
         return (None, None)
     key = _fn_key(defs[0])
     return (holders.get(key), hstruct.get(key))
+
+
+def _returns_frame_by_name(name_defs: dict, returns_frame: dict) -> tuple:
+    """`({name: struct}, {name: rows})` — what a CALL to `name` hands back.
+
+    The by-name reader of the returned-frame table, and the same agree-or-refuse
+    discipline as `_by_name_holder`: a call site carries a name and nothing else,
+    so "is the value of `f(...)` a frame address, and whose" is answerable only
+    when every definition of `f` gives the same answer. Where they do not
+    agree the name is ABSENT from the view — which every reader treats as "this
+    call does not hand back a frame" — and the disagreement is reported in the
+    second half so the caller can REFUSE it, which is the direction both wrong
+    answers fail in (see `model.frame_return_overloads_disagree_refusal`).
+
+    It is also what makes the holder fixpoint TERMINATE, and that is not a
+    refinement: `returns_frame` used to be keyed by `fn.name` and written by
+    every definition under that name, so two definitions of one name with
+    different answers overwrote each other once per pass in opposite directions
+    — each pass one stored its struct and the other popped it, `changed` went
+    true on both, and the inner `while changed:` never ended. Measured on
+    `std/python/bindings.mojo`, whose `PythonTypeBuilder.def_py_init` is
+    declared twice (one overload ends `return self`, the other
+    `return self.def_py_init[…](…)`): 7819 passes and 4.1 M node walks in 20 s,
+    still going, at 0.06 GB flat — the sweep's `-t 30` was the only bound on it,
+    and `std/python/bindings.mojo` now refuses in 2.0 s with a specific message
+    (the next real finding: calling a compile-time `def` parameter means
+    MONOMORPHISING it, and this path does not instantiate type parameters —
+    `bugs/FORMAL_known_limits.md` §1.1).
+
+    The per-function table it reads is keyed by `_fn_key`, like every other
+    per-function table here, so one definition's answer can no longer overwrite
+    another's and the two questions — "what does THIS body return" and "what
+    does a CALL to this name return" — stop sharing one slot.
+
+    The rows are `[(definition spelling, answer)]`, because the reader's next
+    question is which definition to change and nothing else in the message can
+    say it.
+    """
+    view, conflicts = {}, {}
+    for name, defs in (name_defs or {}).items():
+        answers = [returns_frame.get(_fn_key(d)) for d in defs]
+        if all(a is None for a in answers):
+            continue
+        # Identity, not `==`: two StructDefs that happen to share a name are two
+        # layouts, and the caller reserves a block sized for one of them.
+        if len({id(a) for a in answers}) == 1:
+            view[name] = answers[0]
+            continue
+        conflicts[name] = [
+            (_definition_spelling(d),
+             f"a frame address of {a.name}" if a is not None
+             else "an ordinary value")
+            for d, a in zip(defs, answers)]
+    return view, conflicts
+
+
+def _definition_spelling(fn) -> str:
+    """`f` / `f[K]` — enough to tell two definitions of a name apart.
+
+    The comptime parameters are what a reader has to look at to find the second
+    definition, so a refusal that names both without them sends the reader
+    through the file looking for a second `def` whose first line is identical.
+    """
+    names = [n for n in (getattr(fn, "comptime_params", None) or ()) if n]
+    return f"{fn.name}[{', '.join(names)}]" if names else fn.name
+
+
+def _holder_state(holders: dict, hstruct: dict, returns_frame: dict) -> tuple:
+    """A comparable snapshot of EVERYTHING the holder fixpoint decides from.
+
+    The holder sets, the candidate structs each holder name may have, and the
+    returned-frame table — which are the only mutable inputs to a pass, the
+    bodies and the parameter lists being fixed for the duration. Two passes
+    that start from equal snapshots decide identically, so a pass that ends
+    where it started while reporting progress cannot be followed by a pass
+    that settles: that is the certificate the inner loop's backstop refuses on,
+    and it is why the comparison is of CONTENT rather than of sizes (a name
+    traded for another, or a candidate list replaced by an equal-length one,
+    moves no size).
+    """
+    return (
+        tuple(sorted((key, tuple(sorted(names)))
+                     for key, names in holders.items())),
+        tuple(sorted((key, name, tuple(id(st) for st in structs))
+                     for key, by_name in hstruct.items()
+                     for name, structs in by_name.items())),
+        frozenset((key, id(st)) for key, st in returns_frame.items()),
+    )
 
 
 def _frame_receivers(functions: list, structs_by_name: dict,
@@ -2358,12 +2449,11 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # the `_DictEntryIter` body's read was checked against. That is a refusal
     # whose every clause is false about the program.
     #
-    # The tables that answer a question ABOUT A NAME — `param0`, and
-    # `returns_frame` below — stay name-keyed, because a CALL SITE only
-    # carries a name and that is the whole of what it can ask. Where a name is
-    # overloaded, `_name_defs` below is what says so at the point of use, so a
-    # by-name lookup answers "these definitions agree" rather than silently
-    # reading whichever one landed last.
+    # A question ABOUT A NAME is a different table, and `param0` is the one
+    # that stays name-keyed: it answers "is this a function in this image",
+    # which a name answers for every definition of it. The other by-name
+    # question — what a CALL to a name hands back — is `_returns_frame_by_name`
+    # over a per-function table, for the reason its docstring gives.
     holders = {_fn_key(fn): set() for fn in functions}
     hstruct = {_fn_key(fn): {} for fn in functions}
     # `{name: [FunctionDef, …]}` — every definition of every name in the image.
@@ -2393,7 +2483,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # "no call site agrees", which is a refusal the pre-existing rule does not
     # make.
     declared_holders = {_fn_key(fn): {} for fn in functions}
-    # `{function name: struct}` — the functions that RETURN a frame address, and
+    # `{_fn_key(fn): struct}` — the functions that RETURN a frame address, and
     # the struct whose layout that frame has.  It is the other half of the
     # holder fixpoint below and is computed inside the same loop, because the
     # two feed each other: a call to one of these functions binds a holder, and
@@ -2402,6 +2492,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # holder is (`model.frame_holder_disagreement_refusal`): the caller has to
     # reserve a block BEFORE the call and read the result out of it afterwards,
     # so one call site's answer is not enough.
+    #
+    # KEYED BY FUNCTION IDENTITY, like every other per-function table here, and
+    # the by-name question a call site asks is answered by the JOIN in
+    # `_returns_frame_by_name` rather than by this table being keyed by name.
+    # That is a termination fix as much as a correctness one — see that
+    # function's docstring for the measured hang a name-keyed slot produced
+    # when two definitions of one name disagreed.
     returns_frame: dict = {}
     for fn in functions:
         owner = owners.get(fn.name)
@@ -2437,8 +2534,21 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
         grew = False
         changed = True
+        # `None` rather than the current state, so the FIRST pass of a round can
+        # never be the one the backstop below refuses — it is the pass that
+        # establishes what there is to compare against.
+        _pass_state = None
         while changed:
             changed = False
+            # The by-name view of `returns_frame`, recomputed once per pass and
+            # read by the two call-site edges below: both ask "does a CALL to
+            # this name hand back a frame", which is the JOIN over that name's
+            # definitions and not one definition's slot. Recomputed rather than
+            # maintained because it is a pure function of a table that is small
+            # (one entry per function) — a second table to keep in step would be
+            # a second thing that can disagree.
+            by_name_returns_frame, _conflicts = _returns_frame_by_name(
+                _name_defs, returns_frame)
             for fn in functions:
                 hs = holders[_fn_key(fn)]
                 for node in M.iter_nodes(fn.body):
@@ -2478,7 +2588,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                     # generic frame-returning constructor.
                     if target and isinstance(value, F.CallExpr):
                         frame_fn = M.call_callee_name(value.func)
-                        st = returns_frame.get(frame_fn) if frame_fn else None
+                        st = (by_name_returns_frame.get(frame_fn)
+                              if frame_fn else None)
                         if st is not None and target not in hs:
                             hs.add(target)
                             hstruct[_fn_key(fn)].setdefault(target, []).append(st)
@@ -2586,14 +2697,35 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             for fn in functions:
                 status, st = _frame_return_status(fn, holders[_fn_key(fn)],
                                                   hstruct[_fn_key(fn)],
-                                                  returns_frame)
+                                                  by_name_returns_frame)
                 fn._frame_return_status = status
-                if status == _RETURN_FRAME and returns_frame.get(fn.name) is not st:
+                key = _fn_key(fn)
+                if status == _RETURN_FRAME and returns_frame.get(key) is not st:
                     changed = grew = True
                 if status == _RETURN_FRAME:
-                    returns_frame[fn.name] = st
-                elif returns_frame.pop(fn.name, None) is not None:
+                    returns_frame[key] = st
+                elif returns_frame.pop(key, None) is not None:
                     changed = grew = True
+            # A pass that claims progress and leaves every table it reads exactly
+            # as it found it is not going to settle: the next pass reads the same
+            # state, makes the same decisions, and reaches here again. So it is
+            # refused instead of spun on. This is the inner loop's backstop, and
+            # it is here because the OUTER loop's bound (`_HOLDER_FIXPOINT_ROUNDS`)
+            # cannot fire while this one is still running — which is how a
+            # non-terminating fixpoint reached a hang rather than the documented
+            # refusal. The state compared is everything the pass decides from:
+            # the holder sets, the candidate lists they name, and the returned-
+            # frame table.
+            if changed and _holder_state(holders, hstruct,
+                                         returns_frame) == _pass_state:
+                raise CodegenError(
+                    f"the holder analysis reported progress in a pass that "
+                    f"changed none of its tables: no holder was added, no "
+                    f"frame-returning function entered or left the table, and "
+                    f"the next pass would therefore decide exactly as this one "
+                    f"did. That means the fixpoint has no fixed point on this "
+                    f"program, which is a compiler bug, not a program error")
+            _pass_state = _holder_state(holders, hstruct, returns_frame)
         moved = (_rewrite_len_on_frame_receivers(functions, holders,
                                           hstruct)
                  + _rewrite_eq_on_frame_receivers(functions, holders,
@@ -2608,14 +2740,39 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             f"feeds has no fixed point. That is a compiler bug, not a program "
             f"error")
 
-    # The whole image's table, published on every function, and the reason it
-    # is published rather than passed: the CALLER of a frame-returning function
-    # is a different function from the one that returns it, and the emitters
-    # ask the question per call site with no unit in hand — the same reason
-    # `_frame_candidates` is published rather than threaded.
+    # The whole image's BY-NAME table, published on every function, and the
+    # reason it is published rather than passed: the CALLER of a frame-returning
+    # function is a different function from the one that returns it, and the
+    # emitters ask the question per call site with no unit in hand — the same
+    # reason `_frame_candidates` is published rather than threaded. It is the
+    # JOIN (`_returns_frame_by_name`), so a name whose definitions disagree is
+    # absent from it and no call site claims a frame from it.
+    #
+    # `_returns_frame_struct` is published alongside it because the emitter's
+    # other question is not a by-name one: "does the function I am EMITTING
+    # return a frame" has an answer for each definition separately, and reading
+    # it out of the by-name table gave both definitions of an overloaded name
+    # one answer — which for a pair whose definitions disagree is a wrong
+    # answer for one of them, since the extra trailing block argument is either
+    # passed or it is not.
+    by_name_returns_frame, conflicts = _returns_frame_by_name(_name_defs,
+                                                             returns_frame)
     for fn in functions:
-        fn._image_returns_frame = dict(returns_frame)
+        fn._image_returns_frame = dict(by_name_returns_frame)
+        fn._returns_frame_struct = returns_frame.get(_fn_key(fn))
     _check_returned_frame_budget(functions, returns_frame, params_of)
+    # An overloaded name whose definitions disagree about returning a frame is
+    # PARKED on each of them, for the reason every other returned-frame refusal
+    # in this file is: this pass runs inside `_prepare_functions`, which is
+    # before the imports resolve, so a refusal raised here would be reported in
+    # place of the import diagnosis — and a file that imports a host module is
+    # out of this backend's reach whatever its own convention says. Parked on
+    # every definition rather than once so the message cannot be lost by a
+    # definition that no later check walks.
+    for name, rows in conflicts.items():
+        message = M.frame_return_overloads_disagree_refusal(name, rows)
+        for fn in _name_defs.get(name) or ():
+            _park_frame_return(fn, message)
 
     # AFTER the fixpoint and BEFORE the per-function loop below, and both of
     # those positions are load-bearing rather than tidy:
@@ -3029,7 +3186,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                              declared_holders, structs_by_name,
                              _name_defs)
     _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
-                            returns_frame)
+                            by_name_returns_frame)
     _park_construction_mismatches(functions, framed)
 
 
@@ -4187,7 +4344,7 @@ _RETURN_WORD = "word"
 _RETURN_UNSOUND = "unsound"
 
 
-def _frame_return_status(fn, holders, by_name, returns_frame):
+def _frame_return_status(fn, holders, by_name, returns_by_name):
     """`(status, struct_or_None)` — what `fn` gives back to its callers.
 
     The decision the returned-frame convention turns on, and it is asked of
@@ -4215,6 +4372,14 @@ def _frame_return_status(fn, holders, by_name, returns_frame):
     word — including a field read (`self.x` is a VALUE read out of the frame,
     not the frame) and a copy construction, which is a frame in THIS function's
     own scratch and is copied out by the same convention when it is returned.
+
+    `returns_by_name` is the JOIN (`_returns_frame_by_name`), not the
+    per-function table: the second case asks about a CALLEE, and a callee is
+    reached by name. A name whose definitions disagree about whether they
+    return a frame is absent from it, so the call is read as a word — which is
+    the answer a caller can act on, since reserving a block for a result half
+    the definitions do not return would size the caller's scratch for a copy
+    that does not happen.
     """
     frames, words = [], []
     for node in M.iter_nodes(getattr(fn, "body", None)):
@@ -4227,7 +4392,7 @@ def _frame_return_status(fn, holders, by_name, returns_frame):
                 frames.append((cands, value.name))
                 continue
         if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
-            st = returns_frame.get(value.func.name)
+            st = returns_by_name.get(value.func.name)
             if st is not None:
                 frames.append(([st], f"{value.func.name}()"))
                 continue
@@ -4404,7 +4569,7 @@ def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
     it.  Counted from the DECLARED parameter list rather than from a call site,
     because the callee is compiled once and every call site has to agree."""
     for fn in functions or ():
-        if fn.name not in returns_frame:
+        if returns_frame.get(_fn_key(fn)) is None:
             continue
         names = params_of.get(_fn_key(fn)) or []
         n = len(M.incoming_args(fn))
@@ -7549,6 +7714,87 @@ def dylib_manifest_path(dylib_path: str) -> str:
     return os.path.abspath(dylib_path) + ".manifest.json"
 
 
+def _write_json_atomic(path: str, payload) -> None:
+    """Write JSON to `path` through a private temp file and `os.replace`.
+
+    The established mechanism in this repository — `cas.publish` does exactly
+    this, and its own comment says why ("Hash-named files are immutable, so a
+    racing identical write is harmless (`os.replace` is atomic)") — applied to
+    the one file here that other processes read WHILE it is being written.
+
+    `open(path, "w")` truncates AT THE OPEN, so between that open and the first
+    byte written the file is 0 bytes, and a reader in that window gets
+    `json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)`.
+    That is not an `OSError`, so none of the `except OSError` around these reads
+    catches it: it propagates out of the build driver and the sweep files the
+    file as `tool: the build driver raised: json.decoder.JSONDecodeError`. The
+    writers are serialised by `formal/imports.py`'s `_dylib_lock`; the READERS
+    take no lock at all, so the pair exists inside one `-j6` sweep — two workers
+    importing the same stdlib module both build its dylib, and one links it
+    while the other rewrites its manifest. Measured twice, on real manifests of
+    11.6 kB: the original report saw 357 of 882 concurrent reads (40 %) land in
+    the 0.21 ms window, and the reproducer against this tree's own code saw 1804
+    failures in 4095 reads — 1759 of them the empty-file `char 0` signature —
+    against 0 in 12792 reads after the fix.
+
+    fsync before the rename, because the failure this removes is a reader
+    seeing a half-written file; a rename that reaches disk before the data does
+    would trade it for a reader seeing the PREVIOUS content on a power cut,
+    which is a whole-file answer and so harmless. The temp name carries the pid
+    and a random suffix so two writers in one process cannot collide on it.
+    """
+    import json
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = os.path.join(
+        directory, f".{os.path.basename(path)}.tmp.{os.getpid()}."
+                   f"{os.urandom(4).hex()}")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(payload, f, indent=1, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def update_dylib_manifest(manifest_path: str, mutate) -> None:
+    """Read `<dylib>.manifest.json`, apply `mutate(payload)`, write it back.
+
+    ONE read-modify-write for every caller, because there were four of them
+    (`write_dylib_manifest`, `_record_link_deps`, `_record_namespace`,
+    `formal/imports.py`'s `_record_depends`) and four copies of a
+    read-modify-write is four chances to leave one of them truncating. The
+    write goes through `_write_json_atomic`, so a reader sees the whole old
+    file or the whole new one.
+
+    A manifest that is not there yet is not an error here: it is the state
+    before `write_dylib_manifest` has run, and each of these callers is
+    recording something INTO a manifest someone else may not have written yet.
+    So there is nothing to update and nothing to report — which is what the
+    `except OSError` these call sites already had does, and it stays. Widening
+    it to `ValueError` would be the wrong fix: it would convert the race above
+    into a silent "no manifest", which reads downstream as a module that
+    exports nothing — the exact false finding `load_dylib_manifests` warns
+    about — and it would also swallow the half-written file a crashed writer
+    leaves behind.
+    """
+    import json
+    try:
+        with open(manifest_path) as f:
+            payload = json.load(f)
+    except OSError:
+        return
+    mutate(payload)
+    _write_json_atomic(manifest_path, payload)
+
+
 def write_dylib_manifest(dylib_path: str, install_name: str,
                          exports: list, module: str = None,
                          constants: dict = None) -> str:
@@ -7592,7 +7838,6 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     a real global with nowhere to live, and it stays refused, which is what
     keeps `sys.argv` and `os.sep` different answers
     (`bugs/FORMAL_module_state_no_storage.md`)."""
-    import json
     path = dylib_manifest_path(dylib_path)
     payload = {
         "dylib": os.path.abspath(dylib_path),
@@ -7609,9 +7854,11 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
                      "frame_params": e.get("frame_params") or []}
                     for e in exports],
     }
-    with open(path, "w") as f:
-        json.dump(payload, f, indent=1, sort_keys=True)
-        f.write("\n")
+    # Atomic, like every other manifest write: this one truncates a file other
+    # processes read while they link (see `_write_json_atomic`), and it is the
+    # write that makes the file exist at all, so a reader in its window would
+    # read an empty manifest rather than a stale one.
+    _write_json_atomic(path, payload)
     return path
 
 
@@ -8807,17 +9054,12 @@ def _export_frame_contract(fn) -> list:
 
 def _record_link_deps(manifest_path: str, linked: list) -> None:
     """Note the libraries this dylib links, so a program can close the set."""
-    import json
-    try:
-        with open(manifest_path) as f:
-            payload = json.load(f)
-    except OSError:
-        return
-    payload["links"] = [{"install_name": d["install_name"],
-                         "path": d.get("path")} for d in linked]
-    with open(manifest_path, "w") as f:
-        json.dump(payload, f, indent=1, sort_keys=True)
-        f.write("\n")
+
+    def _record(payload):
+        payload["links"] = [{"install_name": d["install_name"],
+                             "path": d.get("path")} for d in linked]
+
+    update_dylib_manifest(manifest_path, _record)
 
 
 def _namespace_library(output: str, install_name: str, arch: str,
@@ -8996,24 +9238,19 @@ def _record_namespace(manifest_path: str, reexports: dict,
     `reexports` and find, for a trait, no symbol to check — which is the true
     fact, but stated in the one field whose contract is "there is a symbol".
     """
-    import json
-    try:
-        with open(manifest_path) as f:
-            payload = json.load(f)
-    except OSError:
-        return
-    payload["kind"] = "namespace"
-    payload["reexports"] = {
-        n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(n)}
-        for n, v in sorted(reexports.items())}
-    if traits:
-        # Absent rather than empty for a pure re-export package: the key means
-        # "this library declares traits", and writing `[]` there would claim a
-        # module with traits and none, which is a different file.
-        payload["traits"] = sorted(set(traits))
-    with open(manifest_path, "w") as f:
-        json.dump(payload, f, indent=1, sort_keys=True)
-        f.write("\n")
+    def _mark(payload):
+        payload["kind"] = "namespace"
+        payload["reexports"] = {
+            n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(n)}
+            for n, v in sorted(reexports.items())}
+        if traits:
+            # Absent rather than empty for a pure re-export package: the key
+            # means "this library declares traits", and writing `[]` there
+            # would claim a module with traits and none, which is a different
+            # file.
+            payload["traits"] = sorted(set(traits))
+
+    update_dylib_manifest(manifest_path, _mark)
 
 
 def compile_formal_dylib(source_paths: list, output: str = None,
