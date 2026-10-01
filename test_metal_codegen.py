@@ -642,7 +642,7 @@ class TestLaunchArgTypes(unittest.TestCase):
         mod = parse(KERNEL_AND_CALLER)
         types, count = dglue.launch_arg_types(mod[0].params)
         self.assertEqual(
-            [(n, isb) for n, _t, isb, _w in types],
+            [(a.name, a.is_buffer) for a in types],
             [('in0', True), ('in1', True), ('output', True), ('len', False)])
         self.assertEqual(count, 3)
 
@@ -1793,6 +1793,76 @@ class TestAutoOffloadRunsOnGpu(unittest.TestCase):
         self.assertIn('kernels 0', out)
         self.assertIn('d 0', out)
         self.assertIn('f 0', out)
+
+
+
+class TestReadOnlyBuffersAreNotWrittenBack(unittest.TestCase):
+    """A read-only buffer is packed and released, but not written back.
+
+    The launch lowering packs EVERY buffer and used to unpack every buffer
+    too, so a kernel with two read-only inputs paid four extra O(n) passes
+    per dispatch (two write-backs, two frees) for no observable effect.
+
+    This is driven by the ORIGIN in the annotation, because `_mojo_type` maps
+    `UnsafePointer[Float32, MutAnyOrigin]` and
+    `UnsafePointer[Float32, ImmutAnyOrigin]` to the same `float *` -- the C
+    type genuinely cannot say which buffers a kernel writes.
+    """
+
+    def test_the_origin_decides_writability(self):
+        self.assertTrue(dglue.buffer_is_writable('UnsafePointer[Float32, MutAnyOrigin]'))
+        self.assertFalse(dglue.buffer_is_writable('UnsafePointer[Float32, ImmutAnyOrigin]'))
+        self.assertFalse(dglue.buffer_is_writable('UnsafePointer[Int32, ImmutUntrackedOrigin]'))
+        # No promise made -> writable. An unnecessary write-back is wasted
+        # work; a skipped one is a wrong answer, so the default is the safe one.
+        self.assertTrue(dglue.buffer_is_writable('UnsafePointer[Float32]'))
+        self.assertTrue(dglue.buffer_is_writable('Float32'))
+
+    def test_the_synthesised_kernel_declares_its_reads_immutable(self):
+        k = ofl.synthesise(_fn(SAXPY), ofl.recognise(_fn(SAXPY)))
+        anns = {p[0]: p[1] for p in k.params}
+        for nm in ('x', 'y'):
+            self.assertIn('Immut', anns[nm], anns[nm])
+            self.assertFalse(dglue.buffer_is_writable(anns[nm]))
+        self.assertIn('Mut', anns['out'], anns['out'])
+        self.assertTrue(dglue.buffer_is_writable(anns['out']))
+
+    def test_only_the_written_buffer_is_written_back(self):
+        gen = gctypes.GimpleGen(None)
+        gen.module_name = 'ro'
+        out = gen.gen_module(list(parse(SAXPY)))
+        i = out.find('void ro_saxpy')
+        host = out[i:out.find('int _gimple_main', i)]
+        # packed: all three, because the kernel needs a contiguous T* to read.
+        for nm in ('x', 'y', 'out'):
+            self.assertIn(f'_mg_pack_float({nm},', host)
+        # written back: only the output.
+        self.assertIn('_mg_unpack_float(out,', host)
+        self.assertNotIn('_mg_unpack_float(x,', host)
+        self.assertNotIn('_mg_unpack_float(y,', host)
+        # freed: all three, so nothing leaks.
+        self.assertEqual(host.count('free ('), 3, host)
+
+    def test_every_free_comes_AFTER_the_dispatch(self):
+        """A read-only buffer's free must not be emitted next to its pack.
+
+        The first version of this put `if (buf) free(buf);` right where the
+        write-back would have been, i.e. BEFORE the dispatch -- so the kernel
+        read memory that had already been released. Measured: the output list
+        came back as its sentinel, and the read-only inputs as garbage. Free
+        and write-back belong in the same place for the same reason: after
+        the dispatch is done with them.
+        """
+        gen = gctypes.GimpleGen(None)
+        gen.module_name = 'ro'
+        out = gen.gen_module(list(parse(SAXPY)))
+        i = out.find('void ro_saxpy')
+        host = out[i:out.find('int _gimple_main', i)]
+        launch = host.index('_mg_launch__mg_offload_saxpy(')
+        for line in host.splitlines():
+            if 'free (' in line:
+                self.assertGreater(host.index(line), launch,
+                                   f'free before the dispatch: {line.strip()}')
 
 
 

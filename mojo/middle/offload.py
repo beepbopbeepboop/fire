@@ -402,6 +402,10 @@ _CONTAINER_ELEMS = {
 #: `List[T]`.
 _POINTER_SPELLING = 'UnsafePointer[%s, MutAnyOrigin]'
 
+#: The same, for a buffer the kernel only READS. See the parameter-ordering
+#: note in `synthesise` for why the host marshalling acts on this.
+_IMMUTABLE_SPELLING = 'UnsafePointer[%s, ImmutAnyOrigin]'
+
 #: The synthesised kernel's length parameter. Separate from every source
 #: name, so adding a synthesised function to a module cannot shadow or be
 #: shadowed by a parameter of the function it came from.
@@ -609,10 +613,28 @@ def synthesise(fdef, info: 'Offloadable') -> 'object':
     # count_idx. Measured: with the length before the buffers, `x`'s
     # [[buffer(0)]] and the scalar's implicit index collided and the real
     # runtime aborted with "Command encoder released without endEncoding".
+    # Read containers are declared with the IMMUTABLE origin and the written
+    # one with the mutable origin. The C type is `float *` either way, so this
+    # changes nothing about the kernel's arithmetic -- it is a promise about
+    # which buffers the kernel writes, and the host marshalling BELIEVES it.
+    #
+    # Why that is worth doing: the launch lowering packs every buffer and
+    # unpacks every buffer back. For a read-only input the unpack is two
+    # wasted O(n) passes (one to write the values it just read out, one to
+    # free), on every dispatch, for no observable effect. The stdlib's own
+    # spelling for this is `ImmutAnyOrigin` (see
+    # std/gpu/host/device_graph.mojo), so this follows the convention rather
+    # than inventing one.
+    #
+    # Note the existing hand-written kernels in this tree pass a BARE
+    # `UnsafePointer[Float32]` for inputs and output alike, so nothing
+    # changes for them: an annotation with no origin is treated as writable,
+    # which is the conservative direction (an unnecessary write-back is
+    # wasted work; a missing one is a wrong answer).
     params: list = []
     for nm in info.reads:
-        params.append((nm, _POINTER_SPELLING % anns[nm]))
-    params.append((info.writes, _POINTER_SPELLING % anns[nm]))
+        params.append((nm, _IMMUTABLE_SPELLING % anns[nm]))
+    params.append((info.writes, _POINTER_SPELLING % anns[info.writes]))
     params.append((_LENGTH_PARAM, 'Int'))
     for nm in sorted(carried):
         params.append((nm, _param_annotation(fdef, nm)))

@@ -27,6 +27,8 @@ calls into it.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 #: C-escape a Python string into C string literal bodies. `?` is escaped for
 #: trigraph safety: `??` followed by one of `=/()'<!>-` is eaten by a
 #: conforming preprocessor as a digraph, and MSL is full of `?:`.
@@ -88,6 +90,51 @@ _SCALAR_WIDTH = {
 }
 
 
+#: Origins that mean the kernel PROMISES not to write through the pointer.
+#: An annotation with no origin, or a mutable one, is writable -- the
+#: conservative direction, because an unnecessary write-back is wasted work
+#: while a skipped one is a wrong answer.
+_IMMUTABLE_ORIGINS = ('immut', 'imm')
+
+
+def buffer_is_writable(annotation: str) -> bool:
+    """Whether a kernel buffer parameter is declared WRITABLE.
+
+    `UnsafePointer[Float32, ImmutAnyOrigin]` -> False (read-only).
+    `UnsafePointer[Float32, MutAnyOrigin]`   -> True.
+    `UnsafePointer[Float32]`                  -> True (no promise made).
+
+    The origin is the ONLY place mutability is recorded: `_mojo_type` maps
+    both spellings to the same `float *`, so the C type cannot answer this.
+    """
+    ann = (annotation or '').strip()
+    if not ann.startswith(_POINTER_ANNOTATIONS):
+        return True
+    ann = ann.lower()
+    for origin in _IMMUTABLE_ORIGINS:
+        if origin in ann:
+            return False
+    return True
+
+
+class LaunchArg(NamedTuple):
+    """One kernel parameter, as the host marshalling sees it.
+
+    A NamedTuple rather than a bare tuple because this grew a fifth field
+    (writable) and every positional unpack of it broke at once. The accessors
+    keep working when the next field arrives, and `writable` is the reason it
+    exists: `_mojo_type` maps `UnsafePointer[Float32, MutAnyOrigin]` and
+    `UnsafePointer[Float32, ImmutAnyOrigin]` to the SAME `float *`, so the C
+    type cannot tell the host which buffers the kernel promised to write.
+    """
+
+    name: str
+    ctype: str
+    is_buffer: bool
+    width: int
+    writable: bool = True
+
+
 class LaunchError(Exception):
     """A kernel whose host side cannot be marshalled honestly."""
 
@@ -113,12 +160,14 @@ def launch_arg_types(params) -> tuple[list[tuple[str, str, bool, int]], int]:
         if _ann.startswith(_POINTER_ANNOTATIONS) or _ann.endswith('*'):
             _inner = (_ann[_ann.find('[') + 1:].split(',')[0].strip()
                       if '[' in _ann else 'Float32')
-            out.append((_pn, _ELEM_CTYPE.get(_inner, 'float') + ' *', True, 0))
+            out.append(LaunchArg(
+                _pn, _ELEM_CTYPE.get(_inner, 'float') + ' *', True, 0,
+                buffer_is_writable(_ann)))
         else:
             if count_idx < 0 and _ann in ('Int', 'Int64'):
                 count_idx = _i
             _ct, _w = _SCALAR_WIDTH.get(_ann, ('int64_t', 8))
-            out.append((_pn, _ct, False, _w))
+            out.append(LaunchArg(_pn, _ct, False, _w, True))
     return out, count_idx
 
 
@@ -162,9 +211,10 @@ def emit_launch_wrappers(kernels: dict) -> str:
     lines: list[str] = []
     for _kn, (params, count_idx) in kernels.items():
         count_idx = element_count_index(_kn, count_idx)
-        _bufs = [(n, t) for n, t, isb, _w in params if isb]
-        _scals = [(n, t, w) for n, t, isb, w in params if not isb]
-        _sig = ', '.join(f'{t} {n}' for n, t, _b, _w in params) or 'void'
+        _bufs = [(a.name, a.ctype) for a in params if a.is_buffer]
+        _scals = [(a.name, a.ctype, a.width) for a in params
+                 if not a.is_buffer]
+        _sig = ', '.join(f'{a.ctype} {a.name}' for a in params) or 'void'
         lines.append('/* host wrapper for kernel %r */' % _kn)
         lines.append('void _mg_launch_%s(%s) {' % (_kn, _sig))
         if _bufs:
@@ -294,7 +344,7 @@ def emit_launch_prototypes(kernels: dict) -> str:
     """
     lines: list[str] = []
     for _kn, (params, _ci) in kernels.items():
-        _sig = ', '.join(f'{t} {n}' for n, t, _isb, _w in params) or 'void'
+        _sig = ', '.join(f'{a.ctype} {a.name}' for a in params) or 'void'
         lines.append(f'void _mg_launch_{_kn}({_sig});')
     # The introspection entry points, unconditionally: they are REAL runtime
     # functions (registered in _RUNTIME_FUNCS, so a call from compiled Mojo

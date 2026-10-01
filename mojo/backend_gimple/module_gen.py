@@ -1194,9 +1194,9 @@ def gen_module_impl(self, stmts):
             # need the pack/unpack pair, whether or not any call site in this
             # module has been reached yet. The call-site pass adds to the
             # same set, so the preamble emits whichever is larger.
-            for _pn, _ct, _isb, _w in _tys:
-                if _isb:
-                    self._list_marshalling_needed.add(_ct[:-2])
+            for _a in _tys:
+                if _a.is_buffer:
+                    self._list_marshalling_needed.add(_a.ctype[:-2])
             # (name, c_type, is_buffer) triples, plus the element-count
             # index. The wrapper generator needs to tell a buffer from a
             # scalar; emit_calls.py reads only the c_types, from

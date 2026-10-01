@@ -472,13 +472,15 @@ def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
 
     _parts = []
     _unpacks = []
+    _frees = []
     for _i, _a in enumerate(node.args):
         # `_device_launch_args` holds (name, c_type, is_buffer) triples so the
         # wrapper generator can tell buffers from scalars; the call site only
         # needs the C type and the is_buffer flag.
         _spec = _argtypes[_i]
-        _want = _spec[1] if isinstance(_spec, tuple) else _spec
-        _is_buf = _spec[2] if isinstance(_spec, tuple) and len(_spec) > 2 else False
+        _want = _spec.ctype if isinstance(_spec, _gmi_glue.LaunchArg) else _spec[1]
+        _is_buf = (_spec.is_buffer if isinstance(_spec, _gmi_glue.LaunchArg)
+                   else (len(_spec) > 2 and _spec[2]))
         _t, _v = _lowered[_i]
         if _is_buf and _t == 'MojoList *':
             # A boxed list where the kernel wants a `T *`.
@@ -492,12 +494,23 @@ def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
             if _count_val is None:
                 raise RuntimeError(
                     f'cannot compile module: GPU kernel {_kname!r} was given a '
-                    f'list for argument {_spec[0]!r}, which needs the '
+                    f'list for argument {_spec.name!r}, which needs the '
                     f"kernel's length parameter to size the buffer, but no "
                     f'length parameter was recorded')
             _elem = _want[:-2] if _want.endswith(' *') else 'float'
             _pack = _gmi_glue._c_helper_name(_elem)
-            _unpack = _gmi_glue._c_unpack_name(_elem)
+            # A buffer the kernel declared with an IMMUTABLE origin is written
+            # back by nobody, so the copy-back -- two O(n) passes plus a free,
+            # per dispatch -- is pure waste. The pack is still needed: the
+            # kernel reads a contiguous `T *` and a MojoList is not one.
+            #
+            # Conservative by construction: an annotation with no origin, or a
+            # mutable one, is writable, so a kernel that writes through a
+            # buffer without saying so still gets its write-back. Only an
+            # explicit immutable promise skips it.
+            _writable = (_spec.writable if isinstance(_spec, _gmi_glue.LaunchArg)
+                         else True)
+            _unpack = _gmi_glue._c_unpack_name(_elem) if _writable else None
             gen._list_marshalling_needed.add(_elem)
             _buf = gen._new_temp(f'{_elem} *')
             # The count handed to the unpacker is the SAME expression the
@@ -511,7 +524,16 @@ def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
             # which segfaults inside the helper. See _PACK_TEMPLATE.)
             gen._emit(f'  {_buf} = {_pack}({_v}, (int64_t){_count_val});')
             _parts.append(_buf)
-            _unpacks.append((_v, _buf, _count_val, _elem))
+            if _unpack is not None:
+                _unpacks.append((_v, _buf, _count_val, _unpack))
+            else:
+                # Still has to be released, just not written back -- and the
+                # release must come AFTER the dispatch, like the write-back
+                # does. Emitting the free here, next to the pack, frees the
+                # buffer while the kernel is still reading it: measured, the
+                # read-only inputs came back as garbage and the output list
+                # was left at its sentinel.
+                _frees.append(_buf)
             continue
         if _t != _want:
             # _safe_coerce_emit returns None -- it writes the coercion into
@@ -522,11 +544,15 @@ def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
             _v = _tmp
         _parts.append(_v)
     gen._emit(f'  {_wname}(' + ', '.join(_parts) + ');')
-    for _list_v, _buf_v, _n_v, _elem in _unpacks:
+    for _list_v, _buf_v, _n_v, _unpack in _unpacks:
         gen._emit(f'  if ({_buf_v}) {{')
-        gen._emit(f'    {_gmi_glue._c_unpack_name(_elem)}({_list_v}, {_buf_v}, (int64_t){_n_v});')
+        gen._emit(f'    {_unpack}({_list_v}, {_buf_v}, (int64_t){_n_v});')
         gen._emit(f'    free ({_buf_v});')
         gen._emit('  }')
+    # Read-only buffers: released here, after the dispatch has finished
+    # reading them.
+    for _buf_v in _frees:
+        gen._emit(f'  if ({_buf_v}) free ({_buf_v});')
     return 'void', '0'
 
 
