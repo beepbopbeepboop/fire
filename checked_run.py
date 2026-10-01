@@ -49,6 +49,14 @@ shell pattern, expands it against the CWD, and folds in every match. It is a
 separate flag rather than a pattern `--extra` might also be read as, because
 silently reinterpreting an existing argument is invisible until it is wrong.
 
+A glob recurses where a named directory did not have to, so it also needs the
+skip rule a named directory does not: `**/test_*.py` reaches `build/`, and the
+A/B machinery's `aside/` and `bside/` hold COPIES of repo files under a second
+name. Those are not inputs, and folding them in would make the key depend on
+whether a sweep had run. `DERIVED_DIRS` is that rule, read by both walks here
+and by `test_suite.py`'s own subject walk, because two copies of a directory
+list is one copy too many.
+
 That is not a hypothetical there. `suite-self-test` is `cache=True` and carries
 the estate check, which is the check that fails when a test file lands with
 neither a registration nor a reason. Keyed on the runner's own sources, adding
@@ -92,6 +100,30 @@ GCC = find_gcc()
 # why that is also the trap, and `main` for the warning that names it.
 MISSING = b'\0missing'
 
+# Directory names whose contents are not an input to anything. ONE list, read
+# by both callers that walk a tree, because the second one is here: `_hash_input`
+# had `__pycache__` and dot-directories hard-coded in its own walk, and a glob
+# needs the same rule plus three more names — and a rule written twice is a
+# rule whose two copies have already drifted once (they did).
+#
+#   __pycache__  derived from files already in the hash, so including it makes
+#                the key depend on whether the tree has been imported yet
+#   build/       this project's derived output (`tools/suite.py` is explicit
+#                that the key does not cover a stale `build/`)
+#   aside/ bside/  the A/B machinery's per-file COPIES of repo files — the same
+#                content under a second name, which would double every input and
+#                make the key depend on a sweep having run
+#
+# A leading `.` is skipped on the same grounds as all of them (VCS metadata,
+# tool caches). It is a predicate rather than a set membership test because
+# `.git` and `.tmp` have to go without anyone remembering to add them.
+DERIVED_DIRS = frozenset({'__pycache__', 'build', 'aside', 'bside'})
+
+
+def is_derived_dir(name: str) -> bool:
+    """Whether a directory NAME is one whose contents are not an input."""
+    return name in DERIVED_DIRS or name.startswith('.')
+
 
 def _hash_input(path: str, parts: list, missing: list) -> None:
     """Fold one `--extra` path into `parts`, and record it in `missing` if absent.
@@ -99,11 +131,8 @@ def _hash_input(path: str, parts: list, missing: list) -> None:
     A FILE contributes its path and its bytes. A DIRECTORY contributes every
     file under it, recursively, each named by the path it was given plus its
     path relative to that directory, so two different directories can never
-    collide even when their contents are identical. `__pycache__` and `*.pyc`
-    are skipped: they are derived from files already in the hash, and including
-    them would make the key depend on whether the tree has been imported yet -
-    the same class of "input" as a stale `build/`, which `tools/suite.py` is
-    explicit that the key does not cover.
+    collide even when their contents are identical. `DERIVED_DIRS` is skipped,
+    for the reasons documented there.
 
     The given path prefixes each entry rather than being dropped, for the same
     reason a file's path is hashed rather than just its bytes: the identity of
@@ -115,8 +144,7 @@ def _hash_input(path: str, parts: list, missing: list) -> None:
         base = os.path.abspath(path)
         found = []
         for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = sorted(d for d in dirnames
-                                 if d != '__pycache__' and not d.startswith('.'))
+            dirnames[:] = sorted(d for d in dirnames if not is_derived_dir(d))
             for fn in sorted(filenames):
                 if fn.endswith(('.pyc', '.pyo')):
                     continue
@@ -150,7 +178,28 @@ def expand_globs(patterns) -> tuple:
     overlap would make the key depend on the overlap rather than on the
     subject. `recursive=True` so `**/…` is available for a flat pattern whose
     set has since grown a subdirectory — which is exactly how this suite's own
-    subject set would rot if the pattern were pinned to the top level.
+    subject set would rot if the pattern were pinned to the top level. A `**`
+    pattern matches the top level too, so `**/test_*.py` covers both the repo's
+    root and its subdirectories with one pattern rather than a list per depth.
+
+    A hit under a `DERIVED_DIRS` directory is DROPPED, and this is the one
+    place a glob needs a rule a named `--extra <dir>` does not. An author who
+    writes `--extra formal/examples` has chosen that directory and means all of
+    it; an author who writes `--extra-glob '**/test_*.py'` has said "everything
+    shaped like this anywhere under the checkout", and `build/`, `aside/` and
+    `bside/` are shaped like it while being derived, duplicated or stale. Left
+    in, the key would depend on whether an A/B sweep or a build had run — the
+    same "input" the module docstring refuses for `__pycache__`, arrived at by
+    the other route.
+
+    …and the rule is applied to the components the PATTERN decides, not to the
+    whole path, which is the difference between a rule and a veto. `**/…`
+    decides every component below the directory it is anchored at, so it cannot
+    reach into `build/`; `/src/build/x_*.py` decides only `x_*.py`, because the
+    author wrote `build` themselves and meant it. Without that distinction the
+    rule misfires on innocent paths — this repo's `TMPDIR` is `.tmp/` inside the
+    checkout, so an absolute pattern under it dropped every hit, and a test
+    written to prove the rule works would have proved the opposite.
 
     A pattern that matches nothing comes back in the second list rather than
     being folded in as a missing path. It is a different failure from a
@@ -160,11 +209,44 @@ def expand_globs(patterns) -> tuple:
     """
     found, empty = set(), []
     for pat in patterns:
-        hits = sorted(glob.glob(pat, recursive=True))
+        pinned = _pinned_prefix_len(pat)
+        hits = sorted(h for h in glob.glob(pat, recursive=True)
+                      if not _under_derived_dir(h, pinned))
         if not hits:
             empty.append(pat)
         found.update(hits)
     return sorted(found), empty
+
+
+def _pinned_prefix_len(pattern: str) -> int:
+    """How many leading components of `pattern` are literal.
+
+    Everything up to the first component carrying a wildcard, which is exactly
+    the part of the path the glob cannot decide: `**/test_*.py` pins nothing
+    (the first component IS a wildcard) and `/src/build/x_*.py` pins three.
+    `expand_globs` skips this many components of each match before asking
+    whether the rest reaches a derived directory.
+    """
+    pinned = 0
+    for comp in os.path.normpath(pattern).split(os.sep):
+        if any(ch in comp for ch in '*?['):
+            break
+        if comp:
+            pinned += 1
+    return pinned
+
+
+def _under_derived_dir(path: str, skip: int = 0) -> bool:
+    """Whether a component of `path` past the first `skip` is a directory whose
+    contents are not an input.
+
+    The components of the path as written, not of its absolute form: `glob`
+    yields matches in the shape of the pattern, and an answer that depended on
+    the caller's cwd would drop files for a reason that has nothing to do with
+    them.
+    """
+    parts = [p for p in os.path.normpath(path).split(os.sep) if p]
+    return any(is_derived_dir(p) for p in parts[skip:])
 
 
 def check_key(name: str, extra_paths, glob_patterns=()) -> str:

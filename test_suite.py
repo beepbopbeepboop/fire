@@ -156,6 +156,31 @@ class _SandboxEnv:
 NO_WAIT_BUDGET_GB = 100000.0
 
 
+@contextlib.contextmanager
+def _chdir(path):
+    """Run a block with `path` as the cwd, and put the old one back.
+
+    Needed by anything that exercises a tool which resolves its arguments
+    against the cwd — `glob.glob('**/test_*.py')` most of all, because a
+    RELATIVE pattern is the only way to see that the subject set is found at
+    the top level and in a subdirectory by one pattern. An absolute pattern
+    would answer a different question, and worse, this repo's `TMPDIR` is
+    `.tmp/` inside the checkout, whose leading dot is exactly what
+    `checked_run.is_derived_dir` skips: every hit would be dropped and the test
+    would pass for the wrong reason.
+
+    Restoring on the way out is not optional in a file that runs hundreds of
+    synthetic runs after this one — a leaked cwd makes every later relative
+    path in this file point into a temporary directory.
+    """
+    old = os.getcwd()
+    os.chdir(path)
+    try:
+        yield path
+    finally:
+        os.chdir(old)
+
+
 def run(names, jobs=4, log='-', quiet=True, budget=NO_WAIT_BUDGET_GB,
         ledger=None, **flags):
     """Select, plan, execute, report — the whole main() path, quietly.
@@ -2232,6 +2257,48 @@ def test_checked_run_key_covers_what_it_names():
           f'got {len(nothing)} paths and empty={empty}: an empty set has to be '
           f'sayable, because the key is then blind to a subject that changed '
           f'shape and nothing else would report it')
+
+    # ── the shape a real subject set has: files at the top level AND in a
+    #    subdirectory, with derived trees beside them that must not count.
+    # A flat `test_*.py` is a second copy of the top level, and `test_llm/`
+    # arrived with the Metal work to prove it: the walk found it, the key did
+    # not. The `**/` form fixes that, and the skip rule is what keeps the fix
+    # from reaching into `build/` and the A/B copies, which are shaped like the
+    # subject and are not it.
+    tree = os.path.join(tempfile.mkdtemp(prefix='crtree_'), 'repo')
+    os.makedirs(os.path.join(tree, 'sub'))
+    for rel in ('test_top.py', 'sub/test_nested.py', 'sub/other.py',
+                'build/test_derived.py', 'aside/root/test_copy.py',
+                '__pycache__/test_cache.py', '.hidden/test_dot.py'):
+        full = os.path.join(tree, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, 'w') as f:
+            f.write(rel)
+    with _chdir(tree):
+        found, empty = checked_run.expand_globs(['**/test_*.py'])
+        check('cache key: a `**/` glob reaches the top level AND a subdirectory',
+              sorted(found) == ['sub/test_nested.py', 'test_top.py']
+              and not empty,
+              f'expanded to {found} from `**/test_*.py`, empty={empty}: `**` '
+              f'matches zero segments too, so one pattern has to cover both '
+              f'depths or the subject set is half a set')
+        dropped = sorted(f for f in found
+                         if not f.startswith(('test_', 'sub/')))
+        check('cache key: a glob drops DERIVED_DIRS, not just the top level',
+              not dropped,
+              f'these are derived or copied, and the key would otherwise depend '
+              f'on whether a build or an A/B sweep had run: {dropped}')
+        # The control: the skip rule filters by DIRECTORY, not by the trailing
+        # component, so a file really called `test_derived.py` at the top level
+        # is still found. Otherwise "the rule works" and "the pattern works"
+        # are indistinguishable above.
+        with open(os.path.join(tree, 'test_derived.py'), 'w') as f:
+            f.write('a real one, at the top level')
+        top, _e = checked_run.expand_globs(['**/test_*.py'])
+        check('cache key: the skip is by DIRECTORY, not by the file\'s name',
+              'test_derived.py' in top,
+              f'top level now holds {top}: a name that also occurs under '
+              f'build/ is being dropped for its name rather than its location')
     del j
 
 
@@ -2471,16 +2538,25 @@ def _unregistered_reason_table():
 def _test_files_in_repo():
     """Every `test_*.py` in the repo, repo-relative.
 
-    `build/`, `__pycache__`, `aside/` and `bside/` are excluded: the first two
-    are derived, and the last two are the A/B machinery's copies of repo files
-    (which is why they hold `checked_run.py` and friends but no `test_*.py`).
+    The skip list is `checked_run.DERIVED_DIRS` and not a second copy of it:
+    `build/`, `__pycache__`, `aside/` and `bside/` are all trees whose contents
+    are not inputs, and the CACHE KEY behind this very check is built from the
+    same predicate. Two lists would be two answers to "what is a test file",
+    which is the disagreement this function exists to prevent — the first
+    version of the estate check and its cache key each had their own, and a
+    subdirectory was found by one and invisible to the other.
+
+    The spelling is still `test_*.py` only, and the gap that leaves is written
+    down rather than fixed here: `formal/x86_64_endtoend_test.py` and
+    `formal/x86_64_model_coverage_test.py` are registered but outside the
+    inventory (both spellings are in use in this repo), plus two `*_test.py`
+    files that are in neither a spec nor a list. See
+    `bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md`.
     """
+    import checked_run
     found = []
     for dirpath, dirnames, filenames in os.walk(HERE):
-        dirnames[:] = [d for d in dirnames
-                       if d not in ('build', '__pycache__', 'aside', 'bside',
-                                    '.git')
-                       and not d.startswith('.')]
+        dirnames[:] = [d for d in dirnames if not checked_run.is_derived_dir(d)]
         for fn in filenames:
             if fn.startswith('test_') and fn.endswith('.py'):
                 found.append(os.path.relpath(os.path.join(dirpath, fn), HERE))
@@ -2592,15 +2668,22 @@ def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
          `test_suite.py`, so ADDING `test_whatever.py` moved nothing and the
          check that exists to report exactly that was served the last green run
          instead of running. The fix is `--extra-glob`: the subject is a SET
-         (93 files, one directory, no directory of its own), which is the one
-         input shape `--extra <dir>` cannot express.
+         (100+ files, mostly in one directory and a few in subdirectories, and
+         no directory of its own), which is the one input shape
+         `--extra <dir>` cannot express.
 
-      3. A GLOB THAT COVERS THE SET. The pattern is flat (`test_*.py`), so a
-         test file added in a SUBDIRECTORY would be found by the walk above and
-         invisible to the key — the walk and the key would disagree about the
-         subject, silently, in the direction that matters. The check below is
-         what keeps the two in agreement, and it is deliberately a check rather
-         than a comment: a promise nobody verifies is how the 50 became the 94.
+      3. A GLOB THAT COVERS THE SET. A FLAT `test_*.py` pattern is a second
+         copy of the top level, so a test file added in a SUBDIRECTORY was
+         found by the walk above and invisible to the key — the walk and the
+         key disagreeing about the subject, silently, in the direction that
+         matters. The pattern is `**/test_*.py`, and `checked_run.expand_globs`
+         drops `DERIVED_DIRS` (`build/`, `aside/`, `bside/`, `__pycache__`)
+         because a glob recurses where a named directory does not have to, and
+         the A/B copies under `aside/`/`bside/` are the same content under a
+         second name. Those two rules are what make the last check below a
+         statement about PATTERNS rather than a tautology, and they are
+         deliberately a check rather than a comment: a promise nobody verifies
+         is how the 50 became the 94.
     """
     spec = suite.REGISTRY.get('suite-self-test')
     check('the estate: the spec that runs this check exists', spec is not None,
@@ -2616,26 +2699,37 @@ def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
           'was supposed to catch it')
 
     check('the estate: ...and it is cached, so its key has to see the subject',
-          spec.cache and 'test_*.py' in spec.extraglob,
+          spec.cache and '**/test_*.py' in spec.extraglob,
           f'cache={spec.cache}, extraglob={list(spec.extraglob)}: a cached PASS '
           f'is replayed, so a key that cannot see a new test file serves the '
           f'last green run instead of running this check')
 
     on_disk = set(_test_files_in_repo())
     nested = sorted(f for f in on_disk if os.path.dirname(f))
-    check('the estate: every test file is where the glob can see it',
-          not nested,
-          f'the `test_*.py` glob is flat and these are not: {nested}. Either '
-          f'make the pattern recursive or say why a subdirectory is exempt — '
-          f'silently, the walk finds them and the cache key does not')
-
+    check('the estate: there IS a test file in a subdirectory to catch with',
+          bool(nested),
+          f'none of the {len(on_disk)} test files is nested, so a flat pattern '
+          f'and a recursive one are indistinguishable here and the checks below '
+          f'prove nothing about recursion')
     import checked_run
+    check('the estate: every pattern is recursive, so a subdirectory is covered',
+          all(p.startswith('**/') for p in spec.extraglob),
+          f'{list(spec.extraglob)}: a pattern without `**/` matches the top '
+          f'level only, and {nested} are not at the top level — the walk finds '
+          f'them and the cache key does not')
+
     globbed, empty = checked_run.expand_globs(spec.extraglob)
+    # Full relative paths, not basenames: the basenames made this check pass
+    # for a glob that found `test_llm/test_llm.py` where the walk found
+    # `somewhere/else/test_llm.py`, which is the disagreement this exists to
+    # catch. Anchored at HERE rather than at the cwd, so it says the same thing
+    # however the file was invoked.
+    rel = {os.path.relpath(os.path.abspath(g), HERE) for g in globbed}
     check('the estate: the glob and the walk agree on the subject set',
-          {os.path.basename(g) for g in globbed} == {os.path.basename(f)
-                                                     for f in on_disk}
-          and not empty,
-          f'glob found {len(globbed)}, walk found {len(on_disk)}; '
+          rel == on_disk and not empty,
+          f'glob found {len(rel)}, walk found {len(on_disk)}; '
+          f'glob-only: {sorted(rel - on_disk)[:5]}; '
+          f'walk-only: {sorted(on_disk - rel)[:5]}; '
           f'empty patterns: {empty}')
 
 
@@ -2832,7 +2926,8 @@ def test_no_test_preflights_on_an_unbuildable_artifact():
 
 def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
-               test_make_driver, test_j_forwarded,                test_deps_order_and_skip,
+               test_make_driver, test_j_forwarded,
+               test_deps_order_and_skip,
                test_exclusive_is_alone, test_fanout_aggregates,
                test_fanout_enumeration_ignores_untracked_scratch,
                test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root,
@@ -2871,9 +2966,8 @@ def main():
                test_a_job_class_covers_its_measured_peak,
                test_a_job_class_covers_the_peak_the_last_run_recorded,
                test_over_provisioned_classes_are_reported_not_silently_kept,
-                test_every_job_over_the_debt_line_says_why,
-                test_an_expect_marker_points_at_a_doc_that_exists,
-
+               test_every_job_over_the_debt_line_says_why,
+               test_an_expect_marker_points_at_a_doc_that_exists,
                test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
         fn()
     print()

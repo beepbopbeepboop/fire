@@ -423,6 +423,25 @@ MEASURED_PEAK_GB = {
     'formal-time':      (0.06, 'measured'),
     'formal-frame-len': (0.05, 'measured'),
     'formal-toplevel':  (0.04, 'measured'),
+    # The four that arrived after that count, measured the same way the same
+    # day (arm64, python 3.14.7, one at a time under `tools/memslot.py --gb 8`).
+    # `formal-os-backing` is the cheapest formal suite in the tree and
+    # `formal-dataclasses` the most expensive of these four, and neither is
+    # close to a class boundary — which is the point of writing the number
+    # down rather than inheriting a class from a resemblance.
+    'formal-os-backing':   (0.06, 'measured'),
+    'formal-module-attr':  (0.07, 'measured'),
+    'llm-reference':       (0.07, 'measured'),   # 31 cases of pure CPython
+    'formal-dataclasses':  (0.10, 'measured'),
+    # Five that were registered and in NO BUCKET, so nothing ran them; each was
+    # measured once, alone, the same way, before being given a class and a
+    # bucket. The two at 0.01 are under what a 0.5 s poll resolves across a
+    # 0.5 s job, and are written down rather than rounded up to look measured.
+    'arm64-encoders':      (0.04, 'measured'),   # 15.1 s of `as` round-trips
+    'cli-usage-text':      (0.04, 'measured'),   # 1.1 s
+    'ownership-destruct':  (0.01, 'measured'),   # 0.5 s, 113 fixture cases
+    'x86-decode':          (0.01, 'measured'),   # 0.5 s, one round-trip check
+    'md2html':             (0.01, 'measured'),   # 0.5 s, 14 unittest cases
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -1049,7 +1068,7 @@ test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True,
      desc='Metal codegen: op tables, device-region selection, MSL emission, '
           'and the generated MSL compiled by Apple\'s real compiler and run '
           'on the GPU against a CPU reference')
-test('md2html', [PY, 'test_md2html.py'], cache=True,
+test('md2html', [PY, 'test_md2html.py'], cache=True, mem='tiny',
      extra=['tools/md2html.py', 'test_md2html.py',
             'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
      desc='the docs\' HTML generator keeps every word of its Markdown, and '
@@ -1064,7 +1083,14 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # The tool prints the name it was INVOKED as (fire / mojoc / stage2/mojo), not a
 # hard-coded one. Registered by the integrator: the test landed with help-rename
 # but in no bucket, which turned `suite-self-test`'s estate check red.
-test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True,
+#
+# `mem='tiny'` and in `check`, both added here rather than at registration:
+# registering a test is not the same as running it, and 12 of this registry's
+# members sat in NO bucket at all — named by a spec, in the estate's inventory,
+# and executed by nothing (the whole list and what is left of it:
+# `bugs/TEST_registered_tests_in_no_bucket_never_run.md`). This one is 1.1 s and
+# 0.04 GB, which is what the everyday bucket is for.
+test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
      extra=['test_cli_usage_text.py', 'fire.py', 'fire_main.py', 'fire_compiler.py'],
      desc='the tool prints the name it was invoked as, in usage, -v and every error')
 # `nonlocal` on both execution paths. Its own test because the feature spans
@@ -1177,13 +1203,13 @@ test('examples-parse', [PY, 'test_examples_parse.py'], cache=True,
 test('x86-examples', [PY, 'test_x86_64_examples.py'],
      deps=['preflight'],
      desc='the x86-64 examples build, run and agree with the source')
-test('arm64-encoders', [PY, 'test_arm64_encoders.py'],
+test('arm64-encoders', [PY, 'test_arm64_encoders.py'], mem='tiny',
      deps=['preflight'],
      desc='every arm64 encoder: the immediate, the shifted, the REX forms')
-test('x86-decode', [PY, 'test_x86_64_decode.py'],
+test('x86-decode', [PY, 'test_x86_64_decode.py'], mem='tiny',
      deps=['preflight'],
      desc='the x86-64 decoder, byte at a time, against hand-written encodings')
-test('ownership-destruct', [PY, 'test_ownership_destruct.py'],
+test('ownership-destruct', [PY, 'test_ownership_destruct.py'], mem='tiny',
      deps=['preflight'],
      desc='an owned value is destructed exactly once')
 test('x86-containers', [PY, 'test_x86_64_containers.py'],
@@ -1253,6 +1279,17 @@ test('preflight', [PY, '-c',
 # that its inputs are its subject, and here the subject is a set of files that
 # nothing in `extra` could name without a list that rots on the next one.
 #
+# `**/test_*.py` rather than `test_*.py`, and that `**` is the second half of
+# the same bug found by the merge rather than by design: the flat pattern is a
+# second copy of the top level, so when `test_llm/test_llm.py` landed the walk
+# below found it and the cache key did not — the check that exists to report
+# exactly that, not seeing it. `**` matches zero segments too, so one pattern
+# still covers the root. `checked_run.expand_globs` drops `DERIVED_DIRS`
+# (`build/`, `aside/`, `bside/`, `__pycache__`) because a glob recurses where a
+# named directory does not have to, and the A/B copies under `aside/`/`bside/`
+# are the same content under a second name; that list is shared with the walk
+# in `test_suite.py`, so the two cannot drift about what a test file is.
+#
 # That is the whole of the bug this doc used to point at
 # (`bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md`, closed and
 # DELETED with the fix) in one mechanism: the check existed, and the cache in
@@ -1261,7 +1298,7 @@ test('suite-self-test', [PY, 'test_suite.py'], cache=True,
      extra=['test_suite.py', 'tools/suite.py', 'tools/procrun.py',
             'tools/memslot.py', 'tools/memcap.py', 'checked_run.py',
             'test_memslot.py'],
-     extraglob=['test_*.py'],
+     extraglob=['**/test_*.py'],
      desc='the runner: drivers, deps, exclusivity, fanout, tally, log split')
 
 # The ledger every job above reserves out of, tested on its own. In `smoke`
@@ -1823,6 +1860,75 @@ test('formal-toplevel', [PY, 'test_formal_toplevel.py'], mem='tiny',
             'formal'] + FORMAL_BUILD_INPUTS,
      desc='a module body runs: built, executed, and diffed against CPython')
 
+# ── the formal backend's other three unregistered files, same shape ─────────
+# Registered here rather than beside the eight above because they were not part
+# of that count: they arrived on master AFTER it, each with a merged branch
+# behind it, and `bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md`
+# (closed and deleted with this) is the hole they walked through one file at a
+# time. `mem='tiny'` for the same reason the eight have it, and `proofs` rather
+# than `check` because none of the three is in the everyday inner loop.
+
+# `@dataclass` as a COMPILE-TIME transform: the annotation is read by the build
+# and the generated `__init__`/`__repr__`/`__eq__` are emitted, so the test
+# builds each case as an image, RUNS it, and compares with a CPython class using
+# the same decorator. 50 checks, 11.9 s, 0.10 GB.
+test('formal-dataclasses', [PY, 'test_dataclasses_formal.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_dataclasses_formal.py', 'formal/dataclass_transform.py',
+            'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
+            'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='@dataclass as a compile-time transform, against CPython')
+# `mod.NAME`: a call, a RE-EXPORTED call, a submodule chain, and a module-level
+# constant, each built for both architectures and run — plus the three shapes
+# that must stay refused, each with a message that names its own reason, and the
+# manifest that is the contract between the two. 10.3 s, 0.07 GB.
+#
+# RED, and registered red rather than excused, for the same reason
+# `formal-struct` above is: a declared red is a report and an unrun red is
+# silence. 1 of 11, and both halves of it are written down in
+# bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md.
+test('formal-module-attr', [PY, 'test_formal_module_attr.py'], mem='tiny',
+     deps=['preflight'],
+     expect='bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_'
+            'dangling_symbol.md — 1 of 11: a bracketed call to a private name '
+            'is refused as a dangling symbol on arm64 and as an unsupported '
+            'call target on x86-64, instead of as the export gap it is',
+     extra=['test_formal_module_attr.py', 'formal/model.py',
+            'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='mod.NAME: calls, re-exports, chains and constants, on both backends')
+# The REAL syscalls behind the `os` host module — the `_syscalls.mojo` layer and
+# the arm64 images it builds — against the machine rather than against a table.
+# 39 cases, 18.1 s, 0.06 GB; the x86_64 half of each case SKIPs with its reason
+# printed, because an `os` dylib that calls the C library is arm64-only on this
+# backend (bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md).
+test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_os_backing.py', 'formal/hostmods/os/_syscalls.mojo',
+            'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='the syscalls under the os host module, through real images')
+
+# ── not the compiler: the CPU reference the Metal path is checked against ───
+# `test_llm/` is a self-contained sub-project: a ~1M-parameter linear-attention
+# character model in pure Python, with hand-written Metal kernels and a bench C
+# program beside it, and it is what `mojo/middle/metal_ops.py`,
+# `mojo/backend_gimple/device_glue.py` and `doc/GPU_OFFLOAD_PLAN.html` all cite
+# as the reference their generated kernels are compared against. So it belongs
+# to the tree, and `test_llm.py` is a `unittest` suite over it that nothing ran.
+#
+# `-m unittest <path>` rather than `python3 test_llm.py`, and the difference is
+# the whole registration: the file's own `main()` TRAINS the full model and
+# prints samples, which is a benchmark, not a test. Naming the path rather than
+# the module name also keeps it visible to the estate check, which reads the
+# `.py` in a spec's `cmd`.
+#
+# `check` and not `proofs`: it needs no compiler at all, so it has no business
+# in the formal bucket, and 14.3 s of CPython arithmetic beside the GPU work is
+# what the everyday bucket is for. 31 cases, 0.07 GB, no `deps` because nothing
+# here reads a build artifact.
+test('llm-reference', [PY, '-m', 'unittest', 'test_llm/test_llm.py'],
+     mem='tiny', extra=['test_llm/test_llm.py'],
+     desc='the pure-Python linear-attention reference model: 31 unittest cases')
+
 # ── the A/B sweep: Make's own job server, so driver='make' ─────────────────
 # Every `make` step names a class, and that is a RULE rather than a fact about
 # these four: a make target's command line is not in the registry, so nothing
@@ -1899,7 +2005,27 @@ BUCKETS = {
               # two are past what the everyday inner loop is for, and an
               # `expect` in this bucket would put a permanently-EXPECTED line
               # in the tally a developer reads to know their tree is fine.
-              'formal-os', 'formal-sys', 'formal-frame-len', 'formal-time'],
+              'formal-os', 'formal-sys', 'formal-frame-len', 'formal-time',
+              # …and the pure-Python reference the Metal path is measured
+              # against, which needs no compiler at all and so belongs on the
+              # side of the line where the everyday loop can afford it. 14.3 s.
+              # `metalgpu`, the other half of that pairing, is registered and in
+              # NO bucket — filed as
+              # bugs/TEST_registered_tests_in_no_bucket_never_run.md rather than
+              # added here, because whether it passes needs a real GPU and a
+              # full codegen run, which is not a thing a registration can be
+              # assumed to be true of.
+              'llm-reference',
+              # …and the four that were REGISTERED and in no bucket at all, so
+              # the estate check counted them as covered while no run executed
+              # them. Measured green one at a time before being named here
+              # (1.1 s, 0.5 s, 0.5 s, 15.1 s), because "register it" is not the
+              # same act as "run it" and the difference is invisible until
+              # somebody reads `--list`. `md2html` joins them: it is the docs'
+              # HTML-staleness check, which is precisely the thing a doc edit
+              # should be caught by.
+              'cli-usage-text', 'ownership-destruct', 'md2html',
+              'arm64-encoders'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -1943,8 +2069,18 @@ BUCKETS = {
                # in both costs nothing.
                'formal-os', 'formal-sys', 'formal-frame-len', 'formal-time',
                'formal-argparse', 'formal-hashlib', 'formal-toplevel',
-               'formal-struct'],
-    'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model'],
+               'formal-struct',
+               # The four that arrived after the count of eight, the same way:
+               # the whole formal picture in one bucket, which is what a reader
+               # of this list is asking. Expansion schedules each test once per
+               # run, so being in `check` too costs nothing.
+               'formal-dataclasses', 'formal-module-attr',
+               'formal-os-backing'],
+    'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
+            # The decoder, which is x86-64 coverage with no image in it: half a
+            # second and one round-trip check, and registered with no bucket,
+            # which is the same hole as the five in `check`.
+            'x86-decode'],
     'coroutine': ['coro', 'coro-nested-capture'],
     'smoke': ['preflight', 'suite-self-test', 'memslot'],
     'ab': ['ab-clean', 'ab-aside', 'ab-bside', 'ab-compare'],
