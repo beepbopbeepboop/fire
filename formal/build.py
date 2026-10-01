@@ -1653,6 +1653,9 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     check_shadowed_global_reads(functions)
     check_construction_shapes(functions, by_name)
     check_frame_return_shapes(functions)
+    # …and the one hole the returned-frame convention opens in premise (B1),
+    # which is the same premise with the sign reversed.
+    check_returned_frame_blob_writes(functions)
     # The ONE late check that can also be an ANSWER rather than a report, which
     # is why it is here and not in the group above: a frame address reaching a
     # callee compiled into another module is decided from the contract that
@@ -2060,12 +2063,17 @@ def _frame_valued_calls(site_fn, structs_by_name, returns_frame, fns):
 
     `returns_frame` is the fixpoint's `{callee name: struct}`, the same
     dictionary published on every function as `_image_returns_frame` and read by
-    both emitters through `struct_returned_frame_sites`.
+    both emitters through `struct_returned_frame_sites`.  It is handed over as
+    `model.frame_returning_predicate(...)` rather than as `dict.get`, for the
+    reason that function's docstring gives: the callee asks with TWO arguments
+    and `dict.get`'s second is a default, so a missing callee would answer with
+    the bound name.
     """
     out = {}
     constructors = M.struct_constructor_sites(site_fn, structs_by_name)
-    returned = M.struct_returned_frame_sites(site_fn, structs_by_name,
-                                             (returns_frame or {}).get)
+    returned = M.struct_returned_frame_sites(
+        site_fn, structs_by_name,
+        M.frame_returning_predicate(returns_frame or {}))
     if not constructors and not returned:
         return out
     for node in M.iter_nodes(getattr(site_fn, "body", None)):
@@ -2874,15 +2882,21 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             # holder table, monotone) or because it is a call to a function already
             # known to return one (also monotone).
             for fn in functions:
-                status, st = _frame_return_status(fn, holders[_fn_key(fn)],
-                                                  hstruct[_fn_key(fn)],
-                                                  by_name_returns_frame)
+                status, st, holder = _frame_return_status(
+                    fn, holders[_fn_key(fn)], hstruct[_fn_key(fn)],
+                    by_name_returns_frame)
                 fn._frame_return_status = status
                 key = _fn_key(fn)
                 if status == _RETURN_FRAME and returns_frame.get(key) is not st:
                     changed = grew = True
                 if status == _RETURN_FRAME:
                     returns_frame[key] = st
+                    # The `(holder, struct)` pair, published for the checks that
+                    # ask about the block rather than about the callee:
+                    # `check_returned_frame_blob_writes` needs the NAME to look
+                    # the container writes up, and a struct alone cannot say
+                    # which of the returned frame's fields it is.
+                    fn._returned_frame = (holder, st)
                 elif returns_frame.pop(key, None) is not None:
                     changed = grew = True
             # A pass that claims progress and leaves every table it reads exactly
@@ -3016,7 +3030,17 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # site.
     for fn in functions:
         hs = holders[_fn_key(fn)]
-        if not hs:
+        if not hs and not _stores_a_frame_returning_call(fn,
+                                                        by_name_returns_frame):
+            # No frame is HELD here, so there is nothing for the escape check to
+            # say — except the one shape that holds nothing: `xs[1] = make(5)`
+            # puts the address of the block this function reserved into a list,
+            # and the list's element outlives the activation.  The emitter's
+            # subscript store does not lower a frame address, so the store is
+            # dropped and the program exits 0 where the source says 5.  That is
+            # why the skip is conditional on a second scan rather than deleted:
+            # running the check for every function would change the messages for
+            # the hundreds that legitimately hold nothing.
             continue
         by_name = hstruct[_fn_key(fn)]
         call_recv = _call_receivers(fn)
@@ -3331,7 +3355,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                                  [f.name for f in functions])), rets,
                              holders, hstruct, params_of,
                              _callee_defs(functions), imported,
-                             star_imports, _name_defs)
+                             star_imports, _name_defs,
+                             by_name_returns_frame)
         _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
         fn._frame_holders = hs
         fn._frame_nested_slots = nested_slots
@@ -4316,7 +4341,8 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
     return nested
 
 
-def _defer_subscript_escape(fn, value, holders, by_name, spelled) -> None:
+def _defer_subscript_escape(fn, value, holders, by_name, spelled,
+                            returns_by_name=None) -> None:
     """Record a frame address stored through a subscript, for a LATE refusal.
 
     Nothing is raised here.  The refusal is real and the finding is kept, but
@@ -4333,13 +4359,32 @@ def _defer_subscript_escape(fn, value, holders, by_name, spelled) -> None:
     `self.dispatch_patterns[pattern_key]` when what the reader needs first is
     "imports 'fire_compiler', which … imports 're', which is a host module".
     One file moved the wrong way and the wrong message won."""
-    if not isinstance(value, F.IdentExpr) or value.name not in holders:
+    if isinstance(value, F.IdentExpr):
+        if value.name not in holders:
+            return
+        cands = by_name.get(value.name) or []
+        who = ", ".join(st.name for st in cands) if cands else value.name
+    elif isinstance(value, F.CallExpr):
+        # `xs[1] = make(5)`.  A call to a frame-returning callee puts the address
+        # of the block THIS function reserved into the list, and the list's
+        # element is a heap cell that outlives this activation — so it is the
+        # same escape as `q[0] = r` with the frame one lifetime further out.  It
+        # used to be missed because the value is a call rather than a name, and
+        # the emitter's subscript store does not lower a frame address, so the
+        # store was dropped: the program built, ran, and exited 0 where the
+        # source says 5.  The read of `returns_by_name` is the fixpoint's JOIN,
+        # so a name whose definitions disagree is absent from it and the store is
+        # not refused on one of two answers.
+        callee = M.call_callee_name(value.func)
+        st = returns_by_name.get(callee) if callee else None
+        if st is None:
+            return
+        who = f"frame in {callee}()"
+    else:
         return
-    cands = by_name.get(value.name) or []
-    who = ", ".join(st.name for st in cands) if cands else value.name
     fn._frame_subscript_escapes = list(
         getattr(fn, "_frame_subscript_escapes", ())) + [(
-            who, value.name, spelled, fn.name)]
+            who, M.expr_spelling(value), spelled, fn.name)]
 
 
 def check_frame_subscript_escapes(functions) -> None:
@@ -4361,6 +4406,39 @@ def check_frame_subscript_escapes(functions) -> None:
                 f"lifted, before this check existed: the shape builds, runs, "
                 f"and returns 0 where the source says 7 — silently, with the "
                 f"program exiting 0")
+
+
+def check_returned_frame_blob_writes(functions) -> None:
+    """Refuse a CONTAINER written into the block a function RETURNS.
+
+    A fourth late frame check, and here for the reason the other three are:
+    `_prepare_functions` runs before the imports resolve, so a refusal raised
+    from inside it is reported in place of the import diagnosis, and the import
+    is the more useful of the two answers.
+
+    It exists because the returned-frame convention opens a hole the by-reference
+    receiver does not have.  Premise (B1) — a frame slot never holds a blob — is
+    true because a blob is bump-allocated in the function that made it, and it
+    is enforced for METHODS by `check_frame_field_blob_premises`.  A returned
+    block outlives the function that made it, so the same reasoning applies with
+    the sign reversed: a blob written into that block names scratch the caller
+    has already taken for its own frames, and the first append through it writes
+    into the callee's reclaimed stack.  The program builds, runs, and returns a
+    number nobody wrote.
+
+    It reads `fn._returned_frame` — the `(holder, struct)` pair
+    `_frame_receivers` publishes for every function that hands a frame back, and
+    the same pair the emitters' copy is sized from, so the block this refuses is
+    the block that would otherwise have been written into.
+    """
+    for fn in functions:
+        plan = getattr(fn, "_returned_frame", None)
+        if plan is None:
+            continue
+        holder, _struct = plan
+        for field, why in M.returned_frame_container_writes(fn, holder):
+            raise CodegenError(M.returned_frame_blob_refusal(
+                fn.name, holder, field, why))
 
 
 def check_frame_field_blob_premises(structs) -> None:
@@ -4554,7 +4632,7 @@ _RETURN_UNSOUND = "unsound"
 
 
 def _frame_return_status(fn, holders, by_name, returns_by_name):
-    """`(status, struct_or_None)` — what `fn` gives back to its callers.
+    """`(status, struct_or_None, holder_or_None)` — what `fn` gives back.
 
     The decision the returned-frame convention turns on, and it is asked of
     every `return` in the body rather than of the first one, because the
@@ -4564,7 +4642,10 @@ def _frame_return_status(fn, holders, by_name, returns_by_name):
 
       * `_RETURN_FRAME` — every path returns a frame address, all of them of
         one struct, and the body cannot fall off the end.  The struct is the
-        one the copy is laid out for.
+        one the copy is laid out for, and the holder is the NAME it came back
+        under, which `check_returned_frame_blob_writes` needs and which is None
+        for `return f()` — the callee built that one, in the caller's block, so
+        this function never held a name for it.
       * `_RETURN_WORD` — no path returns a frame address.  The ordinary case,
         and everything that compiled before the convention existed.
       * `_RETURN_UNSOUND` — a frame on one path and something else on another,
@@ -4607,16 +4688,16 @@ def _frame_return_status(fn, holders, by_name, returns_by_name):
                 continue
         words.append(_expr_spelling(value))
     if not frames:
-        return _RETURN_WORD, None
+        return _RETURN_WORD, None, None
     if words:
         _park_frame_return(fn, M.frame_return_mixed_refusal(
             fn.name, _frame_return_spelling(frames[0][1]),
             f"the value {words[0]!r}", False))
-        return _RETURN_UNSOUND, None
+        return _RETURN_UNSOUND, None, None
     if not M.returns_on_every_path(getattr(fn, "body", None)):
         _park_frame_return(fn, M.frame_return_mixed_refusal(
             fn.name, _frame_return_spelling(frames[0][1]), None, True))
-        return _RETURN_UNSOUND, None
+        return _RETURN_UNSOUND, None, None
     # Every path returns a frame, so the only question left is WHICH frame, and
     # the answer has to be one struct: the copy is `n` slots wide and the
     # caller reserved a block sized for the struct this returns.
@@ -4628,8 +4709,15 @@ def _frame_return_status(fn, holders, by_name, returns_by_name):
     if len(shapes) > 1:
         rows = [(st.name, len(M.struct_frame_slots(st))) for st in shapes]
         _park_frame_return(fn, M.frame_return_candidates_refusal(fn.name, rows))
-        return _RETURN_UNSOUND, None
-    return _RETURN_FRAME, shapes[0]
+        return _RETURN_UNSOUND, None, None
+    # The HOLDER is the returned NAME, and it is only a name for one of the two
+    # shapes a frame return takes: a bare `return p` names it, and `return f()`
+    # does not — the callee built that one, in the caller's block, and this
+    # function never held a name for it.  None is the honest answer for the
+    # second, and `check_returned_frame_blob_writes` reads None as "there is no
+    # name here to have put a container into".
+    holder = next((sp for _cands, sp in frames if "()" not in sp), None)
+    return _RETURN_FRAME, shapes[0], holder
 
 
 def _frame_return_spelling(value) -> str:
@@ -4926,12 +5014,39 @@ def _check_method_receiver_types(fn, holders, by_name, owners,
         )
 
 
+def _stores_a_frame_returning_call(fn, returns_by_name) -> bool:
+    """Whether `fn` puts a frame-returning call's address through a subscript.
+
+    The one frame escape a function can commit while holding no frame name, and
+    therefore the one the `if not hs` skip above would miss.  Deliberately
+    narrow — a subscript STORE whose right-hand side is a call this image knows
+    returns a frame — because the answer is only used to decide whether the
+    escape check is worth running, and a broader predicate would run it on
+    hundreds of functions that have nothing to say.
+    """
+    table = returns_by_name or {}
+    if not table:
+        return False
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, (F.AssignStmt, F.AugAssignStmt)):
+            continue
+        if not isinstance(getattr(node, "target", None), F.SubscriptExpr):
+            continue
+        value = getattr(node, "value", None)
+        if not isinstance(value, F.CallExpr):
+            continue
+        callee = M.call_callee_name(value.func)
+        if callee and callee in table:
+            return True
+    return False
+
+
 def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                          structs_by_name=None, created_here=frozenset(),
                          rets=None, all_holders=None, all_hstruct=None,
                          params_of=None, callee_defs=None,
                          imported=None, star_imports=(),
-                         name_defs=None) -> None:
+                         name_defs=None, returns_by_name=None) -> None:
     """Refuse every construct a frame ADDRESS may not take part in.
 
     A frame belongs to the function that created it and is reclaimed when that
@@ -4961,6 +5076,16 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     `created_here` is the set of holder names this function BUILT; a holder
     outside it arrived from a caller, and the return refusal says so rather than
     naming this function as the creator.
+
+    `returns_by_name` is the fixpoint's by-name table of the callees that hand
+    back a frame (`_returns_frame_by_name`), and it is what lets the SUBSCRIPT
+    escape recognise `xs[1] = make(5)`.  That value is not a name, so the
+    holder walk has nothing to look up and the check used to see an ordinary
+    assignment — and the emitter drops the store, so the program built, ran and
+    exited 0 where the source says 5.  It is the same escape as `q[0] = r`, one
+    hop further out: the frame this call hands back lives in the caller's
+    scratch, which is longer-lived than a local's, and the list's element is
+    longer still.
 
     `all_holders`/`all_hstruct`/`params_of` are the whole image's tables, and
     they are what the CALL half is decided from.  A parameter is a frame holder
@@ -5142,7 +5267,7 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
             # entry points call beside the other two.
             _defer_subscript_escape(
                 fn, getattr(node, "value", None), holders, by_name,
-                _subscript_chain(node.target))
+                _subscript_chain(node.target), returns_by_name)
         elif isinstance(node, F.CallExpr):
             callee = M.call_callee_name(node.func)
             # A struct CONSTRUCTOR carries NO escape to check, and the reason is
@@ -10037,6 +10162,21 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             or _module_prefix(source_paths[0]),
             constants=_namespace_constants(reexports, constants, linked),
             traits=traits)
+
+    # A DYDLIB cannot export a function that returns a frame, and this is the
+    # one place that knows it: the convention needs the CALLER to reserve the
+    # block the object is copied into, and an importer of this library is a
+    # compilation this build does not perform — it binds the symbol and has no
+    # way to learn the width of the block it must reserve.  Refusing here is the
+    # honest answer rather than emitting a function every importer gets wrong,
+    # and it is the executable build's own answer that is absent here: `main`
+    # has a stub to refuse it and an exported function has nothing.
+    #
+    # Read off the per-function table `_frame_receivers` published rather than
+    # recomputed, so the question is the one the emitters will ask.
+    for fn in ordered:
+        if getattr(fn, "_returns_frame_struct", None) is not None:
+            raise FormalBuildError(M.returned_frame_library_refusal(fn.name))
 
     # The library's merged slot table is PUBLISHED before the codegen runs,
     # because a slot access is an absolute address the codegen computes against

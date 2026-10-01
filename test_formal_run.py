@@ -2661,6 +2661,14 @@ RETURNED_FRAME_CASES = [
 # channels with no such destination — a container, a field, a subscript, a
 # position whose meaning this path cannot see — and each is a different hole in
 # the same lifetime argument.
+#
+# `formal-frame-escape` MOVED `byref_refuse_returned` out of this list rather
+# than updating it, and the move is right: the case asserted that `return p`
+# from the function that built `p` is refused, which was true and is no longer.
+# The object now outlives its creator, so leaving a case here that says
+# "refused" about a construct that builds would be a test asserting the
+# opposite of the truth. It is a demonstration in
+# `test_formal_returned_frame.py` now, beside the rest of the family.
 BYREF_REFUSALS = [
     # Into a container: a list blob has no layout for a frame address.
     ("byref_refuse_stored_in_a_list",

@@ -932,8 +932,16 @@ dylib_exports: list = None, globals_base: int = None,
         # the lot.  The layout is the shared model's, so x86-64 reserves the
         # same bytes at the same offsets and a returned frame cannot be correct
         # on one machine and a use-after-free on the other.
+        # `model.frame_returning_predicate`, NOT `self._image_returns_frame.get`:
+        # `struct_returned_frame_sites` takes a TWO-argument predicate and
+        # `dict.get` takes `(key, default)`, so handing it the bound method
+        # answers "no" with the bound NAME and treats every call in the module as
+        # returning a frame.  The model's comment there has the measurement: five
+        # wasted instructions per call, and a nine-argument call refused for an
+        # argument it never had.
         self._ret_frame_sites = M.struct_returned_frame_sites(
-            f, self._structs, self._image_returns_frame.get)
+            f, self._structs,
+            M.frame_returning_predicate(self._image_returns_frame))
         self._ret_frame_base = self._frame_recv_bytes
         self._ret_frame_bytes = sum(v[2] for v in self._ret_frame_sites.values())
         self._frame_slots = dict(getattr(f, "_frame_slots", None) or {})
