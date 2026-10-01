@@ -151,7 +151,10 @@ LIMITS, MEASURED, NOT ASSUMED
    rather than making "you did not size it right" a process exit. The size a
    caller needs is `2 * (re.ngroups(pattern) + 1)` for the three span
    functions and `1 + 2 * maxn` for `findall` and `split`, and it is the one
-   thing a caller has to know that it cannot read back off the list.
+   thing a caller has to know that it cannot read back off the list. The
+   exception is `sub`, which writes ONE word (`status[0]`) and therefore has no
+   size to be told; see its own docstring for why the capacity parameter went
+   rather than being checked.
 
 7. **`re.sub` AND `re.split` DO NOT RE-COMPILE PER MATCH** and a backtracking
    engine is exponential in the worst case, so a run is given a step budget.
@@ -2135,14 +2138,16 @@ def sub(status, pattern: String, repl: String, subject: String,
     interned VERBATIM (`os/__init__.mojo`'s `linesep` is the measurement), so
     a `\\n` the caller wrote is two characters and stays two characters.
 
-    **`status` IS NOT THE `n`-TH ARGUMENT every other writer here takes, and
-    that is a fact rather than an oversight.** `out` in `search`/`findall`/
-    `split` is written up to `2 * (ngroups + 1)` times at RUN time, so its size
-    is something only the caller knows and the module has to be told; `status`
-    is exactly one word at index 0, always, so there is no size to get wrong
-    and no check to make. It was a parameter anyway, unread, and a second
-    parameter past the sixth is what the x86-64 ABI refuses — so the one
-    argument here that carried no information is the one that goes.
+    **`status` IS NOT PRECEDED BY A CAPACITY, as it is in every other writer
+    here, and that is a fact rather than an oversight.** `out` in `search` /
+    `findall` / `split` is written up to `2 * (ngroups + 1)` times at RUN time,
+    so its size is something only the caller knows and the module has to be
+    told; `status` is exactly one word, at index 0, on every path out of this
+    function, so there is no size to get wrong and no check to make. The
+    parameter was there anyway and never read — `n = str_len(subject)`
+    overwrote it on the first line of the body — and a seventh parameter is
+    what the x86-64 ABI refuses (`sub: 7 parameters exceeds the 6 …`), so the
+    one argument here that carried no information is the one that goes.
     """
     a = _arena()
     e = _prepare(a, pattern, flags)
