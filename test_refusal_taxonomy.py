@@ -24,10 +24,27 @@ protecting, and they are not the same thing:
    into "other". The samples below are real messages, abbreviated at clause
    boundaries, and each asserts the family it must land in.
 
+3. **A count that reads like a gap and is not one.** The cause table in
+   `tools/formal_sweep_causes.py` ranks by what a fix would have to CHANGE, and
+   prints `FILES BLOCKED` with an explicit warning that it is an upper bound.
+   For a cause whose refusal is about a MODULE's boundary rather than a
+   construct in the swept file, the bound is loose enough to invert the
+   decision: `module exports no public functions` was 38 files, 35 of them
+   behind `std/collections/binary_heap.mojo`, and 34 of those 35 contain no
+   occurrence of `BinaryHeap` at all — the formal backend builds a dylib for
+   every module in a file's EAGER import closure, so a module with no boundary
+   symbol refuses importers that bind nothing in it. That is why the table also
+   prints `uses:` (how many of a module's blocked files name anything it
+   declares), and the section below pins it: a `uses` column that is always 0,
+   that matches substrings, or that reports "I could not find the module" as a
+   measured 0, is worse than no column. Measured ceilings, both 0 files:
+   `bugs/FORMAL_dylib_export_gate_ceiling.md`.
+
 Run:  python3 test_refusal_taxonomy.py
 """
 import os
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "tools"))
@@ -110,6 +127,7 @@ SAMPLES = [
 
 def main() -> int:
     failures = []
+    checks = len(SAMPLES) + 3
 
     for family, msg in SAMPLES:
         got = S._refusal_family(msg)
@@ -150,10 +168,172 @@ def main() -> int:
 
     for f in failures:
         print("  FAIL  " + f)
+    checks += _uses_column_checks(failures)
     print(f"\nrefusal taxonomy: {'PASS' if not failures else 'FAIL'} "
-          f"({len(SAMPLES) + 3 - len(failures)}/{len(SAMPLES) + 3} checks, "
+          f"({checks - len(failures)}/{checks} checks, "
           f"{len(set(names))} families)")
     return 1 if failures else 0
+
+
+# ── the `uses:` column of the CAUSE table, and the audit it rests on ─────────
+#
+# The same discipline the family table above is held to, applied to the number
+# the cause table ranks by. `FILES BLOCKED` is an upper bound; for a cause about
+# a module's boundary the question "how many of these files would a fix to THAT
+# MODULE actually reach" has a cheap exact answer when the files name none of
+# its declarations, and it is not the count.
+#
+# The cause table is reached as `formal_sweep_causes`, whose source index is a
+# module global built by walking both trees; the tests below pin it to four
+# fixture files, because "the number is 0 because it could not look" and "the
+# number is 0 because it looked and found nothing" have to be told apart.
+
+# The real wording `no_public_api_reason` emits for a generic struct template.
+_MODULE_REFUSAL = ("template.mojo: formal dylib has no public functions: "
+                   "template.mojo exports nothing under doc/ABI.md's rules: it "
+                   "declares only the generic struct template(s) Thing, and a "
+                   "parametric type has no single boundary layout either.")
+
+
+def _uses_column_checks(failures):
+    import formal_sweep_causes as C
+    n = [0]
+
+    def check(ok, message):
+        n[0] += 1
+        if not ok:
+            failures.append(message)
+
+    tmp = tempfile.mkdtemp(prefix="uses_column_")
+
+    def write(name, text):
+        path = os.path.join(tmp, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    module = write("template.mojo",
+                   "struct Thing[T: Copyable]:\n  var x: Int\n")
+    uses_it = write("uses_it.mojo",
+                    "from template import Thing\nvar h = Thing[Int]()\n")
+    does_not = write("does_not.mojo",
+                     "from something_else import Widget\nvar w = Widget()\n")
+    # Its only `Thing` is inside `ThingHelper`, so a substring match counts it.
+    longer = write("longer_name.mojo",
+                   "from template import ThingHelper\nvar q = ThingHelper()\n")
+
+    def line(path, refuser):
+        return (f"CODEGEN/DEPENDENCY: {path}  (build: a.mojo imports 'x', which "
+                f"cannot be built either: {refuser}: {_MODULE_REFUSAL})")
+
+    def rank(log, index):
+        saved = C._index
+        C._index = index
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".log",
+                                             delete=False) as f:
+                f.write(log)
+                logpath = f.name
+            try:
+                return C.rank(logpath)[0]
+            finally:
+                os.unlink(logpath)
+        finally:
+            C._index = saved
+
+    def row_of(table, cause):
+        for r in table:
+            if r["cause"] == cause:
+                return r
+        return None
+
+    table = rank("\n".join([line(uses_it, "template.mojo"),
+                            line(does_not, "template.mojo"),
+                            line(longer, "template.mojo")]) + "\n",
+                 {"template.mojo": [module]})
+    row = row_of(table, C.CAUSE_NO_BOUNDARY_SYMBOL)
+    check(row is not None,
+          "a real `module exports no public functions` message was not "
+          "classified as one, so the cause table no longer recognises the "
+          f"wording it was written for. Labels seen: "
+          f"{[r['cause'] for r in table]}")
+    if row is None or len(row["uses"]) != 1:
+        check(False,
+              f"three findings from one refusing module produced "
+              f"{0 if row is None else len(row['uses'])} `uses:` entries")
+        return n[0]
+    refuser, src, blocks, uses, declared = row["uses"][0]
+    check(blocks == 3, f"expected 3 blocked files, got {blocks}")
+    check(src == module,
+          f"the refusing module resolved to {src!r}, not the fixture "
+          f"{module!r} — the index lookup is not returning the file it was "
+          f"handed")
+    check(declared == ["Thing"],
+          f"the declared names are {declared}, expected ['Thing'] — the column "
+          f"is searching for the wrong population")
+    # One use, and `longer.mojo` is not one: a plain substring match would
+    # report 2, and 0 would make every row read as closure.
+    check(uses == 1,
+          f"`uses` counted {uses} of 3. It must count `uses_it.mojo` alone — "
+          f"0 makes every row read as closure, and a substring match also "
+          f"counts `longer_name.mojo`, whose only `Thing` is inside "
+          f"`ThingHelper`")
+
+    gone = row_of(rank(line(does_not, "gone.mojo") + "\n", {}),
+                  C.CAUSE_NO_BOUNDARY_SYMBOL)
+    check(gone is not None and len(gone["uses"]) == 1,
+          "a refusal from a module that is not on disk produced no `uses:` "
+          "entry, so there is nowhere for the not-measured note to live")
+    if gone is not None and gone["uses"]:
+        check(gone["uses"][0][1] is None,
+              f"a refusing module absent from the tree resolved to "
+              f"{gone['uses'][0][1]!r} instead of None, so its 0 would be "
+              f"printed as a measurement")
+
+    def resolve(basename, index):
+        saved = C._index
+        C._index = index
+        try:
+            return C._resolve_refuser(basename, does_not)
+        finally:
+            C._index = saved
+
+    one = write("dup_a/__init__.mojo", "struct Other:\n  var y: Int\n")
+    two = write("dup_b/__init__.mojo", "struct Other:\n  var y: Int\n")
+    got = resolve("__init__.mojo", {"__init__.mojo": [one, two]})
+    check(got is None,
+          f"an ambiguous basename resolved to {got!r}; a count computed from "
+          f"the wrong one of two files is a number nobody can check")
+    solo = resolve("template.mojo", {"template.mojo": [module]})
+    check(solo == module,
+          f"an unambiguous basename resolved to {solo!r}, so the ambiguity "
+          f"guard would pass for the wrong reason")
+
+    # The audit the whole 38-file row rests on, which nothing pinned before.
+    heap = None
+    try:
+        import module_loader
+        cand = os.path.join(module_loader.STDLIB_PATH,
+                            "std", "collections", "binary_heap.mojo")
+        heap = cand if os.path.isfile(cand) else None
+    except Exception:                                    # noqa: BLE001
+        heap = None
+    if heap is None:
+        print("  SKIP  the stdlib is not reachable from here, so the "
+              "binary_heap.mojo export audit is not checked")
+    else:
+        import reflect
+        with open(heap, encoding="utf-8", errors="replace") as f:
+            excl = reflect.export_exclusions(f.read())
+        check(excl == {"BinaryHeap": "generic-template"},
+              f"std/collections/binary_heap.mojo's export exclusions are "
+              f"{excl}, not {{'BinaryHeap': 'generic-template'}}. "
+              f"FORMAL_known_limits.md §1.1a and the 38-file row both rest on "
+              f"that being the whole story: if it changed, the row is a "
+              f"different finding and the doc is wrong, and both need "
+              f"re-auditing rather than a stale number standing in for them")
+    return n[0]
 
 
 if __name__ == "__main__":
