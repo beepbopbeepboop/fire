@@ -115,3 +115,15 @@ CPython's exact text as the expectation.
   rediscover that a closure carrying an empty env can still mutate an outer
   local. Note this is arguably a *refusal* the compiled path owes (Python has
   no answer here), so the fix may be to say so rather than to capture.
+- Two `test_gimple_runner.py` cases are RED on master, measured by
+  reverse-applying a finished branch and re-running them, so they are not
+  collateral from any of the work in this area and the integrator should not
+  read them as such:
+
+      FAIL gimple_char_scan_allocates_nothing_per_character: stdout '4800000\n'
+        (want '4800000\n'), peak RSS 246.7 MB (limit 60)
+      FAIL gimple_kinds_survive_a_sibling_list_being_freed: expected
+        "[9.5, 1, 'zz']\n9.5\n1\nTrue\n[2.5, 1, 'yy']\n[3.5, 1, 'xx']\n[2.5, 1, 'yy'] [3.5, 1, 'xx']\n",
+        got "[9.5, 1, 'zz']\n"
+
+  Identical output at master (246.6 MB for the first). Neither has a doc.
