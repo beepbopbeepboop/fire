@@ -158,11 +158,66 @@ CASES = [
      "    print(b)\n"
      "    return 0\n", "3\n11\n"),
 
+    # ── where the substitution is READ from ──
+    #
+    # Every case above reads a module-level name in a position the substitution
+    # already covered — as a return value, as an argument, on the right of a
+    # binop. These two read it from the one position it did NOT cover, and the
+    # gap was live on master: `_apply_module_constant_sites` rewrote in place,
+    # so a bare `IdentExpr` — which has no child slots, its fields being `name`,
+    # `line` and `col` — was walked straight through and left alone. Every
+    # other position reached the replacement through a list element or through
+    # `_rewrite_child`, which is why the substitution looked complete and was
+    # not: `G = 7` then `x = G` inside a function was refused with
+    # "'G' has no home" on BOTH architectures, for a construct the build
+    # answers. Fixed in `formal/build.py` (the AssignStmt/VarDecl/AugAssign
+    # value side goes through `_rewrite_child`, which returns a replacement).
+    #
+    # `read_global_as_an_assignment_value` is the plain shape;
+    # `read_global_into_a_field_store` is the one that matters, because a
+    # `MemberExpr` store target is the shape this backend uses for every struct
+    # field write, so the uncovered position was reached by ordinary code
+    # rather than by an assignment to a bare local.
+    ("read_global_as_an_assignment_value",
+     "G = 7\n"
+     "\n"
+     "def main(n):\n"
+     "    x = G\n"
+     "    y: Int = G\n"
+     "    print(x)\n"
+     "    print(y)\n"
+     "    return 0\n", "7\n7\n"),
+
+    ("read_global_into_a_field_store",
+     "struct Wrap:\n"
+     "    v: Int\n"
+     "\n"
+     "G = 7\n"
+     "\n"
+     "def main(n):\n"
+     "    w = Wrap()\n"
+     "    w.v = G\n"
+     "    x: Int = w.v\n"
+     "    print(x)\n"
+     "    return 0\n", "7\n"),
+
     # ── containers ──
     # A module-level list is an address-valued slot: the slot holds a POINTER to
     # the blob, so it is the case that exercises the initializer at all — an
     # int global is fully described by the bytes in its slot, so a broken
     # initializer still leaves a readable number behind.
+    #
+    # The trailing `main(0)` is not decoration, and every container case below
+    # carries it for the same reason. `NUMS = [10, 20, 30]` is a module-level
+    # binding whose value does NOT fold to a literal, so it is module BODY
+    # (`model.module_body`'s own classification, and the only exemption from it
+    # is a binding that folds). The module body is therefore the entry, and
+    # `main` runs only if the body calls it — which is what CPython does with
+    # this file, and which `bugs/FORMAL_toplevel_statements_dropped.md`'s own
+    # case 3 pins ("a body that never calls `main` exits 0, and so does this").
+    # Without the call these three cases print nothing and both backends are
+    # right; they were written before the body existed, when a module-level
+    # statement was dropped and `main` was the entry by default.
     ("read_list_elements",
      "NUMS = [10, 20, 30]\n"
      "\n"
@@ -171,7 +226,9 @@ CASES = [
      "    last: Int = NUMS[2]\n"
      "    print(first)\n"
      "    print(last)\n"
-     "    return 0\n", "10\n30\n"),
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "10\n30\n"),
 
     # Subscripting a global from inside a FUNCTION, so the function's prologue
     # has to run the lazy initializer before the load rather than relying on
@@ -185,7 +242,9 @@ CASES = [
      "def main(n):\n"
      "    t: Int = total()\n"
      "    print(t)\n"
-     "    return 0\n", "60\n"),
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "60\n"),
 
     # TWO module-level stores of one container name. `collect_global_slots` keeps
     # the LAST binding as the slot's initializer, so this pins that the earlier
@@ -225,7 +284,9 @@ CASES = [
      "    p = NUMS\n"
      "    v: Int = p[1]\n"
      "    print(v)\n"
-     "    return 0\n", "20\n"),
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "20\n"),
 
     # ── strings ──
     # `printf` rather than `print` for strings, and the reason is worth stating

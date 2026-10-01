@@ -173,10 +173,16 @@ MULTI_INDEX_DATA = "data-multi-index"
 # The MLIR spelling forms, which take a bracketed TEMPLATE rather than an
 # index: the elements are backtick-quoted literal fragments interleaved with
 # compile-time sub-expressions, and the whole thing denotes a dialect
-# attribute. `__mlir_op` is absent on purpose — it is a real side-effecting
-# op, lowered as a call (see fire_compiler's statement parser), and its
+# attribute. `__mlir_op` is absent on purpose and is NOT a gap left by that:
+# it is a real side-effecting op, lowered as a call (see fire_compiler's
+# statement parser), so calling it a template would misdescribe it, and its
 # bracket list is MLIR op attributes with `attrs` set, which is a different
-# (already separately refused) node.
+# node again. It is refused by the OTHER rule — `mlir_dialect_refusal`, asked
+# for any `__mlir_*` name no template rule covers, which is why the two
+# refusals are different sentences rather than one: the template reader can
+# quote the fragments the reader has to look for, and the dialect reader
+# cannot. Both are arch-free and both are asked through the one reader each
+# backend uses.
 MLIR_TEMPLATE_NAMES = frozenset((
     "__mlir_attr",
     "__mlir_deferred_attr",
@@ -7184,6 +7190,55 @@ def variadic_named_args(symbol: str):
 #
 # That only works if "is this operand a string or a number" is decided before
 # anything is emitted, which is the question the next section answers.
+
+
+def comptime_val_kind(vals: dict, name: str):
+    """What the `comptime` binding `name` holds — `STR_KIND`, `INT_KIND`, or
+    None when this says nothing.
+
+    ONE reader, asked by both backends from the two places that must decide
+    what a read holds: the read itself (`print`, truthiness, `len`, a string
+    `==`) and the store that COPIES it into a local (`var t = OS`). Two copies
+    of this is two chances for one of them to keep treating a word as something
+    it is not, which is the shape of the bug this closes:
+
+        def main():
+            comptime OS = "darwin"
+            var t = OS
+            print("t=", t)
+
+    printed a NUMBER — a different one on each architecture (measured 4378772376
+    on arm64, 4308386740 on x86-64) — because `_emit_comptime_read` materializes
+    the interned literal (so the WORD in the register really is a `char *`) and
+    every kind-deciding path then classified the read as an integer.
+
+    It is not a guess, and the reason is what is absent from the table rather
+    than what is in it. `_comptime_vals` holds a name ONLY when
+    `comptime_eval.resolve_var` folded its initializer, so every entry here is a
+    compile-time constant, and the materialization for it is already written:
+    a `str` becomes the interned literal and anything else becomes an immediate
+    (`_emit_comptime_read`). Classifying the folded value IS classifying the
+    word. Nothing here widens "unclassified" into a guess — a `comptime` LIST
+    binding is kept in `_comptime_list_asts` instead, a subscript of it stays
+    unclassified, and a name that is in neither table answers None and reaches
+    the refusal that exists for it.
+
+    The integer half matters as much as the string half and for a different
+    reason: it is what makes the two routes to the same value agree. A
+    MODULE-level `comptime` is substituted at its read as a literal AST node
+    (`_substitute_module_constants`), so `print(PW)` classifies; a
+    FUNCTION-LOCAL one is not, so `print(PW)` used to refuse while
+    `var t = PW; print(t)` answered — the same value, two verdicts, decided by
+    which route reached it."""
+    val = (vals or {}).get(name)
+    if isinstance(val, str):
+        return STR_KIND
+    if isinstance(val, bool):
+        return INT_KIND
+    if isinstance(val, int):
+        return INT_KIND
+    return None
+
 
 def print_literal(text: str) -> str:
     """`text` as a fragment of a `print` format string.

@@ -1018,12 +1018,13 @@ class ARM64Codegen:
                                   resolve(parse_type_name(ptype)
                                           or DEFAULT_INT_TYPE))
                 continue
-            # Past the 10 callee-saved registers a parameter's home is a spill
-            # slot, and the incoming register is written there now or its first
-            # read in the body would load whatever the slot happened to hold.
-            # Unreachable until the returned-frame hidden word made an
-            # eleventh local possible; see `_load_home_from_reg` for the bug
-            # that was waiting there.
+            # An incoming argument register becomes this local's home — a
+            # callee-saved register when one was left, a spill slot otherwise,
+            # and the store is what makes the body read the caller's value
+            # rather than whatever the slot held. ONE routine for the write,
+            # because the returned-frame hidden word below has the same
+            # requirement and is not a parameter: it is an address, so it must
+            # not be narrowed to a declared width.
             self._load_home_from_reg(pname, i, ptype)
         # The RETURNED-FRAME hidden word, moved from the register the caller
         # passed it in to its home, in the same place and for the same reason
@@ -1033,7 +1034,7 @@ class ARM64Codegen:
         # narrowing it would be a pointer into the low half of a stack.
         if self._returns_frame is not None:
             sret_arg = len(incoming)
-            if sret_arg >= 8:
+            if sret_arg >= _ABI_ARG_REGS:
                 raise CodegenError(
                     M.returned_frame_convention_refusal(f.name, sret_arg)
                     or f"{f.name} needs one hidden word for the caller's block "
@@ -3112,7 +3113,12 @@ class ARM64Codegen:
             if value.name in self._dict_vars:
                 self._dict_vars.add(name)
                 self._string_vars.discard(name)
-            elif value.name in self._string_vars:
+            elif self._expr_str_kind(value) == M.STR_KIND:
+                # `value.name in self._string_vars` OR a `comptime` binding
+                # whose folded value is the text: `var t = OS` binds exactly the
+                # `char *` `t = s` binds, and asking `_expr_str_kind` rather
+                # than re-deriving the test here is what keeps the two paths
+                # from disagreeing about the same read.
                 self._string_vars.add(name)
                 self._dict_vars.discard(name)
             else:
@@ -3718,12 +3724,19 @@ class ARM64Codegen:
     def _expr_str_kind(self, expr):
         """What `expr` holds: "str", "int", or None if undecidable.
 
-        Two sources, and `_string_vars` WINS where they disagree. It is
+        Three sources, and `_string_vars` WINS where they disagree. It is
         flow-sensitive and tracks what the emission of this very function has
         bound so far, so it is strictly better informed than the whole-function
         `ValueKinds`; the whole-function map is what covers the shapes
         `_note_binding` does not see (a parameter's annotation, a function's
-        return type, a subscript's element kind).
+        return type, a subscript's element kind). A `comptime` binding is the
+        third source and it is neither: `ValueKinds` never scans a
+        `comptime NAME = …` statement, so a folded binding reached this as an
+        unclassified read — and a STRING one, which `_emit_comptime_read`
+        materializes as the interned literal, was then emitted as an INTEGER,
+        differently on each architecture. The binding is a compile-time
+        constant the emission already holds, so what it holds is known rather
+        than guessed; `model.comptime_val_kind` is the one reader of it.
 
         Named for what it answers rather than for the first caller: `print`,
         the method-receiver guard and `_note_binding` all need the same
@@ -3733,8 +3746,12 @@ class ARM64Codegen:
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
                 return M.STR_KIND
-        elif isinstance(expr, F.IdentExpr) and expr.name in self._string_vars:
-            return M.STR_KIND
+        elif isinstance(expr, F.IdentExpr):
+            if expr.name in self._string_vars:
+                return M.STR_KIND
+            bound = M.comptime_val_kind(self._comptime_vals, expr.name)
+            if bound is not None:
+                return bound
         return self._vkinds.kind_of(expr)
 
     def _expr_is_fd(self, expr) -> bool:
@@ -5848,7 +5865,6 @@ class ARM64Codegen:
             raise CodegenError(
                 f"call {name}(): {nargs} arguments exceeds the "
                 f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
-
         # AAPCS: pass up to 8 integer args in X0..X7. Evaluate left-to-right,
         # spilling each result so nested evaluations (which clobber X0/X1/X2)
         # don't destroy earlier arguments. Pop in reverse so arg0 lands in X0.

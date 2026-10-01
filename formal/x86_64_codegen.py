@@ -697,7 +697,7 @@ class X86_64Codegen:
         self._cur_fn = f
         # This function's LOCAL names, which is what decides whether a bare
         # name is served from `__DATA` or from a register — see
-        # `_module_global`. Built from the same shared allocation order the
+        # `model.module_slot_for`. Built from the same shared allocation order
         # registers come from, so the two cannot disagree.
         self._fn_local_names = set(_collect_var_names(f))
         self.asm.label(f.name)
@@ -967,7 +967,7 @@ class X86_64Codegen:
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
             self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * slot))
             return
-        gslot = self._module_global(name)
+        gslot = M.module_slot_for(name, self._fn_local_names)
         if gslot is not None:
             self._emit_global_load(gslot, dst)
             return
@@ -1199,7 +1199,7 @@ class X86_64Codegen:
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
             self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * nested, src))
             return
-        gslot = self._module_global(name)
+        gslot = M.module_slot_for(name, self._fn_local_names)
         if gslot is not None:
             self._emit_global_store(gslot, src)
             return
@@ -2196,12 +2196,19 @@ class X86_64Codegen:
     def _expr_str_kind(self, expr):
         """What `expr` holds: "str", "int", or None if undecidable.
 
-        Two sources, and `_string_vars` WINS where they disagree: it is
+        Three sources, and `_string_vars` WINS where they disagree: it is
         flow-sensitive and tracks what the emission of this very function has
         bound so far, so it is strictly better informed than the
         whole-function `ValueKinds`, which is what covers the shapes
         `_note_binding` does not see (a parameter's annotation, a function's
-        return type, a subscript's element kind).
+        return type, a subscript's element kind). A `comptime` binding is the
+        third source: `ValueKinds` never scans a `comptime NAME = …` statement,
+        so a folded binding reached this as an unclassified read — and a STRING
+        one, which `_emit_comptime_read` materializes as the interned literal,
+        was then emitted as an INTEGER, differently on each architecture. The
+        binding is a compile-time constant the emission already holds, so what
+        it holds is known rather than guessed; `model.comptime_val_kind` is the
+        one reader of it.
 
         Named for what it answers rather than for the first caller: `print`,
         the method-receiver guard and `_note_binding` all need the same
@@ -2211,8 +2218,12 @@ class X86_64Codegen:
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
                 return M.STR_KIND
-        elif isinstance(expr, F.IdentExpr) and expr.name in self._string_vars:
-            return M.STR_KIND
+        elif isinstance(expr, F.IdentExpr):
+            if expr.name in self._string_vars:
+                return M.STR_KIND
+            bound = M.comptime_val_kind(self._comptime_vals, expr.name)
+            if bound is not None:
+                return bound
         return self._vkinds.kind_of(expr)
 
     def _expr_is_fd(self, expr) -> bool:
@@ -5268,7 +5279,12 @@ class X86_64Codegen:
             self._blob_vars.add(name)
         elif isinstance(value, F.StringLiteral) or (
                 isinstance(value, F.IdentExpr)
-                and value.name in self._string_vars):
+                and self._expr_str_kind(value) == M.STR_KIND):
+            # `value.name in self._string_vars` OR a `comptime` binding whose
+            # folded value is the text: `var t = OS` binds exactly the `char *`
+            # `t = s` binds, and asking `_expr_str_kind` rather than
+            # re-deriving the test here is what keeps the two paths from
+            # disagreeing about the same read.
             self._string_vars.add(name)
         elif isinstance(value, F.CallExpr) and M.string_method_yields_string(
                 value, self._expr_str_kind(
@@ -5478,6 +5494,17 @@ class X86_64Codegen:
             # `external_call["sym", T](…)` as a specialization, naming the C
             # symbol — and the two architectures would then differ on the very
             # construct this shared text exists to keep them agreeing about.
+            #
+            # `not is_extern_call` is load-bearing, and it is the merge of two
+            # constructs that both spell a callee with a bracket. An
+            # `external_call["sym", RetType](…)` IS a `SubscriptExpr` callee
+            # and IS lowered, above, by this very path — so without the guard
+            # the refusal would eat it and every `std/os/env.mojo` in the tree
+            # would go back to failing on a construct that lowers. A template
+            # that was already answered or already refused has returned by the
+            # time execution reaches here, so `is_extern_call` False is the
+            # statement that the bracket is a specialization's comptime
+            # parameters rather than a C symbol and a return type.
             raise CodegenError(M.specialization_call_refusal(name))
 
         if len(args) > len(ARG_REGS):
