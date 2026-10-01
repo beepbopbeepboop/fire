@@ -855,6 +855,16 @@ static void _kinds_forget(uint64_t addr)
 typedef struct {
     uint64_t magic;
     int64_t  bits;
+    /* The slot's own kind byte (mojo_list_set_kinds' alphabet), copied from
+     * the list at BOX time. A box exists precisely because the raw word is
+     * not self-describing — a double has no int64_t spelling, and a str
+     * slot's word is a bare pointer with nothing to say it is one — so the
+     * consumer has to be able to ASK rather than guess. Without this the box
+     * only ever carried the float case and every other kind came back as the
+     * bare word: `mojo_repr_boxed` could only answer "box ⇒ float", so a
+     * STRING slot of the same heterogeneous list printed as its address
+     * decimal. */
+    char     kind;
 } MojoBox;
 
 static _PtrReg _reg_box;
@@ -868,8 +878,15 @@ int mojo_is_boxed(int64_t v)
 int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
 {
     if (!l || i < 0 || i >= l->len) return 0;
-    if (mojo_list_slot_kind(l, i) != 'd')
-        return l->data[i];          /* the raw word, exactly as before */
+    char _k = mojo_list_slot_kind(l, i);
+    /* An int slot is its own answer and stays the bare word: a box is a heap
+     * cell per (list, slot), and taxing every int in a mixed list to serve the
+     * uncommon kinds would be the wrong trade. Every OTHER kind is boxed —
+     * not just 'd' — because for each of them the raw word is ambiguous: a
+     * double has no int64_t spelling, and a `char *` slot's word is a bare
+     * pointer a consumer cannot tell from an int. */
+    if (_k == 'i')
+        return l->data[i];
     uint64_t addr = (uint64_t)(uintptr_t)l;
     int fresh = 0;
     _KindRow *r = _kinds_row_for_write(addr, &fresh);
@@ -889,6 +906,7 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
          * it is what mojo_list_get_double does. Storing the double TRUNCATED
          * to an int64_t instead would read back 2.5 as 2.0. */
         bx->bits = l->data[i];
+        bx->kind = _k;
         _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
         r->boxes[i] = bx;
     }
@@ -915,32 +933,66 @@ int64_t mojo_double_to_bits(double v) {
     return bits;
 }
 
-/* The box read as a double. A value that is NOT a box comes back as its own
- * numeric value, not 0: the codegen marks a whole READ SITE as possibly
- * boxed (the runtime decides per slot), so a call here must be correct for
- * the int slots of the same list too — and promoting an int to a double is
- * exactly what an operation with a float operand already does to it. */
+/* The box read as a double. A value that is NOT a box — or a box of a kind
+ * that is not a double's — comes back as its own numeric value, not 0: the
+ * codegen marks a whole READ SITE as possibly boxed (the runtime decides per
+ * slot), so a call here must be correct for the int slots of the same list
+ * too — and promoting an int to a double is exactly what an operation with a
+ * float operand already does to it. A non-double box unwraps to its raw word
+ * first, which is what that same slot returned before it was boxed at all. */
 double mojo_box_double(int64_t v)
 {
     if (!mojo_is_boxed(v)) return (double)v;
-    return mojo_double_from_bits(((MojoBox *)(intptr_t)v)->bits);
+    MojoBox *bx = (MojoBox *)(intptr_t)v;
+    if (bx->kind != 'd') return (double)bx->bits;
+    return mojo_double_from_bits(bx->bits);
 }
 
 /* The box read as an integer: Python's own conversion (truncation toward
- * zero), and the value itself when it is not a box. */
+ * zero) of a DOUBLE box, and the raw word for anything else — including a
+ * non-double box, whose slot is not a number at all and whose word is what
+ * the unboxed read returned. */
 int64_t mojo_box_int(int64_t v)
 {
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (!bx || !mojo_is_boxed(v)) return v;
+    if (bx->kind != 'd') return bx->bits;
     return (int64_t)mojo_box_double(v);
 }
 
-/* The repr of a possibly-boxed int64_t. Box -> the double it holds; not a
- * box -> the plain integer, which is what every other int64_t in this
- * runtime already is. One call so the consumer needs no branch. */
+/* The repr of a possibly-boxed int64_t. A box is described by its OWN kind
+ * byte (see MojoBox): 'd' the double it holds, 'p' a str, 's' bytes, 'l' a
+ * nested container, 'n' None, anything else the plain integer. Not a box ->
+ * the plain integer, which is what every other int64_t in this runtime
+ * already is. One call so the consumer needs no branch.
+
+ * The per-kind arms are `mojo_repr_list_kinds`' own, so a str slot and a str
+ * element of a heterogeneous list cannot print differently — and the str arm
+ * is why this cannot go on answering "box ⇒ float": a `char *` slot's word is
+ * a bare pointer, so without asking the box a str element printed as its own
+ * address decimal. */
 char *mojo_repr_boxed(int64_t v)
 {
-    if (mojo_is_boxed(v)) return mojo_repr_float(mojo_box_double(v));
+    if (mojo_is_boxed(v)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)v;
+        switch (bx->kind) {
+            case 'd': return mojo_repr_float(mojo_double_from_bits(bx->bits));
+            /* str() semantics, NOT repr(): every caller of this function is a
+             * str() spelling (`print`, an f-string, `%s`, the `str` builtin),
+             * where `str("yy")` is `yy` and only `repr` would quote it. The
+             * float case could not tell the two apart, which is why the
+             * name says "repr" and the behaviour was never checked; the str
+             * slot can. strdup'd because the string belongs to the list, and
+             * callers treat this result as their own (see
+             * mojo_cstr_or_int_str's ownership comment). */
+            case 'p': return strdup((char *)(intptr_t)bx->bits);
+            case 's': return mojo_bytes_repr((MojoBytes *)(intptr_t)bx->bits);
+            case 'l': return mojo_repr_list_kinds(
+                (MojoList *)(intptr_t)bx->bits, NULL);
+            case 'n': return strdup("None");
+            default:  return mojo_repr_int(bx->bits);
+        }
+    }
     return mojo_str_from_int(v);
 }
 

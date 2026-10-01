@@ -358,18 +358,42 @@ def _seed_selfhost_return_elem_types(self):
             self._return_elem_types[_k] = _e
 
 
-def _returns_kinds_valued(node) -> bool:
+def _returns_kinds_valued(gen, node) -> bool:
     """True when `node` is an expression that produces a value whose
     per-slot element kinds are recorded on the VALUE itself — a
-    `struct.unpack` of a format that mixes kinds, or a `Struct` handle's
-    `unpack`/`iter_unpack` on such a format. The kinds then survive a
-    `return` even though the compile-time NAME they were recorded against
-    does not, which is the whole reason this question needs answering at
-    the callee (see `_infer_return_maybe_kinds`).
+    `struct.unpack` of a format that mixes kinds, a `Struct` handle's
+    `unpack`/`iter_unpack` on such a format, or a heterogeneous list/tuple
+    LITERAL. The kinds then survive a `return` even though the compile-time
+    NAME they were recorded against does not, which is the whole reason this
+    question needs answering at the callee (see `_infer_return_maybe_kinds`).
 
     Only literal formats answer, the same bar `_struct_ctor_format` sets:
     a computed format is not statically known, and guessing would be the
-    wrong-static-answer failure the whole table exists to avoid."""
+    wrong-static-answer failure the whole table exists to avoid. The list
+    case is decided by the same rule `_lower_list_literal` records under —
+    a kind byte per element (`mojo_list_set_kinds`'s own alphabet, which
+    `_list_literal_slot_kind` maps), emitted only when they are not all the
+    same — so the two cannot disagree about which literals describe
+    themselves.
+
+    The heterogeneous-literal case is what makes `def mixed(x: Float64, s:
+    String) -> List: return [x, 1, s]` readable through a call. Its
+    elements' joined type is `char *` (`TypeLattice.join` resolves
+    double-vs-char* to char*), so the caller binds the result's element type
+    from `_return_elem_types` and `a[p]` lowers to `mojo_list_get_str` — a
+    float slot's IEEE-754 bits handed to `strlen`, which SIGSEGVs. The kinds
+    ARE recorded, by the callee's own literal lowering; marking the call
+    result makes the read a boxed one and lets the runtime answer per slot."""
+    if isinstance(node, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+        _kinds = set()
+        for _el in (node.elements or []):
+            if isinstance(_el, (gimple_ctypes.NoneLiteral,)) or (
+                    isinstance(_el, gimple_ctypes.IdentExpr) and _el.name == 'None'):
+                _kinds.add('n')
+            else:
+                _kinds.add(gimple_ctypes.TypeLattice.slot_kind_byte(
+                    gen._quick_type(_el)))
+        return len(_kinds) > 1
     if not isinstance(node, gimple_ctypes.CallExpr):
         return False
     f = node.func
@@ -391,7 +415,7 @@ def _returns_kinds_valued(node) -> bool:
     return False
 
 
-def _infer_return_maybe_kinds(gen, body) -> bool:
+def _infer_return_maybe_kinds(gen, body, func_def=None) -> bool:
     """Does any `return` in this body hand back a kinds-carrying value?
 
     The cross-function half of the per-slot-kinds mechanism. A
@@ -411,30 +435,49 @@ def _infer_return_maybe_kinds(gen, body) -> bool:
     not — recorded rather than approximated, since over-approximating here
     would only cost a boxed read on a value the runtime then reports as
     unboxed, while under-approximating costs a wrong answer, and a missing
-    case is a missing case either way."""
+    case is a missing case either way.
+
+    `func_def` is the definition this body belongs to, and its ANNOTATED
+    params are seeded into `var_types` for the duration of the walk: the
+    heterogeneous-literal test reads each element's type, and a parameter is
+    the most ordinary element there is — `return [x, 1, s]` in
+    `def mixed(x: Float64, s: String) -> List` is three elements of which two
+    are params. With `var_types` unseeded `_quick_type` answers int64_t for
+    every identifier, so all three read as one kind and the literal looks
+    homogeneous. Seed and restore are the same save/overlay/restore
+    `_infer_return_elem_type` does for the same reason."""
+    _saved_vt = gen.var_types
+    gen.var_types = dict(_as_dict(_saved_vt))
+    if func_def is not None:
+        for _pname, _ptype in (func_def.params or []):
+            if _ptype:
+                gen.var_types[_pname] = gimple_ctypes._mojo_type(_ptype)
     bound: set = set()
-    for _round in range(2):
-        found = False
-        for nd in _walk_ast(body):
-            if (isinstance(nd, gimple_ctypes.AssignStmt)
-                    and isinstance(nd.target, gimple_ctypes.IdentExpr)):
-                if _returns_kinds_valued(nd.value) or (
-                        isinstance(nd.value, gimple_ctypes.IdentExpr)
-                        and nd.value.name in bound):
-                    bound.add(nd.target.name)
-            elif (isinstance(nd, gimple_ctypes.VarDecl) and nd.name
-                    and _returns_kinds_valued(getattr(nd, 'value', None))):
-                bound.add(nd.name)
-            elif isinstance(nd, gimple_ctypes.ReturnStmt):
-                v = getattr(nd, 'value', None)
-                if _returns_kinds_valued(v):
-                    found = True
-                elif (isinstance(v, gimple_ctypes.IdentExpr)
-                      and v.name in bound):
-                    found = True
-        if found:
-            return True
-    return False
+    try:
+        for _round in range(2):
+            found = False
+            for nd in _walk_ast(body):
+                if (isinstance(nd, gimple_ctypes.AssignStmt)
+                        and isinstance(nd.target, gimple_ctypes.IdentExpr)):
+                    if _returns_kinds_valued(gen, nd.value) or (
+                            isinstance(nd.value, gimple_ctypes.IdentExpr)
+                            and nd.value.name in bound):
+                        bound.add(nd.target.name)
+                elif (isinstance(nd, gimple_ctypes.VarDecl) and nd.name
+                        and _returns_kinds_valued(gen, getattr(nd, 'value', None))):
+                    bound.add(nd.name)
+                elif isinstance(nd, gimple_ctypes.ReturnStmt):
+                    v = getattr(nd, 'value', None)
+                    if _returns_kinds_valued(gen, v):
+                        found = True
+                    elif (isinstance(v, gimple_ctypes.IdentExpr)
+                          and v.name in bound):
+                        found = True
+            if found:
+                return True
+        return False
+    finally:
+        gen.var_types = _saved_vt
 
 
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
@@ -4531,22 +4574,22 @@ def gen_module_impl(self, stmts):
     # per nesting level. Memoised by body identity so a body is walked once
     # per compile even when the enclosing structure revisits it.
     _mk_cache: dict = {}
-    def _mk(name, body):
+    def _mk(name, body, fdef=None):
         _k = id(body)
         _v = _mk_cache.get(_k)
         if _v is None:
-            _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body)
+            _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body, fdef)
         if _v:
             self._return_maybe_kinds.add(name)
     for s in all_functions:
         if not _is_foreign_main(s) and isinstance(s, FunctionDef):
-            _mk(s.name, s.body)
+            _mk(s.name, s.body, s)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             _sk = _as_structdef_node(s)
             for _m in _sk.methods:
                 if _m.name != '__init__':
-                    _mk(f"{_sk.name}_{_m.name}", _m.body)
+                    _mk(f"{_sk.name}_{_m.name}", _m.body, _m)
     for _pass2c_iter in range(8):
         _c_changed = False
         for s in all_functions:
