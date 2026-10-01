@@ -284,9 +284,47 @@ computes, (c) CAS keying by `(template-id, type args, comptime params)` so two
 instantiations of one template get two entries, and (d) a decision about
 `ReflectedFn.display_name` — a *concrete* method on a *parametric* type, whose
 symbol name is only determined once the type arguments are. Items (a)–(c) are
-the project; (d) falls out of it. This is weeks, not an afternoon, and it is
-the single largest lever in the whole residue: it alone would unblock **24 of
-family 1's 30 files**.
+the project; (d) falls out of it. This is weeks, not an afternoon.
+
+**§1.2, measured 2026-09-30: "24 of 30" was an upper bound and the real ceiling
+of the largest chunk of it is ZERO.** This paragraph argued the cost from the
+shape of the modules, which is the one thing `FILES BLOCKED` cannot tell you.
+Three probes over a fresh 637-file sweep of `738fb3ab` (cold CAS; full method,
+chains and numbers in `FORMAL_dylib_export_gate_ceiling.md`):
+
+- **34 of the 35 files blocked by `std/collections/binary_heap.mojo` do not
+  contain the string `BinaryHeap` anywhere.** They are refused because
+  `std/collections/__init__.mojo:27` re-exports it, and the formal backend
+  builds a dylib for every module in a file's EAGER import closure. The 35th is
+  that re-export line itself.
+- Giving `binary_heap.mojo` a concrete public symbol — the stand-in for "one
+  concrete instantiation", and the only change the 34 could even notice —
+  moves **0 of 35**. The refusal advances one level, into `binary_heap.mojo`'s
+  own body (`len(self._data)` on a `List[Self.T]` slot has no representable
+  value), so the module carrying the 35 does not lower today whatever its export
+  table says.
+- Deleting the re-export, so `binary_heap.mojo` is not in the closure at all,
+  moves **0 of 35** as well: all 35 land on `dtype.mojo`'s MLIR constructs (26)
+  or `_assembly.mojo`'s `inlined_assembly` (9), which are §2 and §1.1 — true
+  limits. `binary_heap.mojo`'s only two real importers
+  (`test/collections/test_binary_heap_assert_empty_{peek,pop}.mojo`, outside the
+  sweep's default scope) also measure 0 under the first probe.
+
+So Stage 5 is still the right long-term answer to "a generic is not a single
+symbol", and it is still weeks — but for THIS family it is not the lever, and
+planning against "24 of 30" would have spent a project on 0 files of coverage.
+The number to plan from is now printed by the cause table on every run:
+
+    $ python3 tools/formal_sweep_causes.py --min 5 <sweep.log>
+       38       0  module exports no public functions
+            uses: 1 of 35 blocked by binary_heap.mojo name anything it declares
+                  (BinaryHeap)  [34 of the 35 name nothing it declares; the rest
+                  of the row is closure]
+
+(`uses:` landed in `b6a94d35`, pinned by `test_refusal_taxonomy.py`; it changes
+no classification and no rate.) The remaining 9 files of the family — `stat.mojo`
+1, `constants.mojo` 1, `_unicode_lookups.mojo` 1 and the six in the 2026-09-27
+table — were not re-probed; the ones measured are accounted for above.
 
 The files that would *not* be unblocked by it, and why:
 
@@ -301,7 +339,10 @@ The files that would *not* be unblocked by it, and why:
   doc/ABI.md's public-symbol rule excludes it on purpose. Permanent, by design.
 
 So the **decisions** in family 1 decompose as **21 blocked on Stage 5, 6
-permanent, 0 wrong.** What was wrong was the *reporting*, and that is closed —
+permanent, 0 wrong** — and the first clause is now known to be worth **0 files
+for its largest single member**, so read the three as *21 pending a project
+whose measured value on `binary_heap.mojo` is zero*, not as 21 files of
+near-term coverage. What was wrong was the *reporting*, and that is closed —
 see "What wave 5 closed".
 
 ## 1.3 One of the 30 should not be in the family at all
