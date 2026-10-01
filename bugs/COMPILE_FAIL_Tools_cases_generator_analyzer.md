@@ -1,5 +1,83 @@
 # COMPILE_FAIL: Tools/cases_generator/analyzer.py
 
+## Status (2026-09-30, branch work/compile-fail-stdlib-misc — own-file errors 4 → 1; the three gone were a C-style cast used as a GIMPLE operand, which is now the tree's one `_inc_val`)
+
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
+(13 s, exit 1). Was **4** own-file `error:` lines; now **1**.
+
+### FIXED this session (commit `6a7c69fd`): `_tN = _t71 + (int64_t)1` is not legal GIMPLE
+
+Two of the four were
+
+```
+analyzer.py:700:17: error: expected expression before '(' token
+analyzer.py:715:18: error: expected expression before '(' token
+```
+
+and the reported source lines (`next(tkn_iter)`, the following `def`) were
+misleading — stripping the `#line` directives and recompiling puts GCC's
+caret squarely on the `(int64_t)` of `_t99 = _t71 + (int64_t)1;`, i.e.
+`_t71 + 1` from the `tokens[idx+1]` at analyzer.py:719. Five
+cursor/counter advances spelled their increment that way: the `next(it)`
+cursor, the `for x in it:` cursor, the regex finditer/findall scan
+positions, and the enumerate counter.
+
+A C-style cast is not a legal gimple OPERAND, so the error is confined to
+`__GIMPLE`-tagged bodies — a lifted closure, i.e. every nested `def`. Both
+of analyzer.py's `visit` helpers are nested `def`s, which is why nothing
+in the existing corpus caught it. The tree already knew the rule
+(`_gen_for_range`'s own `step_v` uses `1LL` for exactly this reason, with
+a comment naming `idx + (int64_t)1` as the failure), so the five sites had
+each grown its own cast instead of using the idiom; they now share one
+helper, `_inc_val`, next to `_new_val`. Regression test
+`cursor_advance_has_no_cast_operand_in_gimple` on both pipelines with
+CPython on the same text: FAIL before (`gcc -fgimple: expected expression
+before '(' token` ×2), PASS after.
+
+### Still blocking: ONE error
+
+```
+analyzer.py:723:1: error: non-trivial conversion in 'var_decl'
+```
+
+raised on
+
+```
+  char * tkn;
+  ...
+  _t74 = mojo_list_get_int (tkn_iter, _t71);
+  tkn = _t74;
+```
+
+`check_escaping_calls_visit` (analyzer.py:690-712) does
+`tkn_iter = iter(stmt.contents)` then `for tkn in tkn_iter:`. The local
+`tkn` is declared `char *` by usage inference (its only uses are
+`tkn.kind` / `tkn.text`, lowered as `_mojo_dispatch_getattr` on an opaque
+handle), but the loop's element read goes through
+`mojo_list_get_int` because `stmt.contents`' element type is unknown, so
+an `int64_t` is stored into the `char *`. GIMPLE rejects that store
+outright; coercing it instead would be a silent reinterpretation of the
+element pointer's bits as a string, which is strictly worse.
+
+So the two defensible fixes are both real work, and neither is narrow:
+thread the element type of a foreign struct's list-valued field into the
+loop-variable's read, or read the element as whatever the loop variable's
+declared type is and let the `.kind`/`.text` dynamic dispatch take it from
+there. NOT attempted — this is the list-element-typing family that
+`construct:cross-function-element-type` / the `hard/` container-element
+docs track, and a wrong guess here silently reinterprets a pointer as a
+string.
+
+### The two architectural blockers below are unchanged
+
+Link-mode sibling resolution still stubs `parser.*` / `lexer.*` (so
+`analyzer.py` reaches gcc but links against weak stubs), and
+`parsing.py`'s polymorphic `yield from self.<field>.tokens()` generators
+are still refused — see `bugs/COMPILE_FAIL_Tools_cases_generator_parsing.md`,
+whose own status changed materially this session.
+
+Doc kept open on the one remaining error.
+
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)

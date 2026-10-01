@@ -374,13 +374,15 @@ def _returns_kinds_valued(node) -> bool:
         return False
     f = node.func
     # `struct.unpack(fmt, buf)` / `struct.unpack_from(fmt, buf, off)` /
-    # `struct.iter_unpack(fmt, buf)` — fmt is the first argument.
+    # `struct.iter_unpack(fmt, buf)` — fmt is the first argument, read
+    # back only when it is a literal (see `_struct_literal_format`).
     if (isinstance(f, gimple_ctypes.MemberExpr)
             and isinstance(f.obj, gimple_ctypes.IdentExpr)
             and f.obj.name == 'struct'
             and f.member in ('unpack', 'unpack_from', 'iter_unpack')
             and node.args):
-        return gimple_ctypes._struct_format_is_mixed(node.args[0].value)
+        return gimple_ctypes._struct_format_is_mixed(
+            gimple_ctypes._struct_literal_format(node.args[0]))
     # `H.unpack(buf)` where H is `struct.Struct('mixed-format')`.
     if (isinstance(f, gimple_ctypes.MemberExpr)
             and f.member in ('unpack', 'unpack_from', 'iter_unpack')):

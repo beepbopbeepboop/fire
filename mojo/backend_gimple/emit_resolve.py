@@ -1743,6 +1743,28 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     return t
 
 
+def _inc_val(gen, base: str) -> str:
+    """`base + 1` as its own int64_t temp — the ONE way to spell a
+    one-step advance in generated GIMPLE.
+
+    A C-style cast is not a legal gimple OPERAND, so the obvious
+    `f'{base} + (int64_t)1'` is a hard gimplification error
+    ("expected expression before '(' token") that takes out the whole
+    translation unit. `1LL` is the tree's existing width-correct int64_t
+    literal idiom (see `_gen_for_range`'s own `step_v`), needs no cast,
+    and IS a legal operand, so the whole expression is valid GIMPLE.
+
+    Every counter/pos/cursor advance in the codegen goes through here
+    rather than each spelling the cast itself: the five sites this
+    replaced (the list-iterator cursor advance in `next(it)` and in
+    `for x in it:`, the regex finditer/findall scan advance, and the
+    enumerate-counter advance) were all still carrying the cast, and
+    Tools/cases_generator/analyzer.py failed to compile on it — the
+    module-level refusal is `cannot compile module` for the whole file
+    because a GIMPLE parse error is not recoverable per-function."""
+    return gen._new_val('int64_t', f'{base} + 1LL')
+
+
 def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list) -> str:
     """Emit a call and return the result temp."""
     t = gen._new_temp(ret_type)

@@ -386,7 +386,7 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     gen._emit_label(bb_post)
     # pos = (mend > pos) ? mend : pos + 1 — advance past the match, or by
     # one char on a zero-width match, exactly like Python's finditer.
-    pos_plus1 = gen._new_val('int64_t', f'{pos_var} + (int64_t)1')
+    pos_plus1 = gen._inc_val(pos_var)
     cmp_t = gen._new_val('_Bool', f'{mend_var} > {pos_var}')
     next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend_var} : {pos_plus1}')
     gen._emit(f'  {pos_var} = {next_pos};')
@@ -465,7 +465,7 @@ def _close_regex_scan(gen, pieces) -> None:
     gen._emit_label(bb_post)
     # pos = (mend > pos) ? mend : pos + 1 — advance past the match, or by
     # one char on a zero-width match, exactly like Python's finditer/findall.
-    pos_plus1 = gen._new_val('int64_t', f'{pos} + (int64_t)1')
+    pos_plus1 = gen._inc_val(pos)
     cmp_t = gen._new_val('_Bool', f'{mend} > {pos}')
     next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend} : {pos_plus1}')
     gen._emit(f'  {pos} = {next_pos};')
@@ -2769,7 +2769,7 @@ def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
-    nc = gen._new_val('int64_t', f"{cur} + (int64_t)1")
+    nc = gen._inc_val(cur)
     gen._emit(f"  {cur} = {nc};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
@@ -2816,7 +2816,7 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
-    nc = gen._new_val('int64_t', f"{ctr} + (int64_t)1")
+    nc = gen._inc_val(ctr)
     gen._emit(f"  {ctr} = {nc};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_check_exc)
