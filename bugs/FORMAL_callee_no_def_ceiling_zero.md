@@ -45,11 +45,16 @@ twelve.
 **Zero.** Six of the twelve are not `codegen` findings about this file at all
 once this refusal is out of the way — they are `codegen/dependency` (3) or
 `not-answerable/host-import` (3), which is where the sweep would classify them
-if the import diagnosis were not preempted. The other six are each behind a
-refusal that belongs to a *different* row of the map: the method-call-on-a-value
-family (`formal-receiver-handoff`), the value-only-callee family
-(`formal-frame-by-value`, `origin_of`), and the frame-escape family
-(`formal-frame-escape`).
+if the import diagnosis were not preempted. **That preemption is its own defect
+and its own document** — a frame refusal raised from `_prepare_functions` beats
+the import diagnosis for any file that does both, which is 80 in-scope files,
+and fixing it moves six rows of the map at once:
+`FORMAL_frame_refusal_preempts_the_import_diagnosis.md`.
+
+The other six are each behind a refusal that belongs to a *different* row of the
+map: the method-call-on-a-value family (`formal-receiver-handoff`), the
+value-only-callee family (`formal-frame-by-value`, `origin_of`), and the
+frame-escape family (`formal-frame-escape`).
 
 So the row's 12 is an upper bound with **no** slack, and this construct cannot
 be worth a fix on file count. It is still worth something, and §2 is what.
@@ -163,6 +168,14 @@ this row twice for them:
    scope (`DEFAULT_STDLIB_SUBTREES = ("std",)`), which is why the map says 12
    where the real population over all roots is 41. That is a property of the
    sweep's scope, not a disagreement about the taxonomy.
+
+**Found in passing, not fixed, not this row's to fix:**
+`bugs/FORMAL_aliased_reexport_publishes_the_wrong_name.md` — the sibling reader
+this change added (`imported_bound_names`) records the name a `from … import`
+BINDS, and `reexported_names` records the name the defining module gave it, so
+`from leaf import base as aliased` in a package `__init__` publishes `base` and
+the consumer's `aliased(21)` cannot bind. Measured, with the build refusing to
+emit an image whose symbol nothing provides.
 
 ## 5. How to reproduce the measurement
 

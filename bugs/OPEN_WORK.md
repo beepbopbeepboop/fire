@@ -31,6 +31,9 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `FORMAL_arm64_instruction_coverage.md`, `FORMAL_arm64_known_proof_gaps.md`, `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | arm64 work — not duplicated here |
 | `FORMAL_formal_frame_size_bounds_recursion_depth.md` | neither backend guards the stack: a fixed 128 KiB (arm64) / 16 KiB (x86-64) frame per call and no depth test, so recursion past 61 (arm64) or 450 (x86-64) frames is a SIGSEGV and not a refusal. **Both backends.** |
 | `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), and the three refusals that named a cause which was not operating |
+| `FORMAL_callee_no_def_ceiling_zero.md` | the work map's row 8, "callee has no definition on this path": ceiling **0 of 12** (six of the twelve are behind an import diagnosis), and the row's one sentence was standing for five facts — an imported free function (26 files over `std/`+`test/`), a compile-time parameter, an MLIR-yielding intrinsic, a star-imported name, and genuinely unbound. The five sentences have landed; the cross-image per-parameter contract that would allow the hand-off has not |
+| `FORMAL_frame_refusal_preempts_the_import_diagnosis.md` | every frame refusal is raised before `_resolve_imports`, so a file that both trips a frame clause and imports something is reported as a `codegen` gap in itself — 80 in-scope files, 6 of 12 measured to change class. Fixing it re-numbers six rows of the map at once |
+| `FORMAL_aliased_reexport_publishes_the_wrong_name.md` | `from leaf import base as aliased` in a package `__init__` publishes `base`; a consumer's `aliased(21)` cannot bind |
 
 ---
 
