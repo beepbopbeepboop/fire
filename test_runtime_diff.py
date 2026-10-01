@@ -451,6 +451,42 @@ BUILTIN_PROGRAMS = {
             print(len({str(i) + str(j): i + j + 1 for i in range(3) for j in range(3)}))
             print({str(i) + str(j): i + j + 1 for i in range(3) for j in range(3) if j > 1})
     """),
+    # A heterogeneous list built in a CALLEE and read at a computed index in the
+    # caller. The elements' joined type is `char *` (TypeLattice.join resolves
+    # double-vs-char* to char*), so without the cross-function kinds marker the
+    # subscript lowered to `mojo_list_get_str` and handed a float slot's
+    # IEEE-754 bits to strlen — SIGSEGV. The callee already records the
+    # literal's per-slot kinds on the VALUE, so the read has to be lowered as a
+    # boxed one and the runtime has to be able to answer a str slot as well as a
+    # float one.
+    "list_returned_by_a_call_reads_heterogeneous_slots": textwrap.dedent("""\
+        def mixed(x: Float64, s: String) -> List:
+            return [x, 1, s]
+
+        def ints() -> List:
+            return [1, 2, 3]
+
+        def strs(s: String) -> List:
+            return [s, s]
+
+        def main():
+            var a = mixed(2.5, "yy")
+            var p = 0
+            print(a[p])
+            print(a[2])
+            print(a)
+            print(a[0] + 1)
+            print(str(a[2]))
+            for e in a:
+                print(e)
+            print(len(a))
+            var b = ints()
+            print(b[0])
+            print(b)
+            var c = strs("q")
+            print(c[0])
+            print(c)
+    """),
     "comprehension_of_tuples_and_lists": textwrap.dedent("""\
         def main():
             print([[5, j] for j in range(3)])
