@@ -3863,13 +3863,21 @@ class Parser:
                 # The loop variable is `_name`, NOT `t`: `t` is already a
                 # `Token *` local in this function (from the `t = self._peek()`
                 # above), and a comprehension target that shadows an enclosing
-                # local of a STRUCT-POINTER type reused that local's C variable,
-                # so the `char *` element came out as an `int64_t` temp assigned
-                # into `struct Token * t` and the self-hosted `make mojoc` died
-                # with "non-trivial conversion in 'var_decl'". Shadowing an
-                # int64_t local happens to work; shadowing a struct pointer does
-                # not, and this function has one. See
-                # bugs/CODEGEN_comprehension_target_shadows_struct_local.md.
+                # local used to reuse that local's C variable, so the `char *`
+                # element came out as an `int64_t` temp assigned into
+                # `struct Token * t` and the self-hosted `make mojoc` died with
+                # "non-trivial conversion in 'var_decl'". Shadowing an int64_t
+                # local happened to work; shadowing a struct pointer did not,
+                # and this function has one.
+                #
+                # The compiled path no longer requires the rename — a
+                # comprehension's target gets its own binding and the enclosing
+                # one is restored afterwards, in `emit_infra.py`'s
+                # `_compr_bind_target` / `_compr_restore_target`, regression
+                # `comprehension_target_shadows_struct_local` in
+                # `test_gimple_runner.py`. The rename stays: it is free, and it
+                # keeps this function's own C output identical to what the
+                # self-host stages were compared byte-for-byte against.
                 return [ComptimeVarStmt(target=_name, value=rhs) for _name in targets]
             if self._peek().kind == "ASSIGN":
                 self._advance()
