@@ -4225,6 +4225,230 @@ INIT_FIELD_TYPE_CASES = [
      "    return b.size()\n", 2, None),
 ]
 
+
+# ── an OVERLOADED NAME, and the struct layout each definition is compiled to ──
+#
+# `formal/build.py`'s `_fn_key` / `_by_name_holder` and the per-definition
+# `_check_holder_agreements` loop. Mojo overloads are ordinary — `reversed` is
+# declared eight times in `std/builtin/reversed.mojo`, with a different receiver
+# type each time — and the frame analysis kept one table per NAME, so the first
+# definition's candidate struct answered for all of them.
+#
+# The measured consequence was a refusal whose every clause is false about the
+# program it was reported against: `reversed`'s `_DictEntryIter` overload reads
+# `value.src`, `_DictEntryIter` declares `src`, and the message said
+# "List has no field 'src'" because the `List` overload was declared first.
+#
+# The cases are in three groups because the fix has three parts, and only
+# together do they hold it:
+#
+#   * POSITIVE (`OVERLOAD_*_CASES`): each definition's member read resolves
+#     against its OWN layout. These build, EXECUTE, and are compared against
+#     CPython on both architectures — the layouts differ here, so a case that
+#     read the wrong one would print the other struct's field.
+#   * `refuse_without:` (`OVERLOAD_*_REFUSALS`): the false-clause refusal is
+#     gone. This is the anti-rot direction, and it is the assertion that would
+#     have caught the original defect on its own.
+#   * `refuse:` (`OVERLOAD_DISPATCH_REFUSALS`): keying the tables per definition
+#     LIFTS a refusal, and a lifted refusal has to leave a correct image behind.
+#     Both backends register functions in one table keyed by name
+#     (`self._functions[f.name] = f`), so an overloaded name is ONE function in
+#     the image and a call to it reaches whichever body was registered last.
+#     So a call site that hands each definition a different struct is still a
+#     refusal — now with the reason that is actually true, and checked against
+#     EVERY definition rather than the one that happened to be first.
+OVERLOAD_LAYOUT_CASES = [
+    # THE CASE, and the one that measures the fix rather than restating it. Two
+    # definitions of one name, each building a LOCAL struct under the SAME local
+    # name and reading a field of it — and the two structs put that field at
+    # DIFFERENT slots (`src` is 1 in `A` and 0 in `B`). Keyed per name, one
+    # table held both layouts as candidates for `v.src` and the refusal was
+    # "this name holds a frame address in more than one shape … A puts it at
+    # slot 1; B puts it at slot 0", which is a true statement about the merged
+    # table and a false one about the program: `v` is an `A` in one definition
+    # and a `B` in the other, and never both. Keyed per definition each body
+    # reads its own struct.
+    #
+    # Only the SECOND definition survives into the image (both backends key
+    # their function table by name), so 33 is the answer — and the CPython
+    # reference is written to compute what that body computes, which is what
+    # `overload_of_plain_parameters_still_builds` explains at length.
+    ("overload_each_definition_reads_its_own_layout",
+     "struct A:\n"
+     "    var pad: Int\n"
+     "    var src: Int\n"
+     "\n"
+     "struct B:\n"
+     "    var src: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    var v = A(7, 42)\n"
+     "    var r = v.src\n"
+     "    return r\n"
+     "\n"
+     "def f[K: Copyable](x: Int) -> Int:\n"
+     "    var v = B(33, 2)\n"
+     "    var r = v.src\n"
+     "    return r\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    printf(\"%d\", f(1))\n"
+     "    return 0\n",
+     "class A:\n"
+     "    def __init__(self, pad, src):\n"
+     "        self.pad = pad\n        self.src = src\n"
+     "\n"
+     "class B:\n"
+     "    def __init__(self, src, pad):\n"
+     "        self.src = src\n        self.pad = pad\n"
+     "\n"
+     "import sys\n"
+     "def main():\n"
+     "    # The SECOND definition is the one a name-keyed dispatch reaches, so\n"
+     "    # the reference computes what that body computes: B(33, 2).src is 33,\n"
+     "    # and reading A's slot instead would give B.pad, which is 2.\n"
+     "    sys.stdout.write(\"%d\" % B(33, 2).src)\n"),
+    # The same construct with the two definitions SWAPPED, which is what makes
+    # the pair a test rather than a demonstration. A first-wins table answers 2
+    # here (A's layout, `src` at slot 1, over a B frame holding `pad` there);
+    # the reference says 42. One case cannot tell "reads its own layout" from
+    # "always reads the first definition's layout", and that is the whole
+    # question this fix turns on.
+    ("overload_layout_resolves_per_definition_not_by_position",
+     "struct A:\n"
+     "    var pad: Int\n"
+     "    var src: Int\n"
+     "\n"
+     "struct B:\n"
+     "    var src: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "def f[K: Copyable](x: Int) -> Int:\n"
+     "    var v = B(33, 2)\n"
+     "    var r = v.src\n"
+     "    return r\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    var v = A(7, 42)\n"
+     "    var r = v.src\n"
+     "    return r\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    printf(\"%d\", f(1))\n"
+     "    return 0\n",
+     "class A:\n"
+     "    def __init__(self, pad, src):\n"
+     "        self.pad = pad\n        self.src = src\n"
+     "\n"
+     "class B:\n"
+     "    def __init__(self, src, pad):\n"
+     "        self.src = src\n        self.pad = pad\n"
+     "\n"
+     "import sys\n"
+     "def main():\n"
+     "    # The LAST definition is the one name-keyed dispatch reaches: A(7, 42),\n"
+     "    # whose `src` is 42.\n"
+     "    sys.stdout.write(\"%d\" % A(7, 42).src)\n"),
+    # The direction that is NOT a wrong answer: a name with several definitions
+    # whose parameter is an ordinary value. This is the plain-Python shape
+    # (`def f(x)` / `def f[K](x)`), it has no frame anywhere, and it must keep
+    # building — the fix is about which LAYOUT a read resolves against, not
+    # about refusing overloaded names.
+    #
+    # The CPython reference computes `7 * 3`, i.e. the SECOND body, and that is
+    # deliberate rather than a fudge: this image has ONE `f`, so the answer a
+    # reader gets is the second definition's. Asserting `7 * 2` would be
+    # asserting an overload RESOLUTION this path does not implement — the same
+    # limit `formal/build.py`\'s dylib rename comment names when it says a call
+    # that wanted the second overload resolves to the first. The case is here to
+    # hold the build; the comment is here so the next reader does not read the
+    # number as a claim about Mojo.
+    ("overload_of_plain_parameters_still_builds",
+     "def twice(x: Int) -> Int:\n"
+     "    return x * 2\n"
+     "\n"
+     "def twice[K: Copyable](x: Int) -> Int:\n"
+     "    return x * 3\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    printf(\"%d\", twice(7))\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    sys.stdout.write(\"%d\" % (7 * 3))\n"),
+]
+
+OVERLOAD_REFUSALS = [
+    # THE ORIGINAL DEFECT, as a `refuse_without:` case: the member read is
+    # legal — `Seven` declares `src` — and the refusal that named a DIFFERENT
+    # struct is what is forbidden. Before the fix this said "One has no field
+    # 'src'" (or `List`, in `reversed`'s own spelling) and every clause of it
+    # was false: `One` was never the receiver, and `Seven` does have `src`.
+    ("overload_no_longer_reports_another_structs_layout",
+     "struct One:\n"
+     "    var n: Int\n"
+     "\n"
+     "struct Seven:\n"
+     "    var pad: Int\n"
+     "    var src: Int\n"
+     "\n"
+     "def go(a: One) -> Int:\n"
+     "    return 0\n"
+     "\n"
+     "def go(a: Seven) -> Int:\n"
+     "    var v = a.src\n"
+     "    return v\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var s = Seven(5, 42)\n"
+     "    return go(s)\n",
+     # `needle` is empty-safe: the assertion is that the forbidden clause is
+     # gone, and `has no field 'src'` is what it must no longer say.
+     "refuse_without::has no field 'src'", None),
+]
+
+OVERLOAD_DISPATCH_REFUSALS = [
+    # The half of the fix that keeps a LIFTED refusal honest. Both definitions
+    # are compiled, each against its own struct, and each call site hands one of
+    # them the OTHER's struct. Both backends register one function per NAME
+    # (`self._functions[f.name] = f`), so there is ONE `pick` in the image and
+    # the call cannot say which body it reaches — which is a real limit of
+    # name-based dispatch here, and the refusal names it.
+    #
+    # This case is the one that MEASURED the danger: with the tables keyed per
+    # definition and the whole-image agreement pass skipping an ambiguous name,
+    # this program BUILT, RAN, and printed 7 and 33 where the source says 42 and
+    # 33 — a wrong answer on the construct this suite exists to keep honest. It
+    # is here so that removing either half of the fix (the per-definition keying
+    # OR the per-definition agreement check) is a red test rather than a silent
+    # wrong number.
+    ("overload_called_with_each_definitions_struct_is_refused",
+     "struct A:\n"
+     "    var pad: Int\n"
+     "    var src: Int\n"
+     "\n"
+     "struct B:\n"
+     "    var src: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "def pick(ref value: A) -> Int:\n"
+     "    var v = value.src\n"
+     "    return v\n"
+     "\n"
+     "def pick[K: Copyable](ref value: B) -> Int:\n"
+     "    var w = value.src\n"
+     "    return w\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var a = A(7, 42)\n"
+     "    var b = B(33, 2)\n"
+     "    printf(\"%d\", pick(a))\n"
+     "    printf(\" %d\", pick(b))\n"
+     "    return 0\n",
+     "refuse:declares 'value' as A", None),
+]
+
 INIT_FIELD_TYPE_REFUSALS = [
     # (3) UNANIMITY, and the first of the two. `self.inner = Inner()` on one
     # branch and `self.inner = None` on the other are both classifiable and they
@@ -8970,6 +9194,8 @@ def main():
                   + ASSIGNED_TYPE_CASES + ASSIGNED_TYPE_REFUSALS \
                   + INIT_FIELD_TYPE_CASES \
                   + INIT_FIELD_TYPE_REFUSALS
+                  + OVERLOAD_LAYOUT_CASES + OVERLOAD_REFUSALS
+                  + OVERLOAD_DISPATCH_REFUSALS
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
@@ -8991,10 +9217,18 @@ def main():
     # in would mean a sentinel in the exit-status column and a branch that reads
     # a sentinel as if it were a status — which is how a case ends up asserting
     # nothing.
-    pair_names = {c[0] for c in TYPE_APPLICATION_CASES}
+    pair_names = {c[0] for c in TYPE_APPLICATION_CASES} | {
+        c[0] for c in OVERLOAD_LAYOUT_CASES}
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
+                     + OVERLOAD_LAYOUT_CASES
                      if not args.cases or c[0] in args.cases])
-    selected = [c for c in everything if not args.cases or c[0] in args.cases]
+    # `selected` is the four-column groups, so the pair cases have to be OUT of
+    # it: they are dispatched separately below, and a name in both would be
+    # counted twice by the arity check and reported as an unknown case. They are
+    # in `everything` for the `--list` census and nowhere else.
+    selected = [c for c in everything
+                if c[0] not in pair_names
+                and (not args.cases or c[0] in args.cases)]
     known = {c[0] for c in everything} | pair_names
     if args.cases and len(selected) + len(wanted_pairs) != len(args.cases):
         missing = set(args.cases) - known
