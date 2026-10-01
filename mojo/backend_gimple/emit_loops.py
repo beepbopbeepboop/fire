@@ -2855,8 +2855,19 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
     """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__."""
     base = gimple_exprtypes._struct_name_of(struct_type)
 
-    # Determine iterator type (may be the same struct or a separate iter type)
-    iter_fn = f"{base}___iter__"
+    # Determine iterator type (may be the same struct or a separate iter type).
+    # Every symbol here goes through `gen._struct_method_csym`, the tree's ONE
+    # composer for a struct method's C name — NOT an f-string spelling
+    # `{Struct}___{method}__` written out again. The hand-written form omits
+    # the home-module qualifier, so a struct reached via `from mod import
+    # Struct` emitted a call to the BARE name: gcc's implicit-declaration
+    # fallback made it an `int` and the `for`/`next` lowering then read
+    # `It___iter__(It *)` as `int`, so `iter_var` was a garbage pointer —
+    # "implicit declaration of function 'It___iter__'; did you mean
+    # 'itmod_It___iter__'?" plus "assignment to 'It *' from 'int' makes
+    # pointer from integer without a cast", with no correct answer anywhere
+    # in the output.
+    iter_fn = gen._struct_method_csym(base, '__iter__', '')
     if iter_fn in gen.func_return_types:
         iter_type = gen.func_return_types[iter_fn]
         iter_var  = gen._new_temp(iter_type)
@@ -2867,8 +2878,8 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         iter_var  = obj_val
         iter_base = base
 
-    has_next_fn = f"{iter_base}___has_next__"
-    next_fn     = f"{iter_base}___next__"
+    has_next_fn = gen._struct_method_csym(iter_base, '__has_next__', '')
+    next_fn     = gen._struct_method_csym(iter_base, '__next__', '')
     elem_type   = gen.func_return_types.get(next_fn, 'int64_t')
     gen._declare_var(var, elem_type, force=(var == shadow_name))
 

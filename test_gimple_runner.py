@@ -5730,6 +5730,79 @@ def main():
 
     test_qualified_module_struct_construction()
 
+    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md,
+    # the part that is fixable without the type-inference project it is
+    # parked on: an iterator struct reached through `from mod import Struct`
+    # composes its protocol methods' C names with a hand-written
+    # `{Struct}___{method}__` f-string instead of `gen._struct_method_csym`,
+    # the tree's ONE composer — so the home-module qualifier was missing and
+    # the call went to a symbol nothing defines.
+    #
+    # The failure mode is worse than a link error. gcc's
+    # -Wimplicit-function-declaration fallback types the undeclared call as
+    # returning `int`, so `It___iter__(It *)` became an `int` and the `for`
+    # lowering assigned that int to an `It *`:
+    #
+    #   implicit declaration of function 'It___iter__'; did you mean 'itmod_It___iter__'?
+    #   assignment to 'It *' from 'int' makes pointer from integer without a cast
+    #
+    # and `next(obj)`'s `{Struct}___next__` had the identical defect.
+    #
+    # No CPython comparison here, deliberately: `__has_next__` is a Mojo-only
+    # protocol (CPython has no such method and would call `__next__` until it
+    # raises), so CPython cannot be the oracle for this fixture — running it
+    # loops forever. The expectation is hand-written and the assertion is
+    # the built binary's REAL stdout, plus a gcc run that must be clean
+    # (pre-fix it does not compile at all).
+    def test_cross_module_iterator_struct_protocol_symbols():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "cross_module_iterator_struct_protocol_symbols"
+        defn = ("class It:\n"
+                "    def __init__(self):\n"
+                "        self.n = 0\n"
+                "    def __iter__(self):\n"
+                "        return self\n"
+                "    def __has_next__(self) -> Bool:\n"
+                "        return self.n < 3\n"
+                "    def __next__(self) -> Int:\n"
+                "        self.n = self.n + 1\n"
+                "        return self.n\n"
+                "\n"
+                "def make() -> It:\n"
+                "    return It()\n")
+        use = ("from xmoditer_defn import make, It\n"
+               "\n"
+               "def main():\n"
+               "    d = make()\n"
+               "    print(next(d))\n"
+               "    for x in d:\n"
+               "        print(x)\n"
+               "    e = It()\n"
+               "    print(next(e))\n"
+               "\n"
+               "main()\n")
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmoditer_defn.py', defn, 'xmoditer_use.py', use)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        # next(d) -> 1 (n becomes 1); the `for` then yields n=2,3 and stops
+        # at __has_next__ (n<3); next(e) on a fresh It -> 1.
+        if out == "1\n2\n3\n1\n":
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected '1\\n2\\n3\\n1\\n', got {out!r}")
+            _FAIL += 1
+
+    test_cross_module_iterator_struct_protocol_symbols()
+
     # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md:
     # two REAL classes sharing a bare name across two modules. The single
     # string this codegen used as a struct's C identity was the bare
