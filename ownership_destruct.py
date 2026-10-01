@@ -40,23 +40,40 @@ simplifications" below):
      another binding believe it shares ownership.
   6. `x` never appears as a call ARGUMENT (positional or keyword) unless
      the call is PROVABLY non-retaining:
-       - a small whitelisted builtin known not to store its argument
-         beyond the call (`len`, `print`, `str`, `repr`, `bool`, `hash`,
-         `id` — read the value, never keep it), or
-       - a call this module can resolve (same narrow resolver as Phase 2:
-         a bare-name free function, or `self.method(...)`) whose matching
-         parameter's convention is canonically `read` — a `read`
-         parameter is BY DEFINITION a borrow the callee cannot store past
-         the call's own lifetime, which is exactly the guarantee needed
-         here. An unresolved call, or a resolved one where the matching
-         parameter is `mut`/`owned`/unannotated, downgrades `x` — being
-         used only via ITS OWN methods (`x.append(...)`, `x["k"] = v`) is
-         fine and does NOT count as a call-argument use, since `x` there
-         is the method's receiver (`.obj`), not one of `args`/`kwargs`.
+- a small whitelisted builtin known not to store its argument
+       beyond the call (`len`, `print`, `str`, `repr`, `bool`, `hash`,
+       `id` — read the value, never keep it), or
+     - a call this module can resolve (same narrow resolver as Phase 2:
+       a bare-name free function, or `self.method(...)`) whose matching
+       parameter is PROVABLY non-escaping, decided from the CALLEE'S OWN
+       BODY by `_summarize_params` — not from a `read` convention keyword.
+       In real Mojo a `read` parameter cannot be stored, but this compiler
+       lowers a copy (`var y = param`) as the SAME pointer, so a callee that
+       copied its `read` parameter into a field would leave the caller's
+       container aliased (see `_summarize_params`'s docstring for the real
+       crash that motivated this). An unresolved call, or a resolved one whose
+       matching parameter may escape, downgrades `x` — being used only via ITS
+       OWN methods (`x.append(...)`, `x["k"] = v`) is fine and does NOT count as
+       a call-argument use, since `x` there is the method's receiver (`.obj`),
+       not one of `args`/`kwargs`.
   7. `x` never appears inside a nested `def`/`LambdaExpr` in the same
      function (a possible closure capture) — conservative exclusion,
      since this module (like ownership_check.py's Phase 1) does not
      analyze closures.
+     Deliberately still blanket, even though the parser now records an
+     explicit capture list (`FunctionDef.captures` /
+     `has_capture_list`) that would in principle say exactly which names
+     a nested scope can capture. `_nested_capture_names` already computes
+     that set and `analyze_returns_fresh` uses it, so the information
+     exists — but this rule rests on the module's core soundness default
+     ("a bare IdentExpr reached through generic recursion always
+     disqualifies that name... if a future change needs a new safe
+     pattern, it must be added as its own branch here, never by weakening
+     the default"), and rule 7 has no such branch. Narrowing it would buy
+     recall on a rare shape (a nested def rebinding a name that is also
+     an enclosing container candidate) at the cost of the one failure
+     mode this analysis is built to have none of: a wrong free. Left
+     alone deliberately, not overlooked.
   8. `x` is never the target of `del`.
 
 Known simplifications (by design, matching ownership_check.py's own
@@ -1236,6 +1253,51 @@ def _has_nested_scope(node) -> bool:
     return False
 
 
+# Every name a nested scope under `node` could capture, and whether that set is
+# COMPLETE. `(True, names)` means every nested `def` wrote an explicit capture
+# list naming specific names, so `names` is the exact capture set and a name
+# outside it provably is not captured. `(False, names)` means at least one
+# nested scope is UNKNOWN — no capture list at all (so captures are inferred
+# from its body), a `{mut}`/`{var}` bare-convention entry (which by definition
+# captures whatever the body references), or a `lambda` (whose capture list is
+# not parsed into names). Callers must keep their conservative behaviour then.
+def _nested_capture_names(node) -> tuple:
+    complete = True
+    names: set = set()
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            c, n = _nested_capture_names(item)
+            complete = complete and c
+            names |= n
+        return complete, names
+    if not _is_node(node):
+        return True, names
+    if isinstance(node, N.LambdaExpr):
+        # A lambda's `captures` field is the raw `{ref}` / `{imm key}` TEXT
+        # (LambdaExpr's own docstring), not a name list, so there is nothing to
+        # extract and the set stays unknown.
+        return False, names
+    if isinstance(node, N.FunctionDef):
+        if not getattr(node, 'has_capture_list', False):
+            return False, names        # captures inferred from the body
+        for entry in (getattr(node, 'captures', None) or []):
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                return False, names
+            cap_name = entry[0]
+            if cap_name is None:
+                return False, names    # `{mut}` — captures whatever is referenced
+            names.add(_as_str(cap_name))
+        # Do NOT descend into the nested body: its own nested scopes are
+        # separate closures with their own capture sets, already visited when
+        # the walk reached them from the enclosing statement lists.
+        return complete, names
+    for f in dataclasses.fields(node):
+        c, n = _nested_capture_names(getattr(node, f.name))
+        complete = complete and c
+        names |= n
+    return complete, names
+
+
 def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
     """True iff EVERY call to `fn` provably returns a brand-new container that
     nothing else references, so the caller may own it (and free it).
@@ -1244,8 +1306,13 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
     of the result would be a crash or a use-after-free:
       - `fn` is a plain function (not async/a generator/decorated: a
         coroutine/generator returns a frame object, a decorator may wrap or
-        cache the result) with no nested `def`/`lambda` (a closure could keep
-        the returned container);
+        cache the result) whose nested `def`/`lambda` scopes do NOT capture
+        anything it returns. Refined from "contains any nested scope at all":
+        a nested `def` with an explicit capture list naming specific names
+        cannot capture a returned name outside that list, and `{}` captures
+        nothing, so either may be ignored — but a nested scope with no list, a
+        bare `{mut}`/`{var}`, or any `lambda` leaves the set unknown and the
+        refusal stands;
       - EVERY path returns a value: the body ends in a terminator and no
         `return` is bare. A path that falls off the end or returns None hands
         the caller a NULL pointer, and freeing that crashes;
@@ -1260,7 +1327,7 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
     """
     if fn.is_async or fn.is_generator or fn.decorators:
         return False
-    if not fn.body or _has_nested_scope(fn.body) or not _block_terminates(fn.body):
+    if not fn.body or not _block_terminates(fn.body):
         return False
     rets = []
     _collect_returns(fn.body, rets)
@@ -1296,6 +1363,31 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
         for nm in names:
             if nm not in _da:
                 return False
+    # The closure veto, applied to the NAMES this function actually returns
+    # rather than to the mere existence of a nested scope.
+    #
+    # It used to be an unconditional `or _has_nested_scope(fn.body)`, which
+    # refused the whole question for any function containing a `def` or
+    # `lambda` anywhere — including one whose closures provably capture
+    # nothing from this scope, and including the very common shape of a helper
+    # that defines a callback and then returns a container the callback never
+    # sees. Each refusal costs the CALLER a free it could have owned
+    # (doc/MEMORY.html §3.B, "user functions proven to return fresh
+    # containers"), so the veto was buying safety with a real leak.
+    #
+    # Now: if every nested scope wrote an explicit capture list naming specific
+    # names, the capture set is known and a returned name outside it cannot be
+    # captured. If any nested scope is unknown — no list (captures inferred from
+    # its body), a bare `{mut}`/`{var}` (captures whatever it references), or a
+    # `lambda` — the old veto stands in full. `{}` counts as KNOWN and captures
+    # nothing, which is what it asserts; `has_capture_list` is what tells the
+    # two apart, since both leave `captures == []`.
+    _caps_complete, _captured = _nested_capture_names(fn.body)
+    if _caps_complete:
+        if names & _captured:
+            return False
+    elif _has_nested_scope(fn.body):
+        return False
     return True
 
 

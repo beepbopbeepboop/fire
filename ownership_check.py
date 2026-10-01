@@ -99,6 +99,7 @@ value). Re-run that sweep after any change to this file.
 
 import dataclasses
 import fire_compiler as N
+from fire_compiler import conv_is_exclusive
 
 
 @dataclasses.dataclass
@@ -202,7 +203,15 @@ def _check_call_aliasing(node, funcs, methods, diags):
         conv = callee.param_convs.get(kw_name, 'read')
         occurrences.setdefault(v.name, []).append((conv, v))
     for name, occs in occurrences.items():
-        if len(occs) < 2 or not any(c == 'mut' for c, _ in occs):
+        # `conv_is_exclusive`, not `c == 'mut'`: one shared definition of "this
+        # parameter is an exclusive borrow" (fire_compiler's `_CONV_EXCLUSIVE`),
+        # so `out` is covered with `mut` and a NEW exclusive convention cannot
+        # be missed by a consumer that hardcoded its own list. `imm`/`read`/`ref`
+        # are read-only and so are correctly NOT exclusive — that was already
+        # the behaviour, but it was an accident of `imm` not equalling `'mut'`
+        # rather than a decision, and the default for an UNANNOTATED parameter
+        # stays 'read' (unknown-but-not-exclusive) either way.
+        if len(occs) < 2 or not any(conv_is_exclusive(c) for c, _ in occs):
             continue
         kinds = sorted({c for c, _ in occs})
         _, second = occs[1]

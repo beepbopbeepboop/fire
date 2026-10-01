@@ -116,6 +116,39 @@ def bisect_first_bad(merged, failed_jobs_):
 SUSPECT = None
 
 
+def sync_with_master(taskname):
+    """MASTER MOVES while a batch is being fixed (the owner lands work directly: 2026-10-01 the new-modular stdlib support, ~6,700 lines).
+    A fix branch must be merged with the CURRENT master before it is probed or gated, or the integrator reports a conflict as 'the
+    fixes do not pass' (it did: attempt 1 had fixed everything, and a one-second probe said otherwise). Try the merge; if it conflicts,
+    an agent resolves it. Returns the task whose branch is current with master."""
+    import argparse as _ap
+    t = C.load()[taskname]
+    wt = t["worktree"]
+    snapshot_tree(t, "synced with master")
+    if C.git("rev-list", "--count", "HEAD..master", cwd=wt, check=False) in ("", "0"):
+        return taskname
+    r = subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt, capture_output=True, text=True)
+    if r.returncode == 0:
+        log("synced %s with master (clean merge)" % taskname); return taskname
+    subprocess.run(["git", "merge", "--abort"], cwd=wt)
+    name = "sync-%s" % taskname
+    task = ("Your branch %s is a finished, fixed batch; MASTER HAS MOVED (the owner lands work directly, e.g. the new-modular stdlib support in "
+            "fire_compiler.py and tools/suite.py). Run `git merge master`, resolve every conflict keeping BOTH sides' intent (the owner's newer work is ground "
+            "truth for the new stdlib syntax/library; the batch's work must be preserved), make the tree coherent (a helper changed on one side and called the "
+            "old way on the other, a duplicated registration or fix: consolidate), fixes of any size are fine. Verify with python3 test_suite.py and the jobs "
+            "named in `python3 tools/control.py status`/the task you came from, one at a time. Hard issue you cannot debug: isolate it and finish BLOCKED naming it. "
+            "Never use git stash. Commit; finish with the REPORT block and CONTROL-STATUS: DONE." % t["branch"])
+    C.cmd_spawn(_ap.Namespace(name=name, claim=["task:" + name], task=task, task_file=None, file=[], base=t["branch"], model=None))
+    log("SYNC: %s started to merge master into %s" % (name, t["branch"]))
+    wait_family(name)
+    tasks = C.load()
+    fam = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
+    for n in fam:
+        snapshot_tree(tasks[n], "the sync agent exited with uncommitted work")
+    done = [n for n in fam if C.ahead(tasks[n]) > 0]
+    return done[-1] if done else taskname
+
+
 def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=180):
     """THE PIECE-FIX RULE. A red batch is usually a handful of small, customary breakages where many branches meet (a
     half-applied conflict resolution, a helper renamed in one branch and still called by its old name in another, an
@@ -173,7 +206,8 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=180):
         if not done:
             log("PIECE-FIX attempt %d produced no commits (%s)" % (attempt, "BLOCKED" if any(C.verdict(tasks[n]) == "BLOCKED" for n in family) else "timeout/none"))
             return False
-        fixname = done[-1]
+        fixname = sync_with_master(done[-1])          # a conflict with a moved master is not a failed fix
+        tasks = C.load()
         prev = tasks[fixname]["branch"]
         log("PIECE-FIX attempt %d: %s has %d commit(s); probing just the failing jobs on it" % (attempt, fixname, C.ahead(tasks[fixname])))
         if not probe([fixname], failed):

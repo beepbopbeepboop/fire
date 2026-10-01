@@ -396,6 +396,7 @@ MEASURED_PEAK_GB = {
     'bootstrap-stage2-cc':         (1.2,  'measured'),
     'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
+    'ptrreg-boxed-str':            (0.2,  'measured'),
     'runtimediff':                 (0.3,  'measured'),
     'modcache':                    (0.3,  'measured'),
     'stdlib-dylib':                (0.2,  'measured'),
@@ -953,6 +954,28 @@ class Fanout:
 
 REGISTRY: dict[str, object] = {}
 
+# The per-job timeout for any test that does not name its own. This used to be
+# None, which meant a hang was UNBOUNDED for 82 of the 91 registered tests --
+# and the only hang detector those tests had was whatever budget the test file
+# itself happened to pass to `subprocess`, which is the wrong owner twice over:
+# too tight to survive load (test_runner.py's 10 s failed the whole gate on a
+# loaded box, while the same test passed 17/17 standalone), and unlabelled when
+# it fired, so a timeout was indistinguishable from a miscompile in the tally.
+#
+# The runner already does the right thing when a timeout IS armed: it kills the
+# job and records it as a failure in its own class, tagged [TIMEOUT], because a
+# job killed at its timeout has reported nothing and a run that hangs a test and
+# exits 0 has silently not run the thing it was asked to run (see the note above
+# `Verdict`). So this is not a new policy, it is arming an existing one for every
+# job instead of nine.
+#
+# 3600 s is ~6x the slowest healthy test measured across the last two full gates
+# (gimplerunner, 607 s; then mojoc 417 s, selfhost 408 s, gimplegenerators
+# 371 s), so it cannot fire on a healthy or merely loaded run, while a genuine
+# wedge is caught in an hour instead of never. Per-test `timeout=` still wins,
+# and `--timeout` still overrides everything.
+DEFAULT_JOB_TIMEOUT_S = 3600.0
+
 
 def test(*a, **kw) -> Spec:
     s = Spec(*a, **kw)
@@ -985,10 +1008,28 @@ test('gimple', [PY, 'test_gimple.py'], cache=True,
 # Registered here as `gimplerunner`/`gimplegenerators` (below, with `runner`
 # and the rest) rather than right after `gimple` — see that comment for the
 # full rationale and the `extra` cache-invalidation list.
-test('runner', [PY, 'test_runner.py'], cache=True,
-     extra=['test_runner.py', 'myinterpreter.py', 'fire.py', 'fire_main.py',
-            RUNTIME_SRC, RUNTIME_HDR],
+test('runner', [PY, 'test_runner.py'], cache=True, timeout=1800,
+     # `exec_budget.py` is imported by the test file, so it belongs in the key:
+     # without it, raising a budget replays a recorded PASS and the change never
+     # runs. The runner's cache is content-addressed over exactly `extra`.
+     extra=['test_runner.py', 'exec_budget.py', 'myinterpreter.py', 'fire.py',
+            'fire_main.py', RUNTIME_SRC, RUNTIME_HDR],
      desc='compile-and-execute runner over a hand-written corpus')
+# `timeout=1800` on `runner` and `modcache` (2026-09-30): both jobs had NO
+# suite-level timeout, so `spec.timeout or opts.timeout` was None and the only
+# hang detector anywhere was the test's own per-executable `subprocess` budget
+# -- 10 s in test_runner.py, 20 s in test_module_cache.py. Those binaries run
+# in milliseconds, so the budgets were pure slack, except under load: at -j18
+# with the machine-wide memslot queue, process startup alone exceeded 10 s and
+# BOTH jobs failed with a spurious `FAIL ... timed out after 10 seconds`. Both
+# pass standalone (runner 17/17, modcache 83/83), so it was never a miscompile.
+#
+# The fix is layering, not forgiveness. The runner already treats a hang as a
+# FAILURE in its own class and tags it [TIMEOUT] (see the note above Verdict);
+# it just was not armed for these two. Now it is, and the inner budgets are
+# raised to sit far INSIDE it (60 s / 120 s), where they can no longer fire on
+# load but still stop a wedged child long before the job is killed. Nothing is
+# absorbed by an `expect=` marker: a real hang is still a red run.
 # `mem='tiny'` (4 GB), down from `module` (24): measured peak 0.3 GB, so the
 # ratchet assigns 0.3 x 1.5 = 0.45 GB and the smallest class that covers it is
 # the new floor. The reason it NAMED a class at all is unchanged and is the one
@@ -998,8 +1039,9 @@ test('runner', [PY, 'test_runner.py'], cache=True,
 # so the class is not about this test's size — it is the statement that the
 # class was chosen from a measurement rather than inherited.
 test('modcache', [PY, 'test_module_cache.py'], mem='tiny', cache=True,
-     extra=GIMPLE_SOURCES + ['test_module_cache.py', 'myinterpreter.py',
-                             'fire.py', 'fire_main.py'],
+     timeout=1800,
+     extra=GIMPLE_SOURCES + ['test_module_cache.py', 'exec_budget.py',
+                             'myinterpreter.py', 'fire.py', 'fire_main.py'],
      desc='module cache end-to-end stages')
 # Registered 2026-09-27. Found while implementing FORMAL.md phase 0:
 # `reflect._PROTO_RE` could not match a pointer return (`char *name(...)` — the
@@ -1013,6 +1055,20 @@ test('modcache', [PY, 'test_module_cache.py'], mem='tiny', cache=True,
 test('ptrreg', [PY, 'test_ptr_registry.py'], mem='tiny', cache=True,
      extra=['test_ptr_registry.py', RUNTIME_SRC, RUNTIME_HDR],
      desc='runtime unit test: pointer-registry table + inline-buffer lists (-O0/-O2/ASan)')
+# The one group of the same harness that is allowed to be red, split out so it
+# can be named instead of taking the green groups down with it. Registered
+# 2026-09-30 when the harness's asserts were found to be compiled out by
+# python3-config's -DNDEBUG (test_ptr_registry.py::_flags); with them live, a
+# pre-existing crash appeared that had been sitting in the file the whole time.
+test('ptrreg-boxed-str', [PY, 'test_ptr_registry.py', '--group', 'boxedstr'],
+     mem='tiny', cache=True,
+     extra=['test_ptr_registry.py', RUNTIME_SRC, RUNTIME_HDR],
+     expect='an int64 dict key in [2^31, 2^47) is misread as a char* and '
+            'dereferenced: `d[3000000000] = 1` segfaults. The scalar body model '
+            'gives a char* and an int64_t the same 64 bits, so the shape test '
+            'cannot be right; the fix is for the codegen to stop asking. See '
+            'bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md',
+     desc='a large integer dict key is not dereferenced as a pointer')
 # The two instruments from the previous round, which existed and ran by nothing
 # for the same reason until agent [5]'s estate check reported them. The taxonomy
 # is what makes the coverage number honest, and `comptime` parity pins the one
@@ -1123,6 +1179,7 @@ test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True,
      desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
 test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py',
+                             'exec_budget.py',      # imported: must be in the key
                              'build_config.py', RUNTIME_SRC, RUNTIME_HDR]
          + CORO_RUNTIME,
      desc='compile-and-execute: every generator/coroutine shape, both backends')
@@ -1212,6 +1269,25 @@ test('x86-decode', [PY, 'test_x86_64_decode.py'], mem='tiny',
 test('ownership-destruct', [PY, 'test_ownership_destruct.py'], mem='tiny',
      deps=['preflight'],
      desc='an owned value is destructed exactly once')
+# Registered 2026-09-30 with the new-modular work. Nine parser features landed
+# that day (dotted literals, `__match` and its flat case layout, typed lambdas
+# with capture/comptime blocks, explicit `def` capture lists, the `imm`
+# convention, struct `where` clauses, multi-target `comptime`, function types in
+# subscript position, decorated imports) and compile_stdlib went 356/610 ->
+# 610/610 on them — with NO fixture for any of them, so a regression in any
+# one would have shown up only as a compile_stdlib delta, days later, in a
+# 610-file run. It already caught one real bug on the day it was written: the
+# multi-target `comptime` consumed its own `=` and then looked for a second,
+# silently dropping the binding (codepoint.mojo compiled with `char` and
+# `num_bytes` bound to nothing).
+test('new-syntax-parse', [PY, 'test_new_syntax_parsing.py'], cache=True,
+     # `fire_compiler.py` is the file under test and is NOT in GIMPLE_SOURCES
+     # (that list is the CODEGEN sources); without it in the key, editing the
+     # parser replayed a recorded PASS.
+     extra=(['test_new_syntax_parsing.py', 'fire_compiler.py']
+            + GIMPLE_SOURCES),
+     desc="the new-modular syntax parses, and still does NOT parse where it "
+          "must not (ellipsis, float literals, attribute access)")
 test('x86-containers', [PY, 'test_x86_64_containers.py'],
      deps=['preflight'],
      expect='nested-comprehension exits nondeterministically (58, or SIGSEGV, '
@@ -1978,7 +2054,8 @@ BUCKETS = {
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
-              'rthdrscan', 'ptrreg', 'runtimedylib', 'sqliteruntime',
+              'rthdrscan', 'ptrreg', 'ptrreg-boxed-str', 'runtimedylib',
+              'sqliteruntime',
               'formal-sweep-truth', 'formal-link-accounting', 'silentnoop',
               'refusal-taxonomy', 'returned-frame-layout',
               # The suite tests ITSELF, and so does the inventory of what runs.
@@ -3278,8 +3355,8 @@ def main(argv=None):
     ap.add_argument('--only', action='append', metavar='RE',
                     help='within the selected buckets, keep only tests whose '
                          'name matches RE (repeatable)')
-    ap.add_argument('--timeout', type=float, default=None,
-                    help='per-job timeout in seconds (default: none)')
+    ap.add_argument('--timeout', type=float, default=DEFAULT_JOB_TIMEOUT_S,
+                    help='per-job timeout in seconds (default: %d)' % DEFAULT_JOB_TIMEOUT_S)
     ap.add_argument('--list', action='store_true',
                     help='print the registry and exit')
     ap.add_argument('--prefix', nargs=3, metavar=('WRAPPER', 'LABEL', 'CLASS'),

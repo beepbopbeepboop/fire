@@ -4151,6 +4151,21 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         if _env_typedef[-1] not in gen._elaborated_externs:
             for _line in _env_typedef:
                 gen._elaborated_externs.append(_line)
+            # A closing lambda's env is heap-allocated from a `__GIMPLE` body,
+            # and `sizeof` is not a valid GIMPLE operand — so the size comes
+            # from a plain-C accessor, defined HERE, next to the typedef it
+            # needs and ahead of every body that allocates one. This env's
+            # typedef is emitted into the preamble rather than by
+            # gen_module's closure-typedef passes, so the accessor has to be
+            # registered here too or the beta-reduced/inlined form
+            # (`_inlined_lambdas`, the shape that inlines the lambda body into
+            # the enclosing function) calls an undefined helper.
+            # See GimpleGen._c_sizeof_helper / _c_helper_def.
+            _env_h = gen._c_sizeof_helper(_env_struct)
+            _env_hd = gen._c_helper_def(_env_h)
+            if _env_hd:
+                gen._elaborated_externs.append(_env_hd)
+                gen._elaborated_externs.append('')
 
     gen.decls                   = saved_decls
     gen.body_lines              = saved_body
@@ -4231,6 +4246,17 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     fwd_decl = f'{ret_type} {lifted_name} ({params_str});'
     if fwd_decl not in gen._elaborated_externs:
         gen._elaborated_externs.append(fwd_decl)
+    # The closing-lambda reference site builds a `mojo_bound_method_new(fn,
+    # env)`, and casting the function designator is not a valid GIMPLE
+    # operand, so it goes through a plain-C accessor — defined HERE, after the
+    # forward declaration above (which is what makes the name declared at this
+    # point in the file) and before every body that takes its address.
+    # See GimpleGen._c_fnaddr_helper / _c_helper_def.
+    _fa_h = gen._c_fnaddr_helper(lifted_name)
+    _fa_hd = gen._c_helper_def(_fa_h)
+    if _fa_hd:
+        gen._elaborated_externs.append(_fa_hd)
+        gen._elaborated_externs.append('')
     if lifted_name not in gen.func_return_types:
         gen.func_return_types[lifted_name] = ret_type
     if not _env_struct:
@@ -4246,7 +4272,14 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # now leads with the env), and nothing needs it.
     _vp = gen._new_temp('void *')
     _envp = gen._new_temp(f'{_env_struct} *')
-    gen._emit(f'  {_vp} = malloc (sizeof({_env_struct}));')
+    # The size comes from a non-GIMPLE accessor, and likewise the function
+    # address below: `sizeof(S)` and `(void *)f` are both invalid GIMPLE
+    # operands ("expected expression before 'sizeof'", "invalid operand in
+    # unary operation"), so they are reached through tiny `static` accessors
+    # the body calls. See GimpleGen._c_sizeof_helper / _c_fnaddr_helper.
+    _sz = gen._new_temp('int64_t')
+    gen._emit(f'  {_sz} = {gen._c_sizeof_helper(_env_struct)} ();')
+    gen._emit(f'  {_vp} = malloc ({_sz});')
     gen._emit(f'  {_envp} = ({_env_struct} *) {_vp};')
     # Which names come from a default argument (value = that expression at
     # this reference site) rather than from an enclosing local (value = the
@@ -4259,13 +4292,39 @@ def _lower_LambdaExpr(gen, node) -> tuple:
             _cv = (gen._coerce_to_type(_st, _ct, _sv) if _ct.endswith(' *')
                    else gen._new_val('int64_t', f'(int64_t){_sv}'))
         elif _ct.endswith(' *'):
-            _cv = gen._coerce_to_type(gen.var_types.get(_cn, 'int64_t'), _ct, _cn)
+            # The env FIELD is a pointer, which on its own says nothing about
+            # what belongs in it: two different captures both land here, and the
+            # local's OWN C type is the only thing that tells them apart.
+            #
+            #   * local is itself a pointer (`MojoDict * d`) — a by-VALUE
+            #     capture of a pointer. The field is the same pointer type, so
+            #     it wants the local's VALUE. Storing `&d` here instead makes
+            #     the body read `_env->d` as the first 8 bytes of the address
+            #     of the local: stack garbage, so every lookup through it is
+            #     wrong and it segfaults about half the time. Found by
+            #     `sorted(d, key=lambda k: d[k])`, whose lambda captures `d`.
+            #   * local is a scalar (`int64_t checksum`, `{mut checksum}`) — a
+            #     capture taken BY REFERENCE, and the field is a pointer TO the
+            #     local. Coercing the bare name emitted `_t8 = checksum;`
+            #     against an `int64_t *` temp, a non-trivial conversion in
+            #     'var_decl' and a hard error
+            #     (benchmarks/memory/bench_heap_parallel).
+            #
+            # Neither the field's type nor "always coerce" nor "always take the
+            # address" is right; branching on the local's type is.
+            _local_t = gen.var_types.get(_cn, 'int64_t')
+            if _local_t.endswith(' *'):
+                _cv = gen._coerce_to_type(_local_t, _ct, _cn)
+            else:
+                _cv = gen._new_temp(_ct)
+                gen._emit(f'  {_cv} = ({_ct}) &{_cn};')
         elif _ct == 'double':
             _cv = gen._new_val('double', f'(double){_cn}')
         else:
             _cv = gen._new_val('int64_t', f'(int64_t){_cn}')
         gen._emit(f'  {_envp}->{_cn} = {_cv};')
-    _fnv = gen._new_val('void *', f'(void *){lifted_name}')
+    _fnv = gen._new_temp('void *')
+    gen._emit(f'  {_fnv} = {gen._c_fnaddr_helper(lifted_name)} ();')
     _bm = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                          [('void *', _fnv), ('void *', gen._new_val('void *', _envp))])
     return 'void *', gen._new_val('void *', f'(void *){_bm}')

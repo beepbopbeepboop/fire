@@ -2046,6 +2046,32 @@ class GimpleGen:
         self._emitted_dispatch_typedefs: set[str] = set()  # Track typedef names already emitted
         self._emitted_dispatch_tables: set[str] = set()    # Track table names already emitted
         self._funcptr_builtins_needed: set[str] = set()    # builtin C names needing static void* vars
+        # Name -> C source for small non-GIMPLE accessor functions that a
+        # __GIMPLE body needs to call. Two operations are legal in ordinary C
+        # but are NOT valid GIMPLE primary expressions:
+        #   * `sizeof(T)`      -> "expected expression before 'sizeof'"
+        #   * `(void *)fn`     -> "invalid operand in unary operation"
+        # so each is reached through a tiny `static` accessor emitted into the
+        # non-GIMPLE prelude, which a gimple call can then invoke. Registered
+        # by `_c_sizeof_helper` / `_c_fnaddr_helper` and flushed by
+        # `gen_module` before the function bodies. Shared with every
+        # _compile_imported_module temp_gen the same way the _emitted_* sets
+        # above are, because all modules' generated code is concatenated into
+        # ONE translation unit for the self-hosted build and a duplicate
+        # top-level `static` would be a redefinition.
+        self._c_helpers_needed: dict[str, str] = {}
+        # Which of those have already had their DEFINITION emitted into the
+        # final .ci. Definitions are emitted inline, immediately before the
+        # function that calls them (see `_c_sizeof_helper_def`), because the
+        # set of needed helpers is not final until the whole module — function
+        # bodies, struct `_alloc_*`, lifted closures — has been walked, and a
+        # single flush point would necessarily land either before some caller or
+        # after a struct typedef the definition needs. Shared with every
+        # _compile_imported_module temp_gen for the same reason the
+        # _emitted_* sets are: all modules' generated code is concatenated into
+        # ONE translation unit, so a duplicate top-level `static` is a
+        # redefinition.
+        self._emitted_c_helpers: set[str] = set()
         # Tracks which of the above have already had their `static void *
         # _funcptr_X = (void *)X;` declaration emitted SOMEWHERE in the final
         # .ci — shared with every _compile_imported_module temp_gen (see
@@ -2963,6 +2989,18 @@ class GimpleGen:
         'fprintf':      ('int', ['void *', 'char *']),
         'sprintf':      ('int', ['char *', 'char *']),
         'fputs':        ('int', ['char *', 'void *']),
+        # `puts`: in _LIBC_DECLARED (so <stdio.h> supplies the prototype and no
+        # self-extern is emitted — correct) but with no pinned signature here,
+        # which left `_emit_call` nothing to coerce its argument against, so a
+        # call lowered as `puts (<int64_t>)`. GCC rejects that outright
+        # ("passing argument 1 of 'puts' makes pointer from integer without a
+        # cast") — the stdlib's
+        # test/ffi/compile_fail/test_external_call_num_fixed_args.mojo hits it.
+        # Pinned as `char *` rather than `const char *`: every other entry in
+        # this table uses the unqualified spelling (they are the coercion
+        # targets, and a `char *` argument converts to `const char *` freely,
+        # where the reverse would not).
+        'puts':         ('int', ['char *']),
         'fputc':        ('int', ['int', 'void *']),
         'putchar':      ('int', ['int']),
         'fgetc':        ('int', ['void *']),
@@ -3080,6 +3118,16 @@ class GimpleGen:
         # site to inherit an extern from, so it hit "implicit declaration of
         # function 'fcntl'" on every cold-CAS-cache stdlib build.
         'dup', 'pipe', 'fcntl', 'close',
+        # dup2: same class as `dup` immediately above, and it was simply
+        # missing. `dup2` is in `_LIBC_DECLARED` (it is a real <unistd.h>
+        # symbol) but <unistd.h> is NOT in this compile's prelude, so the
+        # external_call path took the "the headers will declare it" branch and
+        # emitted no prototype at all — while `dup`, sitting beside it in the
+        # same std/sys/_libc.mojo wrapper file, did get one. Result: a module
+        # whose only libc call is `dup2` compiles to a bare `dup2 (...)` and
+        # GCC 15 rejects it ("implicit declaration of function 'dup2'; did you
+        # mean 'dup'?"). The pinned `_LIBC_SIGS` prototype already existed.
+        'dup2',
         # fork/waitpid/execv: headers (<unistd.h>/<sys/wait.h>) not in our prelude,
         # so _emit_stdlib_import_externs must not skip them (the new
         # _LIBC_DECLARED check would otherwise suppress them).
@@ -3737,6 +3785,54 @@ class GimpleGen:
         return gfn._func_mangleable(self, name)
     def _func_csym(self, bare_name: str) -> str:
         return gfn._func_csym(self, bare_name)
+    def _c_sizeof_helper(self, struct_name: str) -> str:
+        """Name of a `static int64_t` accessor returning `sizeof(struct_name)`,
+        registering it for emission into the non-GIMPLE prelude.
+
+        Needed because `sizeof` is not a valid GIMPLE primary expression: a
+        `__GIMPLE` body writing `_p = malloc (sizeof(S));` is rejected with
+        "expected expression before 'sizeof'". The size has to come from
+        somewhere real C can compute, and a gimple call to an ordinary `static`
+        function is a valid operand. Returns the helper's name.
+        """
+        hname = '_mojo_sizeof_' + struct_name
+        if hname not in self._c_helpers_needed:
+            self._c_helpers_needed[hname] = (
+                f'static int64_t {hname} (void) '
+                f'{{ return (int64_t)sizeof({struct_name}); }}')
+        return hname
+    def _c_fnaddr_helper(self, func_name: str) -> str:
+        """Name of a `static void *` accessor returning `(void *)func_name`,
+        registering it for emission into the non-GIMPLE prelude.
+
+        Needed because casting a function designator is not a valid GIMPLE
+        operand: `_p = (void *)some_fn;` inside a `__GIMPLE` body is rejected
+        with "invalid operand in unary operation", and the same cast as a
+        gimple call argument is rejected as "invalid argument to gimple call".
+        Returns the helper's name.
+        """
+        hname = '_mojo_fnaddr_' + func_name
+        if hname not in self._c_helpers_needed:
+            self._c_helpers_needed[hname] = (
+                f'static void * {hname} (void) '
+                f'{{ return (void *){func_name}; }}')
+        return hname
+    def _c_helper_def(self, hname: str) -> str:
+        """The full C definition of a registered helper, or '' if this
+        translation unit already has it.
+
+        Emitted inline at the single point that needs it, which is what keeps
+        it correctly ordered against both the caller and the struct typedefs
+        the body refers to — see `_c_helpers_needed`'s docstring for why there
+        is no single flush point that satisfies both.
+        """
+        if hname in self._emitted_c_helpers:
+            return ''
+        src = self._c_helpers_needed.get(hname)
+        if not src:
+            return ''
+        self._emitted_c_helpers.add(hname)
+        return src
     def gen_func(self, node: FunctionDef) -> str:
         return gfn.gen_func(self, node)
     def _gen_toplevel(self, toplevel_stmts: list) -> str:
@@ -3939,6 +4035,9 @@ class GimpleGen:
         return gex._lower_BoolLiteral(self, node)
     def _lower_EllipsisLiteral(self, node) -> tuple[str, str]:
         return gex._lower_EllipsisLiteral(self, node)
+
+    def _lower_DottedLiteral(self, node) -> tuple[str, str]:
+        return gex._lower_DottedLiteral(self, node)
     def _lower_StringLiteral(self, node):
         return gex._lower_StringLiteral(self, node)
     def _lower_TstringLiteral(self, node) -> tuple[str, str]:

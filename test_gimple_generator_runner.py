@@ -41,6 +41,29 @@ _SS_RUNTIME_SRCS = [
 _ss_runtime_objs_cache = None
 
 
+from exec_budget import (COMPILE_TIMEOUT_S as SHARED_COMPILE_TIMEOUT_S,
+                      LINK_TIMEOUT_S as SHARED_LINK_TIMEOUT_S,
+                      RUN_TIMEOUT_S as SHARED_RUN_TIMEOUT_S)
+
+# Per-child budgets. These programs are snippets that run in milliseconds, so
+# these numbers are not a claim about how long they SHOULD take -- they only stop
+# a wedged child. They were far too tight to survive a loaded machine: the 10 s
+# one failed FOUR cases of this suite in a full gate at -j18 ("list_consumes_
+# counter_generator", "param_generator_counter_start_count",
+# "param_generator_single_param_direct_yield",
+# "param_generator_unannotated_string_via_cross_call" -- all "timed out after
+# 10 seconds") while this file passed 155/155 standalone. So a red gate here was
+# load, not a miscompile.
+#
+# The real hang detector is the SUITE's per-job timeout. `gimplegenerators`
+# carries no explicit one, so it now inherits DEFAULT_JOB_TIMEOUT_S (3600 s) --
+# which the runner enforces by killing the job and reporting it as a FAILURE
+# tagged [TIMEOUT], ~6x the slowest healthy test measured. These budgets only
+# have to sit far inside that, which they now do.
+COMPILE_TIMEOUT_S = SHARED_COMPILE_TIMEOUT_S
+LINK_TIMEOUT_S = SHARED_LINK_TIMEOUT_S
+RUN_TIMEOUT_S = SHARED_RUN_TIMEOUT_S
+
 def _ss_runtime_objs(wd):
     global _ss_runtime_objs_cache
     if _ss_runtime_objs_cache is None:
@@ -48,7 +71,7 @@ def _ss_runtime_objs(wd):
         for i, src in enumerate(_SS_RUNTIME_SRCS):
             o = os.path.join(wd, f'rt{i}.o')
             r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', o, src],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
             if r.returncode != 0:
                 raise RuntimeError(f"compile of {src} failed: {r.stderr}")
             objs.append(o)
@@ -104,7 +127,7 @@ def _build_generator_program(mojo_src: str) -> str:
 
     r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-w', '-c', '-o',
                         os.path.join(wd, 'prog.o'), c_path],
-                        capture_output=True, text=True, timeout=30)
+                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}\n---\n{c_code}")
     objs = [os.path.join(wd, 'prog.o')]
@@ -114,7 +137,7 @@ def _build_generator_program(mojo_src: str) -> str:
         runtime_o = os.path.join(wd, 'fire_runtime.o')
         r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o,
                             os.path.join(RUNTIME_DIR, 'fire_runtime.c')],
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
         if r.returncode != 0:
             raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
         objs.append(runtime_o)
@@ -124,7 +147,7 @@ def _build_generator_program(mojo_src: str) -> str:
             f.write(cpp_code)
         r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o',
                             os.path.join(wd, 'prog_gen.o'), cpp_path],
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
         if r.returncode != 0:
             raise RuntimeError(f"g++ compile of .cpp failed: {r.stderr}")
         objs.append(os.path.join(wd, 'prog_gen.o'))
@@ -132,7 +155,7 @@ def _build_generator_program(mojo_src: str) -> str:
         import fire
         r = fire.link_executable(objs, exe, cxx=True)
     else:
-        r = subprocess.run([GCC, '-o', exe, *objs], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([GCC, '-o', exe, *objs], capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"link failed: {r.stderr}")
     os.chmod(exe, 0o755)
@@ -143,7 +166,7 @@ def test_generator_stdout(name: str, mojo_src: str, expected_stdout: str):
     global _PASS, _FAIL
     try:
         exe = _build_generator_program(mojo_src)
-        out = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
+        out = subprocess.run([exe], capture_output=True, timeout=RUN_TIMEOUT_S).stdout.decode()
         if out == expected_stdout:
             print(f"PASS  {name}")
             _PASS += 1
@@ -169,7 +192,7 @@ def test_generator_c_compiles(name: str, mojo_src: str):
             f.write(c_code)
         r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-w',
                             '-fsyntax-only', cp],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
         if r.returncode == 0:
             print(f"PASS  {name}")
             _PASS += 1
