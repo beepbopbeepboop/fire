@@ -6576,7 +6576,18 @@ def generate_arm64_proof(prog, code, info) -> str:
         conds = _collect_conds(fn, param, env)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
-        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo"
+        # `sKey` is ProofLib's sign-flip, i.e. how `evalExpr` renders a signed
+        # comparison, and it has to be in the simp set or the `by_cases`
+        # hypothesis is not the goal's `if` test: `_cmp_go` spells the
+        # condition as the expanded `(l ^^^ 0x8000…) < (r ^^^ 0x8000…)` while
+        # `evalExpr` (lib/ProofLib.lean) writes `sKey l < sKey r`.  Two
+        # renderings of one comparison never meet definitionally, so the `if`
+        # inside the AST evaluation cannot be discharged by the hypothesis
+        # that decided it, and every `if n > 0:`-shaped body was unprovable
+        # (10 of the 45 examples: absval, bigconst, condassign, condassign2,
+        # deepif, elif3, ifonly, ifonly2, ifparam, twoifs).  The x86-64
+        # generator has had `sKey` in this set for the same reason.
+        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
         if len(conds) == 0:
             eval_eq_mojo_proof = f"simp +decide [{simp_lems}]"
         else:
