@@ -196,6 +196,16 @@ CAUSE_SAMPLES = [
     ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
      "the module-level comptime binding '_PLUGIN_COUNT' is initialized from an "
      "MLIR attribute template: __mlir_attr[`#kgen.param_list.size<`"),
+    # The TYPE spelling, which is the one `formal/model.py` computes from the
+    # node (`kind = "type" if is_mlir_type_template(node) else "attribute"`).
+    # It is a SEPARATE sample rather than a variant of the one above because
+    # `classify_message` sees only the message: one sample in a cause is one
+    # proof its marker matches, and a marker added for the type wording that no
+    # sample exercised is exactly the dead-marker failure this file exists for.
+    ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
+     "the module-level comptime binding '_dtype_to_llvm_type_f8' is initialized "
+     "from an MLIR type template: __mlir_type.`i8` names an MLIR TYPE, not a "
+     "value"),
     ("inlined_assembly (a gimple-C runtime construct)",
      "inlined_assembly: 'NoneType' has no home: this module declares no "
      "module-level name by that spelling"),
@@ -230,11 +240,39 @@ CAUSE_SAMPLES = [
     ("receiver stored in a container",
      "a Optional receiver is stored in a container, which has no layout for a "
      "frame address on this path"),
+    # The three causes below, plus the MLIR row's fourth wording, were all
+    # added on 2026-10-01 from the b3 sweep, and every one of them is a marker
+    # that was MISSING rather than one that had gone stale: each shape had files
+    # in it and the table could not see them, so `other refusal` read 183 files
+    # where the classified rows below read 50. Samples are cut from that run's
+    # own arm64 log, abbreviated at clause boundaries as above.
+    ("receiver stored in a field of a struct that outlives it",
+     "a Optional receiver is stored in the field 'self.start', so it outlives "
+     "the frame it names by however long that object lives: the slot belongs to "
+     "the function that created THAT frame"),
+    ("a parameter's declared type contradicts every call site",
+     "b64encode() declares 'result' as String, so it is compiled with 'result' "
+     "as the ADDRESS of a frame of 8-byte slots — and every call site in this "
+     "image hands it something else: b64encode(input_bytes, result) passes a "
+     "name, 'result'"),
+    ("a bracketed specialization of a callee this unit does not compile",
+     "debug_assert[…](…) calls a name this unit does not compile, so the "
+     "brackets cannot be bound. A comptime specialization's brackets are the "
+     "generic's comptime parameters"),
     ("a field of a field: a frame slot holds one word, not a struct",
      "self._dict._table._ctrl reads a field of a field through the receiver"),
     ("a field of a nested frame that the struct does not declare",
      "self._slice._slice._data reads '_data' out of a nested StringSlice frame"),
-    ("a slot's declared type is not declared by its struct",
+    # The OLD wording of the slot sentence, kept as a sample of the row that
+    # now owns it. `formal/build.py:2731` reworded its tail ("The declared type
+    # of 'asm' is the only thing here that could say so, and it does not" →
+    # "Only a type for 'asm' could say so … and there is no single one"), the
+    # old row's two markers were both IN that tail, and the row went to 0 files
+    # on both arches without anything failing. This sample is what makes that
+    # visible: it is a real message (quoted in full, with the file it came
+    # from, in `bugs/FORMAL_frame_receiver_handoff.md` §D2) and it classifies
+    # to the row that owns the construct.
+    ("the slot would have to hold a frame address, and no type says so",
      "self.asm.org() hands the word in the slot self.asm to Assembler.org(), "
      "whose receiver is the ADDRESS of a frame of 8-byte slots — so the slot "
      "would have to hold a frame address. The declared type of 'asm' is the "
@@ -273,9 +311,25 @@ CAUSE_SAMPLES = [
     ("a method on a multi-field struct where a descriptor is meant",
      "writer.write_string() is a method on a Writer — a multi-field struct, so "
      "on this path the receiver is the ADDRESS of a frame"),
-    ("too many parameters for the arm64 register ABI",
+    # TWO samples, one cause: this row is the register-argument count and both
+    # architectures word it from the same f-string with their own constant
+    # interpolated (`_ABI_ARG_REGS` = 8, `len(ARG_REGS)` = 6), so a table that
+    # only knew the arm64 number read 57 x86-64 files as unclassified. Both
+    # wordings are real messages from the 2026-10-01 r2 logs, one per arch.
+    ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
      "_build_segment_64: 9 parameters exceeds the 8 the formal arm64 ABI "
      "passes in registers"),
+    ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
+     "b2_g: 7 parameters exceeds the 6 the formal x86-64 ABI passes in "
+     "registers"),
+    # The two x86-64-only refusals. They are the two files whose message DIFFERS
+    # between architectures on an otherwise class-identical sweep
+    # (`bugs/FORMAL_known_limits.md` §6.5), and they are here because the doc
+    # had measured the drift the table could not show.
+    ("an operator the x86-64 codegen does not lower",
+     "unsupported unary operator '^' on the formal x86-64 path"),
+    ("a call target the x86-64 codegen does not lower",
+     "unsupported call target on the formal x86-64 path (got SubscriptExpr)"),
     ("comptime does not fold to a constant",
      "comptime num_coefficients = ... does not fold to a compile-time "
      "constant on this path"),
@@ -302,6 +356,66 @@ CAUSE_SAMPLES = [
      "a String frame address is passed to Error(), and Error is a real type "
      "this path has no representation for at all: one formal value is one "
      "64-bit word, and Error is not one word"),
+    # ── the rows added by the 2026-10-01 r2 split of the `other refusal`
+    #    bucket (50 files on arm64, 104 on x86-64, down to 4 and 4). Cut from
+    #    the r2 logs of THIS tree, arm64 unless the sample says otherwise, and
+    #    each one is the terminal message a planner would have to go and read
+    #    by hand out of a bucket that meant "this tool has not classified
+    #    this". ──
+    ("Optional unwrap: `None` and a value are one word, with no tag",
+     "self.step.or_else() is an Optional unwrap: it answers by knowing which "
+     "of two words was the empty one, and on this path there is no way to "
+     "know"),
+    ("the slot would have to hold a frame address, and no type says so",
+     "self._slice._slice._data.unsafe_offset() hands the word in the slot "
+     "self._data to Pointer.unsafe_offset(), whose receiver is the ADDRESS of "
+     "a frame of 8-byte slots — so the slot would have to hold a frame "
+     "address"),
+    # Both wordings of the rebind row, because the two sites are two walkers
+    # and a refactor could break either one alone.
+    ("a slot holding a frame address is rebound by a later assignment",
+     "self._slots is a Pointer, a struct of this module whose receiver is a "
+     "frame of 8-byte slots, so the slot does hold a frame address — but a "
+     "method of SwissTable ASSIGNS that field"),
+    ("a slot holding a frame address is rebound by a later assignment",
+     "atom is assigned _Parser_parse_atom(self) in _Parser_parse_repeat(), and "
+     "atom also holds the address of a Repeat frame — Repeat() binds it to "
+     "one, and this path has no way to say that a later binding changes what "
+     "the name is"),
+    ("a field the struct does not declare (missing, or a comptime member)",
+     "res._InjectedValues is a field of res, and _ZipIterator has no field "
+     "'_InjectedValues': its 2 field(s): origin, _values"),
+    ("a field the struct does not declare (missing, or a comptime member)",
+     "shape.is_flat is a field of shape, and Coord has no field 'is_flat': "
+     "its 3 field(s): _storage, rank, product"),
+    ("a NUMBER compared with a string (`strcmp` would dereference it)",
+     "`_v == '1'` compares a NUMBER with a string, and the string comparison "
+     "this would lower to is `strcmp`, which DEREFERENCES both operands"),
+    ("a module-global container has storage but no initializer",
+     "arch_spec: 'ARCHES' has storage here — it is one of the module-global "
+     "slots in this image's `__DATA`, because a function writes it through "
+     "`global ARCHES` — but that storage has no initializer"),
+    ("`field(default_factory=F)`: nowhere to keep a per-instance value",
+     "CallExpr.args: `field(default_factory=F)` calls F once per instance, "
+     "and this path has nowhere to keep the result"),
+    ("a constructor body that reads `self` is not inlined",
+     "constructing ModuleSpecGenerator with arguments is a call to a "
+     "user-defined `__init__` whose body this path does not inline: a read of "
+     "'self' in the right-hand side"),
+    ("a module whose API is its top-level statements, imported by another",
+     "ab_filelist.py: line 12: this module's API is its top-level statements "
+     "(AssignStmt, IfStmt), and a library has no entry point to run them"),
+    ("a local read before its first assignment",
+     "load: 'f' is read at line 22 before anything in this function stores "
+     "it, and CPython raises UnboundLocalError for that program"),
+    ("a class-level default that is not a value this build can materialize",
+     "Type.origin: the default for field 'origin' is not a value this build "
+     "can materialize, and a class-level default on this path has to be one"),
+    ("a String method that returns a SHORTER string writes the receiver's "
+     "bytes",
+     "member.strip() is a real method of String, but it returns a SHORTER "
+     "string, which on a bare char * means writing a terminator over the "
+     "first trailing whitespace byte"),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,
@@ -318,6 +432,18 @@ NO_ARM64_SAMPLE = {
         "message that matches it in a real sweep is claimed by one of the "
         "three causes above it, which is what the precedence check below "
         "asserts",
+    # DEAD, and measured dead: 0 files on the 2026-10-01 r2 sweep on BOTH
+    # architectures. Its site reworded the tail of its message, both its
+    # markers were in that tail, and the row that superseded it (one sentence
+    # earlier, and the sentence both wordings share) now owns the construct.
+    # Kept rather than deleted so the table can still read a pre-2026-10-01
+    # log, which is an artifact the sweep tool has no reason to keep.
+    "a slot's declared type is not declared by its struct":
+        "SUPERSEDED and 0 files measured: `formal/build.py:2731` reworded the "
+        "tail of this message, both of this row's markers were in that tail, "
+        "and 'the slot would have to hold a frame address, and no type says "
+        "so' now keys on the sentence the two wordings share. Its old wording "
+        "is still exercised, as a sample of THAT row",
 }
 
 
@@ -386,6 +512,47 @@ def check_cause_table(failures):
             "broader receiver cause; its findings are counted as a receiver "
             f"problem again (got {C.classify_message(pre)!r})")
 
+    # The bracketed-specialization row and the callee row are about the SAME
+    # callee, and `formal/model.py` grew the second message as a sibling of the
+    # first. They share no substring today, so neither order is load-bearing —
+    # and a refactor that made them share one would be silent about which row
+    # lost. Both directions are stated, with the message each way, because the
+    # cost of getting this wrong is the 93-file row being counted as the
+    # 28-file one.
+    bracket = ("debug_assert[…](…) calls a name this unit does not compile, so "
+               "the brackets cannot be bound")
+    if C.classify_message(bracket) != (
+            "a bracketed specialization of a callee this unit does not "
+            "compile"):
+        failures.append(
+            "the bracketed-specialization cause is being shadowed; its row is "
+            "the largest in the sweep and it must classify to itself, not to a "
+            f"neighbouring callee row (got {C.classify_message(bracket)!r})")
+    plain = ("a X receiver is passed to foo(), which is a name with no "
+             "definition in hand IN THIS IMAGE")
+    if C.classify_message(plain) != "callee has no definition on this path":
+        failures.append(
+            "the 'callee has no definition' cause is now being shadowed BY the "
+            "bracketed-specialization one; adding a cause below it must not "
+            f"steal its row (got {C.classify_message(plain)!r})")
+
+    # The field-store row is a SIBLING of the container row, not an
+    # alternative: `formal/build.py` emits different wording for each, and the
+    # two say different things (a field has an owner that outlives the call).
+    # Asserted separately so merging them cannot happen unnoticed.
+    for msg, want in (
+            ("a Optional receiver is stored in a container, which has no layout "
+             "for a frame address on this path", "receiver stored in a container"),
+            ("a Optional receiver is stored in the field 'self.start', so it "
+             "outlives the frame it names",
+             "receiver stored in a field of a struct that outlives it")):
+        if C.classify_message(msg) != want:
+            failures.append(
+                f"the container/field frame-store pair collapsed: expected "
+                f"{want!r}, got {C.classify_message(msg)!r}. They are two "
+                "constructs — a container has no owner, a field outlives the "
+                "call — and a merge would hide which one a file is blocked by")
+
 
 def main() -> int:
     failures = []
@@ -432,7 +599,13 @@ def main() -> int:
 
     for f in failures:
         print("  FAIL  " + f)
-    checks = (len(SAMPLES) + 3 + len(CAUSE_SAMPLES) + len(C.CAUSES) + 4)
+    # `+ 4` is the number of assertions `main` makes about the FAMILY table
+    # below (precedence, the catch-all's absence, one per marker). It is
+    # written as a literal because these are counted by hand, which is exactly
+    # how a tally starts lying: an assertion added to `check_cause_table` and
+    # not counted here is a check that cannot fail the run in anyone's reading
+    # of the number. Anything added to either function needs its count bumped.
+    checks = (len(SAMPLES) + 3 + len(CAUSE_SAMPLES) + len(C.CAUSES) + 4 + 4)
     # …and the `uses:` column's own audit, which counts its checks into the
     # same total rather than printing a second tally.
     checks += _uses_column_checks(failures)
