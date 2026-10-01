@@ -2077,6 +2077,15 @@ class GimpleGen:
         self._calls_in_stmts_cache: dict = {}
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
+        # Which pool NAMES have already had their `static char * _slit_N;`
+        # forward declaration emitted in THIS translation unit. Every imported
+        # module emits a pool block of its own (the declaration form, since only
+        # the root emits definitions) and the pool is shared, so without this
+        # each module re-declared every name interned before it — quadratic in
+        # the number of imported modules. Same shape and same purpose as
+        # `_regex_progs_defined` below, which does the same for a regex
+        # program's `static const ARRAY[] = {...}`.
+        self._str_pool_declared: set[str] = set()
         # Compile-time-known regex support (see regex_compile.py, BACKLOG-CODEGEN.md §4f):
         self._regex_patterns: dict[str, str] = {}    # `X = re.compile("...")` var name → pattern source
         self._regex_progs: dict[str, dict] = {}      # pattern source → regex_compile.compile_pattern(...) result

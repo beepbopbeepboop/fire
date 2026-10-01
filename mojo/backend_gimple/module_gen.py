@@ -10050,8 +10050,26 @@ def gen_module_impl(self, stmts):
             _sp_lines = [f'static char * {sname} = "{escaped}";'
                          for escaped, sname in self._str_pool.items()]
         else:
+            # Only the names this module's own emission put in the pool, and
+            # only those no earlier module in this TU has already declared.
+            # Both filters are needed and they are not the same filter: the
+            # pool is SHARED (`temp_gen._str_pool = gen._str_pool`), so an
+            # imported module sees every string interned before it — including
+            # its importers' and its own — and without `_str_pool_declared`
+            # each of them re-declared all of them. Legal C (a file-scope
+            # declaration without an initializer is a tentative definition, and
+            # any number of those precede the root's one real definition), so
+            # this was never a compile error — it was N copies of a line per
+            # name, quadratic in the imported-module count, in every .ci this
+            # backend writes. See bugs/CODEGEN_inline_import_string_pool_
+            # name_collision.md, whose reported `redefinition of '_slit_NNN'`
+            # was measured on this tree and does not occur: the pool is shared
+            # by construction and only the root emits definitions.
             _sp_lines = [f'static char * {sname};'
-                         for escaped, sname in self._str_pool.items()]
+                         for escaped, sname in self._str_pool.items()
+                         if sname not in self._str_pool_declared]
+            for _escaped, _sname in self._str_pool.items():
+                self._str_pool_declared.add(_sname)
         for _sp_line in sorted(_sp_lines):
             parts.append(_sp_line)
         parts.append('')
