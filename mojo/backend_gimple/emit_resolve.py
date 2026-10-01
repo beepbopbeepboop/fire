@@ -359,6 +359,77 @@ def _register_closure_struct_inits(gen, stmts) -> None:
                     gen.func_param_types[_mangled] = _ctypes
 
 
+def publish_a3_generators(gen, meta) -> None:
+    """Publish `gen`'s own A3-lowered (stack-switch) free-function
+    generators into the whole-program `_generator_home_api` — the same
+    cross-module registry `_register_free_generator`
+    (mojo/backend_gimple/module_gen.py) publishes the C++20-coroutine-path
+    ones into.
+
+    Without it, `_cpp_resolve_generator_call_api`'s `<module>.<gen_fn>`
+    shape — the only way a generator body of one module can construct a
+    FOREIGN module's compiled generator handle — could resolve a
+    cpp-lowered generator and never an A3-lowered one, because
+    `mojo/middle/coro.py`'s `register` fills only the per-bare-name
+    `_generator_api`. Both backends deliberately expose the IDENTICAL
+    four-symbol ABI (`<base>_start` -> `MojoGenerator *`, `<base>_resume`
+    -> `_Bool`, `<base>_value`, `<base>_destroy`, with matching
+    `func_return_types`/`func_param_types` entries — coro.py's `register`
+    sets the same keys `_register_free_generator` does), so a handle from
+    either is drivable by one `next()` / for-loop lowering; only the
+    registry entry was missing.
+
+    Real: `c_common/tables.py`'s `read_table` doing
+    `lines = strutil._iter_significant_lines(infile)` then `next(lines)`.
+    `_iter_significant_lines` is A3-eligible while `read_table` is not
+    (kwonly params → "kwonly params (v0)"), so `read_table` compiles
+    through the cpp path and could not resolve the foreign handle,
+    refusing the whole module with `a call to unresolved callee
+    'next(...)'`. See bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+
+    Must be called at the A3 registration site, not from gen_module: by the
+    time gen_module runs, `mojo/middle/coro.py`'s `lower()` has already
+    REPLACED each generator's FunctionDef with its injected
+    `__mgco_<name>_body`, so the original bare name is gone from
+    `_local_top_level_func_names` and there is nothing left to key on. The
+    `meta` list handed to `register` is the authoritative, per-module record
+    of exactly what this module lowered.
+
+    Qualifier: `module_qualifier(gen.module_name)`, NOT `_func_qualifier`.
+    The A3 backend mangles a free generator's symbols UNQUALIFIED
+    (`__mgco_<name>`, coro.py's own `base = f'__mgco_{fn.name}'`), so there
+    is no per-call-site qualifier to consult — this module's own sanitized
+    name IS the right half of the key, and it is exactly what a reader
+    computing `module_qualifier(imported_symbols[bound_module]['module'])`
+    produces for the same module (`strutil`, `._strutil`, `pkg.strutil` all
+    land on the same spelling). First writer wins, so a cpp-lowered
+    generator's own entry is never displaced."""
+    from mojo.middle.module_shared import module_qualifier
+    if not meta:
+        return
+    qual = module_qualifier(getattr(gen, 'module_name', None) or '')
+    if not qual:
+        return
+    for _m in meta:
+        # A method goes to `_generator_method_api` (keyed by struct), an
+        # async generator drives a different API (`last_yield_was_wd`), and
+        # a nested `@parameter async def` is keyed by its qualified base
+        # with no module-level binding at all — none of the three is a
+        # `<module>.<free generator>` a cpp body can look up.
+        if (_m.get('is_method') or _m.get('nested')
+                or _m.get('is_async') or _m.get('is_async_gen')):
+            continue
+        _name = _m.get('name')
+        if not _name:
+            continue
+        _api = (gen._generator_api or {}).get(_name)
+        if _api is None:
+            continue
+        _key = qual + '::' + _name
+        if _key not in gen._generator_home_api:
+            gen._generator_home_api[_key] = _api
+
+
 def _compile_imported_module(gen, module_name: str) -> tuple:
     """Find and compile an imported .mojo/.py module, extracting type
     information.
@@ -759,6 +830,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(stmts)
                 if _ss_meta:
                     gimple_codegen.gimple_gen_coro.register(temp_gen, _ss_meta)
+                    publish_a3_generators(temp_gen, _ss_meta)
 
                 code = temp_gen.gen_module(stmts)
 

@@ -3698,6 +3698,26 @@ class Parser:
             names = [target]
             while self._peek().kind == "COMMA":
                 self._advance()
+                # A TRAILING comma makes the target a 1-tuple, and the `in`
+                # that follows is what says so — `for patterns, in
+                # _resolve_file_values(f, xs.items()):` (real: c_parser/
+                # preprocessor/__init__.py:169) is Python-legal and means
+                # "unpack each item's single element", which is NOT the same
+                # as the bare-name target this loop would otherwise produce:
+                # `_parse_unpack_target()` has no way to know a comma is
+                # trailing rather than a separator, so it happily consumed
+                # the `in` as a second target name and the parse then died
+                # with "Expected KW got NAME('<iterable>')". Closing the
+                # target here preserves the 1-tuple meaning and reuses the
+                # ONE representation `for (a,) in b:` already produces
+                # (`"(a)"`, see _parse_unpack_target), so every downstream
+                # consumer of a parenthesised for-target — the interpreter's
+                # and both codegen paths' — is unchanged rather than having
+                # a second spelling to learn. Silently dropping the comma
+                # instead would bind the whole item to the name: a wrong
+                # answer with no error at all.
+                if self._is_kw("in"):
+                    break
                 names.append(self._parse_unpack_target())
             target = "(" + ", ".join(names) + ")"
         self._expect("KW", "in")

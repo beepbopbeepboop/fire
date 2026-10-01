@@ -4802,6 +4802,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     gimple_gen_coro.register_abi_externs(gen)
     if _coro_meta or gimple_gen_coro._NATIVE_FUTURE_CLASSES:
         gimple_gen_coro.register(gen, _coro_meta)
+        grsl.publish_a3_generators(gen, _coro_meta)
     gen._current_filename = filename
     # Self-hosting bootstrap: when compiling this compiler's own source as a
     # transitive closure (`python3 fire.py build fire.py`, `--dump-full
