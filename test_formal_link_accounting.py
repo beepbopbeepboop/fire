@@ -281,6 +281,10 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "hashlib": "test_formal_hashlib.py",
     "re": "test_re_formal.py",
     "dataclasses": "test_dataclasses_formal.py",
+    "json": "test_formal_json.py",
+    "pathlib": "test_formal_pathlib.py",
+    "io": "test_formal_small_hosts.py",
+    "typing": "test_formal_small_hosts.py",
 }
 
 
@@ -370,7 +374,11 @@ def test_host_tiers():
     # them "not fixable" was false. A name that has been WRITTEN is not in
     # this list because it is implemented rather than unreachable; see
     # `written_modules()` above for the derived account.
-    for m in ('math', 'json'):
+    # `json` and `re` are both out of this list, and for the same reason: each
+    # left HOST_MODELLED by being WRITTEN, which is the other half of what the
+    # account above checks, and a name with a Mojo source is implemented rather
+    # than "reachable in principle".
+    for m in ('math',):
         check(I.host_module_tier(m) == 'modelled',
               f'{m} is modelled (reachable in principle, not implemented)')
     # `time` and `re` are NOT in that list and their omissions are the point:

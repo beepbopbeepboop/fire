@@ -520,7 +520,11 @@ class TestSweepReach(unittest.TestCase):
 
 
 class TestSystemModuleCall(unittest.TestCase):
-    SRC = "import os\nimport json\n\ndef main():\n    pass\n"
+    # `math` and not `json`: `json` used to be the host module named here, and
+    # `formal/hostmods/json.mojo` landed in 2026-09-30, so a `json` that is
+    # "not available here" is no longer a fact about anything. `math` has no
+    # Mojo source in this tree, so the message this rule reads is still true.
+    SRC = "import os\nimport math\n\ndef main():\n    pass\n"
 
     def test_a_self_describing_message_is_a_target_fact(self):
         got = S._system_module_call(
@@ -530,9 +534,9 @@ class TestSystemModuleCall(unittest.TestCase):
 
     def test_a_message_naming_a_host_member_is_a_target_fact(self):
         got = S._system_module_call(
-            "build: json.dumps() cannot be lowered: json is not available here",
+            "build: math.floor() cannot be lowered: math is not available here",
             self.SRC)
-        self.assertEqual(got, "json")
+        self.assertEqual(got, "math")
 
     def test_a_construct_refusal_is_not(self):
         """The negative that matters most, because the fallback is `codegen`.

@@ -154,8 +154,27 @@ HOST_MODELLED = frozenset((
     #     real filesystem. `listdir` and `walk` need a run-time-length
     #     sequence, which a list on this path cannot be, and `environ` needs
     #     a `char **` walk; both are bug docs rather than approximations.
-    "errno", "stat", "platform", "select", "io",
-    "pathlib", "glob", "fnmatch", "secrets", "uuid",
+    #   `io`  — `formal/hostmods/io.mojo`, in the part of CPython's `io` that
+    #     is not streams: `SEEK_SET`, `SEEK_CUR`, `SEEK_END` and
+    #     `DEFAULT_BUFFER_SIZE`, each checked against CPython's own `io` by
+    #     `test_formal_small_hosts.py`. The streams are absent because a
+    #     stream is a descriptor, a cursor and a buffer and a value cannot
+    #     cross a dylib boundary unless it is one 64-bit word — which
+    #     `formal/hostmods/sys.mojo` already says about `sys.stdout`, and `io`
+    #     is those streams one level up. It also closes the `io.open`-over-
+    #     `os` idea the `module:small-hosts` doc proposed: `os/_syscalls.mojo`
+    #     has `fs_open_ro`, `fs_lseek` and `fs_close` and NO read or write, so
+    #     the missing half is a stream.
+    "errno", "stat", "platform", "select",
+    #   `pathlib`  — `formal/hostmods/pathlib.mojo`, in the pure half only,
+    #     checked read for read against CPython's own `PurePosixPath` by
+    #     `test_formal_pathlib.py`: `as_posix`, `name`, `stem`, `suffix`,
+    #     `parent`, the three pure rewritings, `relative_to`, `match` and
+    #     `is_reserved`, over a corpus of awkward corners. It is the part
+    #     pathlib has and `os.path` has no name for, and the names `os.path`
+    #     already answers are NOT answered again there — see the module's own
+    #     docstring, which names each one.
+    "glob", "fnmatch", "secrets", "uuid",
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is
@@ -202,31 +221,41 @@ HOST_MODELLED = frozenset((
     #     caller-allocated span list, because an object is more than one
     #     64-bit word and a compiled pattern has nowhere to live between
     #     calls.
+    #   `json`  — `formal/hostmods/json.mojo`, checked case for case against
+    #     CPython's own `json` by `test_formal_json.py`: RFC 8259's accept and
+    #     reject over ~180 documents, the kind of every one of them, the
+    #     scanner's and the encoder's escape tables, and `dumps_str` over
+    #     every code point in nineteen ranges — the surrogate-pair arithmetic
+    #     is the part most likely to be wrong at exactly one point. Its
+    #     `loads`/`load`/`dump`/`dumps` of a CONTAINER are absent, because a
+    #     dict is a frame blob and cannot cross a dylib boundary; what is here
+    #     is the scanner, which is the half of the module whose answers are
+    #     one word each. Its docstring also records WHY the byte-value read
+    #     that a 2026-09-29 attempt at this module measured as UNAVAILABLE is
+    #     in fact available — it is a spelling, `var q: Pointer[UInt8] = s + i`
+    #     before `q.value()`, and not a capability the target lacks — and
+    #     `test_formal_json.py`'s `primitive` group is the assertion that says
+    #     so over 351 byte values, each against the byte CPython's `ord` names.
     #
+    #   `typing`  — `formal/hostmods/typing.mojo`, ONE function
+    #     (`TYPE_CHECKING`, checked against CPython's own), and the count is
+    #     the finding: the formal backends ERASE ANNOTATIONS, so a
+    #     `from typing import Optional` resolves as soon as the module EXISTS
+    #     and `Optional` need not be in its export table, because nothing ever
+    #     reads the name. `formal/elf.py` and `type_system.py` put all seven of
+    #     their imported names in annotations or in a default, which is why the
+    #     module is one function long. `test_formal_small_hosts.py` pins that
+    #     measurement — the annotation shapes build and run, and a name used as
+    #     a VALUE is still refused, so the erasure is not a promise the module
+    #     makes.
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "json", "math", "random", "decimal", "fractions",
+    "math", "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
     "weakref", "pprint", "reprlib", "pickle",
-    # A shape over the source language rather than a runtime facility: the
-    # parser, the type lattice. Neither of the two that USED to be named here
-    # is: `dataclasses` is a front-end transform and `argparse` has a file, and
-    # a name on this list alongside a paragraph saying it is written is a lie
-    # this list is not allowed to tell.
-    #
-    #   `dataclasses` — a COMPILE-TIME transform in
-    #     `formal/dataclass_transform.py`, and it has LEFT this list, which is
-    #     what `FRONTEND_PROVIDED_MODULES` below exists to say. The
-    #     measurement that decided the layer is in that file's docstring; the
-    #     short of it: `@dataclass` decorates a CLASS, a formal value is one
-    #     64-bit word with no type tag, and a decorator applied to a class is
-    #     DROPPED by both backends before the front end looks at it (measured:
-    #     a decorator whose body prints, applied to a class, produces an image
-    #     that runs without printing). So a `formal/hostmods/dataclasses.mojo`
-    #     would export a symbol nothing calls.
-    "ast", "typing",
+    "ast",
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same
