@@ -2086,7 +2086,8 @@ _IMAGE_FUNCTIONS = ()
 
 
 def _call_receivers(fn):
-    """The `id()` of every MemberExpr used as `X.m(...)`'s callee object.
+    """The `id()` of every MemberExpr used as `X.m(...)`'s — or `X.m[T](...)`'s
+    — callee object.
 
     POSITION, not shape, and the distinction is the whole of the largest group
     in the sweep. `self.f.g` in a value position is a field of a field: the
@@ -2100,13 +2101,26 @@ def _call_receivers(fn):
     reaches `_emit_expr` as a value, misses every slot table, and reads a
     scratch register — a wrong answer rather than a failure.
 
+    **The specialization counts as a call too, and leaving it out is what made
+    `recv.m[T](x)` a value-position method reference.** The brackets are a
+    generic's comptime parameters, so `b.run[3](4)` is a call in the same sense
+    `b.run(4)` is, and both receivers are the same node: the `MemberExpr` under
+    the `SubscriptExpr`. The walk therefore looks THROUGH a subscript on the
+    callee, which is what `formal/model.py`'s `call_callee_name` does for the
+    same reason — one recogniser per question, and both answers say `call`.
+
     `id()` of the node, because the walk yields nodes and a set of identities
     is the only way to say "this node, in this position" without a second walk
     that could disagree about which nodes it saw."""
     out = set()
     for node in M.iter_nodes(getattr(fn, "body", None)):
-        if isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr):
-            out.add(id(node.func))
+        if not isinstance(node, F.CallExpr):
+            continue
+        func = node.func
+        if isinstance(func, F.SubscriptExpr):
+            func = func.obj
+        if isinstance(func, F.MemberExpr):
+            out.add(id(func))
     return out
 
 
@@ -6318,7 +6332,11 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not M.empty_blob_constructor(base_name)
                         and not base_name.startswith(M.MLIR_DIALECT_PREFIX)
                         and not M.is_external_call_template(sub)):
-                    why = M.specialization_call_refusal(base_name)
+                    why = (M.ambiguous_method_specialization_refusal(
+                        M.member_chain_text(sub.obj), sub.obj.member,
+                        _ambiguous_method_owners(sub.obj, structs_by_name))
+                        if _ambiguous_method_owners(sub.obj, structs_by_name)
+                        else M.specialization_call_refusal(base_name))
             if why is not None:
                 bracketed[id(root_ident)] = why
         # A BRACKETED CALLEE, `f[x](...)`, is a comptime SPECIALIZATION of `f`
@@ -7188,6 +7206,54 @@ def _receiverless_methods(owners: dict, structs_by_name: dict) -> set:
     return out
 
 
+def _method_call_target(call, owners: dict):
+    """`recv.m` or `recv.m[T]` on a CallExpr: (owner, member, receiver), or None.
+
+    The one recogniser for "this call's callee is a method of a struct this
+    module declares", over BOTH spellings a method call has: a bare `recv.m`
+    and a comptime-specialized `recv.m[T]`.  The second is the same call with a
+    generic's brackets on it, so it must be the same answer — a subscript whose
+    base is the MemberExpr is not a subscript of a VALUE, and treating it as one
+    is what made `recv.m[T](a)` arrive at the frame analysis as a field read of
+    `recv.m` and get refused as a bound-method value (see `_specialized_method_call`
+    for the measurement and the shapes deliberately left out).
+
+    `None` for every other callee, which is the answer `owners` itself gives for
+    a name two structs declare — dispatch here is by NAME, so an ambiguous one
+    has no owner to lift to.
+    """
+    func = call.func
+    if isinstance(func, F.SubscriptExpr):
+        func = func.obj
+    if not (isinstance(func, F.MemberExpr) and isinstance(func.obj, F.IdentExpr)):
+        return None
+    owner = owners.get(func.member)
+    if owner is None:
+        return None
+    return owner, func.member, func.obj
+
+
+def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
+    """The structs in this image that BOTH declare `base.<member>`, or [].
+
+    The one place the ambiguity is computed, and it is asked of the DECLARATIONS
+    (`M.struct_methods`) rather than of `_method_owners`' output, because that map
+    has already thrown the name away — it pops every ambiguous name precisely so
+    `_rewrite_method_calls` cannot pick one.  Re-deriving it from the same tables
+    it reads is what keeps the two from disagreeing about whether a name was
+    ambiguous.
+
+    `None` for a callee that is not a method call on a plain name, which is the
+    answer `owners` gives for those too and the reason the caller can use a bare
+    truthiness test.
+    """
+    if not (isinstance(base, F.MemberExpr) and isinstance(base.obj, F.IdentExpr)):
+        return []
+    declaring = [st for st in (structs_by_name or {}).values()
+                 if any(m.name == base.member for m in M.struct_methods(st))]
+    return declaring if len(declaring) > 1 else []
+
+
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,
                           receiverless: set = None) -> None:
     """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
@@ -7207,19 +7273,26 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     accident of the design, and this function is where it shows up: the
     receiver-width refusal below fires only for a struct that fits NEITHER
     representation, which with the switch on is one whose fields cannot be
-    given a real slot at all."""
+    given a real slot at all.
+
+    `recv.m[T](a)` goes through the same lift with the brackets KEPT on the
+    callee, which is the whole of what a specialization is: `model.incoming_args`
+    puts a generic's comptime parameters first and arm64's `_emit_call` passes
+    the bracket expressions first, so `Struct_m[T](recv, a)` and
+    `Struct_m(recv, a)` reach the callee's parameters identically.  See
+    `_specialized_method_call`."""
     if isinstance(node, list):
         for x in node:
             _rewrite_method_calls(x, owners, wide, receiverless)
         return
-    if (isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr)
-            and isinstance(node.func.obj, F.IdentExpr)):
-        owner = owners.get(node.func.member)
-        if owner is not None:
+    if isinstance(node, F.CallExpr):
+        target = _method_call_target(node, owners)
+        if target is not None:
+            owner, member, receiver = target
             if (wide or {}).get(owner) is not None:
                 st = wide[owner]
                 raise CodegenError(
-                    f"{owner}.{node.func.member}() cannot be lowered: its "
+                    f"{owner}.{member}() cannot be lowered: its "
                     f"receiver has {M.struct_field_summary(st)}, and a formal "
                     f"value is one 64-bit word, so `self.<field>` has no "
                     f"representation on this path. The receiver would have to "
@@ -7227,11 +7300,18 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
                     f"a change to the value model the two backends AND the Lean "
                     f"proof share, not to this one function. Concretely, "
                     f"{M.struct_width_cost(st)}")
-            if node.func.member not in (receiverless or ()):
-                receiver = node.func.obj
+            lifted = F.IdentExpr(name=M.method_function_name(owner, member))
+            if member not in (receiverless or ()):
                 node.args = [receiver] + list(node.args)
-            node.func = F.IdentExpr(name=M.method_function_name(
-                owner, node.func.member))
+            if isinstance(node.func, F.SubscriptExpr):
+                # The brackets stay, and stay on the callee: they are the
+                # specialization, and the emitter reads them off the callee
+                # (`arm64_codegen._specialization_of`).  Only the BASE is
+                # replaced, which is the one thing that changes — it becomes the
+                # lifted name instead of the receiver's.
+                node.func.obj = lifted
+                return
+            node.func = lifted
             return
     for name in getattr(node, "__dataclass_fields__", {}):
         _rewrite_method_calls(getattr(node, name), owners, wide, receiverless)
