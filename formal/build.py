@@ -2814,6 +2814,34 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                     )
                 inner = M.struct_frame_slot(nested, node.member)
                 if inner is None:
+                    # The METHOD check `member_read_without_a_field` makes for a
+                    # depth-1 read, applied here too, and it is the same defect
+                    # this site had: `self.strong.fetch_add` is a read of a
+                    # member `Atomic` does not have as a FIELD — it is one of
+                    # its METHODS, and the sentence below said so in a way that
+                    # sent the reader to the layout ("and that struct's 3
+                    # field(s): T, scope, _value has no such field") when the
+                    # answer is that the name is not a field at all.
+                    #
+                    # Measured on `std/memory/arc_pointer.mojo`, whose
+                    # `self.strong.fetch_add[ordering=…](1)` is that call.
+                    # One recogniser (`model.structs_declaring_method`) so the
+                    # two sites cannot drift, which is the property the depth-1
+                    # message was written to have.
+                    owners = M.structs_declaring_method([nested], node.member)
+                    if owners:
+                        raise CodegenError(
+                            f"{chain} names {node.member!r}, which is a METHOD "
+                            f"of the nested {owners[0].name} frame rather than "
+                            f"one of its fields: a value-position method "
+                            f"reference is a bound method, and a method is not "
+                            f"a word — there is no slot to read it out of and "
+                            f"nothing to store it in, so this path has no "
+                            f"representation for it. Call it "
+                            f"(`{chain}(...)`), which is a receiver and a call "
+                            f"and lowers, or write the operation out where it "
+                            f"was used"
+                        )
                     raise CodegenError(
                         f"{chain} reads {node.member!r} out of a nested "
                         f"{nested.name} frame, and that struct's "

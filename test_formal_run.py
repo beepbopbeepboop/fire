@@ -4758,6 +4758,38 @@ INIT_FIELD_TYPE_REFUSALS = [
      "    var v = w.src\n"
      "    return v\n",
      "refuse:the shapes do not agree on where 'src' lives", None),
+    # THE SAME CORRECTION ONE LEVEL IN, at the only other site that has to
+    # choose between the two shapes. A member read out of a NESTED frame
+    # (`self.strong.fetch_add`, `std/memory/arc_pointer.mojo`) had no method
+    # check, so a name that is a METHOD of the nested struct was reported as a
+    # field it does not have — the same false diagnosis as the case above, one
+    # level down, and the reason it is a separate case rather than a note.
+    #
+    # `helper` is a method of `Inner` and `value` is its field, so the two are
+    # distinguishable in the source: `self.strong.helper` is a bound method and
+    # `self.strong.value` is a word, and only the second has a slot.
+    ("a_nested_frames_method_is_not_reported_as_a_missing_field",
+     "struct Inner:\n"
+     "    var value: Int\n"
+     "    var other: Int\n"
+     "\n"
+     "    def helper(mut self) -> Int:\n"
+     "        return 3\n"
+     "\n"
+     "struct Outer:\n"
+     "    var strong: Inner\n"
+     "    var pad: Int\n"
+     "\n"
+     "    def bump(mut self) -> Int:\n"
+     "        var v = self.strong.helper\n"
+     "        return v\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var o = Outer(Inner(7, 8), 0)\n"
+     "    printf(\"%d\", o.bump())\n"
+     "    return 0\n",
+     "refuse:is a METHOD of the nested Inner frame rather than one of its "
+     "fields", None),
 ]
 # ── wave 5 (E2): the three CONSTRUCTION shapes ─────────────────────────────
 #
