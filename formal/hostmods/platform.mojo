@@ -49,16 +49,22 @@ libSystem and nothing else does not have. None of them is a missing line of
 code, and `test_formal_platform.py`'s `absent` group pins each one as a
 REFUSAL so an omission cannot read as an implementation.
 
-  * `platform()`, and it is ONE call away. It needs `architecture()`, which
-    asks `file(1)` what the executable is, and everything else it composes is
-    here. Answering it by hardcoding `('64bit', 'Mach-O')` would be right on
-    this target and wrong on every other, which is the wrong `time.time()`
-    shape `formal/hostmods/time.mojo`'s docstring refuses.
-  * `architecture()`, `libc_ver()`, `processor()` — `file(1)`, the executable's
-    own bytes, and `uname -p`. Three subprocesses or a readable file. (Its own
-    `_default_architecture` table would answer Darwin without them, but only
-    after `file` has failed, and reaching for it would be guessing the answer
-    the subprocess exists to find.)
+  * `platform()`, and it is STILL one composition away even though
+    `architecture()` is here: everything it composes (`uname`, `mac_ver`,
+    `system_alias`, `architecture`) answers, and what is left is CPython's
+    `_platform()` string join plus the `sys.executable` it passes to
+    `architecture` — a path this image does not know, which needs
+    `_NSGetExecutablePath`. The measurement, the two differences that are NOT
+    ours to fix (CPython's `uname -p` subprocess, which is `processor`), and the
+    exact next step are in
+    `bugs/FORMAL_platform_one_call_from_answered.md`.
+  * `libc_ver()`, `processor()` — `uname -p` and a readable C library, i.e. two
+    subprocesses or a file. (CPython's own `_default_architecture` table would
+    answer Darwin for `architecture` without `file(1)`, but only after `file` has
+    failed, and reaching for it would be guessing the answer the subprocess
+    exists to find — which is why `architecture` reads the header instead and
+    agrees with CPython on every file shape, `/bin/ls`'s universal binary
+    included.)
   * `python_version()`, `python_implementation()`, `python_build()`,
     `python_branch()`, `python_compiler()`, `python_revision()`,
     `python_version_tuple()` — there is no Python on this image. This module
@@ -103,7 +109,10 @@ THE TWO SPELLING RULES EVERY FUNCTION HERE FOLLOWS
     `bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`, and the
     functions CPython DOES give defaults to (`platform(aliased, terse)`,
     `architecture(executable, bits, linkage)`, `mac_ver(release, versioninfo,
-    machine)`) are absent here anyway, so the question does not arise twice.
+    machine)`) are absent here or take their argument, so the question does not
+    arise twice: `architecture_bits`/`architecture_linkage` both take the path
+    and neither takes a preset, which is the one part of CPython's `architecture`
+    signature this module cannot honour and each docstring says so.
 
 MEMORY, AND WHO OWNS A STRING
 -----------------------------
@@ -123,16 +132,16 @@ caller who gets it wrong gets a double free.
 BOTH BACKENDS, and that is worth saying because the module this one takes its
 C library calls from says otherwise
 ----------------------------------------------------
-`formal/hostmods/os/_syscalls.mojo`'s docstring says a module dylib that calls
-into the C library "is arm64-only on this backend", and this module inherits
-`uname`, `sysctlbyname` and `strcmp` from there — so it was written expecting
-to inherit that too. It does not: measured on this tree, `machine()` builds AND
-RUNS under `--backend=x86_64` and under `--backend=arm64`, and on each it
-reports the architecture of the image it is running in, which is the whole
-point of the name. (`os.getcwd()`, measured the same way on the same tree,
-also builds and runs on x86_64, so that claim in `_syscalls.mojo` is stale for
-whatever `os` too — not this claim's file to correct, and recorded here only so
-nobody reads this paragraph as the opposite finding.)
+`formal/hostmods/os/_syscalls.mojo`'s docstring used to say a module dylib
+that calls into the C library "is arm64-only on this backend", and this module
+inherits `uname`, `sysctlbyname` and `strcmp` from there — so it was written
+expecting to inherit that too. It does not: measured on this tree, `machine()`
+builds AND RUNS under `--backend=x86_64` and under `--backend=arm64`, and on
+each it reports the architecture of the image it is running in, which is the
+whole point of the name. That claim in `_syscalls.mojo` has since been
+corrected in place, along with the five other modules that repeated it; what
+the x86-64 backend does need is the right symbol per call, which is
+`formal/model.py`'s `target_libc_symbol`.
 
 A Rosetta-emulated x86-64 process on an Apple Silicon host sees
 `hw.machine == "x86_64"`, so the x86-64 image's answer is `x86_64` and not this
@@ -144,6 +153,18 @@ process's `arm64`. That is correct behaviour rather than a discrepancy, and
 from os._syscalls import uts_str, kern_str, str_cmp
 from os._syscalls import str_len, str_at, str_alloc, str_copy, str_build
 from os._syscalls import fs_free
+
+# Which fact `os._syscalls.fs_macho_field` is asked for, as the two NUMBERS it
+# takes. Numbers here rather than `os._syscalls`'s own names because a
+# module-level constant is not exported as a word across a dylib boundary
+# (`bugs/FORMAL_module_state_no_storage.md`) — which is why `_syscalls.mojo`
+# spells the same two constants as `MACHO_WIDTH`/`MACHO_EXECUTABLE` for its own
+# callers and this module repeats the numbers it passes. 0 is the pointer width
+# in bits and 1 is "the kind of file `file -b` would call an executable"; both
+# are documented at `fs_macho_field`.
+MACHO_WIDTH = 0
+MACHO_EXECUTABLE = 1
+from os._syscalls import fs_macho_field
 
 
 # The five fields of `uname(3)`, in the order `os.uname()` returns them, so a
@@ -593,6 +614,86 @@ def system_alias_version(sysname, rel, ver) -> str:
     An ALIAS of `ver`. Do not pass it to `platform_free`.
     """
     return _alias_part(2, sysname, rel, ver)
+
+
+# ── what the executable IS ─────────────────────────────────────────────────
+
+def architecture_bits(exe) -> str:
+    """`platform.architecture(exe)[0]`: `"64bit"`, `"32bit"`, or `"64bit"`.
+
+    THE FIRST HALF of CPython's `architecture`, whose answer is a TUPLE and a
+    tuple on this path is a frame blob that cannot cross a boundary — hence the
+    two functions. `architecture_bits` and `architecture_linkage` are one
+    question asked twice, and `architecture_linkage`'s docstring says which one
+    to believe when they seem to disagree.
+
+    CPython reads the answer out of `file -b <exe>` and looks for `32-bit` or
+    `64-bit` in it. This reads the same fact out of the file's own Mach-O header
+    (`os._syscalls.fs_macho_field`, `MACHO_WIDTH`), which is where `file` reads
+    it, so the two agree by construction rather than by coincidence — and no
+    subprocess is involved, which is the whole reason the question was open for
+    as long as it was.
+
+    A path that is not a Mach-O answers CPython's DEFAULT, which is
+    `sizeof(void *) * 8` — and on this target a value IS a 64-bit word, so that
+    is `"64bit"` whether or not the file was readable. That is CPython's own
+    behaviour (`platform.architecture('fire.py')` is `('64bit', '')` here, and
+    so is `platform.architecture('/no/such/file')`), and it is stated here
+    because it is the one place this function answers without having read
+    anything.
+
+    NOT ANSWERABLE: the `bits` PRESET parameter. CPython's signature is
+    `architecture(executable, bits='', linkage='')` and a caller may pass
+    `bits='32bit'` to be told `('32bit', …)` for a file it cannot read; a
+    default argument is not applied across a dylib boundary
+    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`), so there is
+    no spelling of "the default, or this" here, and a caller that needs one
+    has to compare the two answers itself.
+    """
+    var b = fs_macho_field(exe, MACHO_WIDTH)
+    if b == 32:
+        return "32bit"
+    return "64bit"
+
+
+def architecture_linkage(exe) -> str:
+    """`platform.architecture(exe)[1]`: `"Mach-O"`, or `""`.
+
+    CPython's second half is "which of the formats `file` named is in the
+    output" — `Mach-O` here, `ELF` on Linux, `PE`/`WindowsPE` on Windows. Only
+    the first is a format this target has: both architectures `formal` emits
+    are Mach-O and the ELF image it also emits is the Linux one, where CPython
+    would answer `'ELF'`, and saying so would be a claim about a machine this
+    image does not run on.
+
+    `"Mach-O"` for an EXECUTABLE and `""` for everything else, and the second
+    half of that is CPython's parser being older than `file(1)` rather than a
+    fact about Mach-O: CPython accepts a file whose `file -b` output contains
+    the word `executable` or the phrase `shared object`, and this macOS's `file`
+    prints "Mach-O 64-bit dynamically linked shared library" for a dylib — never
+    that phrase — so CPython answers `architecture(any_dylib)` as
+    `('64bit', '')` here. MEASURED on this host, and emulated deliberately: this
+    module is a mirror of CPython, so a right answer that disagrees with the
+    thing being mirrored is still a wrong answer for a caller. The reading is
+    the header's `filetype` (`os._syscalls.fs_macho_field`'s `MACHO_EXECUTABLE`),
+    which is where `file` reads it too.
+
+    `""` for anything that is not a Mach-O either, which is CPython's own answer
+    for a file whose format it does not recognise (`platform.architecture
+    ('fire.py')` is `('64bit', '')`), and it is the answer a caller can act on:
+    CPython's `platform()` puts `linkage` in the string it builds, so `""` drops
+    out.
+
+    THE TWO HALVES CANNOT DISAGREE about the file and only disagree about the
+    default: `architecture_linkage("")` says nothing about the width, while
+    `architecture_bits` answers CPython's default for a file it could not read.
+    Both are CPython's answers for the same file, and
+    `test_formal_platform.py`'s `arch` group asks CPython for the PAIR rather
+    than for one half at a time.
+    """
+    if fs_macho_field(exe, MACHO_EXECUTABLE) == 1:
+        return "Mach-O"
+    return ""
 
 
 # ── memory ────────────────────────────────────────────────────────────────

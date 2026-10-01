@@ -700,11 +700,15 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
                   dylib_exports: list = None):
     """The codegen for `arch`, configured for the `fmt` binary it feeds.
 
-    The only format-dependent choice is how an unbound symbol is called:
-    Mach-O carries a __TEXT,__stubs trampoline (`call rel32` to it), while
-    ELF has no stub section and calls through the .got slot the loader fills
-    (`call [rip+disp32]`). Everything else about the two backends is the
-    same contract, so it is selected here rather than at each call site.
+    The only format-dependent choice made here is how an unbound symbol is
+    called: Mach-O carries a __TEXT,__stubs trampoline (`call rel32` to it),
+    while ELF has no stub section and calls through the .got slot the loader
+    fills (`call [rip+disp32]`). Everything else about the two backends is the
+    same contract, so it is selected here rather than at each call site. `fmt`
+    is also handed to the x86-64 backend as `target_fmt`, for the other
+    format-dependent question — which SPELLING of a C name this target binds,
+    since macOS and glibc disagree about that (see
+    `model.target_libc_symbol`).
 
     `dylib_exports` is the linked libraries' manifest export lists, in the
     same LINK ORDER as `dylib_syms`, so the two answer identically about a
@@ -732,7 +736,8 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
                              dylib_syms=dylib_syms,
                              comptime_hook=comptime_hook,
                              dylib_exports=dylib_exports,
-                             globals_base=gbase)
+                             globals_base=gbase,
+                             target_fmt=fmt)
     raise FormalBuildError(
         f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
 
@@ -8215,10 +8220,19 @@ def _is_libsystem(sym: str) -> bool:
     `formal/imports.py`'s host split — was reported as binding a symbol nothing
     provides. Now the answer comes from dlsym against the real library.
 
+    The name asked about is `model.libc_source_name`'s, not the symbol's own
+    spelling, and the difference is a whole architecture's worth: a
+    `readdir$INODE64` in the symbol list is the 64-bit-inode `readdir(3)` (see
+    `model.target_libc_symbol`), and the dlsym here runs in THIS python3, so it
+    can only answer for the host — where that spelling may not exist at all. On
+    an arm64 host asking about `readdir$INODE64` would report an x86-64 image's
+    correct binding as a symbol nothing provides, which is a build refused over
+    a name that is right.
+
     Memoised per symbol: this runs once per extern per build, and a dlsym per
     extern would be a needless syscall storm in a large program.
     """
-    bare = sym.lstrip("_") if isinstance(sym, str) else sym
+    bare = M.libc_source_name(sym) if isinstance(sym, str) else sym
     if not bare:
         return False
     hit = _LIBSYSTEM_MEMO.get(bare)

@@ -105,17 +105,15 @@ time.
 
 WHAT IS NOT HERE, AND WHY
 -------------------------
-  * **ARM64 ONLY TODAY, and not because of anything in this source.** This
+  * **BOTH BACKENDS TODAY, and not because of anything in this source.** This
     module calls the C library (`malloc`, `strlen`, `memcmp`, `snprintf`), and
-    a module dylib that makes a call into it builds and RUNS with
-    `--backend=arm64` while the loader refuses the same image under
-    `--backend=x86_64` on this host with ``main executable failed strict
-    validation``. Measured on the two-line program above, and it is the same
-    defect `formal/hostmods/os/__init__.mojo` records at the top of its own
-    docstring — filed as
-    `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`.
-    `test_formal_argparse.py` builds arm64 for the same reason
-    `test_formal_sys.py` does.
+    a module dylib that makes a call into it builds and RUNS under
+    `--backend=x86_64` as well as `--backend=arm64`, measured on this tree.
+    It used to say otherwise here and in five sibling modules, citing a bug doc
+    that does not exist; `formal/hostmods/os/__init__.mojo` gives the corrected
+    claim and the evidence at length. A host with no x86-64 support at all still
+    skips the x86-64 half of `test_formal_argparse.py`, with the reason
+    printed.
   * **`type=float` is REFUSED, and that is not an oversight.** A value on this
     path is one 64-bit word holding an INTEGER: `2.5` as a literal is the
     integer 2, `1.0` is 1, and `atof("3.5")` is 1 — measured, and the reason is

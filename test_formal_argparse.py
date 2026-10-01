@@ -699,10 +699,13 @@ def test_the_parse_matches_cpython(tmp, _shared):
     nargs shape, `choices`, type errors, required errors, unrecognized
     arguments, the usage line, the error wording and the exit status 2.
 
-    arm64 only, and for the reason `test_formal_sys.py` gives: a module dylib
-    that calls into the C library builds and runs with `--backend=arm64` and
-    produces an image the loader refuses under `--backend=x86_64` on this host
-    (`bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`).
+    arm64 only. The reason this file gives for that used to be "a module dylib
+    that calls into the C library produces an image the loader refuses under
+    `--backend=x86_64`", and it was false — see the top of
+    `formal/hostmods/os/__init__.mojo`, which is where the measurement is. What
+    is true is narrower and is left as it stands: this file builds ONE
+    architecture, in `build_and_run` and in the CAS path it reads, so making it
+    cover both is a change to this file's shape rather than a skip to remove.
     """
     if platform.machine() not in ("arm64", "aarch64", "x86_64"):
         print("        SKIP: no Darwin host to run the image on")

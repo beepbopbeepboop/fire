@@ -418,7 +418,7 @@ class X86_64Codegen:
     def __init__(self, test_input: int = 10, extern_style: str = "stub",
                  dylib_syms: dict = None, comptime_hook=None,
                  module_source: str = "", dylib_exports: list = None,
-                 globals_base: int = None):
+                 globals_base: int = None, target_fmt: str = "macho"):
         """test_input: the value the startup stub passes to the entry.
 
         extern_style: how a call to an unbound symbol is emitted.
@@ -430,6 +430,16 @@ class X86_64Codegen:
             needs no stub section. What the ELF image carries
             (`formal.elf.compute_got_addrs`), matching the toy x86-64 path
             this was ported from.
+
+        target_fmt: the container this unit is being emitted for, `"macho"` or
+        `"elf"` — the same choice `extern_style` above makes, carried
+        separately because it is a PLATFORM fact rather than an encoding one:
+        `_extern_symbol` asks `model.target_libc_symbol` which spelling of a C
+        name this target binds, and the two C libraries this backend can emit
+        for disagree about that (macOS exports `readdir$INODE64` beside
+        `readdir`; glibc has only one `readdir`). Defaults to `"macho"`, which
+        is what `extern_style`'s own default means; `formal.build._make_codegen`
+        passes the real one for both.
 
         dylib_syms: {source-level callee name: the spelling a linked formal
         dylib exports it under}. A call whose callee is not defined in this
@@ -454,6 +464,7 @@ class X86_64Codegen:
                 f"unknown extern_style {extern_style!r} (expected stub|got)")
         self.test_input = test_input
         self.extern_style = extern_style
+        self._target_fmt = target_fmt
         self._dylib_syms = dict(dylib_syms or {})
         # The same libraries' MANIFEST export entries, in the same order
         # `_dylib_syms` was built in, indexed flat by bare name (so a bare
@@ -5174,11 +5185,26 @@ class X86_64Codegen:
         `mod.f` can never bind some other library's `f`; and a dotted name whose
         module IS linked but does not publish it is refused here, naming both
         halves, rather than emitted as a BL against a symbol nothing defines.
+
+        Then `model.target_libc_symbol`, which is the OTHER half of what the
+        emitted symbol has to be right about and is the whole of this
+        backend's own answer: a name no module answers for is the C library's
+        own, and on x86_64 several of those names bind a different function than
+        they do on arm64 — `readdir` is the 32-bit-inode `readdir(3)` here and
+        the 64-bit-inode one is `readdir$INODE64`, so binding the bare name
+        loads an image that runs and returns `cc.txt` where CPython returns
+        `ccc.txt`. The `sym == name` guard is what keeps a LINKED MODULE's export
+        out of a rewrite meant for the C library's spellings: a module's
+        mangled symbol carries its module name and a hash
+        (`formal.build._abi_symbol`), so it can never equal the bare C name.
         """
-        return M.dylib_extern_symbol(name, self._dylib_syms,
-                                     self._dylib_by_name,
-                                     self._dylib_by_module,
-                                     self._dylib_forwarded)
+        sym = M.dylib_extern_symbol(name, self._dylib_syms,
+                                    self._dylib_by_name,
+                                    self._dylib_by_module,
+                                    self._dylib_forwarded)
+        if sym == name:
+            sym = M.target_libc_symbol(sym, "x86_64", self._target_fmt)
+        return sym
 
     def _untyped_callee(self, name) -> bool:
         """Is `name` a MOJO function that does not say what it returns?

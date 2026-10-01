@@ -17,16 +17,24 @@ links libSystem and nothing else can actually be asked for. The shape of the
 restriction is the same everywhere in this module and is worth stating once,
 because it is not a matter of taste:
 
-  * ARM64 ONLY TODAY, and not because of anything in this source. A module
-    dylib that makes a call into the C library is arm64-only on this backend:
-    the same two-line module builds and RUNS with `--backend=arm64` and
-    produces an image the loader refuses with ``main executable failed strict
-    validation`` under `--backend=x86_64``, which is the unclaimed-trailing-byte
-    failure `formal/macho_linker.py`'s `_assert_no_unclaimed_bytes` exists for.
-    Every function below needs the C library, so all of them are arm64-only
-    until that is fixed; `test_formal_os.py` skips a non-arm64 host and the
-    reason it has to is here. Filed as
-    `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`.
+  * BOTH BACKENDS, and the BINDING is the whole story. This used to say that a
+    module dylib which makes a call into the C library is arm64-only on this
+    backend, citing a bug doc that does not exist, and six sibling modules
+    repeated it. It is false, and the cost of it was not a stale sentence: the
+    case that would have caught a real defect was skipped on x86-64 for exactly
+    this reason. Measured on this tree — a program importing `os`, building
+    with `--backend=x86_64` and running under `arch -x86_64`, with every answer
+    compared against CPython's — is what `test_formal_os_backing.py` does for
+    all 51 of its cases, `os` and `os.path` and `os.listdir` included. What the
+    x86-64 backend does need is to bind the right SYMBOL: macOS's C library
+    exports several of the entry points below TWICE, once with a 32-bit `ino_t`
+    and once with a 64-bit one, and on x86-64 the bare name is the 32-bit
+    `readdir(3)`/`stat(2)`, whose `struct dirent`/`struct stat` is a different
+    layout. That table is `model.target_libc_symbol`'s, and what it cost before
+    it was there is
+    `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes.md`.
+    (A host with no x86-64 support at all still skips the x86-64 half of the
+    suites, with the reason printed.)
 
   * A CONSTANT IS A CALL. `os.sep` is a module-level name, and a module-level
     name is not exported as a word across a dylib boundary — there is no

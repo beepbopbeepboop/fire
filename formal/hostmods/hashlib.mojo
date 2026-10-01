@@ -42,13 +42,11 @@ because a `bytes` object cannot cross the boundary either.
     random spread, so the empty message, the single-block boundary at 128 and
     the two-block case are covered rather than assumed.
 
-  * ARM64 ONLY TODAY, for the reason `formal/hostmods/os/__init__.mojo` gives
-    at length: a module dylib that calls into the C library produces an image
-    the loader refuses under `--backend=x86_64`
-    (`bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`).
-    `test_formal_hashlib.py` skips a non-arm64 host and the reason it has to
-    is here. BLAKE2b itself is pure integer arithmetic and would work on
-    either backend; it is in this file for that reason alone.
+  * BOTH BACKENDS TODAY, for the reason `formal/hostmods/os/__init__.mojo` gives
+    at length: a module dylib that calls into the C library builds and runs
+    under `--backend=x86_64` as well, and the claim this replaces was false.
+    BLAKE2b itself is pure integer arithmetic and never needed the C library;
+    it is in this file because `hashlib` is the name a caller reaches for.
 
 WHAT IS NOT HERE, AND WHY
 -------------------------
