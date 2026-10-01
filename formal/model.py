@@ -8700,6 +8700,55 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
     return (syms or {}).get(name, name)
 
 
+def dylib_module_reference(node, imported) -> str:
+    """The module a dotted chain reads THROUGH, or None if it is not one.
+
+    THE ONE recogniser of the shape, and it answers a different question from
+    every other reader of a dotted name here. `dylib_export_lookup` answers
+    "which EXPORT does this callee bind"; this answers "is the ROOT of this
+    chain a module, or is it a value?" — and the second question is what
+    `check_module_symbols` needs, because a module root has no register and
+    needs none: it is a library on the link line, named by a manifest.
+
+    It walks a `MemberExpr` / `SubscriptExpr` chain down to its `IdentExpr`
+    root, the same root the callee exemption collects, and then asks whether
+    that root names a module THIS UNIT IMPORTS. Returns the root's name so the
+    caller can exempt the root by node identity, exactly as the callee
+    exemption does — never by name, because `iter_nodes` has no parent and the
+    same spelling is a module root in one position and a genuine local in
+    another.
+
+    The gate accepts a PACKAGE PREFIX as well as an exact match, and that is
+    the same rule the callee gate uses: `import os.path` binds the name `os`,
+    so `os.path.join(…)` roots at a name that is not itself on the list. A name
+    that is a dotted PREFIX of an imported module cannot be a value either —
+    locals, parameters and module-level names are all bare, and nothing in this
+    language puts an attribute on one — so accepting the prefix cannot exempt a
+    value read.
+
+    `imported` is `imports.imported_modules(stmts)` — the modules that must be
+    on the link line — NOT the export tables. That is deliberate and it is the
+    gate `check_module_symbols` already applies to a dotted CALLEE: a target
+    with no module mechanism (an ELF image: no dylib form, nothing to link)
+    resolves no imports, and exempting a module root there would let an image be
+    emitted with a member read of something nothing provides. Empty/None
+    imported means the answer is None for every chain, which is the old
+    behaviour."""
+    parts = []
+    cur = node
+    while isinstance(cur, (F.MemberExpr, F.SubscriptExpr)):
+        if isinstance(cur, F.MemberExpr):
+            parts.append(cur.member)
+        cur = cur.obj
+    if not isinstance(cur, F.IdentExpr):
+        return None
+    root = cur.name
+    for mod in (imported or ()):
+        if root == mod or str(mod).startswith(f"{root}."):
+            return root
+    return None
+
+
 def _module_is_linked(by_module: dict, forwarded: dict, module: str) -> bool:
     """Whether `module` names a library on this link line at all.
 
@@ -15185,6 +15234,64 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
             f"Write the operation in this module, or call a public function "
             f"that does it — which is the same program with a definition this "
             f"image can bind")
+
+
+def module_attribute_refusal(spelling: str, module: str, leaf: str,
+                             fn_name: str, published) -> str:
+    """The diagnostic for reading `module.leaf` as a VALUE.
+
+    A DIFFERENT fact from `module_global_refusal`'s "imported" arm, and the
+    difference is the whole of this function. That arm is raised about a BARE
+    name — `from sys import argv`, then `argv` — and it says "this name's value
+    is a real global with nowhere to live". It is true there, because `argv`
+    genuinely is a global of `sys`.
+
+    Here the name being refused is a MODULE (`sys`), and a module is not a
+    global, not a variable, and not a value with nowhere to live: it is the
+    library on the link line, and the thing being read is its ATTRIBUTE `argv`.
+    Saying "there is no storage for a variable called `sys`" is a claim about a
+    variable that does not exist, and it sends the reader to look for storage for
+    the one name in the program that needs none — measured, this is what
+    `t_argv.mojo`, `mojo.mojo`, `tools/ab_filelist.py`, `tools/audit_determinism.py`,
+    `tools/ci_line.py` and `tools/detach.py` were each refused with, on both
+    architectures, all six of them naming `sys`.
+
+    So the sentence is about the ATTRIBUTE and it says what the boundary can
+    publish, which is the same fact `dylib_extern_symbol` states for a dotted
+    CALL: a dylib exports functions (as symbols) and module-level names the
+    build FOLDED TO A LITERAL (as values, because a literal needs no storage to
+    cross). `sys.argv` is neither — it is a list, and §(4) of
+    `bugs/FORMAL_module_state_no_storage.md` records that the command line is
+    gone before the first statement runs, so there is nothing in it either.
+
+    `published` is the list of what the module DOES publish, so a reader can see
+    in one line whether the name they wrote is one of the module's own or a
+    capability it does not have. That is `dylib_extern_symbol`'s own device,
+    reused rather than reinvented."""
+    who = f"{fn_name}: " if fn_name else ""
+    shown = ", ".join(sorted(published)[:8])
+    if len(published) > 8:
+        shown += ", …"
+    if not shown:
+        shown = ("nothing under a name a caller can bind — every name it "
+                 "publishes is re-exported, and the modules it re-exports from "
+                 "publish none of this one")
+    return (f"{who}{spelling} reads {leaf!r} out of the imported module "
+            f"`{module}`, and a module is not a value this path can place: "
+            f"there is no register, frame slot or `__DATA` word for it because "
+            f"it is not one — it is the library on this link line, and what a "
+            f"dylib publishes is its FUNCTIONS (as symbols, so "
+            f"`{module}.fn(...)` lowers) and its module-level names the build "
+            f"FOLDED TO A LITERAL (as values, so `{module}.K = 1` lowers — "
+            f"there is exactly one value of a folded module-level name in a "
+            f"whole program, so the importer materializes the same one). What "
+            f"it cannot publish is a VARIABLE, and `{leaf}` is one: a list, an "
+            f"object or a stream has no representation as a word on the other "
+            f"side of the boundary, because every value a formal program can "
+            f"name lives in a function's own stack scratch, which is reclaimed "
+            f"when the function returns. What `{module}` publishes: {shown}. "
+            f"`bugs/FORMAL_module_state_no_storage.md` records the design and "
+            f"what would have to be true to close it, and §(2) is this shape")
 
 
 def module_global_refusal(name: str, sym, fn_name: str) -> str:
