@@ -10,7 +10,8 @@ ten live cross-references point at it (a `git rm` would orphan every one —
 the exact rot this directory's README catalogues), and one recorded
 divergence of the new mechanism belongs here rather than nowhere. The one
 genuinely open bug this work uncovered is a DIFFERENT one, filed at
-`bugs/CODEGEN_list_return_via_local_types_the_return_int64_t.md`: a
+`bugs/CODEGEN_list_return_via_local_types_the_return_int64_t.md` (since
+closed and removed): a
 function that returns a `MojoList *` it built in a LOCAL is typed `int64_t`
 by return-type inference, so the caller print()s the pointer's address and
 iterating it SEGFAULTS — pre-existing, and independent of `struct`.

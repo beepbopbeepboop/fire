@@ -2,9 +2,20 @@
 
 ## Status
 
-OPEN for two of the nineteen. The other seventeen are accounted for below: five
-were measured and given a bucket by the change that wrote this, eleven belong to
-another doc, and one is deliberate.
+OPEN for three of fifteen. The count was nineteen when this doc was written, the
+same commit that wrote it moved five of them into a bucket (`cli-usage-text`,
+`md2html`, `ownership-destruct`, `arm64-encoders` in `check`, `x86-decode` in
+`x86`) — which is **fourteen** — and `new-syntax-parse` arrived on master after
+the nineteen were counted, which is **fifteen** again.
+
+    $ python3 tools/suite.py --list | grep '\[\]$' | awk '{print $1}' | sort | tr '\n' ' '
+    async-runtime-scaffold async-void-return async-with-lock-guard coro-detached-async
+    coro-future-await gimple-async-runner metalgpu mutable-async-capture nested-async-generic
+    new-syntax-parse prooflib taskgroup transitive-closure-capture x86-containers x86-examples
+    # 15, and 11 + 1 + 3 is 15
+
+Eleven of the fifteen belong to another doc, one is deliberate, and the three
+that are left are `metalgpu`, `new-syntax-parse` and `x86-examples`.
 
 ## What is believed
 
@@ -39,9 +50,11 @@ They fall into three groups, and only one of them is a mistake.
         it is in no bucket on purpose so `make check`/`make gate` do not pay for
         it. Naming it here so the count reconciles and nobody "fixes" it.
 
-     7  registered, NOT expect-marked, and ungated — the actual gap:
-        metalgpu, x86-examples, cli-usage-text, md2html, arm64-encoders,
-        ownership-destruct, x86-decode
+     3  registered, NOT expect-marked, and ungated — the actual gap: metalgpu,
+        x86-examples and new-syntax-parse. The other five of the seven that
+        were ungated when this was written have since been given a bucket; they
+        are named above and in the Status section, and they are left out of the
+        list here so it is the census rather than a history.
 
 ## What was run, and what it showed
 
@@ -66,10 +79,49 @@ They fall into three groups, and only one of them is a mistake.
 Five of the six were therefore measured, given `mem='tiny'` (which is what the
 ratchet assigns at those peaks), and NAMED in a bucket: `cli-usage-text`,
 `ownership-destruct`, `md2html` and `arm64-encoders` in `check`, `x86-decode` in
-`x86`. That is the fix, and it is why this doc's status is OPEN for two rather
-than six.
+`x86`. That is the fix, and it is why this doc's status is OPEN for three rather
+than eight (seven from that commit, plus `new-syntax-parse` from master).
 
-## The two that are left, and why
+Re-run on the merged tree after those five landed, and again after
+`new-syntax-parse` arrived from master, to confirm the census the Status section
+quotes:
+
+    $ python3 tools/suite.py --list | grep '\[\]$' | awk '{print $1}' | sort | tr '\n' ' '
+    async-runtime-scaffold async-void-return async-with-lock-guard coro-detached-async
+    coro-future-await gimple-async-runner metalgpu mutable-async-capture nested-async-generic
+    new-syntax-parse prooflib taskgroup transitive-closure-capture x86-containers x86-examples
+    # 15, and 11 + 1 + 3 is 15
+
+## `new-syntax-parse`, the fifteenth, added 2026-10-01 with master's new-modular work
+
+`new-syntax-parse` (`test_new_syntax_parsing.py`) is an eighth instance of
+group 3, and it arrived the same way the other seven did: a registration that
+satisfied the estate check and nothing ever ran. Master's `92a71744` wrote both
+the test and the spec, and `076977dd` did not bucket it. It is NOT an artefact
+of any merge — `git show master:tools/suite.py | grep new-syntax-parse` prints
+the registration and no bucket line, so it is ungated on master too.
+
+Measured, because the fix for this group is always "measure, then name":
+
+    $ python3 tools/memslot.py --gb 8 --label new-syntax-parse -- \
+        python3 tools/memcap.py --limit-gb 8 --label new-syntax-parse -- \
+        python3 test_new_syntax_parsing.py
+    Results: 87 passed, 0 failed
+    memcap: done, peak 0.0 GB across up to 1 procs (ceiling 8.0 GB), child exit 0
+
+    $ python3 tools/suite.py new-syntax-parse
+    suite: 1 passed, 0 failed, 0 skipped  (1 tests, 1 jobs, 0.6s wall)
+
+So the measurement the next step needs is already in hand: 0.6 s and 0.0 GB,
+`mem='tiny'`, and `check` beside `examples-parse` (the other parser suite) is
+where it belongs. NOT DONE here — `tools/suite.py` bucket membership is not
+this branch's to change, and the merge that surfaced it has no mandate to edit
+registrations beyond resolving its own conflict. It is also `cache=True` with
+`extra=['test_new_syntax_parsing.py', 'fire_compiler.py']`, so unlike the
+other seven it cannot silently rot into a stale PASS: the key covers the file
+under test, and editing the parser re-runs it.
+
+## The three that are left, and why
 
 **`metalgpu`** — `test_metal_codegen.py`: MSL emitted by
 `mojo/backend_gimple/emit_metal.py`, compiled by Apple's real Metal compiler and
@@ -80,6 +132,10 @@ natural home is `check`, beside the `llm-reference` CPU reference it is paired
 with — and the honest first step is to run it once, alone:
 
     python3 tools/memslot.py --gb 8 --label metalgpu -- python3 tools/suite.py metalgpu
+
+**`new-syntax-parse`** — measured, 0.6 s and 0.0 GB, and the measurement is in
+the section above. `check`, beside `examples-parse` (the other parser suite),
+is where it belongs; nothing more needs measuring to put it there.
 
 **`x86-examples`** — `test_x86_64_examples.py` builds every `formal/examples/*.mojo`
 for x86-64 and compares each answer with the source. Its natural home is `x86`,
@@ -99,15 +155,23 @@ to notice.
 
 ## The next step, exactly
 
-1. Run `metalgpu` alone, once, on a machine with a GPU. If it is green, add it to
+1. Add `new-syntax-parse` to `check` with `mem='tiny'` beside `examples-parse`.
+   It is measured (0.6 s, 0.0 GB) and green, so this is the whole of it — the
+   cheapest of the three by an order of magnitude, and the one with no open
+   question behind it.
+2. Run `metalgpu` alone, once, on a machine with a GPU. If it is green, add it to
    `check` and give it a measured row; if it is red, register the red with an
    `expect=` and a bug doc, which is the discipline CLAUDE.md states for a
    subject that really is broken.
-2. Run `x86-examples` the way `formal-x86` runs (or add it to the `x86` bucket
+3. Run `x86-examples` the way `formal-x86` runs (or add it to the `x86` bucket
    and let the bucket report it), then bucket it on the result.
-3. Not this: sweeping the twelve `expect=`-marked ones in from here. That is
-   `tools/suite.py:disabled-status`, and the argument for it — a marker nobody
-   can observe going stale — is written down in the doc that owns it.
+4. Not this: sweeping the eleven `expect=`-marked ones in from here. That group
+   is `bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md`, and the
+   argument for it — a marker nobody can observe going stale — is written down
+   there and in CLAUDE.md, "Known-failing tests". Sweeping them in is also not
+   free: eight of them are `mem=small` and `gimple-async-runner` alone declares
+   36 failing cases, so it is a measured change to what the gate does, not a
+   bookkeeping one.
 
 ## Related
 

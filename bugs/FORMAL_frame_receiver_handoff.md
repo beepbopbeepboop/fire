@@ -149,6 +149,42 @@ already refused by name: `DEREFERENCE_METHODS` covers `value`/`unsafe_value`,
 and says why in terms a reader can act on. The word that escapes is one nothing
 on this path dereferences.
 
+### 2b. Case (a) again: `origin_of`, which has no body to dereference anything
+
+Added 2026-09-30, and it is the same mistake as `Pointer` one step further
+out. `origin_of` was in `FRAME_VALUE_ONLY_CALLS`, so the same sentence refused
+it: *"it wants the object itself … so what would arrive is the address
+`origin_of()` would then dereference as one"*. But `origin_of` is not a callee
+this model lowers at all — it is a COMPILE-TIME intrinsic with no body here, so
+there is no call to emit and nothing on this path reads the word it names. The
+clause that makes the sentence false is the last one, and it is the only one that
+mattered: the sentence describes a dereference that does not exist, and its
+advice (`origin_of(self.n)`) sends a reader to rewrite a program that is already
+correct. **7 stdlib files** were refused this way, and every one of them is in
+the shape the corpus actually uses — a TYPE argument,
+`Self.IteratorType[origin_of(self)]`, `Pointer[Deque[T], origin_of(self)]` — so
+the reader being misled was being misled about a construct that is not even a
+runtime expression.
+
+It is now `FRAME_IDENTITY_CALLS`, the first branch of
+`frame_receiver_escape_refusal` beside `FRAME_ADDRESS_CTORS`'s, and it is
+erased to its operand by `build._rewrite_identity_intrinsic_calls`. **A rewrite
+and not an emitter lowering**, for a reason this file's row 1 already states in
+another form: the escape analysis reads the AST, so an emitter that lowers the
+call leaves `origin_of(s)` standing in the tree the build pass has walked.
+Measured, on both machines, with the identity in the emitters: `return
+origin_of(s)` builds, runs and returns the frame's own address modulo 256, and
+`printf("%d\n", origin_of(s))` prints 1793355120 and exits 0 — the second of
+those is the exact failure §13's `FRAME_C_VALUE_CALLS` message cites as its
+reason. Three regressions for it are in `test_formal_run.py`
+(`ORIGIN_OF_REFUSALS`: the return, the variadic C call, the container), because
+the rewrite erases the CALL and not the CHECK.
+
+The identity is not a convenience: `myinterpreter.py` — this project's own
+reference for the language — defines `origin_of` as
+`lambda x, *args, **kwargs: x`, so there is an oracle for the answer in the tree
+rather than a judgement call about it.
+
 ## 3. Case (b): the frame layout and the struct's C layout **coincide**, and
 ## it is measured
 
@@ -347,8 +383,21 @@ justification. The arity refusal stays for a genuine mismatch.
   intrinsic with no representation on this path. The new message says "a name
   with no definition in hand", which is true and unhelpful; the useful message
   would name it as a compile-time intrinsic, which is a model change.
+  **DONE** — `formal/model.py`'s `frame_undefined_callee_refusal` names it (and
+  says where the MLIR it yields would have gone), because the sweep's one
+  sentence for that branch was standing for five different facts and this was
+  one of them. Measured with it, and with the sibling arms: 41 files over the
+  repo, `std/` and `test/`, 26 of which are an IMPORTED free function whose
+  "no definition in hand" was false twice over. See
+  `FORMAL_callee_no_def_ceiling_zero.md`.
 * **`getattr`/`setattr` and the other host builtins** reach the same "no
-  definition in hand" branch. Correct, and the same fix as above.
+  definition in hand" branch. Correct, and the same fix as above — except that
+  for these the old sentence IS true (nothing in the image defines `getattr`,
+  and no import names it), so they were deliberately left on it rather than
+  given a fifth variant of a sentence that would fit. A program that reaches
+  one of them is a program with a Python builtin this backend does not
+  implement, which is a fact about the backend's surface rather than about the
+  image, and naming it needs a table of what the backend DOES implement.
 
 ## Verification
 
@@ -936,3 +985,299 @@ fail on the pre-change tree and two are labelled GUARDs because they are correct
 before and after. The four refusals additionally require CPython to raise
 `TypeError` on the same program, so what is pinned is that the decision is
 RIGHT, not merely that this compiler makes it.
+
+---
+
+# Wave 11: the position family had a fourth case in it, and it was the only one the message had never heard of
+
+Row 4 of `bugs/FORMAL_sweep_work_map_2026-09-30.md` — "a receiver passed at
+argument position 0", 25 files, all in their own source — was measured here
+rather than assumed, and the measurement is the deliverable, because the work
+map's own §3 says a file's terminal cause is the FIRST refusal the walk reaches
+and that the row is an upper bound.
+
+## 18. What the 25 files are, once the construct is looked at instead of the message
+
+**Zero of the 25 reach `pass`, and every one has another blocker behind the
+first**, so the row's honest reading is not "25 files". Measured two ways, both
+before any code changed: a scratch harness that swallows `CodegenError` from
+`_check_frame_escapes` and reports the NEXT refusal, and an instrumented
+`_check_frame_escapes` that prints the callee object's node kind at the refused
+site. The first answers "what is behind this"; the second answers "what IS
+this", and the two together are what found §19.
+
+What is behind each of the 25, after the position refusal is lifted:
+
+| next blocker | files | whose it is |
+|---|---|---|
+| a method call on a value receiver whose struct is not established — **the same defect, 17 of them** (`?.write_to` ×4, `encoder.encode*` ×3, `writer.write_string`, `w.write_string`, `value.__hash__`, `?.fields`, `?.enqueue_copy`, `values._write_to`, `Self.__eq__`, `self.mojo_value.write_repr_to`, `gfn._selfhost_…`, `Tensor.registry.append`) | 17 | §4a. Filed as `FORMAL_method_call_on_a_subscripted_receiver.md`, with the four shapes of receiver and where each one's type would come from |
+| an MLIR dialect construct in an imported module (`dtype.mojo`, `info.mojo`, `rebind.mojo`, `function.mojo`) | 6 | row 1, a **documented true limit** — 107 files, not work |
+| an imported function's name has no definition in hand (`coord_to_index_list`, `rebind`, `_b64encode`, `atof`, `debug_assert`) | 5 | row 8, honest as written |
+| a frame address returned from a method that received it as its receiver | 6 | §4b |
+| `Slice.__eq__`'s `other.start` in `builtin_slice.mojo` | 3 | row 3, measured ceiling **0** (§3.2 of the map) |
+| a method-parameter field; `origin_of()`, a value-only callee | the rest | rows 3 and 7 |
+| a callee compiled into an imported module, whose own analysis this pass has not read | 3 | §7 case 3, honest as written |
+
+The rows overlap, because a file can have several and the walk reports the first
+— which is the whole of the map's §3 point. **The one number that does not
+overlap is the headline: 0 of 25.**
+
+## 19. The fourth case: a comptime-specialized callee, which is not a method call at all
+
+Six of the 25 files were refused with
+
+> a method call on a value receiver is dispatched by NAME, so `recv.m(x)`
+> carries no type and the parameter list this argument lands in belongs to a
+> declaration this walk has not read
+
+and **not one of them contains a method call.** The callee is a `SubscriptExpr`:
+`_reduce_generator[input_fn, output_fn, …](shape, init=init)` in
+`std/algorithm/reduction.mojo`, `BitSet_union[self_type](self, other)` in
+`std/collections/bitset.mojo`, `Self.compile_entries_runtime[0](…)` in
+`std/collections/string/format.mojo`, `StringLiteral_format[…](buffer, …)` in
+`std/builtin/string_literal.mojo`, `Span_get_immutable[…](self)` in
+`std/memory/span.mojo`, `Self.mojo_value.write_repr_to[…](…)` in
+`std/python/bindings.mojo`. A message that mentions a receiver, a method and a
+NAME dispatch about a callee that is a plain name with none of them is §4's
+defect class exactly, and it sent the reader after "a receiver whose type names
+the struct" — which is not what these files need.
+
+**It is not a method call, and it is not a position question: it is a
+specialization, and the callee's name is in hand.** `f[T](x)` names `f`; the
+brackets are a compile-time binding and contribute no call-time argument, so
+call-time position `i` is the `i`th entry of `function_param_shape(f).names` —
+which is the list every frame table in `formal/build.py` is keyed by. The ABI
+that makes that true is already the shared one: `model.incoming_args` puts a
+generic's comptime parameters first, arm64's `_emit_call` passes the bracket
+expressions first, and arm64's `_allocation_order` allocates them first.
+Measured before any of it was written down:
+
+```
+def f[type: Int](x: Int, y: Int) -> Int: return x * 100 + y
+f[1](3, 7)                       ->  arm64: 307   (307 & 0xFF = 51)
+each parameter read on its own    ->  type=1  x=3  y=7
+```
+
+So `model.call_callee_name` is the one recogniser for the two spellings that name
+a function of this image by a bare name, and **the three places that decide
+whether a frame address follows a call all read it**: the holder fixpoint,
+`_check_frame_escapes`, `_check_holder_agreements`. Three, not one, because the
+blind edge is the SILENT direction: had the fix lifted the refusal without the
+fixpoint, `f`'s parameter would have read as an ordinary word and `r.a` a load
+eight bytes from wherever it pointed.
+
+**The two things that had to be found while doing it, and neither was a
+refusal.**
+
+* `_call_spelling` did `call.func.name`, so the disagreement message — the
+  refusal this family exists to produce — **raised `AttributeError` on exactly
+  the calls it exists to quote**. A crash in the safety check is worse than the
+  wrong answer it was built to prevent, because nothing downstream reports it as
+  a finding.
+* `_expr_spelling` had no `SubscriptExpr` arm, so a diagnostic about a
+  specialization printed `SubscriptExpr(r, 1)`. `_subscript_chain` already
+  spells `f[1]`, and §13's own note — "_expr_spelling is the one spelling
+  function" — says which way round that goes.
+
+## 20. What it moved, measured with the sweep over exactly the 25 files
+
+```
+$ python3 tools/formal_sweep.py -j 4 -t 90 <the 25 files>
+[arm64] 25 files: PASS=0 not-pass=25
+  codegen by family: receiver passed as an argument x23,
+                      callee has no definition on this path x2
+```
+
+**0 files gained a PASS and 0 lost one** — the ceiling of this row is 0, measured
+rather than assumed, and the two things that moved are the two things the row
+counted wrongly:
+
+| files | before | after |
+|---|---|---|
+| `reduction.mojo` | position 0 of `_reduce_generator[…]` | `coord_to_index_list()` — "no definition in hand" |
+| `string_slice.mojo` | position 0 | `rebind()` — the same |
+| `string_literal.mojo`, `bitset.mojo`, `format.mojo` | **"a method call on a value receiver is dispatched by NAME"** | **"The callee of this call is `Self._vectorize_apply[_union]` … which names no function this pass has a parameter list for"** — the actual callee, named |
+| the other 20 | unchanged | unchanged |
+
+The three in the third row are the change that matters: the reason they were
+reported that way was **entirely false**, and the message now says the true
+thing — a specialization of a DOTTED callee (`Self.m[…]`, `Struct.m[…]`),
+which `_rewrite_method_calls` does not lift and so has no parameter list to read.
+
+## 21. The two-backend split, which is a finding and not a defect in the change
+
+`f[T](x)` with a frame address in an argument **builds and computes on arm64 and
+is REFUSED on x86-64**, with a message that is true:
+
+```
+build: unsupported call target on the formal x86-64 path (got SubscriptExpr)
+```
+
+x86-64 has no specialization pass at all (its `_emit_call` constructor docstring
+says so), while its callee prologue **does** reserve a register per comptime
+parameter, because `incoming_args` is shared. So the x86-64 refusal is
+load-bearing: teaching it the callee's name without the call-site half would make
+`f[1](3, 7)` read `x` from where `type` should be. Handed over as
+`FORMAL_x86_64_comptime_specialization_abi.md` with the three-half table and the
+three lines to port; `test_formal_receiver_position.py`'s
+`x86_abi_refusal_is_load_bearing` pins the refusal, because a change that made
+x86-64 "work" by answering the name alone would pass every other case in the
+file and produce a silently wrong image.
+
+## 22. Where the code is
+
+| what | where |
+|---|---|
+| the callee name, for both bare-name spellings | `formal/model.py` `call_callee_name`, next to `incoming_args` |
+| the three readers that must agree | `formal/build.py` `_frame_receivers`, `_check_frame_escapes`, `_check_holder_agreements` |
+| the refusal that remains, and what it says | `formal/model.py` `frame_opaque_position_refusal`, new `callee_shape` |
+| the spelling, through one function | `formal/model.py` `expr_spelling` → `subscript_chain_text`; `formal/build.py` `_expr_spelling` and `_subscript_chain` are aliases of them, and `_call_spelling` composes |
+| the cases | `test_formal_receiver_position.py` — 6 differential cases (2 labelled GUARD), 5 refusals checked on BOTH backends, 1 x86-64 ABI case |
+
+The 12 cases, and which nine fail before the change: the four differential
+construct cases were **refused**; the five refusals were refused with *different
+words* (three of them the false method sentence). The three that pass before and
+after are the two labelled GUARDs and the x86-64 ABI refusal.
+
+---
+
+# Wave 6 (F4): the second evidence source for a field's type — and the store it must not read
+
+<!-- Appended at the END of this document rather than in wave order: it was
+     written against a tree whose last wave here was 8, and renumbering the
+     waves would have renumbered every `##` section between them. Its own
+     `##` numbering continues from 22, so nothing in the file has two numbers.
+     See `bugs/OPEN_WORK.md` for the current state of each row. -->
+
+D2's rule is *a field's **declared** type, and only when every binding
+agrees*. Ten files in the repo sweep were sitting on the other half of that
+sentence, and the refusal named the gap itself:
+
+```
+interpreter.scope.define() hands the word in the slot interpreter.scope to
+Scope.define(), whose receiver is the ADDRESS of a frame of 8-byte slots …
+The declared type of 'scope' is the only thing here that could say so, and it
+does not: Interpreter: Interpreter does not declare 'scope', so nothing here
+says what the slot holds — a class that assigns its fields in __init__ and
+declares none, and a field named only by __slots__ or only by a method's read
+of self.scope, are both that shape
+```
+
+**The refusal listed the unblocking shape among its own reasons for not
+knowing.** `myinterpreter.py`'s `Interpreter.__init__` assigns
+`self.scope = Scope()`; `formal/arm64_codegen.py`'s `__init__` assigns
+`self.asm = Assembler()`. The fields exist — `struct_field_names` already
+counts a `self.<name>` read, which is why both classes measure as multi-field
+framed structs at all — and the constructor is the only place the source
+NAMES the type.
+
+## 23. `struct_field_assigned_type`, and why premise (B2) is what makes it evidence
+
+`model.struct_field_type` is the one function that combines the two sources,
+so the decision (`frame_field_type_candidates`), the placement
+(`struct_nested_frame_fields`) and the diagnostic (`field_type_disagreement`)
+read one table. Three rules, each load-bearing:
+
+* **A declaration still wins**, and not by preference. `S()` does not run
+  `__init__` on this path (`FRAME_FIELD_BLOB_PREMISE_B2`), so the word in the
+  slot is the constructor's; the declaration is the better evidence about
+  that word, and cross-checking the two would refuse correct code. Measured
+  in `assigned_type_a_declaration_still_wins`: `var in1: Inner` with
+  `self.in1 = Other()` builds and computes **128 on both architectures**,
+  which is what CPython computes for the same program with `Inner()` in the
+  `__init__`.
+* **`decls` is a gate, not a hint.** The inference names a struct only when
+  `decls` holds it, so a call to anything else cannot turn an unknown name
+  into `field_type_is_value`'s dangerous "provably a plain value" direction.
+  `self._fd_vars = set()` and `self._vkinds = self._scan_value_kinds(f)` are
+  the two shapes the sweep still reports, and both are honestly untyped.
+* **Only `__init__` is read.** A store in another method *does* execute, so it
+  is a write rather than evidence — and `struct_fields_written_outside_init`
+  already turns such a field into `_REASSIGNED`, which is the better
+  diagnosis: the type is known, what is not is WHOSE frame the slot holds.
+  `byref_refuse_assigned_field_written_by_a_method` pins that.
+
+## 24. The store the inference must not read, found by reading a type out of one
+
+`self.a, self.b = A(), B()` is the shape `tools/procrun.py` writes.  Read as
+evidence, it **built, ran, and answered 123 where the source says 128** — a
+tuple store to a *field* is refused by name on x86-64 and ACCEPTED-AND-DROPPED
+on arm64, where `self.p, self.q, self.r = 3, 4, 7` in an `__init__` computes
+0. So the shape is RECOGNISED (otherwise the message says "its `__init__` does
+not assign it" about a field it assigns on the line above) and NOT used as
+evidence, and the refusal names the store.  `bugs/FORMAL_tuple_store_to_a_field.md`
+carries the codegen bug.
+
+**The generalisation, and it is the one worth keeping:** on a path whose whole
+value is that a store is a store, *any* new inference that reads a field's
+value has to ask the emitter whether the store happens.  A declaration is a
+declaration and cannot be dropped silently; `__init__`'s right-hand side is an
+instruction.
+
+## 25. The sweep, before and after, and where the dependents landed
+
+`python3 tools/formal_sweep.py --no-stdlib -t 300`, both runs, 304 files:
+
+| | before | after |
+|---|---|---|
+| `PASS` | 84 | **84** |
+| `codegen` (the finding) | 41 | **38** |
+| `not-answerable/host-import` | 174 | 176 |
+| `codegen coverage` | 84/125 = 67.2% | **84/122 = 68.9%** |
+| `codegen by family`: *field slot holds a frame address* | **x10** | **x2** |
+
+**Zero files gained a PASS and zero lost one.** The rate rose 1.7 points
+**because the denominator shrank by 3**, and 2 of those 3 are files that left
+the codegen class for a *target* fact — `test_myinterpreter.py` and
+`test_myinterpreter_simple.py` import `sys`. That is the direction of drift
+that flatters a number, called out here rather than left in a table. The
+third is `formal/arm64_codegen.py`, which needs ~4.5 min and times out at
+`-t 300`.
+
+**The timeout, because it is a finding the sweep was hiding.** At `-t 300` it
+is one of the 5 `tool` rows; at `-t 600` it builds long enough to refuse, and
+lands on `self._fd_vars = set()` — honestly untyped, and the family is **x3**
+rather than x2 with the whole run at 39 codegen findings and 84/123 = 68.3%.
+So two separate measurements of the same tree, and the honest one is the
+longer: a 30-second sweep timeout was reporting "no verdict" for a file that
+has a verdict, which is `tools/formal_sweep.py`'s own warning about `-t`
+being the usual cause, confirmed.
+
+**Where the 8 that left the family landed**, which is the part the task asks
+for and the part a count cannot say:
+
+| file | landed on |
+|---|---|
+| `scripts/stage2_mojo_interpreter.mojo` | `a Interpreter receiver is returned from the function that created it` — `load_interpreter_with_full_pipeline` returns it |
+| `test_myinterpreter_validation.py`, `test_phase2_parser_simple.py` | the same return refusal |
+| `test_phase2_parser.py`, `test_phase3_codegen_simple.py` | `a Interpreter receiver is stored in a container` |
+| `test_myinterpreter.py`, `test_myinterpreter_simple.py` | `not-answerable/host-import` — they import `sys` |
+| `formal/x86_64_codegen.py` | `self._vkinds = self._scan_value_kinds(f)`: assigned from a method call, not a construction |
+| `tools/procrun.py` | §15: the tuple store, by name |
+| `mojo/middle/solvers.py`, `test_formal_sweep.py` | still a field of a field, and now for an accurate reason: `DispatchSolver.compilability` is assigned in a method other than `__init__`, and `TestDyldProbe._tmp` has no `__init__` at all |
+
+So the family closed almost entirely, and **8 of the 10 moved to a refusal
+that is about a different construct** — five of them to the frame-ESCAPE
+family, which is a lifetime question rather than a layout one.
+
+## 26. A neighbour found on the way, and not closed
+
+`bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md`: a nested
+struct whose *every* field is a class-level literal default has two of them
+demoted to constants by `_split_declaration`'s clause 6, so
+`struct_is_framed` flips to `False` and `o.in1.a` is refused with
+`field_access_refusal`'s `holder=True` message — which means a bug in *this
+compiler*, not a limit of the construct.  Four-line reproducer; the same
+program with two of the three fields undefaulted builds and returns 8.  Not
+this lane's file, and the choice between the two repairs is a design
+decision rather than a patch.
+
+## 27. Where the code is
+
+| what | where |
+|---|---|
+| the two sources, combined | `formal/model.py` `struct_field_type` |
+| the constructor half | `formal/model.py` `struct_field_assigned_type` (`_assigned_value_for` for the store shapes) |
+| the only gate on the constructor half | `formal/model.py` `_constructed_struct_name` |
+| the four-way answer, and the emitter that acts on it | `formal/build.py` `_typed_nested_frame`, `model.struct_nested_frame_fields` |
+| the spelling the diagnostics share | `formal/model.py` `member_chain_text` / `subscript_chain_text` / `expr_spelling` — which is where `formal/build.py`'s three private copies went; `build.py` keeps the names as aliases so its two call sites read the same |

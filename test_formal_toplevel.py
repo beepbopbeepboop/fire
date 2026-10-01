@@ -614,12 +614,23 @@ def test_a_module_body_can_still_be_refused_by_the_ordinary_codegen(tmpdir,
     body. The message is the ordinary construction refusal, unchanged, because
     the body is a function and the function pipeline is what answers it. A
     second, body-specific refusal list would have made this a different
-    message for the same construct depending on where it was written."""
+    message for the same construct depending on where it was written.
+
+    The argument count is THREE, and that is what keeps the case about the
+    thing it claims to be about. It was two when this was written, and two is
+    exactly the arity the declared `__init__` takes, so `c0438b4`'s inline
+    started answering it: `Point(1, 2)` in a module body now builds, runs, and
+    prints 1, which is the right answer for the program. Three is refused by
+    the SAME message for the same reason the case is about — the body is a
+    function, so the ordinary construction check is what refuses it — and it
+    exercises the arm of the inline that genuinely has no answer (a count no
+    declared arity admits) rather than the arm that was fixed underneath it.
+    """
     return case_refused(
         "body_construction_refusal",
         "struct Point:\n    x: Int\n    y: Int\n    def __init__(self, x, y):\n"
         "        self.x = x\n        self.y = y\n\n"
-        "p = Point(1, 2)\nprintf(\"%d\\n\", p.x)\n",
+        "p = Point(1, 2, 3)\nprintf(\"%d\\n\", p.x)\n",
         "is a call to a user-defined `__init__`", tmpdir, verbose)
 
 
@@ -655,7 +666,23 @@ def test_module_body_classification(tmpdir, verbose):
         ("X = 5 + 2 * 3\n", []),                # folds: the folder's closure
         ("comptime X = 5\n", []),               # a compile-time binding
         ("exit(0)\n", ["ExprStmt"]),
-        ("X = [1, 2]\n", ["AssignStmt"]),       # does not fold: module state
+        # A CONTAINER literal does not fold, so it is module STATE — and since
+        # module globals got a `__DATA` slot, that state is in the IMAGE: the
+        # slot's initializer is laid out by the linker before the program
+        # starts. So the store is not body either, and leaving it there was not
+        # merely redundant: `entry_function` picks the body as the entry, so a
+        # module whose whole top level is that binding never called `main` and
+        # the image exited 0 printing nothing. Both architectures, measured; see
+        # `model.module_body`'s `_is_image_initialized`.
+        ('X = [1, 2]\n', []),
+        # …but a container the body REBINDS still needs its store, which is what
+        # `module_body`'s `rebound` re-walk is for and why the exemption is
+        # conditional rather than a blanket "a container is in the image": a
+        # name the body writes has a value the image's initializer does not
+        # describe. (Both of the two stores here is what the rule produces — the
+        # second is a `BinaryOp`, so it is body on its own account.)
+        ('X = [1, 2]\nfor i in range(2):\n    X = [3]\n',
+         ["AssignStmt", "ForStmt"]),
         ("X = 1\nX = 2\n", ["AssignStmt", "AssignStmt"]),
         ("for i in range(3):\n    pass\n", ["ForStmt"]),
         ("if True:\n    pass\n", ["IfStmt"]),

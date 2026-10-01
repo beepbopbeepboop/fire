@@ -154,8 +154,35 @@ HOST_MODELLED = frozenset((
     #     real filesystem. `listdir` and `walk` need a run-time-length
     #     sequence, which a list on this path cannot be, and `environ` needs
     #     a `char **` walk; both are bug docs rather than approximations.
-    "errno", "stat", "platform", "select", "io",
-    "pathlib", "glob", "fnmatch", "secrets", "uuid",
+    #   `io`  — `formal/hostmods/io.mojo`, in the part of CPython's `io` that
+    #     is not streams: `SEEK_SET`, `SEEK_CUR`, `SEEK_END` and
+    #     `DEFAULT_BUFFER_SIZE`, each checked against CPython's own `io` by
+    #     `test_formal_small_hosts.py`. The streams are absent because a
+    #     stream is a descriptor, a cursor and a buffer and a value cannot
+    #     cross a dylib boundary unless it is one 64-bit word — which
+    #     `formal/hostmods/sys.mojo` already says about `sys.stdout`, and `io`
+    #     is those streams one level up. It also closes the `io.open`-over-
+    #     `os` idea the `module:small-hosts` doc proposed: `os/_syscalls.mojo`
+    #     has `fs_open_ro`, `fs_lseek` and `fs_close` and NO read or write, so
+    #     the missing half is a stream.
+    "errno", "stat", "platform", "select",
+    #   `pathlib`  — `formal/hostmods/pathlib.mojo`, in the pure half only,
+    #     checked read for read against CPython's own `PurePosixPath` by
+    #     `test_formal_pathlib.py`: `as_posix`, `name`, `stem`, `suffix`,
+    #     `parent`, the three pure rewritings, `relative_to`, `match` and
+    #     `is_reserved`, over a corpus of awkward corners. It is the part
+    #     pathlib has and `os.path` has no name for, and the names `os.path`
+    #     already answers are NOT answered again there — see the module's own
+    #     docstring, which names each one.
+    "glob", "fnmatch", "secrets", "uuid",
+    #   `ast`  — `formal/hostmods/ast.mojo`, the TOKENIZER and a lexical
+    #     validator, not a tree: `parse`, `parse_reason`, `tokenize`,
+    #     `tokenize_from`, `token_bound` and `token_name`, with token kinds,
+    #     positions and counts compared against CPython's own `tokenize` by
+    #     `test_ast_formal.py`. What it cannot do is build a tree, because a
+    #     value on this path is one 64-bit word and a node is not one: the
+    #     subset, the 21 measured ways `parse` differs from CPython's verdict,
+    #     and the f-string collapsing are in `bugs/FORMAL_ast_module_subset.md`.
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is
@@ -202,31 +229,40 @@ HOST_MODELLED = frozenset((
     #     caller-allocated span list, because an object is more than one
     #     64-bit word and a compiled pattern has nowhere to live between
     #     calls.
+    #   `json`  — `formal/hostmods/json.mojo`, checked case for case against
+    #     CPython's own `json` by `test_formal_json.py`: RFC 8259's accept and
+    #     reject over ~180 documents, the kind of every one of them, the
+    #     scanner's and the encoder's escape tables, and `dumps_str` over
+    #     every code point in nineteen ranges — the surrogate-pair arithmetic
+    #     is the part most likely to be wrong at exactly one point. Its
+    #     `loads`/`load`/`dump`/`dumps` of a CONTAINER are absent, because a
+    #     dict is a frame blob and cannot cross a dylib boundary; what is here
+    #     is the scanner, which is the half of the module whose answers are
+    #     one word each. Its docstring also records WHY the byte-value read
+    #     that a 2026-09-29 attempt at this module measured as UNAVAILABLE is
+    #     in fact available — it is a spelling, `var q: Pointer[UInt8] = s + i`
+    #     before `q.value()`, and not a capability the target lacks — and
+    #     `test_formal_json.py`'s `primitive` group is the assertion that says
+    #     so over 351 byte values, each against the byte CPython's `ord` names.
     #
+    #   `typing`  — `formal/hostmods/typing.mojo`, ONE function
+    #     (`TYPE_CHECKING`, checked against CPython's own), and the count is
+    #     the finding: the formal backends ERASE ANNOTATIONS, so a
+    #     `from typing import Optional` resolves as soon as the module EXISTS
+    #     and `Optional` need not be in its export table, because nothing ever
+    #     reads the name. `formal/elf.py` and `type_system.py` put all seven of
+    #     their imported names in annotations or in a default, which is why the
+    #     module is one function long. `test_formal_small_hosts.py` pins that
+    #     measurement — the annotation shapes build and run, and a name used as
+    #     a VALUE is still refused, so the erasure is not a promise the module
+    #     makes.
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "json", "math", "random", "decimal", "fractions",
+    "math", "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
     "weakref", "pprint", "reprlib", "pickle",
-    # A shape over the source language rather than a runtime facility: the
-    # parser, the type lattice. Neither of the two that USED to be named here
-    # is: `dataclasses` is a front-end transform and `argparse` has a file, and
-    # a name on this list alongside a paragraph saying it is written is a lie
-    # this list is not allowed to tell.
-    #
-    #   `dataclasses` — a COMPILE-TIME transform in
-    #     `formal/dataclass_transform.py`, and it has LEFT this list, which is
-    #     what `FRONTEND_PROVIDED_MODULES` below exists to say. The
-    #     measurement that decided the layer is in that file's docstring; the
-    #     short of it: `@dataclass` decorates a CLASS, a formal value is one
-    #     64-bit word with no type tag, and a decorator applied to a class is
-    #     DROPPED by both backends before the front end looks at it (measured:
-    #     a decorator whose body prints, applied to a class, produces an image
-    #     that runs without printing). So a `formal/hostmods/dataclasses.mojo`
-    #     would export a symbol nothing calls.
-    "ast", "typing",
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same
@@ -831,6 +867,95 @@ def declared_kinds(path: str) -> dict:
     return out
 
 
+def _from_import_bindings(stmts) -> list:
+    """[(bound_name, original_name, module_as_spelled)] per imported name.
+
+    The primitive both readers of a `from … import …` share, so the two cannot
+    come to disagree about what the statement says. TWO names and not one,
+    because `x as y` is two facts and the two readers want different ones: this
+    file binds `y`, while the module being re-exported is whatever DEFINED `x`,
+    and only a table keyed on the definition's own name can be matched against
+    a library's export set later. The module is recorded AS SPELLED (`.sub`,
+    `pkg.sub`) because nothing has resolved it here and a qualified spelling is
+    a different question from a bound name."""
+    out = []
+    for st in stmts or []:
+        if not isinstance(st, F.FromImportStmt):
+            continue
+        for pair in (st.names or []):
+            if isinstance(pair, (tuple, list)):
+                original = pair[0] if pair else None
+                bound = pair[1] if len(pair) > 1 and pair[1] else original
+            else:
+                original = bound = pair
+            if isinstance(original, str) and original:
+                out.append((bound, original, st.module))
+    return out
+
+
+def _defined_names(stmts) -> set:
+    """The names this module DEFINES — a function or a struct's name."""
+    return {st.name for st in (stmts or [])
+            if isinstance(st, (F.FunctionDef, F.StructDef))}
+
+
+def imported_bound_names(stmts) -> dict:
+    """{bound_name: module} for every name a `from … import …` BINDS here.
+
+    Every one of them, including the private ones, which is the whole difference
+    from `reexported_names`: that table answers "what does this module publish
+    under its own name", and a leading underscore is exactly what stops a name
+    being published. This one answers "which names in this file come from
+    somewhere else", and `from ._b64encode import _b64encode` binds
+    `_b64encode` here whatever it is allowed to export. The two readers used to
+    be the same loop with a different filter, which is the pair that agrees
+    until somebody changes one of them.
+
+    A name this module also DEFINES is not in it, for the reason
+    `reexported_names` gives and not for the export's sake: a bare call resolves
+    by name, so `def take_it` here is what a call of `take_it` reaches, and the
+    submodule's same-named symbol is irrelevant to it.
+
+    Read from the AST alone, so it needs no resolution and no file: the caller
+    is a pass that runs BEFORE `_resolve_imports` (`_prepare_functions`), and
+    the question it asks — is this bare callee a name from another module? — is
+    answerable from the import statements themselves. Whether that module
+    actually builds is a different question, asked later and by someone else;
+    this table does not claim it does.
+
+    `import a.b` binds the MODULE and not a name, so it contributes nothing,
+    here or in `reexported_names`."""
+    defined = _defined_names(stmts)
+    out: dict = {}
+    for bound, _original, module in _from_import_bindings(stmts):
+        if bound and bound not in defined:
+            out.setdefault(bound, module)
+    return out
+
+
+def star_imported_modules(stmts) -> tuple:
+    """The modules this file writes `from … import *` for, in source order.
+
+    The complement of `imported_bound_names`, and it exists because that table
+    CANNOT answer the question a star import raises.  `from lib import *` parses
+    to a `FromImportStmt` with an EMPTY `names` list — there is nothing in the
+    AST to enumerate — so the set of names it binds is `lib`'s EXPORT SET,
+    which is a fact about another module's compilation and about a library that
+    `_resolve_imports` has not built yet.  22 files of the standard library
+    write one.
+
+    A caller that wants to say "this callee is not defined here and not named by
+    any import" has to say what this returns in the same breath, or it is
+    claiming nothing binds the name when a star import may well bind it."""
+    out = []
+    for st in stmts or []:
+        if isinstance(st, F.FromImportStmt) and not (st.names or []) \
+                and st.module:
+            if st.module not in out:
+                out.append(st.module)
+    return tuple(out)
+
+
 def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     """{name: (module, kind)} for the names this module binds by RE-EXPORT.
 
@@ -856,22 +981,37 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     through a genuinely missing function.
 
     `import a.b` binds the MODULE, not a name, so it contributes nothing here;
-    only `from ... import ...` does."""
-    defined = {st.name for st in (stmts or [])
-               if isinstance(st, (F.FunctionDef, F.StructDef))}
+    only `from ... import ...` does. The loop is `_from_import_bindings`, shared
+    with `imported_bound_names`, and the three filters below are what make this
+    table a PUBLICATION list rather than a binding list: a name this module
+    defines, one `_is_inert_module` accepts, and a private name. The second of
+    those is applied to the imported NAME and not to the module the statement
+    names, which is what it has always been applied to and is not what its own
+    name suggests — so `from __future__ import annotations` is still listed
+    here, inert module or not. Pre-existing, harmless (a manifest entry no
+    consumer asks for), and not this reader's to change while it is rewriting
+    the loop underneath.
+
+    KEYED ON THE DEFINITION'S OWN NAME, not on the alias — `from x import f as
+    g` is recorded as `f` — which is what this table has always done and is
+    deliberate in one direction and a known gap in the other. Deliberate: an
+    export is matched against a library's export set by the name the DEFINING
+    module gave it. A gap: the name this file actually binds is `g`, so an
+    aliased re-export is published under a spelling no consumer of this module
+    can ask for. `imported_bound_names` records `g` for exactly that reason, and
+    fixing this table to match would change what every dylib manifest already
+    on disk claims its module exports — a manifest-content change for callers to
+    re-derive, which is not this reader's to make silently."""
+    defined = _defined_names(stmts)
     kinds_by_module = kinds_by_module or {}
     out: dict = {}
-    for st in stmts or []:
-        if not isinstance(st, F.FromImportStmt):
+    for _bound, name, module in _from_import_bindings(stmts):
+        if (name in defined or _is_inert_module(name)
+                or name.startswith("_")):
             continue
-        for pair in (st.names or []):
-            name = pair[0] if isinstance(pair, (tuple, list)) else pair
-            if (isinstance(name, str) and name and name not in defined
-                    and not _is_inert_module(name)
-                    and not name.startswith("_")):
-                out.setdefault(name, (st.module,
-                                      kinds_by_module.get(st.module, {})
-                                      .get(name, "unknown")))
+        out.setdefault(name, (module,
+                              kinds_by_module.get(module, {})
+                              .get(name, "unknown")))
     return out
 
 

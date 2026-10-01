@@ -1,52 +1,62 @@
 INTERFACE REQUEST  from=[4]  to=integrator  file=formal/build.py
 
-WHY FIRST: `formal/build.py` is in NOBODY's write set this round and is not in
-FORMAL.md §11.2's "Deliberately unowned" list either, so it has no owner. It is
-also the file that raises the refusal which is the entire target of [4]'s item:
-all 18 of the "returned by its creator" findings come from ONE line.
+**RESOLVED — the gate at `formal/build.py:2423` is gone and the half that
+depended on it has landed.**  Kept as a pointer, not as an open item, because
+one thing in it is still somebody else's.
 
-WHAT:  `formal/build.py:2423`, inside `_check_frame_escapes`:
+WHY IT WAS FIRST: `formal/build.py` was in NOBODY's write set and is not in
+FORMAL.md §11.2's "Deliberately unowned" list either. It is also the file that
+raised the refusal which was the entire target of [4]'s item: every "returned by
+its creator" finding came from ONE line.
 
-        raise CodegenError(M.frame_return_refusal(
-            owner.name if owner is not None else None,
-            node.value.name not in created_here,
-            _names(node.value)))
+WHAT WAS ASKED, and where each half is now:
 
-     This is the gate on `return <frame>`. The fix — a returned frame copied
-     into a block in the CALLER's own scratch, so it outlives its creator — is
-     now designed and its layout is landed in `formal/model.py`
-     (`struct_returned_frame_sites`, `returned_frame_convention_refusal`).
-     What is left here is to stop refusing, once the codegen half and the
-     proof-side obligation have landed:
+  1. "a `ReturnStmt` whose value is a holder in `created_here` should NOT
+     raise."
+     DONE, and the `received=True` half with it.  The reason it could be is
+     that the convention names the destination: the caller reserves a block,
+     passes its address as one hidden trailing argument, and the callee copies
+     into it.  A frame that arrived as a PARAMETER is sound to copy out for the
+     same reason — the copy happens while the caller's frame is live — so
+     `def fwd(r): return r` and `def stash(x, y): return y` compute now.  That
+     supersedes the "stays refused" in the request below, which was written when
+     the destination was going to be computed by the callee (the candidate
+     `returned_frame_convention_refusal` rules out, because the callee has not
+     read the caller's body and cannot know which of its blocks to use).
+     `formal/build.py`'s `_check_frame_escapes` and the new
+     `check_frame_return_shapes`, which is parked and raised from the entry
+     points beside the other three late frame checks.
+  2. "the call-side counterpart … `struct_returned_frame_sites` has to be handed
+     the `returns_frame` predicate this file's holder fixpoint already
+     computes."
+     DONE, and the predicate is a whole-image table rather than a per-call
+     answer: `_frame_receivers` now computes `{function: struct}` for the
+     functions that return a frame INSIDE the holder fixpoint (the two feed
+     each other) and publishes it on every function as `_image_returns_frame`.
+     `struct_returned_frame_sites` takes a one-argument predicate and now
+     reserves a block for EVERY call of such a callee, not only the ones that
+     bind the result to a name.
+  3. "`returned_frame_convention_refusal` has to be RAISED from here, or from
+     the codegen, or the hidden word is silently dropped."
+     DONE TWICE, deliberately: `_check_returned_frame_budget` parks it from the
+     build pass (one function, many call sites, counted from the DECLARED
+     parameter list), and each backend raises it again at the call site that
+     would otherwise drop the word.  The budget is SIX source arguments, not
+     the eight the request assumed, because x86-64 passes integer arguments in
+     six registers and a limit of eight would make the two machines answer
+     differently about one program.
 
-     1. a `ReturnStmt` whose value is a holder in `created_here` should NOT
-        raise. The copy is emitted by the callee; there is nothing for the
-        build pass to do but not object. (The `received=True` case is a
-        DIFFERENT shape — the frame came in as a parameter, so the creator is
-        up the call chain — and it stays refused: the callee cannot copy a
-        frame it did not build into a place the caller can reach, because
-        "the caller" is not a function this analysis can name. Those are the
-        9 `aliased out of a method` findings, and they are not this fix.)
-     2. the call-side counterpart: a call whose result binds a frame holder
-        needs no new refusal, but it DOES need the caller's block, and
-        `struct_returned_frame_sites` has to be handed the `returns_frame`
-        predicate this file's holder fixpoint already computes. That is a new
-        argument on a new call, not a change to an existing one.
-     3. `returned_frame_convention_refusal` fires for a returning callee that
-        already takes 8 arguments. That refusal has to be RAISED from here, or
-        from the codegen, or the hidden word is silently dropped — see the
-        `BLOCKS` note.
+THE ONE THING STILL OPEN, and it is [3]'s: "the hidden argument is a
+calling-convention change whose proof-side obligation is a `lib/Refine.lean`
+predicate".  The codegen half is landed and measured, and no example in
+`formal/examples/` exercises a wide receiver, so the proof layer has not been
+asked the question yet.  What a proof would need to state, and cannot yet: that
+the hidden word is a block in the CALLER's scratch, that the callee writes only
+into it, and that every other channel out of a frame is refused — the third of
+those is `formal/build.py`'s, the first two are the emitter's.
 
-WHY:  Measured, not inferred. `tools/formal_sweep.py` arm64, this tree:
-     `returned by its creator` is **18 of the 128 in-file codegen findings**
-     (14.1%), and every one of the 18 is this one line. The refusal is
-     CORRECT today — the address really does name reclaimed stack, and the
-     measured failure with the check removed is 10 on arm64 and 0 on x86-64
-     where the source says 7. What is wrong is that the check is the answer
-     rather than a placeholder for one, and the fix now exists on the other
-     side of it.
-
-BLOCKS: Nothing of [4]'s that has already landed. It blocks the END-TO-END
-        part — the 18 findings becoming PASS — which is the item's "Done when".
-        The part that is [4]'s to own (the layout, the convention decision,
-        the codegen half) does not depend on this and is not waiting on it.
+WHERE TO READ IT NOW: `bugs/FORMAL_wide_receiver_by_reference.md`, wave 8 —
+the convention, the three properties that make it work, the refusals that
+remain, the sweep numbers on both machines, and the arm64 spill bug the
+eleventh local made reachable.  And `test_formal_returned_frame.py`, whose 14
+cases all fail on the pre-change tree.

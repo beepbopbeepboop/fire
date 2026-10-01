@@ -304,7 +304,10 @@ checkouts.
 A test registered with `expect='<why>'` in `tools/suite.py` is a known
 failure. It reports as `EXPECTED` with its reason on screen, in the tally,
 and in `--list`, and it does not fail the run. The reason string is
-mandatory — a marker without one is a silenced test.
+mandatory — a marker without one is a silenced test. **What running it costs
+decides whether `expect=` is the right marker at all: a known failure too
+expensive to run gets `disabled=<bug doc>` instead, which is the subject of
+the next section.**
 
 The anti-rot half is the point: an `expect`-marked test that **passes** is
 reported as a **FAILURE** ("marked expect=… but it PASSES — drop the
@@ -331,22 +334,78 @@ mark it with a reason and a bug-doc link.
   compiled path ignored decorators too, so the diff was clean). A new
   interpreter-oracle bug belongs there, not in `test_runtime_diff.py`.
 
-Current `EXPECTED` entries, all one root cause — the self-hosted binary
-segfaults on any input, including a two-line program (`./mojoc --dump-full`
-exits 139), so these three are red together and are fixed together:
+Current `EXPECTED` entries, and the one `DISABLED` entry — the five that reach a
+bucket, plus eleven more `expect=` jobs registered in no bucket at all (so they
+run in nothing today; `bugs/CODEGEN_ab_native_fails.md` §4 has those eleven with
+a recommendation each). **`python3 tools/suite.py --list` is the census**, not
+this table: the bucket column reads `[]` for an ungated test, and nothing else in
+the tree reads it.
 
-| test | subject |
-|---|---|
-| `ab-native` | python vs native codegen over the A/B corpus |
-| `native-dumpfull` | the native `--dump-full` artifact vs the reference |
-| `bootstrap-stage2-dumps` | the compiled binary dumping every source |
+| test | marker | subject | cost it charges every gate |
+|---|---|---|---|
+| `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
+| `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
+| `bootstrap-stage2-dumps` | `expect=` (`SELFHOST_STAGE2_STALL`) | the compiled binary dumping every source | 47 items x 0.5 GB, `tiny` (4 GB) each |
+| `formal-struct` | `expect=` (`bugs/FORMAL_struct_pack_over_eight_arguments.md`) | `struct.pack`/calcsize against CPython | 2 of 148 cases; `proofs` |
+| `formal-toplevel` | `expect=` (`bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md`) | a module body runs, diffed against CPython | 2 of 70 cases; `proofs` |
+| `formal-module-attr` | `expect=` (`bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md`) | `mod.NAME` on both backends | 1 of 11 cases; `proofs` |
 
-Tracked in `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`. They
-flip themselves to FAIL the moment the binary stops crashing, which is the
-intended way for them to be retired.
+**A declared red and an unrun red are different failures**, and the second is
+worse: a marker on a test no gate runs can never be observed going green, so it
+cannot rot out. That is why the eleven ungated ones above are a coverage hole
+(`bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md`) and not merely a
+cost question, and why "register it" is never the same act as "run it"
+(`bugs/TEST_registered_tests_in_no_bucket_never_run.md` for the ungated tests
+that are not marked at all).
+
+The two heavyweight `expect=` entries are the old "the binary segfaults on any
+input" claim, which was **measured false on 2026-09-27 and corrected rather than
+left to rot**: `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 MB
+/ 94.6 M instructions. What is left is the self-hosting bootstrap pre-pass's cost
+(~15-30 GB / ~15-25 s per call, localised in
+`bugs/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0) and, for
+`bootstrap-stage2-dumps`, a silent-wrong-answer `mojo_unsupported_iter` class
+that no exit code reports. Divergences themselves:
+`bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`.
 
 **The gate is otherwise clean**: `check` 11/11, `coro` 20/20, `stdlib` 2/2,
-`mojoc` builds, `bootstrap` green through `stage2-cc`.
+`mojoc` builds, `bootstrap` green through `stage2-cc`. (Those counts are a claim
+about a *run*, so only a gate run establishes them; `check` has since gained
+members, so read the current tally off `build/suite.log` rather than this line —
+see `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md`.)
+
+## Known failures: `expect=` or `disabled=`, decided by cost
+
+Two markers for the same state of knowledge — *this test is red and we know
+why* — and the only thing that decides between them is what running it costs.
+
+1. **A known failure that is CHEAP runs, with `expect='<why>'`.** Its anti-rot
+   is the whole reason it is worth running: an expected-fail that starts
+   passing is reported as a FAILURE. A cheap test can afford to keep that
+   check alive every gate.
+2. **A known failure that is EXPENSIVE must not be run: `disabled='bugs/<doc>.md'`.**
+   Registered, never run — no process, no memcap, no reservation, no wall time
+   — reported as its own `DISABLED` status with the doc, counted in the tally,
+   listed on screen and in `--list` and `--dry-run`, and it reserves **0** from
+   the memslot ledger whatever class it carries. **The threshold is the
+   3-4 GB memory standard in `bugs/PERF_memory_over_4gb_is_a_bug.md`**, applied
+   to time as well: a class over that line is a debt, so a job carrying one is
+   too expensive to spend on a known answer; so is one that takes more than a
+   few minutes. Measured, not guessed — `ab-native` was `expect=` while using
+   20.5 GB and holding 55 of the machine's 96 GB, exclusive, every gate.
+3. **Never spend an exclusive, machine-sized reservation on a job whose outcome
+   is already known.** `excl` and a `program` class are for jobs that must
+   finish; on a job that cannot pass yet, they are the machine paying twice.
+
+**The bug doc IS the switch, and that is what makes this safe.** The rule
+below says a fully fixed bug's doc is DELETED, so the doc's disappearance is
+exactly the event "the bug is fixed": `tools/suite.py` refuses to load the
+registry while a disabled test's doc is gone, naming the test and saying to turn
+it back on. A doc that never existed (a typo) fails the same way with its own
+message, and a job carrying both markers is refused outright. So a fix cannot
+land without re-enabling its test, and a disabled test cannot stay off
+forever. Checked in `test_suite.py` (`the disabled markers in the registry are
+honest`) and enforced at import.
 
 ## Bug docs
 

@@ -59,7 +59,7 @@ architectures, both scopes).
 | family | files (arm64, stdlib scope) | distinct causes | it is really |
 |---|---|---|---|
 | 1. `formal dylib has no public functions` | **30** | **8** terminal modules | 7 true limits + 1 reached by a separate bug |
-| 2. `__mlir_attr[...]` assembles an MLIR attribute | **46** | **1** terminal module | 1 true limit |
+| 2. `__mlir_attr[...]` assembles an MLIR attribute | **46** | **1** terminal module | 1 true limit for the dialect attributes; a `#kgen.param.expr<…>` target QUERY is now answered (§2.0) — and no file moved, because `std/sys/info.mojo`'s next blocker is a different construct |
 | 3. the small shapes nobody else claimed | 8 | 6 | 6 true limits |
 
 Two facts about the *shape* of these families matter more than their sizes,
@@ -221,6 +221,42 @@ symbol is advertised (`test_every_defined_entry_point_is_advertised`). The
 first held while the table named 30 of 459, because the other 429 were dropped
 rather than advertised wrongly; only the second makes a regression red.
 
+## 1.1a Re-audited 2026-09-30: the family is 38 files and 9 terminal modules, and `binary_heap.mojo` is 35 of them
+
+The 2026-09-27 audit above measured this family at 30 files across 8 terminal
+modules. It is now **38 across 9**, and the new member is not a small one:
+
+| terminal module | files | what the file actually declares | verdict |
+|---|---|---|---|
+| `std/collections/binary_heap.mojo` | **35** | one `struct BinaryHeap[T: …]` — a generic struct template and nothing else | **true limit**, measured the same way as the eight above |
+
+Measured with the same two functions, on this tree:
+
+```
+std/collections/binary_heap.mojo        exports: []   exclusions={'BinaryHeap': 'generic-template'}
+std/stat/stat.mojo                      exports: []   exclusions={'S_ISLNK': …, all 'generic-template'}
+std/sys/_assembly.mojo                  exports: []   exclusions={'inlined_assembly': 'generic-template'}
+```
+
+(`formal.build._export_entries` + `reflect.export_exclusions` — the same pair the
+table above measured with, and the same rule: a generic template has no single
+boundary layout, so `doc/ABI.md` excludes it and an importer has nothing to
+bind.)
+
+**Why it was invisible for a week, which is the part worth keeping.**
+`binary_heap.mojo` did not fail at the export gate until `5536f17b` ("a type
+APPLICATION is not a type value") landed: before it, `BinaryHeap`'s own
+`List[Self.T]()` refused first, so every one of its 35 importers was counted
+under a different cause entirely and this family read 3 files. **A family's size
+is a function of how far the walk gets before it reaches the question**, so a
+row in this document can be an order of magnitude out of date without anything
+being wrong — the audit table is a measurement of a walk's progress as much as
+of a module's shape. The re-measurement is
+`bugs/FORMAL_sweep_work_map_2026-09-30_r2.md` §3.2, and it notes what is NOT
+available: with the 35 files behind it, this family is now the largest single
+cause on the tree that nobody owns, and its ceiling is Stage 5 (§1.2), not a
+bug.
+
 
 ## 1.2 What would close it, and what it costs
 
@@ -248,9 +284,47 @@ computes, (c) CAS keying by `(template-id, type args, comptime params)` so two
 instantiations of one template get two entries, and (d) a decision about
 `ReflectedFn.display_name` — a *concrete* method on a *parametric* type, whose
 symbol name is only determined once the type arguments are. Items (a)–(c) are
-the project; (d) falls out of it. This is weeks, not an afternoon, and it is
-the single largest lever in the whole residue: it alone would unblock **24 of
-family 1's 30 files**.
+the project; (d) falls out of it. This is weeks, not an afternoon.
+
+**§1.2, measured 2026-09-30: "24 of 30" was an upper bound and the real ceiling
+of the largest chunk of it is ZERO.** This paragraph argued the cost from the
+shape of the modules, which is the one thing `FILES BLOCKED` cannot tell you.
+Three probes over a fresh 637-file sweep of `738fb3ab` (cold CAS; full method,
+chains and numbers in `FORMAL_dylib_export_gate_ceiling.md`):
+
+- **34 of the 35 files blocked by `std/collections/binary_heap.mojo` do not
+  contain the string `BinaryHeap` anywhere.** They are refused because
+  `std/collections/__init__.mojo:27` re-exports it, and the formal backend
+  builds a dylib for every module in a file's EAGER import closure. The 35th is
+  that re-export line itself.
+- Giving `binary_heap.mojo` a concrete public symbol — the stand-in for "one
+  concrete instantiation", and the only change the 34 could even notice —
+  moves **0 of 35**. The refusal advances one level, into `binary_heap.mojo`'s
+  own body (`len(self._data)` on a `List[Self.T]` slot has no representable
+  value), so the module carrying the 35 does not lower today whatever its export
+  table says.
+- Deleting the re-export, so `binary_heap.mojo` is not in the closure at all,
+  moves **0 of 35** as well: all 35 land on `dtype.mojo`'s MLIR constructs (26)
+  or `_assembly.mojo`'s `inlined_assembly` (9), which are §2 and §1.1 — true
+  limits. `binary_heap.mojo`'s only two real importers
+  (`test/collections/test_binary_heap_assert_empty_{peek,pop}.mojo`, outside the
+  sweep's default scope) also measure 0 under the first probe.
+
+So Stage 5 is still the right long-term answer to "a generic is not a single
+symbol", and it is still weeks — but for THIS family it is not the lever, and
+planning against "24 of 30" would have spent a project on 0 files of coverage.
+The number to plan from is now printed by the cause table on every run:
+
+    $ python3 tools/formal_sweep_causes.py --min 5 <sweep.log>
+       38       0  module exports no public functions
+            uses: 1 of 35 blocked by binary_heap.mojo name anything it declares
+                  (BinaryHeap)  [34 of the 35 name nothing it declares; the rest
+                  of the row is closure]
+
+(`uses:` landed in `b6a94d35`, pinned by `test_refusal_taxonomy.py`; it changes
+no classification and no rate.) The remaining 9 files of the family — `stat.mojo`
+1, `constants.mojo` 1, `_unicode_lookups.mojo` 1 and the six in the 2026-09-27
+table — were not re-probed; the ones measured are accounted for above.
 
 The files that would *not* be unblocked by it, and why:
 
@@ -265,7 +339,10 @@ The files that would *not* be unblocked by it, and why:
   doc/ABI.md's public-symbol rule excludes it on purpose. Permanent, by design.
 
 So the **decisions** in family 1 decompose as **21 blocked on Stage 5, 6
-permanent, 0 wrong.** What was wrong was the *reporting*, and that is closed —
+permanent, 0 wrong** — and the first clause is now known to be worth **0 files
+for its largest single member**, so read the three as *21 pending a project
+whose measured value on `binary_heap.mojo` is zero*, not as 21 files of
+near-term coverage. What was wrong was the *reporting*, and that is closed —
 see "What wave 5 closed".
 
 ## 1.3 One of the 30 should not be in the family at all
@@ -309,7 +386,57 @@ document's lane — it belongs to whoever owns `formal/imports.py`.
 
 # 2. MLIR attribute templates — 46 files, 1 cause
 
-## 2.1 The refusal is true, and it is the right refusal
+**PARTLY CLOSED, 2026-09-29. The "true limit, and permanent on this path" verdict
+below was right about two thirds of the family and wrong about the rest, and the
+wrong part was the part that mattered.** Read §2.0 first; the rest of the section
+is unchanged and still describes the dialect-attribute half.
+
+## 2.0 What is now answered, and what the family actually is
+
+The refusal's ground is "there is no MLIR on this path for the template to
+become". That is **true of a dialect attribute** — `#kgen.simd<1>`,
+`#pop.float_literal<nan>`, `#lit.struct<{…}>`, `#kgen.downcast<:…>`, `#kgen.dtype
+.constant<bool>` — and it was applied to **the whole family**, including the one
+member whose meaning is not an MLIR object at all: a
+`#kgen.param.expr<…>` **target query**.
+
+A formal image is compiled for ONE target, and that target is stated by the build
+itself (`compile_formal(arch=…, fmt=…)`, the same `arch`/`fmt` pair
+`formal/imports.py` keys its dylib cache on). So `target_get_field<current_target,
+"arch">` has exactly one correct answer, and answering it at build time is not a
+guess. `formal/model.py` now has a leaf-most evaluator for them —
+`Target`, `target_template`, `fold_target_template`, `template_is_answered` —
+answering `arch`, `os`, `endianness`, `pointer_width`, `simd_bit_width`,
+`cross_compilation` (measured against `os.uname().machine`, so it is *false* for
+the native build and *true* for `--arch=x86_64` on the same Mac, which no
+constant gets right) and `accelerator_arch`.
+
+What it refuses, and why, is the half that was right:
+
+| query | verdict | why |
+|---|---|---|
+| `target_has_feature` | **refused** | a CPU feature is a property of a CPU; the build names the architecture it emits and never a CPU. A hand-kept feature table would rot into a wrong answer no test could see |
+| `"triple"`, `"stdlib_plugin"`, any unknown field | **refused**, naming the field | a property of a target *description*; the build commits to two facts and states neither of these |
+| `current_target` as a **value** | **refused** | a target is a description, not a 64-bit word. Its FIELDS answer — and the message says so, because the old MLIR wording sent the reader looking for a missing MLIR while every `target_get_field` in the same file worked |
+| `__mlir_type` templates | **refused, and now as a TYPE** | they name a type. The message used to call them attributes, which is false of `std/sys/info.mojo`'s `_TargetType` — the module this whole family hangs on |
+| `#kgen.simd<N>`, `#pop.…`, `#lit.…`, `#kgen.dtype.…` | **refused, unchanged** | the original true limit. §2.1 below still describes these |
+
+**Measured effect on the sweep: no file moved.** `std/sys/info.mojo` is still a
+direct finding, now on its `_TargetType` **type** binding rather than on an
+attribute — the same module, one message corrected. The next terminal behind it
+is a different construct entirely and is filed as
+**`FORMAL_target_query_evaluator.md`**, with the measurement.
+
+Two builds of the two spellings and the two nesting positions a query reaches
+(`formal/build.py:_fold_target_queries`, `model.fold_module_value`) are the
+whole of the plumbing, and they are in the SHARED pipeline so the two
+architectures cannot get different answers — the property §2's original verdict
+was most worried about losing. The suite is
+`test_formal_target_queries.py` (25 checks, arm64 images EXECUTED against values
+stated independently of the code under test, refusals asserted on both
+architectures).
+
+## 2.1 The remaining refusal is true, and it is the right refusal
 
 `formal/model.py`'s `is_mlir_template` reads a bracket or a dotted member
 access on one of four names (`__mlir_attr`, `__mlir_deferred_attr`,
@@ -351,43 +478,78 @@ index to lower hiding behind these.
 honest closure is a *different target*: a build that embeds an MLIR dialect
 registry and evaluates `#kgen.*` attributes to concrete values at compile time
 — which is what the real compiler does and is the entire content of the formal
-backend's premise. Until then this refusal is the correct answer, and its cost
-is 46 files of coverage that are unreachable by construction.
+backend's premise. Until then this refusal is the correct answer for the
+DIALECT-ATTRIBUTE half, and its cost is 46 files of coverage that are
+unreachable by construction.
 
-## 2.2 `__mlir_op` still builds and segfaults
+**Corrected 2026-09-29:** the sentence used to end "…and its cost is 46 files of
+coverage that are unreachable by construction", which overstated it. The
+dialect attributes really are unreachable, but one member of the family — a
+`#kgen.param.expr<…>` target query — is a *question*, not an MLIR object, and it
+is answered now. §2.0 has the split and the numbers. **The 46 is unchanged as a
+file count**, so the cost statement stands; what changed is that the reason is
+narrower than the section claimed, and a reader who took "permanent" as covering
+the whole family would not have looked for the query case at all.
 
-`__mlir_op` is deliberately *absent* from `MLIR_TEMPLATE_NAMES`, on the stated
-ground that "it is a real side-effecting op, lowered as a call". The call it
-lowers to is a symbol nothing defines:
+## 2.2 `__mlir_op` — CLOSED 2026-09-30: refused, on both architectures, and pinned
 
-```mojo
-def main():
-    var n = 3
-    var a = __mlir_op.`pop.inline_asm`[n]
-    print("a = %llu\n", a)
+**This section said "`__mlir_op` still builds and segfaults". That is no longer
+true, and it stopped being true before the sentence was written to record it.**
+It is kept, with the measurement, because a reader deciding what to do about
+inline assembly needs the reason the refusal is the RIGHT one rather than a
+gap someone left.
+
+The measurement above was taken in wave 5. What the construct does now:
+
 ```
+$ fire.py build --formal --no-prove --backend=arm64 -o m2 m2.mojo
+build: main: __mlir_op is an MLIR dialect construct. This path has no MLIR: it
+lowers a Mojo program to a Mach-O image whose only value is a 64-bit word, and
+an MLIR attribute, type or operation has no representation in one … Write the
+value the construct denotes at the use site
+# identical text, byte for byte, for --backend=x86_64
 ```
-$ fire.py build --formal --no-prove --backend=arm64 -o m2 m2.mojo && ./m2
-Built: m2.aout
-Segmentation fault: 11                                    # exit 139
-$ fire.py build --formal --no-prove --backend=x86_64 -o m2x m2.mojo && ./m2x
-Built: m2x.aout
-Segmentation fault: 11                                    # exit 139
-```
+
+Re-measured 2026-09-30 on this tree for three spellings of the same operation —
+`__mlir_op.`pop.inline_asm`[n]`, the keyword-argument form
+`__mlir_op.`pop.inline_asm`[_type=None, assembly="nop", constraints="", …](p)`
+that `std/sys/_assembly.mojo` writes, and the `return`-ed form inside that
+file's `inlined_assembly` — on BOTH architectures. All six builds refuse; none
+of them links an image, so there is no exit 139 left to produce. Pinned by
+`a_bare_dialect_operation_is_refused_rather_than_built` in
+`test_formal_mlir_precedence.py`, which asserts the refusal on both backends and
+therefore goes red if the limit is ever closed.
+
+**Why the refusal is right, and why the suggested repair was not the one taken.**
+The paragraph below proposed adding `__mlir_op` to `MLIR_TEMPLATE_NAMES`. That
+was the wrong lever, and `model.mlir_dialect_refusal` is why: `__mlir_op` is an
+OPERATION BUILDER, not an attribute or type template, so putting it in a set
+whose four entries are all templates would misdescribe it, and it is spelled
+with a dotted template and a bracket in every real use — two node shapes the
+`MLIR_TEMPLATE_NAMES` test does not key on. What landed instead is the rule that
+is actually true of it and of `__mlir_attr` alike: a name with the `__mlir_`
+prefix that no template rule covers has no representation in a 64-bit word, and
+is refused by name. The refusal is arch-free text in `formal/model.py`, asked
+through the one reader both backends use, so the two architectures cannot come to
+name different limits for one construct.
 
 `std/sys/_assembly.mojo` — the module that heads 17 of family 1's 30 files — is
-built out of exactly this construct. **Verdict: a gap, not a false refusal, and
-it is the largest remaining hole in this document**: a construct that builds,
-links, and dies at the first instruction. **What it should be:** refused with
-the same MLIR-template wording, and the honest reason is the one its own comment
-contradicts: the bracketed list is MLIR op attributes, which is a different
-node, and the `pop.inline_asm` body is `__mlir_attr` again, so there is no call
-to lower either. **Cost: minutes**, now that `is_mlir_template` exists and
-`mlir_template_refusal` is one call — it needs `__mlir_op` added to the name
-set and its "deliberately absent" comment deleted. Not done in wave 5: it was
-not in that wave's brief, and adding a fifth name to a set whose other four
-entries are each pinned by a `refuse:` case deserves its own case rather than a
-drive-by.
+built out of exactly this construct, so it is refused, and the seventeen files
+behind it are refused on it. **That is the correct end state for them, not a
+gap.** The module's entire purpose is inline assembly, there is no MLIR in a
+freestanding image for an MLIR operation to become, and nothing about the
+`_get_kgen_string` import it also fails on can change that: the body is fatal
+whether or not the import resolves. See `FORMAL_target_query_evaluator.md`
+Blocker 2 for the cycle that is behind that import, and
+`FORMAL_imported_generic_reported_as_a_module_level_name.md` for the
+diagnostic it produces (which the pre-emption now shadows for this file, so the
+output quoted in that doc no longer reproduces — the defect it describes is
+unchanged).
+
+What DID have to change for the message to be the right one is
+`FORMAL_mlir_refusal_preemption.md`: `NoneType` at `_assembly.mojo:94` used to
+pre-empt `__mlir_op` at line 95, so this module was reported as a missing local
+rather than as the construct it is written in.
 
 ---
 
@@ -396,7 +558,7 @@ drive-by.
 | shape | files (arm64, stdlib scope) | verdict | evidence / what it should be |
 |---|---|---|---|
 | `constructing X has no representation: this image has no declaration of X` | 4 — `stdlib_core.mojo` (`StringRef`, direct) and `std/testing/prop/{__init__,random,runner}.mojo` (`Error`, at depth) | **refusal TRUE** | `Error` really is 2 fields and `StringRef` is a fat pointer, so neither fits one word, and neither is a struct in these images. The message now says the one thing it has checked — that there is no declaration here to ask — instead of asserting a shape it cannot see |
-| `__mlir_attr[...]` assembles an MLIR attribute | 46 | **true limit** | §2 |
+| `__mlir_attr[...]` assembles an MLIR attribute | 46 | **true limit for the dialect attributes** | §2.1; §2.0 for the target-query half, which is answered |
 | `comptime X = … does not fold to a compile-time constant` | 2 (`std/math/polynomial.mojo`, `std/algorithm/backend/tile.mojo`) | **true limit** — and the arch drift is **CLOSED** (2026-09-27) | `comptime n = len(coefficients)` over a *runtime* parameter, which is genuinely not knowable at compile time. The **drift** was that x86-64 refused **earlier and differently** (`unsupported call target on the formal x86-64 path (got SubscriptExpr)` for `polynomial.mojo`, `unsupported statement ComptimeForStmt` for `tile.mojo`), so one construct got two different limits from two architectures that are one language implementation. Closed by giving x86-64 the same `mojo/middle/comptime.py` resolver arm64 uses — that module documents x86-64 as an intended consumer of exactly this seam and it never was one — so both now refuse with `model.comptime_fold_refusal`, byte for byte. Side effect: x86-64 now *builds* a comptime binding that folds, which it used to refuse outright |
 | `a \`...\` stands where this path needs instructions to emit` | 1 (`std/builtin/len.mojo`) | **true limit**, message **CLOSED** (2026-09-27) | `def len(value: StringSlice) -> Int: ...` has no instructions, and the old message (`unsupported expression EllipsisLiteral on the formal <arch> path`) named an AST node the author never wrote and said nothing about what to do. On x86-64 it was worse than weak: `_unsupported_expr_message` appended "container and string values are not", false of a `...`. Now one arch-free `model.ellipsis_refusal`, naming the language's own no-implementation marker and both repairs. **Measured, both arches, because the old note's scope claim was wrong in a way worth recording:** a `...` in a `trait` method builds, but a `...` in a plain function is refused whether or not anything ever CALLS it — so the distinction is the declaration KIND, not reach |
 | `a Optional receiver is stored in a container` | 1 (`std/iter/__init__.mojo`) | **true limit** | by-reference receiver work; **already pinned** by `byref_refuse_stored_in_a_list` (`test_formal_run.py`). Not duplicated here |
@@ -689,20 +851,28 @@ Direct `codegen` — 127 files on arm64, 128 on x86-64 — decomposes as:
 | 19 distinct singleton causes | 19 | each its own file; §3 is the right home for these |
 
 `codegen/dependency` — 181 files — is **13 terminal modules**, and the top four
-are 168 of the 181:
+were 168 of the 181. **`env.mojo`'s 55 left this family on 2026-09-29**, so the
+table's top four are now three:
 
 | terminal module | files | terminal reason | the refusal is | to close it |
 |---|---|---|---|---|
-| `std/os/env.mojo` | **55** | `external_call['setenv', Int32]` — a subscript whose index is a tuple | **true, but the message names the wrong mechanism** (§6.2) | Stage 5 monomorphization |
+| ~~`std/os/env.mojo`~~ | ~~**55**~~ **0** | ~~`external_call['setenv', Int32]` — a subscript whose index is a tuple~~ | **CLOSED 2026-09-29** — the analysis in §6.2 was right about the misdiagnosis and wrong about the cost; see below | **done, and it did not need Stage 5** |
 | `std/sys/info.mojo` | 37 | module-level `comptime` binding initialized from an MLIR attribute | true, **permanent** (§2) | nothing on this path |
 | `std/collections/binary_heap.mojo` | 35 | `a BinaryHeap frame address is passed to len()` | true | by-reference receiver work |
 | `std/builtin/builtin_slice.mojo` | 20 | `constructing Slice with 3 argument(s) is a call to a user-defined __init__` | true, and **the best-worded refusal in the residue** | run `__init__` / field-filling construction |
 | `std/sys/_assembly.mojo` | 18 | one generic `inlined_assembly[…]` | true (§1.1) | Stage 5 |
 | `function.mojo` 4, `_io.mojo` 3, `random.mojo` 3, `tile.mojo` 2, `_select.mojo` 1, `_unicode_lookups.mojo` 1, `stat.mojo` 1, `itertools.mojo` 1 | 16 | §1.1, table verbatim | 7 true + permanent | Stage 5, or nothing |
 
-## 6.2 A true refusal with a false explanation, in the largest family
+## 6.2 A true refusal with a false explanation, in the largest family — CLOSED
 
-The single largest family in the residue — **55 files, one construct** — is
+**Status: closed 2026-09-29 (`4ad34f3`).** The analysis below was right about
+the misdiagnosis and **wrong about the cost**, and the second half of that is
+the part that mattered: it said the family is a §1.1 family-1 member and needs
+Stage 5 monomorphization, and it does not. Read the rest of this section for
+why, and `bugs/FORMAL_env_family_next_terminal.md` for the measurement and for
+where the 55 files landed.
+
+The single largest family in the residue — **55 files, one construct** — was
 refused like this:
 
 ```
@@ -749,26 +919,74 @@ family-1 member**, and its cost the same: Stage 5.
 55-file family whose explanation is wrong is a family the next person will
 re-derive from scratch.
 
+### 6.2.1 …and then it turned out not to be a monomorphization at all
+
+The last two paragraphs above were **half right in a way that cost more than
+they saved**, so they are corrected here rather than deleted.
+
+`external_call` looks like a §1.1 family-1 member because the shape is the
+shape: a subscript over a name, with a type in the bracket. But the thing the
+bracket selects is not a *function to monomorphize* — it is a **C symbol that
+already exists**, named by a string literal in the source. There is no
+instantiation to mangle and no boundary symbol to invent: the target is
+`setenv`, and `setenv` is on the link line whether or not anybody has compiled
+a Mojo function. Stage 5 is what you need when the callee is a template this
+compiler must EMIT; `external_call`'s callee is a template this compiler must
+NOT emit. Conflating the two is what made a 55-file family look like weeks of
+work, and it is the same confusion §2.1 of this document warns about one
+section earlier — deciding what a construct means from its SPELLING.
+
+So the repair was not a monomorphizer. It was: recognise the construct by its
+base name (`M.is_external_call_template`), read the symbol and the declared
+return type out of the bracket (`M.external_call_spec`), and let both
+architectures take the extern path they already had for every other external
+call — plus the one thing an extern call cannot know and this construct states
+outright, the **declared return type**, which is what says whether the return
+register holds the whole answer or the low half of one. Measured: **55 files
+left the family and 0 entered it.** `bugs/FORMAL_env_family_next_terminal.md`
+has the before/after table and the next terminal.
+
+Two things this document should have said and did not, and which are the real
+transferable lesson:
+
+  * **A shape shared with a construct that needs work is not evidence that it
+    needs that work.** The bracket in `external_call["sym", T]` and the bracket
+    in `size_of[type, target]` are the same AST node. One of them needs a
+    monomorphizer and the other needs a `BL`. Nothing in the refusal, in the
+    sweep, or in the family count could tell you which, and the ranking in §6.3
+    inherited the answer from the family it was lumped in with.
+  * **The measurement that settles a construct's cost is a program, not a
+    count.** The family was 55 files and the doc had been re-deriving 55 for
+    several waves. Writing the three functions of `env.mojo` out as a
+    standalone program, with the `std.ffi`/`std.sys` imports dropped so the
+    import closure could not answer for it, took minutes and showed the bodies
+    lower and run correctly on both architectures — which is the fact the
+    whole ranking hinged on and which no amount of reading had produced.
+
 ## 6.3 Ranked, with costs — the answer to "what is next"
 
 | # | lever | files | cost | why this rank |
 |---|---|---|---|---|
-| **1** | **Stage 5 monomorphization on the formal path** | **89** (55 `env.mojo` + 34 of family 1: 18 `_assembly` + 16 remainder) | **weeks** — §1.2 (a)–(c), plus a 2-D-index-free statement for `external_call`'s tuple | The largest single lever, by a factor of two over anything else, and it is the *same* work for both halves: a monomorphizer, a mangling function that agrees with `doc/ABI.md` and with what the importer computes, and CAS keying by `(template-id, type args, comptime params)` |
-| **2** | **by-reference frame escape** | **97 direct**, of which 29 are in files that also import a host module and so cannot build anyway → **68 actionable** | days-to-weeks, and it is a *design* question, not a patch | Widest single shape in the residue, and already has its own design document (`bugs/FORMAL_wide_receiver_by_reference.md`). Ranks second only because it is harder, not because it is smaller |
+| **1** | **Stage 5 monomorphization on the formal path** | **34** (family 1: 18 `_assembly` + 16 remainder) — **was 89; the 55 `env.mojo` files left on 2026-09-29** (§6.2.1) | **weeks** — §1.2 (a)–(c) | The largest single lever, and it is the *same* work for both halves: a monomorphizer, a mangling function that agrees with `doc/ABI.md` and with what the importer computes, and CAS keying by `(template-id, type args, comptime params)`. It was ranked first on a 89 that included 55 files that turned out not to need it; the 34 that remain are the real size, and the re-ranking against #2 below is a judgement call now that the numbers are this close |
+| **2** | **by-reference frame escape** | **97 direct**, of which 29 are in files that also import a host module and so cannot build anyway → **68 actionable** | days-to-weeks, and it is a *design* question, not a patch | Widest single shape in the residue, and already has its own design document (`bugs/FORMAL_wide_receiver_by_reference.md`) |
 | **3** | `Slice.__init__` — run a declared `__init__` / field-filling construction | 20 | **days**, self-contained | The cheapest *capability* in the residue, and the message that describes it is already exact. Nothing about it needs a new value model |
-| **4** | `env.mojo`'s message, rewritten to name a template application | 0 (55 already unblocked by #1) | **under an hour** | Not a coverage item at all. Listed because a wrong explanation on the largest family costs the next reader more than the fix does |
+| **4** | ~~`env.mojo`'s message, rewritten to name a template application~~ | ~~0~~ **55** | **done 2026-09-29** | The reword was never needed: the message was replaced by a **lowering** (§6.2.1). Listed here struck through because a ranking that still carries it would send the next reader to edit text that no longer exists |
 | **5** | the 19 singleton direct causes (§3) | 19 | one sitting each | Already audited in §3; several are weak messages rather than capabilities, and §3's own guidance applies: **prefer fixing a wrong message to adding a capability** |
-| — | MLIR attribute templates | 41 | **nothing — permanent** | §2. Not work. Read as a fact about those modules |
+| — | MLIR attribute templates | 41 | **nothing — permanent** for the dialect attributes (§2.1); the `#kgen.param.expr<…>` target queries ARE answered (§2.0) | §2 for the attributes; `FORMAL_target_query_evaluator.md` for what the query half still does not reach |
 | — | host-import | 166 (160 in reach) | sized, see below | not a limit at all |
 
 **So: the biggest remaining lever is Stage 5 monomorphization, and the numbers
-are 89 files and weeks.** It is the same answer §1.2 reached for family 1
-alone, with `env.mojo`'s 55 added because that family turned out to be family 1
-in disguise (§6.2). The second answer is the by-reference frame work at 68
-actionable files, and the honest comparison is that #1 is 89 files of *plumbing
-the design already specifies* while #2 is 67 files of *design that does not
-exist yet* — which is why #1 is first despite being the larger number only by a
-little.
+are 34 files and weeks.** It is the same answer §1.2 reached for family 1
+alone; `env.mojo`'s 55 were added to that number on the reasoning that the
+family "turned out to be family 1 in disguise" (§6.2), and that reasoning was
+**wrong** — see §6.2.1, where the 55 are closed and the cost was under a day.
+The second answer is the by-reference frame work at 68 actionable files, so
+the honest comparison is now 34 files of *plumbing the design already
+specifies* against 68 files of *design that does not exist yet* — which
+inverts the old order on the numbers, and leaves the ranking a judgement call
+rather than a fact. Read the design cost as the thing that has actually been
+estimated and the file count as the thing that has been re-measured most
+recently.
 
 **Nothing in this list should be started as a side quest.** #1 is a project,
 which is why it is written down here rather than attempted.
@@ -905,3 +1123,105 @@ section header reading "Compile-time constant evaluators (for comptime)" and
 `self._comptime_vals` / `_module_const_int` already track folded values, so the
 scaffolding is half-present. That is a feature, not a fix, and it is the kind of
 item §11.4's easy/hard line sends to a bug doc rather than a session.
+
+---
+
+# Addendum (2026-09-29, `formal-inline-asm`): §1.1's `_assembly.mojo` row now has the right MEASUREMENT behind it
+
+The **verdict** in the §1.1 audit table is unchanged and was re-measured: the
+row is a true limit, and nothing here closes it. What changed is the
+**diagnosis** the build actually produced, which was false about the file.
+
+`std/sys/_assembly.mojo` used to refuse with
+
+> `inlined_assembly: '_get_kgen_string' is imported from
+> `std.collections.string.string_slice`, so it is a module-level name of
+> another module.`
+
+That is false, and it is false in the way this document cares about: it names
+a **storage** problem the file does not have. `_get_kgen_string[asm]()` is a
+CALL — a comptime specialization, whose brackets bind a generic's parameters —
+and the root of the bracket was being walked as a read of a value because
+`check_module_symbols` collected a call's callee only when the callee was a
+bare `IdentExpr`. Seventeen files inherited the diagnosis through their import
+chains, so one mis-worded sentence about a subscript was the stated terminal
+cause for a sixth of the residue.
+
+**What the file needs, stated honestly.** `inlined_assembly` cannot be lowered
+on this path, and the reason is not the import:
+
+1. its body is `__mlir_op.`pop.inline_asm`` — an MLIR dialect **operation**.
+   This path has no MLIR (it lowers to a Mach-O image whose only value is a
+   64-bit word) and no inline assembler, so the constraint string has nowhere
+   to go. `model.mlir_dialect_refusal` already says exactly this, arch-free;
+2. even with MLIR, `doc/ABI.md` §Generics is the binding constraint and it is
+   unchanged — a generic is not a boundary symbol, each instantiation is, and
+   this path does not monomorphize. `_assembly.mojo`'s only public declaration
+   is generic, so `_export_entries` returns `{}` and `no_public_api_reason`
+   refuses it as a module that exports nothing. **That is this row's own
+   verdict, and it is still the reason.**
+
+So the honest answer is the refusal, and §1.1's "true limit" stands. The 17
+files do not unblock, and the task's expectation that they would was wrong:
+nothing in this branch can move them, and a doc that said otherwise would send
+the next session after a fix that does not exist.
+
+**The two constructs now standing in front of the true one**, both filed, both
+diagnostic-accuracy rather than coverage, both with the measurement that sizes
+them:
+
+| reported instead of the true limit | docs |
+|---|---|
+| `'NoneType' has no home` — a bare TYPE name in a `comptime` type comparison, refused with an enumeration of where a *value* lives (52 stdlib files, up from 35) | `FORMAL_type_name_as_a_value.md` |
+| any unplaced name earlier in the body — the construct-refusal pre-pass is implemented for the bracketed/dotted MLIR spellings and not for the bare `__mlir_op` dialect name, so line order decides the message for 18 of 36 files | `FORMAL_mlir_refusal_preemption.md` — **the pre-emption has landed** (2026-09-30); what is left there is 16 files decided by the order of two FUNCTIONS |
+
+**Both rows above are stale for `std/sys/_assembly.mojo` itself, and that is the
+point of the second one landing.** Re-measured 2026-09-30 on this tree, the
+module's own body reports the construct it is written in —
+`inlined_assembly: __mlir_op is an MLIR dialect construct` — so the 17 files
+behind it are refused on the MLIR operation rather than on a missing local or a
+type name read as a value. The quotes above are what the file reported when this
+addendum was written, and they are kept because they are the measurement that
+made the pre-emption worth landing; they are not what the build says now.
+
+**The one measured gain**, over all 664 stdlib files through the exact function
+that changed: 305 files were refused as an imported module-level name, 269 are
+after; 10 files are no longer refused by it at all; 612 of 664 verdicts are
+byte-identical.
+
+---
+
+## Container size: the one number that is an architectural limit, not a gap
+
+**Added 2026-09-30. True, measured on this tree, and TRUE OF BOTH BACKENDS —
+which is what makes it a limit and not a finding.**
+
+A container blob on this path is a run of 8-byte slots in the function's own
+frame, out of a budget the whole body shares, and a literal reserves its whole
+blob before any element is evaluated. So a container literal has a size at which
+it cannot fit, and that size is set by the frame, not by the backend's ability
+to lower it:
+
+| backend | frame budget for containers | largest word-element list literal | bytes needed at the boundary |
+|---|---|---|---|
+| arm64 | 131072 (`_SCRATCH`) | **16383** words | `8*(1+16383)` = 131064 |
+| x86-64 | 16384 (`_BLOB_BYTES`), less any receiver frames the function reserves | **2047** words | `8*(1+2047)` = 16360 |
+
+Measured by building `[1] * n` for n at and either side of each boundary, on
+both architectures, and running the image. Over the limit, both refuse with the
+same sentence from `model.frame_blob_refusal`, differing only in the two byte
+counts, which is the whole point: the ceilings differ because the frames do,
+and saying so is what a reader comparing the architectures needs.
+
+**What this replaced.** A bare `AssertionError` out of
+`encode_str_xt_xn_imm` on arm64 at 4095 words — the 12-bit-scaled STR-immediate
+offset field's reach, not a frame limit at all — so arm64 used to crash at a
+quarter of the size it can actually hold, and to crash rather than refuse. A
+blob element is now stored and loaded through a register offset past that
+reach (`_emit_blob_store` / `_emit_blob_load`).
+
+**One measurement that is NOT a limit and looks like one:** `len(range(0, n))` is
+refused, on both backends, for every `n`, with "`len(a)` is `len()` of a value
+classified as `'int'`". The `range()` result is not classified as a list for
+`len`, which is a gap in the result's classification and not a size question.
+Index a `range()` result rather than measuring it, until that is fixed.

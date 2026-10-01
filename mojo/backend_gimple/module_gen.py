@@ -62,6 +62,13 @@ from mojo.middle.module_shared import (
     _mojo_type, _pair_key, _ptr_slot_in_range, _register_sym, _selfhost_fn_reassigns_method, _selfhost_homogeneous_tuple_ret_funcs,
     _selfhost_modglobal_is_pathcall, _selfhost_module_scalar_globals, _selfhost_struct_dict_field_val_types, _sms_key, _walk_ast
 )
+# Module-qualified struct identity (the same-bare-name collision fix) — see
+# `_struct_cname_by_id` in GimpleGen.__init__ and the collision pass in
+# `gen_module_impl` below. Imported from funcs_shared, the same module
+# `_struct_method_qualifier` lives in, so the C-name qualifier and the
+# method-symbol qualifier are one function on one input.
+import mojo.middle.funcs_shared as _ggfs
+from mojo.middle.funcs_shared import _resolve_struct_cname, _sanitize_cname_qualifier
 
 
 def _gmi_literal_ctype(node):
@@ -367,13 +374,15 @@ def _returns_kinds_valued(node) -> bool:
         return False
     f = node.func
     # `struct.unpack(fmt, buf)` / `struct.unpack_from(fmt, buf, off)` /
-    # `struct.iter_unpack(fmt, buf)` — fmt is the first argument.
+    # `struct.iter_unpack(fmt, buf)` — fmt is the first argument, read
+    # back only when it is a literal (see `_struct_literal_format`).
     if (isinstance(f, gimple_ctypes.MemberExpr)
             and isinstance(f.obj, gimple_ctypes.IdentExpr)
             and f.obj.name == 'struct'
             and f.member in ('unpack', 'unpack_from', 'iter_unpack')
             and node.args):
-        return gimple_ctypes._struct_format_is_mixed(node.args[0].value)
+        return gimple_ctypes._struct_format_is_mixed(
+            gimple_ctypes._struct_literal_format(node.args[0]))
     # `H.unpack(buf)` where H is `struct.Struct('mixed-format')`.
     if (isinstance(f, gimple_ctypes.MemberExpr)
             and f.member in ('unpack', 'unpack_from', 'iter_unpack')):
@@ -1019,8 +1028,24 @@ def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
             f"}}"
         )
         func_parts.append('')
+    # A LAMBDA inside this closure's body is lifted by `_lower_LambdaExpr`
+    # into `gen._lambda_parts` — a side table that only `gen_module` flushes
+    # into the output, and it used to be flushed only by the top-level-
+    # function, struct-method and toplevel paths. This path did not, so a
+    # lambda nested inside a nested `def` was DECLARED and had its address
+    # taken (`static void * _funcptr_X = (void *)X;`) but was never defined:
+    # `Undefined symbols ...: "__make_make_lambda_1", referenced from:
+    # __funcptr__make_make_lambda_1` at link time. Clear the table BEFORE
+    # generating the body (so nothing pending from an earlier function is
+    # misattributed to this one) and flush it AFTER (so this one's lambdas
+    # are emitted) — the same reset-then-flush the sibling paths do, and the
+    # reason their comments all repeat it.
+    self._lambda_parts = []
     func_parts.append(self._gen_lifted_closure(ci, outer_name))
     func_parts.append('')
+    if self._lambda_parts:
+        func_parts.extend(self._lambda_parts)
+        self._lambda_parts = []
 
 
 
@@ -1346,6 +1371,18 @@ def gen_module_impl(self, stmts):
     for _lsn_s in stmts:
         if isinstance(_lsn_s, StructDef):
             self._local_struct_names.add(_as_str(_lsn_s.name))
+    # Each StructDef's HOME module, the input to the collision test in the
+    # module-qualified-identity pass further down (see `_struct_cname_by_id`
+    # in GimpleGen.__init__). THIS gen_module call IS the compile of
+    # `self.module_name`, so every StructDef in `stmts` is that module's own.
+    # Keyed by node identity, which is what `_struct_name_owner` compares when
+    # it decides "same class", so the two agree on what that means. The ROOT
+    # module compiles with `module_name == ''`; it is not a peer of any
+    # imported module, so it claims the bare name like any other first-wins
+    # owner rather than being qualified against itself.
+    for _hms in stmts:
+        if isinstance(_hms, StructDef) and self.module_name:
+            self._struct_home_by_id[id(_hms)] = _as_str(self.module_name)
     # Overloaded / duplicated top-level functions (same name, multiple defs)
     # can't all be emitted as distinct C symbols. Two genuinely different
     # situations hide behind that one description, with OPPOSITE correct
@@ -2000,10 +2037,53 @@ def gen_module_impl(self, stmts):
                         _xf_orig = _xf_call.func.member
                 if not _xf_mod or not _xf_orig:
                     continue
-                _xf_pnames = _xf_struct_init_params(_xf_mod, _xf_orig)
+                # The module the binding NAMES is not necessarily the module
+                # that DEFINES the struct: a package `__init__.py` that
+                # re-exports (`from .sub import Dialog`) is a re-exporting
+                # module. Both consumers below are keyed on the DEFINING
+                # module — `_xf_struct_init_params` has to find a real
+                # StructDef to read `__init__`'s param names from (a
+                # re-exporting module has none, so it returned None and the
+                # hint was silently never recorded), and `_xf_key_base`'s
+                # qualifier half is matched by the defining temp_gen against
+                # its OWN `module_name` when it merges the hint. Without
+                # this, a `from pkg import Struct as Alias; Alias("s")` left
+                # the struct's unannotated `self.f = f` field at the
+                # `int64_t` default (a hard `gcc -fgimple` "non-trivial
+                # conversion in 'var_decl'" when unaliased, and a `char *`
+                # laundered through `int64_t` and printed as a pointer
+                # decimal when aliased). Resolving to the defining module
+                # first makes both spellings correct, which is what
+                # `_find_symbol_home_module` exists for; a None answer (no
+                # reachable module defines the name, e.g. the call is not a
+                # struct constructor at all) leaves `_xf_mod` untouched.
+                # TWO spellings of the defining module, for two different
+                # jobs: `_xf_struct_init_params` has to OPEN the module, and
+                # the hint KEY below has to spell it the way the defining
+                # gen spells itself. See `_find_symbol_home_module`'s own
+                # docstring for why a relative spelling resolved against
+                # this importing module is the wrong file.
+                _xf_home = self._find_symbol_home_module(_xf_mod, _xf_orig, 'struct')
+                if _xf_home:
+                    _xf_home_abs = self._find_symbol_home_module(
+                        _xf_mod, _xf_orig, 'struct', want_abs=True) or _xf_home
+                    _xf_mod = _xf_home
+                    _xf_open = _xf_home_abs
+                else:
+                    _xf_open = _xf_mod
+                _xf_pnames = _xf_struct_init_params(_xf_open, _xf_orig)
                 if not _xf_pnames:
                     continue  # not a known struct constructor in that module
-                _xf_key_base = _xf_mod.replace('.', '_').replace('-', '_') + '::' + _xf_orig
+                # `lstrip('.')` on the qualifier half, matching
+                # `_note_own_func_home`'s canonicalization of the module key
+                # the DEFINING gen was keyed by (and so the spelling its own
+                # `_note_own_func_home` call recorded) — see
+                # `_find_symbol_home_module`'s docstring. Without it a module
+                # reached as `.sub` produced the key `_sub::Struct::field`
+                # while the defining gen compared against `sub`, so a
+                # package whose `__init__.py` re-exports never saw its own
+                # struct's field hints.
+                _xf_key_base = _xf_mod.lstrip('.').replace('.', '_').replace('-', '_') + '::' + _xf_orig
                 for _xfi, _xfa in enumerate(_xf_call.args):
                     if _xfi >= len(_xf_pnames):
                         break
@@ -3157,18 +3237,88 @@ def gen_module_impl(self, stmts):
         if isinstance(s, StructDef) and s.name == 'GimpleGen':
             self._struct_name_owner['GimpleGen'] = s
             break
+    # Module-qualified struct IDENTITY. See `_struct_cname_by_id` in
+    # GimpleGen.__init__ for what a cname is and why the bare StructDef.name
+    # used to BE it was the bug.
+    #
+    # Every StructDef gets an entry in `_struct_cname_by_id`, and
+    # `_struct_cname_of_name[bare]` is the WINNER's cname — for a struct that
+    # never collided that is simply the bare name, so every non-colliding
+    # struct's `struct_field_types` key, `typedef struct X` name, `_alloc_X`
+    # helper and `{X}_{method}` symbol stay byte-identical to what they were
+    # before. Only a GENUINE cross-module collision mints a qualified cname,
+    # and even then the loser's METHOD SYMBOLS do not move: its cname is
+    # `{qualifier}_{Name}`, and `_struct_method_qualifier` answers '' for an
+    # already-qualified spelling, so the composer emits exactly the
+    # `{qualifier}_{Name}_{method}` this codegen has always emitted for such a
+    # struct. Nothing but the C *type* identity moves.
+    #
+    # A same-home same-named pair is NOT a collision: that is one file
+    # redefining a class (Python semantics — the second binding replaces the
+    # first), which is what `_struct_name_owner`'s first-wins already models,
+    # and it is the shape this compiler's own two byte-identical
+    # `class StringLiteral` definitions take (see this doc's §5). Keying the
+    # qualification on the genuine cross-module case, NOT on the name loss,
+    # is what keeps the self-hosting closure's struct set unchanged.
     for s in all_struct_defs:
         s = _as_structdef_node(s)
-        if isinstance(s, StructDef) and s.name not in self._struct_name_owner:
-            self._struct_name_owner[s.name] = s
-    for s in all_struct_defs:
-        s = _as_structdef_node(s)
-        if isinstance(s, StructDef) and self._struct_name_owner.get(s.name) is s:
-            if s.name not in self.struct_field_types:
-                self.struct_field_types[s.name] = {}
+        if not isinstance(s, StructDef):
+            continue
+        _sid = id(s)
+        if _sid in self._struct_cname_by_id:
+            continue
+        _sname = _as_str(s.name)
+        _shome = self._struct_home_by_id.get(_sid, '')
+        _owner = self._struct_name_owner.get(_sname)
+        if _owner is None:
+            # First claim on this bare name: it OWNS it, under the bare name.
+            self._struct_name_owner[_sname] = s
+            self._struct_cname_by_id[_sid] = _sname
+            self._struct_cname_of_name[_sname] = _sname
+            if _shome:
+                self._struct_cname_by_home[_shome + '::' + _sname] = _sname
+            continue
+        if _owner is s:
+            self._struct_cname_by_id[_sid] = _sname
+            continue
+        # A different StructDef already owns this bare name. Genuine collision?
+        _ohome = self._struct_home_by_id.get(id(_owner), '')
+        if not _shome or not _ohome or _shome == _ohome:
+            # Same file (or an unresolvable home): a redefinition, not a
+            # cross-module collision. Leave it to the first-wins skip below.
+            continue
+        # Real cross-module collision: give the loser a module-qualified cname,
+        # uniquified against any cname already handed out.
+        _q = _sanitize_cname_qualifier(_shome)
+        _cname = _q + '_' + _sname
+        _n = 2
+        while _cname in self._struct_cname_of_name or _cname in self._struct_name_owner:
+            _cname = _q + '_' + _sname + str(_n)
+            _n += 1
+        self._struct_cname_by_id[_sid] = _cname
+        self._struct_name_owner[_cname] = s
+        self._struct_cname_by_home[_shome + '::' + _sname] = _cname
+        self._struct_qualified_cnames.add(_cname)
     for s in all_struct_defs:
         s = _as_structdef_node(s)
         if isinstance(s, StructDef):
+            _sname = _as_str(s.name)
+            _cname = self._struct_cname_by_id.get(id(s), _sname)
+            if self._struct_name_owner.get(_cname) is not s:
+                continue
+            if _cname not in self.struct_field_types:
+                self.struct_field_types[_cname] = {}
+    for s in all_struct_defs:
+        s = _as_structdef_node(s)
+        if isinstance(s, StructDef):
+            # The struct's C IDENTITY from here on. Every `s.name` that keys a
+            # whole-program table (field table, class attrs, boxed/bool field
+            # sets, per-struct elem/array/annotation side tables) is this, not
+            # the bare name — and that substitution IS the fix: a collision
+            # loser's fields land in its OWN table instead of being dropped,
+            # and its `self.<field>` accesses then read the ctype IT declared.
+            _sname = _as_str(s.name)
+            s.name = self._struct_cname_by_id.get(id(s), _sname)
             if self._struct_name_owner.get(s.name) is not s:
                 continue
             if s.name not in self.struct_field_types:
@@ -3637,6 +3787,27 @@ def gen_module_impl(self, stmts):
         self._field_scan_member_cache[sid] = cands
         return cands
 
+    def _scan_stmt_member_assigns(stmt):
+        """`[(obj name, member, value node)]` for every `o.m = <value>`
+        whose receiver is a bare identifier — the assignment EVIDENCE the
+        phantom-field mint below types the field from. A sibling of the two
+        scans above, and memoized the same way (`_walk_ast` is the expensive
+        part, and this runs over every top-level statement twice)."""
+        sid = id(stmt)
+        cached = self._field_scan_assign_cache.get(sid)
+        if cached is not None:
+            return cached
+        cands = []
+        for node in _walk_ast(stmt):
+            if (isinstance(node, AssignStmt)
+                    and isinstance(getattr(node, 'target', None), MemberExpr)
+                    and isinstance(node.target.obj, IdentExpr)
+                    and node.value is not None):
+                cands.append((node.target.obj.name, node.target.member,
+                              node.value))
+        self._field_scan_assign_cache[sid] = cands
+        return cands
+
     def _scan_body_for_local_field_access(body, own_struct_name):
         # Collect EVERY struct type each local name is ever bound to, then
         # keep only unambiguous names. The candidate scan is flow-insensitive
@@ -3666,6 +3837,26 @@ def gen_module_impl(self, stmts):
                     local_types[name] = only_type
         if not local_types:
             return
+        # `{(obj name, member): ctype}` for every `o.m = <value>` in this
+        # body, keyed like the mint that consumes it. Built BEFORE the mint
+        # loop so an assignment that appears textually AFTER the read (the
+        # `print(o.x)` line, then `o.x = "hello"`) still counts — the same
+        # flow-insensitive union `local_type_sets` above is built on, and
+        # for the same reason: a struct's field set is a whole-program
+        # fact, not a statement-order one. First answer wins, so a member
+        # written twice keeps the first write's type; conflicting writes are
+        # not represented, exactly as `local_type_sets` drops an ambiguous
+        # name rather than guessing.
+        _assigned_member_ctypes = {}
+        for stmt in body:
+            for obj_name, fn, value in _scan_stmt_member_assigns(stmt):
+                _k = (obj_name, fn)
+                if _k in _assigned_member_ctypes:
+                    continue
+                try:
+                    _assigned_member_ctypes[_k] = self._quick_type(value)
+                except Exception:
+                    pass
         for stmt in body:
             for obj_name, fn in _scan_stmt_member_candidates(stmt):
                 target_struct = local_types.get(obj_name)
@@ -3734,7 +3925,24 @@ def gen_module_impl(self, stmts):
                         for _base_name in (getattr(target_def, 'bases', None) or [])
                         for m in getattr(_struct_by_name.get(_base_name), 'methods', ())):
                     continue
-                self.struct_field_types[target_struct][fn] = 'int'
+                # The minted field's TYPE, from the value actually assigned to
+                # this member, when there is one. The `int` below is the
+                # "nothing is known about this member" answer, and it is
+                # right for a read-only phantom — but a member that IS
+                # assigned is not read-only, and storing a `char *` or a
+                # `double` through a 4-byte `int` field TRUNCATES the value:
+                # `o.x = "hello"; print(o.x)` printed the low 32 bits of the
+                # string's address as a decimal, and `len(o.x)` then
+                # dereferenced that truncated value and SEGFAULTED. Only
+                # POINTER-shaped and floating answers override `int` — those
+                # are the ones an `int` slot is provably wrong for — so a
+                # member assigned an ordinary integer keeps exactly the
+                # declaration it has always had.
+                _mft = 'int'
+                _afn = _assigned_member_ctypes.get((obj_name, fn))
+                if _afn and (_afn.endswith(' *') or _afn in ('double', 'float')):
+                    _mft = _afn
+                self.struct_field_types[target_struct][fn] = _mft
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
                     target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
@@ -3742,6 +3950,31 @@ def gen_module_impl(self, stmts):
     _scan_body_for_local_field_access(stmts, None)
     if self.do_imports or self.link_imports:
         _scan_body_for_local_field_access(imported_stmts, None)
+
+    # Aliased CLASS imports (`from M import Class as Alias`) for the WHOLE
+    # module, module scope AND function bodies, resolved HERE rather than
+    # only where the from-import statement is later lowered. The reason is
+    # ordering, not tidiness: `_note_struct_import_alias` is gated on
+    # `struct_field_types`, which is only populated by the struct passes
+    # above, and the alias has to be known to every inference pass that
+    # runs after this point — a function-scoped `from M import C as A`
+    # whose `return A("s")` feeds the free-function RETURN-type inference
+    # (below, in `_gmi_collect_return_values`' consumers) otherwise infers
+    # `int64_t`, and the caller then reads the struct through an integer
+    # (`assignment to 'char *' from 'int64_t' ... makes pointer from
+    # integer without a cast`). `_gen_stmt_FromImportStmt` keeps its own
+    # call for the `not do_imports` shape, where this pass does not run;
+    # `_note_struct_import_alias` is first-writer-wins, so the two can
+    # never disagree about what an alias names.
+    for _al_n in _walk_ast(stmts):
+        if not (isinstance(_al_n, FromImportStmt)
+                and not getattr(_al_n, 'wildcard', False)):
+            continue
+        for _al_ip in (getattr(_al_n, 'name_alias_strs', None) or []):
+            _al_name = gimple_ctypes._fi_name(_al_ip)
+            _al_alias = gimple_ctypes._fi_alias(_al_ip)
+            if _al_alias:
+                self._note_struct_import_alias(_al_n.module, _al_alias, _al_name)
 
     _phase0_func_types = dict(self.func_return_types)   # save Phase 0 registrations
     _phase0_imported   = dict(getattr(self, 'imported_symbols', {}))  # save Phase 0 imported_symbols
@@ -3883,9 +4116,15 @@ def gen_module_impl(self, stmts):
                             # `-Wpointer-to-int-cast` warning, not just a
                             # diagnostic).
                             try:
-                                _ov_path = self._parsed_import(s.module)[0]
+                                _ov_pi = self._parsed_import(s.module)
+                                _ov_path = _ov_pi[0]
                                 if _ov_path:
-                                    _ov_src = open(_ov_path).read()
+                                    # The source `_parsed_import` already read and
+                                    # cached for this module, not a fresh
+                                    # `open(...).read()` per imported symbol (each
+                                    # read was a whole file that nothing freed:
+                                    # ~800 MB on `--dump-full fire.py`).
+                                    _ov_src = _as_str(_ov_pi[1])
                                     if len(re.findall(
                                             rf'\b(?:fn|def)\s+{re.escape(_rs_nm)}\s*\(',
                                             _ov_src)) > 1:
@@ -4061,6 +4300,28 @@ def gen_module_impl(self, stmts):
                         _mangled_kw_name = self._func_csym(s.name)
                         self._func_kwargs_slot[_mangled_kw_name] = _kw_i
                         self._func_kwargs_has_vararg[_mangled_kw_name] = _seen_star
+                    except Exception:
+                        pass
+            # Same walk, recording the packed-parameter shape for a function
+            # taken as a VALUE (see `_variadic_func_shape`'s own comment).
+            # `_kw_i` above stops at the first `**`; this one needs the
+            # leading ordinary-parameter count too, so it is its own loop.
+            _vf_nfixed = 0
+            _vf_kind = -1
+            for _pn, _pt in (s.params or []):
+                if _pn.startswith('**'):
+                    _vf_kind = 1 if _vf_kind == 0 else 2
+                elif _pn.startswith('*'):
+                    if _vf_kind < 0:
+                        _vf_kind = 0
+                elif _vf_kind < 0:
+                    _vf_nfixed += 1
+            if _vf_kind >= 0 and _vf_nfixed <= 4:
+                self._variadic_func_shape[s.name] = (_vf_nfixed, _vf_kind)
+                if _s_owns_tiers:
+                    try:
+                        self._variadic_func_shape[self._func_csym(s.name)] = (
+                            _vf_nfixed, _vf_kind)
                     except Exception:
                         pass
         if isinstance(s, FunctionDef) and s.name not in self._NO_OVERLOAD_MANGLE:
@@ -4424,7 +4685,9 @@ def gen_module_impl(self, stmts):
                     else:
                         _ret_type = self._resolve_type(m.return_type)
                 else:
-                    _saved_var_types = dict(self.var_types)
+                    _saved_var_types = self.var_types
+                    _scratch_mark_sm: int = self._scan_scratch_top
+                    self.var_types = self._scratch_dict_copy(_saved_var_types)
                     self.var_types['self'] = f"{s.name} *"
                     for _pn, _pt in real_params:
                         self.var_types[_pn] = self._resolve_type(_pt)
@@ -4446,6 +4709,7 @@ def gen_module_impl(self, stmts):
                         pass
                     _ret_type = self._infer_return_type(m.body)
                     self.var_types = _saved_var_types
+                    self._scan_scratch_top = _scratch_mark_sm
                 # Self-hosting bootstrap: the frozen GimpleGen signature
                 # table is authoritative — override this pass's per-instance
                 # inference so `_struct_method_signatures`, the method
@@ -4606,7 +4870,13 @@ def gen_module_impl(self, stmts):
     # preamble (reads struct_field_types directly) and the `__init__` body's
     # own store codegen (reads it at emission time, later still) agree.
     if getattr(self, '_xmod_ctor_field_hints', None) and self.module_name:
-        _xf_self_q = self.module_name.replace('.', '_').replace('-', '_')
+        # `lstrip('.')` — the same canonicalization `_find_symbol_home_module`
+        # documents and the producer above applies: this gen's `module_name`
+        # is the import string that first pulled the module in, and a
+        # RELATIVE spelling (`.sub`) canonicalizes with its leading dots
+        # stripped, exactly as `_note_own_func_home` does when it records
+        # this module's own free functions' home.
+        _xf_self_q = self.module_name.lstrip('.').replace('.', '_').replace('-', '_')
         for _xf_key in self._xmod_ctor_field_hints:
             _xf_hq, _xf_hstruct, _xf_hfield = _xf_key.split('::', 2)
             if _xf_hq != _xf_self_q:
@@ -5190,6 +5460,71 @@ def gen_module_impl(self, stmts):
         else:
             d[pname] = (e, ne)
 
+    def _literal_arg_elems(a):
+        """`(elem, nested)` C types for a container LITERAL passed as a call
+        argument, or None when `a` is not one whose element type is statically
+        decidable. The same two answers `note_list_literal` inside
+        `_scan_container_elems` derives for a literal bound to a local, so the
+        two observation sources of this table cannot drift: a list-of-lists is
+        `('MojoList *', <inner elem>)`, anything else is `(<joined elem>,
+        None)`.
+
+        Why this exists at all: `_param_elem_types` was fed ONLY from an
+        argument that is a bare identifier naming a tracked local, so
+        `show(xs)` inherited xs's element type while `show([1.5, 2.5])` —
+        the SAME call with the list written in place — inherited nothing. The
+        callee then read every element through `mojo_list_get_int` and
+        `print(r)` emitted the floats' raw IEEE-754 bit patterns with exit 0.
+        See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md
+        ("Item 8")."""
+        if not isinstance(a, ListExpr):
+            return None
+        els = a.elements
+        if not els:
+            return None
+        if isinstance(els[0], ListExpr):
+            return ('MojoList *', self._infer_list_elem_type(els[0].elements))
+        return (self._infer_list_elem_type(els), None)
+
+    def _informative_elem_ctype(e):
+        """True when an observed element ctype tells the callee something the
+        `int64_t` default would not already do.
+
+        `int64_t` is this table's "no information" answer, not a fact about
+        the value: the consumer seeds `_elem_types[bare] = e` and every
+        absent entry falls back to exactly the same `int64_t`
+        (`_elem_of`), so an int list is read identically with or without a
+        contract. Recording it as EVIDENCE can therefore only ever destroy
+        information — it collides with a `char *`/`double` observation from a
+        sibling call site and turns a resolvable param into
+        `(None, None)` = unknown = `int64_t` again, which is what the int
+        observation alone already gave. So a literal argument contributes its
+        element ctype only when it is one the default gets wrong.
+
+        Deliberately NOT applied to the bare-identifier branch below, which
+        predates this: dropping `int64_t` there flips which side of a
+        genuinely-heterogeneous param (`f(int_list)` and `f(str_list)` from
+        different call sites) reads correctly, and that is a coin flip
+        either way — not worth re-rolling real stdlib code on while the
+        breadth number is unmeasured."""
+        return e != 'int64_t' and e != ''
+
+    def _note_literal_arg_elems(callee, pname, a):
+        """Record `pname`'s element ctype from a container-literal argument.
+        No-op unless the literal's element ctype is one the `int64_t` default
+        gets wrong (see `_informative_elem_ctype`)."""
+        pair = _literal_arg_elems(a)
+        if pair is None:
+            return
+        e = pair[0]
+        ne = pair[1]
+        if not _informative_elem_ctype(e):
+            return
+        import os as _os
+        if _os.environ.get('MOJO_TRACE_PARAM_ELEM'):
+            print('TRACE', _as_str(callee), _as_str(pname), e, ne, file=sys.stderr)
+        _record_param_elem(callee, pname, e, ne)
+
     _fn_by_name: dict = {}
     for _fbn_s in all_functions:
         if isinstance(_fbn_s, FunctionDef):
@@ -5294,6 +5629,19 @@ def gen_module_impl(self, stmts):
                     _sp_inner = _struct_obs.setdefault(callee, {})
                     _sp_set = _sp_inner.setdefault(pnames[i], set())
                     _sp_set.add(_gmi_as_str(spt))
+            # Keyword arguments name the parameter directly, so the element
+            # contract reads them the same way — `show(data=[1.5, 2.5])` is
+            # the same call as `show([1.5, 2.5])` and used to inherit exactly
+            # as little. Only the literal branch is added here: the scalar and
+            # struct-pointer observations above are a separate pre-existing
+            # contract with its own coverage, and widening those is not this
+            # change's business.
+            for _kw in (getattr(call, 'kwargs', None) or []):
+                _kwn = _as_str(_kw[0])
+                for _ki in range(len(pnames)):
+                    if pnames[_ki] == _kwn:
+                        _note_literal_arg_elems(callee, _kwn, _kw[1])
+                        break
 
     for caller_name, caller_struct, cbody in _method_caller_bodies:
         _melem, _mnested, _ = self._scan_container_elems(cbody)
@@ -6240,7 +6588,8 @@ def gen_module_impl(self, stmts):
             # of the isinstance filter.
             s = _as_funcdef_node(s)
             _saved_vt_23e = self.var_types
-            self.var_types = dict(_saved_vt_23e)
+            _scratch_mark_23e: int = self._scan_scratch_top
+            self.var_types = self._scratch_dict_copy(_saved_vt_23e)
             # Index, don't unpack — see the identical fix + comment at the
             # earlier return-type-inference pass above.
             _p23e_params = s.params
@@ -6259,6 +6608,7 @@ def gen_module_impl(self, stmts):
             if s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.var_types = _saved_vt_23e
+            self._scan_scratch_top = _scratch_mark_23e
             self.func_return_types[s.name] = inferred
 
     for s in all_functions:
@@ -6520,7 +6870,8 @@ def gen_module_impl(self, stmts):
             _saved_vt_3b = self.var_types
             _saved_fcn_3b = self.current_func_name
             self.current_func_name = _p3b_s.name
-            self.var_types = dict(_saved_vt_3b)
+            _scratch_mark_3b: int = self._scan_scratch_top
+            self.var_types = self._scratch_dict_copy(_saved_vt_3b)
             # Index, don't unpack — see the identical fix + comment at the
             # earlier return-type-inference passes above.
             _p3b_params = _p3b_s.params
@@ -6542,6 +6893,7 @@ def gen_module_impl(self, stmts):
             if _p3b_s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.var_types = _saved_vt_3b
+            self._scan_scratch_top = _scratch_mark_3b
             self.current_func_name = _saved_fcn_3b
             self.func_return_types[_p3b_s.name] = inferred
 
@@ -9146,6 +9498,36 @@ def gen_module_impl(self, stmts):
 
     _stub_only_modules = {'jit.arm64', 'jit'}
     _imp_syms = _as_dict(self.imported_symbols)
+
+    def _sn_def_name(_si, _sn):
+        """The name this TU's OWN inline definitions use for the symbol
+        `imported_symbols` records under `_sn` — the `original_name` for a
+        genuine `from M import f as g` alias, else `_sn` itself.
+
+        `inline_defined` is built from the parsed FunctionDef NAMES, so a
+        bare-name entry always hits it and an ALIAS entry never did. That
+        miss is not cosmetic: the `inline_defined` skip exists precisely
+        because a symbol this TU defines must not get a second,
+        independently-typed declaration from the text-scan export table,
+        and an alias skipped the skip and so emitted one. With an
+        unannotated `def` the scan's signature has no parameters
+        (`int64_t helper (void)`), so the single-TU output carried a
+        forward declaration contradicting the definition compiled a few
+        hundred lines below it:
+        #
+        #   conflicting types for 'helper_mod_helper_9f63a2';
+        #     have 'int64_t(void)'
+        #   main2.py:4:9: error: too many arguments to function
+        #     'helper_mod_helper_9f63a2'; expected 0, have 1
+        #
+        # for `from helper_mod import helper as h; h(41)`. Same module, same
+        # alias, no re-export involved.
+        """
+        _od = _si.get('original_name')
+        if isinstance(_od, str) and _od:
+            return _od
+        return _sn
+
     for sym_name in sorted(_imp_syms):
         # `_sn` — a FRESH `_as_str` view (the sorted() loop var is int64_t;
         # reassigning `sym_name` would re-widen it via whole-function
@@ -9194,6 +9576,7 @@ def gen_module_impl(self, stmts):
         # runs first and would win the race to define `_MOJO_STUB_<sym>`,
         # suppressing the definition pass's own declaration.
         if (_sn in inline_defined
+                or _sn_def_name(sym_info, _sn) in inline_defined
                 or (_sn in self._global_inline_defs and 'signature' not in sym_info)):
             continue
         if _sn in self.struct_field_types:

@@ -21,8 +21,7 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `FORMAL_x86_64_end_to_end_proof.md` | B1–B23, the proof work, the per-form ledger |
 | `CODEGEN_bootstrap_resource_blowup.md` | the ~192 GB runaway, the 55 GB ceiling, attribution |
 | `CODEGEN_noshim_dumpfull_preexisting_divergence.md` | native-vs-reference `.ci` divergence |
-| `CODEGEN_nested_comprehension.md` | the `gimple`-path part, which is FIXED: a 2+ clause comprehension silently dropped every clause after the first (see the commit that lands `_compr_pending_inner`). Read it for the dropped-clause mechanism; the OPEN remainder is `FORMAL_nested_comprehension_nondeterministic_exit.md` |
-| `FORMAL_nested_comprehension_nondeterministic_exit.md` | the OPEN remainder of the case above: the same shape in the SEPARATE proof-oriented backend, which exits 58 or SIGSEGV at random and is not reachable from a `mojo/backend_gimple/` fix |
+| *(deleted 2026-09-30)* | the nested-comprehension cluster is CLOSED on both the compiled and the formal backends: a 2+ clause comprehension no longer drops clauses (`_compr_pending_inner`), and the formal backends no longer exit 58/SIGSEGV at random — `_emit_range_list` gave every `range()` in a function one shared `_rabs` label, so the first range branched into the second's block and left through the second's `jmp div_label`. See the two commits on `work/codegen-old-divergences` and the cases in `test_x86_64_containers.py` |
 | `TEST_expect_marked_tests_in_no_bucket_never_run.md` | 11 of the 16 `expect`-marked tests have NO bucket, so no gate runs them and their anti-rot "marked expect= but it PASSES" check can never fire — ~69 failing cases, mostly the compiled-path async/await cluster |
 | `CODEGEN_set_dict_comprehension_multi_clause_dropped.md` | the list/generator half of the multi-clause comprehension fix is in; `set` and `dict` still drop every clause after the first (silent, exit 0) |
 | `CODEGEN_range_comprehension_tuple_slot_type_lost.md` | a comprehension over `range()` whose element is a tuple/list drops the per-slot element types, so a 0 in a non-first slot reads as NULL and prints `None` — silent, exit 0, and pre-existing (reproduces on a single clause) |
@@ -30,7 +29,14 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `FORMAL_string_value_model.md` | what a string IS on the formal path, `len`/`==`/`+` on it, and the `String`-struct collision behind the 16 "a String receiver" refusals |
 | `FORMAL_arm64_instruction_coverage.md`, `FORMAL_arm64_known_proof_gaps.md`, `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | arm64 work — not duplicated here |
 | `FORMAL_formal_frame_size_bounds_recursion_depth.md` | neither backend guards the stack: a fixed 128 KiB (arm64) / 16 KiB (x86-64) frame per call and no depth test, so recursion past 61 (arm64) or 450 (x86-64) frames is a SIGSEGV and not a refusal. **Both backends.** |
-| `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), and the three refusals that named a cause which was not operating |
+| `FORMAL_method_call_on_a_subscripted_receiver.md` | the 17 of row 4's 25 files whose receiver's STRUCT is not established, so `_rewrite_method_calls` cannot lift the call: the four shapes of receiver, where each one's type would come from, and the 4 whose diagnostic is measurably wrong (a LINK diagnosis for a CODEGEN problem). Needs receiver-type inference — `construct:formal-value-model-gaps` |
+| `FORMAL_x86_64_comptime_specialization_abi.md` | x86-64 refuses `f[T](x)` and the refusal is LOAD-BEARING (its callee reserves a register per comptime parameter and its call site passes none): three lines to port, and until they land the receiver-position family's construct lowers on arm64 only |
+| `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), `origin_of` (the same mistake again — a compile-time intrinsic with no body, so no dereference for the sentence to describe; fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), the three refusals that named a cause which was not operating, and the constructor-assigned field type that closed the `field slot holds a frame address` family (10 files → 2) |
+| `FORMAL_frame_by_value_ceiling_zero.md` | map rows 7 and 8 of the sweep work map, **measured at a ceiling of 0**: 26 files, both refusals lifted behind a temporary guard, not one reaches `pass`, and 10 of the 26 land in a chain whose end is a documented permanent limit. Carries the per-file landing table, which is the deliverable. Two of the row-7 sub-shapes are now FIXED and the landing table is measured after both: `origin_of` (`14a2e42d`) and a subscript's argument list (`30e5e2e9`) — 4 of the 7 files move to a true refusal, 0 reach `pass` |
+| `FORMAL_dotted_base_bracket_list_is_not_classified.md` | the remainder of the closed `FORMAL_type_argument_read_as_a_container.md`: a subscript over a name this unit cannot classify (`external_call["sym", T]`'s 55-file half belongs to `formal-extcall-tuple`) keeps its refusal, because deciding it needs the imported module's declarations and `formal/imports.py` owns those. 0 swept files today |
+| `FORMAL_callee_no_def_ceiling_zero.md` | the work map's row 8, "callee has no definition on this path": ceiling **0 of 12** (six of the twelve are behind an import diagnosis), and the row's one sentence was standing for five facts — an imported free function (26 files over `std/`+`test/`), a compile-time parameter, an MLIR-yielding intrinsic, a star-imported name, and genuinely unbound. The five sentences have landed; the cross-image per-parameter contract that would allow the hand-off has not |
+| `FORMAL_frame_refusal_preempts_the_import_diagnosis.md` | every frame refusal is raised before `_resolve_imports`, so a file that both trips a frame clause and imports something is reported as a `codegen` gap in itself — 80 in-scope files, 6 of 12 measured to change class. Fixing it re-numbers six rows of the map at once |
+| `FORMAL_aliased_reexport_publishes_the_wrong_name.md` | `from leaf import base as aliased` in a package `__init__` publishes `base`; a consumer's `aliased(21)` cannot bind |
 
 ---
 
@@ -39,22 +45,50 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 Verbatim, with the current measured state attached to each. Ordered as I would
 take them.
 
-### A1. `call_rel32` — 7 examples, the last big uncovered form — **high**
+### A1. `call_rel32` — WIRED, no longer a blocker — **done, needs a run**
 
-The largest single blocker left in the x86-64 proof work. `x86_step_call_rel32`
-**already exists** in `lib/X86.lean`; it is simply not wired into the
-generator's `_FORMS`/`_SUCCS`/`_resolve` trio. What makes it more than a
-lookup is that a call has **two** successors *and* a memory write: it pushes
-the return address and jumps. The pushed word has to be shown separated from
-the callee's frame, and the callee has to be in the path tree at all. Real
-design work, not a wiring change.
+`x86_step_call_rel32` exists in `lib/X86.lean` and **is now** wired into the
+generator's `_FORMS`/`_SUCCS`/`_resolve` trio
+(`formal/x86_64_endtoend_test.py`: `_FORMS` at :177, the successor expression at
+:259, the literal-address substitution at :429). `lib/X86.lean` also grew the
+call/return *pairing* section — `x86_call_post`, `x86_ret_post`,
+`x86_at_target` and the stack round-trip theorem — which is the "two successors
+and a memory write" work this item said was real design rather than a wiring
+change.
+
+**Measured 2026-09-30 (`_plan` over `formal/examples`, no Lean):** `call_rel32`
+is named as a missing lemma by **0 of 45** examples. Six plan clean *through*
+it — `count`, `fact`, `fib`, `pow2`, `sqsum`, `sum` — and none is blocked by it.
+So it is no longer on the critical path, and the "7 examples" figure in the
+header below is what it was on 2026-09-26.
+
+**What remains is verification, and the code says so itself**: the entry is
+commented `NOT VERIFIED. This was wired without running the suite`, with the
+open risk named as the continuation AT the target — a call's `rip` is
+`m + 5 + off`, a literal supplied by the generator, and whether the path from
+there re-enters a block whose certificate is wired is a question only a run
+answers. Running `formal/x86_64_endtoend_test.py` settles it, and it needs Lean
+runs this worker is not permitted to start; it belongs with the integrator.
+
+What the remaining blockers actually are, same measurement: `movsx_r64_r8` (3),
+`alu_ri32` (3), and one each of `alu_rr`, `shift_imm8`, `cqo`, `group3`,
+`lea_r64_rm64`, `mov_r64_rm64`, `mov_rm64_r64` — i.e. A2 below, which is now
+the whole of the uncovered-form work.
 
 ### A2. `movsx_r64_r8` (3 examples) + 8 one-example forms — **medium**
 
-After `call_rel32`, the remaining uncovered forms are `movsx_r64_r8` and
-singletons: `alu_rr:and`/`:or`/`:xor`, `alu_rr32:xor`, `shift_imm8:shl`/`:shr`,
-`group3:div`, `alu_ri32:and`. One lemma each, and most follow an existing
-shape — see the generalisation rule at the end of A4.
+With `call_rel32` done (A1) this is now the WHOLE of the uncovered-form work.
+The forms below are what `_plan` names as missing across `formal/examples`,
+measured 2026-09-30: `movsx_r64_r8` (3), `alu_ri32` (3), and one each of
+`alu_rr`, `shift_imm8`, `cqo`, `group3`, `lea_r64_rm64`, `mov_r64_rm64`,
+`mov_rm64_r64`.
+
+The list above names the old forms (`alu_rr:and`/`:or`/`:xor`, `alu_rr32:xor`,
+`shift_imm8:shl`/`:shr`, `group3:div`, `alu_ri32:and`) because that is the list
+this item was written from; where the measurement disagrees, the measurement
+wins — note that `cqo` and `lea_r64_rm64` were not on it, and `alu_ri32` is
+reported once as a family rather than per sub-op. One lemma each, and most
+follow an existing shape — see the generalisation rule at the end of A4.
 
 ### A3. 14 termination proofs carry a `sorry` — **medium**
 
@@ -133,7 +167,21 @@ so compiler-binary optimization is not the lever. Measure first:
 2. Profile by phase; establish whether peak is in the *transitive* dump.
 3. **Cheapest and most valuable: distinguish live-set from fragmentation** — an
    allocation-count probe, or `leaks`/`vmmap`. Answers whether the memory is
-   reachable objects or a leak. Do this one first.
+   reachable objects or a leak. Do this first.
+
+Two causes now measured, both fixed at their call sites or worked around, and
+both worth knowing before the next bisect because they produce the same
+"it got slower and bigger" symptom by different means:
+
+- `CODEGEN_selfhost_tokenize_region_eq_quadratic.md` — the self-hosted
+  tokenizer's own closing-triple-quote scan is quadratic in each string
+  literal (a runtime length check rescans from byte 0 on every character):
+  0.05 s under python3, 2.5 minutes self-hosted, for `myinterpreter.py`,
+  before a single statement is compiled.
+- `CODEGEN_container_eq_is_pointer_identity.md` — `==` between two containers
+  is a pointer comparison, so any fixed-point loop written on one never
+  terminates; with C2's never-freed allocator each round's fresh set is also
+  permanent. Measured: a two-line program past 8 GB.
 
 ### C2. The self-hosted runtime's never-frees allocator — **high**
 
@@ -207,6 +255,23 @@ emitter actually rejects as loop-shaped. The *form* counts are stable and
 trustworthy (`call_rel32` 7, `movsx_r64_r8` 3, eight singletons); the loop
 split is not. Cheap to reconcile, and worth doing before anyone reasons about
 "how many loop examples are left".
+
+### D4. Two finished branches each built the whole returned-frame convention, differently — **needs a decision**
+
+`work/formal-string-return` and `work/formal-frame-escape` diverge from the
+same commit and each implemented the caller-owned-block convention in full —
+prologue, call site, model and its own refusal family. Merging the second onto
+a tree carrying the first was attempted and aborted: 22 conflict regions over 8
+files, and the two disagree about the *shape of the table the backends read*
+and about the **arity of the predicate** `model.struct_returned_frame_sites` is
+called with, so neither tree passes the other's tests
+(`TypeError: _p() takes 1 positional argument but 2 were given`).
+
+Neither is half-applied; both branches are intact. The map, the evidence, the
+argument for which table shape to keep, and the five steps to reconcile are in
+`FORMAL_returned_frame_two_incompatible_designs.md`. **Do not resolve it by
+keeping both tables** — they answer the same question for the same image, and
+which one a backend reads would then depend on which was assigned last.
 
 ### D3. A/B sweep shows 605 CI-DIFFs, untriaged — **medium, may be benign**
 

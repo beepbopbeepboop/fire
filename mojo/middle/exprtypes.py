@@ -423,6 +423,34 @@ def _local_literal_ctype(value) -> str | None:
         return '_Bool'
     return None
 
+def is_python_bool_expr(gen, node) -> bool:
+    """Does this AST expression hold a Python `bool` VALUE, as distinct from a
+    plain int?
+
+    A bool's C type is a plain `int` in this backend — `BoolLiteral` lowers to
+    `int`, and `any`/`all`/`isinstance` return a C `int` on purpose — so every
+    consumer that has to CHOOSE between the int formatting and the bool one
+    (`1`/`0` vs `True`/`False`) has to look at the expression instead, and a
+    bare NAME has nothing left to look at: `b = True` gives `b` an `int`
+    lowered type. Those names are recorded in `gen._bool_valued` by
+    `_record_bool_valued` (emit_stmts.py) for exactly this purpose.
+
+    One predicate, so `print`, a dict store and a list literal cannot disagree
+    about the same value — which they did: `print(b)` formatted as True/False
+    while `{'k': b}` stored a value the dict repr then rendered as `1`.
+
+    Best-effort by contract: a node nothing can type simply answers False,
+    which is the pre-existing behaviour of every caller."""
+    if isinstance(node, BoolLiteral):
+        return True
+    if isinstance(node, IdentExpr) and node.name in getattr(gen, '_bool_valued', ()):
+        return True
+    try:
+        return gen._quick_type(node) == '_Bool'
+    except Exception:
+        return False
+
+
 def _receiver_key(e) -> str | None:
     """Stable string identity for a "receiver" sub-expression whose STORED
     per-name type info (`dict_val_types`, below) was recorded under that

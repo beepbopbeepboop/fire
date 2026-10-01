@@ -249,13 +249,6 @@ class BoolLiteral:
     col: int = 0
 
 @dataclass
-class StringLiteral:
-    value: str
-    line: int = 0
-    col: int = 0
-    is_bytes: bool = False
-
-@dataclass
 class EllipsisLiteral:
     line: int = 0
     col: int = 0
@@ -1130,12 +1123,214 @@ def _split_on_separators(s: str) -> list[str]:
     parts.append("".join(buf))
     return parts
 
-def py_tokenize(src: str) -> list[Token]:
+# ── what a line break is ────────────────────────────────────────────────────
+#
+# The line terminators the LANGUAGE has, and `str.splitlines()` is not it: that
+# also breaks on vertical tab, form feed, the four C1 information separators,
+# NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR, and CPython's tokenizer breaks on
+# none of them. So `s.splitlines()` invented a line break inside any string
+# literal containing one of those, which destroyed the literal — `x = "a\x0bb"`
+# tokenized to NO STRING token at all, and the diagnostic then named a line with
+# no problem on it — and inside a COMMENT, where the second half became a bare
+# NAME statement the source never contained. Eight characters, every one of
+# which CPython accepts inside a string, and not one of which occurs in any of
+# the 617 `.mojo`/`.py` files reachable from this worktree (counted, not
+# assumed).
+#
+# `\r` IS a line terminator, and CPython's tokenizer agrees: `compile` of
+# `s = "a\rb"` is a SyntaxError. The value CPython gives a `\r` that lands inside
+# a TRIPLE-quoted literal is normalized to `\n`, and this path normalizes nothing
+# — that half is the documented byte-exact divergence. The SPLIT is the part that
+# has to agree, and for a single-quoted literal agreeing means refusing.
+#
+# Both users are here so there is one answer to "where does a line end":
+# `_scan_string_end` (which must refuse to let a literal cross one) and
+# `_source_lines` (which must split on one and only on one).
+_LINE_ENDS = '\r\n'
+_LINE_TERMINATORS = re.compile(r'\r\n|\r|\n')
+
+
+def _source_lines(src: str) -> list:
+    """`src`'s physical lines, split the way the language splits them.
+
+    Same shape as `str.splitlines()` for every input built from `\n`, `\r\n` and
+    `\r` alone — including the trailing-empty-line convention, so this is a
+    drop-in for every file on this tree.
+    """
+    lines = _LINE_TERMINATORS.split(src)
+    if lines and lines[-1] == '':
+        lines.pop()
+    return lines
+
+
+def _indent_expanded(line: str) -> str:
+    r"""`line` with tabs expanded in its LEADING whitespace only.
+
+    The tab expansion exists for the INDENT, and `indent` below is computed from
+    the leading run and nothing else — so expanding the body of the line was
+    pure loss. In code a tab is whitespace (`_TOKEN_RE`'s WS arm is `[^\S\n]+`,
+    which a tab matches) and expanding it changed no token. Inside a string
+    literal a tab is CONTENT, and expanding it rewrote the value in a program
+    that built, ran and printed the wrong string:
+
+        print("x<TAB>y")     CPython: x<TAB>y, len 3      here, before: x y, len 4
+
+    The leading run is the only part that matters and a tab at the start of a
+    line always lands on a column boundary, so expanding that run alone gives
+    the same `indent` — and `lstrip` splits at the same place either way, since
+    `expandtabs` turns a tab into spaces and both are whitespace to it.
+
+    This is the third pass in this function to need to know where the literals
+    are, after the backslash join and the line split; the other two are
+    `_ends_inside_string` and `_strip_inline_comment`, and this one is the only
+    one that still had to be taught.
+    """
+    cut = len(line) - len(line.lstrip())
+    return line[:cut].expandtabs(_INDENT_SIZE) + line[cut:]
+
+
+def _scan_string_end(src: str, i: int, quote: str, triple: bool) -> int:
+    r"""Index just PAST the closing delimiter of the string literal that OPENS at
+    `i`, or -1 when that literal is unterminated.
+
+    This is the one place in the front end that answers "where does this string
+    literal end", shared by `py_tokenize`'s triple-quote collapse and its
+    ordinary-quote skip (CLAUDE.md: consolidate duplicates — the two used to be
+    separate inline loops that could disagree, and the disagreement is silent).
+
+    The rule is CPython's, and it is worth stating exactly because getting it
+    wrong is the bug this function exists to make impossible
+    (bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md).
+    (That doc's examples spell quote runs out longhand from here on: a literal
+    triple quote inside this docstring would close it.)
+
+        A backslash consumes the NEXT CHARACTER, whatever it is.
+
+    That is what makes a backslash-quote not close a non-raw literal, in a
+    triple-quoted one as much as in a single-quoted one. Written with D for a
+    double quote, the source `DDDa\DD"bDDD` is a triple-quoted literal whose
+    content is `a\"bDD` — emphatically NOT "a literal that ends one quote
+    early". It is also what makes a backslash immediately before the closing run
+    UNTERMINATED rather than closed. CPython says so too — "unterminated
+    triple-quoted string literal" for `DDD\DDD`, "unterminated string literal"
+    for `"abc\"` — and refusing is what this path does now.
+
+    The alternative rule proposed in that bug's original report — "an escape
+    consumes the next byte only when it is a backslash or the quote character" —
+    is the same rule for every input that can END a literal, because only a
+    backslash or a quote can be both "the byte after a backslash" and "a
+    delimiter". It therefore changes nothing about where literals end, and it
+    cannot make the reported case parse, because CPython does not parse it
+    either. (What it does change is the VALUE, and this path's value is already
+    byte-exact: no escape is processed at all, which is a separate, documented
+    divergence from CPython and not this function's business.)
+
+    A single-quoted literal may not cross a bare newline (CPython: "EOL while
+    scanning string literal"); a backslash-continued one may, and a
+    triple-quoted one obviously may. Unterminated is returned as -1, never as
+    "the rest of the file": a literal that ran off the end used to swallow
+    every remaining line into its own value, which is a silent miscompile, and
+    the alternative — pretending the delimiters were not there — is worse
+    still, because it turns the literal's text into ordinary code
+    (`x = "abc` used to parse as `x = abc`, and `x = it's` as `x = it`
+    followed by a bare `s`).
+    """
+    n = len(src)
+    delim = quote * 3 if triple else quote
+    dlen = len(delim)
+    j = i + dlen
+    while j < n:
+        c = src[j]
+        if c == '\\' and j + 1 < n:
+            j += 2
+            continue
+        if src.startswith(delim, j):
+            return j + dlen
+        if c in _LINE_ENDS and not triple:
+            # A raw line break closes nothing in a single-quoted literal, and
+            # that includes `\r`: CPython's tokenizer treats a lone CR as a line
+            # end (its own value for a CR inside a triple-quoted literal is
+            # normalized to `\n`, which is the byte-exact divergence, not this)
+            # and refuses `compile('s = "a\rb"')` as an unterminated literal.
+            # Without this arm the CR stayed invisible here and the front end
+            # refused to refuse — see `_source_lines`, which splits on the same
+            # two characters.
+            return -1
+        j += 1
+    return -1
+
+def _ends_inside_string(line: str) -> bool:
+    r"""True when `line` stops part-way through an unterminated string literal.
+
+    The companion question to `_scan_string_end` ("where does the literal that
+    OPENS at `i` end") — this one asks "is the line's last character inside one",
+    which is what the backslash-continuation join in `py_tokenize` needs to know.
+    Same escape rule, so the two cannot disagree: a backslash consumes the NEXT
+    character, and a backslash at the very end of the line therefore consumes
+    the line break that follows it, leaving the line still inside its string.
+
+    A backtick string is skipped as an opaque unit and is NOT reported as being
+    inside: it has no backslash escape, so a trailing backslash in one is not a
+    continuation and the join must keep treating it as one (the pre-existing
+    behaviour for that spelling, unchanged).
+
+    Only single-quoted literals can reach `True`. `py_tokenize` replaces
+    triple-quoted spans with placeholder names before this is consulted, and a
+    single-quoted literal cannot hold a raw newline, so a line can only end
+    inside one by way of the backslash-newline pair this function exists for.
+    """
+    i = 0
+    n = len(line)
+    delim = None
+    while i < n:
+        c = line[i]
+        if delim is None:
+            if c == '`':
+                j = line.find('`', i + 1)
+                if j < 0:
+                    return False
+                i = j + 1
+                continue
+            if c in ('"', "'"):
+                delim = c * 3 if line.startswith(c * 3, i) else c
+                i += len(delim)
+                continue
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if line.startswith(delim, i):
+            i += len(delim)
+            delim = None
+            continue
+        i += 1
+    return delim is not None
+
+def _src_loc(src: str, pos: int, filename: str = "") -> str:
+    """gcc-style `file:line:col: ` prefix for a diagnostic about `src[pos]`.
+
+    Same shape as `Parser._loc` (which can only name a token, and the string
+    scan runs before any token exists), so a lexer refusal reads exactly like
+    the parser's own. `filename` is empty when the caller has none.
+    """
+    line = src.count('\n', 0, pos) + 1
+    nl = src.rfind('\n', 0, pos)
+    col = pos - nl
+    if filename:
+        return f"{filename}:{line}:{col}: "
+    return f"{line}:{col}: "
+
+
+def py_tokenize(src: str, filename: str = "") -> list[Token]:
     """Tokenize with layout rules derived from the .md spec:
         - Indentation (4 spaces) → INDENT/DEDENT
         - ';' → statement separator
         - '#' → end-of-line comment
-        - Multi-line statements use indentation (no backslash continuation)"""
+        - Multi-line statements use indentation (no backslash continuation)
+
+    `filename` is used only to prefix an "unterminated string literal"
+    diagnostic; omit it and the message carries `line:col:` alone."""
     import re
     string_cache = {}
     string_idx = [0]
@@ -1187,6 +1382,35 @@ def py_tokenize(src: str) -> list[Token]:
                 j = src.find('\n', i)
                 i = n if j == -1 else j
                 continue
+            if c == '`':
+                # A backtick string is a Mojo extension with no CPython
+                # counterpart, but it is a STRING, and the two quote checks
+                # below must not see a delimiter that is inside one. Two real
+                # silent misparses came from its not being skipped as a whole
+                # unit, and the second is the reason the unterminated-string
+                # refusal below is safe to add at all:
+                #
+                #   x = `it's fine`   the `'` opened a phantom string, so the
+                #                       apostrophe in an English word was
+                #                       scanned as a delimiter — the new
+                #                       "unterminated string literal" refusal
+                #                       would have named a line with no
+                #                       unterminated literal on it.
+                #   x = `a"""b`       the `"""` was taken as a triple-quote
+                #                       OPENER, so the backtick string was
+                #                       split in two and the second half
+                #                       swallowed the rest of the file.
+                #
+                # No backslash escape: a backtick string ends at the next
+                # backtick, which is what `_TOKEN_RE`'s `` `[^`]*` `` arm and
+                # `_strip_inline_comment`'s `in_str != '`'` special case both
+                # already assume. `find` is the whole rule.
+                j = src.find('`', i + 1)
+                if j < 0:
+                    loc = _src_loc(src, i, filename)
+                    raise SyntaxError(f"{loc}unterminated backtick string literal")
+                i = j + 1
+                continue
             if c in ('"', "'"):
                 # Recognize an optional string prefix (f/r/b/u/t, up to two
                 # letters) immediately before this quote, but only if those
@@ -1213,10 +1437,11 @@ def py_tokenize(src: str) -> list[Token]:
                 start = _string_prefix_start(src, i)
                 quote3 = c * 3
                 if src[i:i + 3] == quote3:
-                    j = i + 3
-                    while j < n and src[j:j + 3] != quote3:
-                        j += 2 if src[j] == '\\' and j + 1 < n else 1
-                    end = j + 3 if j < n else n
+                    end = _scan_string_end(src, i, c, True)
+                    if end < 0:
+                        loc = _src_loc(src, i, filename)
+                        raise SyntaxError(
+                            f"{loc}unterminated triple-quoted string literal")
                     seg = src[last:start]
                     if pending_pad and '\n' in seg:
                         nl_idx = seg.index('\n')
@@ -1251,12 +1476,11 @@ def py_tokenize(src: str) -> list[Token]:
                     # opaque unit so its contents can never be misread as a
                     # triple-quote delimiter. Left in the output untouched —
                     # only real triple-quoted spans get placeholder-ed.
-                    j = i + 1
-                    while j < n and src[j] != c:
-                        if src[j] == '\\' and j + 1 < n: j += 2
-                        elif src[j] == '\n': break
-                        else: j += 1
-                    i = j + 1 if j < n and src[j] == c else j
+                    end = _scan_string_end(src, i, c, False)
+                    if end < 0:
+                        loc = _src_loc(src, i, filename)
+                        raise SyntaxError(f"{loc}unterminated string literal")
+                    i = end
                     continue
             i += 1
         tail = src[last:i]
@@ -1273,8 +1497,38 @@ def py_tokenize(src: str) -> list[Token]:
         return ''.join(out)
 
     src = replace_multiline_strings(src)
-    raw_lines = src.splitlines()
+    raw_lines = _source_lines(src)
     # Join backslash-continued lines: "expr = \\\n    continuation" → one logical line
+    #
+    # CPython deletes a backslash-newline pair from the source BEFORE it
+    # tokenizes, and what the pair is worth depends on where it sits. Outside a
+    # string it separates two tokens, so a space is the right thing to put
+    # between the joined halves and the next line's indentation is
+    # insignificant. INSIDE a string the pair is worth nothing and the next
+    # line's indentation is CONTENT, and CPython keeps both facts:
+    #
+    #     x = "a\
+    #     b"          CPython: 'ab'         here, before: 'a b'
+    #     x = "a\
+    #         b"      CPython: 'a    b'     here, before: 'a  b'
+    #
+    # (the second is `a`, four spaces, `b` — the join put one space in and took
+    # the four out). Both were the silent-miscompile class, and both are the
+    # same defect shape as the one `_scan_string_end` was written for: a
+    # line-joining pass with no idea where the literals are. `_ends_inside_string`
+    # is the one place that now answers that, and it is asked about the
+    # RSTRIPPED line, which is the text whose last character the loop has just
+    # decided is a backslash.
+    #
+    # What the pair is worth is CPython's own rule, measured with `tokenize`
+    # rather than inferred: the STRING token's TEXT is `'"a\\nb"'` for
+    # `"a\<nl>b"` and `'r"a\\\nb"'` for `r"a\<nl>b"` — deleted unless the
+    # literal is raw. This join deletes it unconditionally, which is right for
+    # three of the four shapes and wrong for a raw single-quoted literal, where
+    # CPython keeps the pair as content. That one is pinned with its exact next
+    # step in bugs/CODEGEN_backslash_continuation_in_a_raw_literal.md; the
+    # triple-quoted shapes are placeholdered before this pass runs and so are
+    # untouched by it either way.
     joined = []
     line_nums = []  # track physical line number (1-based) for each logical line
     i = 0
@@ -1282,10 +1536,13 @@ def py_tokenize(src: str) -> list[Token]:
         start_line = i + 1  # 1-indexed physical line number
         line = raw_lines[i]
         while line.rstrip().endswith('\\'):
-            line = line.rstrip()[:-1]  # strip the backslash
+            stripped = line.rstrip()
+            inside = _ends_inside_string(stripped)
+            line = stripped[:-1]  # strip the backslash
             i += 1
             if i < len(raw_lines):
-                line = line + ' ' + raw_lines[i].lstrip()
+                nxt = raw_lines[i] if inside else raw_lines[i].lstrip()
+                line = line + ('' if inside else ' ') + nxt
             else:
                 break
         joined.append(line)
@@ -1298,7 +1555,7 @@ def py_tokenize(src: str) -> list[Token]:
     continued_from_prev = False  # last physical line ended in an implicit-continuation token
     for line_idx, line in enumerate(joined):
         physical_line = line_nums[line_idx]
-        expanded = line.expandtabs(_INDENT_SIZE)
+        expanded = _indent_expanded(line)
         raw_content = expanded.lstrip()
         if not raw_content or raw_content.startswith(_CMT_CHAR): continue
         content = _strip_inline_comment(raw_content).rstrip()
@@ -4211,10 +4468,16 @@ class Parser:
     def _decode_bytes_literal(self, raw: str) -> str:
         """Strip a `b'...'` token's prefix+quotes and decode its escape
         sequences to a latin-1 string carrying one character per output
-        byte (codepoints 0-255). `\\xNN`, `\\n`, `\\t`, `\\r`, `\\0`,
-        `\\\\`, `\\'`, `\\"` are recognised; a raw `r` prefix disables all
-        escape processing. Unknown `\\c` sequences are kept verbatim
-        (backslash + char), matching CPython's bytes-literal leniency."""
+        byte (codepoints 0-255). `\\xNN`, `\\n`, `\\t`, `\\r`, `\\a`,
+        `\\b`, `\\f`, `\\v`, `\\0`, `\\\\`, `\\'`, `\\"` are recognised; a
+        raw `r` prefix disables all escape processing. Unknown `\\c`
+        sequences are kept verbatim (backslash + char), matching CPython's
+        bytes-literal leniency — but a KNOWN one is not unknown, and
+        `\\f`/`\\v`/`\\a`/`\\b` were missing from the table below, so
+        `b"\\f"` was two characters (backslash, f) rather than one
+        (0x0c): a silent wrong value in every bytes literal using them, and
+        an inconsistency with the `str` path, which decoded all of them
+        correctly. Measured against CPython, all four now agree."""
         inner = self._strip_string_prefix_and_quotes(raw)
         is_raw = False
         prefix_len = 0
@@ -4246,6 +4509,14 @@ class Parser:
                 out.append('\t'); i += 2; continue
             if nxt == 'r':
                 out.append('\r'); i += 2; continue
+            if nxt == 'a':
+                out.append('\a'); i += 2; continue
+            if nxt == 'b':
+                out.append('\b'); i += 2; continue
+            if nxt == 'f':
+                out.append('\f'); i += 2; continue
+            if nxt == 'v':
+                out.append('\v'); i += 2; continue
             if nxt == '\\':
                 out.append('\\'); i += 2; continue
             if nxt == "'":
@@ -6544,6 +6815,26 @@ class Parser:
             names = [target]
             while self._peek().kind == "COMMA":
                 self._advance()
+                # A TRAILING comma makes the target a 1-tuple, and the `in`
+                # that follows is what says so — `for patterns, in
+                # _resolve_file_values(f, xs.items()):` (real: c_parser/
+                # preprocessor/__init__.py:169) is Python-legal and means
+                # "unpack each item's single element", which is NOT the same
+                # as the bare-name target this loop would otherwise produce:
+                # `_parse_unpack_target()` has no way to know a comma is
+                # trailing rather than a separator, so it happily consumed
+                # the `in` as a second target name and the parse then died
+                # with "Expected KW got NAME('<iterable>')". Closing the
+                # target here preserves the 1-tuple meaning and reuses the
+                # ONE representation `for (a,) in b:` already produces
+                # (`"(a)"`, see _parse_unpack_target), so every downstream
+                # consumer of a parenthesised for-target — the interpreter's
+                # and both codegen paths' — is unchanged rather than having
+                # a second spelling to learn. Silently dropping the comma
+                # instead would bind the whole item to the name: a wrong
+                # answer with no error at all.
+                if self._is_kw("in"):
+                    break
                 names.append(self._parse_unpack_target())
             target = "(" + ", ".join(names) + ")"
         self._expect("KW", "in")

@@ -1,199 +1,27 @@
-# COMPILE_FAIL: Lib/contextlib.py — request for member '__module__' in something not a structure or union
+# COMPILE_FAIL: Lib/contextlib.py — blocked on the async/coroutine codegen (title STALE)
 
-## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): unchanged, byte-for-byte identical failure
+## Status (2026-09-30 — rewritten; not an import-qualifier bug, not attempted)
 
-Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
-against this worktree (fast-forwarded to master `e60b9cd`): exit 1,
-byte-for-byte the same `RuntimeError` naming the same 11 async
-functions (`__aenter__` x3, `__aexit__` x4, `_exit_wrapper`, `aclose`,
-`enter_async_context`, `inner`), same "every `return` must carry a
-scalar value" / "*args/**kwargs parameters not supported for compiled
-async functions" reasons. Still the same genuinely large, out-of-scope
-feature (non-scalar `__aenter__`-return boxing/type-erasure + variadic
-`__aexit__`-parameter support in the C++20 coroutine codegen) — per
-this session's mandate, not attempted. DOCUMENTED-NOT-FIXED.
+Its current blocker is NOT an import/qualifier problem and not the one
+in the title: it is the async/coroutine codegen. The refusal is raised from
+`mojo/backend_gimple/module_gen.py`'s async-function eligibility gate
+("cannot compile module: function(s) ... (async function(s), declared
+`async def`)"), and the per-function reasons are emitted verbatim by
+`mojo/backend_gimple/cpp_async.py` — `__aenter__`: "every `return` must
+carry a scalar value" (line ~1878) and `__aexit__`: "*args/**kwargs
+parameters not supported for compiled async functions" (line ~1616). Both
+are still exactly those two messages in the current tree.
 
-## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): unchanged, byte-for-byte identical failure
+That is: non-scalar `__aenter__`-return boxing/type-erasure plus
+variadic `__exit_wrapper` parameters in the C++20 coroutine frame — a
+genuinely large feature, and not in the decorators/import-qualifiers area
+this doc was filed under. Filed here originally for a `request for member
+'__module__'` GCC error that stopped happening long before 2026-08-06 (the
+title and the original note are STALE, as the 2026-08-06 entry below
+already said); the accumulated "re-verified unchanged" entries after that
+are what a `bugs/` entry is supposed to stop being, so they are gone.
 
-Fresh safety-wrapped `python3 fire.py build .../Lib/contextlib.py`
-against this worktree (includes this session's dict-keyed
-%-formatting landing, commit `e1e12bb`): exit 1, byte-for-byte the same
-`RuntimeError` naming the same 11 async functions (`__aenter__` x3,
-`__aexit__` x4, `_exit_wrapper`, `aclose`, `enter_async_context`,
-`inner`), same "every `return` must carry a scalar value" /
-"*args/**kwargs parameters not supported for compiled async functions"
-reasons. Still the same genuinely large, out-of-scope feature
-(non-scalar `__aenter__`-return boxing/type-erasure + variadic
-`__aexit__`-parameter support in the C++20 coroutine codegen) — not
-attempted. DOCUMENTED-NOT-FIXED.
-
-## Status (re-verified 2026-08-26, branch fix/rest-remainder15): unchanged, byte-for-byte identical failure
-
-Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
-contextlib.py` against current tree (`a913ab8`): exit 1, byte-for-byte
-the same `RuntimeError` naming the same 11 async functions (`__aenter__`
-x3, `__aexit__` x4, `_exit_wrapper`, `aclose`, `enter_async_context`,
-`inner`), same "every `return` must carry a scalar value" /
-"*args/**kwargs parameters not supported for compiled async functions"
-reasons. Source-confirmed both refusal messages are still emitted
-verbatim from `gimple_cpp_async.py` (line ~1399 and ~1146/2325) with no
-change since. None of this campaign's other landings (pkgutil's
-map()/getattr investigation, struct-collision re-check, lambda-in-
-generator re-check) touch the async-eligibility gate. Confirmed still
-the same genuinely large, out-of-scope feature (non-scalar
-`__aenter__`-return boxing/type-erasure + variadic `__aexit__`-parameter
-support in the C++20 coroutine codegen) — not attempted.
-DOCUMENTED-NOT-FIXED.
-
-## Status (re-verified 2026-08-25): unchanged; unaffected by this session's intervening fixes
-
-Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
-fresh against current master (past the struct-method cross-call scalar
-contract "Pass 1.3e", generator-consumption-ordering fixed-point retry +
-defaults-aware arg padding, `**kwargs`-forward slot-alignment fix, and
-coroutine-body `int()`/`float()` builtin support — none of which touch
-the async-eligibility gate this file is blocked on). Byte-for-byte
-identical failure: same `RuntimeError` naming the same 11 async
-functions (`__aenter__` x3, `__aexit__` x4, `_exit_wrapper`, `aclose`,
-`enter_async_context`, `inner`), same "every `return` must carry a
-scalar value" / "*args/**kwargs parameters not supported for compiled
-async functions" per-function reasons. Confirmed still the same
-genuinely large, out-of-scope feature (non-scalar `__aenter__`-return
-boxing/type-erasure + variadic `__aexit__`-parameter support in the
-C++20 coroutine codegen) — not attempted. DOCUMENTED-NOT-FIXED.
-
-## Status (re-verified 2026-08-24): unchanged, unaffected by the unrelated `gimple_cpp_core.py` generator-typing fix landed this session
-
-Landed `bugs/COMPILE_FAIL_ctypes_macholib_dyld.md`'s targeted fix
-(coroutine-body local/yield typing derived from a callee's trusted
-return type). Re-ran `python3 fire.py build /Users/mrs/net/
-Python-3.14.6/Lib/contextlib.py`: byte-for-byte identical failure —
-same `RuntimeError` naming the same 11 async functions (`__aenter__`
-x3, `__aexit__` x4, `_exit_wrapper`, `aclose`, `enter_async_context`,
-`inner`), same "no suspend/resume state-machine transform" /
-"*args/**kwargs parameters not supported" messages. Expected: this
-file's blocker is the async-eligibility gate rejecting non-scalar
-`__aenter__` returns and variadic `__aexit__` params, entirely
-upstream of and unrelated to the return-type-typing fix this session
-landed (which only affects locals/yields ALREADY inside an eligible
-coroutine body). Still DOCUMENTED-NOT-FIXED, still a genuinely large
-separate feature (non-scalar coroutine value boxing/type-erasure +
-variadic coroutine-frame parameters) — not attempted here.
-
-## Status (re-verified 2026-08-23, triage pass)
-
-Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
-contextlib.py`: fails identically — the same hard `RuntimeError`
-naming the same 11 async functions (`__aenter__` x3, `__aexit__` x4,
-`_exit_wrapper`, `aclose`, `enter_async_context`, `inner`) with the
-same "no suspend/resume state-machine transform" message, raised from
-gen_module's async-function eligibility check before any codegen.
-Unchanged assessment: extending the C++20 coroutine codegen to
-non-scalar `__aenter__` returns and `*args`/`**kwargs` `__aexit__`
-params is a genuine large feature (boxing/type-erasure for non-scalar
-coroutine values + variadic coroutine-frame parameters).
-DOCUMENTED-NOT-FIXED.
-
-## Status (re-verified 2026-08-09, fresh against current master post-merge)
-
-Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
-against current master (this worktree's branch was rebuilt on top of
-local master at fdd5e66, which includes all fixes from the intervening
-sessions referenced elsewhere in `bugs/` — dict-subscript augmented
-assignment, `del` statement, class-body enum attributes, for-loop
-tuple-unpacking, etc.). None of those touched the async/generator
-codegen path. Output is byte-for-byte the same failure class as the
-2026-08-07 status below: the identical `RuntimeError` naming the same
-11 async functions (`__aenter__` x3, `__aexit__` x4, `_exit_wrapper`,
-`aclose`, `enter_async_context`, `inner`), same "no suspend/resume
-state-machine transform" message. Still structural, still correctly
-out of scope for a narrow fix — see the unchanged root-cause analysis
-below. Checked whether the sibling fix that resolved
-`bugs/COMPILE_FAIL_Lib_runpy_...md` (deleted 2026-08-09, function-
-scoped-import link stub) or the socket.py `_lower_matmul` fix would
-have any bearing here: neither is reachable, since this file fails
-during `gen_module`'s async-function eligibility check, before any
-link-time or matmul codegen is ever attempted. Not a shared root cause
-with the other two docs in this cluster.
-
-## Status (re-verified 2026-08-07, Track B continuation session)
-
-The PERF hard bug this doc previously matched
-(`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`)
-has since had its Phase 2 fix land — `Lib/contextlib.py` no longer
-times out: `python3 fire.py build .../contextlib.py` now completes in
-~11s. It still does NOT build, but for a completely different reason:
-a hard, honest `RuntimeError` refusal —
-
-```
-cannot compile module: function(s) __aenter__, __aenter__, __aenter__,
-__aexit__, __aexit__, __aexit__, __aexit__, _exit_wrapper, aclose,
-enter_async_context, inner (async function(s), declared `async def`)
-```
-
-`MOJO_DEBUG=1` shows the specific eligibility failures:
-`__aenter__: every 'return' must carry a scalar value (int64_t/double/
-_Bool), and all of them must agree on one consistent type` and
-`__aexit__: *args/**kwargs parameters not supported for compiled async
-functions`. This is the SAME class of limitation as
-`bugs/hard/CODEGEN_generator_struct_typed_param_refused.md` (task
-#147, explicitly out of scope per this session's assignment) and the
-tuple-yield generator refusal documented in `bugs/CODEGEN_generator_
-function_Lib_weakref.md`'s 2026-08-07 update — this codegen's C++20
-coroutine translation for generators/async functions only supports a
-narrow set of shapes (scalar yield/return values, no `*args`/`**kwargs`,
-a fixed list of scalar/container parameter types), and `contextlib.py`'s
-`@contextmanager`/`@asynccontextmanager`-heavy code hits several of
-those restrictions at once (non-scalar `__aenter__` return, variadic
-`__aexit__` params). Extending the coroutine codegen to support these
-shapes is a genuinely large feature (would need real boxing/type-
-erasure for non-scalar yield/return values and variadic-parameter
-support in the coroutine frame), matching the profile of the other
-generator/async-codegen limitations already flagged as out-of-scope for
-this session — NOT attempted here.
-
-## Status (updated 2026-08-06, historical — perf timeout above now fixed, current blocker is different)
-
-Re-ran with a 150s timeout: TIMED OUT again (no output at all before
-the timeout, not even the usual `drop stale export` dylib-link noise
-that normally appears seconds in). Retried standalone with a longer
-background run — still running after 9+ minutes before being killed
-for this session's time budget, on a machine also running several
-other agents' `fire.py build` processes concurrently (this session is
-one of many parallel worktree-agent-* sessions).
-
-This matches the ALREADY-DOCUMENTED performance hard bug
-`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
-almost exactly — that doc's own confirmed repro is THIS EXACT FILE
-(`Lib/contextlib.py`, chosen specifically because it imports `abc`,
-`collections`, `functools`, `os`, `sys`, `types`, `warnings`, ...): a
-`cProfile` run there shows `_walk_ast` called 4.47 MILLION times for
-just 36 nested `gen_module` invocations, a confirmed quadratic-ish
-blowup in the transitive-import compile path (do_imports=True) — not
-a timing fluke or system load artifact, a real algorithmic issue with
-a concrete root cause and phased fix plan already written up in that
-doc.
-
-The ORIGINAL `__module__`/"consolidated" note below is STALE (from an
-older bug-tracking scheme predating the current `bugs/hard/` layout;
-the referenced `consolidated/` directory no longer exists) — not
-re-verified since the file doesn't get far enough to reach a GCC error
-at all anymore, it never finishes compiling within any reasonable
-timeout. Not investigated further here beyond confirming the PERF
-hard-bug match — see that doc for the real fix plan.
-
-## Original stale note (pre-2026-08-06, unverified)
-
-**TIMEOUT resolved** (2026-07-25) — the hang was caused by the multi-name
-`import a, b, c` binding bug (fixed in commit 52ea4d7). The file no longer
-times out, but now hits COMPILE_FAIL errors in its transitive dependencies.
-
-```
-request for member '__module__' in something not a structure or union
-```
-
-This error pattern was tracked in:
-`consolidated/COMPILE_FAIL_cc_error_request_for_member_x_in_something_not_a_structure_o.md`
-(directory no longer exists as of 2026-08-06).
-
-Source file: `/Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
+**Next step** (unchanged in substance, now stated once): extend
+`cpp_async.py`'s coroutine codegen to box non-scalar `__aenter__` returns
+and to carry `*args`/`**kwargs` in the coroutine frame. Nothing about
+imports, decorators or symbol qualification is involved.

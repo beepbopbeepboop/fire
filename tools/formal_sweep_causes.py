@@ -25,8 +25,32 @@ otherwise. A file's terminal cause is the FIRST refusal the build's walk
 reaches, so a module is typically behind a stack of two to four of them, and
 fixing one moves the file to the next with the count unchanged. Two causes were
 measured this way on 2026-09-30 and BOTH had a ceiling of zero files — see
-`bugs/FORMAL_sweep_work_map_2026-09-30.md` §3. Nothing here can tell you a
-cause's real value; only re-sweeping the files it blocks can.
+`bugs/FORMAL_sweep_work_map_2026-09-30.md` §3. The current map, which every
+number below comes from, is `bugs/FORMAL_sweep_work_map_2026-09-30_r2.md`.
+Nothing here can tell you a cause's real value; only re-sweeping the files it
+blocks can.
+
+OF THOSE FILES, HOW MANY EVEN NAME WHAT THE REFUSING MODULE DECLARES
+---------------------------------------------------------------------
+`FILES BLOCKED` answers "how big is this row", which is the wrong first
+question for a cause whose refusal is about a MODULE rather than about a
+construct in the file that was swept. The formal backend builds a dylib for
+every module in a file's EAGER import closure (`formal/imports.py`'s
+`build_module_dylib`), so a module with no boundary symbol refuses every
+importer of its importers — whether or not any of them binds a name in it.
+The 2026-09-30 r2 sweep's second-largest row was 38 files on exactly that
+refusal, 35 of them behind `std/collections/binary_heap.mojo`, and 34 of THOSE
+35 do not contain the string `BinaryHeap` anywhere: they are refused for a type
+in a module one line of `std/collections/__init__.mojo` re-exports.
+
+So `uses:` below, per refusing module: how many of the files it blocks name
+anything it declares. It is computed from `reflect.export_exclusions` — the one
+export rule, the same function the refusal message is built from — and the
+declared names are printed with it, so a reader can check the search rather
+than trust it. `0 of 35` next to a row of 35 is the difference between "38
+files of work" and "38 files waiting on a Stage 5 dependency", and it is the
+number that says which. Measured ceilings for that row: 0 files reach `pass`
+under either probe (`bugs/FORMAL_dylib_export_gate_ceiling.md`).
 
 THE MARKERS ARE AND-WITHIN / OR-WITHIN, and both halves are load-bearing
 -------------------------------------------------------------------------
@@ -58,6 +82,28 @@ load-bearing: `callee has no definition on this path` is asked before
 `receiver passed at argument position 0` (they share `… is passed to …`, and
 asking the other way round puts 12 findings in the wrong column), and
 `frame address passed where a value is wanted` is asked before the same pair.
+
+A MARKER IS A CONTRACT WITH A MESSAGE THAT CAN BE REWORDED, and breaking it is
+invisible from here
+-----------------------------------------------------------------------------
+A marker is a quoted substring of a message `formal/` owns. When a worker
+rewords that message — which is a routine improvement, and a good one — every
+cause keyed on the old wording silently drops to zero and its files fall into
+`other refusal`, which is the bucket that means "this tool has not classified
+this". That is the quiet failure mode again, one level up: nothing raises, the
+table still sums to the total, and the number that changed is the number a
+planner would act on. It happened here for real between the two 2026-09-30
+sweeps: `formal-module-attr` reworded `… so it is a module-level name of
+another module` into `… and it is a module-level name of another module`, and
+4 findings walked out of that row into `other refusal` with nothing to show
+for it.
+
+So this table lists BOTH wordings where a message has had one, and — the part
+that keeps doing it from happening again — `test_formal_sweep.py` asserts that
+every marker matches at least one refusal the sweep actually produced, by
+building the message from `formal/`'s own text rather than from a copy in the
+test. A reword that breaks a marker fails a test instead of quietly moving a
+column.
 
     python3 tools/formal_sweep_causes.py .tmp/sweep.log          # the table
     python3 tools/formal_sweep_causes.py --json .tmp/sweep.log   # machine-readable
@@ -126,6 +172,15 @@ CAUSES = (
       ("__mlir_op is an MLIR dialect construct",))),
     ("inlined_assembly (a gimple-C runtime construct)",
      (("inlined_assembly:",),)),
+    # ABOVE the broad `has no representation` cause below, and it has to be:
+    # `model.multi_index_refusal` ENDS with "so a tuple index has no
+    # representation on this path", so a multi-index message satisfies both and
+    # first match wins. Asked the other way round this cause collects nothing
+    # forever and nothing says so — the precedence failure this file's sibling
+    # test (`test_refusal_taxonomy.py`) exists to catch, in the table that
+    # ranks the causes rather than the one that summarises them.
+    ("multi-index subscript",
+     (("is a subscript whose index is a tuple",),)),
     ("value with no representation on this path",
      (("has no representation on this path",),
       ("has no representation for",))),
@@ -151,7 +206,12 @@ CAUSES = (
     ("a module-global name has no storage",
      (("is bound at module level, and this path has no module-global storage",),)),
     ("a module-level name of ANOTHER module is not exported as a word",
-     (("so it is a module-level name of another module",),)),
+     # TWO wordings, because the message has been reworded once and the
+     # earlier wording is what the 2026-09-30 sweep log still contains — the
+     # log is an artifact, so a table that only knows the new wording silently
+     # reads an old log as `other refusal`. See the module docstring.
+     (("so it is a module-level name of another module",),
+      ("and it is a module-level name of another module",))),
 
     # ── the frame / receiver families. The by-reference receiver design, and
     #    each of these is one of its bands. ──
@@ -193,6 +253,14 @@ CAUSES = (
      (("does not match its fields",),)),
     ("a `...` body: no instructions to emit",
      (("stands where this path needs instructions",),)),
+    # 37 files on the 2026-09-30 r2 sweep, and 36 of them are ONE stdlib host
+    # module refusing on ONE comparison — the largest single construct in the
+    # whole table, and it was in `other refusal` until this marker existed.
+    # `other refusal` is the bucket that means "unclassified", so a construct
+    # this large sitting in it is not a rounding error in a reader's
+    # judgement; it is the tool declining to do the one job it exists for.
+    ("`==` between two values whose kind no call site established",
+     (("compares two values this path can only call numbers",),)),
     ("print() cannot classify the argument's type",
      (("cannot tell whether",),)),
     ("len() of a value that has no length",
@@ -207,12 +275,22 @@ CAUSES = (
      (("does not fold to a compile-time constant",),)),
     ("variadic call has no ABI",
      (("has no variadic ABI",),)),
-    ("multi-index subscript",
-     (("multi-index subscript",),)),
-    ("unimplemented intrinsic",
-     (("unimplemented intrinsic",),)),
+    # (`unimplemented intrinsic` was a cause here until 2026-09-30 r2, and it
+    # was DEAD twice over: its marker was the FAMILY NAME from
+    # `formal_sweep.py`'s `_REFUSAL_FAMILIES` rather than anything a message
+    # contains — no message anywhere in the tree says "unimplemented
+    # intrinsic" — and the message it was written for is the `...`-body
+    # refusal three entries above. A duplicate with a dead marker is worse
+    # than no row: it reads as a cause that blocks nothing, which is
+    # indistinguishable from a cause nothing is blocked by.)
     ("method call on a value receiver is not one of the lowered methods",
      (("lowers only append, close, write",),)),
+    # 3 files, and below the 5-file bar a cause has to clear to be worth a
+    # row — but it has a bug doc of its own
+    # (`bugs/FORMAL_none_is_not_a_literal.md`), and a cause with a doc and no
+    # marker is a cause nobody can find from the table.
+    ("a class-level default is the NAME `None`",
+     (("is a NAME rather than a literal",),)),
 )
 
 def _check_cause_shape():
@@ -257,6 +335,14 @@ _check_cause_shape()
 # subscript and the member-expression spellings are one row and two problems).
 _REFUSED_NAME_RE = re.compile(r"'([A-Za-z_]\w*)'")
 
+# The cause whose refusal is about a MODULE's boundary rather than about a
+# construct in the file that was swept. It is named here rather than tested for,
+# because the `uses:` column is computed for every cause (it is the same three
+# lines) and this is the one where reading it changes what to do next: the fix
+# named by the message is a project (monomorphization), and the number beside
+# it says the row is not that project's priority.
+CAUSE_NO_BOUNDARY_SYMBOL = "module exports no public functions"
+
 DEFAULT_MIN = 1
 
 
@@ -274,6 +360,126 @@ def classify_message(msg):
     return "other refusal"
 
 
+# ── `uses:` — of the files a refusing module blocks, how many name anything it
+# declares. See the module docstring for why this is the first number to read
+# for a cause about a module's boundary.
+
+_decl_cache: dict = {}
+_src_cache: dict = {}
+
+
+def _declared_names(path: str):
+    """The top-level names `path` declares, or None if it cannot be read/parsed.
+
+    From `reflect.export_exclusions`, which is the ONE export rule:
+    `formal/build.py`'s `no_public_api_reason` builds its message out of the
+    same table, so the names searched for below are exactly the names the
+    refusal is about and cannot drift from it. Its keys are the declarations
+    the rule EXCLUDED — which is the whole population for a cause whose message
+    is "this module exports nothing".
+    """
+    if path in _decl_cache:
+        return _decl_cache[path]
+    out = None
+    try:
+        import reflect
+        with open(path, encoding="utf-8", errors="replace") as f:
+            out = set(reflect.export_exclusions(f.read()))
+    except Exception:                                   # noqa: BLE001
+        out = None
+    _decl_cache[path] = out
+    return out
+
+
+def _source(path: str):
+    if path not in _src_cache:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                _src_cache[path] = f.read()
+        except OSError:
+            _src_cache[path] = ""
+    return _src_cache[path]
+
+
+_index: dict = {}
+
+
+def _source_index():
+    """`{basename: [paths]}` over this repository and the stdlib, built once.
+
+    The chain in a sweep line names a refusing module by BASENAME
+    (`binary_heap.mojo`) and never says where it is, so resolving it from the
+    blocked file's own search roots — the obvious thing — works only when the
+    module happens to sit in a directory that file can see. `dtype.mojo` is at
+    `std/dtype/dtype.mojo` and `binary_heap.mojo` at
+    `std/collections/binary_heap.mojo`, so neither resolves from a file under
+    `std/sys/`, and the column silently reported "source not resolvable" for
+    the two largest rows in the table. An index over the two trees that
+    contain every source the sweep can compile is exact instead.
+
+    A basename with more than one match resolves to NOTHING rather than to the
+    first one: several stdlib packages have an `__init__.mojo`, and a count
+    computed from the wrong one is a number nobody can check.
+    """
+    global _index
+    if _index:
+        return _index
+    roots = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+    try:
+        import module_loader
+        if module_loader.STDLIB_PATH:
+            roots.append(os.path.abspath(module_loader.STDLIB_PATH))
+    except Exception:                                   # noqa: BLE001
+        pass
+    skip = {".git", "__pycache__", "build", ".tmp", "node_modules"}
+    idx: dict = collections.defaultdict(list)
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in skip]
+            for name in filenames:
+                if name.endswith((".mojo", ".py")):
+                    idx[name].append(os.path.join(dirpath, name))
+    _index = dict(idx)
+    return _index
+
+
+def _resolve_refuser(refuser: str, blocked_file: str):
+    """The source path of a refusing module named by BASENAME in the chain, or
+    None when it is absent or ambiguous. See `_source_index`."""
+    hits = _source_index().get(os.path.basename(refuser))
+    if hits and len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def _uses_table(rows_for_label):
+    """`[(module, source, blocks, uses, declared_names)]`, biggest first.
+
+    One entry per refusing module, `uses` counting the blocked files that
+    contain any name the module declares as a WHOLE WORD. A word boundary and
+    not a substring, because `BinaryHeap` inside `BinaryHeapX` is not a use of
+    it; and the count is over the blocked files, never over the module itself,
+    so `uses <= blocks` is an invariant a reader can check. `source` is None
+    when the basename is absent or ambiguous and `uses` is then 0 — which the
+    printed note says, so a 0 can never be read as a measurement.
+    """
+    groups = collections.defaultdict(list)
+    for path, refuser in rows_for_label:
+        groups[refuser].append(path)
+    out = []
+    for refuser, files in groups.items():
+        src = _resolve_refuser(refuser, files[0])
+        declared = sorted(_declared_names(src) or ()) if src else []
+        uses = 0
+        if declared:
+            pat = re.compile(r"\b(?:%s)\b" % "|".join(
+                re.escape(n) for n in declared))
+            uses = sum(1 for f in files if pat.search(_source(f)))
+        out.append((refuser, src, len(files), uses, declared))
+    out.sort(key=lambda r: (-r[2], r[0]))
+    return out
+
+
 def rank(log_path):
     """`[{cause, files, in_file, refused_in, example, text}]`, biggest first."""
     rows = []
@@ -288,6 +494,10 @@ def rank(log_path):
     where = collections.defaultdict(collections.Counter)
     refused_names = collections.defaultdict(collections.Counter)
     examples = {}
+    # (path, refuser) per cause, for the `uses:` column — the same two facts
+    # `where` counts, kept as rows because the column needs the file each
+    # refusal was reported against, not just the count.
+    per_cause = collections.defaultdict(list)
     for cls, path, detail in rows:
         hops, term = FS._split_chain(detail)
         refuser = FS._refuser(term)
@@ -299,7 +509,10 @@ def rank(log_path):
         # Where the refusal really came from, which is NOT the file the sweep
         # swept: for a dependency that is the module at the end of the chain,
         # and the distinction is the whole reason the class exists.
-        where[label][refuser or (hops[-1] if hops else "(this file)")] += 1
+        src = refuser or (hops[-1] if hops else "(this file)")
+        where[label][src] += 1
+        if src != "(this file)":
+            per_cause[label].append((path, src))
         named = _REFUSED_NAME_RE.search(msg)
         if named:
             refused_names[label][named.group(1)] += 1
@@ -315,6 +528,7 @@ def rank(log_path):
             "in_file": in_file[label],
             "refused_in": where[label].most_common(),
             "refused_names": refused_names[label].most_common(),
+            "uses": _uses_table(per_cause[label]),
             "example": path,
             "text": msg,
         })
@@ -347,6 +561,29 @@ def main():
                 print("        names:      "
                       + ", ".join(f"{k} x{v}"
                                   for k, v in r["refused_names"][:8]))
+            for refuser, src, blocks, uses, declared in r["uses"]:
+                if src is None:
+                    note = ("NOT MEASURED: the chain names this module by "
+                            "basename only and that basename is absent or "
+                            "ambiguous in this tree")
+                elif not declared:
+                    note = ("measured 0, and it cannot be otherwise: the "
+                            "module declares no name the export rule could "
+                            "exclude")
+                elif uses == 0:
+                    note = ("the refusal is about the import CLOSURE, not "
+                            "about these files — see the module docstring")
+                elif uses == blocks:
+                    note = "every blocked file uses it, so the row is work"
+                else:
+                    note = (f"{blocks - uses} of the {blocks} name nothing it "
+                            f"declares; the rest of the row is closure")
+                print(f"        uses:        "
+                      f"{'not measured' if src is None else uses} "
+                      f"of {blocks} blocked by {refuser} name anything it "
+                      f"declares"
+                      + (f" ({', '.join(declared[:6])})" if declared else "")
+                      + f"  [{note}]")
             print(f"        example:    {r['example']}")
         shown_files = sum(r["files"] for r in shown)
         print(f"\n{shown_files} of {total} codegen/dependency lines "
@@ -355,7 +592,9 @@ def main():
         print("FILES BLOCKED IS AN UPPER BOUND: a file's terminal cause is the "
               "first refusal reached,\nso fixing one usually moves it to the "
               "next. Measure a cause's real value by\nre-sweeping the files it "
-              "blocks — see bugs/FORMAL_sweep_work_map_2026-09-30.md §3.")
+              "blocks — the census is "
+              "bugs/FORMAL_sweep_work_map_2026-09-30_r2.md, which replaced "
+              "§3 of the 2026-09-30 original.")
     return 0
 
 

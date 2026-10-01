@@ -56,11 +56,24 @@ JIT_RUN_FAIL_MARKER = "JIT execution failed with code"
 def run_one(mode: str, fpath: str) -> tuple:
     """Run fpath through one execution engine.
 
-    mode is 'interp' (`python3 fire.py run X.mojo`) or 'jit'
-    (`python3 fire.py --jit X.mojo`). Returns (status, stdout, exit_code,
+    mode is 'interp' (`python3 fire.py run X.mojo`), 'jit'
+    (`python3 fire.py --jit X.mojo`), or 'cpy' (`python3 X.mojo` — CPython
+    itself, for a program it can run). Returns (status, stdout, exit_code,
     stderr). status is 'ok', 'timeout', or 'error'.
     """
-    cmd = [sys.executable, MOJO, 'run' if mode == 'interp' else '--jit', fpath]
+    if mode == 'cpy':
+        # CPython defines `main` and stops; Mojo RUNS it. So the CPython run
+        # gets a driver line appended, which is the whole difference between
+        # "CPython printed nothing" and "CPython printed the wrong thing".
+        cpy = fpath + '.py'
+        with open(fpath) as f:
+            _src = f.read()
+        with open(cpy, 'w') as f:
+            f.write(_src + "\nmain()\n")
+        cmd = [sys.executable, cpy]
+    else:
+        cmd = [sys.executable, MOJO, 'run' if mode == 'interp' else '--jit',
+               fpath]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
                            errors='replace', timeout=TIMEOUT, cwd=HERE)
@@ -95,8 +108,12 @@ def _first_stdout_diff(stdout_a: str, stdout_b: str) -> str:
             f"first {which}-only line at {i + 1}: {extra!r}")
 
 
-def diff_program(fpath: str) -> tuple:
+def diff_program(fpath: str, cpython: bool = False) -> tuple:
     """Run fpath through both engines and compare stdout + exit code.
+
+    `cpython=True` adds a third run — CPython itself — and requires the
+    compiled path to agree with it as well, which is the only check here that
+    can see a bug the two engines share (see `CPYTHON_COMPARABLE`).
 
     Returns (status, detail). See the module docstring for status meanings.
     """
@@ -120,7 +137,25 @@ def diff_program(fpath: str) -> tuple:
         return 'JIT-COMPILE-FAILED', f"{reason[:300]}"
 
     if i_code == j_code and i_out == j_out:
-        return 'PASS', 'stdout + exit identical'
+        if not cpython:
+            return 'PASS', 'stdout + exit identical'
+        # The two engines agreeing is not evidence that EITHER is right — a
+        # bug they share is invisible here, which is why test_interp_oracle.py
+        # exists. For a program CPython can also run, the third opinion is
+        # available and this is where it is asked for: the compiled path has
+        # to agree with CPython too, not merely with the interpreter.
+        c_status, c_out, c_code, c_err = run_one('cpy', fpath)
+        if c_status != 'ok':
+            return 'ERROR', f"cpython run failed: {c_err}"
+        if j_out != c_out or j_code != c_code:
+            detail = _first_stdout_diff(c_out or '', j_out or '')
+            if j_code != c_code:
+                detail = (f"exit codes differ: cpython={c_code} jit={j_code}"
+                          if j_out == c_out
+                          else f"{detail}; exit codes differ: "
+                               f"cpython={c_code} jit={j_code}")
+            return 'FAIL', f"compiled path disagrees with CPython: {detail}"
+        return 'PASS', 'stdout + exit identical, and CPython agrees'
 
     detail = _first_stdout_diff(i_out or '', j_out or '')
     if i_code != j_code:
@@ -193,6 +228,59 @@ BUILTIN_PROGRAMS = {
             var x: Int = 42
             var s = f"value={x}"
             print(s)
+    """),
+    # A method call is the only `return` EXPRESSION KIND whose type the
+    # enclosing function's inference had no case for: `_quick_type`'s
+    # method-call branch is gated on the RECEIVER's type naming a registered
+    # struct, and during return inference the receiver local (`p` here) is not
+    # in `var_types` yet. So `g` below was declared `int64_t` and its correct
+    # `char *` came back as a pointer DECIMAL (measured: 4380508000), and the
+    # compiled path disagreed with the interpreter and with CPython about the
+    # program while `k` — the same local, read as a FIELD — was already right.
+    # That contrast is the test: the receiver is the same `P *` in both, so
+    # only `k` passing would be evidence the inference never had the receiver
+    # type at all.
+    #
+    # `repr(p)` is deliberately NOT in this program: the interpreter has its
+    # own documented gap there (it prints `<P instance>` instead of `R<a>`,
+    # bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_container_
+    # spellings.md), and this harness diffs the two engines, so putting it
+    # here would make this case red for a bug that is not the one under test.
+    "method_call_result": textwrap.dedent("""\
+        class P:
+            def __init__(self, x):
+                self.x = x
+            def __repr__(self):
+                return "R<" + self.x + ">"
+
+        def g():
+            p = P("a")
+            return p.__repr__()
+
+        def k():
+            p = P("a")
+            return p.x
+
+        def main():
+            print(g())
+            print(k())
+    """),
+    # The natural missing-key guard, and it was INVERTED on the compiled
+    # path: `d.get(k)` lowers to `mojo_dict_get_str`, which returns NULL for an
+    # absent key, and `None` — a singleton, with no NULL to compare against —
+    # was routed through `mojo_char_to_str((char)0)`, i.e. compared against
+    # the one-character string NUL. So the branch that tells "absent" from
+    # "present" answered the wrong way (CPython True, compiled False), exit 0,
+    # no diagnostic. `print(d.get("MISSING"))` printed whatever printf does
+    # with a NULL `%s` ("(null)") rather than `None`, which is the same
+    # misreading in a second place.
+    "dict_get_none_guard": textwrap.dedent("""\
+        def main():
+            a = {"A": "1"}
+            print(a.get("MISSING"))
+            print(a.get("MISSING") == None)
+            print(a.get("A") == None)
+            print(a.get("MISSING") is None)
     """),
     "struct_def": textwrap.dedent("""\
         struct Point:
@@ -658,6 +746,93 @@ BUILTIN_PROGRAMS = {
         def main():
             print(outer(True))
     """),
+    # A VARIADIC lambda, called every way a real program holds one: through
+    # a local, as an argument, returned, rebound across branches, and as a
+    # `sorted(key=)` / `map` / `filter` callable. Its lifted C signature is
+    # the PACKED form (`MojoList *` for `*args`, `MojoDict *` for
+    # `**kwargs`) while the call site writes loose arguments, so the compiled
+    # path used to hand the callee a raw integer where a `MojoList *` was
+    # wanted and dereference it — a SIGSEGV in both engines' shared shape.
+    # Belongs HERE rather than in test_interp_oracle.py because the compiled
+    # path now supports it, and this harness additionally proves the two
+    # engines agree (a strictly stronger assertion).
+    #
+    # `sorted(key=lambda *a: ...)` / `map(lambda *a: ...)` are deliberately
+    # NOT here: the COMPILED path handles them (test_gimple_runner.py's
+    # `gimple_variadic_lambda_works_through_every_holder` covers both), but
+    # the INTERPRETER crashes on a user-defined function passed as a builtin
+    # callback at all — `sorted(key=lambda a: -a)` and `sorted(key=k)` for a
+    # plain `def k(a)` fail the same way — so this harness could not compare
+    # anything. Tracked in
+    # bugs/CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md.
+    "variadic_lambda_packs_its_arguments": textwrap.dedent("""\
+        def add(a, b):
+            return a + b
+
+        def apply(f, v):
+            return f(v, v)
+
+        def mk(n):
+            return lambda *a: a[0] * n
+
+        class Box:
+            def __init__(self):
+                self.fn = None
+
+        def main():
+            print(apply(lambda *a: a[0] + a[1], 3))
+            print(mk(2)(21))
+            n = 7
+            cap = lambda *args, **kwargs: add(n, args[0])
+            print(cap(1))
+            b = Box()
+            b.fn = lambda *a: a[0] + 1
+            print(b.fn(41))
+            if 1:
+                r = lambda *a: a[0]
+            else:
+                r = lambda *a: a[1]
+            print(r(7, 8))
+            e = lambda *a, **k: len(a) * 100 + len(k)
+            print(e(1, 2, z=9))
+            f = lambda *a: len(a)
+            print(f(1, 2, 3, 4, 5, 6, 7))
+    """),
+    # `*args` and `**kwargs` together, with keyword arguments at the call
+    # site and a zero-argument call (which must still hand the callee a real
+    # empty dict, never NULL).
+    "variadic_lambda_kwargs_at_the_call_site": textwrap.dedent("""\
+        def walk(*a, **k):
+            return len(a) * 10 + len(k)
+
+        def main():
+            e = lambda *a, **k: len(a) * 100 + len(k)
+            print(e(1, 2))
+            print(e(1, 2, z=9))
+            only = lambda **k: len(k)
+            print(only(a=1, b=2, c=3))
+            print(only())
+            both = lambda *a, **k: walk(*a, **k)
+            print(both(1, 2, 3))
+            print(both(1, z=5))
+            two = lambda f, g, *a: f * g + len(a)
+            print(two(3, 4, 1, 2))
+    """),
+}
+
+
+# Corpus programs that CPython can run verbatim, so the compiled path has to
+# agree with CPython and not only with the interpreter. Every entry here is
+# plain Python 3 — no `var`, no `struct`, no Mojo-only annotation — because
+# `python3 X.mojo` has to parse it.
+# (`var x: Int = 10` — the corpus's `arithmetic`, `if_else`, `while_loop`,
+# `list_ops`, `string_ops` and `fstring` — is Mojo-only syntax and is
+# therefore NOT in this list: `python3 X.mojo` cannot parse it, so there is
+# no third opinion to ask for. `function_def` is here because PEP 649 makes
+# `def add(a: Int, b: Int) -> Int:` a legal Python annotation, so it runs.)
+CPYTHON_COMPARABLE = {
+    "minimal_main", "function_def", "method_call_result",
+    "dict_get_none_guard",
 }
 
 
@@ -676,7 +851,8 @@ def run_program_source(name: str, source: str) -> str:
         fpath = os.path.join(td, f"{name}.mojo")
         with open(fpath, 'w') as f:
             f.write(source)
-        status, detail = diff_program(fpath)
+        status, detail = diff_program(fpath, cpython=name in
+                                      CPYTHON_COMPARABLE)
         report(status, name, detail)
         return status
 

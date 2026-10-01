@@ -1,5 +1,86 @@
 # COMPILE_FAIL: Lib/importlib/resources/readers.py
 
+## Status (2026-09-30, branch work/compile-fail-stdlib-misc — the crash that blocked the whole closure is FIXED; 7 modules in it now compile and report their own errors; readers.py's own 5 errors unchanged and all now precisely located)
+
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py`
+(129 s). Exit 1, 145 `error:` lines, 5 of them in `readers.py`:
+
+```
+readers.py:82:3:   implicit declaration of function 'operator_attrgetter___init__'
+readers.py:118:10: implicit declaration of function '_itertools_only_37bd8e'; did you mean '_itertools_only_15e7c2'?
+readers.py:171:9:  implicit declaration of function 're_finditer_37bd8e'
+readers.py:174:3:  too many arguments to function 'pathlib_Path___init__'; expected 2, have 3
+readers.py:203:3:  too many arguments to function 'pathlib_Path___init__'; expected 2, have 3
+```
+
+### FIXED this session: `AttributeError: 'IdentExpr' object has no attribute 'value'` (commit `b501954c`)
+
+This was NOT one of the two blockers the 2026-09-27 entry listed, and it
+took out seven modules of this closure before gcc ever ran:
+
+```
+# ERROR: compiling imported module 'zipfile'      ... : 'IdentExpr' object has no attribute 'value'
+# ERROR: compiling imported module 'shutil'       ... : 'IdentExpr' object has no attribute 'value'
+# ERROR: compiling imported module 'tempfile'     ... : 'IdentExpr' object has no attribute 'value'
+# ERROR: compiling imported module '._common'     ... : 'IdentExpr' object has no attribute 'value'
+# ERROR: compiling imported module '._functional' ... : 'IdentExpr' object has no attribute 'value'
+# ERROR: compiling imported module '.'            ... : 'IdentExpr' object has no attribute 'value'
+# ERROR: compiling imported module '._itertools'   ... : 'IdentExpr' object has no attribute 'value'
+Error building: 'IdentExpr' object has no attribute 'value'
+```
+
+`_returns_kinds_valued` (`mojo/backend_gimple/module_gen.py`) read
+`node.args[0].value` on any `struct.unpack*` call — an attribute only a
+string-literal node has — so `struct.unpack(fmt, buf)` with a VARIABLE
+format, i.e. every module that forwards a caller-supplied format, killed
+the build. Its own docstring already said "only literal formats answer";
+the code did not. The literal test existed only in `_struct_ctor_format`,
+which has its own inline copy of "is this node a plain non-bytes string
+literal"; that reading is now the one shared `_struct_literal_format`, so
+there is no second copy left to omit the guard from. Two regression tests
+(`struct_unpack_computed_format_compiles`,
+`struct_unpack_computed_format_keeps_literal_half`), the second asserting
+the LITERAL half still answers True so the fix cannot have silently
+disabled the per-slot-kinds feature.
+
+Measured on this build: the `AttributeError` appears **0** times.
+`zipfile`, `importlib/resources/{__init__,_common,_functional,_itertools}`
+now compile (they are in the closure's compiled file list) instead of
+crashing; `shutil` compiles up to the `'open' is ambiguous` refusal
+(`bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md`);
+`tempfile` contributes 3 real gcc errors.
+
+### Still blocking, unchanged, all four located
+
+1. **`re_finditer`** (171) — no compiled representation of CPython's
+   C-extension `_sre` objects. Feature-sized, as recorded.
+2. **`_itertools_only_37bd8e` vs `_itertools_only_15e7c2`** (118) — the
+   2026-09-27 entry's `lstrip('.')` fix corrected the PREFIX but not the
+   SUFFIX. The two halves of a mangled symbol are `<qualifier>_<name>_<hash>`
+   where the hash is `overload_suffix_for(_effective_param_types(...))`,
+   and here the DEFINITION is `_itertools_only_15e7c2` (types
+   `(MojoList *, MojoList *, int64_t)`) while the CALL is `_37bd8e` — the
+   call site typed the imported function's parameters differently from
+   `only()`'s own signature, because `only(one_dir)`'s only argument comes
+   from `itertools.tee(children, 3)` whose return type is unknown. So this
+   is the BUG-2026-024 param-type-snapshot family, one step further on than
+   the entry above recorded. NOT attempted: `_effective_param_types` is the
+   machinery that a wrong change to silently calls the wrong overload.
+3. **`pathlib_Path___init__` arity** (174, 203) — cross-module struct
+   constructor called with 3 args where the registered signature has 2;
+   `MultiPlug`/`_adapters` pass extra positionals to a foreign struct's
+   `__init__`. Same defaults/arity-padding family as (2).
+4. **`operator_attrgetter___init__`** (82) — `operator.attrgetter` is a C
+   type; its `__init__` has no compiled declaration here.
+
+Closure error distribution for scale: `pathlib` 43,
+`importlib/_bootstrap_external` 15, `statistics` 14,
+`importlib/resources/_itertools` 11, `pathlib/_os` 10, `glob` 10,
+`tokenize` 9, `random` 6, `readers.py` 5.
+
+Doc kept open. **Not closable on this file's account** — items 2-4 are
+shared-machinery gaps whose own blast radius is every module in the tree.
+
 ## Status (2026-09-27, latest — blocker #1, the cross-module symbol-name mismatch, is FIXED and verified on the real file)
 
 The first of the two remaining `readers.py`-specific errors is closed. It was

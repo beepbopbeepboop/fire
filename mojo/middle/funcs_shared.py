@@ -21,6 +21,10 @@ from gimple_codegen import _selfhost_impl_py_files
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+# NOT `from mojo.middle.module_shared import module_qualifier` here:
+# `module_shared` imports `_resolved_export_entry` from this module at its
+# own top level, so that would be a cycle. It is imported at the one use
+# site instead — see `_struct_method_qualifier._sanitize_qualifier`.
 
 def _from_import_name_is_submodule(gen, module: str, name: str) -> bool:
     """True when `from module import name` binds a real SUBMODULE FILE
@@ -505,6 +509,232 @@ def _find_imported_struct(gen, module: str, name: str):
             return s
     return None
 
+def _resolved_export_entry(gen, module: str, name: str, info):
+    """`info` (one `module_loader` export-table entry) upgraded to the
+    DEFINING module's own parsed signature when the scan's is lossy.
+
+    `module_loader`'s export table is a TEXT scan: for an unannotated
+    `def tri(x)` it emits `int64_t tri (void)` — no parameters — because it
+    reads signatures off the text rather than off the parse tree. That is
+    survivable while a sibling import is inlined into the SAME translation
+    unit: the definition itself carries the true prototype, and the extern
+    preamble deliberately skips any symbol this TU defines. But the
+    re-export path RE-EMITS the entry for a symbol this TU does NOT define,
+    so the lossy prototype became the only declaration in the file:
+
+        too many arguments to function 'sub_tri_9f63a2'; expected 0, have 1
+
+    Rebuild it from the parsed FunctionDef — the same resolver the
+    definition side itself uses, so the two agree — and keep the scan's
+    return type when the def carries no annotation, since an absent
+    annotation means int64_t everywhere else in this path too.
+
+    Returns `info` unchanged when it is not a dict with a signature, or the
+    module's own source has no such top-level FunctionDef (nothing better to
+    say). Only the re-export callers use this; the ordinary
+    already-resolved import is left exactly as it was.
+    """
+    if not isinstance(info, dict) or not info.get('signature'):
+        return info
+    _fn = None
+    try:
+        for _fs in (gen._parsed_import(module)[2] or []):
+            if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == name:
+                _fn = _fs
+                break
+    except Exception:
+        _fn = None
+    if _fn is None:
+        return info
+    _ret = _as_str(info.get('c_return_type') or 'int64_t')
+    if _fn.return_type:
+        _ret = gen._resolve_type(_fn.return_type)
+    _pts = gen._signature_ctypes(_fn.params, _fn)
+    _cparams = []
+    for _i, _cpt in enumerate(_pts):
+        _pn = (_fn.params or [])[_i][0] if _i < len(_fn.params or []) else ''
+        _cparams.append(_cpt + ' ' + _as_str(_pn).lstrip('*'))
+    _out = dict(info)
+    _out['c_return_type'] = _ret
+    _out['c_parameters'] = _cparams
+    _out['signature'] = (_ret + ' ' + _as_str(name) + ' ('
+                         + (', '.join(_cparams) or 'void') + ')')
+    return _out
+
+def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
+    """Does `module`'s OWN top-level source define `name`? `kind` is
+    'struct' (a StructDef) or 'fn' (a top-level FunctionDef).
+
+    Top-level only by construction: `_parsed_import`'s statement list is
+    the module's own body, so a METHOD that happens to share the name (a
+    `__init__` inside a class, say) is never matched.
+    """
+    if kind == 'struct':
+        return gen._find_imported_struct(module, name) is not None
+    _p, _s, _stmts = gen._parsed_import(module)
+    for _st in (_stmts or []):
+        if isinstance(_st, gimple_ctypes.FunctionDef) and _st.name == name:
+            return True
+    return False
+
+def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int = 0,
+                              want_abs: bool = False):
+    """The module ref whose own source DIRECTLY defines top-level `name`,
+    starting from `module` and following its `from X import name` statements
+    transitively (re-export chains). None if no reachable module defines it
+    — an honest "not found", never a guess. `kind` is 'fn' or 'struct'.
+
+    `want_abs` selects the ABSOLUTIZED spelling of the same answer (`.sub`
+    -> `p.sub`) instead of the one as written (`.sub`), for the callers
+    that need to OPEN the file rather than to spell its C symbol prefix.
+    Both spellings name the same module; which one is correct depends
+    entirely on the question, so both are first-class here instead of each
+    caller absolutizing for itself and getting the base wrong (a relative
+    ref resolved against the IMPORTING module is a different file whenever
+    the hop chain is more than one level deep).
+
+    Why this exists: the module a client imports a symbol FROM and the
+    module that DEFINES it are two different modules whenever the former
+    re-exports the latter, which is the standard layout for a Python
+    package (`p/__init__.py` doing `from .sub import tri`). The compiled
+    path's symbol mangling is `<qualifier>_<name>_<suffix>`, and the
+    qualifier half is supposed to be "the module that defines this symbol"
+    — every mangled name is emitted twice, once by the definer (keyed by the
+    module name IT was compiled under) and once by each importer, and the
+    two halves must name the same binding. Deriving the call site's half
+    from the import statement's own module string therefore emits
+    `p_tri_<suffix>` against a definition emitted as `sub_tri_<suffix>`:
+    a hard `implicit declaration of function 'p_tri_...'; did you mean
+    'sub_tri_...'?` on the single-TU path, and — because the same wrong
+    qualifier is what keys the `_imported_home_param_types` /
+    `_home_def_param_types` lookup beside it — a SILENTLY mis-typed result
+    wherever the mismatch is a field/inference key rather than a symbol
+    name (bugs/CODEGEN_reexported_function_import_qualifier_names_the_
+    wrong_module.md, and the struct-through-a-re-export shape
+    bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md sits
+    next to).
+
+    Each hop matches on the LOCAL name the importing module binds, and
+    recurses under the name the SUBMODULE exports (`from .sub import tri
+    as triple` binds `triple` locally but the definition is `tri`), so a
+    re-export that renames still resolves.
+
+    The returned ref is the spelling AS WRITTEN in the re-exporting
+    statement (`st.module`), not the absolutized one the walk had to build
+    to parse the next hop, and that distinction is load-bearing: the
+    defining module compiles under exactly the spelling the import that
+    first pulled it in used (`modules_to_compile` is keyed by the import
+    string), and `_note_own_func_home` canonicalizes that spelling by
+    stripping LEADING DOTS only (`_func_qualifier._sanitize_qualifier`'s
+    own docstring records why the dot-stripped form is the convergent
+    one). So the same file reached as `.sub` and as `p.sub` compiles under
+    `sub` and `p_sub` respectively, and a caller that absolutized before
+    sanitizing would emit `p_sub` for the `.sub`-reached module — the very
+    mismatch this function exists to remove. Consumers that need to open
+    the file use `gen._submodule_source_path`, which resolves a relative
+    ref against the current module, or `_abs_module` with the base they
+    already know.
+
+    A re-export chain must terminate and a cycle (`p/__init__.py`
+    re-exporting from `q`, `q/__init__.py` from `p`) must not hang: the
+    memo stores None for an in-progress (kind, module, name) BEFORE
+    recursing, so a re-entry reads that None and stops, and the depth cap
+    is a second belt.
+    """
+    if depth > 5 or not module:
+        return None
+    cache = _as_dict(gen._struct_home_cache)
+    # String key, not a (kind, module, name) tuple: a 3-tuple set-key
+    # coerces to a boxed int64_t on the self-hosted path, so `key in cache`
+    # would never hit and every call would re-walk the whole chain (the
+    # same trap `_find_generic_source`'s docstring records for its own key).
+    key = kind + '\x1f' + module + '\x1f' + name
+    if want_abs:
+        key = key + '\x1fabs'
+    if key in cache:
+        return cache[key]
+    cache[key] = None
+    if _module_defines_symbol(gen, module, name, kind):
+        cache[key] = module
+        return module
+    _path, _src, stmts = gen._parsed_import(module)
+    if not stmts:
+        return None
+    for st in stmts:
+        if not (isinstance(st, gimple_ctypes.FromImportStmt)
+                and not getattr(st, 'wildcard', False)):
+            continue
+        for _fip6 in (getattr(st, 'name_alias_strs', None) or []):
+            nm = gimple_ctypes._fi_name(_fip6)
+            alias = gimple_ctypes._fi_alias(_fip6)
+            if (alias or nm) != name:
+                continue
+            sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
+            r = _find_symbol_home_module(gen, sub, nm, kind, depth + 1,
+                                         want_abs=want_abs)
+            if r:
+                # `r` is the spelling the NEXT hop used to reach the
+                # definition, which for a relative hop is absolute
+                # (`p.sub` for `.sub`). What the defining module actually
+                # compiles under is `st.module` — the spelling THIS
+                # statement used — so re-derive it for the case where they
+                # differ. `r == sub` (the non-relative, therefore identical
+                # case) is by far the common one and is left untouched. With
+                # `want_abs` the caller asked for the parseable spelling, so
+                # `r` is already the answer.
+                _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
+                cache[key] = _raw
+                return _raw
+    return None
+
+def _note_struct_import_alias(gen, module: str, alias: str, orig_name: str) -> str | None:
+    """Record `alias -> orig_name` in `gen._struct_import_aliases` when
+    `from <module> import <orig_name> as <alias>` names a CLASS, and return
+    the real bare name it was recorded under (or None).
+
+    One implementation for both spellings that need it — the module-scope
+    `_register_sym` and the function-scoped `_gen_stmt_FromImportStmt` — so
+    the two can never disagree about what an aliased class import means.
+
+    Two gates keep this off the hot path, because the alternative (a probe
+    per `from X import Y`) would re-parse an import for every imported
+    FUNCTION, which is the overwhelmingly common case:
+
+    * `orig_name` must already be a key of `gen.struct_field_types`. That
+      table is keyed by the struct's own bare name as written in its
+      defining module and is populated from the whole-program closure
+      BEFORE any import registration runs, so membership here is a free
+      dict test and says "some module in this closure defines a struct
+      with exactly this name".
+    * that membership is then CONFIRMED against `module`'s own source, by
+      the same re-export-hop walk `_find_struct_home_module` already does.
+      Without the confirmation a `from mod_b import f` for a FUNCTION `f`
+      would be captured whenever some other module happens to declare a
+      struct also named `f`, and `f(...)` would then construct that struct
+      instead of calling the function. With it, the answer is "the class
+      really is reachable from the module the import statement names", so
+      a same-named struct in an unrelated module is not enough.
+
+    The C-keyword rename (`auto` -> `_kw_auto`, `module_gen.py`'s
+    `_c_kw_struct_renames`) is applied to the RECORDED name, because the
+    consumer (the constructor dispatch) applies it to the name it is
+    handed before looking it up, and both must agree.
+    """
+    if not alias or alias == orig_name:
+        return None
+    if orig_name not in gen.struct_field_types:
+        return None
+    if not gen._find_struct_home_module(module, orig_name):
+        return None
+    _real = gen._c_kw_struct_renames.get(orig_name, orig_name)
+    # First-writer-wins, matching `struct_field_types`'s own collision
+    # semantics: two modules exporting the same class name under the same
+    # alias resolve to one of them the same way the struct table resolves a
+    # bare name to one of them.
+    if alias not in gen._struct_import_aliases:
+        gen._struct_import_aliases[alias] = _real
+    return gen._struct_import_aliases[alias]
+
 def _resolve_test_relative_module(gen, module: str) -> str | None:
     """Fallback for local test-only packages (e.g. `test_utils`) that
     `imports.py`'s resolver can't find: it only searches MOJO_PATH/
@@ -825,6 +1055,16 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     exempt by never going through struct-method mangling at all."""
     if struct_name == 'Span':
         return ''
+    # An already-QUALIFIED struct cname (a same-bare-name collision loser's;
+    # see `_struct_cname_by_id` in GimpleGen.__init__) carries its own module
+    # prefix, so it must compose to `{cname}_{method}` with NOTHING prepended.
+    # Prefixing again would name the symbol `mod_b_mod_b_Dialog___init__`,
+    # which nothing defines — and answering '' is exactly what keeps such a
+    # struct's method symbols byte-identical to what this codegen emitted for
+    # it before the collision fix, since the pre-fix spelling was already
+    # `{qualifier}_{Name}_{method}`.
+    if struct_name in getattr(gen, '_struct_qualified_cnames', ()):
+        return ''
     # GimpleGen: same shape of exemption as Span just above, for a
     # different reason. GimpleGen genuinely DOES have a real home module
     # (gimple_codegen.py) and a normal per-file compile of THAT file
@@ -865,26 +1105,36 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     # an undefined symbol). See _func_qualifier's own comment for the
     # same fix applied to the free-function case.
     def _sanitize_qualifier(q):
-        # Strip LEADING dots before the '.'->'_' substitution: a raw
-        # relative-import spelling (`.base`, from `_link_inline_modules`'
-        # link-mode fallback — see `_compile_imported_module`'s temp_gen
-        # `module_name=module_name`, which passes `stmt.module` through
-        # completely unresolved) would otherwise sanitize to `_base`
-        # (leading underscore) here, while `_emit_stdlib_import_externs`'
-        # OWN relative-import resolution (`_resolve_relative`, run
-        # against the SAME statement) already strips the dots before
-        # this function ever sees the name and produces plain `base` —
-        # two internally-consistent but MUTUALLY DISAGREEING spellings
-        # of the identical module for the identical bare name. A call
-        # site resolving one way and the definition resolving the other
-        # way emits a reference to an undeclared identifier that (being
-        # a bare, non-function name in a `(void *)` cast) silently
-        # compiles to a null pointer instead of erroring — see
-        # bugs/CODEGEN_link_mode_from_submodule_import_symbol_value_
-        # call_segfault.md. Stripping leading dots here makes every
-        # qualifier path converge on the same plain-name spelling
-        # regardless of which one happened to run first.
-        return q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
+        # `module_qualifier` (mojo/middle/module_shared.py) owns the string
+        # rule — leading dots stripped BEFORE the '.'->'_' substitution,
+        # since a raw relative-import spelling (`.base`) would otherwise
+        # sanitize to `_base` while `_emit_stdlib_import_externs`' own
+        # relative-import resolution already produced `base`. See that
+        # function's docstring for the full failure mode the divergence
+        # caused and the three other copies this one replaces. Kept as a
+        # one-line wrapper so the struct- and free-function qualifiers read
+        # identically instead of re-spelling the chain.
+        #
+        # Imported HERE, not at module scope, and that is load-bearing rather
+        # than a micro-optimization: `module_shared` imports
+        # `_resolved_export_entry` from THIS module at its own top level, so a
+        # module-scope import back is a cycle and whichever of the two the
+        # process happens to reach first fails. The measured symptom was the
+        # formal build path refusing every program:
+        #
+        #   formal/model.py `runtime_abi` -> `import reflect` ->
+        #   `gimple_codegen` -> `mojo.backend_gimple.emit_methods` ->
+        #   `emit_funcs` -> `mojo.middle.module_shared` -> (line 29)
+        #   `mojo.middle.funcs_shared` -> (this import) `module_qualifier`
+        #   ImportError: cannot import name 'module_qualifier' from
+        #   partially initialized module 'mojo.middle.module_shared'
+        #
+        # — i.e. the cycle closed on the one path that has no other way in.
+        # `mojo/backend_gimple/emit_resolve.py` already imports the same name
+        # at its use site for the same reason; the direction that stays
+        # top-level is `module_shared` -> `funcs_shared`.
+        from mojo.middle.module_shared import module_qualifier
+        return module_qualifier(q)
     # NOT an early self-hosting-file bare short-circuit — see the free-
     # function sibling `_func_qualifier`'s matching comment: unconditionally
     # bare-ifying every struct reference from a self-hosting-flagged file
@@ -949,6 +1199,72 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     if home and struct_name in home:
         return _sanitize_qualifier(home[struct_name])
     return ''
+
+
+# ---------------------------------------------------------------------------
+# Module-qualified struct IDENTITY (same-bare-name collisions across modules)
+# ---------------------------------------------------------------------------
+
+def _sanitize_cname_qualifier(q):
+    """The C-identifier form of a module qualifier. Deliberately the same
+    transformation as `_struct_method_qualifier`'s own `_sanitize_qualifier`
+    just above, so a qualified struct cname and a qualified method symbol of
+    the same struct always agree: `{cname}_{method}` and
+    `{qualifier}_{Name}_{method}` are the same string."""
+    return q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
+
+
+def _resolve_struct_cname(gen, name: str, home: str = '') -> str:
+    """The C identity (`cname`) a reference to the class spelled `name`
+    resolves to, optionally disambiguated by the MODULE it was reached
+    through.
+
+    With no `home`, this is the historical answer: the bare name for every
+    struct that never collided, and the WINNER's cname for one that did
+    (`_struct_cname_of_name`). With a `home` module qualifier, a class owned
+    by THAT module resolves to its own cname instead — the whole point:
+    `mod_b.Dialog(...)` must construct mod_b's `Dialog`, not whichever of two
+    same-named classes won the bare-name race.
+
+    Returns the bare `name` unchanged when nothing is registered for it, so
+    this is safe to call on any name (a builtin, a local, a not-yet-scanned
+    struct) and degrades exactly to the pre-existing behaviour."""
+    if not name:
+        return name
+    if home:
+        _q = _sanitize_cname_qualifier(home)
+        if _q:
+            _hit = getattr(gen, '_struct_cname_by_home', None)
+            if _hit:
+                _v = _hit.get(_q + '::' + name)
+                if _v:
+                    return _v
+    _owner = getattr(gen, '_struct_cname_of_name', None)
+    if _owner:
+        _v2 = _owner.get(name)
+        if _v2:
+            return _v2
+    return name
+
+
+def _ctor_cname_via_module(gen, binding: str, name: str) -> str:
+    """`_resolve_struct_cname` keyed by the module a qualified-constructor
+    receiver (`mod_b.Dialog(...)`) actually names.
+
+    `binding` is the SOURCE-LEVEL spelling of the receiver, which is a LOCAL
+    alias, not necessarily the module's own name (`import mod_b as mb` binds
+    `mb`). `imported_symbols[binding]['module']` resolves the alias back to
+    the real module — the key `_struct_cname_by_home` was registered under. A
+    binding with no recorded module (a builtin, a local name) resolves to the
+    bare name, the historical answer."""
+    _info = getattr(gen, 'imported_symbols', None)
+    if _info:
+        _e = _info.get(binding)
+        if isinstance(_e, dict):
+            _m = _e.get('module')
+            if _m:
+                return _resolve_struct_cname(gen, name, _m)
+    return _resolve_struct_cname(gen, name)
 
 
 # ---------------------------------------------------------------------------
@@ -1127,29 +1443,106 @@ def _selfhost_extracted_fn_index() -> dict:
     `mojo/middle` + `mojo/backend_gimple`) — the extracted helper that a
     `class GimpleGen` delegate method `return <alias>.<fn>(self, ...)`
     forwards to. Cached with the field scanner's cache key."""
-    _hit = _SELFHOST_EXTRA_FIELD_CACHE.get('fnidx')
+    # Validated once per top-level compile (see `_selfhost_begin_compile`), not
+    # on every call: this is asked once per function parameter, and each
+    # validation listed the source directories and stat'ed ~60 files, building
+    # a fresh path list and key string that nothing freed (~1.3 GB on
+    # `--dump-full fire.py`).
+    _validated = _SELFHOST_FNIDX_VALIDATED.get('idx')
+    if _validated is not None:
+        return _validated
     _sd = gimple_codegen._SELFHOST_DIR
     _files = sorted(_selfhost_impl_py_files(_sd))
-    _key = tuple((f, gimple_ctypes.os.path.getmtime(f)) for f in _files)
-    if _hit is not None and _hit[0] == _key:
-        return _hit[1]
+    _key = 'fnidx#' + _selfhost_files_key(_files)
+    _hit = _SELFHOST_EXTRA_FIELD_CACHE.get(_key)
+    if _hit is not None:
+        _SELFHOST_FNIDX_VALIDATED['idx'] = _hit
+        return _hit
     _idx: dict = {}
     for _f in _files:
-        try:
-            _mod: list = ast_rewriter.rewrite(
-                Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
-        except Exception:
-            continue
+        _mod: list = _selfhost_parsed_source(_f)
         for _fn in _mod:
             if (isinstance(_fn, FunctionDef) and _fn.params
                     and _fn.params[0][0].lstrip('*') in ('gen', 'self')
                     and _fn.name not in _idx):
                 _idx[_fn.name] = _fn
-    _SELFHOST_EXTRA_FIELD_CACHE['fnidx'] = (_key, _idx)
+    _SELFHOST_EXTRA_FIELD_CACHE[_key] = _idx
+    _SELFHOST_FNIDX_VALIDATED['idx'] = _idx
     return _idx
 
 
+# The fn-index answer already checked against the source files' mtimes during
+# this compile; emptied by `_selfhost_begin_compile` so the next top-level
+# compile re-validates (an edited source file is still picked up).
+_SELFHOST_FNIDX_VALIDATED: dict = {}
+
+
+def _selfhost_begin_compile() -> None:
+    """Start of one top-level compile: forget which source-file-derived answers
+    were validated, so they are checked once more (and only once)."""
+    _SELFHOST_FNIDX_VALIDATED.clear()
+
+
+# --- the compiler's own sources, parsed ONCE per process ------------------
+#
+# Three passes need the parsed compiler sources: `_selfhost_parsed_modules`
+# (module_shared.py), `_selfhost_extracted_fn_index` above, and
+# emit_funcs._selfhost_scan_gimplegen_extra_fields. Each used to run its own
+# `py_tokenize` + `parse_module` + `ast_rewriter.rewrite` over the same ~60
+# files and keep its own copy. All of them now read this one cache.
+#
+# The cache key is a STRING, `path@mtime`. Both a tuple `(path, mtime)` and a
+# tuple-of-tuples file-list fingerprint compared with `==` look right and are
+# right under CPython, but a self-hosted tuple hashes/compares by the tuple
+# object's ADDRESS, so every lookup missed and every pass re-tokenized and
+# re-parsed the whole compiler on every call, per imported module, retaining
+# each copy: ~16 GB of tokenizer garbage in `mojoc --dump-full fire.py`
+# (bugs/PERF_selfhost_memory_leak_hunt.md; the general defect is
+# bugs/CODEGEN_tuple_dict_key_hashed_by_address.md).
+#
+# `{ path + '@' + str(mtime): stmts }`, plus the distinguished `_PARSE_FAILED`
+# entry recording a file that failed to parse (not re-attempted on every
+# pass). A module-level sentinel rather than `None`: a parse can legitimately
+# produce `None`, and `None` as a cache value would be indistinguishable from
+# a miss.
+_SELFHOST_PARSE_CACHE: dict = {}
+_PARSE_FAILED = object()
+
+
+def _selfhost_parsed_source(_f: str) -> list:
+    """The rewritten statement list of the compiler source `_f`, tokenized,
+    parsed and rewritten exactly once per (path, mtime). `[]` when the file
+    is unreadable or does not parse: every caller treats a failed file as
+    contributing nothing, and an empty statement list contributes nothing."""
+    _mtime = gimple_ctypes.os.path.getmtime(_f)
+    _ck = _f + '@' + str(_mtime)
+    if _ck in _SELFHOST_PARSE_CACHE:
+        _entry = _SELFHOST_PARSE_CACHE[_ck]
+    else:
+        _entry = _PARSE_FAILED
+        try:
+            with open(_f) as _fh:
+                _src = _fh.read()
+            _entry = ast_rewriter.rewrite(
+                Parser(py_tokenize(_src)).with_filename(_f).parse_module())
+        except Exception:
+            _entry = _PARSE_FAILED
+        _SELFHOST_PARSE_CACHE[_ck] = _entry
+    if _entry is _PARSE_FAILED:
+        return []
+    return _entry
+
+
+def _selfhost_files_key(_files: list) -> str:
+    """Content-hashable fingerprint of a source-file list: every path with
+    its mtime, as ONE string (see the tuple-key note above)."""
+    _parts: list = []
+    for _f in _files:
+        _parts.append(_f + '@' + str(gimple_ctypes.os.path.getmtime(_f)))
+    return '\n'.join(_parts)
+
 
 # --- dependency _SELFHOST_EXTRA_FIELD_CACHE (from gimple_gen_funcs.py) ---
+# Result cache for the passes above, keyed `<pass>#<files fingerprint>`.
 _SELFHOST_EXTRA_FIELD_CACHE: dict = {}
 

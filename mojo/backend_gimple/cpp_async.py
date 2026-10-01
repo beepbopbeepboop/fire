@@ -395,13 +395,16 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # Increment D guard: a nested async GENERATOR that captures enclosing
     # locals in a shape the A3 capture-box threading cannot reach (driven
     # from a further-nested `async def` sibling's `async for`/await loop).
-    # The A3 side records these in `_UNTHREADABLE_NESTED_ASYNC_GENS` during
-    # `_hoist_nested_async`; this emitter has no capture model at all, so
+    # The A3 side records these in `_UNTHREADABLE_NESTED_ASYNC_GENS`, on
+    # BOTH backends (mojo/middle/coro.py's `_scan_unthreadable_nested_async_
+    # gens`, which runs whether or not the stack-switch lowering does) --
+    # it used to be populated only by that lowering, so this guard never
+    # fired here and the shape it exists to refuse produced a generated-C++
+    # error instead. This emitter has no capture model at all, so
     # emitting one produced a body referencing the captured name in a scope
     # where it does not exist -- a hard "'acc' was not declared in this
     # scope" from the generated .cpp, which blames generated code rather
-    # than the program. Refuse honestly instead. See
-    # bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md (item 3).
+    # than the program. Refuse honestly instead.
     if (getattr(fn, 'name', None) in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS
             or (struct_name and f'{struct_name}_{fn.name}'
                 in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS)):
@@ -2748,12 +2751,11 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     """Increment D guard, for the same reason as
     `_gen_cpp_generator_unit`'s: a nested async GENERATOR that captures
     enclosing locals in a shape the A3 capture-box threading cannot reach.
-    Recorded by `_hoist_nested_async` into
+    Recorded by the A3 side, on BOTH backends, into
     `_UNTHREADABLE_NESTED_ASYNC_GENS`. Without this the emitted coroutine
     body referenced the captured name in a scope where it does not exist —
     a hard "'acc' was not declared in this scope" from the generated .cpp,
-    blaming generated code rather than the program. See
-    bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md (item 3).
+    blaming generated code rather than the program.
     """
     if getattr(fn, 'name', None) in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS:
         raise gimple_exprtypes._UnsupportedGeneratorShape(

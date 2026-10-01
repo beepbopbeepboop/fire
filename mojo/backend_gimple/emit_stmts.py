@@ -44,10 +44,11 @@ import mojo.backend_gimple.emit_infra as ginf
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.stmts_shared import *  # noqa: F401,F403
 from mojo.middle.stmts_shared import (
-    _annotation_dict_nested_val_type, _annotation_dict_val_type, _as_str, _assign_target, _collect_isinstance_narrowings, _handler_bind_name,
+    _annotation_container_elem_type, _annotation_dict_nested_val_type, _annotation_dict_val_type, _as_str, _assign_target, _collect_isinstance_narrowings, _handler_bind_name,
     _handler_exc_name, _is_except_as_member_target, _is_genexp, _isinstance_narrow_struct, _iter_ast, _narrow_key_for_expr,
     _pair_key, _seed_genexp_list_narrowing, _with_item_alias_name
 )
+
 
 def gen_stmt(gen, node):
     # Emit #line directive to track source location. Critical for debugging:
@@ -114,7 +115,8 @@ def gen_stmt(gen, node):
     if isinstance(node, gimple_ctypes.PassStmt):
         gen._gen_stmt_PassStmt(node)
     elif isinstance(node, gimple_ctypes.VarDecl):
-        if isinstance(node.name, str) and ginf.maybe_stack_alloc_owned_ctor(gen, node.name, node.value):
+        if isinstance(node.name, str) and ginf.maybe_stack_alloc_owned_ctor(
+                gen, node.name, node.value, getattr(node, 'type_ann', None)):
             pass  # fully handled — see gimple_gen_infra.py's Phase 6 section
         else:
             gen._decl_value_node = node.value
@@ -124,7 +126,9 @@ def gen_stmt(gen, node):
             gen._decl_value_node = None
     elif isinstance(node, gimple_ctypes.AssignStmt):
         if (isinstance(node.target, IdentExpr)
-                and ginf.maybe_stack_alloc_owned_ctor(gen, node.target.name, node.value)):
+                and ginf.maybe_stack_alloc_owned_ctor(
+                    gen, node.target.name, node.value,
+                    getattr(node, 'type_ann', None))):
             pass  # fully handled — see gimple_gen_infra.py's Phase 6 section
         else:
             gen._decl_value_node = node.value
@@ -291,8 +295,6 @@ def _record_bool_valued(gen, name: str, value) -> None:
     `b = True`, `print(any(xs))` all printed `1`/`0`. Keyed by NAME and
     consulted only by the print dispatch, so this adds no claim to the type
     lattice itself."""
-    if not hasattr(gen, '_bool_valued'):
-        gen._bool_valued = set()
     try:
         if isinstance(value, gimple_ctypes.BoolLiteral):
             gen._bool_valued.add(name)
@@ -467,6 +469,20 @@ def _gen_stmt_VarDecl(gen, node):
         # a few lines below this method).
         if actual_dst == 'MojoBoundMethod *' and v in gen._bound_method_ret_types:
             gen._bound_method_ret_types[node.name] = gen._bound_method_ret_types[v]
+        # Any callable VALUE assigned to a variable (`f = lambda: False`):
+        # carry its real return type onto the variable too, for the same
+        # reason and by the same mechanism as the two propagations above —
+        # the call site keys on the VARIABLE's name, not the RHS temp the
+        # value was materialized into. Without this the type is lost at the
+        # assignment and `f()` prints `0` for a `lambda: False`.
+        if v in gen._callable_ret_types:
+            gen._callable_ret_types[node.name] = gen._callable_ret_types[v]
+        # Same for the dict's own record of what was stored in it: a dict
+        # LITERAL is materialized into a temp and only then bound to the
+        # variable, so `d = {"k": lambda: False}; print(d["k"]())` looked the
+        # temp up and found nothing.
+        if v in gen._dict_callable_ret:
+            gen._dict_callable_ret[node.name] = gen._dict_callable_ret[v]
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,
@@ -484,17 +500,26 @@ def _gen_stmt_VarDecl(gen, node):
         # seed the element type from the annotation here too — otherwise a
         # list filled via insert()/index-stores reads back as raw int64_t
         # handles (same gap as the no-initializer path's seeding below).
-        if actual_dst == 'MojoList *' and isinstance(node.type_ann, str) \
-                and '[' in node.type_ann and not node.type_ann.startswith('['):
-            _li = gimple_ctypes._split_top_level_commas(
-                node.type_ann.split('[', 1)[1].rstrip(']').strip())
-            if _li:
-                try:
-                    _et = gen._resolve_type(_li[0].strip())
-                except Exception:
-                    _et = None
-                if _et and _et != 'int64_t' and node.name not in gen._elem_types:
-                    gen._elem_types[node.name] = _et
+        if actual_dst == 'MojoList *' or actual_dst == 'MojoSet *':
+            _et = _annotation_container_elem_type(gen, node.type_ann, actual_dst)
+            if _et and node.name not in gen._elem_types:
+                gen._elem_types[node.name] = _et
+        # `var s: Set[Int] = {}` — an empty `{}` display carries no evidence
+        # for ANY container kind (an empty dict, list and set are equally
+        # "nothing"), and its default lowering is a DICT, so coercing it to
+        # the declared `MojoSet *` either reinterprets the header (the
+        # silent-wrong-value shape: `s.add(i)` became a no-op and the set
+        # printed `{}` forever) or, once anything in the body needs the set's
+        # real kind, hard-refuses with "cannot coerce MojoDict * to MojoSet *".
+        # Build the kind the destination declares instead. Same
+        # `reify_empty_container_literal` call, same reason, as the
+        # plain-assignment path below — which is the shape the
+        # `parts: List[String] = ...` rewriter produces, so the `var` spelling
+        # was the only one still missing it.
+        _reified = gimple_ctypes.reify_empty_container_literal(
+            gen, vtype, actual_dst, node.value)
+        if _reified is not None:
+            vtype, v = actual_dst, _reified
         gen._safe_coerce_emit(vtype, actual_dst, v, gen._write_dest(node.name))
     else:
         ctype = gen._resolve_type(node.type_ann)
@@ -989,6 +1014,21 @@ def _gen_stmt_AssignStmt(gen, node):
             # bugs/CODEGEN_untyped_param_string_passthrough_wrong.md.
             if ctype in ('int', 'int64_t') and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
                 ctype = vtype
+            # `s: Set[Int] = {}` — an ANNOTATED assignment declares a
+            # container kind, and an empty `{}` is a dict DISPLAY: evidence
+            # for the dict and nothing else. Without this the annotation is
+            # honoured for the element/value type (the `_dv` / `List[T]`
+            # blocks below) but not for the container KIND itself, so `s`
+            # was declared and stack-allocated as a `MojoDict`, `s.add(i)`
+            # became a no-op against a dict header, `i in s` was False and
+            # `len(s)` was 0 — silently, exit 0. Same premise as the
+            # VarDecl path (which resolves `node.type_ann` outright) and as
+            # `reify_empty_container_literal` just below: the declared kind
+            # wins, because the literal is empty.
+            _ann_ctype = ginf.ann_container_ctype(gen,
+                                                  getattr(node, 'type_ann', None))
+            if _ann_ctype is not None:
+                ctype = _ann_ctype
             gen._declare_var(tname, ctype)
             # BUG-2026-023 residual (box.3d/game FileSystem.current_dir_path):
             # the rewriter turns `parts: List[String] = ...` into an
@@ -997,17 +1037,9 @@ def _gen_stmt_AssignStmt(gen, node):
             # annotation so insert()/index-stores + later subscript reads
             # dispatch on the real element instead of int64_t handles.
             _ann_as = getattr(node, 'type_ann', None)
-            if ctype == 'MojoList *' and isinstance(_ann_as, str) \
-                    and '[' in _ann_as and not _ann_as.startswith('['):
-                _li = gimple_ctypes._split_top_level_commas(
-                    _ann_as.split('[', 1)[1].rstrip(']').strip())
-                if _li:
-                    try:
-                        _et = gen._resolve_type(_li[0].strip())
-                    except Exception:
-                        _et = None
-                    if _et and _et != 'int64_t':
-                        gen._elem_types[tname] = _et
+            _et = _annotation_container_elem_type(gen, _ann_as, ctype)
+            if _et:
+                gen._elem_types[tname] = _et
         # A heap-boxed mutable capture: _write_dest returns `*name` (the
         # deref, pointee-typed lvalue), so the coercion target must be
         # the POINTEE ctype, not the box pointer ctype — otherwise the
@@ -1080,6 +1112,14 @@ def _gen_stmt_AssignStmt(gen, node):
             gen._bm_tainted_locals.add(tname)
             if v in gen._bound_method_ret_types:
                 gen._bound_method_ret_types[tname] = gen._bound_method_ret_types[v]
+        # Any callable VALUE assigned to a variable — the AssignStmt path's
+        # identical propagation a few hundred lines above, same reason:
+        # `f = lambda: False` materializes the value into a temp, and the
+        # call site keys on the variable's name.
+        if v in gen._callable_ret_types:
+            gen._callable_ret_types[tname] = gen._callable_ret_types[v]
+        if v in gen._dict_callable_ret:
+            gen._dict_callable_ret[tname] = gen._dict_callable_ret[v]
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,
@@ -1109,6 +1149,41 @@ def _gen_stmt_AssignStmt(gen, node):
         # of `MojoGenerator *`).
         if dst == 'MojoAsync *' and v in gen._async_var_api:
             gen._async_var_api[tname] = gen._async_var_api[v]
+        # The per-slot-KIND side tables, carried from the RHS temp onto the
+        # assigned name — the exact mirror of the three same-shaped blocks in
+        # this file's VarDecl path (see the `var m = struct.unpack('<if', b)`
+        # / `var s = struct.Struct('<if')` comments there), and for the same
+        # reason. All three are keyed by the NAME a value is read under, and
+        # that name is the RHS temp only until this assignment replaces it:
+        #
+        #   b = [1, 2.5]     ->  b[0] read 5e-324 (the int slot's bits as a
+        #   for x in b          denormal double) and `for x in b` printed
+        #                         5e-324 / 2.5, exit 0 — while the `var b =
+        #                         [1, 2.5]` spelling of the very same value was
+        #                         exactly right, because the VarDecl path
+        #                         already carried the marker across.
+        #   t = struct.unpack('<if', buf)  ->  same, for the same reason.
+        #   s = struct.Struct('<if')       ->  `s.unpack(buf)` found no format
+        #                         on `s`, so the per-slot kinds the format
+        #                         names were never recovered for the unpack.
+        #
+        # `_maybe_kinds_vals` is the load-bearing one: a heterogeneous
+        # container's tracked element type is its PROMOTED one ('double' for
+        # `[1, 2.5]`), which is exactly the answer that is wrong for its int
+        # slot, and this marker is what routes the read to the runtime's own
+        # per-slot record instead (see the `_maybe_kinds_vals` check in
+        # `_lower_Subscript`'s list branch and in `_gen_for_list`).
+        #
+        # Same `type_ann is None` guard as the VarDecl path: an ANNOTATED
+        # local is declared as some other container on purpose, so the
+        # initializer's own side tables describe a value it is not.
+        if getattr(node, 'type_ann', None) is None:
+            if v in gen._struct_slot_kinds:
+                gen._struct_slot_kinds[tname] = gen._struct_slot_kinds[v]
+            if v in gen._maybe_kinds_vals:
+                gen._maybe_kinds_vals.add(tname)
+            if v in gen._struct_formats:
+                gen._struct_formats[tname] = gen._struct_formats[v]
         gen._track_pointer_actual_type(tname, dst, v, vtype)
         gen._safe_coerce_emit(vtype, dst, v, gen._write_dest(tname))
     elif isinstance(node.target, gimple_ctypes.MemberExpr):
@@ -1365,9 +1440,15 @@ def _gen_stmt_AssignStmt(gen, node):
             else:
                 # Mark so generic repr() prints True/False instead of 1/0
                 # for this dict's values — see mojo_mark_dict_bool_values's
-                # doc comment in runtime/fire_runtime.c.
-                if isinstance(node.value, gimple_ctypes.BoolLiteral):
+                # doc comment in runtime/fire_runtime.c. A literal RHS was
+                # the only shape recognised, so `d['a'] = b` for a `b = True`
+                # and `d['a'] = 1 == 1` both printed `{'a': 1}` while
+                # `print(b)` and `repr(b)` were already right; the one shared
+                # predicate is `is_python_bool_expr`, which the dict LITERAL
+                # store and the print dispatch use too.
+                if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                     gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
+                gen._note_dict_callable_ret(obj_v, v)
                 # Pass actual vtype so _emit_call can coerce pointers to int64_t
                 gen._emit_call('void', '', 'mojo_dict_set_int',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
@@ -1421,8 +1502,9 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
-                    if isinstance(node.value, gimple_ctypes.BoolLiteral):
+                    if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
+                    gen._note_dict_callable_ret(dp, v)
                     # Pass actual vtype so _emit_call can coerce pointers to int64_t
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
@@ -1436,6 +1518,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      ('char *', v)])
                 else:
+                    gen._note_dict_callable_ret(_dsw_dp, v)
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      (vtype, v)])
@@ -2371,7 +2454,12 @@ def _gen_stmt_DelStmt(gen, node):
         elif ot == 'MojoList *':
             idx_type, idx_val = gen.lower_expr(target.index)
             idx64 = gen._to_int64(idx_type, idx_val)
-            gen._emit_call('int64_t', '', 'mojo_list_pop_at',
+            # mojo_list_delitem, not mojo_list_pop_at: `del t[0]` and
+            # `t.pop(0)` remove the same slot but are different Python
+            # operations, and CPython refuses them differently on a tuple
+            # (TypeError "doesn't support item deletion" vs AttributeError
+            # "has no attribute 'pop'"). See mojo_list_delitem's definition.
+            gen._emit_call('int64_t', '', 'mojo_list_delitem',
                              [('MojoList *', ov), ('int64_t', idx64)])
         elif ot in ('int', 'int64_t', 'void *'):
             # Fully dynamic: the container's real type isn't known until
@@ -2399,7 +2487,9 @@ def _gen_stmt_DelStmt(gen, node):
             lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
             lidx_type, lidx_val = gen.lower_expr(target.index)
             lidx64 = gen._to_int64(lidx_type, lidx_val)
-            gen._emit_call('int64_t', '', 'mojo_list_pop_at',
+            # mojo_list_delitem, matching the statically-typed branch above
+            # — this is still `del x[i]`, not `x.pop(i)`.
+            gen._emit_call('int64_t', '', 'mojo_list_delitem',
                              [('MojoList *', lp), ('int64_t', lidx64)])
             gen._emit(f"  goto {bb_after};")
             gen._emit_label(bb_after)
@@ -2684,8 +2774,9 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             elif ot == 'MojoDict *':
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
-                if isinstance(node.value, gimple_ctypes.BoolLiteral):
+                if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                     gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
+                gen._note_dict_callable_ret(obj_v, v)
                 gen._emit_call('void', '', 'mojo_dict_set_int',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
             elif ot in ('int', 'int64_t'):
@@ -2712,8 +2803,9 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True, True)
-                    if isinstance(node.value, gimple_ctypes.BoolLiteral):
+                    if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
+                    gen._note_dict_callable_ret(dp, v)
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
             elif ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) not in gen.struct_field_types:

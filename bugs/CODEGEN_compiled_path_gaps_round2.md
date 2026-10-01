@@ -1,5 +1,62 @@
 # CODEGEN: four compiled-path gaps measured on 2026-09-27, none of them refusals
 
+## Status (2026-09-30): TWO OF THE FOUR ARE CLOSED — #2 fixed here, #4 was
+## already fixed on 2026-09-27 — and #1 and #3 are still open
+
+Re-measured against the current tree, with CPython alongside, on
+2026-09-30 (branch `work/codegen-old-divergences`):
+
+| # | gap | state |
+|---|---|---|
+| 1 | an inherited `@classmethod`/`@generator` binds the DEFINING class and does not dispatch | **OPEN** — analysis below re-measured and unchanged |
+| 2 | `x == None` on a `char *` is False, and `print` of one prints `(null)` | **FIXED** (two commits on this branch) |
+| 3 | a heterogeneous `dict \| dict` has no static value type | **OPEN** — deliberately unhandled; the refusal is still the recommended move and is still unmeasured |
+| 4 | `__itertools_only_<hash>` vs `_itertools_only_<hash>` | **FIXED on 2026-09-27**, not by this branch — see below |
+
+## #2 — FIXED. `x == None` and `print(None)
+
+Both halves reproduced first, against the current tree:
+
+```python
+def main():
+    a = {"A": "1"}
+    print(a.get("MISSING"))          # CPython None      compiled (null)
+    print(a.get("MISSING") == None)  # CPython True      compiled False
+main()
+```
+
+**Cause.** `d.get(k)` lowers to `mojo_dict_get_str`, which returns `NULL` for
+an absent key, and `None` is a singleton with no NULL to point at. The
+string-equality lowering sent the `None` side through
+`mojo_char_to_str((char)0)` — the one-character string NUL — so the answer was
+`strcmp(NULL, "")`, i.e. False. `print` reached `printf("%s", NULL)`, which
+glibc and Darwin both render `(null)`.
+
+**Fix.** `x == None` with `x` a `char *` is now a pointer comparison against 0
+(`mojo/backend_gimple/emit_exprs.py`, emitted before the string path, in the
+same shape as the `is`/`is not` pointer-identity case), and
+`mojo_print`/`mojo_print_stderr` print `None` for a NULL string. The polarity
+is the operator itself, which is the OPPOSITE of the `mojo_str_eq` idiom above
+it (that helper returns 1 for equal, so `==` becomes `!= 0`); the first attempt
+inverted it and turned all ten probe lines the other way.
+
+**Verified** on the real binaries: every line of the probe now agrees across
+CPython, the interpreter and the compiled path, including `a.get("A") == None`
+(False), `"" == None` (False) and `a.get("MISSING") is None` (True, which was
+already right). Regression: `dict_get_none_guard` in `test_runtime_diff.py`,
+cross-checked against CPython, red without the fix
+(`interp='None' jit='(null)'`).
+
+**Still open inside #2, deliberately not fixed:** `None == 0` is True on the
+compiled path where CPython says False. The numeric path cannot tell a boxed
+null POINTER from the integer 0, and folding it to a constant False would
+break every `d.get(k)` guard whose local is untyped (the pointer bits ARE 0 on
+a miss). It needs the boxed-any representation item #3 also needs.
+
+The original write-up follows, one item per section, with #2 and #4 marked.
+
+---
+
 Found while landing the round-2 fixes for
 `COMPILE_FAIL_importlib_resources_readers.md`,
 `COMPILE_FAIL_Android_android.md` and
@@ -74,8 +131,11 @@ this compiler's own generated code is not built that way.
 
 ---
 
-## 2. `x == None` is False on the compiled path for a NULL `char *`, and
-##    `print()` of one prints `(null)`
+## 2. FIXED 2026-09-30 — `x == None` is False on the compiled path for a NULL
+##    `char *`, and `print()` of one prints `(null)`
+
+(Reproduced against the current tree, root-caused and fixed; see the Status at
+the top of this file. The original analysis is kept below.)
 
 Found by accident, writing a `dict_union_get` regression: the natural
 assertion `d.get("MISSING") == None` is wrong on the compiled path.
@@ -141,8 +201,18 @@ exactly the change CLAUDE.md warns regresses dozens of modules quietly.
 
 ---
 
-## 4. A cross-module symbol-name mismatch: `__itertools_only_<hash>` vs
-##    `_itertools_only_<hash>`
+## 4. FIXED 2026-09-27 (not by this branch) — a cross-module symbol-name
+##    mismatch: `__itertools_only_<hash>` vs `_itertools_only_<hash>`
+
+`mojo/middle/module_shared.py`'s `_register_sym` was the only one of the five
+module-string -> C-prefix manglers that omitted `lstrip('.')`, so
+`from ._itertools import only` gave the call site `__itertools_only_37bd8e`
+against a `_itertools_only_37bd8e` definition. One token. Its regression is
+`test_module_cache.py`'s `test_underscore_prefixed_sibling_import_symbol`,
+which asserts the call site and the definition use ONE spelling — necessary
+because in the minimal shape a sibling TU accidentally satisfies the bad name
+and a link/exit-code assertion passes on the broken tree. `test_module_cache.py`
+83/0 on 2026-09-30. The original write-up follows.
 
 Found by building `Lib/importlib/resources/readers.py`, whose two remaining
 errors are this and gap-3-shaped territory:

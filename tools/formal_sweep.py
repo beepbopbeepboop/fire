@@ -522,8 +522,21 @@ _FRAME_ESCAPES = (
     # A field slot holding a frame address, so two bindings of one name
     # disagree about what lives where.
     ("hands the word in the slot", "field slot holds a frame address"),
+    # A member read of a name that is a METHOD of the receiver's own struct,
+    # in a VALUE position. Not a frame question at all: a bound method is not
+    # a word, so there is no slot to read it out of. `formal/model.py`'s
+    # `member_read_without_a_field` says so where the old message claimed two
+    # layouts disagreed when there was one, and WITHOUT this family the five
+    # files it fixed fall into "other refusal" — which is the specific thing
+    # this table exists to prevent, introduced by fixing a diagnostic.
+    ("which is a METHOD of", "member read of a method used as a value"),
+    # A member read of a name the receiver's struct does not have. One
+    # candidate and no disagreement, so there was nothing to disagree about;
+    # the same five-file note applies.
+    ("has no field", "member read of a name the struct does not have"),
     # The same disagreement, stated as a placement failure rather than as a
-    # slot.
+    # slot. Matches ONLY the two-candidate wording now, which is the only case
+    # it was ever true of.
     ("cannot be placed", "name has two disagreeing shapes"),
 )
 
@@ -557,6 +570,27 @@ _REFUSAL_FAMILIES = (
     ("MLIR attribute template", "MLIR construct"),
     ("MLIR dialect construct", "MLIR construct"),
     ("__mlir_", "MLIR construct"),
+    # The two halves of an MLIR TEMPLATE that name something with no value here
+    # rather than a dialect attribute: a `__mlir_type` is a TYPE, and the
+    # current target is a target. Both used to be reported as "MLIR attribute
+    # template", which is false of every `__mlir_type` binding in the stdlib —
+    # including `std/sys/info.mojo`'s `_TargetType`, the module that heads this
+    # family. Same bucket, because the repair is the same (a value model that
+    # can hold a type or a target); distinct markers, because a message that
+    # names the construct is the only thing a reader of a file nobody has read
+    # can act on.
+    ("names an MLIR TYPE", "MLIR construct"),
+    ("asks for the current TARGET", "MLIR construct"),
+    # A `#kgen.param.expr<…>` QUESTION the build cannot answer, as opposed to
+    # the attribute templates above, which are answers with nowhere to go. Its
+    # OWN family because the fix is different and specific: this build states
+    # the architecture it emits and the container it wraps it in, and a field
+    # or a CPU feature outside those two needs an input the backend does not
+    # have. One marker for the whole class, so the three specific wordings
+    # behind it (a field with no source, a per-CPU question, an operand that
+    # does not fold) are counted as the limit they are rather than falling
+    # through to whatever matches next.
+    ("this build cannot answer this target query", "target query not answerable"),
     # A read through a nested frame, e.g. `self._a._b._c`: the outer frame slot
     # holds a frame address and the inner one is then read through it.
     ("out of a nested", "nested frame field read"),

@@ -19,6 +19,49 @@ from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.types import _BUILTIN_RET_CTYPES  # underscore name: `import *` won't carry it
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
+# `_resolved_export_entry` — `from X import *` skips underscore names, and
+# `_register_sym` needs it to give a re-exported function's registered
+# signature the DEFINING module's real one instead of the export text scan's
+# parameter-less placeholder. It is NOT imported here or at its use site: like
+# the re-export-hop WALK beside it, it needs `gen`, so it is reached as the
+# `GimpleGen` method `gen._resolved_export_entry` — the same shape as
+# `gen._find_symbol_home_module` and `gen._parsed_import`.
+#
+# Not importing it at all is also what makes the self-hosted closure compile.
+# The one `from mojo.middle.funcs_shared import _resolved_export_entry` this
+# used to carry, at `_register_sym`'s one call, registered the name in THAT
+# module's `imported_symbols`, and `imported_symbols` is per-gen while
+# `inline_defined` — the preamble's "this TU defines it, so do not declare it
+# again" set — is built from TOP-LEVEL imports only. So the same symbol that
+# `emit_funcs`' top-level `from mojo.middle.funcs_shared import ...` correctly
+# suppresses here escaped the suppression, and the text scan's declaration of
+# it reached the file beside the definition it contradicts:
+#
+#   mojo/middle/module_shared.py:561: error: too many arguments to function
+#     'mojo_middle_funcs_shared__resolved_export_entry_ee1b12'; expected 2,
+#     have 4
+#   mojo/middle/funcs_shared.py:507: error: conflicting types for the same
+#     symbol; have 'int64_t(GimpleGen *, char *, char *, int64_t)'
+#
+# Two is the scan's arity, not the definition's: the def annotates two of its
+# four params and `module_loader._scan_source` DROPS an unannotated one, and
+# nothing in the scan can type a leading `gen` as `GimpleGen *` at all — so
+# the scan cannot be made to agree, and a `name (...)` fallback cannot either
+# (gcc rejects a prototype against a later full one). Removing the import
+# removes the declaration instead, which is the fix.
+#
+# `funcs_shared` reaches `gimple_codegen`, which reaches the gimple backend,
+# which reaches `funcs_shared` again, so a top-level import in BOTH middle
+# modules closes a cycle. Whichever of the two the process happened to
+# reach first then died with `ImportError: cannot import name ... from
+# partially initialized module`, and the measured victim was the formal
+# build path, which enters through `reflect` -> `gimple_codegen` and has no
+# other way in: `formal/model.py` `runtime_abi` -> ... ->
+# `mojo/backend_gimple/emit_funcs.py` -> here. The direction that stays
+# top-level is `funcs_shared` -> `gimple_codegen`; every edge back down
+# into the middle tier is at its use site, so importing EITHER middle module
+# first works. See `funcs_shared._struct_method_qualifier._sanitize_qualifier`
+# for the same rule on the other side.
 # Closure-scan leaf helpers live in mojo/middle.closures (formal + gimple
 # share one copy; closures must not import this module — it pulls gimple_codegen).
 from mojo.middle.closures import (
@@ -26,6 +69,7 @@ from mojo.middle.closures import (
 )
 import gimple_codegen  # constants used by some extracted helpers
 from gimple_codegen import _selfhost_impl_py_files
+from mojo.middle.funcs_shared import _selfhost_parsed_source
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -98,12 +142,10 @@ def _selfhost_parsed_modules(sd: str) -> list:
     `_selfhost_module_scalar_globals` covers a superset — so a whole-list
     key could never be shared between them anyway).
 
-    A file that fails to parse is cached as a parse FAILURE, not
-    re-attempted on every pass: the three call sites all `continue` on
-    exception, and without this the same unparseable file would be
-    tokenized once per pass per call, forever. Read errors are NOT cached
-    (they are not content-derived), so a file that appears later is still
-    picked up.
+    The per-file cache and its string key live in
+    funcs_shared._selfhost_parsed_source (shared with the fn-index and
+    extra-field scans). A file that fails to parse is cached as a FAILURE and
+    contributes an empty statement list.
     """
     _files = sorted(_selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in
@@ -115,25 +157,7 @@ def _selfhost_parsed_modules(sd: str) -> list:
     for _f in _files:
         if not os.path.isfile(_f):
             continue
-        try:
-            _mtime = os.path.getmtime(_f)
-        except OSError:
-            continue
-        _ck = (_f, _mtime)
-        if _ck in _SELFHOST_PARSE_CACHE:
-            _entry = _SELFHOST_PARSE_CACHE[_ck]
-        else:
-            _entry = _PARSE_FAILED
-            try:
-                with open(_f) as _fh:
-                    _src = _fh.read()
-                _entry = ast_rewriter.rewrite(
-                    Parser(py_tokenize(_src)).with_filename(_f).parse_module())
-            except Exception:
-                _entry = _PARSE_FAILED
-            _SELFHOST_PARSE_CACHE[_ck] = _entry
-        if _entry is not _PARSE_FAILED:
-            _out.append((_f, _entry))
+        _out.append((_f, _selfhost_parsed_source(_f)))
     return _out
 
 def _selfhost_module_scalar_globals(sd: str) -> dict:
@@ -291,6 +315,49 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
                         _out.setdefault(f"{_s.name}_{_m.name}", _e)
     return _out
 
+def module_qualifier(q) -> str:
+    """The ONE module-string -> C-qualifier sanitization every cross-module
+    registry key and symbol prefix in this codegen must agree on.
+
+    Every one of these keys is written by ONE half of the compiler and read
+    by the OTHER (a defining module registering its own signature/struct/-
+    generator under a `(home, name)` key; an importing module looking that
+    same key up to mangle its call site to the same symbol). Two internally
+    consistent but MUTUALLY DISAGREEING spellings of one module therefore
+    do not fail loudly — they make a lookup MISS, and a miss silently
+    falls through to a worse tier (the shared bare-name slot, all-int64_t
+    param types) whose overload hash then differs from the definition's,
+    producing `implicit declaration of function '<name>_<suffixA>'; did you
+    mean '<name>_<suffixB>'?` at g++ time.
+
+    That is exactly what happened for every module whose name carries a
+    leading depth dot AND an underscore of its own — the overwhelmingly
+    common `from . import _common` / `from ._regexes import ...` shape.
+    The leading-dot strip is load-bearing, NOT cosmetic:
+      `'._common'` -> lstrip-then-substitute -> `_common`   (correct)
+                   -> substitute-only        -> `__common`  (a key nothing
+                                                     will ever look up)
+    `._regexes` happens to agree under both (`_regexes` either way), which
+    is why the bug read as "sometimes it works" rather than "always
+    broken".
+
+    Callers that additionally need the per-compile `_inline_module_qualifiers`
+    remap keep doing that lookup themselves (it needs a `gen`; this is a pure
+    string function on purpose, so both the reference side and the defining
+    side can call it without one).
+
+    Consolidated out of four near-identical private copies
+    (`_func_qualifier._sanitize_qualifier`,
+    `_struct_method_qualifier._sanitize_qualifier`,
+    `_cpp_sanitize_module_qualifier`, and the inline chain in `_local_def_pts`
+    / `_imported_def_pts`), two of which omitted the lstrip. One
+    implementation, so the halves cannot drift again.
+    """
+    if not q:
+        return q
+    return q.lstrip('.').replace('.', '_').replace('-', '_')
+
+
 def _collect_import_modules(modules_to_compile: dict, node_list):
     """Populate `modules_to_compile` with every module named by an import
     anywhere in `node_list` — top level and nested inside function bodies,
@@ -399,20 +466,118 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
         }
         self._module_alias_names.add(_sk)
         return
+    # `from M import Class as Alias`: the export table carries no class
+    # exports at all (module_loader only emits function and global_var
+    # entries), so `sym_info` is empty and the alias would otherwise land
+    # in `_unresolved_import_aliases` with nothing recorded. Recorded
+    # BEFORE the falsy-`sym_info` bail below so the constructor dispatch
+    # can still resolve the name; the alias map is deliberately NOT
+    # `imported_symbols`, which every reader treats as "a function I can
+    # emit an `extern` for" (see module_gen.py's re-export preamble).
+    if not s.wildcard:
+        self._note_struct_import_alias(s.module, _sk, orig_name)
+    # `from REEXPORTER import name`, where `REEXPORTER` only RE-EXPORTS
+    # `name` from somewhere else — the standard package layout
+    # (`p/__init__.py` doing `from .sub import tri`). The export table
+    # `load_module`/`_local_sibling_module_exports` builds is a TEXT scan of
+    # the module the statement NAMES, and a re-exporting `__init__.py`
+    # contains no `def` at all, so `sym_info` is empty and the import used
+    # to die in the `_unresolved_import_aliases` bail immediately below —
+    # nothing recorded, and the call site bound to the extern preamble's
+    # `weak` "unavailable in compiled mode" stub instead of the real
+    # definition (link mode) or failed to resolve outright. Follow the
+    # re-export hops and take the DEFINING module's own export entry,
+    # which is the entry the definer's C symbol was built from.
+    #
+    # Gated on `not sym_info` so the ordinary case (the named module does
+    # define the function) does no extra work at all, and on the resolver
+    # answering, so a name nothing reachable defines keeps today's exact
+    # behaviour — including the `_unresolved_import_aliases` bail. Every
+    # use of `s.module` BELOW is `_eff_mod` for the same reason: the
+    # registered entry's `module`, the sibling param resolution and the
+    # param-ctype snapshot all have to name the module that actually
+    # defines the symbol, not the one it was re-exported through, or each
+    # of them looks the answer up under a key nothing ever wrote.
+    _eff_mod = s.module
+    # Gated on the bail this is rescuing, NOT on `not sym_info` alone. An
+    # import that DID resolve is already registered correctly by the pass
+    # that owns it (`_emit_stdlib_import_externs` for a stdlib/test module),
+    # and re-pointing its recorded module changes the emitted symbol's
+    # spelling and whether it is overload-mangled at all — measured: with
+    # the wider gate, `from std.memory import alloc` stopped being the bare
+    # `extern int64_t alloc (...)` the stdlib dylib's own export table
+    # advertises and became a mangled `std_memory_alloc_alloc_9f63a2
+    # (int64_t layout)`, and four stdlib modules then failed with
+    # `implicit declaration of function 'mojo_memset'` (32 sites) plus a
+    # spurious `unsafe_memcpy: unavailable in compiled mode` weak stub.
+    # The narrower gate below can only ever REPLACE an abandoned import
+    # with a resolved one, so it cannot demote a name that already worked.
+    if _sib_qualifier and not sym_info and not s.wildcard:
+        _home_fn = self._find_symbol_home_module(s.module, orig_name, 'fn')
+        if _home_fn and _home_fn != s.module:
+            # The ABSOLUTIZED ref for opening the file: a relative spelling
+            # (`.alloc`, from a re-exporting `__init__.py`) resolved
+            # against THIS importing module is a different file as soon as
+            # the chain is more than one level deep, and the export lookup
+            # would then silently consult the wrong module's source.
+            _home_abs = self._find_symbol_home_module(s.module, orig_name, 'fn',
+                                                      want_abs=True) or _home_fn
+            _hexp = None
+            _hqual = None
+            try:
+                _hexp, _hqual = self._local_sibling_module_exports(_home_abs)
+            except Exception:
+                _hexp = None
+            if _hexp is None:
+                try:
+                    import module_loader as _mlmod_reexp
+                    if _mlmod_reexp.can_resolve_module_path(_home_abs):
+                        _hexp = load_module(_home_abs)
+                except Exception:
+                    _hexp = None
+            _hinfo = _hexp.get(orig_name) if _hexp else None
+            if _hinfo:
+                # Adopt the defining module ONLY now, when its own exports
+                # really have this name. Adopting it on the strength of the
+                # hop alone (with those exports still empty) also adopted
+                # `_hqual`, and that flipped the `_sib_qualifier and not
+                # sym_info` bail below ON for names that used to fall
+                # through to `_emit_stdlib_import_externs`' stdlib
+                # registration — so the symbol lost its `extern` entirely
+                # and its call site emitted a call to nothing. Measured
+                # across the stdlib dylib build: `implicit declaration of
+                # function 'mojo_memset'`, 32 sites in 4 modules, plus a
+                # spurious `unsafe_memcpy: unavailable in compiled mode`
+                # weak stub that had not been emitted before.
+                _eff_mod = _home_fn
+                # Through the DEFINING module's own parsed signature, not
+                # the text scan's: this entry is re-emitted as an `extern`
+                # for a symbol this translation unit does not define (the
+                # re-exporting module has no definition to skip it for), so
+                # the scan's parameter-less `int64_t tri (void)` for an
+                # unannotated `def tri(x)` would become the only prototype
+                # in the file and reject its own call site. See
+                # `_resolved_export_entry`.
+                # Reached as a `GimpleGen` method, not imported at this use
+                # site: the module-scope comment above gives both reasons.
+                sym_info = self._resolved_export_entry(_eff_mod, orig_name,
+                                                       _hinfo)
+                if _hqual:
+                    _sib_qualifier = _hqual
     if _sib_qualifier and not sym_info:
         if not s.wildcard:
             self._unresolved_import_aliases.add(_sk)
         return
     if isinstance(sym_info, str):
         _reg_isym[_sk] = {
-            'module': s.module, 'original_name': orig_name,
+            'module': _eff_mod, 'original_name': orig_name,
             'return_type': sym_info, 'parameters': [],
             'signature': f"{sym_info} {_sk} (void)"
         }
         self.func_return_types[_sk] = sym_info
     elif isinstance(sym_info, dict):
         sym_info = _as_dict(dict(sym_info))
-        sym_info['module'] = s.module
+        sym_info['module'] = _eff_mod
         # Only record `original_name` for a genuine `import X as Y` alias.
         # For an unaliased import it equals `_sk`, and storing it makes
         # `_func_csym` read it back (MojoDict get -> int64_t, then a POINTER
@@ -429,7 +594,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             pass
         elif _sib_is_local_project and sym_info.get('return_type'):
             _resolved_ret = self._resolve_sibling_param_ctype(
-                s.module, sym_info['return_type'])
+                _eff_mod, sym_info['return_type'])
             if _resolved_ret:
                 sym_info['c_return_type'] = _resolved_ret
                 _ret_changed = True
@@ -450,7 +615,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
                     sym_info.get('parameters') or [],
                     sym_info['c_parameters']):
                 _resolved_ctype = self._resolve_sibling_param_ctype(
-                    s.module, _p_raw_type)
+                    _eff_mod, _p_raw_type)
                 if _resolved_ctype:
                     _c_name = (_c_param.split()[-1]
                                if _c_param.strip() else _p_name)
@@ -532,10 +697,57 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             # qualifier derived from the import STRING cannot honour that;
             # only the module_name the defining module was itself compiled
             # under can.
-            _qual = (s.module.lstrip('.').replace('.', '_')
-                     .replace('-', '_'))
+            #
+            # "The module the defining module was compiled under" is NOT
+            # always the module this statement names: a package
+            # `__init__.py` that re-exports (`from .sub import tri`) is a
+            # re-exporting module, not a defining one, so `from p import
+            # tri` was qualifying by `p` against a definition emitted as
+            # `sub_tri_<suffix>` — a hard gcc "implicit declaration of
+            # function 'p_tri_...'; did you mean 'sub_tri_...'?" on the
+            # single-TU path, and a silent wrong answer on the link-mode
+            # one (the extern preamble's `weak` "unavailable in compiled
+            # mode" stub binds instead). Worse than the wrong symbol: the
+            # same wrong qualifier is the `_home_def_param_types` /
+            # `_imported_home_param_types` lookup key beside it, so a
+            # mismatch there is a mis-TYPED result rather than a
+            # compile error — that is how a re-exported CLASS loses its
+            # field types (`from mod_root import Dialog` typed
+            # `Dialog.widgetName` `int64_t` and printed the `char *`'s
+            # bits). `_find_symbol_home_module` answers the question this
+            # half is actually asking ("which module DEFINES this name,
+            # following re-export hops"), with the visited-set that makes
+            # a re-export cycle terminate. A None answer (nothing
+            # resolvable defines it) falls back to the import string
+            # unchanged — no worse than before, and never a guess.
+            # `_eff_mod` already IS the defining module when the name only
+            # REACHES `s.module` through a re-export (resolved above);
+            # otherwise this statement names the defining module directly and
+            # the import string is the right spelling.
+            _home_ref = _eff_mod if _eff_mod != s.module else None
+            if _home_ref:
+                _qual = (_home_ref.lstrip('.').replace('.', '_')
+                         .replace('-', '_'))
+            else:
+                _qual = (s.module.lstrip('.').replace('.', '_')
+                         .replace('-', '_'))
         else:
+            # Same requirement, opposite spelling: a module satisfied by a
+            # recorded dylib keeps the PATH-derived qualifier, because that
+            # is what the dylib's own export table used. When the symbol
+            # only REACHES this module through a re-export, the defining
+            # module is a different file, so re-derive the basename from
+            # the DEFINING module's path instead of the importing one's.
             _qual = _sib_qualifier
+            _home_ref = _eff_mod if _eff_mod != s.module else None
+            if _home_ref:
+                try:
+                    _hp = self._parsed_import(_home_ref)[0]
+                    if _hp:
+                        import module_loader as _mlmod_home
+                        _qual = _mlmod_home.module_name_for_path(_hp)
+                except Exception:
+                    pass
         # BUG-2026-024: snapshot THIS import's param ctypes
         # under (home_qualifier, as_referenced_name) BEFORE
         # anything else can overwrite the shared bare-name
@@ -563,7 +775,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
         # slot.
         try:
             _pts_snap = None
-            for _fs in (self._parsed_import(s.module)[2] or []):
+            for _fs in (self._parsed_import(_eff_mod)[2] or []):
                 if isinstance(_fs, FunctionDef) and _fs.name == orig_name:
                     _pts_snap = self._signature_ctypes(_fs.params, _fs)
                     break
@@ -644,7 +856,8 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
                 self._quick_type(_n.value.args[0]))
         if isinstance(_n, FunctionDef):
             _saved = self.var_types
-            self.var_types = dict(_saved)
+            _scratch_mark_17: int = self._scan_scratch_top
+            self.var_types = self._scratch_dict_copy(_saved)
             for _pname, _ptype in (_n.params or []):
                 if _ptype:
                     self.var_types[_pname] = _mojo_type(_ptype)
@@ -653,6 +866,7 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
                     self.var_types[_lname] = _ltype
             _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
             self.var_types = _saved
+            self._scan_scratch_top = _scratch_mark_17
         elif isinstance(_n, IfStmt):
             _gmi_phase17_collect_appends(self, _n.then_body or [], _append_hits)
             if _n.else_body:
@@ -1241,16 +1455,7 @@ def _gmi_as_str(x) -> str:
 # `_SELFHOST_MODGLOBAL_CACHE` under three private keys ('k' / 'sdfvt' /
 # 'httrf'). That dict is GONE: three result caches over one shared file list
 # is three parses of the same source and three AST copies retained for the
-# life of the process. `_selfhost_parsed_modules` below keys one cache per
-# FILE on `(path, mtime)` and all three passes read it.
-#
-# `{ (path, mtime): stmts }`, plus one distinguished entry recording a file
-# that failed to parse. Deliberately NOT one whole-list key: the three
-# passes cover different file lists, so a whole-list key could never be
-# shared between them anyway.
-_SELFHOST_PARSE_CACHE: dict = {}
-# A module-level sentinel, not `None`: a parse can legitimately produce
-# `None`, and `None` as a cache value would be indistinguishable from a miss.
-_PARSE_FAILED = object()
+# life of the process. `_selfhost_parsed_modules` above reads the one
+# per-FILE cache (funcs_shared._SELFHOST_PARSE_CACHE, keyed `path@mtime`).
 from mojo.middle.exprtypes import _walk_ast
 from mojo.middle.types import _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _extract_init_expr, _import_targets, _mojo_type

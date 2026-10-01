@@ -55,10 +55,11 @@ from mojo.middle.resolve_shared import *  # noqa: F401,F403
 from mojo.middle.resolve_shared import (
     _as_assignstmt_node, _as_multiassignstmt_node, _as_str, _as_vardecl_node, _calls_in_stmts, _closure_value_locals,
     _collect_calls_in_stmt, _collect_local_container_elems, _collect_return_elems, _decode_str_literal_text, _dtrace, _eval_const,
-    _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _is_none_literal, _is_sys_stderr, _lbn_target_names,
+    _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _scratch_dict_copy, _is_none_literal, _is_sys_stderr, _lbn_target_names,
     _lbn_walk, _module_const_int, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
+from mojo.middle.calls_shared import user_dunder_repr_call
 # gimple_gen_coro is reached via `gimple_codegen.gimple_gen_coro` below,
 # not a separate import of its own here -- see gimple_codegen.py's own
 # module-level `import gimple_gen_coro` and its comment on why a
@@ -359,6 +360,77 @@ def _register_closure_struct_inits(gen, stmts) -> None:
                     gen.func_param_types[_mangled] = _ctypes
 
 
+def publish_a3_generators(gen, meta) -> None:
+    """Publish `gen`'s own A3-lowered (stack-switch) free-function
+    generators into the whole-program `_generator_home_api` — the same
+    cross-module registry `_register_free_generator`
+    (mojo/backend_gimple/module_gen.py) publishes the C++20-coroutine-path
+    ones into.
+
+    Without it, `_cpp_resolve_generator_call_api`'s `<module>.<gen_fn>`
+    shape — the only way a generator body of one module can construct a
+    FOREIGN module's compiled generator handle — could resolve a
+    cpp-lowered generator and never an A3-lowered one, because
+    `mojo/middle/coro.py`'s `register` fills only the per-bare-name
+    `_generator_api`. Both backends deliberately expose the IDENTICAL
+    four-symbol ABI (`<base>_start` -> `MojoGenerator *`, `<base>_resume`
+    -> `_Bool`, `<base>_value`, `<base>_destroy`, with matching
+    `func_return_types`/`func_param_types` entries — coro.py's `register`
+    sets the same keys `_register_free_generator` does), so a handle from
+    either is drivable by one `next()` / for-loop lowering; only the
+    registry entry was missing.
+
+    Real: `c_common/tables.py`'s `read_table` doing
+    `lines = strutil._iter_significant_lines(infile)` then `next(lines)`.
+    `_iter_significant_lines` is A3-eligible while `read_table` is not
+    (kwonly params → "kwonly params (v0)"), so `read_table` compiles
+    through the cpp path and could not resolve the foreign handle,
+    refusing the whole module with `a call to unresolved callee
+    'next(...)'`. See bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+
+    Must be called at the A3 registration site, not from gen_module: by the
+    time gen_module runs, `mojo/middle/coro.py`'s `lower()` has already
+    REPLACED each generator's FunctionDef with its injected
+    `__mgco_<name>_body`, so the original bare name is gone from
+    `_local_top_level_func_names` and there is nothing left to key on. The
+    `meta` list handed to `register` is the authoritative, per-module record
+    of exactly what this module lowered.
+
+    Qualifier: `module_qualifier(gen.module_name)`, NOT `_func_qualifier`.
+    The A3 backend mangles a free generator's symbols UNQUALIFIED
+    (`__mgco_<name>`, coro.py's own `base = f'__mgco_{fn.name}'`), so there
+    is no per-call-site qualifier to consult — this module's own sanitized
+    name IS the right half of the key, and it is exactly what a reader
+    computing `module_qualifier(imported_symbols[bound_module]['module'])`
+    produces for the same module (`strutil`, `._strutil`, `pkg.strutil` all
+    land on the same spelling). First writer wins, so a cpp-lowered
+    generator's own entry is never displaced."""
+    from mojo.middle.module_shared import module_qualifier
+    if not meta:
+        return
+    qual = module_qualifier(getattr(gen, 'module_name', None) or '')
+    if not qual:
+        return
+    for _m in meta:
+        # A method goes to `_generator_method_api` (keyed by struct), an
+        # async generator drives a different API (`last_yield_was_wd`), and
+        # a nested `@parameter async def` is keyed by its qualified base
+        # with no module-level binding at all — none of the three is a
+        # `<module>.<free generator>` a cpp body can look up.
+        if (_m.get('is_method') or _m.get('nested')
+                or _m.get('is_async') or _m.get('is_async_gen')):
+            continue
+        _name = _m.get('name')
+        if not _name:
+            continue
+        _api = (gen._generator_api or {}).get(_name)
+        if _api is None:
+            continue
+        _key = qual + '::' + _name
+        if _key not in gen._generator_home_api:
+            gen._generator_home_api[_key] = _api
+
+
 def _compile_imported_module(gen, module_name: str) -> tuple:
     """Find and compile an imported .mojo/.py module, extracting type
     information.
@@ -509,6 +581,17 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen.struct_boxed_fields = gen.struct_boxed_fields
                 temp_gen.struct_bool_fields = gen.struct_bool_fields
                 temp_gen._struct_name_owner = gen._struct_name_owner  # share: cross-module same-name collision guard
+                # The module-qualified struct IDENTITY that guard feeds: which
+                # C name each colliding StructDef is emitted under, and which
+                # module owns it. Shared for the same reason — a sibling
+                # module's temp_gen must classify the SAME StructDef node
+                # identically, or the two halves of one class would disagree
+                # about its own name. See GimpleGen._struct_cname_by_id.
+                temp_gen._struct_cname_by_id = gen._struct_cname_by_id
+                temp_gen._struct_cname_of_name = gen._struct_cname_of_name
+                temp_gen._struct_cname_by_home = gen._struct_cname_by_home
+                temp_gen._struct_qualified_cnames = gen._struct_qualified_cnames
+                temp_gen._struct_home_by_id = gen._struct_home_by_id
                 temp_gen._global_var_types = gen._global_var_types
                 temp_gen._global_c_decl_types = gen._global_c_decl_types
                 # share: definition-side free-function signature truth —
@@ -771,6 +854,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(stmts)
                 if _ss_meta:
                     gimple_codegen.gimple_gen_coro.register(temp_gen, _ss_meta)
+                    publish_a3_generators(temp_gen, _ss_meta)
 
                 code = temp_gen.gen_module(stmts)
 
@@ -1200,10 +1284,48 @@ def _register_link_imports(gen, stmts) -> list:
     def scan(stmt_list):
         for stmt in stmt_list:
             if isinstance(stmt, gimple_ctypes.ImportStmt):
-                # `import M` + `M.Class` — the OTHER spelling of the
-                # FromImportStmt branch below, which was the only one this
-                # scan considered. See `_inline_bare_import_struct`.
+                # `import M` needs TWO things registered here, and they are
+                # the only two arms of this ladder that ever matched a bare
+                # import — see the unreachable `elif isinstance(stmt,
+                # ImportStmt)` further down, whose whole body used to live
+                # there and which this arm made dead code (two branches
+                # landing in the same `if`/`elif` chain from two different
+                # merges; the earlier one is the arm that runs).
+                #
+                # 1. `import M` + `M.Class` — the OTHER spelling of the
+                #    FromImportStmt branch below, which was the only one
+                #    this scan considered. See `_inline_bare_import_struct`.
                 _inline_bare_import_struct(gen, stmt, _marker_reads)
+                # 2. A plain `import a.b` binds `a` and makes the SUBMODULE
+                #    `a.b` reachable as an attribute, so `a.b.f(...)` is a
+                #    real cross-module call whose symbol link mode has to be
+                #    able to provide. Registering the submodule for inlining
+                #    is what stops that call site binding the extern
+                #    preamble's `weak` "unavailable in compiled mode" stub —
+                #    printing `tri: unavailable in compiled mode` then `0`,
+                #    exit 0, with the diagnostic on the program's own stdout
+                #    (bugs/CODEGEN_import_dotted_name_two_hop_attribute_
+                #    call_exits_1.md's link-mode half; `test_gimple.py`'s
+                #    `dotted_import_two_hop_attribute_call` is its
+                #    regression, both pipelines, against CPython).
+                #
+                #    Only the DOTTED form, and only when nothing else can
+                #    provide the module: a real dylib/reflection entry keeps
+                #    its own path, and `import a` (no dot) names a module the
+                #    normal machinery already handles. `import a.b as q` is
+                #    left alone — the alias names the submodule directly,
+                #    which is the single-hop spelling `_register_sym`
+                #    already resolves.
+                for _im_pair in ([(stmt.module, stmt.alias)]
+                                 + list(getattr(stmt, 'extra', None) or [])):
+                    _im_m = gimple_ctypes._as_str(_im_pair[0])
+                    if '.' not in _im_m or gimple_ctypes._as_str(_im_pair[1]):
+                        continue
+                    _exp2, _refl2, _src2 = _exports(_im_m)
+                    if _exp2:
+                        continue
+                    if _src2 and gen._submodule_source_path(_im_m):
+                        gen._link_inline_modules.add(_im_m)
             elif isinstance(stmt, gimple_ctypes.FromImportStmt):
                 exports, from_reflection, source = _exports(stmt.module)
                 for _fip11 in (getattr(stmt, 'name_alias_strs', None) or []):
@@ -1281,6 +1403,34 @@ def _register_link_imports(gen, stmts) -> list:
                         if gen._from_import_name_is_submodule(stmt.module, name):
                             gen._link_inline_modules.add(
                                 gimple_ctypes._join_import_member(stmt.module, name))
+                            continue
+                        # A module that only RE-EXPORTS `name` (a package
+                        # `__init__.py` doing `from .sub import tri`) is the
+                        # same dead end for a different reason: there is no
+                        # `def` in its source for the classification below to
+                        # find, and no submodule file of that name, so
+                        # nothing at all was registered — while the call
+                        # site's `extern` (emitted from the call-site
+                        # registration in module_shared.py's
+                        # `_register_sym`, which DOES follow the hop) names
+                        # the DEFINING module's symbol. The program then
+                        # failed to link with
+                        # `Undefined symbols: "_sub_tri_9f63a2"`, where
+                        # before the call-site half was fixed it had bound
+                        # the extern preamble's `weak` "unavailable in
+                        # compiled mode" stub and printed a wrong 0.
+                        #
+                        # Inline the DEFINING module, which is the same
+                        # mechanism the submodule branch just above uses and
+                        # needs no reflection bookkeeping: the inline-compile
+                        # loop emits the real definition into this
+                        # translation unit. The ref is the spelling that
+                        # statement used, which is exactly what that loop
+                        # keys its own compilation by.
+                        _reex_home = gen._find_symbol_home_module(
+                            stmt.module, name, 'fn')
+                        if _reex_home and _reex_home != stmt.module:
+                            gen._link_inline_modules.add(_reex_home)
                             continue
                         # Not a concrete export — classify `name` against the
                         # module's own SOURCE TEXT and record how to make it
@@ -1600,6 +1750,28 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     else:
         gen._emit(f'  {t} = {rhs};')
     return t
+
+
+def _inc_val(gen, base: str) -> str:
+    """`base + 1` as its own int64_t temp — the ONE way to spell a
+    one-step advance in generated GIMPLE.
+
+    A C-style cast is not a legal gimple OPERAND, so the obvious
+    `f'{base} + (int64_t)1'` is a hard gimplification error
+    ("expected expression before '(' token") that takes out the whole
+    translation unit. `1LL` is the tree's existing width-correct int64_t
+    literal idiom (see `_gen_for_range`'s own `step_v`), needs no cast,
+    and IS a legal operand, so the whole expression is valid GIMPLE.
+
+    Every counter/pos/cursor advance in the codegen goes through here
+    rather than each spelling the cast itself: the five sites this
+    replaced (the list-iterator cursor advance in `next(it)` and in
+    `for x in it:`, the regex finditer/findall scan advance, and the
+    enumerate-counter advance) were all still carrying the cast, and
+    Tools/cases_generator/analyzer.py failed to compile on it — the
+    module-level refusal is `cannot compile module` for the whole file
+    because a GIMPLE parse error is not recoverable per-function."""
+    return gen._new_val('int64_t', f'{base} + 1LL')
 
 
 def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list) -> str:
@@ -1940,10 +2112,28 @@ def _split_expr_format(src: str) -> str:
 
 
 
-def _repr_value(gen, rat: str, rav: str) -> str:
+def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     """Convert an already-lowered (type, value) pair into a `char *` per
-    Python `repr()` semantics. Shared by the `repr()` builtin and `%r`
-    string-formatting."""
+    Python `repr()` semantics. Shared by the `repr()` builtin, `%r` and an
+    f-string's `!r` conversion.
+
+    `enode` is the operand's AST node when the caller has it, and is the ONLY
+    way a bool is distinguishable from the integer 1/0 it shares a slot with:
+    a bool's C type here is a plain `int` (see `is_python_bool_expr`)."""
+    # `_Bool` FIRST, before every other arm: Python's repr of a bool is
+    # `True`/`False`, and with no arm for it a `_Bool` fell all the way to
+    # the int64_t one and printed `1`/`0` — the right value, the wrong type.
+    # `print()` was already right (`_gen_print`'s `_Bool` arm) and so was
+    # `%s` and `f'{x}'`, which is exactly what let this survive: the obvious
+    # smoke test passes, and the spellings that ship (`repr(x)`, `'%r' % (x,)`,
+    # `f'{x!r}'`, a dict's repr) are the ones that are wrong.
+    # `mojo_repr_bool` takes an `int`, not a `_Bool`, on purpose — this header
+    # is included from the C++20 backend's translation units, where `_Bool`
+    # does not exist — so the cast is the same one the print path makes.
+    if rat == '_Bool' or (enode is not None and rat in ('int', 'int64_t')
+                          and gimple_exprtypes.is_python_bool_expr(gen, enode)):
+        return gen._call_expr('char *', 'mojo_repr_bool',
+                              [('int', gen._new_val('int', f'(int){rav}'))])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
@@ -1969,25 +2159,20 @@ def _repr_value(gen, rat: str, rav: str) -> str:
         # which its `repr(p)` spelling reached through an import but which
         # is NOT an import bug.
         #
-        # Deliberately CONSERVATIVE: each condition below is one "we know
-        # this is right", and anything unproven falls through to the
-        # pre-existing lowering, so this can only ever replace a wrong
-        # answer with a right one, never introduce a new shape.
+        # The lookup itself is `user_dunder_repr_call` in
+        # mojo/middle/calls_shared.py, SHARED with `_stringify_value` (the
+        # `str()` / `%s` / f-string route) so the two spellings cannot
+        # disagree about which dunder a struct answers. `repr()` passes
+        # `('__repr__',)` only: CPython's own fallback here is `__str__`, and
+        # taking it would silently change the repr of every struct in the
+        # tree that defines `__str__` without `__repr__` — a wide behaviour
+        # change, recorded rather than smuggled in here.
         _rsn = rat[:-2].strip() if rat.endswith(' *') else ''
-        if _rsn and '__repr__' in (gen._struct_method_names.get(_rsn) or ()):
-            _rcs = gen._struct_method_csym(_rsn, '__repr__', '')
-            if gen.func_return_types.get(_rcs) == 'char *':
-                _rcall = gen._call_expr('char *', _rcs, [(rat, rav_local)])
-                # Same null semantics the generated field-dump has: a NULL
-                # object reprs as "None" rather than crashing. Interned
-                # through `_intern_string` because a bare `"None"` literal is
-                # not a GIMPLE r-value (see its own docstring), and bound to
-                # a local first rather than nested in the f-string so the
-                # expression uses no quote nesting at all — this file is
-                # compiled by the compiler it implements.
-                _none_slit = gen._intern_string('None')
-                return gen._new_val(
-                    'char *', f'({rav_local} ? {_rcall} : {_none_slit})')
+        if _rsn:
+            _rcall = user_dunder_repr_call(gen, _rsn, rat, rav_local,
+                                           ('__repr__',))
+            if _rcall is not None:
+                return _rcall
         # Dispatch through the per-struct field-by-field reprs generated
         # in gen_module (see reflect_structs) when the runtime type tag
         # is one this program actually allocates — falls back to the
@@ -2038,17 +2223,23 @@ def _intern_string(gen, escaped: str) -> str:
 
 
 
-def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str) -> str:
+def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
+                         enode=None) -> str:
     """Render one %-spec's operand to `char *`, applying any width or
     precision in `full_spec` via a real C sprintf (see _sprintf_one)
-    rather than reimplementing printf-style padding by hand."""
+    rather than reimplementing printf-style padding by hand.
+
+    `enode` is the operand's AST node when the caller has it. It carries the
+    only thing that distinguishes a bool from an int 0/1 — a bool's lowered C
+    type is a plain `int` — so `'%r' % (b,)` has no other way to print True
+    (see `is_python_bool_expr` and `_repr_value`)."""
     if conv == 's':
-        sval = gen._stringify_value(et, ev)
+        sval = gen._stringify_value(et, ev, enode)
         if full_spec == '%s':
             return sval
         return gen._sprintf_one(full_spec[:-1] + 's', sval)
     if conv == 'r':
-        rval = gen._repr_value(et, ev)
+        rval = gen._repr_value(et, ev, enode)
         if full_spec == '%r':
             return rval
         return gen._sprintf_one(full_spec[:-1] + 's', rval)
@@ -2821,8 +3012,9 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         else:
             # See the dict-literal case's identical comment: vt alone
             # can't distinguish a real bool literal from a genuine int.
-            if isinstance(node.key, gimple_ctypes.BoolLiteral):
+            if gimple_exprtypes.is_python_bool_expr(gen, node.key):
                 gen._emit(f"  mojo_mark_dict_bool_values ({res});")
+            gen._note_dict_callable_ret(res, vv)
             vv64 = gen._to_int64(vt, vv)
             gen._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
 

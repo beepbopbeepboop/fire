@@ -4,6 +4,13 @@ The second-largest `codegen/dependency` family in the arm64 sweep — ~30 of 578
 files in the default scope — and the one refusal whose *message* was the worst
 in the tree. Wave 3 (agent C3).
 
+**This document is about the REFUSAL and its message. What the family is worth
+is measured separately, in `FORMAL_dylib_export_gate_ceiling.md`: for the
+largest member (`std/collections/binary_heap.mojo`, 35 files) every candidate —
+a per-instantiation export, a type descriptor, one concrete instantiation, a
+demand-pruned import closure — has a measured ceiling of 0 files, because 34 of
+the 35 name `BinaryHeap` nowhere.**
+
 **Status: two of the four causes are fixed; the other two are correctly
 refused, and now say which one they are.**
 

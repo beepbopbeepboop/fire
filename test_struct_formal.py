@@ -475,17 +475,15 @@ def test_the_module_builds_on_both_backends(_tmpdir=None):
     fit six — and that is not discoverable from either backend alone, which is
     why it is asserted here rather than discovered.
 
-    **The x86-64 half of this currently FAILS, and that is a filed bug, not a
-    skipped test.** The arity half of the finding is settled by the x86-64
-    CODEGEN — the module's own functions compile for x86-64, which is what the
-    8-vs-6 refusal was about — but getting a module dylib onto an x86-64 link
-    line needs a container that does not exist: `compile_formal_dylib` emits
-    a Mach-O for `fmt="elf"` too
-    (`bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md`). So the arm64 half
-    below asserts the dylib is produced, and the x86-64 half asserts the
-    SOURCE compiles — which is what proves the arity — and the check is written
-    so that when the container lands it becomes a stronger assertion rather than
-    needing to be rewritten.
+    **Both halves build now, on both architectures.** The arity half of the finding
+    was settled first — the module's own functions compile for x86-64, which is
+    what the 8-vs-6 refusal was about — and what held the x86-64 dylib back was
+    a container defect, not a codegen gap: `build_macho_dylib` wrote its stubs
+    with no `arch`, so the arm64 12-byte stub was `bytearray`-inserted into the
+    x86-64 6-byte slots and left the image longer than `__LINKEDIT` declared,
+    which `codesign` refuses outright. `struct.mojo` calls the C library, so it
+    has stubs, so it was caught by that. Both are now fixed and the x86-64 half
+    asserts the dylib is produced with the right container.
     """
     sys.path.insert(0, HERE)
     import tempfile as _tf
@@ -519,9 +517,22 @@ def test_the_module_builds_on_both_backends(_tmpdir=None):
         check(False, "struct.mojo's functions prepare for the x86-64 codegen",
               str(e)[:300])
 
-    # …and the dylib, which is expected to fail until the ELF container
-    # exists. Asserted, not skipped: a test that went quiet here would be the
-    # one thing that could let the bug outlive its fix unnoticed.
+# …and the dylib, which is now produced on both architectures. The
+    # container is asserted against `default_format(arch)`, not hardcoded: on a
+    # macOS host that is Mach-O for x86-64 too, because an x86-64 image that
+    # runs here has to be one Rosetta 2 will load, and `fire.py`'s
+    # `_formal_run_argv` is what runs them. Asserting ELF would be asserting
+    # the wrong container for this host and would fail against a library that
+    # is correct.
+    #
+    # This check used to require a Mach-O-to-ELF fix that could not have been
+    # the right one: it failed on "the x86-64 module dylib is an ELF object"
+    # while the x86-64 EXECUTABLE beside it was a Mach-O, so the dylib and the
+    # thing linking it had to agree on the container and the test said they
+    # must not. `bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md` reported
+    # the same wrong premise, and its real content — that `fmt` was accepted
+    # and ignored, and that an x86-64 module dylib with an extern call could
+    # not be signed — was two separate real defects, now fixed.
     with _tf.TemporaryDirectory() as d:
         try:
             out = build_module_dylib("struct", src, d, "x86_64",
@@ -530,18 +541,19 @@ def test_the_module_builds_on_both_backends(_tmpdir=None):
             if produced:
                 with open(out, "rb") as f:
                     magic = f.read(4)
-                check(magic == b"\x7fELF",
-                      f"the x86-64 module dylib is an ELF object, not a "
-                      f"Mach-O (magic {magic!r})")
+                want = (b"\xcf\xfa\xed\xfe" if B.default_format("x86_64")
+                        == "macho" else b"\x7fELF")
+                check(magic == want,
+                      f"the x86-64 module dylib's container is {magic!r}, "
+                      f"expected {want!r} — the format this host builds "
+                      f"x86-64 in. A module library and the image linking it "
+                      f"must agree on the container.")
             else:
                 check(False, "struct.mojo produces a module dylib for x86_64")
         except Exception as e:
-            check("x86_64_module_dylib_emitted_as_macho" in str(e) or
-                  "strict validation" in str(e),
-                  "the x86-64 module dylib is an ELF object; while it is a "
-                  "Mach-O this must fail with the container mismatch "
-                  f"(bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md), "
-                  f"not something else. Got: {str(e)[:200]}")
+            check(False,
+                  "struct.mojo produces a module dylib for x86-64; it was "
+                  f"refused or mis-containered: {str(e)[:300]}")
 def test_unservable_formats_are_refused_not_wrong(tmpdir):
     """A format needing more values than registers returns nothing.
 

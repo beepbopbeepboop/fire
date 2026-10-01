@@ -40,6 +40,7 @@ import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_exprs as gex
+from mojo.middle.module_shared import module_qualifier
 
 # Sentinel for "this dict has no such key", so a caller can tell a key
 # that is ABSENT from one whose value happens to be falsy. Used by
@@ -310,7 +311,7 @@ def _cpp_pad_struct_method_call_args(gen, sym: str, bare: str,
             if dv is None:
                 out.append('0')
             else:
-                _dt, dval = gen._default_expr_to_pair(dv)
+                _dt, dval = gen._default_expr_to_pair(dv, cxx=True)
                 out.append(dval)
     # Cast every supplied argument to its positional parameter's real C
     # type (the SAME registry `expected` comes from — slot 0 is the
@@ -434,7 +435,7 @@ def _cpp_try_kwargs_forward_call(gen, e):
     call_args = list(given_vals)
     for i in range(len(gap_defaults)):
         pname, dflt_ast = gap_defaults[i]
-        _dt, dval = gen._default_expr_to_pair(dflt_ast)
+        _dt, dval = gen._default_expr_to_pair(dflt_ast, cxx=True)
         gap_var = f"_kwgap{uid}_{i}"
         if gap_ctypes[i] == 'char *':
             lines.append(
@@ -969,14 +970,16 @@ def _cpp_reset_unit_state(gen):
     gen._cpp_list_iter_cursor = {}
 
 
-def _cpp_sanitize_module_qualifier(mod: str) -> str:
-    """The module-string -> C-qualifier sanitization EVERY cross-module
-    registry key in this codegen uses (`_generator_home_api` keys, the
-    FromImportStmt binding probes) — factored out so the coroutine emitter's
-    bound-module generator resolution derives keys byte-identically instead
-    of re-spelling the same replace chain (one more site and they WILL
-    drift)."""
-    return mod.replace('.', '_').replace('-', '_')
+# The module-string -> C-qualifier sanitization EVERY cross-module registry
+# key in this codegen uses (`_generator_home_api` keys, the FromImportStmt
+# binding probes) is `module_qualifier`, shared with the ordinary function /
+# struct / method-qualifier paths so a bound-module generator lookup derives
+# keys byte-identically instead of re-spelling the replace chain. It used to
+# live here as a second, DIVERGENT copy: this one substituted without first
+# stripping a relative-import module's leading depth dot, so a
+# `_generator_home_api` lookup for `._foo`/`._bar` style modules spelled the
+# key differently from the `_func_qualifier` half that WROTE it — a silent
+# miss, then an honest refusal, for a generator that really was compiled.
 
 
 def _cpp_expr_static_ctype(gen, e):
@@ -1072,7 +1075,7 @@ def _cpp_resolve_generator_call_api(gen, func):
         mod = info.get('module')
         if not mod:
             return None
-        qual = _cpp_sanitize_module_qualifier(mod)
+        qual = module_qualifier(mod)
         return gen._generator_home_api.get(f"{qual}::{func.member}")
     return None
 
@@ -1118,7 +1121,7 @@ def _cpp_emit_generator_start_expr(gen, call, api):
                 f"call to compiled generator '{api['base']}': expected "
                 f"{len(sub_params)} argument(s), got {len(arg_exprs)} "
                 f"(no default at slot {len(arg_exprs)})")
-        arg_exprs.append(gen._default_expr_to_pair(_dv)[1])
+        arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"call to compiled generator '{api['base']}': expected "
@@ -3968,8 +3971,11 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
     consumer side actually trusts for its own accessor choice."""
     tvar = gen._cpp_fresh_name('_mg_tup')
     self_fields = getattr(gen, '_cpp_gen_self_fields', None)
-    lines = [f"{indent}MojoList *{tvar} = mojo_list_new();",
-             f"{indent}mojo_mark_as_tuple({tvar});"]
+    # Built unmarked and marked at the END (just before the yield), because a
+    # marked list is refused by every mutating MojoList entry point — marking
+    # first made every `yield (a, b)` raise out of its own construction. Same
+    # ordering rule as _lower_tuple_literal's identical literal.
+    lines = [f"{indent}MojoList *{tvar} = mojo_list_new();"]
     for el in tup.elements:
         ectype = gimple_exprtypes._infer_simple_expr_ctype(el, declared, self_fields, gen._async_api) or 'int64_t'
         ev = gen._cpp_expr(el)
@@ -3990,6 +3996,7 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
                 lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)\"\");")
             else:
                 lines.append(f"{indent}mojo_list_append_int({tvar}, 0);")
+    lines.append(f"{indent}mojo_mark_as_tuple({tvar});")
     lines.append(f"{indent}co_yield {tvar};")
     return lines
 
@@ -5457,7 +5464,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 f"`for ... in {sub_name}(...)`: expected "
                 f"{len(sub_params) - len(receiver_exprs)} argument(s), "
                 f"got {len(call.args)}")
-        arg_exprs.append(gen._default_expr_to_pair(_dv)[1])
+        arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`for ... in {sub_name}(...)`: expected "
@@ -5575,6 +5582,67 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     Lowers to a C++ range-for or indexed loop over the iterable.
     Only supports iterable as a simple identifier or call expression."""
     target = s.target
+    # `for <var> in <g>:` where `g` is a compiled-generator HANDLE local
+    # (bound by `g = <compiled generator>(...)`, tracked in
+    # `_cpp_generator_var_api`; same-module, an aliased import, or a
+    # FOREIGN module's — see `_cpp_resolve_generator_call_api`). Drives the
+    # identical `{base}_resume`/`{base}_value` protocol `next(g)`
+    # (`_cpp_next_on_generator_expr`) and `yield from g`
+    # (`_cpp_yield_from`) already use, including the exhaustion-vs-
+    # escaped-exception disambiguation both of those share, so all three
+    # consumption forms of one generator handle now agree.
+    #
+    # Before this, such a loop fell through to the generic C++ range-for
+    # over the bare handle text and g++ rejected it with "'begin' was not
+    # declared in this scope" — `MojoGenerator *` is an opaque runtime
+    # handle with no begin/end, so there was no representation at all.
+    # Real: `c_common/tables.py`'s `read_table` consuming
+    # `strutil._iter_significant_lines(infile)` — once that FOREIGN
+    # generator's handle is resolvable at all, the `for` half of the
+    # read-it-fully idiom is what a real program does with it next.
+    #
+    # The handle is deliberately NOT destroyed on exhaustion: same
+    # documented never-frees convention every other generator-handle
+    # consumer in this emitter follows. A `for/else` is refused rather than
+    # approximated — this emitter's break-flag protocol is shared with the
+    # generic path and wiring a generator loop into it is a separate,
+    # unexercised change.
+    if (isinstance(target, str) and ',' not in target
+            and not s.else_body
+            and isinstance(s.iterable, gimple_ctypes.IdentExpr)
+            and s.iterable.name in getattr(gen, '_cpp_generator_var_api', {})):
+        _gi_api = gen._cpp_generator_var_api[s.iterable.name]
+        _gi_base = _gi_api['base']
+        _gi_vct = gimple_exprtypes._c_to_cpp_scalar_type(
+            _gi_api.get('value_ctype') or 'int64_t')
+        _gi_handle = gen._cpp_kw_param_renames.get(
+            s.iterable.name, s.iterable.name)
+        _gi_stop = gen._exc_type_id('StopIteration')
+        _gi_refs = getattr(gen, '_cpp_xmod_generator_refs', None)
+        if _gi_refs is not None:
+            _gi_refs.setdefault(_gi_base, {
+                'value_ctype': _gi_api.get('value_ctype', 'int64_t'),
+                'params': list(_gi_api.get('params') or [])})
+        if target not in declared:
+            declared[target] = _gi_vct
+            if gen._cpp_func_scope_decls is not None:
+                gen._cpp_func_scope_decls.append(f"{_gi_vct} {target};")
+        # A `_Bool`-valued generator's slot must be narrowed the same way
+        # `next()`'s `-> bool` lambda return does, or assigning the `_Bool`
+        # through a `bool`-typed local is at best a narrowing warning.
+        _gi_read = (f"{_gi_base}_value({_gi_handle})"
+                    if _gi_vct != 'bool'
+                    else f"(({_gi_base}_value({_gi_handle})) != 0)")
+        lines = [f"{indent}while ({_gi_base}_resume({_gi_handle})) {{",
+                 f"{indent}    {target} = {_gi_read};"]
+        for inner in s.body:
+            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+        lines.append(f"{indent}}}")
+        return lines
+    # `for <var> in <iterable>` where `<iterable>` is a plain list local —
+    # the generic indexed-loop lowering lives further down, after the
+    # container-literal / module-global cases; the generator-handle case
+    # above must precede it because a handle is never a list.
     # `for x in it:` where `it` is a resumable list-iterator local (bound by
     # `it = iter(<list>)`, tracked in `_cpp_list_iter_cursor`) — continue from
     # the shared cursor (which `next(it)` may already have advanced), and
@@ -7329,7 +7397,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                 f"`yield from {sub_name}(...)`: expected "
                 f"{len(sub_params) - len(receiver_exprs)} argument(s), "
                 f"got {len(call.args)}")
-        arg_exprs.append(gen._default_expr_to_pair(_dv)[1])
+        arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`yield from {sub_name}(...)`: expected {len(sub_params)} "

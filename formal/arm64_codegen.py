@@ -59,6 +59,14 @@ _CALLEE_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 # refuse.
 _ABI_ARG_REGS = 8
 
+# The local a frame-returning function keeps the CALLER'S block address in.
+# A name rather than a dedicated register, so the word goes through the same
+# register-or-spill-slot home every other local has; the leading underscores
+# keep it out of any name the source can spell, and the reason it is not one of
+# those is the same reason `_SCRATCH` is a constant: a source that binds this
+# name must not be able to reach the convention's own state.
+_SRET_LOCAL = "__sret_block"
+
 
 def _for_target_tree(target: str):
     """Parse a for/comprehension target string into a leaf name or nested list.
@@ -104,10 +112,21 @@ def _collect_var_names(f: F.FunctionDef) -> list:
 
     Statement-level names come from the shared middle-end walk
     (`mojo.middle.boundnames`) — same structure GIMPLE's
-    `_locally_bound_names` uses. Formal only adds MemberExpr field-slot
+    `_lbn_locally_bound_names` uses. Formal only adds MemberExpr field-slot
     keys on top (scalar replacement; backend-specific, not middle-end)."""
     names = bound_names_in_order(f.body, f.params)
+    # A name the function declares `global` is NOT a local of it, whatever the
+    # assignment walk said: `global G; G = G + 1` assigns G, so the walk reports
+    # it bound, and giving it a register here would make the function keep TWO
+    # homes for one word — a register, which the emitter would read back as the
+    # current value, and the `__DATA` slot, which is where the module's value
+    # lives. Which one a read picked would decide the program's answer, and the
+    # two architectures would not have to pick the same one.
+    module_globals = M.global_names_bound_in(f)
+    if module_globals:
+        names = [n for n in names if n not in module_globals]
     seen = set(names)
+
     # `h.x` for a frame receiver is a SLOT IN MEMORY, not a local: the value
     # lives at `[h, #8k]` and is loaded by `_load_var`. Allocating a register
     # for it would waste one of the ten callee-saved registers on a name nothing
@@ -519,8 +538,14 @@ class ARM64Codegen:
 
     def __init__(self, test_input: int = 10, dylib_syms: dict = None,
                  comptime_hook=None, module_source: str = "",
-                 dylib_exports: list = None):
+                 dylib_exports: list = None, globals_base: int = None):
         self.test_input = test_input
+        # Where this unit's module-global data segment is MAPPED. A parameter
+        # and not a lookup, because it differs per container (macho_linker and
+        # elf define separate constants) and because every slot access has to be
+        # computed against it BEFORE the image exists. None means "this unit has
+        # no module globals", which is the ordinary case.
+        self._globals_base = globals_base
         self.asm = Assembler()
         self._functions = {}
         self._structs: dict = {}
@@ -530,6 +555,10 @@ class ARM64Codegen:
         self._while_counter = 0
         self._assert_counter = 0
         self._tup_counter = 0
+        # Per-image counter for the lazy module-global initializer's skip
+        # label; unique per function because the assembler's labels are.
+        self._gi_counter = 0
+        self._fn_local_names: set = set()
         self._strings = []   # list[(label, bytes)]
         self._str_counter = 0
         self._var_regs = {}
@@ -570,6 +599,21 @@ class ARM64Codegen:
         # `a.b.c` member path (scalar replacement, a local). Reset per function.
         self._frame_holders: set = set()
         self._frame_base = 0
+        # ── A frame that COMES BACK from a callee ────────────────────────
+        # `_ret_frame_sites` is this function's `{id(call): (struct, offset,
+        # bytes)}` from `model.struct_returned_frame_sites`: one reserved
+        # block per call site of a function that returns a frame, at
+        # `_ret_frame_base` and above, and the same region the constructor
+        # frames use because a returned block has the same lifetime a local
+        # one has.  `_returns_frame` is the struct THIS function returns, and
+        # `_image_returns_frame` the whole image's table, which is what
+        # `_emit_call` asks to decide whether a call site needs a block.
+        self._ret_frame_sites: dict = {}
+        self._ret_frame_base = 0
+        self._ret_frame_bytes = 0
+        self._returns_frame = None
+        self._image_returns_frame: dict = {}
+        self._entry_name = None
         # Stack of enclosing loops, innermost last. Each entry:
         #   start -- loop top (continue target for `while`)
         #   step  -- iteration step (continue target for `for`)
@@ -695,6 +739,7 @@ class ARM64Codegen:
         self.asm.org(base_addr)
 
         first_func_name = functions[0].name
+        self._entry_name = first_func_name if emit_startup else None
         if emit_startup:
             self.asm.emit(encode_stp_sp_pre(29, 30))
             test_val = self.test_input
@@ -747,14 +792,57 @@ class ARM64Codegen:
 
     def _emit_function(self, f: F.FunctionDef) -> None:
         self._current_function = f.name
+        # The whole image's `{function: struct}` table for the functions that
+        # RETURN a frame, published by `formal/build.py`'s fixpoint.  It is
+        # read twice and for two different questions: whether THIS function is
+        # one (the callee half, below) and whether a call site in it is one
+        # (the caller half, in `_emit_call`).  One table for both, because two
+        # answers to "does callee F return a frame" is the disagreement that
+        # makes a caller reserve a block the callee never writes.
+        self._image_returns_frame = dict(
+            getattr(f, "_image_returns_frame", None) or {})
         # The FUNCTION NODE, not just its name.  The pointer value model reads
         # a receiver's declared type from the function being emitted — a
         # parameter annotation, a `var p: Pointer[T]`, the bindings of a name —
         # and `_current_function` is a string, so it cannot answer any of those.
         self._cur_fn = f
+        # This function's LOCAL names, which is what decides whether a bare
+        # name is served from `__DATA` or from a register — see
+        # `_module_global`. Built from the same shared allocation order the
+        # registers come from, so the two cannot disagree.
+        self._fn_local_names = set(_collect_var_names(f))
         self.asm.label(f.name)
 
         var_names = _allocation_order(f)
+        # The RETURNED-FRAME convention, set up before the locals so that the
+        # hidden word has a home of its own.  A function that returns a frame
+        # address takes one extra trailing argument — the address of a block in
+        # its CALLER's scratch — and `return <frame>` becomes "copy the block
+        # to that word, return that word".  The word is kept in an ordinary
+        # local's home rather than a dedicated register so that it goes
+        # through `_load_var`/`_store_var` like every other value on this path:
+        # a register of its own would be a second answer to "where does a
+        # function keep a word", and the one that has to hold it is the same
+        # answer for a spilled local and a register local.
+        self._returns_frame = self._image_returns_frame.get(f.name)
+        if self._returns_frame is not None and f.name == self._entry_name:
+            # The ENTRY has no caller to reserve a block, so the convention has
+            # nothing to hand it.  Refused here, where which function is the
+            # entry is already known, and with the SHARED message so x86-64
+            # says the same thing about the same program.
+            raise CodegenError(M.entry_frame_return_refusal(f.name))
+        if self._returns_frame is not None and getattr(
+                f, "_frame_return_problems", None):
+            # The build pass parked a returned-frame refusal for this function
+            # and its entry points raise it after the imports resolve.  Reaching
+            # an emitter with one still parked means this function was compiled
+            # outside those entry points, and compiling it would emit a plain
+            # address return on the paths that do not return a frame — the
+            # silent wrong number the parked refusal exists to prevent.  The
+            # SAME text either way, because it is the same parked message.
+            raise CodegenError(f._frame_return_problems[0])
+        if self._returns_frame is not None:
+            var_names = list(var_names) + [_SRET_LOCAL]
         n_reg = min(len(var_names), len(_CALLEE_SAVED))
         self._var_regs = {name: _CALLEE_SAVED[i]
                           for i, name in enumerate(var_names[:n_reg])}
@@ -801,6 +889,18 @@ class ARM64Codegen:
         self._frame_recv_bytes = sum(
             M.struct_frame_block_bytes(st, self._structs)
             for st, _off, _nested in self._frame_sites.values())
+        # Blocks for frames this function RECEIVES from a callee that returns
+        # one.  The same region as the constructor frames and the same reason:
+        # a returned block has exactly the lifetime a local one has — both live
+        # in the creating function's scratch and die with it — so it goes at the
+        # bottom of the same reserved scratch and the blob cursor starts above
+        # the lot.  The layout is the shared model's, so x86-64 reserves the
+        # same bytes at the same offsets and a returned frame cannot be correct
+        # on one machine and a use-after-free on the other.
+        self._ret_frame_sites = M.struct_returned_frame_sites(
+            f, self._structs, self._image_returns_frame.get)
+        self._ret_frame_base = self._frame_recv_bytes
+        self._ret_frame_bytes = sum(v[2] for v in self._ret_frame_sites.values())
         self._frame_slots = dict(getattr(f, "_frame_slots", None) or {})
         # `{"h.a.b": slot}` — a NESTED frame read, two loads rather than one,
         # and a separate table because a `_frame_slots` entry is one load and a
@@ -832,15 +932,23 @@ class ARM64Codegen:
         }
         self._vtypes = function_var_types(f, self._call_types)
         self._pending_finally = []
-        # The blob cursor starts ABOVE the receiver frames, not at the bottom
-        # of the scratch: the frames live there (see above) and a blob must not
-        # land on one.
-        self._list_cursor = self._frame_recv_bytes
+        # The blob cursor starts ABOVE the receiver frames AND above the blocks
+        # reserved for frames this function receives, not at the bottom of the
+        # scratch: the frames live there (see above) and a blob must not land
+        # on one.
+        self._list_cursor = self._frame_recv_bytes + self._ret_frame_bytes
         self._for_list_depth = 0
         self._compr_depth = 0
         self._container_ctx = 0
         self._string_vars = set()
         self._dict_vars = set()
+        # …seeded with the module globals this function mentions, because the
+        # literal that says what they hold is in the MODULE's statement list and
+        # `_note_binding` only ever sees this function's. Seeded BEFORE the body
+        # is walked, and not instead of it: a name the function also binds is
+        # still module-scoped until the local store, which is the same
+        # order-dependent rule the local marks already implement.
+        self._note_global_kinds(f)
         self._fd_vars = set()
         self._comptime_vals = {}
         self._comptime_list_asts = {}
@@ -862,6 +970,16 @@ class ARM64Codegen:
         self.asm.emit(encode_mov_zr_xn(29, 31))  # MOV X29, SP
         for i in range(self._npairs):
             self.asm.emit(encode_stp_sp_pre(19 + 2 * i, 20 + 2 * i))
+        # The module-global initializer, LAZILY: a function that touches a
+        # global checks a flag and fills the slots if they are not filled yet.
+        # Placed here — after the frame is established and the callee-saved
+        # registers are saved, before anything can read a slot — because the
+        # prologue above is what makes X16/X17 available to it. See
+        # `_emit_global_init` for why this is CODE and not a relocation, and
+        # `model.initialization_is_lazy` for why it is not in the startup stub.
+        if M.function_touches_globals(f):
+            self._gi_counter += 1
+            self._emit_global_init(skip_label=f"__gi_done_{self._gi_counter}")
         self.asm.emit(encode_mov_zr_xn(19, 0))   # MOV X19, X0 (argument 0)
         # AAPCS delivers argument i in Xi on entry, and Xi is caller-saved —
         # so arguments 1..7 have to be moved into the callee-saved register
@@ -894,30 +1012,34 @@ class ARM64Codegen:
                 # Already in X19 by the unconditional save above, which also
                 # keeps the no-parameter case (unknown-name reads fall back to
                 # X19 and so still see the entry argument).
-                home, src = 19, 19
-            else:
-                home = self._var_regs.get(pname)
-                if home is None:
-                    # Past the 10 callee-saved registers, so this parameter's
-                    # home is a spill slot: write the incoming argument there
-                    # now, or its first read in the body would load whatever
-                    # the slot happened to hold. Same addressing as
-                    # `_store_var`'s spill path. Reachable for arguments 0..7
-                    # of a function with more than ten parameters — the
-                    # arity check above bounds how MANY arguments there are,
-                    # not how many names want a register.
-                    if pname in self._var_spills:
-                        self.asm.emit(encode_mov_zr_xn(17, i))
-                        _emit_sub_imm(self.asm, 17, 17,
-                                      self._spill_off(pname))
-                        self.asm.emit(encode_str_xt_xn_imm(17, 17, 0))
-                    continue
-                self.asm.emit(encode_mov_zr_xn(home, i))
-                src = home
-            if ptype is None:
-                continue         # a comptime parameter: already a full word
-            self._emit_extend(home, src,
-                              resolve(parse_type_name(ptype) or DEFAULT_INT_TYPE))
+                if ptype is None:
+                    continue     # a comptime parameter: already a full word
+                self._emit_extend(19, 19,
+                                  resolve(parse_type_name(ptype)
+                                          or DEFAULT_INT_TYPE))
+                continue
+            # An incoming argument register becomes this local's home — a
+            # callee-saved register when one was left, a spill slot otherwise,
+            # and the store is what makes the body read the caller's value
+            # rather than whatever the slot held. ONE routine for the write,
+            # because the returned-frame hidden word below has the same
+            # requirement and is not a parameter: it is an address, so it must
+            # not be narrowed to a declared width.
+            self._load_home_from_reg(pname, i, ptype)
+        # The RETURNED-FRAME hidden word, moved from the register the caller
+        # passed it in to its home, in the same place and for the same reason
+        # as the parameters above: every incoming argument is caller-saved, so
+        # anything still in X0..X7 when the body starts is the CALLER's value
+        # again.  It is a full word and NOT extended — it is an address, and
+        # narrowing it would be a pointer into the low half of a stack.
+        if self._returns_frame is not None:
+            sret_arg = len(incoming)
+            if sret_arg >= _ABI_ARG_REGS:
+                raise CodegenError(
+                    M.returned_frame_convention_refusal(f.name, sret_arg)
+                    or f"{f.name} needs one hidden word for the caller's block "
+                       f"and there is no argument register left for it")
+            self._load_home_from_reg(_SRET_LOCAL, sret_arg)
         _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
 
         for stmt in f.body:
@@ -956,6 +1078,14 @@ class ARM64Codegen:
         this one function, so one branch here covers all of them and there is
         no second lowering to keep in step.
 
+        A MODULE GLOBAL is also not a local, and for the sharper reason: its
+        home has to outlive every frame, so it is in the image's `__DATA` and
+        this is an ADRP/ADD to that address followed by a load. Intercepted
+        here for the same reason as the frame slot, and for one more: the name
+        is deliberately absent from `_var_regs`/`_var_spills` (see
+        `_collect_var_names`), so this branch is the ONLY place it can be read
+        from — there is no second home for a read to disagree with.
+
         A name in none of those tables has NO ADDRESS, and the two answers the
         old code gave it were the two answers the two architectures gave the
         same program: X19 (a callee-saved register holding whatever the caller
@@ -965,6 +1095,10 @@ class ARM64Codegen:
         slot = self._frame_slots.get(name)
         if slot is not None:
             self._emit_frame_load(name, slot, dst)
+            return
+        gslot = self._module_global(name)
+        if gslot is not None:
+            self._emit_global_load(gslot, dst)
             return
         # A NESTED frame slot is TWO loads and is checked before the one-load
         # table, because the name is `h.a.b` and the one-load table keys on
@@ -998,7 +1132,158 @@ class ARM64Codegen:
             _emit_sub_imm(self.asm, 17, 17, off)
             self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 0))
             return
+        # A TYPE name read as a value is the FOURTH place a name's value comes
+        # from, after the three above, and it is asked HERE — at the end, where
+        # the X19 fall-through used to be — for two reasons. It is the only
+        # reader of "does this name have a home" in the file, so putting the tag
+        # anywhere earlier would mean a second one: measured, an arm in
+        # `_emit_expr` before `_load_var` made `var Int = 7; printf("%d", Int)`
+        # print the TAG of the type `Int` (-913451874) instead of the local's
+        # 7, silently and on every such program. And a type has no home by
+        # definition, so "no home" and "is a type" are not in competition here —
+        # they are the same observation read twice.
+        #
+        # Asked of the shared model reader so this architecture and x86-64
+        # cannot answer `t == Int32` differently, which for a tag is not a
+        # diagnostic that differs but a comparison that comes out one way on one
+        # side. `formal/build.py` places the name in a pre-pass, so a type
+        # reaching here is a route that pass does not model, and the tag is
+        # still the answer rather than the fall-through.
+        tag = M.type_tag_for_name(name)
+        if tag is not None:
+            self._emit_mov_imm(f"X{dst}", tag)
+            return
         raise CodegenError(self._no_home(name))
+
+    def _emit_global_init(self, skip_label: str = None) -> None:
+        """Fill every address-valued module-global slot, and set the flag.
+
+        WHY CODE AND NOT A RELOCATION. The obvious mechanism is a relocation —
+        dyld's classic `REBASE` opcode stream for Mach-O, `R_X86_64_RELATIVE` for
+        ELF — and it is what the file-format documentation describes. It does not
+        work on the target this backend actually runs on: measured on macOS 26,
+        a well-formed `LC_DYLD_INFO_ONLY` rebase stream naming `__DATA` is parsed
+        (a malformed one aborts at launch with "missing
+        REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB") and then SILENTLY NOT
+        APPLIED — the slot still held the link-time address, and the first read
+        through it was a segfault. A silent no-op relocation is the worst
+        possible failure for this, because the image is well-formed by every
+        check available.
+
+        So the addresses are computed by the same instructions that already work
+        here: ADRP/ADD is how a string literal's address reaches a register, and
+        it is PC-relative, so it is correct under whatever slide dyld chose.
+
+        `skip_label`, when given, is where control goes once the flag says the
+        globals are already filled — the caller's lazy-init check branches there
+        and the body of every function that touches a global ends up with one
+        branch that is never taken after the first call.
+
+        X16 and X17: the address being stored and the address of the slot. Both
+        are the intra-procedure scratch registers, and neither holds anything
+        across these instructions."""
+        table = M.module_slots()
+        base = self._globals_base
+        if not table or base is None:
+            if skip_label:
+                self.asm.emit_label_rel(skip_label, here_offset=-4)
+            return
+        image = M.build_data_image(table, base)
+        if skip_label:
+            # CBNZ over the whole body — the flag is CLEAR (zero) until the
+            # last store below, so the first call falls through and runs it and
+            # every later call branches past it.
+            self._adrp_add_abs(17, base + image.init_flag_offset)
+            self.asm.emit(encode_ldr_xt_xn_imm(16, 17, 0))
+            # Recorded AFTER the instruction is emitted, biased back over it —
+            # the idiom every branch on this path uses, because the assembler
+            # computes the position from the current length.
+            self.asm.emit(encode_cbnz_xn(0, 16))
+            self.asm.emit_label_rel(skip_label, here_offset=-4)
+        for at, target in image.fixups:
+            self._adrp_add_abs(16, base + target)
+            self._adrp_add_abs(17, base + at)
+            self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+        # A word holding a STRING, which is the same store with the other end
+        # computed from a LABEL rather than from the data segment: the interned
+        # literal is the one `char *` to these bytes on this path, so the word
+        # has to be the address the rest of the program already uses for this
+        # text. `emit_adrp_add` rather than `_adrp_add_abs` because that is the
+        # addressing a string literal in an expression already uses, and the
+        # equality of the two addresses is the whole point — see
+        # `GlobalDataImage.string_cells`.
+        for at, text in image.string_cells:
+            self.asm.emit_adrp_add(16, self._intern_string(text))
+            self._adrp_add_abs(17, base + at)
+            self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+        if skip_label:
+            # Set the flag LAST, after every store, so a slot is never observed
+            # filled while another still holds its link-time address.
+            self._adrp_add_abs(16, base + image.init_flag_offset)
+            self._adrp_add_abs(17, base + image.init_flag_offset)
+            self.asm.emit(encode_movz_xn_imm(16, 1))
+            self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+            # `label`, not `emit_label_rel`: this DEFINES where the check above
+            # branches to. Recording a relocation here would be a second branch
+            # to a label nothing ever defines, which the assembler reports as
+            # "Undefined label" at resolve time.
+            self.asm.label(skip_label)
+
+    def _global_slot_address(self, slot) -> None:
+        """X17 = the address of a module-global's `__DATA` slot.
+
+        ADRP brings the page and ADD the offset, the same pair the string
+        literals use (`emit_adrp_add`), so the addressing is the one this
+        backend already proves against a real dyld rather than a new one. X17
+        because it is this function's existing scratch for spill addressing and
+        is dead across the load that follows.
+
+        The address is `globals_base() + 8 * slot.index`, and all three parts
+        come from shared functions — `formal.build.globals_base` for the
+        container's mapping base and `model.GLOBAL_SLOT_BYTES` for the stride,
+        which is the same pair the image builder used to LAY the bytes out. Two
+        independent computations of an address would be two answers to one
+        question, and the linker writing one while the code reads the other is
+        not a crash anyone can attribute."""
+        addr = self._globals_base + M.GLOBAL_SLOT_BYTES * slot.index
+        self._adrp_add_abs(17, addr)
+
+    def _adrp_add_abs(self, reg: int, addr: int) -> None:
+        """ADRP Xreg, page ; ADD Xreg, Xreg, #off, for an ABSOLUTE address.
+
+        `emit_adrp_add` takes a LABEL and resolves it against the assembler's
+        label table; a slot's address is not a label in the code, it is a
+        constant in another segment, so it is encoded here directly. The page
+        delta is measured from the instruction's own position, which the
+        assembler knows — hence going through `emit_adrp_add` with a synthetic
+        label would be one indirection for a number already known."""
+        pos = self.asm._org + len(self.asm.sections["text"])
+        page_delta = ((addr & ~0xFFF) - (pos & ~0xFFF)) // 4096
+        immlo = page_delta & 3
+        immhi = (page_delta >> 2) & 0x7FFFF
+        self.asm.emit(struct.pack("<I", 0x90000000 | (immlo << 29)
+                                  | (immhi << 5) | reg))
+        self.asm.emit(struct.pack("<I", 0x91000000 | ((addr & 0xFFF) << 10)
+                                  | (reg << 5) | reg))
+
+    def _emit_global_load(self, slot, dst: int) -> None:
+        """Xdst = a module-global's value — one load from its `__DATA` slot."""
+        self._global_slot_address(slot)
+        self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 0))
+
+    def _emit_global_store(self, slot, src: int) -> None:
+        """A module-global's value = Xsrc — one store to its `__DATA` slot.
+
+        The address goes into X17 and the value has to be somewhere else, so a
+        store whose value is already in X17 parks it in X16 first. X16 is the
+        IP0/intra-procedure-call scratch on AAPCS and holds nothing across these
+        two instructions on this path, which is the same reason `_emit_frame_store`
+        uses it."""
+        if src == 17:
+            self.asm.emit(encode_mov_zr_xn(16, src))
+            src = 16
+        self._global_slot_address(slot)
+        self.asm.emit(encode_str_xt_xn_imm(src, 17, 0))
 
     def _emit_frame_load(self, name: str, slot: int, dst: int) -> None:
         """`LDR Xdst, [Xholder, #8*slot]` — a receiver field read.
@@ -1029,15 +1314,32 @@ class ARM64Codegen:
         self._load_var(holder, 17)
         self.asm.emit(encode_str_xt_xn_imm(src, 17, 8 * slot))
 
+    def _module_global(self, name: str):
+        """The `__DATA` slot that holds `name` in the function being EMITTED.
+
+        The decision and the words are `model.module_slot_for`'s, shared with
+        the x86-64 emitter: two spellings of CPython's scoping rule in two
+        backends is two places for one language implementation to disagree about
+        where a word lives."""
+        return M.module_slot_for(name, self._fn_local_names)
+
+
     def _store_var(self, name: str, src: int) -> None:
         """local `name` = src. Register homes MOV; spill slots STR via X17.
 
         A frame slot is a store into the receiver's frame — see
         `_emit_frame_store` and `_load_var` above for why the branch is here
-        rather than at the call sites."""
+        rather than at the call sites. A module global is a store into the
+        image's `__DATA`, for the same reason and with the same single-home
+        argument: the name was kept out of this function's registers, so this
+        is the only place the store can land."""
         slot = self._frame_slots.get(name)
         if slot is not None:
             self._emit_frame_store(name, slot, src)
+            return
+        gslot = self._module_global(name)
+        if gslot is not None:
+            self._emit_global_store(gslot, src)
             return
         # A NESTED frame slot, and the same two-step as `_load_var`: the OUTER
         # load gives the nested frame's base and the store lands in the nested
@@ -1078,6 +1380,48 @@ class ARM64Codegen:
         # store. Refused, by name, with the same reason the read half gives.
         raise CodegenError(self._no_home(name))
 
+    def _load_home_from_reg(self, name: str, src: int, ptype=None):
+        """X<src> → this local's home, and the register it ended up in.
+
+        ONE routine for "an incoming argument register becomes a local",
+        because there are two callers with the same requirement and the
+        second one (the returned-frame hidden word) is not a parameter: it is
+        an address, so it must not be narrowed to a declared width, and it
+        still has to be out of the caller-saved X0..X7 before the body runs.
+
+        The SPILL half of it was wrong before this existed and is what the
+        returned-frame convention made reachable: it moved `X<src>` into X17
+        and then stored X17 *through* X17, so the slot received the ADDRESS of
+        itself instead of the value. It was unreachable while a function had
+        at most eight parameters and ten callee-saved registers; a
+        frame-returning function's hidden word is an eleventh local, so a
+        program with ten locals reached it. A parameter is written to its slot
+        first and then EXTENDED through a register, because the slot is what
+        the body reads later and a stale high word poisons every comparison —
+        which the old `continue` skipped, since that path could not be taken."""
+        if name in self._var_regs:
+            home = self._var_regs[name]
+            if home != src:
+                self.asm.emit(encode_mov_zr_xn(home, src))
+            if ptype is not None:
+                self._emit_extend(home, home, resolve(
+                    parse_type_name(ptype) or DEFAULT_INT_TYPE))
+            return home
+        if name in self._var_spills:
+            # Park the value in a register the address scratch is not, so the
+            # extend has something to work on and the store has the right
+            # operand whichever way round it goes.
+            if src == 17:
+                self.asm.emit(encode_mov_zr_xn(16, src))
+                src = 16
+            if ptype is not None:
+                self._emit_extend(16, src, resolve(
+                    parse_type_name(ptype) or DEFAULT_INT_TYPE))
+                src = 16
+            self._store_var(name, src)
+            return None
+        return None
+
     def _no_home(self, name: str) -> str:
         """The refusal for a name with no register, spill slot or frame slot.
 
@@ -1108,6 +1452,8 @@ class ARM64Codegen:
         if isinstance(stmt, F.ReturnStmt):
             if stmt.value is None:
                 self.asm.emit(encode_movz_xd_imm(0, 0))
+            elif self._returns_frame is not None:
+                self._emit_frame_return(stmt.value)
             else:
                 self._emit_expr(stmt.value)
             self._flush_pending_finally()
@@ -1582,7 +1928,7 @@ class ARM64Codegen:
         self.asm.label(ok_label)
         # Push e0..e(n-1); pop assigns last target first.
         for i in range(n_t):
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_load(9, 8 * (i + 1))
             self.asm.emit(encode_stp_sp_pre(0, 31))
         for i in range(n_t - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))
@@ -1619,7 +1965,7 @@ class ARM64Codegen:
             els = list(elements)
         self.asm.emit(encode_mov_zr_xn(9, reg))
         for i, el in enumerate(els):
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_load(9, 8 * (i + 1))
             if isinstance(el, F.IdentExpr):
                 self._store_var(el.name, 0)
             elif isinstance(el, F.MemberExpr):
@@ -1792,6 +2138,7 @@ class ARM64Codegen:
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_string_iteration("a for-in iteration", it)
             tnames = _lbn_target_names(stmt.target) if isinstance(
                 stmt.target, str) else []
             if not tnames or any(not n.isidentifier() for n in tnames):
@@ -1944,7 +2291,7 @@ class ARM64Codegen:
             if isinstance(child, str) and child.startswith("*"):
                 self._emit_for_unpack_star_rest(child[1:], tag)
                 continue
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_load(9, 8 * (i + 1))
             self._emit_for_unpack(child, tag)
 
     def _emit_for_unpack_star_rest(self, name: str, tag: str) -> None:
@@ -1956,9 +2303,9 @@ class ARM64Codegen:
         rest_cap = 64
         nbytes = 8 + 8 * rest_cap
         if self._list_cursor + nbytes > self._blob_cap:
-            raise CodegenError(
-                f"for-star rest exceeds the formal frame "
-                f"({self._list_cursor + nbytes} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a for-star unpacking buffer", self._list_cursor + nbytes,
+                self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += nbytes
 
@@ -2269,6 +2616,22 @@ class ARM64Codegen:
             return
 
         if isinstance(expr, F.MemberExpr):
+            # `DType.<member>` is a VALUE naming a type — `dtype == DType.int32`
+            # is how `std/testing/prop/random.mojo:304` asks a question — and
+            # the value is the member's tag, the same word the bare `Int32` is.
+            # Asked BEFORE the member path below, which would read the slot key
+            # `DType.int32` and refuse it: this is a compile-time constant, not
+            # a field of anything.
+            tag = M.type_value_tag(expr)
+            if tag is not None:
+                self._emit_mov_imm("X0", tag)
+                return
+            if M.is_dtype_member_access(expr):
+                # `DType.float8_e4m3fn` and its siblings: a real Mojo type whose
+                # NAME is in no table on this path, so there is no tag to
+                # compute. Refused by name here, because the arm below would
+                # read the slot key `DType.<member>` and report a missing FIELD.
+                raise CodegenError(M.dtype_member_refusal("DType", expr.member))
             key = _member_slot_key(expr)
             if key is not None:
                 # A chain DEEPER than a frame slot reaching a VALUE position is
@@ -2297,6 +2660,29 @@ class ARM64Codegen:
                         f"as though it were a struct's storage")
                 self._load_var(key, 0)
                 return
+            # A field read off a call that RETURNS A FRAME: `fwd(r).a`,
+            # `r.give().x`.  The base is the block this function reserved for
+            # that call's result, so the field is one load at `base + 8*slot`
+            # — the same access a named holder gets, with the address arriving
+            # from the call rather than from a register.  Without this branch
+            # it fell into the "no object model, the field reads as 0" path
+            # below, which is a plausible number and not the program's.
+            if isinstance(expr.obj, F.CallExpr):
+                site = self._ret_frame_sites.get(id(expr.obj))
+                if site is not None:
+                    st = site[0]
+                    slot = M.struct_frame_slot(st, expr.member)
+                    if slot is None:
+                        raise CodegenError(
+                            f"{M.spelled(expr)} reads {expr.member!r} out of a "
+                            f"{st.name} this call returns, and that struct's "
+                            f"{M.struct_field_summary(st)} has no such field: "
+                            f"this path has no way to know which word that is, "
+                            f"and reading the wrong one is a wrong answer "
+                            f"rather than a failure")
+                    self._emit_expr(expr.obj)
+                    self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 8 * slot))
+                    return
             # Non-named base (call result, literal, …): evaluate the base
             # for side effects; formal has no object model, so the field
             # itself reads as 0.
@@ -2517,7 +2903,8 @@ class ARM64Codegen:
             else self._frame_candidates.get(root)
         if not cands:
             return None
-        ann = M.frame_slot_declared_annotation(cands, expr.member)
+        ann = M.frame_slot_declared_annotation(cands, expr.member,
+                                                self._structs)
         if ann is None:
             return None
         return self._slot_ann_pair(ann)
@@ -2529,7 +2916,7 @@ class ARM64Codegen:
         only = M.struct_sole_field_name(cands[0])
         if only is None:
             return None
-        ann = M.frame_slot_declared_annotation(cands, only)
+        ann = M.frame_slot_declared_annotation(cands, only, self._structs)
         return self._slot_ann_pair(ann) if ann is not None else None
 
     def _slot_ann_pair(self, ann):
@@ -2663,6 +3050,31 @@ class ARM64Codegen:
             by_name[name] = want
         return by_node, by_name
 
+    def _note_global_kinds(self, fn) -> None:
+        """Mark the module globals `fn` mentions, from their SLOTS.
+
+        The counterpart of `_note_binding` for a name this function does not
+        bind. A local gets its kind from the assignment it is bound by; a module
+        global has no assignment in the function at all, so without this its
+        kind is whatever a bare word defaults to — an integer — and the two
+        things that ask go wrong in opposite directions:
+
+          * `D["a"]` on a dict global was emitted as a SEQUENCE subscript, so
+            the key's interned address became an element offset and the image
+            exited 1 on the bounds check (measured, both architectures);
+          * `print(NAME)` on a string global rendered the address as a decimal
+            (measured) — see `model.global_slot_is_string`.
+
+        Only marks what the SLOT says, and a name with no slot was refused by
+        name long before here, so this cannot invent a kind."""
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            if not isinstance(node, F.IdentExpr):
+                continue
+            if M.global_slot_is_dict(node.name):
+                self._dict_vars.add(node.name)
+            elif M.global_slot_is_string(node.name):
+                self._string_vars.add(node.name)
+
     def _note_binding(self, name: str, value) -> None:
         """Track whether `name` holds a string pointer or a dict pair-blob.
 
@@ -2686,8 +3098,11 @@ class ARM64Codegen:
             self._fd_vars.add(name)
         else:
             self._fd_vars.discard(name)
-        if isinstance(value, F.DictExpr) or (
-                isinstance(value, F.Comprehension) and value.kind == "dict"):
+        # `M.is_dict_expr` is the shared spelling of this rule (a dict
+        # literal OR a dict comprehension); it used to be written out here
+        # and in x86_64_codegen separately, and x86-64's copy was missing
+        # the comprehension half.
+        if M.is_dict_expr(value):
             self._dict_vars.add(name)
             self._string_vars.discard(name)
         elif isinstance(value, F.SetExpr) or (
@@ -2702,7 +3117,12 @@ class ARM64Codegen:
             if value.name in self._dict_vars:
                 self._dict_vars.add(name)
                 self._string_vars.discard(name)
-            elif value.name in self._string_vars:
+            elif self._expr_str_kind(value) == M.STR_KIND:
+                # `value.name in self._string_vars` OR a `comptime` binding
+                # whose folded value is the text: `var t = OS` binds exactly the
+                # `char *` `t = s` binds, and asking `_expr_str_kind` rather
+                # than re-deriving the test here is what keeps the two paths
+                # from disagreeing about the same read.
                 self._string_vars.add(name)
                 self._dict_vars.discard(name)
             else:
@@ -2732,7 +3152,11 @@ class ARM64Codegen:
         if isinstance(obj, F.MemberExpr):
             key = _member_slot_key(obj)
             return key is not None and key in self._dict_vars
-        if isinstance(obj, F.DictExpr):
+        # `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
+        # COMPREHENSION is a `Comprehension` with kind='dict', and asking
+        # only about literals sent `d[k]` down the index path. See
+        # `M.is_dict_expr`.
+        if M.is_dict_expr(obj):
             return True
         return False
 
@@ -2824,9 +3248,8 @@ class ARM64Codegen:
         n = len(static_pairs)
         size = 8 * (1 + 2 * n)
         if self._list_cursor + size > self._blob_cap:
-            raise CodegenError(
-                f"dict literal exceeds the formal frame "
-                f"({self._list_cursor + size} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a dict literal", self._list_cursor + size, self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += size
 
@@ -2993,6 +3416,21 @@ class ARM64Codegen:
         against another. It built, it ran, and it disagreed with x86-64."""
         return self._is_dict_subscript(e.obj)
 
+    def _refuse_string_iteration(self, op: str, obj) -> None:
+        """Refuse to ITERATE a `char *` as a container.
+
+        The sibling of `_refuse_frame_container_operand`, and the same
+        failure: the blob walk reads offset 0 of the operand and calls it a
+        COUNT, and a string's first eight bytes are text. `M.
+        string_iteration_refusal` owns the wording and the measurements (see
+        there for what both architectures returned before this), and both
+        backends ask it through their own `_is_string_subscript`, which is
+        the one place that knows whether an expression holds a `char *`.
+        """
+        if self._is_string_subscript(obj):
+            raise CodegenError(M.string_iteration_refusal(
+                op, self.func_name or "<module>"))
+
     def _refuse_frame_container_operand(self, op: str, obj) -> None:
         """Raise if `obj` is a BARE NAME holding a frame address.
 
@@ -3031,6 +3469,19 @@ class ARM64Codegen:
         contract for) and the second emitted a store through a computed
         address. Both now say no."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        if M.is_external_call_template(e):
+            # The ONE place an `external_call[...]` is a subscript that is not
+            # the callee of a call, and `M.multi_index_refusal_for` above (and
+            # in `build.py`) cannot see that, because `M.iter_nodes` has no
+            # parent.  `_emit_call` intercepts the template BEFORE any address
+            # is computed, so reaching here means the source used it as a
+            # VALUE — and there is no such value: the bracket names a symbol and
+            # a return type, and the word it would produce is the C function's,
+            # which only a call can ask for.  Refused here rather than falling
+            # through to the dict/frame address paths, which would answer with
+            # an address into a frame that nobody asked for.
+            raise CodegenError(M.external_call_value_refusal(
+                M.external_call_spelling(e)))
         # The element width this subscript reads at, for the caller that emits
         # the load. A container element and a dict value are a word, a string
         # byte and a declared pointee are whatever the pointee is, and the
@@ -3045,8 +3496,8 @@ class ARM64Codegen:
         # case on the BASE name rather than on a comma list — see its
         # docstring. A single-element `__mlir_type[x]` used to skip this call
         # entirely and fabricate a word.
-        why = M.multi_index_refusal_for(
-            e, self._is_dict_subscript(e.obj), self._functions)
+        why = M.multi_index_refusal_for(e, self._is_dict_subscript(e.obj),
+                                        self._functions, self._structs)
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_key_subscript(e):
@@ -3105,8 +3556,17 @@ class ARM64Codegen:
             self.asm.emit(encode_ldp_sp_post(0, 31))  # restore SP (clobbers X0)
             self.asm.emit(encode_mov_zr_xn(0, 9))
             return
+        # A COMPREHENSION is in this list for the same reason the container
+        # literals are: it produces a blob of exactly the shape the walk below
+        # reads (`[count][e0…]`, reserved before any generator runs). Without
+        # it, `[i * 2 for i in [1, 2, 3]][2]` was REFUSED here and computed on
+        # x86-64 — the two backends disagreeing about one program, which is
+        # the one thing this pair may not do. A string base is not here
+        # because it never reaches this gate: `_is_string_subscript` above
+        # takes it as a byte load.
         obj_ok = type(e.obj) in (F.IdentExpr, F.CallExpr, F.ListExpr,
-                                 F.TupleExpr, F.MemberExpr, F.SubscriptExpr)
+                                 F.TupleExpr, F.Comprehension, F.MemberExpr,
+                                 F.SubscriptExpr)
         if not obj_ok:
             raise CodegenError(
                 "subscript base must be a list/tuple name or literal on "
@@ -3295,12 +3755,19 @@ class ARM64Codegen:
     def _expr_str_kind(self, expr):
         """What `expr` holds: "str", "int", or None if undecidable.
 
-        Two sources, and `_string_vars` WINS where they disagree. It is
+        Three sources, and `_string_vars` WINS where they disagree. It is
         flow-sensitive and tracks what the emission of this very function has
         bound so far, so it is strictly better informed than the whole-function
         `ValueKinds`; the whole-function map is what covers the shapes
         `_note_binding` does not see (a parameter's annotation, a function's
-        return type, a subscript's element kind).
+        return type, a subscript's element kind). A `comptime` binding is the
+        third source and it is neither: `ValueKinds` never scans a
+        `comptime NAME = …` statement, so a folded binding reached this as an
+        unclassified read — and a STRING one, which `_emit_comptime_read`
+        materializes as the interned literal, was then emitted as an INTEGER,
+        differently on each architecture. The binding is a compile-time
+        constant the emission already holds, so what it holds is known rather
+        than guessed; `model.comptime_val_kind` is the one reader of it.
 
         Named for what it answers rather than for the first caller: `print`,
         the method-receiver guard and `_note_binding` all need the same
@@ -3310,8 +3777,12 @@ class ARM64Codegen:
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
                 return M.STR_KIND
-        elif isinstance(expr, F.IdentExpr) and expr.name in self._string_vars:
-            return M.STR_KIND
+        elif isinstance(expr, F.IdentExpr):
+            if expr.name in self._string_vars:
+                return M.STR_KIND
+            bound = M.comptime_val_kind(self._comptime_vals, expr.name)
+            if bound is not None:
+                return bound
         return self._vkinds.kind_of(expr)
 
     def _expr_is_fd(self, expr) -> bool:
@@ -4101,6 +4572,56 @@ class ARM64Codegen:
         self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
+    # ── Reading and writing one element of a blob, at any distance ──
+    #
+    # A blob element `i` is at byte `8*(i+1)` from the blob's base, and the
+    # immediate-offset LDR/STR reach 12 bits SCALED by the access size: 4095
+    # words, 32760 bytes. Element 4095 is the first one past it. A list literal
+    # or a `range()` literal that long used to die inside
+    # `encode_str_xt_xn_imm`'s own `assert 0 <= imm12 < 0x1000`, three frames
+    # below anything that could name the limit — a bare AssertionError out of
+    # the encoder, on a program whose only problem is that it is large.
+    #
+    # So the offset goes in a REGISTER past the immediate's reach and the
+    # register-offset form is used, and the limit that remains is the frame's,
+    # which `_reserve_blob`-style checks already state. The immediate form is
+    # still used below the threshold because it is one instruction instead of
+    # three, and every list anyone writes is below it.
+    #
+    # X15 is the offset register: locals live in X19..X28 and the temps this
+    # emitter uses are X0..X14 and X16..X18, so X15 is dead here. It is written
+    # AFTER the value is in place and read by the very next instruction, so it
+    # does not have to survive the element's own emission either.
+    _BLOB_IMM_MAX = 0x1000 * 8 - 8      # last byte the scaled imm12 names
+    _BLOB_OFFSET_REG = 15
+
+    def _emit_blob_store(self, base: int, byte_off: int, val: int) -> None:
+        """STR X{val}, [X{base}, #byte_off] — or the register-offset form.
+
+        `base` is the blob's base register (X9, the convention every blob site
+        in this file uses) and `byte_off` is a compile-time byte offset into it.
+        See `_BLOB_IMM_MAX` for why the second form exists."""
+        if byte_off <= self._BLOB_IMM_MAX:
+            self.asm.emit(encode_str_xt_xn_imm(val, base, byte_off))
+            return
+        self._emit_mov_imm(f"X{self._BLOB_OFFSET_REG}", byte_off)
+        self.asm.emit(encode_str_xt_xn_xm(
+            val, base, self._BLOB_OFFSET_REG))
+
+    def _emit_blob_load(self, base: int, byte_off: int, val: int = 0) -> None:
+        """LDR X{val}, [X{base}, #byte_off] — or the register-offset form.
+
+        The load-side twin of `_emit_blob_store`, and for the same reason: the
+        tuple-unpack sites index a blob with the same `8*(i+1)` shape and would
+        otherwise keep the assert alive one path over from the fix.
+        """
+        if byte_off <= self._BLOB_IMM_MAX:
+            self.asm.emit(encode_ldr_xt_xn_imm(val, base, byte_off))
+            return
+        self._emit_mov_imm(f"X{self._BLOB_OFFSET_REG}", byte_off)
+        self.asm.emit(encode_ldr_xt_xn_xm(
+            val, base, self._BLOB_OFFSET_REG))
+
     def _emit_list(self, expr: F.ListExpr) -> None:
         """Stack-allocate a list blob: [count:i64][elem0]...[elemN-1].
 
@@ -4123,9 +4644,8 @@ class ARM64Codegen:
         cap = max(n, self._list_caps.get(id(expr), n))
         size = 8 * (1 + cap)
         if self._list_cursor + size > self._blob_cap:
-            raise CodegenError(
-                f"list literals exceed the formal frame "
-                f"({self._list_cursor + size} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a list literal", self._list_cursor + size, self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += size
 
@@ -4136,7 +4656,7 @@ class ARM64Codegen:
             self._emit_expr(el)
             # Recompute base: element emission (calls, ADRP, …) clobbers X9.
             self._emit_list_base(offset)
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_store(9, 8 * (i + 1), 0)
         if n == 0:
             self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
@@ -5097,6 +5617,52 @@ class ARM64Codegen:
             self._emit_frame_base(offset)
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
+    def _emit_frame_return(self, value) -> None:
+        """`return <frame>` in a function the convention applies to.
+
+        The whole of the callee's half, and it is three steps because the
+        destination is a block the CALLER reserved and named:
+
+          * the source address is whatever the expression yields in X0 — a
+            bare holder name IS its block's address, and a call to another
+            frame-returning function leaves the address of the block reserved
+            for ITS result in this function. Both are the same word, which is
+            why there is no separate path for the two;
+          * the BLOCK is copied, not just the fields: the object's own slots
+            and, for each placed nested frame, that frame's bytes — and then
+            each nested slot is RE-POINTED at the copy. That last step is what
+            makes the copy more than a memcpy: without it the destination slot
+            would hold the address of a frame in the frame being reclaimed,
+            and the caller would read a nested field out of dead memory. The
+            re-point is the same loop the constructor runs to bring the nested
+            frames up (`_emit_frame_constructor`), over the same shared layout;
+          * the destination address is the RESULT, in X0 — the same word the
+            caller passed in, so the call site's value is the block the caller
+            reserved and every use of it downstream is an ordinary frame
+            access.
+
+        The copy is SHALLOW for every field that is not a placed nested frame,
+        and that is the language's semantics rather than a shortcut: a slot
+        holds one word.  What makes it safe is the confinement — every other
+        channel out of a block is refused by `formal/build.py` — and premise
+        (B1), that a frame slot never holds a container whose blob belongs to
+        another activation.
+        """
+        self._emit_expr(value)
+        self._load_var(_SRET_LOCAL, 17)
+        nested, block = M.struct_frame_block_layout(self._returns_frame,
+                                                    self._structs)
+        # The source is X0 and the destination is X17 for the whole loop: a
+        # store never writes its base register, so the source address survives
+        # every iteration, and X16 is the only other register this needs.
+        for off in range(0, block, 8):
+            self.asm.emit(encode_ldr_xt_xn_imm(16, 0, off))
+            self.asm.emit(encode_str_xt_xn_imm(16, 17, off))
+        for _fname, slot, _child, child_off in nested:
+            _emit_add_imm(self.asm, 16, 17, child_off)
+            self.asm.emit(encode_str_xt_xn_imm(16, 17, 8 * slot))
+        self.asm.emit(encode_mov_zr_xn(0, 17))
+
     def _emit_frame_base(self, offset: int) -> None:
         """X9 = the address of the receiver frame `offset` bytes into the area.
 
@@ -5143,21 +5709,54 @@ class ARM64Codegen:
             raise CodegenError(str(exc))
 
     def _emit_call(self, e: F.CallExpr) -> None:
-        name = _callee_symbol(e.func)
+        # `external_call["sym", RetType](args…)` — a direct call to the C symbol
+        # the bracket names, with `RetType` marshalling the result.
+        #
+        # Intercepted at the TOP, before `_callee_symbol`, and that is the whole
+        # point: `_callee_symbol` reads the bracket as a generic's comptime
+        # specialization and answers `external_call`, so without this the call
+        # became `BL external_call` — a symbol no library defines, on an image
+        # that would have died in dyld.
+        #
+        # The `is_extern_call` flag is the other half, and it is what makes
+        # `std/os/env.mojo` lowerable at all: the bracket names a C SYMBOL, and
+        # that module defines Mojo functions called `getenv`, `setenv` and
+        # `unsetenv` over the same three C symbols.  A name is looked up in
+        # `self._functions` before the extern path is taken, so a bare name
+        # would have branched to the module's OWN `getenv` — which takes an
+        # `Int` and returns an `Int`, so the call "succeeded" and the program
+        # then read an Int where it had asked for a `char *` and segfaulted
+        # dereferencing it.  A C function and a Mojo function occupy different
+        # namespaces in the language (the real compiler mangles the Mojo one to
+        # `__mlir_fn.env.getenv`), so on this path the C symbol must go to the
+        # extern machinery even when this image declares that name — and the
+        # BUILTIN interception below must be skipped for the same reason, since
+        # `external_call["printf", Int32](fmt, n)` is a call to `printf` with
+        # the format the source wrote, not `print`.
+        ext_return = None
+        is_extern_call = M.is_external_call_template(e.func)
+        if is_extern_call:
+            symbol, ext_return, why = M.external_call_spec(e.func)
+            if why is not None:
+                raise CodegenError(M.external_call_refusal(
+                    M.external_call_spelling(e.func), why))
+            name = symbol
+        else:
+            name = _callee_symbol(e.func)
         if name is None:
             raise CodegenError(
                 f"unsupported call target on the formal arm64 path "
                 f"(got {type(e.func).__name__})")
-        if name == "range":
+        if not is_extern_call and name == "range":
             self._emit_range_list(list(e.args))
             return
-        if name == "len":
+        if not is_extern_call and name == "len":
             self._emit_len(e)
             return
-        if name == "print":
+        if not is_extern_call and name == "print":
             self._emit_print(e)
             return
-        if M.builtin_function(name) == "file_open":
+        if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
@@ -5205,7 +5804,7 @@ class ARM64Codegen:
         # files here declare and an identity conversion, and preferring the
         # declaration would change a program's MEANING rather than its
         # verdict.
-        if name not in self._functions:
+        if not is_extern_call and name not in self._functions:
             nargs = len(e.args) + len(e.kwargs or [])
             if not M.type_constructor_prefers_local_struct(
                     name, self._structs, nargs):
@@ -5213,10 +5812,10 @@ class ARM64Codegen:
                 if tkind is not None:
                     self._emit_type_constructor(e, name, tkind)
                     return
-        if name in self._structs:
+        if not is_extern_call and name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
-        is_extern = name not in self._functions
+        is_extern = is_extern_call or name not in self._functions
         # The gimple backend's C runtime is not an external dependency of THIS
         # target but a library of a different one, and it is spelled in the
         # source as bare `mojo_*` names (`mojo_sqlite3_open`, `mojo_list_len`,
@@ -5261,6 +5860,26 @@ class ARM64Codegen:
             if ct_params:
                 bound = self._specialization_args(e, ct_params)
                 args = bound + list(args)
+        elif not is_extern_call and isinstance(e.func, F.SubscriptExpr):
+            # A BRACKETED callee this unit does not compile. The branch above
+            # is the only place a specialization's brackets are turned into
+            # arguments, so without this the brackets are silently DROPPED and
+            # `plain[3](5)` is emitted as `plain(5)` — measured, an image that
+            # built, ran and printed a number the source never wrote. The
+            # shared text is `model.specialization_call_refusal`, which x86-64
+            # asks too.
+            #
+            # `and not is_extern_call`, and that is load-bearing rather than
+            # belt-and-braces: `is_extern` is `is_extern_call or name not in
+            # self._functions`, so an `external_call["setenv", Int32](…)` is
+            # `is_extern` TOO — and this arm, keyed on `is_extern` and the
+            # bracket, then refused the whole `external_call` construct as a
+            # specialization, naming the C symbol `setenv` as a generic. The
+            # construct is not a specialization and it is lowered, ten lines
+            # above, by the same `is_extern_call` flag every other arm in this
+            # function is gated on. Measured: 9 of `test_formal_external_call.py`'s
+            # 29 cases, on both architectures, before this guard.
+            raise CodegenError(M.specialization_call_refusal(name))
         # Flatten `*star` / reject `**dst` before the arity check so a
         # single list literal expands to its elements (common: f(*[a,b])).
         flat: list = []
@@ -5289,6 +5908,8 @@ class ARM64Codegen:
         # (they don't produce call arguments).
         for se in side_effects:
             self._emit_expr(se)
+        sret_site = self._ret_frame_sites.get(id(e))
+        nargs = len(args) + (1 if sret_site is not None else 0)
         # AAPCS passes the first eight arguments in X0..X7. A ninth has no
         # register, and this path has no stack-argument convention to fall
         # back on, so the call is REFUSED here rather than truncated: the
@@ -5301,11 +5922,29 @@ class ARM64Codegen:
         # caller who passed zero. Same shape, same words, as the x86-64
         # check in `_emit_call` there — the two differ in their limit (8 vs
         # 6) because the ABIs do, not in what they do about it.
-        if len(args) > _ABI_ARG_REGS:
+        #
+        # `nargs` and not `len(args)`, because the returned-frame hidden word
+        # below IS an argument — the callee reads it out of the register
+        # after the last source one — so eight source arguments to a
+        # frame-returning function is a NINE-argument call. The frame
+        # overflow check that used to sit after the pushes is hoisted to
+        # here, so ONE refusal covers both overflows and the
+        # evaluate-then-drop it guarded against is gone with it: with the
+        # drop removed, that later check had nothing left to catch, and
+        # keeping it would be a second answer to a question asked once.
+        # The frame case still gets the construct's OWN sentence, which
+        # names the hidden word and the budget it ran into rather than
+        # reporting a count the reader cannot account for.
+        if nargs > _ABI_ARG_REGS:
+            if sret_site is not None:
+                raise CodegenError(
+                    M.returned_frame_convention_refusal(name, len(args))
+                    or f"calling {name}() needs one hidden word for the "
+                       f"caller's block and there is no argument register "
+                       f"left for it")
             raise CodegenError(
-                f"call {name}(): {len(args)} arguments exceeds the "
+                f"call {name}(): {nargs} arguments exceeds the "
                 f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
-
         # AAPCS: pass up to 8 integer args in X0..X7. Evaluate left-to-right,
         # spilling each result so nested evaluations (which clobber X0/X1/X2)
         # don't destroy earlier arguments. Pop in reverse so arg0 lands in X0.
@@ -5313,7 +5952,13 @@ class ARM64Codegen:
         for arg in args:
             self._emit_expr(arg)
             self.asm.emit(encode_stp_sp_pre(0, 31))
-        for i in range(len(args) - 1, -1, -1):
+        if sret_site is not None:
+            # The block's own address, in the same scratch the constructor
+            # frames use and at the offset the shared layout gave it.
+            self._emit_frame_base(self._ret_frame_base + sret_site[1])
+            self.asm.emit(encode_mov_zr_xn(0, 9))
+            self.asm.emit(encode_stp_sp_pre(0, 31))
+        for i in range(nargs - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))
             if i != 0:
                 self.asm.emit(encode_mov_zr_xn(i, 0))
@@ -5329,6 +5974,30 @@ class ARM64Codegen:
         else:
             self.asm.emit(encode_bl(0))
             self.asm.emit_label_rel(name, here_offset=-4)
+        if ext_return is not None:
+            self._emit_extern_return(ext_return)
+
+    def _emit_extern_return(self, kind) -> None:
+        """Put the return register into the shape the DECLARED return type says.
+
+        The ABI puts the low `bits` of a narrow integer return in X0 and leaves
+        the rest unspecified, and a W-register write zero-extends on AArch64, so
+        the value that actually arrives is zero-extended.  `Int32` and `c_int`
+        are signed and the source means the sign-extended value:
+        `zero_extend(0xFFFFFFFF)` is 4294967295, not -1.  So this is the
+        conversion, not tidying, and `model.py`'s section on the construct is
+        where the reasoning and the measurement live.
+
+        A pointer (`getenv` declares `_CPointer[UInt8, …]`), a 64-bit integer
+        and a string are already the whole register, so they need no
+        instruction, and `NoneType` returns nothing at all.  The width
+        normalization itself is `_emit_extend` — the same one an `Int32(x)`
+        conversion uses, so there is one implementation of "make this word
+        this width" per architecture rather than two."""
+        if kind == M.EXTERN_RETURN_VOID or kind == M.EXTERN_RETURN_WORD:
+            return
+        width, signed = kind
+        self._emit_extend(0, 0, IntType(width, signed))
 
 
     # ── Comprehension / slice / div-shift / compare-chain ──────────
@@ -5473,6 +6142,11 @@ class ARM64Codegen:
         false_label = f"{fn}_cg{wid}_false"
         end_label = f"{fn}_cg{wid}_end"
 
+        # Same walk as a for-in, so the same operand it refuses: a `char *`
+        # has no count word at offset 0, and one here is read as a count of
+        # its own first bytes (measured: SIGBUS walking past the string).
+        self._refuse_string_iteration("a comprehension iterable",
+                                      gen.iterable)
         self._emit_expr(gen.iterable)
         self._store_var(cb_name, 0)
         self.asm.emit(encode_movz_xd_imm(0, 0))
@@ -5572,14 +6246,23 @@ class ARM64Codegen:
 
     def _compr_append_pair(self, res_offset: int, cap: int) -> None:
         """Append (X0=key, X1=value) to dict result; exit(1) past cap."""
-        # Two pushes, and the offsets below depend on the order: the SECOND
-        # stp lands lower, so [sp+0] is the value pushed second and [sp+8] is
-        # the key. They were read the other way round, so every dict
-        # comprehension stored its key in the value slot and vice versa —
-        # which is why the right keys and the right len sat next to values
-        # that were somebody else's.
-        self.asm.emit(encode_stp_sp_pre(0, 1))  # push key, value
-        self.asm.emit(encode_stp_sp_pre(1, 31))  # push value again (lower)
+        # ONE 16-byte frame slot, with the key at [sp+0] and the value at
+        # [sp+8], and both loads reading back exactly those offsets.
+        #
+        # This used to be two STP pairs — `stp x0, x1` then `stp x1, x31` —
+        # which the comment above it read back as "the second stp lands lower,
+        # so [sp+0] is the value and [sp+8] is the key". It does not: STP
+        # Xrt1, Xrt2 stores Xrt1 at [SP] and Xrt2 at [SP+8], so after those
+        # two pushes [sp+8] holds **X31**, a scratch register, and the key was
+        # sitting unused at [sp+16]. Every dict comprehension therefore
+        # stored a garbage key and the right value: the first pair read 0 out
+        # of X31 by luck, so `{i: 100 + i for i in range(3)}[0]` was right and
+        # [1] and [2] were a miss (exit 1). The value needed a second slot
+        # only because the count load below clobbers X1; a plain STR into the
+        # slot the STP already reserved is that, without moving the frame
+        # twice or putting the key somewhere the loads cannot see.
+        self.asm.emit(encode_stp_sp_pre(0, 31))            # key at [sp+0]
+        self.asm.emit(encode_str_xt_xn_imm(1, 31, 8))     # value at [sp+8]
         self._emit_list_base(res_offset)
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
         self._emit_mov_imm("X2", cap)
@@ -5592,13 +6275,12 @@ class ARM64Codegen:
         self.asm.emit_label_rel(oob, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 1))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = key
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))   # [sp+0] = key
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 0))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))   # [sp+0] = value
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = value
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 8))
         self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
         self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
-        self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
         self.asm.label(oob)
@@ -6920,9 +7602,9 @@ class ARM64Codegen:
             n = len(vals)
             size = 8 * (1 + n)
             if self._list_cursor + size > self._blob_cap:
-                raise CodegenError(
-                    f"range() literal exceeds the formal frame "
-                    f"({self._list_cursor + size} > {self._blob_cap} bytes)")
+                raise CodegenError(M.frame_blob_refusal(
+                    "a range() literal", self._list_cursor + size,
+                    self._blob_cap))
             offset = self._list_cursor
             self._list_cursor += size
             self._emit_list_base(offset)
@@ -6931,7 +7613,7 @@ class ARM64Codegen:
             for i, val in enumerate(vals):
                 self._emit_mov_imm("X0", val)
                 self._emit_list_base(offset)
-                self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (i + 1)))
+                self._emit_blob_store(9, 8 * (i + 1), 0)
             self.asm.emit(encode_mov_zr_xn(0, 9))
             return
         # Dynamic: evaluate start/stop/step onto stack, loop, append.
@@ -7062,7 +7744,7 @@ class ARM64Codegen:
                     or M.is_mlir_template(target)):
                 why = M.multi_index_refusal_for(
                     target, self._is_dict_subscript(target.obj),
-                    self._functions)
+                    self._functions, self._structs)
                 raise CodegenError(
                     f"del {why}" if why is not None else
                     "del on a subscript with a tuple index is not supported "
