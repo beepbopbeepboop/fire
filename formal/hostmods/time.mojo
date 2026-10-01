@@ -13,12 +13,15 @@ links libSystem and nothing else can be asked for. The restrictions are
 stated once, here, because three of them are properties of the VALUE MODEL
 rather than of this module, and every function below is shaped by them.
 
-  * ARM64 ONLY TODAY, for the reason `formal/hostmods/os/__init__.mojo` gives
-    at length: a module dylib that calls into the C library produces an image
-    the loader refuses under `--backend=x86_64`
-    (`bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`).
-    Every function here needs the C library, so all of them are arm64-only
-    until that is fixed, and `test_formal_time.py` skips a non-arm64 host.
+  * BOTH BACKENDS TODAY, for the reason `formal/hostmods/os/__init__.mojo` gives
+    at length: a module dylib that calls into the C library builds and RUNS
+    under `--backend=x86_64` too, and the claim this replaces was false. Every
+    function here needs the C library, so what the x86-64 backend has to get
+    right is the symbol each call binds — and for `localtime`/`strftime`, whose
+    answer is a `struct tm` this target fills in, that is the same
+    dual-spelling table `formal/model.py`'s `target_libc_symbol` is. A host
+    with no x86-64 support at all still skips the x86-64 half of
+    `test_formal_time.py`.
 
   * A FLOAT IS NOT A FLOAT. `formal/arm64_codegen.py`'s `FloatLiteral` arm
     says it: *"formal is int-only; truncate toward zero (matches C cast)"*,

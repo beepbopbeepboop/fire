@@ -189,10 +189,12 @@ LIMITS MEASURED, not assumed
     BRACKET_CAP** (64 each); deeper is a refusal, not a wrong answer. Measured
     over this repository plus CPython 3.14.6's `Lib`: the deepest indentation
     in any of those files is 12 and the deepest bracket nesting is 9.
-  * **ARM64 ONLY**, for the same reason `os` and `sys` are: a module dylib
-    that makes a call into the C library does not load under `--backend=x86_64`
-    (`bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`).
-    `test_ast_formal.py` skips a non-arm64 host and says why.
+  * **BOTH BACKENDS**, for the same reason `os` is: a module dylib that makes a
+    call into the C library builds and runs under `--backend=x86_64` as well,
+    and the claim this replaces was false — see the top of
+    `formal/hostmods/os/__init__.mojo`, which is where the measurement is. A
+    host with no x86-64 support at all still skips the x86-64 half of the
+    suite, with the reason printed.
 """
 
 from os._syscalls import str_alloc, str_build, str_len

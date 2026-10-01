@@ -43,16 +43,20 @@ writing it.
 WHAT IS NOT HERE, AND WHY — each measured on this target before it was left
 out rather than guessed at:
 
-  * ARM64 ONLY TODAY, and not because of anything in this source. A module
-    dylib that makes a call into the C library is arm64-only on this backend:
-    the same two-line module builds and RUNS with `--backend=arm64` and
-    produces an image the loader refuses with ``main executable failed strict
-    validation`` under `--backend=x86_64``, which is the unclaimed-trailing-byte
-    failure `formal/macho_linker.py`'s `_assert_no_unclaimed_bytes` exists for.
-    Every function below needs the C library, so all of them are arm64-only
-    until that is fixed; `test_formal_os.py` skips a non-arm64 host and the
-    reason it has to is here. Filed as
-    `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`.
+  * BOTH BACKENDS TODAY, and not because of anything in this source. This used
+    to say a module dylib that makes a call into the C library is arm64-only on
+    this backend, and it was false: every function below builds and RUNS under
+    `--backend=x86_64`, which is what `test_formal_os_backing.py` measures on
+    both architectures with CPython as the arbiter. The one thing the x86-64
+    backend has to get right, and now does, is the SYMBOL each call binds:
+    macOS exports `readdir`, `opendir`, `stat` and the rest of this file's
+    entry points twice — once for a 32-bit `ino_t` and once for a 64-bit one —
+    and on x86-64 the bare name is the 32-bit function, whose `struct dirent`
+    and `struct stat` are laid out differently. `formal/model.py`'s
+    `target_libc_symbol` is that table;
+    `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes.md`
+    records what reading the wrong one of the two costs. A host with no x86-64
+    support at all still skips the x86-64 half of the suites.
 
   * BYTE READS. `p[0]` on a `Pointer[UInt8]` is a one-byte load now. It used to
     take the blob path in `_emit_subscript_addr`, which reads a COUNT from

@@ -123,16 +123,16 @@ caller who gets it wrong gets a double free.
 BOTH BACKENDS, and that is worth saying because the module this one takes its
 C library calls from says otherwise
 ----------------------------------------------------
-`formal/hostmods/os/_syscalls.mojo`'s docstring says a module dylib that calls
-into the C library "is arm64-only on this backend", and this module inherits
-`uname`, `sysctlbyname` and `strcmp` from there — so it was written expecting
-to inherit that too. It does not: measured on this tree, `machine()` builds AND
-RUNS under `--backend=x86_64` and under `--backend=arm64`, and on each it
-reports the architecture of the image it is running in, which is the whole
-point of the name. (`os.getcwd()`, measured the same way on the same tree,
-also builds and runs on x86_64, so that claim in `_syscalls.mojo` is stale for
-whatever `os` too — not this claim's file to correct, and recorded here only so
-nobody reads this paragraph as the opposite finding.)
+`formal/hostmods/os/_syscalls.mojo`'s docstring used to say a module dylib
+that calls into the C library "is arm64-only on this backend", and this module
+inherits `uname`, `sysctlbyname` and `strcmp` from there — so it was written
+expecting to inherit that too. It does not: measured on this tree, `machine()`
+builds AND RUNS under `--backend=x86_64` and under `--backend=arm64`, and on
+each it reports the architecture of the image it is running in, which is the
+whole point of the name. That claim in `_syscalls.mojo` has since been
+corrected in place, along with the five other modules that repeated it; what
+the x86-64 backend does need is the right symbol per call, which is
+`formal/model.py`'s `target_libc_symbol`.
 
 A Rosetta-emulated x86-64 process on an Apple Silicon host sees
 `hw.machine == "x86_64"`, so the x86-64 image's answer is `x86_64` and not this
