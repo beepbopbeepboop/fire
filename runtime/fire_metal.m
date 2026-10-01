@@ -22,6 +22,12 @@ static id<MTLCommandQueue>    g_queue = nil;
 static id<MTLLibrary>         g_lib = nil;
 static int                    g_have_device = 0;
 static int64_t                g_dispatches = 0;
+/* Failed dispatches since load, process-wide, alongside g_dispatches.
+ * The generated sidecar used to keep its own per-translation-unit
+ * `_mg_failures`, which meant a query from a different unit than the
+ * dispatch read that unit's zero. The counters belong HERE, next to the
+ * device state they describe, so there is one answer per process. */
+static int64_t                g_failures = 0;
 static char                   g_error[512] = "";
 
 static void _set_error(const char *fmt, ...) {
@@ -32,7 +38,13 @@ static void _set_error(const char *fmt, ...) {
 }
 
 const char *mojo_metal_last_error(void) { return g_error; }
+
+static int mojo_metal_dispatch_impl(const char *, int64_t, void *const *,
+                          const int64_t *, int64_t, void *const *,
+                          const uint8_t *, int64_t, int64_t);
 int64_t mojo_metal_dispatch_count(void) { return g_dispatches; }
+int64_t mojo_metal_failure_count(void) { return g_failures; }
+int64_t mojo_metal_have_device(void) { return g_have_device; }
 
 int mojo_metal_init(const char *msl_source) {
     if (g_have_device) return 1;
@@ -70,7 +82,13 @@ int mojo_metal_init(const char *msl_source) {
     return 1;
 }
 
-int mojo_metal_dispatch(const char *kernel_name,
+/* The real body. Everything that decides success or failure is in here, and
+ * it returns 1 or 0 -- it does NOT count. The counting is one line, in the
+ * wrapper below, so no early return and no `fail:` label can be missed. An
+ * earlier version counted at the success tail only, which meant every one of
+ * the failure paths (no device, no library, no function, no pipeline, OOM,
+ * encoder failure) silently reported zero failures. */
+static int mojo_metal_dispatch_impl(const char *kernel_name,
                         int64_t n_bufs, void *const *bufs,
                         const int64_t *sizes,
                         int64_t n_scalars, void *const *scalars,
@@ -125,7 +143,7 @@ int mojo_metal_dispatch(const char *kernel_name,
                     options:MTLResourceStorageModeShared];
                 if (!db) {
                     _set_error("buffer %lld allocation failed", (long long)bi);
-                    return 0;
+                    goto fail;
                 }
                 [enc setBuffer:db offset:0 atIndex:(NSUInteger)bi];
                 devbufs[bi] = db;
@@ -137,7 +155,7 @@ int mojo_metal_dispatch(const char *kernel_name,
                     options:MTLResourceStorageModeShared];
                 if (!db) {
                     _set_error("scalar %lld allocation failed", (long long)si);
-                    return 0;
+                    goto fail;
                 }
                 if (scalars && scalars[si])
                     memcpy([db contents], scalars[si], w);
@@ -168,7 +186,7 @@ int mojo_metal_dispatch(const char *kernel_name,
             if (tg > 0xFFFFFFFFu) {
                 _set_error("output of %lld elements needs more threadgroups "
                            "than Metal can dispatch", (long long)need);
-                return 0;
+                goto fail;
             }
         }
         if (tg == 0) tg = 1;
@@ -192,7 +210,47 @@ int mojo_metal_dispatch(const char *kernel_name,
                        (size_t)(n * (int64_t)sizeof(float)));
         }
         free(devbufs);
-        g_dispatches++;
         return 1;
+
+    fail:
+        /* A dispatch that fails after the command encoder exists still has to
+         * END it. Returning without endEncoding leaves the encoder to the
+         * @autoreleasepool, and Metal asserts on that --
+         *
+         *   -[_MTLCommandEncoder dealloc]: failed assertion `Command encoder
+         *   released without endEncoding'
+         *
+         * which ABORTS the process. So a failed dispatch killed the program
+         * instead of returning 0, which turns an ordinary, reportable
+         * condition (a zero-length buffer allocation, a grid too large to
+         * dispatch) into a crash that hides the real error the caller was
+         * already told about by `_set_error`.
+         *
+         * Found by auto-offload: a length that reached the device as 0 made
+         * every list pack to zero elements, `newBufferWithBytes:length:0`
+         * returned nil, and that `return 0` aborted here. The underlying bug
+         * was fixed at the source; this is the runtime not being allowed to
+         * escalate a recoverable failure into a SIGABRT.
+         *
+         * endEncoding + commit is the documented way to discard an encoded
+         * command; the work never runs, which is what a failure means.
+         */
+        [enc endEncoding];
+        [cb commit];
+        free(devbufs);
+        return 0;
     }
+}
+
+int mojo_metal_dispatch(const char *kernel_name,
+                        int64_t n_bufs, void *const *bufs,
+                        const int64_t *sizes,
+                        int64_t n_scalars, void *const *scalars,
+                        const uint8_t *widths,
+                        int64_t nthreads, int64_t ngroups) {
+    int rc = mojo_metal_dispatch_impl(kernel_name, n_bufs, bufs, sizes,
+                                      n_scalars, scalars, widths,
+                                      nthreads, ngroups);
+    if (rc) g_dispatches++; else g_failures++;
+    return rc;
 }

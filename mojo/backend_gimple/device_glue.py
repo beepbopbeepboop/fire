@@ -27,6 +27,8 @@ calls into it.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 #: C-escape a Python string into C string literal bodies. `?` is escaped for
 #: trigraph safety: `??` followed by one of `=/()'<!>-` is eaten by a
 #: conforming preprocessor as a digraph, and MSL is full of `?:`.
@@ -88,6 +90,51 @@ _SCALAR_WIDTH = {
 }
 
 
+#: Origins that mean the kernel PROMISES not to write through the pointer.
+#: An annotation with no origin, or a mutable one, is writable -- the
+#: conservative direction, because an unnecessary write-back is wasted work
+#: while a skipped one is a wrong answer.
+_IMMUTABLE_ORIGINS = ('immut', 'imm')
+
+
+def buffer_is_writable(annotation: str) -> bool:
+    """Whether a kernel buffer parameter is declared WRITABLE.
+
+    `UnsafePointer[Float32, ImmutAnyOrigin]` -> False (read-only).
+    `UnsafePointer[Float32, MutAnyOrigin]`   -> True.
+    `UnsafePointer[Float32]`                  -> True (no promise made).
+
+    The origin is the ONLY place mutability is recorded: `_mojo_type` maps
+    both spellings to the same `float *`, so the C type cannot answer this.
+    """
+    ann = (annotation or '').strip()
+    if not ann.startswith(_POINTER_ANNOTATIONS):
+        return True
+    ann = ann.lower()
+    for origin in _IMMUTABLE_ORIGINS:
+        if origin in ann:
+            return False
+    return True
+
+
+class LaunchArg(NamedTuple):
+    """One kernel parameter, as the host marshalling sees it.
+
+    A NamedTuple rather than a bare tuple because this grew a fifth field
+    (writable) and every positional unpack of it broke at once. The accessors
+    keep working when the next field arrives, and `writable` is the reason it
+    exists: `_mojo_type` maps `UnsafePointer[Float32, MutAnyOrigin]` and
+    `UnsafePointer[Float32, ImmutAnyOrigin]` to the SAME `float *`, so the C
+    type cannot tell the host which buffers the kernel promised to write.
+    """
+
+    name: str
+    ctype: str
+    is_buffer: bool
+    width: int
+    writable: bool = True
+
+
 class LaunchError(Exception):
     """A kernel whose host side cannot be marshalled honestly."""
 
@@ -113,12 +160,14 @@ def launch_arg_types(params) -> tuple[list[tuple[str, str, bool, int]], int]:
         if _ann.startswith(_POINTER_ANNOTATIONS) or _ann.endswith('*'):
             _inner = (_ann[_ann.find('[') + 1:].split(',')[0].strip()
                       if '[' in _ann else 'Float32')
-            out.append((_pn, _ELEM_CTYPE.get(_inner, 'float') + ' *', True, 0))
+            out.append(LaunchArg(
+                _pn, _ELEM_CTYPE.get(_inner, 'float') + ' *', True, 0,
+                buffer_is_writable(_ann)))
         else:
             if count_idx < 0 and _ann in ('Int', 'Int64'):
                 count_idx = _i
             _ct, _w = _SCALAR_WIDTH.get(_ann, ('int64_t', 8))
-            out.append((_pn, _ct, False, _w))
+            out.append(LaunchArg(_pn, _ct, False, _w, True))
     return out, count_idx
 
 
@@ -162,9 +211,10 @@ def emit_launch_wrappers(kernels: dict) -> str:
     lines: list[str] = []
     for _kn, (params, count_idx) in kernels.items():
         count_idx = element_count_index(_kn, count_idx)
-        _bufs = [(n, t) for n, t, isb, _w in params if isb]
-        _scals = [(n, t, w) for n, t, isb, w in params if not isb]
-        _sig = ', '.join(f'{t} {n}' for n, t, _b, _w in params) or 'void'
+        _bufs = [(a.name, a.ctype) for a in params if a.is_buffer]
+        _scals = [(a.name, a.ctype, a.width) for a in params
+                 if not a.is_buffer]
+        _sig = ', '.join(f'{a.ctype} {a.name}' for a in params) or 'void'
         lines.append('/* host wrapper for kernel %r */' % _kn)
         lines.append('void _mg_launch_%s(%s) {' % (_kn, _sig))
         if _bufs:
@@ -294,7 +344,7 @@ def emit_launch_prototypes(kernels: dict) -> str:
     """
     lines: list[str] = []
     for _kn, (params, _ci) in kernels.items():
-        _sig = ', '.join(f'{t} {n}' for n, t, _isb, _w in params) or 'void'
+        _sig = ', '.join(f'{a.ctype} {a.name}' for a in params) or 'void'
         lines.append(f'void _mg_launch_{_kn}({_sig});')
     # The introspection entry points, unconditionally: they are REAL runtime
     # functions (registered in _RUNTIME_FUNCS, so a call from compiled Mojo
@@ -309,14 +359,35 @@ def emit_launch_prototypes(kernels: dict) -> str:
     return '\n'.join(lines)
 
 
+def c_suffix(module_name: str) -> str:
+    """A C-identifier suffix distinguishing one module's device state from
+    another's in a SINGLE translation unit.
+
+    The MSL string, its init flag and its device flag are per MODULE and
+    cannot be shared the way the pack/unpack helpers are: each module carries
+    its own MSL, so one shared `_mg_msl_source` would compile the wrong
+    kernels. And `static` does not rescue them -- `static` is internal
+    linkage, so two `static int64_t _mg_init_state` in one FILE are still a
+    redefinition. Measured, from a two-module program: six of them
+    (`_mg_pack_float`, `_mg_msl_source`, `_mg_init_state`, ...).
+    """
+    out = ''.join(ch if (ch.isalnum() or ch == '_') else '_'
+                  for ch in module_name)
+    if not out:
+        return ''
+    return ('_' + out) if not out[0].isdigit() else ('_m' + out)
+
+
 def emit_device_sidecar(parts: list[str], kernel_names: list[str],
-                        kernels: dict | None = None) -> str:
+                        kernels: dict | None = None,
+                        module_name: str = '') -> str:
     """The whole device sidecar as C text, ready to append to the module.
 
     `parts` and `kernel_names` are in the SAME order -- `module_gen` builds
     both in one pass over the functions -- so they pair positionally rather
     than by re-parsing the MSL to recover which kernel is which.
     """
+    sfx = c_suffix(module_name)
     lines: list[str] = []
     lines.append('/* ── GPU device code ──')
     lines.append('   The MSL below is the compiler\'s output for this module\'s')
@@ -324,32 +395,36 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('   compiles it at load time for the GPU actually present, so')
     lines.append('   this file stays self-contained: no .metallib, no second')
     lines.append('   artifact, and nothing to wire into the build. */')
-    lines.append('static const char *_mg_msl_source =')
+    lines.append('static const char *_mg_msl_source{sfx} =')
     lines.append(c_string_literal(msl_module(parts), indent='    '))
     lines.append(';')
     lines.append('')
     lines.append('/* Lazily initialised on FIRST DISPATCH, not at load. A module with a')
     lines.append('   kernel that is never called must not compile any MSL, and a')
     lines.append('   machine with no GPU must still load and run. */')
-    lines.append('static int64_t _mg_init_state = 0;   /* 0 uninit, 1 done */')
-    lines.append('static int64_t _mg_have_device = 0;')
-    lines.append('static int64_t _mg_dispatches = 0;')
-    lines.append('static int64_t _mg_failures = 0;')
+    lines.append('static int64_t _mg_init_state{sfx} = 0;   /* 0 uninit, 1 done */')
+    lines.append('static int64_t _mg_have_device{sfx} = 0;')
+    # The DISPATCH and FAILURE counters are NOT here. They were `static int64_t`
+    # per-unit, so a program that dispatched in one module and asked in
+    # another read the asker's zero. They are process-wide in the runtime now.
     lines.append('')
-    lines.append('static void _mg_init(void) {')
-    lines.append('    if (_mg_init_state) return;')
-    lines.append('    _mg_init_state = 1;')
-    lines.append('    _mg_have_device = (int64_t) mojo_metal_init(_mg_msl_source);')
+    lines.append('')
+    lines.append('static void _mg_init{sfx}(void) {')
+    lines.append('    if (_mg_init_state{sfx}) return;')
+    lines.append('    _mg_init_state{sfx} = 1;')
+    lines.append('    _mg_have_device{sfx} = (int64_t) mojo_metal_init(_mg_msl_source{sfx});')
     lines.append('}')
     lines.append('')
-    lines.append('static int64_t _mg_run(const char *name, int64_t n_bufs,')
+    lines.append('static int64_t _mg_run{sfx}(const char *name, int64_t n_bufs,')
     lines.append('                          void *const *bufs, const int64_t *sizes,')
     lines.append('                          int64_t n_scalars, void *const *scalars,')
     lines.append('                          const uint8_t *widths,')
     lines.append('                          int64_t nthreads, int64_t ngroups) {')
-    lines.append('    _mg_init();')
-    lines.append('    if (!_mg_have_device) {')
-    lines.append('        _mg_failures++;')
+    lines.append('    _mg_init{sfx}();')
+    lines.append('    if (!_mg_have_device{sfx}) {')
+    # No counter bump here: mojo_metal_dispatch counts BOTH outcomes, and this
+    # branch never reaches it -- it is the "no device at all" case, which
+    # _mojo_gpu_have_device already reports. See the note in fire_metal.m.
     # Each C string literal is on ONE source line. An earlier version
     # wrapped these as Python implicit concatenation across several physical
     # lines, which emitted a C string split across source lines -- an
@@ -362,7 +437,6 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('            "machine with a GPU.\\n", name);')
     lines.append('        return 0;')
     lines.append('    }')
-    lines.append('    _mg_dispatches++;')
     lines.append('    return (int64_t) mojo_metal_dispatch(name, n_bufs, bufs, sizes,')
     lines.append('                                    n_scalars, scalars, widths,')
     lines.append('                                    nthreads, ngroups);')
@@ -392,8 +466,53 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     # There is deliberately no `_mojo_gpu_kernel_name`: returning a name
     # would mean handing back a pointer into static storage as an int64_t,
     # and a caller would have no way to read it.
-    lines.append('int64_t _mojo_gpu_kernel_count(void)   { return %d; }' % len(kernel_names))
-    lines.append('int64_t _mojo_gpu_have_device(void)  { _mg_init(); return _mg_have_device; }')
-    lines.append('int64_t _mojo_gpu_dispatch_count(void) { return _mg_dispatches; }')
-    lines.append('int64_t _mojo_gpu_failure_count(void)  { return _mg_failures; }')
-    return '\n'.join(lines)
+    lines.append('__attribute__((weak)) int64_t _mojo_gpu_kernel_count(void)'
+                 '   { return %d; }' % len(kernel_names))
+    lines.append('__attribute__((weak)) int64_t _mojo_gpu_have_device(void)'
+                 '  { _mg_init{sfx}(); return _mg_have_device{sfx}; }')
+    lines.append('__attribute__((weak)) int64_t _mojo_gpu_dispatch_count(void)'
+                 ' { return mojo_metal_dispatch_count(); }')
+    lines.append('__attribute__((weak)) int64_t _mojo_gpu_failure_count(void)'
+                 '  { return mojo_metal_failure_count(); }')
+    return '\n'.join(lines).replace('{sfx}', sfx)
+
+
+#: The introspection entry points, for a module with NO device code at all.
+#:
+#: `emit_device_sidecar` is skipped when a module offloads nothing, and it is
+#: the only definition of these four. So a program that merely ASKS whether the
+#: device path was taken could not be linked -- "implicit declaration of
+#: function '_mojo_gpu_kernel_count'" -- which is precisely the question
+#: `--no-gpu` makes interesting: with the flag, "did anything go to the GPU?"
+#: should answer 0, not fail to build.
+#:
+#: Deliberately no `#include <fire_metal.h>`, no MSL, and no device
+#: initialisation: a module with no kernels must not acquire a dependency on
+#: the Metal runtime (see module_gen's preamble comment), and must stay
+#: loadable on a machine with no GPU. `have_device` therefore reports 0 --
+#: truthfully, nothing here can use a device.
+EMPTY_SIDECAR = """\
+/* No device code in this module, so there is nothing to offload. The
+   introspection entry points still exist so a program can ASK whether the
+   device path was taken -- which is the question --no-gpu makes worth asking
+   -- and get an honest 0. See device_glue.EMPTY_SIDECAR. */
+__attribute__((weak)) int64_t _mojo_gpu_kernel_count(void)    { return 0; }
+__attribute__((weak)) int64_t _mojo_gpu_have_device(void)     { return 0; }
+__attribute__((weak)) int64_t _mojo_gpu_dispatch_count(void)  { return 0; }
+__attribute__((weak)) int64_t _mojo_gpu_failure_count(void)   { return 0; }
+"""
+
+
+def emit_introspection_prototypes() -> str:
+    """Prototypes for the four introspection entry points, unconditionally.
+
+    They are REAL runtime functions registered in _RUNTIME_FUNCS, so a call
+    from compiled Mojo must resolve to a sidecar definition rather than
+    colliding with a weak auto-stub. Emitted for every module, kernel or not.
+    """
+    return ('/* GPU introspection entry points; present in every module so a\n'
+            '   program can ask whether the device path was taken. */\n'
+            + '\n'.join(
+                f'int64_t {_n}(void);' for _n in
+                ('_mojo_gpu_kernel_count', '_mojo_gpu_have_device',
+                 '_mojo_gpu_dispatch_count', '_mojo_gpu_failure_count')))
