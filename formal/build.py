@@ -2655,7 +2655,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                              set(_constructor_bindings(
                                  fn, framed,
                                  [f.name for f in functions])), rets,
-                             holders, hstruct, params_of)
+                             holders, hstruct, params_of,
+                             _callee_defs(functions))
         _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
         fn._frame_holders = hs
         fn._frame_nested_slots = nested_slots
@@ -4086,7 +4087,7 @@ def _check_method_receiver_types(fn, holders, by_name, owners,
 def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                          structs_by_name=None, created_here=frozenset(),
                          rets=None, all_holders=None, all_hstruct=None,
-                         params_of=None) -> None:
+                         params_of=None, callee_defs=None) -> None:
     """Refuse every construct a frame ADDRESS may not take part in.
 
     A frame belongs to the function that created it and is reclaimed when that
@@ -4145,6 +4146,41 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
         return [st.name for st in (by_name.get(node.name) or [])] \
             if isinstance(node, F.IdentExpr) else []
 
+    # Bracket lists that are TYPE ARGUMENT lists, collected before the walk and
+    # keyed by the index node's identity — `M.iter_nodes` has no parent, so this
+    # is the only way a child can be named again, and `struct_constructor_sites`
+    # already keys on `id` for the same reason.
+    #
+    # A TYPE ARGUMENT LIST IS NOT A CONTAINER, and the branch below could not
+    # tell the two apart: `Pointer[Deque[T], origin_of(self)]` and
+    # `[s, 1]` both arrive as a `TupleExpr`, and both were refused with the
+    # sentence "is stored in a container, which has no layout for a frame
+    # address" — which is FALSE about the first, and false in the way that
+    # costs the most, because it tells the reader their program has a frame
+    # that outlives its creator when it has no such frame at all. Measured on
+    # the 2026-09-30 sweep: 4 stdlib files
+    # (`std/builtin/tuple.mojo`, `std/collections/{deque,linked_list,set}.mojo`),
+    # each of which is refused for a store that does not happen.
+    #
+    # Skipping is the safe direction and the WHOLE of it is a skip: the
+    # subscript is not thereby allowed through — `model.multi_index_kind`
+    # answers `MULTI_INDEX_COMPTIME_PARAMS` for these bases and the construct is
+    # refused by name, with a sentence about explicit parameters that is true.
+    # What is not done here is inventing a decision:
+    # `subscript_index_is_a_comptime_parameter_list` answers only for a base
+    # this image can classify, so a bracket list over a name it cannot — a
+    # dotted `h.tag[…]`, an unknown name, a local — takes the refusal below
+    # exactly as before, and that limit is written down in
+    # `bugs/FORMAL_dotted_base_bracket_list_is_not_classified.md`. Every escape
+    # the branch is really for (`d[s, 1] = 5`, `var k = l[s, 1]`, `[s, 1]`) has a
+    # base that is a dict or a list, and no type name is either.
+    type_index_ids = {
+        id(sub.index)
+        for sub in M.iter_nodes(getattr(fn, "body", None))
+        if M.subscript_index_is_a_comptime_parameter_list(
+            sub, structs_by_name, callee_defs)
+    }
+
     for node in M.iter_nodes(fn.body):
         if isinstance(node, F.ReturnStmt) and node.value is not None:
             # `return <frame>` used to be refused here, and the refusal was
@@ -4185,6 +4221,10 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
             _refuse_holder_use(fn, node.value, holders, by_name,
                                "is returned from the function that created it")
         elif isinstance(node, (F.ListExpr, F.TupleExpr, F.DictExpr)):
+            if id(node) in type_index_ids:
+                # A TYPE APPLICATION, not a store — the skip is justified above
+                # and the subscript is refused by name further in.
+                continue
             for el in _container_values(node):
                 _refuse_holder_use(fn, el, holders, by_name,
                                    "is stored in a container, which has no "
@@ -5748,7 +5788,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             if why is None and isinstance(sub, F.SubscriptExpr) \
                     and not type_application:
                 why = M.multi_index_refusal_for(sub, False,
-                                                _callee_defs(functions))
+                                                _callee_defs(functions),
+                                                structs_by_name)
                 if why is None and M.is_external_call_template(sub) \
                         and id(sub) not in xc_callees:
                     # A well-formed template that is not a call's callee: a
@@ -5771,7 +5812,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         why = M.mlir_template_refusal(outer)
                         if why is None:
                             why = M.multi_index_refusal_for(
-                                outer, False, _callee_defs(functions))
+                                outer, False, _callee_defs(functions),
+                                structs_by_name)
                         break
             if why is None and isinstance(sub, F.SubscriptExpr) \
                     and id(root_ident) in bracket_callee_roots:
