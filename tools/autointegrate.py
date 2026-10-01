@@ -87,68 +87,67 @@ def enqueue_fixer(name, why):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--interval-min", type=float, default=10)
+    ap.add_argument("--interval-min", type=float, default=5, help="sleep this long only when there is nothing to do or the integrator is busy")
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--screen", action="store_true",
+                    help="screen each branch through the quick tier before the full gate (off by default: the full gate "
+                         "contains the same jobs, so for a branch that passes the screen is pure added time)")
     a = ap.parse_args()
     while True:
         st = load_state()
         screen = st.setdefault("screen", {})
-        cands = sorted(I.pick_candidates(quiet=True), key=C.priority_key)
-        if not cands:
-            log("nothing new to integrate")
-        # FAST LANE FIRST: test-infrastructure-only branches need no project gate (owner's policy) and cost minutes,
-        # so every one of them is handled before any gate work, whatever its priority.
-        for name in cands:
+        busy = False
+        # FAST LANE FIRST: test-infrastructure-only branches need no project gate (owner's policy) and cost minutes.
+        for name in sorted(I.pick_candidates(quiet=True), key=C.priority_key):
             if name in I.pick_candidates(quiet=True) and I.infra_only(C.load()[name]["branch"]):
                 log("%s touches only test infrastructure: fast lane (no project gate)" % name)
                 rc, out = run_integrate("--only", name, "--fast")
                 tail = [l for l in out.splitlines() if l.startswith(("GREEN", "RED", "NOT test", "CONFLICT", "merged", "fast lane"))]
                 log("%s: rc=%d %s" % (name, rc, " | ".join(tail)[:300]))
                 if "another integrator" in out:
-                    log("integrator busy; retry next interval"); break
-        cands = sorted(I.pick_candidates(quiet=True), key=C.priority_key)
-        # In PRIORITY order, one branch at a time: screen it alone through the quick tier; if it passes, LAND it
-        # (full gate) before looking at the next, so the most important branch is never kept waiting behind the
-        # screening of less important ones. A branch that fails its screen is skipped here and handed to a fixer below.
-        for name in cands:
-            if name not in I.pick_candidates(quiet=True):
-                continue                                  # superseded or integrated under us
-            if I.infra_only(C.load()[name]["branch"]):       # handled by the fast-lane pre-pass above
-                continue
-            head = head_sha(name)
-            if screen.get(name, {}).get("head") != head:
-                log("screening %s alone (quick tier)" % name)
-                rc, out = run_integrate("--only", name, "--jobs", *I.QUICK)
-                if "another integrator" in out:
-                    log("integrator busy; retry next interval"); break
-                if "--jobs run finished" not in out:     # it conflicted (a fixer was queued) or nothing merged
-                    log("%s: did not reach the quick tier: %s" % (name, " | ".join(l for l in out.splitlines() if "CONFLICT" in l)[:200]))
-                    continue
-                ok = rc == 0
-                screen[name] = {"head": head, "pass": ok, "why": "" if ok else failed_jobs(os.path.join(I.INTEG, "gate.log")), "t": time.time()}
-                json.dump(st, open(STATE, "w"))
-                log("%s: quick tier %s" % (name, "PASS" if ok else "FAIL: " + screen[name]["why"].replace("\n", " ")[:160]))
-            if not (screen.get(name, {}).get("pass") and screen[name]["head"] == head_sha(name)):
-                continue
-            log("LANDING %s (passed the quick tier; full gate now)" % name)
-            rc, out = run_integrate("--only", name)
-            tail = [l for l in out.splitlines() if l.startswith(("GREEN", "RED", "CONFLICT", "merged", "gate exited"))]
-            log("%s: rc=%d %s" % (name, rc, " | ".join(tail)[:400]))
-            if "another integrator" in out:
-                log("integrator busy; retry next interval"); break
-            if rc != 0:
-                screen[name]["pass"] = False
-                screen[name]["why"] = "full gate red: " + failed_jobs(os.path.join(I.INTEG, "gate.log"))
-                json.dump(st, open(STATE, "w"))
-        # Phase 3: the rest (failed their screen) are handed to fixers, once per head.
+                    busy = True; break
+        # Then exactly ONE branch per iteration: the highest-priority eligible candidate, RE-CHOSEN each time (so a
+        # priority change applies at once, and a branch that just landed or conflicted changes what is next).
+        did = False
+        if not busy:
+            elig = [n for n in sorted(I.pick_candidates(quiet=True), key=C.priority_key)
+                    if not I.infra_only(C.load()[n]["branch"])
+                    and not (screen.get(n, {}).get("head") == head_sha(n) and not screen[n].get("pass"))]
+            if elig:
+                name = elig[0]; head = head_sha(name); did = True
+                if a.screen and screen.get(name, {}).get("head") != head:
+                    log("screening %s alone (quick tier)" % name)
+                    rc, out = run_integrate("--only", name, "--jobs", *I.QUICK)
+                    if "another integrator" in out:
+                        busy = True
+                    elif "--jobs run finished" not in out:
+                        log("%s: did not reach the quick tier: %s" % (name, " | ".join(l for l in out.splitlines() if "CONFLICT" in l)[:200]))
+                    else:
+                        ok = rc == 0
+                        screen[name] = {"head": head, "pass": ok, "why": "" if ok else failed_jobs(os.path.join(I.INTEG, "gate.log")), "t": time.time()}
+                        json.dump(st, open(STATE, "w"))
+                        log("%s: quick tier %s" % (name, "PASS" if ok else "FAIL"))
+                elif not busy:
+                    log("LANDING %s (merged alone onto master; full gate, failed jobs confirmed alone)" % name)
+                    rc, out = run_integrate("--only", name)
+                    tail = [l for l in out.splitlines() if l.startswith(("GREEN", "RED", "CONFLICT", "merged", "gate exited", "the red did NOT"))]
+                    log("%s: rc=%d %s" % (name, rc, " | ".join(tail)[:400]))
+                    if "another integrator" in out:
+                        busy = True
+                    elif rc != 0 and name in I.pick_candidates(quiet=True):     # red (a conflict supersedes the branch itself)
+                        screen[name] = {"head": head_sha(name), "pass": False, "t": time.time(),
+                                        "why": "full gate red: " + failed_jobs(os.path.join(I.INTEG, "gate.log"))}
+                        json.dump(st, open(STATE, "w"))
+        # A branch that failed on its own is handed to a fixer, once per head.
         for name in sorted(I.pick_candidates(quiet=True), key=C.priority_key):
             r = screen.get(name)
-            if r and r["head"] == head_sha(name) and not r["pass"]:
+            if r and r["head"] == head_sha(name) and not r["pass"] and not I.infra_only(C.load()[name]["branch"]):
                 log("%s failed on its own: queueing a fixer" % name)
                 enqueue_fixer(name, r["why"])
         if a.once:
             return
-        time.sleep(a.interval_min * 60)
+        if busy or not did:
+            time.sleep(a.interval_min * 60)
 
 
 if __name__ == "__main__":
