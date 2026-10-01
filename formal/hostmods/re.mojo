@@ -151,7 +151,10 @@ LIMITS, MEASURED, NOT ASSUMED
    rather than making "you did not size it right" a process exit. The size a
    caller needs is `2 * (re.ngroups(pattern) + 1)` for the three span
    functions and `1 + 2 * maxn` for `findall` and `split`, and it is the one
-   thing a caller has to know that it cannot read back off the list.
+   thing a caller has to know that it cannot read back off the list. The
+   exception is `sub`, which writes ONE word (`status[0]`) and therefore has no
+   size to be told; see its own docstring for why the capacity parameter went
+   rather than being checked.
 
 7. **`re.sub` AND `re.split` DO NOT RE-COMPILE PER MATCH** and a backtracking
    engine is exponential in the worst case, so a run is given a step budget.
@@ -184,7 +187,8 @@ from os._syscalls import str_len, str_alloc, str_put, str_copy
 # call, which is the same bargain `os.path.join` makes and for the same reason:
 # there is no `free` in this module and `os.os_free(p)` is the spelling.
 
-_PARSER = 0            # 24 words of 4 bytes
+_PARSER = 0            # 32 words of 4 bytes; words 24-25 are `sub`'s own
+                       # (_P_USED below) and the block ends where _PFRAMES does
 _PFRAMES = 128         # the parser's per-piece frames, _PFRAMEW words each
 _PFRAMEW = 8
 _PDEPTHMAX = 24
@@ -270,6 +274,16 @@ _P_ENTRY = 20
 _P_NEXT = 21
 _P_PHASE = 22
 _P_CLROUT = 23
+# Words 24 and 25 are `sub`'s OUTPUT-BUFFER state: how much of the caller's
+# buffer is written, and whether this pass measures it or writes it. They were
+# a trailing `used, w` parameter of SEVEN functions of the template walk, which
+# is what put three of them over the six integer argument registers the x86-64
+# ABI passes (`sub: 7 parameters exceeds the 6 …`), so the whole module was
+# refused there and with it the 45 files that import it. Per-call state in the
+# arena is where the rest of this engine keeps it, and the walk is not
+# re-entrant — one `sub` call owns one arena — so there is nothing to lose.
+_P_USED = 24
+_P_W = 25
 
 # Opcodes. A node is 8 bytes: op, a, b, c, p0 (2 bytes), p1 (2 bytes).
 OP_CHAR = 1
@@ -2114,7 +2128,7 @@ def findall(out, n: Int, pattern: String, subject: String, flags: Int,
     return cnt
 
 
-def sub(status, n: Int, pattern: String, repl: String, subject: String,
+def sub(status, pattern: String, repl: String, subject: String,
         flags: Int, count: Int) -> Pointer[UInt8]:
     """`re.sub`, in a buffer the CALLER owns. `count` 0 means every match.
 
@@ -2123,6 +2137,17 @@ def sub(status, n: Int, pattern: String, repl: String, subject: String,
     string escape in the replacement, because a string literal on this path is
     interned VERBATIM (`os/__init__.mojo`'s `linesep` is the measurement), so
     a `\\n` the caller wrote is two characters and stays two characters.
+
+    **`status` IS NOT PRECEDED BY A CAPACITY, as it is in every other writer
+    here, and that is a fact rather than an oversight.** `out` in `search` /
+    `findall` / `split` is written up to `2 * (ngroups + 1)` times at RUN time,
+    so its size is something only the caller knows and the module has to be
+    told; `status` is exactly one word, at index 0, on every path out of this
+    function, so there is no size to get wrong and no check to make. The
+    parameter was there anyway and never read — `n = str_len(subject)`
+    overwrote it on the first line of the body — and a seventh parameter is
+    what the x86-64 ABI refuses (`sub: 7 parameters exceeds the 6 …`), so the
+    one argument here that carried no information is the one that goes.
     """
     a = _arena()
     e = _prepare(a, pattern, flags)
@@ -2135,18 +2160,19 @@ def sub(status, n: Int, pattern: String, repl: String, subject: String,
         status[0] = 0 - r
         return _empty()
     d = str_alloc(r)
-    used = _subfill(a, d, 0, subject, n, repl, count)
+    _subfill(a, d, subject, n, repl, count)
     status[0] = 1
     return d
 
 
-def _subwalk(a, subj, n: Int, repl: String, count: Int, dst, used: Int, w: Int) -> Int:
-    """One pass of `sub`. With `w` 0 it measures, with `w` 1 it writes.
+def _subwalk(a, subj, n: Int, repl: String, count: Int, dst) -> Int:
+    """One pass of `sub`. With `_P_W` 0 it measures, with 1 it writes.
 
     One function for both because the template walk is the part that is easy to
     get subtly wrong, and a second copy of it to measure would be a second
-    thing to be wrong about. `dst` is the caller's buffer and `used` is how
-    much of it is written.
+    thing to be wrong about. `dst` is the caller's buffer; how much of it is
+    written is `_P_USED`, set by `_sublen` and `_subfill` before the walk and
+    advanced by every helper in it.
     """
     pos = 0
     prev = 0
@@ -2161,27 +2187,43 @@ def _subwalk(a, subj, n: Int, repl: String, count: Int, dst, used: Int, w: Int) 
             break
         s0 = _pa(a, _P_MSTART)
         s1 = _pa(a, _P_MEND)
-        used = _emit(a, subj, prev, s0, dst, used, w)
-        used = _repcopy(a, dst, used, repl, subj, w)
+        _emit(a, subj, prev, s0, dst)
+        _repcopy(a, dst, repl, subj)
         prev = s1
         nsub = nsub + 1
         pos = _pa(a, _P_NEXT)
-    return _emit(a, subj, prev, n, dst, used, w)
+    return _emit(a, subj, prev, n, dst)
 
 
-def _emit(a, subj, lo: Int, hi: Int, dst, used: Int, w: Int) -> Int:
-    """Subject bytes `lo..hi` into the result."""
+def _emit(a, subj, lo: Int, hi: Int, dst) -> Int:
+    """Subject bytes `lo..hi` into the result. The new `used`."""
+    u = _pa(a, _P_USED)
     if hi <= lo:
-        return used
-    if w == 1:
-        return str_put(dst, used, subj + lo, hi - lo)
-    return used + (hi - lo)
+        return u
+    if _pa(a, _P_W) == 1:
+        u = str_put(dst, u, subj + lo, hi - lo)
+    else:
+        u = u + (hi - lo)
+    _spa(a, _P_USED, u)
+    return u
 
 
-def _repcopy(a, dst, used: Int, repl: String, subj, w: Int) -> Int:
-    """The template, expanded, into the result. The new `used`."""
+def _repcopy(a, dst, repl: String, subj) -> Int:
+    """The template, expanded, into the result. The new `used`.
+
+    THE OUTPUT-BUFFER STATE IS IN THE ARENA (`_P_USED`, `_P_W`), and every
+    helper that advances it publishes it there and returns it. It was a
+    trailing `used, w` parameter instead, threaded through all seven of these
+    functions, which is what put three of them past the six integer argument
+    registers the x86-64 ABI passes and made this module unbuildable there —
+    see the comment on `_P_USED`. `dst` stays a parameter: it is the CALLER's
+    buffer, one word wide, and it is the one thing here that is not per-call
+    state this module owns.
+    """
     i = 0
     nr = str_len(repl)
+    used = _pa(a, _P_USED)
+    w = _pa(a, _P_W)
     while i < nr:
         c = _b(repl, i)
         if c == 92:
@@ -2193,7 +2235,7 @@ def _repcopy(a, dst, used: Int, repl: String, subj, w: Int) -> Int:
                 break
             d = _b(repl, i)
             if d == 103:                      # \g<…>
-                used = _gref(a, dst, used, repl, subj, w, i + 1)
+                used = _gref(a, dst, repl, subj, i + 1)
                 i = _gskip(repl, i + 1)
             elif d == 92:
                 if w == 1:
@@ -2201,7 +2243,7 @@ def _repcopy(a, dst, used: Int, repl: String, subj, w: Int) -> Int:
                 used = used + 1
                 i = i + 1
             elif d >= 48 and d <= 57:
-                used = _gput(a, dst, used, d - 48, subj, w)
+                used = _gput(a, dst, d - 48, subj)
                 i = i + 1
             else:
                 if w == 1:
@@ -2213,6 +2255,7 @@ def _repcopy(a, dst, used: Int, repl: String, subj, w: Int) -> Int:
                 _sb(dst, used, c)
             used = used + 1
             i = i + 1
+    _spa(a, _P_USED, used)
     return used
 
 
@@ -2225,7 +2268,7 @@ def _gskip(repl, i: Int) -> Int:
     return i
 
 
-def _gref(a, dst, used: Int, repl: String, subj, w: Int, i: Int) -> Int:
+def _gref(a, dst, repl: String, subj, i: Int) -> Int:
     """`\\g<n>` or `\\g<name>`. A name is not looked up: the number is read."""
     v = 0
     got = 0
@@ -2240,11 +2283,11 @@ def _gref(a, dst, used: Int, repl: String, subj, w: Int, i: Int) -> Int:
         else:
             i = i + 1
     if got == 0:
-        return used
-    return _gput(a, dst, used, v, subj, w)
+        return _pa(a, _P_USED)
+    return _gput(a, dst, v, subj)
 
 
-def _gput(a, dst, used: Int, g: Int, subj, w: Int) -> Int:
+def _gput(a, dst, g: Int, subj) -> Int:
     """Group `g`'s text, if that group exists and matched.
 
     The existence test lives HERE and not at the two call sites, so there is
@@ -2252,22 +2295,26 @@ def _gput(a, dst, used: Int, g: Int, subj, w: Int) -> Int:
     second spelling of the same question.
     """
     if g >= _pa(a, _P_NG):
-        return used
+        return _pa(a, _P_USED)
     lo = _g4s(a, _slab(a, g))
     hi = _gspan(a, g)
-    return _emit(a, subj, lo, hi, dst, used, w)
+    return _emit(a, subj, lo, hi, dst)
 
 
 def _sublen(a, subj, n: Int, repl: String, count: Int) -> Int:
     """The result's length, or the negated status if there is not one."""
-    r = _subwalk(a, subj, n, repl, count, 0, 0, 0)
+    _spa(a, _P_USED, 0)
+    _spa(a, _P_W, 0)
+    r = _subwalk(a, subj, n, repl, count, 0)
     if r < 0:
         return 0 - r
     return r
 
 
-def _subfill(a, dst, used: Int, subj, n: Int, repl: String, count: Int) -> Int:
-    return _subwalk(a, subj, n, repl, count, dst, used, 1)
+def _subfill(a, dst, subj, n: Int, repl: String, count: Int) -> Int:
+    _spa(a, _P_USED, 0)
+    _spa(a, _P_W, 1)
+    return _subwalk(a, subj, n, repl, count, dst)
 
 
 def split(out, n: Int, pattern: String, subject: String, flags: Int,

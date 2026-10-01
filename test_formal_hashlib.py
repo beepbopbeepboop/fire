@@ -40,6 +40,15 @@ Building and RUNNING, not building. `test_formal.py` typechecks the generated
 proof and never executes the image; every case here exits with a status this
 file checks.
 
+    --backend=x86_64 runs the WHOLE file on the other codegen, and it is not a
+    repeat of the arm64 run. `hashlib.mojo` used to be refused outright for
+    x86-64 — `b2_g: 7 parameters exceeds the 6 …` and, behind that, an
+    `encode_mov_r64_imm64` that CRASHED on any 64-bit constant with bit 63 set,
+    which is four of BLAKE2b's eight IVs — so there was no x86-64 digest to
+    compare and this file could only ever ask one architecture. Two backends
+    that lower the same module are two lowerings of it, and a digest is exactly
+    the thing where a second lowering can be wrong without failing to build.
+
 Groups: `commoncrypto`, `blake2b`, `raw`, `absent`. With no argument, all.
 """
 import argparse
@@ -79,13 +88,25 @@ def mojo_string(s):
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+BACKEND = None      # None = the default (arm64); `--backend` on the command line
+
+
 def build(src, name):
+    """Build `src` through the formal backend, on `BACKEND`.
+
+    The module is compiled for BOTH architectures and every group here is
+    executed on the one this process selected, so the digests are checked
+    against CPython on each rather than on one and assumed for the other.
+    """
     tmp = os.path.join(TEMP, name + ".mojo")
     out = os.path.join(TEMP, name)
     with open(tmp, "w") as f:
         f.write(src)
-    r = subprocess.run([sys.executable, FIRE, "build", "--formal", "--no-prove",
-                        "-o", out, tmp],
+    argv = [sys.executable, FIRE, "build", "--formal", "--no-prove"]
+    if BACKEND:
+        argv.append("--backend=%s" % BACKEND)
+    argv += ["-o", out, tmp]
+    r = subprocess.run(argv,
                        capture_output=True, text=True, timeout=BUILD_TIMEOUT,
                        cwd=HERE)
     check(r.returncode == 0,
@@ -358,9 +379,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("groups", nargs="*", help="subset: " + ", ".join(GROUPS))
+    ap.add_argument("--backend", default=None,
+                    help="formal backend to build for (default: arm64)")
     args = ap.parse_args()
+    global BACKEND
+    BACKEND = args.backend
     if platform.machine() not in ("arm64", "aarch64"):
-        print(f"SKIP: formal output is arm64-only, host is "
+        print(f"SKIP: this host cannot run the formal images at all, host is "
               f"{platform.machine()}")
         return 0
     names = args.groups or list(GROUPS)
