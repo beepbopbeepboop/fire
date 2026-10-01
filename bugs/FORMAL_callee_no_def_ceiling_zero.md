@@ -15,7 +15,7 @@ row's one sentence into the five things it was standing for.
 ## 1. The ceiling, per file, on a cold CAS
 
 Every file re-built with `model.frame_undefined_callee_refusal` patched to
-`None` **in that process only** (nothing in the tree edited; §5 has the six
+`None` **in that process only** (nothing in the tree edited; §6 has the six
 lines), so the build walks past this refusal and reports the next one:
 
     env GMOJO_HOME=$PWD/.tmp/gmojo_nc python3 next_refusal.py <file>
@@ -95,7 +95,10 @@ sends the reader after a non-bug").
 * `formal/model.py`: `frame_undefined_callee_refusal` — one classifier, five
   texts — and `frame_receiver_escape_refusal`'s fifth branch delegates to it,
   keeping its own five-case order (an ADDRESS constructor still returns `None`,
-  which is what `Pointer(to=s)` depends on).
+  which is what `Pointer(to=s)` depends on). One more case sits BEFORE the
+  delegation and not in it: `FRAME_VARIADIC_BUILTIN_CALLS`, which is `print` —
+  a name this backend compiles, so it never belonged in "no definition in hand"
+  at all. §5 has the measurement.
 * `formal/build.py`: `_check_frame_escapes`'s "not in this image" branch passes
   the three facts the classifier needs. `imported` is threaded from
   `_prepare_functions`, which is the only function that has the module
@@ -177,7 +180,50 @@ BINDS, and `reexported_names` records the name the defining module gave it, so
 the consumer's `aliased(21)` cannot bind. Measured, with the build refusing to
 emit an image whose symbol nothing provides.
 
-## 5. How to reproduce the measurement
+## 5. The histogram that found the last false clause
+
+The name histogram per arm (over the 41, which is what a cause table prints per
+row) is how the two remaining imprecisions in this family were found, and both
+are now fixed:
+
+| arm | names |
+|---|---|
+| imported free function | `_b64encode`, `_write_float` ×2, `assert_equal` ×10, `assert_true` ×2, `rand`, `randn`, `realpath`, `split`, `exists` ×2, `write_sequence_to`, `_count_utf8_continuation_bytes`, `_end_metal_trace_capture`, `keep` |
+| comptime reflection intrinsic | `__get_mvalue_as_litref` ×5 |
+| compile-time parameter | `ElementFn` |
+| star import | `assert_true`, `assert_equal` |
+| unbound | `getattr`, `hasattr`, `iter`, `debug_assert`, **`print`**, **`type_of`** |
+
+* **`print` is a name this backend COMPILES** — `print("hi")` builds, runs and
+  prints — so "no definition in hand" was false of it, and it is the most
+  consequential name on this list: with the refusal lifted, `print(<frame>)`
+  builds, runs, **exits 0** and prints the frame's ADDRESS as a decimal, 6102330608
+  on arm64 and 13027830976 on x86-64 for the same source, and a different number
+  on every run because the address moves. It now has its own refusal
+  (`FRAME_VARIADIC_BUILTIN_CALLS`), deliberately NOT in `FRAME_C_VALUE_CALLS`,
+  whose sentence says "a C library entry point" and `print` is Mojo's builtin
+  lowered through `_emit_print` in each backend's call emitter.
+* **`type_of(x)` is not implemented on this path at all** (no occurrence of the
+  name in `formal/`), so for it the generic sentence is true and it stays there.
+* `getattr`, `hasattr`, `iter` are host builtins with no Mojo source anywhere,
+  and `debug_assert` is a stdlib function (`std/builtin/debug_assert.mojo`) that
+  `std/collections/interval.mojo` does not import — so "nothing in this image
+  binds it" is true of all four. The useful refinement for them ("the backend has
+  no implementation of this builtin") would need a table of what the backend DOES
+  implement, and the honest test for that today is a name somebody wrote down
+  after measuring it — see the `print` note above for why that is a debt rather
+  than a design.
+
+**What would retire the table**: the emitter-level builtins are hard-coded per
+backend (`formal/arm64_codegen.py:5157` and `formal/x86_64_codegen.py:4926` each
+spell `if name == "print"`), so "which builtins does this backend compile" is
+now in three places — two emitters and this model set. A single published
+`model.EMITTER_BUILTINS` that both emitters' `if name == …` chains and
+`FRAME_VARIADIC_BUILTIN_CALLS` read would make the three agree by construction;
+that is a change to both backends' call emitters and is not this construct's to
+make.
+
+## 6. How to reproduce the measurement
 
 **The row's numbers** come from the sweep's own tooling, which is committed:
 
@@ -200,10 +246,10 @@ twelve import most of the standard library, and `cas.formal_build_key` does not
 fold a module's sources in (`bugs/FORMAL_sweep_cache_ignores_imports.md`), so a
 warm CAS replays verdicts about those modules' old contents.
 
-**The five minimal programs** are `test_formal_run.py`'s
-`byref_refuse_imported_free_function`, `byref_refuse_star_imported_free_function`,
-`byref_refuse_compile_time_parameter`, `byref_refuse_reflection_intrinsic` and
-`byref_refuse_invisible_callee` — committed, each refusing identically on arm64
+**The minimal programs** are `test_formal_run.py`'s `byref_refuse_*` cases —
+imported free function, star import, compile-time parameter, reflection
+intrinsic, bare method name, `print` of a frame, and the `byref_refuse_invisible_callee`
+guard for the generic sentence — committed, each refusing identically on arm64
 and x86-64:
 
     python3 test_formal_run.py byref_refuse_imported_free_function

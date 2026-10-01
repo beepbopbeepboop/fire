@@ -4855,6 +4855,33 @@ FRAME_C_VALUE_CALLS = {
     "malloc", "calloc", "realloc", "free", "memset", "qsort", "abs", "labs",
 }
 
+# Builtins of the LANGUAGE that this backend compiles, and that are VARIADIC over
+# conversions — so what they are handed is FORMATTED, and a word is a perfectly
+# good thing to format.
+#
+# `print` is here and NOT in `FRAME_C_VALUE_CALLS`, and the reason is the same
+# one that put `abs` in two sets: the sentence for that set says "a C library
+# entry point", and `print` is Mojo's builtin lowered through `_emit_print` in
+# each backend's call emitter, not a C symbol.  A reader sent to `printf`'s
+# prototype would be looking for a function this program never names.  The
+# CONSEQUENCE is the one measured on `printf`, and it is the reason this set
+# exists rather than a comment: with the refusal lifted, `print(p)` builds,
+# runs, exits 0, and prints the frame's ADDRESS as a decimal — 6102330608 on
+# arm64 and 13027830976 on x86-64 for the same source, and a different number
+# on every run because the address moves.  A silently wrong answer, which is
+# the outcome this whole family exists to prevent.
+#
+# ONE name, and deliberately a set rather than a general rule: a builtin the
+# backend does not compile must NOT be answered from here, and the only honest
+# test for "the backend compiles this" today is a name someone wrote down after
+# measuring it.  Every emitter has its own hard-coded branch (`arm64_codegen.py`
+# and `x86_64_codegen.py` each spell `if name == "print"`), so a table here is
+# the second place that fact lives — see
+# `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 for what would retire it.
+FRAME_VARIADIC_BUILTIN_CALLS = {
+    "print",
+}
+
 
 def frame_receiver_escape_refusal(callee: str, struct_names,
                                   imported_from: str = None,
@@ -4903,6 +4930,25 @@ def frame_receiver_escape_refusal(callee: str, struct_names,
         # Measured, not assumed: see FRAME_ADDRESS_CTORS. Returning None here
         # is the whole of the fix for the `_c_stat`/`Pointer(to=stat)` shape.
         return None
+    if callee in FRAME_VARIADIC_BUILTIN_CALLS:
+        # Between the ADDRESS constructor and the C entry points, because it is
+        # neither: this name IS compiled, so it cannot fall through to case 5
+        # ("no definition in hand"), and it is not a C symbol, so the C
+        # sentences are false of it.  Measured consequence in the set's comment.
+        return (f"a {who} receiver is passed to {callee}(), which is a builtin "
+                f"of the language rather than a C entry point, and it is "
+                f"VARIADIC over conversions: whatever it is handed, it formats. "
+                f"A frame address is a word, so what it formats is the ADDRESS, "
+                f"and a decimal rendering of it is indistinguishable from a "
+                f"number the program meant to print. Measured with this refusal "
+                f"lifted, on both architectures: the image builds, runs, exits "
+                f"0, and prints the frame's address — 6102330608 on arm64 and "
+                f"13027830976 on x86-64 for the same source, and a different "
+                f"number on every run, because the address moves. Not a missing "
+                f"layout and not a missing callee: a wrong CATEGORY of "
+                f"argument, the one {callee} shares with `printf` in a "
+                f"different wrapper. Read a field out first "
+                f"(`{callee}(p.a)`)")
     if callee in FRAME_C_LIBRARY_CALLS:
         return (f"a {who} frame address is passed to {callee}(), which is a C "
                 f"library entry point and reads the struct's BYTES, and the "

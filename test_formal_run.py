@@ -2483,6 +2483,26 @@ BYREF_REFUSALS = [
      "    s.b = 8\n"
      "    return get(s) + n\n",
      "refuse:defines no FUNCTION of that name", None),
+    # `print` is a builtin this path COMPILES (`print("hi")` builds, runs and
+    # prints), so a frame address handed to it could not be reported as a name
+    # with "no definition in hand" — that is false of it. It could not go in
+    # `FRAME_C_VALUE_CALLS` either, because that set's sentence says "a C
+    # library entry point" and `print` is Mojo's builtin lowered through
+    # `_emit_print`. The needle is the clause that names what it is; the
+    # measured consequence (the image prints the frame's ADDRESS as a decimal,
+    # differently on each machine and on each run) is in the message.
+    ("byref_refuse_print_of_a_frame",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    print(p)\n"
+     "    return n\n",
+     "refuse:is a builtin of the language rather than a C entry point", None),
     # ── wave 3 (C5) ──
     #
     # A frame address PARKED IN A FIELD. `o.inner = i` looks like an ordinary
