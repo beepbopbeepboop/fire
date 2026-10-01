@@ -6670,13 +6670,15 @@ ORIGIN_OF_REFUSALS = [
      "    printf(\"%d\\n\", origin_of(s))\n"
      "    return 0\n",
      "refuse:passed to printf()", None),
-    # A CONTAINER. `origin_of(s)` erased to `s` inside a subscript's argument
-    # list is refused as a container store, which is the right ANSWER for the
-    # wrong reason — an index list is not a container — and that imprecision has
-    # its own bug doc (`FORMAL_type_argument_read_as_a_container.md`) with the
-    # one-line reproducer that has no `origin_of` in it at all. The row is here
-    # so the answer is pinned as a refusal: whatever the index list is, a frame
-    # address in it does not become a store the analysis can see through.
+    # A CONTAINER, and a GENUINE one — `[s, 1]` is a list literal, not a
+    # subscript's argument list, so this row is the control for
+    # `TYPE_ARGUMENT_LIST_CASES` below and the reason that group's escape-check
+    # skip could not have caught this one. It used to be mislabelled: the
+    # comment here called the list "a subscript's argument list", so it drew a
+    # complaint about the wrong reason and it is what made the REAL defect
+    # (`Box[Int, s]`, which has no `origin_of` in it at all) look like this
+    # row. The answer was right and the reasoning was not; both fixed in
+    # `30e5e2e9`.
     ("origin_of_refuse_a_frame_in_a_container",
      "struct S:\n"
      "    var a: Int\n"

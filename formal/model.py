@@ -337,9 +337,10 @@ def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
     brackets select an instantiation. So every consumer that would otherwise
     read a bracket list as a container has to ask this before it does, and the
     two answers in this file that were false about the second kind are what
-    cost it (`FORMAL_type_argument_read_as_a_container.md` for the escape
-    check, and `multi_index_kind` below, which answered "a subscript whose
-    index is a tuple" about a type application).
+    cost it: the escape check's container branch in `formal/build.py`, and
+    `multi_index_kind` below, which answered "a subscript whose index is a
+    tuple" about a type application. Both are measured before and after in
+    `bugs/FORMAL_frame_by_value_ceiling_zero.md`.
 
     THE ONE ANSWER, for the same reason `multi_index_refusal_for` is the one
     reader of the multi-index question: two functions deciding "is this bracket

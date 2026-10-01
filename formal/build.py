@@ -2923,13 +2923,14 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     # Skipping is the safe direction and the WHOLE of it is a skip: the
     # subscript is not thereby allowed through — `model.multi_index_kind`
     # answers `MULTI_INDEX_COMPTIME_PARAMS` for these bases and the construct is
-    # refused by name, with a sentence about explicit parameters that is true
-    # (`FORMAL_type_argument_read_as_a_container.md`, now closed). What is not
-    # done here is inventing a decision: `subscript_index_is_a_comptime_parameter_list`
-    # answers only for a base this image can classify, so a bracket list over a
-    # name it cannot — an imported `Self.IteratorType[…]`, an unknown name, a
-    # local — takes the refusal below exactly as before. Every escape the
-    # branch is really for (`d[s, 1] = 5`, `var k = l[s, 1]`, `[s, 1]`) has a
+    # refused by name, with a sentence about explicit parameters that is true.
+    # What is not done here is inventing a decision:
+    # `subscript_index_is_a_comptime_parameter_list` answers only for a base
+    # this image can classify, so a bracket list over a name it cannot — a
+    # dotted `h.tag[…]`, an unknown name, a local — takes the refusal below
+    # exactly as before, and that limit is written down in
+    # `bugs/FORMAL_dotted_base_bracket_list_is_not_classified.md`. Every escape
+    # the branch is really for (`d[s, 1] = 5`, `var k = l[s, 1]`, `[s, 1]`) has a
     # base that is a dict or a list, and no type name is either.
     type_index_ids = {
         id(sub.index)

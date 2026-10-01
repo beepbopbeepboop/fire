@@ -1,9 +1,11 @@
 # FORMAL_frame_by_value_ceiling_zero: rows 7 and 8 of the sweep map, measured — 0 of 26 files move, and the 7 that leave row 7 land in five other causes
 
-**Status: the ceiling is measured at 0, one sub-shape is fixed (`origin_of`,
-commit `14a2e42d`), one neighbouring gap is filed, and the rest of rows 7 and 8
-is not work.** This is the measurement the work map asked for before anything
-was built (§3 of `FORMAL_sweep_work_map_2026-09-30.md`, on
+**Status: the ceiling is measured at 0, two sub-shapes are fixed
+(`origin_of`, commit `14a2e42d`; and the subscript argument list, commit
+`30e5e2e9`, which is the neighbouring gap this document used to file and
+which has been closed), one remaining limit is filed, and the rest of rows 7
+and 8 is not work.** This is the measurement the work map asked for before
+anything was built (§3 of `FORMAL_sweep_work_map_2026-09-30.md`, on
 `work/formal-sweep-next`), carried out on the 26 files those two rows name. The
 map's warning was that "files blocked" is an UPPER BOUND and that rows 2 and 3
 were 68 files of not-work; this is the same measurement for rows 7 and 8, and
@@ -104,20 +106,52 @@ Re-sweeping the 26 with the fix in place:
                      receiver passed as an argument x1
 ```
 
-**7 files leave row 7 and 0 reach `pass`.** Where they land:
+**7 files leave row 7 and 0 reach `pass`.** Where they land, measured again
+after the second fix (`30e5e2e9`, the subscript argument list below) — the
+right-hand column is the state on this tree, and the middle one is the state
+between the two fixes, which is what made the second fix worth landing:
 
-| file | lands on | whose |
-|---|---|---|
-| `std/builtin/tuple.mojo` | `a Tuple receiver is stored in a container` | the neighbouring gap below |
-| `std/collections/deque.mojo` | same | same |
-| `std/collections/linked_list.mojo` | same | same |
-| `std/collections/set.mojo` | same | same |
-| `std/collections/counter.mojo` | `a Counter receiver is passed to other.lt in argument position 0` | map row 4 (`formal-receiver-position`) |
-| `std/memory/unsafe_pointer.mojo` | `a Pointer receiver is passed to type_of()` | `type_of` is not lowered at all, on any receiver — a plain missing builtin |
-| `std/gpu/host/_device_context_metal.mojo` | `function.mojo`: `__mlir_attr[...]` | map row 1, permanent |
+| file | after `origin_of` (`14a2e42d`) | after the argument list (`30e5e2e9`) | whose |
+|---|---|---|---|
+| `std/builtin/tuple.mojo` | `a Tuple receiver is stored in a container` | `a Tuple receiver is passed to type_of()` | map row 8, `formal-callee-no-def` |
+| `std/collections/deque.mojo` | same | `Deque__physical_index() takes a Deque receiver at argument 0 … one parameter, two kinds of value` | `_check_holder_agreements` |
+| `std/collections/linked_list.mojo` | same | dependency: `builtin_slice.mojo`: `'other.start' is a field access through 'other'` | map row 3 |
+| `std/collections/set.mojo` | same | `Set_issubset() takes a Set receiver at argument 1 … one parameter, two kinds of value` | `_check_holder_agreements` |
+| `std/collections/counter.mojo` | `a Counter receiver is passed to other.lt in argument position 0` | **unchanged** | map row 4, `formal-receiver-position` |
+| `std/memory/unsafe_pointer.mojo` | `a Pointer receiver is passed to type_of()` | **unchanged** | `type_of` is a missing builtin, on any receiver |
+| `std/gpu/host/_device_context_metal.mojo` | dependency: `function.mojo`: `__mlir_attr[...]` | **unchanged** | map row 1, permanent |
 
-So the fix buys 7 truthful diagnoses and 4 of the 7 immediately walk into the
-next false one, which is the single most reusable thing left in these two rows.
+The before/after of the whole seven, one sweep each, same tree, the change
+reversed with `git apply -R` for the first column and re-applied for the
+second:
+
+```
+$ python3 tools/memslot.py --gb 8 --label sweep-7-before -- \
+      python3 tools/formal_sweep.py -j 4 -t 300 <the 7 files>
+[arm64] 7 files: PASS=0 not-pass=7
+  codegen by family: receiver stored in a container x4,
+                     callee has no definition on this path x1,
+                     receiver passed as an argument x1
+  codegen/dependency by family: function.mojo: MLIR construct x1
+
+$ … the same command with 30e5e2e9 in place …
+[arm64] 7 files: PASS=0 not-pass=7
+  codegen by family: callee has no definition on this path x2,
+                     self has two kinds of value across call sites x2,
+                     receiver passed as an argument x1
+  codegen/dependency by family: builtin_slice.mojo: other refusal x1,
+                                function.mojo: MLIR construct x1
+```
+
+**4 files move and 0 reach `pass`,** which is the ceiling this document has
+measured from the start. What moved is the SENTENCE: the four were refused for
+storing a frame address in a container that does not exist, and each is now
+refused for something that is true of it — a callee with no definition, a
+parameter that is a frame address at one call site and a copy at another, and a
+module it imports. `linked_list.mojo` also changes CLASS, from an in-file
+`codegen` finding to `codegen/dependency`, which is the sweep saying the file's
+own refusal is no longer the one in front of it — not that its body is clean,
+which nothing here establishes.
 
 ## The fix's verdict footprint is exactly those 7 files
 
@@ -147,14 +181,24 @@ should find exactly the 7 verdicts the table above lists, with 0 reaching
 `pass`. (That re-sweep is a large run and was not done here; it belongs to the
 gate.)
 
-## The neighbouring gap: a subscript's argument list is not a container
+`30e5e2e9` has the same property and the same argument, in the other
+direction: it can only change a file whose verdict is one of two sentences —
+`is stored in a container` from the escape check's container branch, or `is a
+subscript whose index is a tuple` from `model.multi_index_kind` — and both of
+those are refusals before and after, so no file that built before it does. The
+measured before/after above is the check: 4 of 7 files, and the 3 that did not
+move were refused by a callee table, a parameter position and an import chain,
+none of which this change reads.
 
-Filed as `bugs/FORMAL_type_argument_read_as_a_container.md`. One paragraph,
-because it is short and it is what stands between 4 files and a truthful
-diagnosis: `_check_frame_escapes`'s container branch cannot tell a `TupleExpr`
-that is a subscript's INDEX from a `TupleExpr` that is a container literal, and
-`iter_nodes` does not give it the parent, so a frame address in a type-argument
-list is refused as a store. The reproducer has no `origin_of` in it at all:
+## The neighbouring gap, closed: a subscript's argument list is not a container
+
+`_check_frame_escapes`'s container branch could not tell a `TupleExpr` that is a
+subscript's INDEX from a `TupleExpr` that is a container literal, and
+`iter_nodes` does not give it the parent. So `Pointer[Deque[T],
+origin_of(self)]` was refused as a store — a sentence about a lifetime the
+program does not have, which is the false diagnosis that costs most, because it
+sends the reader after an escape that is not there. The reproducer has no
+`origin_of` in it at all:
 
 ```python
 struct S:  a, b
@@ -163,6 +207,40 @@ def main(n):
     s = S(); s.a = 3; s.b = 4
     return Box[Int, s].v
 ```
+
+Fixed by `30e5e2e9`. `model.subscript_index_is_a_comptime_parameter_list` is the
+one answer to "is this bracket list a comptime parameter list", and both
+consumers ask it: the escape check skips those indices, and `multi_index_kind`
+answers `MULTI_INDEX_COMPTIME_PARAMS` for the same bases. Both classes are
+refusals before and after, so nothing is let through by the skip — the
+sentence that replaced the false one is
+`Box[Int, s] is a compile-time explicit-parameter list on a generic, not a
+subscript: the brackets name types and comptime values, none of which is a
+runtime word`, which is true.
+
+Two things in the original doc's plan were wrong or unfinished, and both are
+recorded here rather than left in the commit message:
+
+* **the undecidable case is not the one it named.**
+  `IteratorType[origin_of(self)]` has a **single** index, so the container
+  branch never saw a bracket list to mistake and there was nothing to decide.
+  What is undecidable is the DOTTED base, and it is still undecidable — see the
+  remaining limit below.
+* **`Box[Int, s]` still does not build,** and should not: a type application is
+  a construct this backend does not lower at all (it has no parameter binding),
+  and the honest answer for it is the model's own refusal. The original doc's
+  "what to measure" asked for a build, which would have meant monomorphization
+  — `FORMAL_known_limits.md` §1.1, `doc/ABI.md` §Generics — and not a
+  narrowing of a check.
+
+## The limit that remains, filed
+
+`bugs/FORMAL_dotted_base_bracket_list_is_not_classified.md`: a subscript over a
+base this unit cannot classify — `Self.IteratorType[origin_of(self)]`,
+`external_call["setenv", c_int]` — is not asked the question, and keeps
+today's refusal. Deciding it needs the imported module's declarations, which is
+`formal/imports.py`'s, and the other half of it
+(`FORMAL_known_limits.md` §6.2, 55 files) belongs to `formal-extcall-tuple`.
 
 ## What a planner should take from this
 
@@ -178,6 +256,10 @@ def main(n):
 * **The next refusal is the deliverable when the ceiling is 0.** The table of
   where 26 files land is worth more than the 26 findings, and it is re-derivable
   in about four minutes with the guards described at the top.
+* **A false diagnosis in the NEXT refusal is worth one round of its own,** and
+  the reason the second fix could be written at all is that the first fix put
+  four named files in front of it. Measuring the landing is not just a report;
+  it is how the next defect becomes findable.
 
 ## Reproducing
 
