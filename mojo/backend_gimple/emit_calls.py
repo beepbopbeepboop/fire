@@ -2524,7 +2524,7 @@ def _lower_next_list_iter(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     gen._emit_label(bb_ok)
     ok = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
     gen._safe_coerce_emit(vct, vct, ok, result)
-    nxt = gen._new_val('int64_t', f"{cur} + (int64_t)1")
+    nxt = gen._inc_val(cur)
     gen._emit(f"  {cur} = {nxt};")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_miss)

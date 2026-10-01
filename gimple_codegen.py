@@ -4219,6 +4219,8 @@ class GimpleGen:
         return grsl._new_temp(self, ctype)
     def _new_val(self, ctype: str, rhs: str) -> str:
         return grsl._new_val(self, ctype, rhs)
+    def _inc_val(self, base: str) -> str:
+        return grsl._inc_val(self, base)
     def _call_expr(self, ret_type: str, fname: str, arg_pairs: list) -> str:
         return grsl._call_expr(self, ret_type, fname, arg_pairs)
     def _void_call(self, fname: str, arg_pairs: list) -> tuple:

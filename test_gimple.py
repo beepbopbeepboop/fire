@@ -6610,6 +6610,106 @@ def computed(fmt, buf):
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_cursor_advance_has_no_cast_operand_in_gimple():
+        """A `+ 1` advance must not put a C-style cast where gimple wants
+        an operand.
+
+        Five cursor/counter advances (the `next(it)` cursor, the
+        `for x in it:` cursor, the regex finditer and findall scan
+        positions, and the enumerate counter) spelled their increment
+        `cur + (int64_t)1`. A C-style cast is not a legal gimple OPERAND,
+        so inside a `__GIMPLE`-tagged function (a lifted closure, which is
+        what every nested `def` becomes) that is a hard gimplification
+        error, "expected expression before '(' token" — and a gimple PARSE
+        error is not recoverable per function, so it takes the whole
+        translation unit with it. Tools/cases_generator/analyzer.py was
+        refused on exactly this, at every `idx + 1` of its two
+        `enumerate(tokens)` loops.
+
+        `1LL` is the tree's existing width-correct int64_t literal idiom
+        (see `_gen_for_range`'s own `step_v`) and IS a legal operand, so
+        the whole expression becomes valid gimple. Nothing about the
+        VALUE changes — which is the point of asserting CPython's answer
+        on the same program rather than only "it compiles": the fix moves
+        one character class, and a wrong answer there would be exactly
+        the kind of silent wrong value a cast-operand fix can introduce.
+
+        Nested `def`s on purpose: a top-level function's body is ordinary
+        C, which GCC lowers to gimple itself and so tolerates the cast
+        syntax there. Only the `__GIMPLE` bodies reject it, so a
+        top-level version of this program passes on the broken tree and
+        would prove nothing."""
+        global _PASS, _FAIL
+        name = "cursor_advance_has_no_cast_operand_in_gimple"
+        src = '''\
+def outer(items):
+    def take(n):
+        it = iter(items)
+        for _ in range(n):
+            print(next(it))
+    def drain():
+        it = iter(items)
+        for x in it:
+            print(x)
+    take(2)
+    drain()
+
+outer([10, 20, 30])
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'cursor_advance.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'cur_{mode}.c')
+                exe = os.path.join(td, f'cur_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    test_cursor_advance_has_no_cast_operand_in_gimple()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()
