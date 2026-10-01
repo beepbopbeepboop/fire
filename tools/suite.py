@@ -1085,9 +1085,9 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # but in no bucket, which turned `suite-self-test`'s estate check red.
 #
 # `mem='tiny'` and in `check`, both added here rather than at registration:
-# registering a test is not the same as running it, and 12 of this registry's
+# registering a test is not the same as running it, and 19 of this registry's
 # members sat in NO bucket at all — named by a spec, in the estate's inventory,
-# and executed by nothing (the whole list and what is left of it:
+# and executed by nothing (the whole list, and the two that are still open:
 # `bugs/TEST_registered_tests_in_no_bucket_never_run.md`). This one is 1.1 s and
 # 0.04 GB, which is what the everyday bucket is for.
 test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
