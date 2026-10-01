@@ -67,6 +67,7 @@ is a kernel that computes a wrong answer at exit 0.
 
 from __future__ import annotations
 
+import copy
 import os
 
 import fire_compiler as gctypes
@@ -1258,7 +1259,7 @@ def _msl(x: str) -> str:
     return x
 
 
-def gemm_tensor_core_msl(info: 'GemmInfo') -> str:
+def gemm_tensor_core_msl(info: 'GemmInfo', fused: int | None = None) -> str:
     """The whole tensor-core kernel body, as MSL text.
 
     A 32x32 output tile per threadgroup, as a 4x4 grid of 8x8 MMAs, one
@@ -1292,10 +1293,19 @@ def gemm_tensor_core_msl(info: 'GemmInfo') -> str:
     """
     m, k, n = info.m, info.k, info.n
     A, B, C = info.a, info.b, info.c
+    # Fused: the grid is tiles*reps, so __tgid carries BOTH the repetition and
+    # the tile. Recover the repetition first and keep the TILE index, because
+    # everything below is in tile space. Dividing by the repetition count
+    # instead would fold the repetition axis into the tile axis -- the right
+    # number of outputs in the wrong places, and no error to notice it by.
+    tile = ('(__tgid - (__tgid / _mg_tiles) * _mg_tiles)' if fused
+            else '__tgid')
+    tiles = (f'    int _mg_tiles = (({m} + 31) / 32) * (({n} + 31) / 32);\n'
+             if fused else '')
     return f"""\
-    int nn = ({n} + 31) / 32;
-    int m0 = (__tgid - (__tgid / nn) * nn) * 32;
-    int n0 = (__tgid / nn) * 32;
+{tiles}    int nn = ({n} + 31) / 32;
+    int m0 = ({tile} - ({tile} / nn) * nn) * 32;
+    int n0 = ({tile} / nn) * 32;
     int lane = int(__lid);
     int fr = ((lane / 4) & 4) + ((lane / 2) % 4);
     int fcol = ((lane / 4) & 2) * 2 + (lane % 2) * 2;
@@ -1341,6 +1351,29 @@ def gemm_tensor_core_msl(info: 'GemmInfo') -> str:
     }}"""
 
 
+def gemm_fused_tensor_core_grid(info: 'GemmInfo', reps: int) -> tuple:
+    """Fused tensor-core GEMM: tiles*reps threadgroups, one SIMDGROUP each.
+
+    `reps` is a literal C expression, and the kernel divides __tgid by the TILE
+    count (not the repetition count) to recover which tile it is -- so the grid
+    is tiles*reps and the division has to be by tiles. Getting that backwards
+    transposes the repetition axis into the tile axis, which computes the right
+    number of outputs in the wrong places: a wrong answer with no error.
+    """
+    return ('32', f'(({info.m} + 31) / 32) * (({info.n} + 31) / 32) * ({_as_str(reps)})')
+
+
+def gemm_naive_grid(info: 'GemmInfo', reps: int) -> tuple:
+    """Fused naive GEMM: one threadgroup per repetition, m*n threads each.
+
+    The runtime caps `use` at the device's maxTotalThreadsPerThreadgroup, so a
+    threadgroup may hold fewer than m*n threads; the kernel retires the surplus
+    against m*n. Setting nthreads rather than ngroups is what makes the
+    repetition index derivable as __gid / __nthreads.
+    """
+    return (f'({info.m} * {info.n})', str(int(reps)))
+
+
 def gemm_tensor_core_grid(info: 'GemmInfo') -> tuple:
     """One threadgroup per 32x32 output tile, one SIMDGROUP wide.
 
@@ -1356,6 +1389,14 @@ def gemm_tensor_core_grid(info: 'GemmInfo') -> tuple:
 #: MOJO_GEMM_TENSOR_CORES=1 A/Bs the two on one source.
 TENSOR_CORES = os.environ.get('MOJO_GEMM_TENSOR_CORES', '') not in ('0', '')
 
+#: Name of the fused repetition count, when one was added.
+_REPS = '_mg_reps'
+
+#: Set to 0 to switch fusion OFF, so the fused and unfused kernels can be
+#: A/B'd on one source. Off is the default for anything that is not a
+#: fusable loop, which is why this only has to be consulted once.
+FUSE = os.environ.get('MOJO_GEMM_FUSE', '1') not in ('0', '')
+
 
 def _raw_msl(text: str):
     """RawMslStmt, imported here so the parser/AST tier has no edge to the
@@ -1364,7 +1405,8 @@ def _raw_msl(text: str):
     return RawMslStmt(text)
 
 
-def synthesise_gemm(info: 'GemmInfo', tensor_cores: bool = False):
+def synthesise_gemm(info: 'GemmInfo', tensor_cores: bool = False,
+                    reps: bool = False):
     """A `@gpu` FunctionDef computing the same product, one thread per output.
 
     The grid is 1-D and sized by the runtime from the OUTPUT buffer's element
@@ -1388,6 +1430,7 @@ def synthesise_gemm(info: 'GemmInfo', tensor_cores: bool = False):
         (info.m, 'Int'), (info.k, 'Int'), (info.n, 'Int'),
     ]
 
+
     def _fdef(body: list):
         # The signature is IDENTICAL for both bodies on purpose. The kernel
         # name, parameter list and address spaces are the recogniser's
@@ -1395,7 +1438,9 @@ def synthesise_gemm(info: 'GemmInfo', tensor_cores: bool = False):
         # so a divergence here could not be reached by a source that passes
         # recognition. That is what lets the two paths be A/B'd on one source.
         return gctypes.FunctionDef(
-            name='_mg_offload_gemm', params=params, return_type=None,
+            name=('_mg_offload_gemm' if not reps
+                  else '_mg_offload_gemm_x%d' % int(reps)),
+            params=params, return_type=None,
             body=body,
             decorators=[gctypes.IdentExpr(name='gpu', line=0, col=0)],
             param_convs={}, param_has_default={}, param_defaults={},
@@ -1403,7 +1448,8 @@ def synthesise_gemm(info: 'GemmInfo', tensor_cores: bool = False):
             line=0, col=0)
 
     if tensor_cores:
-        return _fdef([_raw_msl(gemm_tensor_core_msl(info))])
+        return _fdef([_raw_msl(gemm_tensor_core_msl(
+            info, int(reps) if reps else None))])
 
     I = gctypes.IdentExpr
     Lit = gctypes.IntLiteral
@@ -1417,7 +1463,7 @@ def synthesise_gemm(info: 'GemmInfo', tensor_cores: bool = False):
 
     idx, i, j, p = (I(name=x, line=0, col=0) for x in ('_mg_idx', 'i', 'j', 'p'))
     acc = I(name='_mg_acc', line=0, col=0)
-    body = [
+    inner = [
         assign(idx, gctypes.MemberExpr(
             obj=I(name='global_idx', line=0, col=0), member='x', line=0, col=0)),
         assign(i, bin('/', idx, I(name=info.n, line=0, col=0))),
@@ -1445,6 +1491,38 @@ def synthesise_gemm(info: 'GemmInfo', tensor_cores: bool = False):
             index=bin('+', bin('*', i, I(name=info.n, line=0, col=0)), j),
             attrs=None, line=0, col=0), acc),
     ]
+    if not reps:
+        return _fdef(inner)
+    # ONE dispatch for the whole host loop, with the repetitions run INSIDE the
+    # kernel and the grid left at the inferred size for ONE repetition.
+    #
+    # The first attempt partitioned repetitions across threadgroups -- reps
+    # threadgroups, each m*n threads -- which is wrong for a reason worth
+    # writing down: the runtime caps threads per threadgroup at the device max,
+    # so a threadgroup cannot hold m*n threads, and the cap is not knowable at
+    # codegen. At 512^3 that silently left 1024 of 262144 outputs written. The
+    # checksum did not notice, because the test data is periodic (mod 17 and
+    # mod 13) and the sum of the first 1024 outputs is EXACTLY the sum of all
+    # 262144 of them. A bit-exact checksum cannot see a kernel that computes
+    # 1/256th of its output, which is why the completeness check exists.
+    #
+    # Sizing the grid for one repetition and looping inside needs no device
+    # constant, cannot under-provision, and still saves N-1 drains -- which is
+    # the whole point, since a drain is ~225 us and is what we are avoiding.
+    # The repetitions are then serialised on an already-saturated grid rather
+    # than spread across it, which costs some parallelism and buys correctness
+    # that does not depend on a number we cannot know.
+    # One dispatch for the whole host loop. The grid is sized tiles*reps and the
+    # kernel recovers which repetition it is from __gid, so the repetitions run
+    # CONCURRENTLY rather than one after another -- which is the point: N
+    # separate dispatches cost N drains, and one drain is ~225 us.
+    body = [gctypes.ForStmt(
+        target='_mg_r',
+        iterable=gctypes.CallExpr(
+            func=I(name='range', line=0, col=0),
+            args=[gctypes.IntLiteral(value=reps, line=0, col=0)],
+            line=0, col=0),
+        body=inner, else_body=None, is_async=False, line=0, col=0)]
     return _fdef(body)
 
 
@@ -1488,11 +1566,247 @@ def rewrite_gemm(fdef, info: 'GemmInfo', kernel):
         line=getattr(fdef, 'line', 0), col=getattr(fdef, 'col', 0))
 
 
+def _walk_stmts(node):
+    """Yield every statement in `node`'s tree, descending into bodies.
+
+    A host loop lives inside a FUNCTION BODY, not at module top level, so a
+    scan that only looked at the top level would never see one -- which is
+    exactly what happened the first time: the GEMM was recognised and the trip
+    count was a literal, and the fusion still did not fire because the loop it
+    was looking for was three levels down inside `main`.
+    """
+    for st in (node or ()):
+        if not isinstance(st, list):
+            st = [st]
+        for x in st:
+            yield x
+            for attr in ('body', 'then_body', 'else_body', 'elifs', 'args',
+                         'operands', 'left', 'right', 'value', 'target'):
+                child = getattr(x, attr, None)
+                if isinstance(child, list) and child and isinstance(
+                        child[0] if child else None, (gctypes.FunctionDef,
+                                                      gctypes.ForStmt,
+                                                      gctypes.IfStmt,
+                                                      gctypes.AssignStmt,
+                                                      gctypes.ExprStmt)):
+                    yield from _walk_stmts(child)
+
+
+def find_fusable_reps(stmts: list, gemm_names: set) -> int:
+    """Largest fusable repetition count in `stmts`, or 0.
+
+    A host loop whose body is EXACTLY one call to an offloaded GEMM, with the
+    loop variable appearing nowhere in the arguments, and a trip count that is a
+    literal. All three conditions are load-bearing:
+
+    - exactly one call, so there is nothing else in the iteration to lose;
+    - the loop variable absent from the arguments, so every repetition
+      computes the same thing and the repetitions are independent -- if the
+      variable reached an argument the calls would not be interchangeable;
+    - a literal trip count, because the count has to become a kernel argument
+      and there is no device-side loop counter to take it from.
+
+    Returns the count only; the rewrite itself is in :func:`rewrite_fused_loop`.
+    """
+    best = 0
+    for st in _walk_stmts(stmts):
+        if not isinstance(st, gctypes.ForStmt):
+            continue
+        n = _literal_range_count(st)
+        if n is None or n < 2:
+            continue
+        body = list(st.body or ())
+        if len(body) != 1 or not isinstance(body[0], gctypes.ExprStmt):
+            continue
+        call = getattr(body[0], 'value', None)
+        if not isinstance(call, gctypes.CallExpr):
+            continue
+        if not isinstance(call.func, gctypes.IdentExpr):
+            continue
+        if _as_str(call.func.name) not in gemm_names:
+            continue
+        # the loop variable must not reach the arguments
+        if _mentions(call.args, str(st.target)):
+            continue
+        if n > best:
+            best = n
+    return best
+
+
+def _literal_range_count(st) -> int | None:
+    """Trip count of `for _ in range(<int literal>)`, or None."""
+    it = getattr(st, 'iterable', None)
+    if not isinstance(it, gctypes.CallExpr):
+        return None
+    if not isinstance(it.func, gctypes.IdentExpr) or _as_str(it.func.name) != 'range':
+        return None
+    if len(it.args) != 1:
+        return None
+    a = it.args[0]
+    if isinstance(a, gctypes.IntLiteral):
+        return int(a.value)
+    return None
+
+
+def _mentions(node, name: str) -> bool:
+    """Does `name` appear anywhere in `node`? Structural, so it cannot be
+    fooled by a shadowing local of the same spelling."""
+    if isinstance(node, gctypes.IdentExpr):
+        return _as_str(node.name) == name
+    if isinstance(node, (list, tuple)):
+        return any(_mentions(x, name) for x in node)
+    for attr in ('left', 'right', 'value', 'target', 'obj', 'index', 'func',
+                 'args', 'operands', 'condition'):
+        child = getattr(node, attr, None)
+        if child is not None and _mentions(child, name):
+            return True
+    return False
+
+
+def rewrite_fused_loop(stmts: list, gemm_names: set, reps: int) -> list:
+    """Replace every fusable loop in `stmts`' tree with ONE call carrying `reps`.
+
+    Recursive, and it REBUILDS the enclosing statements rather than mutating
+    them: the fusable loop sits inside a function body, so collapsing it means
+    producing a new body, and the synthesised kernel copies nodes out of the
+    originals -- mutating in place would change what those copies contain.
+
+    Returns `(new_stmts, n_rewritten)` so the caller can tell whether the pass
+    did anything, rather than having to assume it did.
+    """
+    I = gctypes.IdentExpr
+    count = 0
+
+    def fusable(st) -> 'gctypes.ExprStmt | None':
+        if not isinstance(st, gctypes.ForStmt) or _literal_range_count(st) != reps:
+            return None
+        body = list(st.body or ())
+        if len(body) != 1 or not isinstance(body[0], gctypes.ExprStmt):
+            return None
+        call = getattr(body[0], 'value', None)
+        if not isinstance(call, gctypes.CallExpr):
+            return None
+        if not isinstance(call.func, gctypes.IdentExpr):
+            return None
+        if _as_str(call.func.name) not in gemm_names:
+            return None
+        if _mentions(call.args, str(st.target)):
+            return None
+        # The call is UNCHANGED. The repetition count is baked into the
+        # synthesised kernel as a literal rather than passed as an argument, so
+        # no signature changes and no other call site has to learn about it --
+        # which is what lets a program have both a fused loop and a direct call
+        # without either breaking.
+        return gctypes.ExprStmt(
+            value=gctypes.CallExpr(func=call.func, args=list(call.args),
+                                   line=0, col=0),
+            line=0, col=0)
+
+    def walk(items) -> list:
+        nonlocal count
+        out = []
+        for st in (items or ()):
+            fused = fusable(st)
+            if fused is not None:
+                out.append(fused)
+                count += 1
+                continue
+            out.append(rebuild(st, walk))
+        return out
+
+    return walk(stmts), count
+
+
+def rebuild(node, walk):
+    """A copy of `node` with every statement-list field passed through `walk`.
+
+    Only fields that actually hold statements are touched, and a node is only
+    rebuilt when a child actually changed, so an untouched tree comes back
+    identical -- which keeps the generated C byte-identical on the paths fusion
+    does not apply to.
+    """
+    changed = False
+    kw = {}
+    for attr in ('body', 'then_body', 'else_body', 'elifs', 'args'):
+        child = getattr(node, attr, None)
+        if not isinstance(child, list):
+            continue
+        new = walk(child)
+        if new != child:
+            kw[attr] = new
+            changed = True
+    if not changed:
+        return node
+    try:
+        new_node = copy.copy(node)
+    except (TypeError, AttributeError):
+        return node
+    for k, v in kw.items():
+        setattr(new_node, k, v)
+    return new_node
+
+
+
+def recognised_gemm_names(stmts: list) -> set:
+    """Names of every free function in `stmts` that recognise_gemm accepts.
+
+    A pre-pass, because fusion has to be decided BEFORE the main walk: a fused
+    GEMM is a different kernel (it carries a repetition argument) and a
+    different grid, so discovering the loop afterwards would mean synthesising
+    the kernel twice and then discarding one.
+    """
+    names = set()
+    for st in stmts or ():
+        if not isinstance(st, gctypes.FunctionDef):
+            continue
+        try:
+            if recognise_gemm(st) is not None:
+                names.add(_as_str(st.name))
+        except (AttributeError, TypeError):
+            continue
+    return names
+
+
+def _unfuse(stmts, lengths_sink, grids_sink):
+    """Redo the module with fusion OFF.
+
+    Reached when the fusion pass rewrote no loop even though the trip count
+    looked fusable. Rather than leave a kernel carrying a repetition argument
+    that no call site supplies -- which computes nothing, reports no failure,
+    and returns zeros -- start over with the unfused synthesis. Cheap: it is a
+    second walk of a small function list, and it happens only in the case that
+    should not occur.
+    """
+    saved = (len(lengths_sink or {}), len(grids_sink or {}))
+    if lengths_sink is not None:
+        for k in list(lengths_sink):
+            if 'gemm' in _as_str(k):
+                del lengths_sink[k]
+    if grids_sink is not None:
+        for k in list(grids_sink):
+            if 'gemm' in _as_str(k):
+                del grids_sink[k]
+    return _offload_module_inner(stmts, lengths_sink, grids_sink, force_fuse=False)
+
+
 def offload_module(stmts: list, lengths_sink: dict | None = None,
                   grids_sink: dict | None = None) -> tuple:
+    return _offload_module_inner(stmts, lengths_sink, grids_sink, force_fuse=None)
+
+
+def _offload_module_inner(stmts: list, lengths_sink, grids_sink,
+                          force_fuse=None) -> tuple:
     """Both halves of increment 3, over a whole module.
 
     Returns `(new_stmts, synthesised_kernels)`.
+
+    FUSION, decided up front: if the module contains a host loop whose body is
+    nothing but a call to a recognised GEMM, with a literal trip count and no
+    dependence on the loop variable, the whole loop becomes ONE dispatch
+    carrying the trip count as a repetition argument. N dispatches cost N
+    drains at ~225 us each; one costs one. That is a 12x difference measured
+    directly, and it is the single largest term in the whole offload path at
+    any size where the arithmetic is small.
 
     For each free function whose whole body is one recognised parallel map:
 
@@ -1510,6 +1824,13 @@ def offload_module(stmts: list, lengths_sink: dict | None = None,
     describe the same computation by construction rather than by agreement
     between two passes.
     """
+    _gemm_names = recognised_gemm_names(stmts)
+    if force_fuse is False or not FUSE:
+        _fused, _use_reps = 0, False
+    else:
+        _fused = find_fusable_reps(stmts, _gemm_names) if _gemm_names else 0
+        _use_reps = _fused >= 2
+
     out: list = []
     kernels: list = []
     for s in (stmts or []):
@@ -1531,7 +1852,12 @@ def offload_module(stmts: list, lengths_sink: dict | None = None,
                 out.append(s)
                 continue
             try:
-                gkernel = synthesise_gemm(ginfo, tensor_cores=TENSOR_CORES)
+                # `_fused` is the COUNT; `_use_reps` is only a bool. Passing
+                # the bool produced `_mg_offload_gemm_x1`, because int(True) is
+                # 1 -- a kernel that fuses exactly one repetition, which is not
+                # fusion at all and looks like it worked.
+                gkernel = synthesise_gemm(ginfo, tensor_cores=TENSOR_CORES,
+                                          reps=(_fused if _use_reps else None))
             except (SynthesisRefused, AttributeError, TypeError):
                 out.append(s)
                 continue
@@ -1543,7 +1869,10 @@ def offload_module(stmts: list, lengths_sink: dict | None = None,
             # A tensor-core kernel needs a grid the runtime cannot infer: one
             # SIMDGROUP per 8x8 output tile. Recorded for the same reason as
             # the lengths -- BEFORE the classification pass builds the args.
-            if grids_sink is not None and TENSOR_CORES:
+            # A FUSED kernel deliberately gets NO grid override. It runs the
+            # repetitions inside one grid sized for a single repetition, so the
+            # inferred grid is exactly right and an override would break it.
+            if grids_sink is not None and TENSOR_CORES and not _use_reps:
                 grids_sink[_as_str(gkernel.name)] = gemm_tensor_core_grid(ginfo)
             out.append(rewrite_gemm(s, ginfo, gkernel))
             kernels.append(gkernel)
@@ -1560,4 +1889,17 @@ def offload_module(stmts: list, lengths_sink: dict | None = None,
         out.append(rewritten)
         kernels.append(kernel)
 
+    if _use_reps:
+        out, _nfused = rewrite_fused_loop(out, _gemm_names, _fused)
+        if os.environ.get('MOJO_GEMM_TRACE'):
+            import sys as _sys
+            print(f'[fuse] reps={_fused} gemms={sorted(_gemm_names)} '
+                  f'rewritten={_nfused} kernels={[k.name for k in kernels]}',
+                  file=_sys.stderr)
+        # If the rewrite found nothing, the kernel was synthesised WITH a
+        # repetition argument that no call site supplies, and the grid was set
+        # for a fused launch. That combination computes nothing and reports no
+        # error, so the two have to be undone together rather than separately.
+        if _nfused == 0:
+            return _unfuse(stmts, lengths_sink, grids_sink)
     return out, kernels

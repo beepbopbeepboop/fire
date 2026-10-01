@@ -280,6 +280,83 @@ allocates fresh per buffer per call</strong> (~8 MB twice per call at
 bandwidth. Reusing buffers across calls is the obvious fix and is not yet
 done.</p>
 
+<h2>Eliminating the fixed cost: loop fusion</h2>
+<p>Phase timing said the fixed per-dispatch cost is the <em>drain</em>, not the
+copying. The experiment that settles whether that is worth attacking, submitting
+the same kernel and changing nothing but the wait pattern:</p>
+<table>
+<tr><th>Wait pattern</th><th>256 KB payload</th><th>4 MB payload</th></tr>
+<tr><td>drain after every call</td><td>225.6 &micro;s/call</td><td>220.3 &micro;s/call</td></tr>
+<tr><td>submit all, wait once</td><td><strong>18.9 &micro;s/call</strong></td><td><strong>24.8 &micro;s/call</strong></td></tr>
+<tr><th>ratio</th><th><strong>11.9&times;</strong></th><th><strong>8.9&times;</strong></th></tr>
+</table>
+<p>So the fix is to <strong>make fewer dispatches</strong>. A synchronous per-call
+API must drain once per call and therefore cannot overlap with itself &mdash; the
+only lever is the <em>count</em>. So a host loop whose body is nothing but a
+recognised GEMM call collapses into <strong>one dispatch carrying the trip
+count</strong>, with the repetitions looped inside the kernel.</p>
+<table>
+<tr><th>128&times;128&times;128, 32 iterations</th><th>&micro;s per GEMM</th><th>dispatches</th><th>outputs written</th></tr>
+<tr><td>unfused</td><td>336</td><td>33</td><td>16304 / 16384</td></tr>
+<tr><td><strong>fused</strong></td><td><strong>16</strong></td><td><strong>2</strong></td><td>16304 / 16384</td></tr>
+<tr><th></th><th><strong>21&times;</strong></th><th></th><th>identical</th></tr>
+</table>
+<p>Preconditions, all load-bearing: the body must be <em>exactly</em> one call;
+the loop variable must not appear in the arguments, or the repetitions are not
+interchangeable; and the trip count must be a literal, because it becomes a
+kernel argument and there is no device-side loop counter to take it from.
+<code>MOJO_GEMM_FUSE=0</code> switches it off, for A/B.</p>
+<p>The count is baked into the kernel as a literal and the kernel is named
+<code>_mg_offload_gemm_x32</code>, rather than passed as an argument. Passing it
+as an argument looks more flexible and is worse: every call site then has to
+supply it, so a program with both a fused loop and a direct call breaks. Two
+loops with different counts get two kernels instead of colliding.</p>
+
+<h3>What fusion must NOT do, and how it nearly did</h3>
+<p>The first version partitioned repetitions across threadgroups &mdash;
+<code>reps</code> threadgroups of <code>m*n</code> threads each. The runtime
+caps threads per threadgroup at the device max, which is <strong>not knowable at
+codegen</strong>, so at 512&sup3; that silently left <strong>1024 of 262144
+outputs written</strong>.</p>
+<p>And <strong>the checksum did not notice.</strong> The test data is periodic
+(values taken mod 17 and mod 13), and &mdash; measured on the CPU &mdash; the sum
+of the first 1024 outputs is <em>exactly</em> the sum of all 262144 of them:
+&minus;56.71484375 either way.</p>
+<pre><code>sum of first   1024 outputs: -56.71484375
+sum of all    262144 outputs: -56.71484375</code></pre>
+<p>So a bit-exact checksum <strong>cannot see a kernel that computes 1/256th of
+its output</strong>. Every "bit-exact" claim in this document predates that
+realisation and should be read with it in mind. The fix is to assert on
+<em>completeness</em> &mdash; a count of outputs actually written, against a count
+computed on the CPU &mdash; which
+<code>test_metal_codegen.TestFusedLoopIsCompleteAndCorrect</code> now does, with
+a second test that guards the guard by pinning the CPU reference count so the
+check cannot silently become vacuous.</p>
+<p>The shipped design instead sizes the grid for <strong>one</strong> repetition
+and loops inside, which needs no device constant and cannot under-provision. It
+costs some parallelism across repetitions and buys correctness that does not
+depend on a number we cannot know.</p>
+
+<h2>A cache blind spot that faked an A/B</h2>
+<p><code>MOJO_GEMM_FUSE</code> and <code>MOJO_GEMM_TENSOR_CORES</code> change the
+<em>generated code</em>, and a content-addressed cache cannot see an environment
+variable: the files on disk are identical for <code>=0</code> and <code>=1</code>,
+so both fingerprints match and the second run is served the first run's binary.
+The effect was an A/B in which <strong>both arms reported the fused kernel's
+dispatch count</strong> &mdash; and the apparent fusion win was measured against
+a stale artifact. Both variables are now folded into
+<code>cas.compiler_fingerprint()</code>, which distinguishes
+<code>unset</code>/<code>=1</code>/<code>=0</code> and is stable when unset.</p>
+<p><code>MOJO_OFFLOAD_MIN_ELEMENTS</code> is deliberately <em>not</em> in the
+fingerprint: it tunes a threshold at runtime and does not change the emitted C,
+so including it would invalidate the cache on every threshold experiment for
+nothing.</p>
+<p>This is the same failure as <code>fire_metal.m</code> missing from
+<code>_RUNTIME_SOURCES</code>, and the lesson generalises: <strong>any input to
+codegen that is not in the fingerprint is a cache that will confidently serve
+the wrong binary.</strong> The two found so far were a file and an environment
+variable; a third would not announce itself either.</p>
+
 <h2>Grid and launch ABI</h2>
 <ul>
 <li><p>The grid is <strong>1-D</strong>. <code>tg = ngroups &gt; 0 ? ngroups : ceil(max(sizes)/tptg)</code> and <code>use = nthreads &gt; 0 ? nthreads : tptg</code>. The launch path sizes the grid from the <strong>largest buffer's element count</strong>, which silently encodes the assumption <em>one thread per output element</em>.</p></li>

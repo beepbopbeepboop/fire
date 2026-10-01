@@ -162,6 +162,26 @@ def compiler_fingerprint() -> str:
                     h.update(f.read())
             except FileNotFoundError:
                 h.update(b'\0missing:' + name.encode())
+        # Environment variables that change the GENERATED CODE.
+        #
+        # These are invisible to a content-addressed cache by construction: the
+        # files on disk are identical for MOJO_GEMM_FUSE=0 and =1, so both
+        # fingerprints come out equal and the second run is served the first
+        # run's binary. That is not hypothetical -- it produced an A/B
+        # comparison in which BOTH arms reported the fused kernel's dispatch
+        # count, and the fusion "win" it appeared to show was measured against a
+        # stale artifact. Same class as fire_metal.m missing from
+        # _RUNTIME_SOURCES: a cache that cannot see an input will confidently
+        # serve the wrong binary.
+        #
+        # Only variables that affect emitted code belong here. One that merely
+        # tunes a threshold at runtime (MOJO_OFFLOAD_MIN_ELEMENTS) does NOT
+        # change the generated C, so it is deliberately absent -- adding it
+        # would invalidate the cache on every threshold experiment for nothing.
+        for _var in ('MOJO_GEMM_TENSOR_CORES', 'MOJO_GEMM_FUSE'):
+            h.update(b'\0env:' + _var.encode() + b'='
+                     + os.environ.get(_var, '').encode())
+
         # Fold in the compiler version as a coarse epoch + safety net: a new
         # commit (or a dirty tree) bumps it, invalidating across versions even if
         # a relevant file were missing from the list above.

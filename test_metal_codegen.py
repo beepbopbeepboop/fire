@@ -1940,6 +1940,118 @@ class TestOffloadHostRewrite(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == 'darwin', 'Metal is macOS-only')
+class TestFusedLoopIsCompleteAndCorrect(unittest.TestCase):
+    """A fused kernel must write EVERY output, and a checksum cannot tell.
+
+    This test exists because a checksum could not. An early fused GEMM sized its
+    grid as `reps` threadgroups of `m*n` threads, but the runtime caps threads
+    per threadgroup at the device max, which is not knowable at codegen. At
+    512^3 that left 1024 of 262144 outputs written -- and the checksum was
+    UNCHANGED, because the test data is periodic (values taken mod 17 and mod
+    13) and the sum of the first 1024 outputs is exactly the sum of all 262144
+    of them. A kernel computing 1/256th of its work passed.
+
+    So the assertions here are on COMPLETENESS -- a count of outputs actually
+    written, against a count computed on the CPU -- and only secondarily on the
+    checksum. A future kernel that drops work cannot hide behind arithmetic
+    that happens to telescope.
+    """
+
+    def _run(self, src, env=None):
+        with tempfile.TemporaryDirectory() as wd:
+            path = os.path.join(wd, 'fused.mojo')
+            with open(path, 'w') as f:
+                f.write(src)
+            e = dict(os.environ)
+            e.setdefault('MOJO_OFFLOAD_MIN_ELEMENTS', '0')
+            e.update(env or {})
+            r = subprocess.run(
+                [sys.executable, os.path.join(HERE, 'fire.py'), '--jit', path],
+                capture_output=True, text=True, timeout=900, env=e)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            return r.stdout
+
+    PROG = """def gemm_dumb(A: List[Float32], B: List[Float32], C: List[Float32],
+              m: Int, k: Int, n: Int):
+    for i in range(m):
+        for j in range(n):
+            acc: Float32 = 0.0
+            for p in range(k):
+                acc = acc + A[i * k + p] * B[p * n + j]
+            C[i * n + j] = acc
+
+def main():
+    m = 128
+    k = 128
+    n = 128
+    A = [0.0] * (m * k)
+    B = [0.0] * (k * n)
+    C = [0.0] * (m * n)
+    for i in range(m * k):
+        A[i] = Float32((i * 37) % 17) * 0.0625 - 0.5
+    for i in range(k * n):
+        B[i] = Float32((i * 53) % 13) * 0.0625 - 0.25
+    for r in range(8):
+        gemm_dumb(A, B, C, m, k, n)
+    var nz: Int = 0
+    for i in range(m * n):
+        if C[i] != 0.0:
+            nz += 1
+    var s: Float64 = 0.0
+    for i in range(m * n):
+        s = s + Float64(C[i])
+    print("written", nz, "of", m * n)
+    print("checksum", s)
+    print("d", _mojo_gpu_dispatch_count())
+    print("f", _mojo_gpu_failure_count())
+"""
+
+    def _counts(self, out):
+        w = re.search(r'written (\d+) of (\d+)', out)
+        c = re.search(r'checksum ([-\d.e+]+)', out)
+        d = re.search(r'^d (\d+)$', out, re.M)
+        f = re.search(r'^f (\d+)$', out, re.M)
+        self.assertTrue(w and c and d and f, out)
+        return (int(w.group(1)), int(w.group(2)), c.group(1),
+                int(d.group(1)), int(f.group(1)))
+
+    def test_fused_and_unfused_agree_on_completeness_and_value(self):
+        """The fused form must match the unfused one on BOTH counts and the
+        value -- and the fused form must actually be one dispatch, or this is
+        not testing fusion."""
+        un = self._counts(self._run(self.PROG, {'MOJO_GEMM_FUSE': '0'}))
+        fu = self._counts(self._run(self.PROG, {'MOJO_GEMM_FUSE': '1'}))
+        self.assertEqual(un[4], 0, 'unfused reported failures')
+        self.assertEqual(fu[4], 0, 'fused reported failures')
+        self.assertEqual(fu[0], un[0],
+                         'fused wrote a different number of outputs than '
+                         'unfused: %d vs %d' % (fu[0], un[0]))
+        self.assertEqual(fu[1], un[1], 'different output counts')
+        self.assertEqual(fu[2], un[2], 'fused and unfused disagree on the value')
+        # 8 loop iterations: 8 dispatches unfused, exactly 1 fused. Asserting
+        # the exact counts is the point -- an earlier version of this test only
+        # compared fused against unfused, which passes just as happily when
+        # NEITHER fused, because both are then 8.
+        self.assertEqual(un[3], 8, 'expected 8 unfused dispatches, got %d'
+                         % un[3])
+        self.assertEqual(fu[3], 1, 'expected exactly 1 fused dispatch, got %d '
+                         '-- fusion did not fire' % fu[3])
+
+    def test_completeness_is_a_real_assertion(self):
+        """Guard the guard: the CPU must write MORE than the fused kernel did
+        when it was under-provisioning, i.e. the written-count check has
+        something to catch. If the CPU count equalled the broken fused count,
+        the test above could never have failed and would prove nothing."""
+        out = self._run(self.PROG, {'MOJO_GEMM_FUSE': '0',
+                                    'MOJO_OFFLOAD_MIN_ELEMENTS': '99999999'})
+        w = re.search(r'written (\d+)', out)
+        self.assertTrue(w, out)
+        self.assertEqual(int(w.group(1)), 16304,
+                         'the CPU reference count changed; this test is '
+                         'calibrated to it and the data generator may have '
+                         'moved')
+
+
 class TestAutoOffloadRunsOnGpu(unittest.TestCase):
     """The end-to-end claim: an UNMARKED Python loop, no `@gpu` anywhere in
     the source, computes the right answer on the real GPU and writes the
