@@ -7464,6 +7464,12 @@ def load_dylib_manifests(dylib_paths: list) -> list:
             "module": payload.get("module") or "",
             "reexports": payload.get("reexports") or {},
             "constants": payload.get("constants") or {},
+            # The trait-only namespace library's own names. Read back for the
+            # same reason `module` is: so a reader can tell an empty trie that
+            # is BY DESIGN (this library declares traits, which have no
+            # symbol) from one that means the build went wrong, without
+            # re-parsing the source the manifest was written from.
+            "traits": list(payload.get("traits") or []),
         })
     return out
 
@@ -8045,6 +8051,45 @@ def _export_entries(source_paths: list, prefixes: dict = None) -> dict:
     return exported
 
 
+def _declared_traits(source_paths: list) -> list:
+    """The public TRAIT names `source_paths` declare at top level.
+
+    A trait is a compile-time contract and a THIRD kind of top-level
+    declaration, and until this function existed nothing in the export path
+    could see one: `_declared_api_shape` buckets `FunctionDef` and `StructDef`
+    only, and `reflect.collect_exports_src` — which every table here is built
+    from, on purpose, so one rule decides what crosses — has no trait rule
+    because a trait has no symbol. So a module whose whole API is traits read
+    as a module that "declares no function and no type at all", and was
+    refused with that sentence. It is false about the file: `AnyType` IS a
+    type, `std/traits/anytype.mojo` declares one, and every read of the name in
+    the standard library is a type position — `def f[T: AnyType](…)`,
+    `var h: Some[Copyable]`.
+
+    Measured on the new-modular stdlib: 11 of its 252 files are trait-only
+    (`traits/{anytype,movable,copyable}`, `hashlib/hasher`, `os/pathlike`,
+    `builtin/{comparable,enum_like,floatable,identifiable}`,
+    `python/conversions`, `testing/prop/strategy/__init__`), and the five
+    `codegen/dependency` lines `tools/formal_sweep.py` attributes to
+    `anytype.mojo` are all this one module. See
+    `formal_traits_namespace` for what a trait-only module builds as.
+    """
+    out = []
+    for path in source_paths:
+        try:
+            with open(path) as f:
+                stmts = F.Parser(F.py_tokenize(f.read())).parse_module()
+        except Exception:
+            # An unparseable file has no shape to report. Returning nothing
+            # leaves it on the refusal it was already getting, so this can
+            # never wave through a file the parser could not read.
+            continue
+        for st in stmts:
+            if isinstance(st, F.TraitDef) and not st.name.startswith("_"):
+                out.append(st.name)
+    return out
+
+
 def _declared_api_shape(text: str) -> dict:
     """What this source DECLARES, ignoring doc/ABI.md's rules — the input to
     `no_public_api_reason`.
@@ -8055,6 +8100,14 @@ def _declared_api_shape(text: str) -> dict:
 
       funcs / generic_funcs / private_funcs   top-level FunctionDefs
       structs / generic_structs / private_structs   top-level StructDefs
+      traits / private_traits   top-level TraitDefs
+
+    The `traits` bucket is what keeps a trait-only module's refusal true. It
+    used to have no bucket at all, so `std/traits/anytype.mojo` — which
+    declares `trait AnyType` and nothing else — was told it "declares no
+    function and no type at all", which is false about the file. A trait is a
+    type; the standard library only ever reads it in a type position. See
+    `_declared_traits` for what a module made of them builds as.
 
     A definition is filed as a GENERIC TEMPLATE **per definition**, and for a
     function the test is the parser's own `FunctionDef.comptime_params` — the
@@ -8087,7 +8140,7 @@ def _declared_api_shape(text: str) -> dict:
     shape = {"funcs": [], "structs": [], "generic_funcs": [],
              "generic_structs": [], "private_funcs": [],
              "private_generic_funcs": [], "private_structs": [],
-             "private_generic_structs": []}
+             "private_generic_structs": [], "traits": [], "private_traits": []}
     try:
         stmts = F.Parser(F.py_tokenize(text)).parse_module()
     except Exception:
@@ -8106,6 +8159,14 @@ def _declared_api_shape(text: str) -> dict:
             key = "generic_structs" if st.name in generic_names else "structs"
             (shape[key] if not st.name.startswith("_")
              else shape["private_" + key]).append(st.name)
+        elif isinstance(st, F.TraitDef):
+            # A trait is neither parametric (the parser records no bracket list
+            # on `TraitDef`) nor a layout, so the one bucket is the whole test.
+            # It matters because a module made only of traits reads as EMPTY to
+            # every other bucket here, and the refusal that follows says the
+            # file "declares no function and no type at all".
+            key = "private_traits" if st.name.startswith("_") else "traits"
+            shape[key].append(st.name)
     return shape
 
 
@@ -8178,12 +8239,14 @@ def no_public_api_reason(source_paths: list) -> str:
     concrete_structs = [n for _f, s in shapes for n in s["structs"]]
     gen_funcs = [n for _f, s in shapes for n in s["generic_funcs"]]
     gen_structs = [n for _f, s in shapes for n in s["generic_structs"]]
+    traits = [n for _f, s in shapes for n in s["traits"]]
     private = [n for _f, s in shapes
                for k in ("private_funcs", "private_generic_funcs",
-                         "private_structs", "private_generic_structs")
+                         "private_structs", "private_generic_structs",
+                         "private_traits")
                for n in s[k]]
     if not concrete_funcs and not concrete_structs and not gen_funcs \
-            and not gen_structs:
+            and not gen_structs and not traits:
         if private:
             listed = ", ".join(sorted(set(private))[:6])
             return (f"{head} exports nothing under doc/ABI.md's rules: every "
@@ -8524,9 +8587,9 @@ def _record_link_deps(manifest_path: str, linked: list) -> None:
 def _namespace_library(output: str, install_name: str, arch: str,
                        reexports: dict, dylib_syms: dict, dep_install: list,
                        linked: list, module: str = None,
-                       constants: dict = None) -> dict:
+                       constants: dict = None, traits: list = None) -> dict:
     """A dylib for a module whose whole API is RE-EXPORTED — a package
-    `__init__.mojo`.
+    `__init__.mojo` — or whose whole API is TRAIT DECLARATIONS.
 
     This is the shape that was being refused as "a struct-only module has no
     free-function API", which it is not: `pkg/__init__.mojo` containing
@@ -8570,6 +8633,30 @@ def _namespace_library(output: str, install_name: str, arch: str,
     as a missing definition would refuse every package that re-exports a type,
     which is most of them, and would be refusing a module whose API is
     complete.
+
+    **A TRAIT-ONLY module belongs here too, and for the same reason one step
+    earlier.** A trait is a compile-time contract: it names a set of method
+    SIGNATURES, and this backend dispatches a method by name on the receiver's
+    own type (`_struct_methods` lifts a struct's methods; nothing resolves a
+    name to a trait). So a trait-only module has no code to emit — no default
+    method body is reachable through it, because reaching one would need
+    dispatch through the trait, which does not exist on this path. Measured, in
+    both directions: a trait default method called on a value is refused by the
+    method-call refusal naming the receiver, identically whether the trait is
+    declared in the same file or imported from a module (both are refused by
+    `model`'s one message), and a struct that defines the method itself is
+    lowered from the STRUCT and answers correctly. So an empty trie here loses
+    no reachable code.
+
+    The traits are recorded under `traits` rather than `reexports`, and the
+    difference is load-bearing rather than tidiness: a re-export is a name this
+    module FORWARDS to a definition elsewhere, so a consumer binds it through
+    the submodule's symbol; a trait is DECLARED here and has no symbol at all.
+    Filing a trait under `reexports` would put it in the "must be provided as a
+    symbol" check above — the message for a missing function DEFINITION — and
+    refuse the module over a name it declares itself. `load_dylib_manifests`
+    reads `traits` so the names are visible to a reader without re-parsing the
+    source, the same reason `module` and `reexports` are read back.
     """
     functions = {n: v for n, v in reexports.items() if v[1] != "type"}
     # A re-exported name is missing only if NO module this one imports provides
@@ -8606,7 +8693,7 @@ def _namespace_library(output: str, install_name: str, arch: str,
     _ad_hoc_sign(output)
     manifest_path = write_dylib_manifest(output, install_name, [],
                                          module=module, constants=constants)
-    _record_namespace(manifest_path, reexports, dylib_syms)
+    _record_namespace(manifest_path, reexports, dylib_syms, traits=traits)
     if linked:
         _record_link_deps(manifest_path, linked)
     return {
@@ -8617,6 +8704,7 @@ def _namespace_library(output: str, install_name: str, arch: str,
         "info": {"labels": {}},
         "exports": [],
         "reexports": reexports,
+        "traits": list(traits or []),
         "backend": f"{arch}/macho-dylib-namespace",
     }
 
@@ -8653,7 +8741,7 @@ def _namespace_constants(reexports: dict, own: dict, linked: list) -> dict:
 
 
 def _record_namespace(manifest_path: str, reexports: dict,
-                      dylib_syms: dict) -> None:
+                      dylib_syms: dict, traits: list = None) -> None:
     """Mark a manifest as a NAMESPACE library and record what it forwards.
 
     The `kind` field is what makes an empty `exports` list legal to read back
@@ -8662,6 +8750,15 @@ def _record_namespace(manifest_path: str, reexports: dict,
     empty, which means the build went wrong". Each re-export records the
     SYMBOL it resolves to, taken verbatim from the defining module's own
     manifest, so a reader can check the forwarding without re-deriving it.
+
+    `traits` is the trait-only module's equivalent record, under its own key
+    rather than under `reexports`, and the reason it is not folded into that
+    one is that the two entries mean different things to a reader: a re-export
+    says "this name is DEFINED elsewhere, and here is its symbol", while a
+    trait says "this name is DECLARED here and has no symbol anywhere". A
+    reader that wanted to check that every published name binds would look in
+    `reexports` and find, for a trait, no symbol to check — which is the true
+    fact, but stated in the one field whose contract is "there is a symbol".
     """
     import json
     try:
@@ -8673,6 +8770,11 @@ def _record_namespace(manifest_path: str, reexports: dict,
     payload["reexports"] = {
         n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(n)}
         for n, v in sorted(reexports.items())}
+    if traits:
+        # Absent rather than empty for a pure re-export package: the key means
+        # "this library declares traits", and writing `[]` there would claim a
+        # module with traits and none, which is a different file.
+        payload["traits"] = sorted(set(traits))
     with open(manifest_path, "w") as f:
         json.dump(payload, f, indent=1, sort_keys=True)
         f.write("\n")
@@ -8854,16 +8956,33 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # most of the files it was reported against, and a message that is false
     # about the file is worse than no message: it sends the reader looking for
     # a struct that isn't there.
+    traits = _declared_traits(source_paths)
     if not _export_entries(source_paths, module_prefixes) \
-            and not reexports:
+            and not reexports and not traits:
         raise FormalBuildError(no_public_api_reason(source_paths))
-    if not _export_entries(source_paths, module_prefixes) and reexports:
+    if not _export_entries(source_paths, module_prefixes) \
+            and (reexports or traits):
         # A proof is a property of CODE, and this library has none. Saying so
         # beats quietly returning a result with no `proof_path` in it: a
         # caller that asked for a checked proof and got a library would
         # otherwise believe it had one. (The only in-tree caller that passes
         # `reexports` is the import path, which asks for neither.)
+        #
+        # The sentence is built from WHICH of the two reasons applies, because
+        # the two are different facts about the module and one sentence cannot
+        # be true of both. A pure re-export package has its definitions in
+        # named submodules; a TRAIT-ONLY module declares everything itself and
+        # has no definition anywhere else to point at, because a trait is not a
+        # definition that can be lowered — see `_namespace_library`'s
+        # `traits` parameter for why the empty trie is still the right answer.
         if prove:
+            if traits:
+                raise FormalBuildError(
+                    f"{os.path.basename(source_paths[0])} declares only the "
+                    f"trait(s) {', '.join(sorted(set(traits))[:6])}, and a "
+                    f"trait is a compile-time contract with no code to emit, "
+                    f"so this library has no code and there is nothing to "
+                    f"prove.")
             raise FormalBuildError(
                 f"{os.path.basename(source_paths[0])} is a package whose API "
                 f"is entirely re-exported, so it compiles to a library with no "
@@ -8875,7 +8994,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             linked,
             module=(module_prefixes or {}).get(source_paths[0])
             or _module_prefix(source_paths[0]),
-            constants=_namespace_constants(reexports, constants, linked))
+            constants=_namespace_constants(reexports, constants, linked),
+            traits=traits)
 
     # The library's merged slot table is PUBLISHED before the codegen runs,
     # because a slot access is an absolute address the codegen computes against
