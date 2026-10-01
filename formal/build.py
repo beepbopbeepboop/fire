@@ -2850,10 +2850,11 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     `model.frame_holder_disagreement_refusal` for the measured program that
     says what happens when only one of them agrees.
 
-    `imported` is this module's imported-NAME table (`formal.imports`'s
-    `imported_bound_names`), passed in for the same reason `params_of` is: a
-    callee this image does not compile is refused for one of four different
-    reasons, and which one depends on facts that live outside this function."""
+    `imported` and `star_imports` are this module's imported-NAME tables
+    (`formal.imports`'s `imported_bound_names` and `star_imported_modules`),
+    passed in for the same reason `params_of` is: a callee this image does not
+    compile is refused for one of five different reasons, and which one depends
+    on facts that live outside this function."""
     known = set(param0)
     # `<Struct>_<method>` for every method of every struct in hand, MINUS the
     # ones this module compiles.  The difference is exactly the set of callees
@@ -4593,11 +4594,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # not. `formal/dataclass_transform.rewrite_equality` takes the holder
     # table as given.
     #
-    # `imported_names` for the same reason and one step further out: it is what
-    # tells a callee this unit does not compile from a callee NOTHING compiles,
-    # and `known`/`cross_module` cannot answer that (neither holds an imported
-    # free function).  Read here, once, from the statements this function was
-    # given, rather than by the pass from `stmts` — the pass does not have them.
+    # The two import tables for the same reason and one step further out: they
+    # are what tells a callee this unit does not COMPILE from a callee NOTHING
+    # compiles, and `known`/`cross_module` cannot answer that (neither holds an
+    # imported free function, nor a star import's export set).  Read here, once,
+    # from the statements this function was given, rather than by the pass from
+    # `stmts` — the pass does not have them.
     from formal.imports import (imported_bound_names,
                                 star_imported_modules)
     _frame_receivers(functions, structs_by_name, dc_equality,

@@ -949,12 +949,12 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     with `imported_bound_names`, and the three filters below are what make this
     table a PUBLICATION list rather than a binding list: a name this module
     defines, one `_is_inert_module` accepts, and a private name. The second of
-    those is tested against the imported NAME, which is what it has always been
-    tested against and is not what its own name suggests; `__future__` is
-    filtered because it is an INERT module and the check reads the other end of
-    the statement, so this table does still list `annotations` from it. That is
-    pre-existing, harmless (a manifest entry no consumer asks for), and not this
-    reader's to change while it is rewriting the loop underneath.
+    those is applied to the imported NAME and not to the module the statement
+    names, which is what it has always been applied to and is not what its own
+    name suggests — so `from __future__ import annotations` is still listed
+    here, inert module or not. Pre-existing, harmless (a manifest entry no
+    consumer asks for), and not this reader's to change while it is rewriting
+    the loop underneath.
 
     KEYED ON THE DEFINITION'S OWN NAME, not on the alias — `from x import f as
     g` is recorded as `f` — which is what this table has always done and is
