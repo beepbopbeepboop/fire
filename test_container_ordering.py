@@ -9,9 +9,9 @@ within one run and simply wrong. Exit 0, no diagnostic: `a < b` gives a
 plausible answer, just not Python's. Unlike `==`, this is ANSWERABLE rather
 than a refusal — this project's CPython implements ordering for lists
 (lexicographic, a shorter prefix ordering first) and for sets (proper subset),
-so there is a correct answer to give. See
-bugs/CODEGEN_container_ordering_is_pointer_identity.md for the measurement that
-found it, as the sibling of the `==` bug test_container_equality.py covers.
+so there is a correct answer to give. Found by the same investigation that
+fixed the `==` sibling test_container_equality.py covers, in the same shape:
+a heap-address comparison is stable within a run, so it produces an answer.
 
 A dict is the exception: `{'a':1} < {'b':2}` is a genuine TypeError on 3.14 as
 well, so it is a REFUSAL here too — and so is a pair of different kinds, and a

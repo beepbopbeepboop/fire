@@ -1,9 +1,9 @@
 # CODEGEN: `None` on either side of `<` / `<=` / `>` / `>=` is compared as a NUMBER, and every answer is wrong
 
 **State: OPEN, measured on `master` (2026-10-01), not fixed.** Found while fixing
-`bugs/CODEGEN_container_ordering_is_pointer_identity.md` (the `<`/`<=`/`>`/`>=`
-operators between two CONTAINERS, which is fixed and covered by
-`test_container_ordering.py`). This is the SCALAR half of the same operator
+the `<`/`<=`/`>`/`>=` operators between two CONTAINERS (fixed 2026-10-01 and
+covered by `test_container_ordering.py`; its doc is deleted). This is the
+SCALAR half of the same operator
 family: no operand here is a container, so it is outside that fix's scope and
 outside the claim that fix was made under. The compiled path does not raise at
 all — it answers.

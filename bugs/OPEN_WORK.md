@@ -182,8 +182,8 @@ both worth knowing before the next bisect because they produce the same
   `==` / `!=` between containers is Python value equality on the compiled path
   (runtime `mojo_set_eq` / `mojo_list_eq` / `mojo_dict_eq` / `mojo_value_eq`),
   diffed against CPython case by case in `test_container_equality.py` (24
-  cases). Doc deleted. The ordering siblings (`<`, `>`, `<=`, `>=`) are
-  `CODEGEN_container_ordering_is_pointer_identity.md`.
+  cases). Doc deleted. The ordering siblings (`<`, `<=`, `>`, `>=`) landed with
+  it on 2026-10-01 — `test_container_ordering.py`, 35 cases.
 
 ### C2. The self-hosted runtime's never-frees allocator — **high**
 
