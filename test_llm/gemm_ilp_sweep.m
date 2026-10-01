@@ -41,6 +41,10 @@
 #define Q_(x) #x
 #define Q(x) Q_(x)
 
+#ifndef TPB
+#define TPB 256
+#endif
+
 static double now_ms(void){static mach_timebase_info_data_t tb;
   if(!tb.denom)mach_timebase_info(&tb);
   return (double)mach_absolute_time()*tb.numer/tb.denom/1e6;}
@@ -107,12 +111,27 @@ int main(int argc, char**argv){
     id<MTLCommandQueue> q=[dev newCommandQueue];
     NSError*e=nil;
     NSString *src=[NSString stringWithUTF8String:SRC];
+    // Dump the EXACT MSL this run compiles. Extracting it from this file with a
+    // regex cannot work: the TM/TN values are stringified OUTSIDE the string
+    // literals, so a literal-only extraction silently yields a file with the
+    // macros undefined. Dumping from the one place that has it assembled is the
+    // only way to be sure the .metal matches the .air.
+    { const char *dump=getenv("GEMM_DUMP");
+      if(dump){ FILE*f=fopen(dump,"w"); fputs(SRC,f); fclose(f); } }
     id<MTLLibrary> lib=[dev newLibraryWithSource:src options:nil error:&e];
     if(!lib){printf("lib fail: %s\n",e.description.UTF8String);
       printf("SRC had %d conversions\n",0);return 1;}
+    // Register pressure is visible at RUNTIME without any IR: when a kernel
+    // needs more registers than the hardware has at the requested occupancy,
+    // the compiler lowers maxTotalThreadsPerThreadgroup. A drop relative to the
+    // device max is the signal that this shape is over budget.
     id<MTLFunction> fn=[lib newFunctionWithName:@"gemm"];
     id<MTLComputePipelineState> ps=[dev newComputePipelineStateWithFunction:fn error:&e];
     if(!ps){printf("ps fail: %s\n",e.description.UTF8String);return 1;}
+    printf("   device max threads/threadgroup = %lu\n",
+           (unsigned long)[dev maxThreadsPerThreadgroup].width);
+    printf("   pipeline maxTotalThreadsPerThreadgroup = %lu  (tpb requested %d)\n",
+           (unsigned long)[ps maxTotalThreadsPerThreadgroup], TPB);
     size_t na=(size_t)M*K, nb=(size_t)K*N, nc=(size_t)M*N;
     float *hA=malloc(na*4), *hB=malloc(nb*4), *hC=malloc(nc*4);
     srand(7);
@@ -125,13 +144,19 @@ int main(int argc, char**argv){
     id<MTLBuffer> C=[dev newBufferWithLength:nc*4 options:MTLResourceStorageModeShared];
     int nm=(M+MMA_M-1)/MMA_M, nn=(N+MMA_N-1)/MMA_N;
     long tiles=(long)nm*nn;
-    int tpb=256; int nsg=tpb/32;
+    int tpb=TPB; int nsg=tpb/32;
     if(nsg>1 && tiles<nsg) tpb=(int)tiles*32;
     if(tpb<32) tpb=32;
     nsg=tpb/32;
     MTLSize grid=MTLSizeMake((NSUInteger)((tiles+nsg-1)/nsg),1,1);
-    double best=1e9;
-    for(int trial=0;trial<5;trial++){
+    // MEDIAN with spread, not best-of. Measured run-to-run variance on this
+    // machine is ~1.4x for an identical binary (6.45-8.98 TFLOPS over six
+    // consecutive process launches), so a best-of-N inside one process reports
+    // the luckiest sample and reads high. Median-of-N plus the observed range is
+    // the only honest summary; the range is printed so the noise is visible
+    // rather than hidden behind a single number.
+    double ts[15]; int nt=15;
+    for(int trial=0;trial<nt;trial++){
       memset([C contents],0,nc*4);
       double t0=now_ms();
       id<MTLCommandBuffer> cb=[q commandBuffer];
@@ -143,13 +168,16 @@ int main(int argc, char**argv){
       [enc setBytes:&K length:4 atIndex:5];
       [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(tpb,1,1)];
       [enc endEncoding];[cb commit];[cb waitUntilCompleted];
-      double dt=now_ms()-t0; if(dt<best)best=dt;
+      ts[trial]=now_ms()-t0;
     }
+    for(int a=0;a<nt;a++)for(int b=a+1;b<nt;b++)if(ts[b]<ts[a]){double x=ts[a];ts[a]=ts[b];ts[b]=x;}
+    double best=ts[nt/2];   // median
+    double lo=ts[0], hi=ts[nt-1];
     double fl=2.0*M*N*K;
-    printf("TM=%d TN=%d  tile %dx%d/simdgroup  acc=%d  grid %lux%u  ",TM,TN,
+    printf("TM=%d TN=%d tpb=%-3d tile %dx%d/simd  acc=%-2d grid %4lux%-3u  ",TM,TN,tpb,
            MMA_M,MMA_N,TM*TN,nsg,(unsigned)grid.width);
-    printf("%7.3f ms  %7.2f TFLOPS  %5.1f%% of 117\n",best,fl/(best/1e3)/1e12,
-           100.0*fl/(best/1e3)/1e12/117.47);
+    printf("%7.3f ms  %7.2f TFLOPS  %5.1f%% of 117   [spread %.3f-%.3f ms]\n",
+           best,fl/(best/1e3)/1e12,100.0*fl/(best/1e3)/1e12/117.47,lo,hi);
     if(check){
       memcpy(hC,[C contents],nc*4);
       long bad=0; double worst=0;

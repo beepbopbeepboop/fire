@@ -59,6 +59,28 @@ going on — possibly the compiler failing to promote the 2-D `simdgroup_matrix`
 array to registers at all rather than running out, which is a different bug with
 a different fix.
 
+## Every resource explanation is now ruled out by measurement
+
+Four hypotheses tested and eliminated. Each was the most plausible one at the
+time, and each died to a measurement rather than to reasoning:
+
+| hypothesis | test | verdict |
+|---|---|---|
+| not enough cores | two concurrent processes at 4096^3 | **disproved** — each takes ~2x longer (24 ms -> 68 ms), wall 2.08x for 2x work. One process already commits the machine. |
+| not enough bandwidth | 201 MB in 24 ms vs measured 307.8 GB/s peak | **disproved** — 8.4 GB/s, 37x under. |
+| register spilling | `[ps maxTotalThreadsPerThreadgroup]` per config | **disproved** — 1024 (the full device max) for TM=TN=1, 2, 4 AND 8. 64 accumulators is 128 registers and still allows full occupancy. |
+| L2 capacity / cache reuse | repeat the sweep at 512^3, which is 3 MB and fits in L2 | **disproved** — the ordering and the ~4x collapse are IDENTICAL at 512^3 (8x8 0.59, 16x16 0.74, 32x32 0.21, 64x64 0.12 TFLOPS). Nothing is being evicted. |
+
+And staged sharing does not help either — see the fan-out section: 5.95 vs 6.64
+TFLOPS for no staging at all.
+
+So the collapse is **intrinsic to the MMA grid size** and is not occupancy, not
+bandwidth, not registers, not cache, and not fixable by staging. The remaining
+candidate is the MMA issue path itself: per k-step the grid issues TM+TN fragment
+loads for TM*TN MMAs, a ratio of 0.5 / 1.0 / 2.0 / 4.0 for 1x1 / 2x2 / 4x4 /
+8x8 — which says bigger grids should be BETTER, and they are 4x worse. That
+inversion is the thing left to explain.
+
 ## What would settle it
 
 The Metal compiler emits AIR as **bitcode**, so the register allocation cannot be
@@ -67,16 +89,22 @@ binary, and disassembling it yields host code). Needed: **textual AIR**, so the
 `simdgroup_matrix` values can be seen as either registers or an `alloca` with
 `addrspace(1)` traffic. Two ways to get it:
 
-1. `xcrun -sdk macosx metal -c f.metal -S -o f.ll` (or whatever emits textual
-   LLVM), if the driver supports it;
-2. the pipeline's own occupancy/limit reporting at runtime —
-   `MTLComputePipelineState.maxTotalThreadsPerThreadgroup` plus
-   `[device supportsFamily:]` — which bounds the answer without the IR.
+1. ~~the pipeline's occupancy reporting~~ — DONE, and it disproved spilling.
+   `[ps maxTotalThreadsPerThreadgroup]` returns 1024, the device max, for every
+   grid from 1x1 to 8x8. This is now a permanent part of the benchmark.
+2. **Textual AIR — ATTEMPTED, and the tooling is not there.** `xcrun -sdk macosx
+   metal -c f.metal -o f.air` and `-emit-llvm` both emit LLVM **bitcode**
+   (magic `0x0B17C0DE`), and Xcode's `llvm-objdump` rejects it as "not a valid
+   object file" — Apple's AIR is not readable with the bundled tools. Grepping
+   the bytes yields host-looking garbage, which is how an hour went into looking
+   for a name-mangling bug that does not exist. Anyone repeating this needs a
+   Metal-capable `llvm-dis`, or `-Xmetal` save-temps support, neither of which is
+   present here.
 
-Until one of those lands, 16x16 is the empirically correct choice and is what
+Until then 16x16 is the empirically correct choice and is what
 `mojo/middle/offload.py` emits. Do not "improve" it by enlarging the tile, and do
-not start a split-K project on the strength of the occupancy story — that story
-is disproved above.
+not start a split-K project on the strength of the occupancy story — disproved
+above. The most promising remaining lead is the MMA issue path, not any resource.
 
 ## The "same slow feed, more work" hypothesis: TESTED, DISPROVEN
 
