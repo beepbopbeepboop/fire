@@ -295,8 +295,6 @@ def _record_bool_valued(gen, name: str, value) -> None:
     `b = True`, `print(any(xs))` all printed `1`/`0`. Keyed by NAME and
     consulted only by the print dispatch, so this adds no claim to the type
     lattice itself."""
-    if not hasattr(gen, '_bool_valued'):
-        gen._bool_valued = set()
     try:
         if isinstance(value, gimple_ctypes.BoolLiteral):
             gen._bool_valued.add(name)

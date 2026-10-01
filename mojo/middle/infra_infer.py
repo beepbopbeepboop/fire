@@ -1677,16 +1677,20 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     if not _locals and not _dict_vals:
         return _infer_return_type_core(gen, body)
     _saved = gen.var_types
-    _merged = dict(_saved)
+    _scratch_mark_ml: int = gen._scan_scratch_top
+    _merged: dict = gen._scratch_dict_copy(_saved)
     for _n, _t in _locals.items():
         if _n not in _merged:
             _merged[_n] = _t
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
     # `_dict_val_types` to type a `return d[k]`. Additive, and a name already
-    # in the table keeps the type an earlier pass decided for it.
+    # in the table keeps the type an earlier pass decided for it. Pooled like
+    # `var_types` above, for the same reason and with the same mark: a fresh
+    # `dict(...)` per call is a leak on the self-hosted binary (no collector),
+    # and this runs once per function per nesting level.
     _saved_dv = getattr(gen, '_dict_val_types', None)
-    _merged_dv = dict(_saved_dv or {})
+    _merged_dv: dict = gen._scratch_dict_copy(_saved_dv if _saved_dv else {})
     for _n, _t in _dict_vals.items():
         if _n not in _merged_dv:
             _merged_dv[_n] = _t
@@ -1695,6 +1699,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         return _infer_return_type_core(gen, body)
     finally:
         gen.var_types = _saved
+        gen._scan_scratch_top = _scratch_mark_ml
         gen._dict_val_types = _saved_dv
 
 

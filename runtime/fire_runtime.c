@@ -3689,9 +3689,17 @@ void mojo_struct_pack_into(const char *fmt, MojoBytes *buf, int64_t offset, Mojo
  * used elsewhere for containers of strings) produces a garbage address
  * (e.g. 0x22 for '"'). Build a real 1-char C string instead. */
 char *mojo_char_to_str(char c) {
-    char *s = malloc(2);
+    /* The 256 possible one-character strings are IMMORTAL and shared: this is
+     * called once per character by every scan over a string (`c = s[i]`,
+     * `c == "\\"`, `buf.append(c)`, `c in ('(', '[')`), and a fresh malloc each
+     * time is a leak with no owner (a list of str never frees its elements). The
+     * result is therefore NOT the caller's to free -- it is deliberately absent
+     * from the codegen's _FRESH_STRING_RETURNS -- and is never written to. The
+     * store below is idempotent (a slot only ever holds its own character), so
+     * there is no init step to race or forget. */
+    static char tbl[256][2];
+    char *s = tbl[(unsigned char)c];
     s[0] = c;
-    s[1] = '\0';
     return s;
 }
 
@@ -4570,12 +4578,25 @@ static int _cmp_seqidx(const void *a, const void *b) {
 int64_t *mojo_dict_order_indices(MojoDict *d)
 {
     if (!d || d->used == 0) return NULL;
-    int64_t (*tmp)[2] = malloc(sizeof(int64_t) * 2 * (size_t)d->used);
+    /* Size the scratch and result arrays from what is actually in the slot
+     * table, not from `used` alone. A well-formed dict has exactly `used`
+     * occupied slots, but a value the compiled backend typed as a dict that is
+     * really another container (a list of pairs was iterated as a dict:
+     * bugs/CODEGEN_list_of_pairs_iterated_as_dict.md) has no such guarantee,
+     * and trusting `used` wrote past the end of the malloc block and corrupted
+     * the allocator's free list, crashing much later inside malloc. The result
+     * is padded to at least `used` entries because MojoDictIter walks
+     * `pos < dict->used`. */
+    int64_t occ = 0;
+    for (int64_t i = 0; i < d->cap; i++)
+        if (d->slots[i].key) occ++;
+    int64_t (*tmp)[2] = malloc(sizeof(int64_t) * 2 * (size_t)(occ ? occ : 1));
     int64_t n = 0;
     for (int64_t i = 0; i < d->cap; i++)
         if (d->slots[i].key) { tmp[n][0] = d->slots[i].seq; tmp[n][1] = i; n++; }
     qsort(tmp, (size_t)n, sizeof(int64_t) * 2, _cmp_seqidx);
-    int64_t *out = malloc(sizeof(int64_t) * (size_t)n);
+    int64_t total = n > d->used ? n : d->used;
+    int64_t *out = calloc((size_t)total, sizeof(int64_t));
     for (int64_t i = 0; i < n; i++) out[i] = tmp[i][1];
     free(tmp);
     return out;
@@ -5487,12 +5508,18 @@ struct MojoSetIter {
 int64_t *mojo_set_order_indices(MojoSet *s)
 {
     if (!s || s->used == 0) return NULL;
-    int64_t (*tmp)[2] = malloc(sizeof(int64_t) * 2 * (size_t)s->used);
+    /* Sized from the slot table, padded to `used` (the iterator's bound): see
+     * mojo_dict_order_indices for why `used` alone cannot be trusted. */
+    int64_t occ = 0;
+    for (int64_t i = 0; i < s->cap; i++)
+        if (s->slots[i].tag != -1) occ++;
+    int64_t (*tmp)[2] = malloc(sizeof(int64_t) * 2 * (size_t)(occ ? occ : 1));
     int64_t n = 0;
     for (int64_t i = 0; i < s->cap; i++)
         if (s->slots[i].tag != -1) { tmp[n][0] = s->slots[i].seq; tmp[n][1] = i; n++; }
     qsort(tmp, (size_t)n, sizeof(int64_t) * 2, _cmp_seqidx);
-    int64_t *out = malloc(sizeof(int64_t) * (size_t)n);
+    int64_t total = n > s->used ? n : s->used;
+    int64_t *out = calloc((size_t)total, sizeof(int64_t));
     for (int64_t i = 0; i < n; i++) out[i] = tmp[i][1];
     free(tmp);
     return out;

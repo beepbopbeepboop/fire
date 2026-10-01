@@ -1420,6 +1420,17 @@ test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
             'over the 4 GB line — see ' + MEM_DEBT_DOC,
      expect=SELFHOST_TOKENIZE_BLOWUP,
      desc="the native --dump-full ARTIFACT, diffed against the reference")
+# Peak-memory budgets for the self-hosted binary, as numbers (see the module
+# docstring of test_selfhost_memory.py). `selfhost-memory` is the fixed cost of
+# one invocation (17.6 GB before the 2026-09-30 leak hunt, 0.4 GB after);
+# `selfhost-memory-fire` is the compiler compiling itself (37 GB, SIGSEGV ->
+# 12 GB) and is excl because it reserves a program-sized slice of the ledger.
+test('selfhost-memory', [PY, 'test_selfhost_memory.py', 'snippet'], driver='mem',
+     mem='small', deps=['mojoc'], extra=['test_selfhost_memory.py'],
+     desc='peak RSS of one self-hosted --dump-full (fixed cost), under budget')
+test('selfhost-memory-fire', [PY, 'test_selfhost_memory.py', 'fire'], driver='mem',
+     mem='module', deps=['mojoc'], excl=True, extra=['test_selfhost_memory.py'],
+     desc='peak RSS of the self-hosted compiler compiling fire.py, under budget')
 
 # ── stdlib ───────────────────────────────────────────────────────────────────
 test('stdlib-tests', [PY, 'test_stdlib.py'],
@@ -2070,7 +2081,7 @@ BUCKETS = {
     # The self-hosted binary's own compiled (native) codegen, as opposed to
     # the python-interpreted reference every other test drives. Overlaps
     # `bootstrap` in `mojoc` only, and running both runs it once.
-    'native': ['mojoc', 'ab-native', 'native-dumpfull'],
+    'native': ['mojoc', 'ab-native', 'native-dumpfull', 'selfhost-memory', 'selfhost-memory-fire'],
 
     # The two stdlib build gates: the from-scratch dylib (whose "fell back to
     # source" count is the signal) and the whole-tree syntax check.

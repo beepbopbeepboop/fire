@@ -2179,6 +2179,18 @@ class GimpleGen:
         self._kw_key_src: dict[str, str] = {}    # see _char_to_cstr(word_ok=)
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
+        # Names bound to a bool, keyed by NAME across functions (see
+        # emit_stmts._record_bool_valued). Declared HERE, not created lazily
+        # behind `if not hasattr(gen, '_bool_valued')`: self-hosted, the field
+        # exists in GimpleGen's struct from the start, so `hasattr` answered
+        # True, the lazy `set()` never ran, and the first `add` went through
+        # a NULL set -- the SIGSEGV that ended every `mojoc --dump-full
+        # fire.py` in `mojo_set_add_str`.
+        self._bool_valued: set = set()
+        # Pool of reusable scratch dicts for the hermetic type scans, handed out
+        # in stack order: see resolve_shared._scan_scratch_dict.
+        self._scan_scratch: list = []
+        self._scan_scratch_top: int = 0
         # Block-scoped destruction state — see emit_infra's block-scope section.
         self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
         self._fresh_returning: set = set()   # names whose calls return a fresh container
@@ -4406,6 +4418,9 @@ class GimpleGen:
                                 _base_var_types=None) -> str | None:
         return grsl._infer_return_elem_type(self, body, func_def=func_def,
                                             _base_var_types=_base_var_types)
+    def _scratch_dict_copy(self, src: dict) -> dict:
+        return grsl._scratch_dict_copy(self, src)
+
     def _infer_local_var_types(self, func: FunctionDef) -> dict[str, str]:
         return grsl._infer_local_var_types(self, func)
     def _collect_calls(self, expr, out):
@@ -4910,6 +4925,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # here, while still deduping correctly *within* one call across every
     # nested GimpleGen instance recursive import-inlining creates (shared
     # by reference — see `_compile_imported_module`'s sharing block).
+    gfn._selfhost_begin_compile()
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)

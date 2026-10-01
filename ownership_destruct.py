@@ -383,6 +383,30 @@ def _param_is_nonescaping(callee, pname: str, funcs, methods, facts: _FuncFacts)
     return pname in summary.split('|')
 
 
+def _call_arg_is_safe(idx: int, in_closure: bool, is_whitelisted_builtin: bool, callee,
+                      param_names: list, offset: int, funcs, methods,
+                      facts: _FuncFacts) -> bool:
+    """Is the `idx`th positional argument of a call safe to pass a bare local to?
+
+    A module-level function taking everything it reads as a parameter, not a
+    closure nested in `_scan_expr` (which is what this used to be). Self-hosted,
+    the nested form's captured-variable environment was laid out in a different
+    order where it was built than where it was read, so `len(param_names)` read
+    the `is_whitelisted_builtin` slot (`True`, i.e. 1) as a list and
+    `mojoc --dump-full fire.py` died in `mojo_list_len(0x1)` while analysing the
+    compiler's own sources."""
+    if in_closure:
+        return False
+    if is_whitelisted_builtin:
+        return True
+    if callee is None:
+        return False
+    real_idx = idx + offset
+    if not (0 <= real_idx < len(param_names)):
+        return False
+    return _param_is_nonescaping(callee, param_names[real_idx], funcs, methods, facts)
+
+
 def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
     """Visits every expression node reachable from `node`. THE CORE
     SOUNDNESS RULE (fixed 2026-09-15 after a real, reproducible self-host
@@ -457,8 +481,17 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
             if _sn != '':
                 struct_recv = _rn
                 _m = facts.structs.get(_sn, {}).get(node.func.member)
-                if (_m is not None and _m.params
-                        and _param_is_nonescaping(_m, _m.params[0][0], funcs, methods, facts)):
+                # Explicit nested tests, NOT `_m is not None and _m.params and
+                # ...`: self-hosted, a bool operand followed by a list operand in
+                # one `and` chain feeds the BOOL's raw value (1) into the later
+                # `mojo_list_len` truthiness check -- `mojo_list_len(0x1)`, the
+                # SIGSEGV that ended `mojoc --dump-full fire.py` here (the same
+                # class as emit_infra._reset_func's `params or ()`, e7fc3ec).
+                _callee_ok = False
+                if _m is not None:
+                    if len(_m.params) > 0:
+                        _callee_ok = _param_is_nonescaping(_m, _m.params[0][0], funcs, methods, facts)
+                if _callee_ok:
                     callee = _m
                 else:
                     facts.disqualify(_rn)
@@ -467,21 +500,10 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
         param_names = [p[0] for p in callee.params] if callee else []
         offset = 1 if (callee and isinstance(node.func, N.MemberExpr)) else 0
 
-        def _arg_is_safe(idx):
-            if in_closure:
-                return False
-            if is_whitelisted_builtin:
-                return True
-            if callee is None:
-                return False
-            real_idx = idx + offset
-            if not (0 <= real_idx < len(param_names)):
-                return False
-            return _param_is_nonescaping(callee, param_names[real_idx], funcs, methods, facts)
-
         for i, a in enumerate(node.args):
             if isinstance(a, N.IdentExpr):
-                if not _arg_is_safe(i):
+                if not _call_arg_is_safe(i, in_closure, is_whitelisted_builtin, callee,
+                                         param_names, offset, funcs, methods, facts):
                     facts.disqualify(a.name)
                 # else: a bare identifier has no further substructure to
                 # scan, and it's already been proven safe — do NOT also

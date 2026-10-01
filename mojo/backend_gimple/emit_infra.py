@@ -256,14 +256,18 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_emit_call` frees it right after the one call that consumes it. Temp
     # names repeat across functions, so this MUST reset per function (a stale
     # entry would free a temp that never owned anything). See doc/MEMORY.html.
-    gen._cstr_key_src: dict[str, str] = {}
-    gen._kw_key_src: dict[str, str] = {}
-    gen._fresh_vals: set = set()   # per function: temp names repeat across functions
+    # Emptied IN PLACE, not rebound to a new container (the four below exist
+    # from GimpleGen.__init__): a dropped container is only garbage under
+    # CPython; self-hosted, each function leaked its old set/dict and every
+    # temp-name string in it (2.7M strings on `--dump-full fire.py`).
+    gen._cstr_key_src.clear()
+    gen._kw_key_src.clear()
+    gen._fresh_vals.clear()   # per function: temp names repeat across functions
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
     # Same per-function reset requirement as `_cstr_key_src`.
-    gen._fresh_str_tmps: set = set()
+    gen._fresh_str_tmps.clear()
     gen.loop_stack:  list[tuple[str,str]] = []
     gen.exc_depth    = 0
     # Entry `len(loop_stack)` of each currently-open `try` body. A
@@ -982,8 +986,11 @@ _FRESH_CONTAINER_RETURNS = frozenset([
 # string_strip, mojo_str_rstrip, mojo_str_lstrip_chars, mojo_str_expandtabs,
 # _str_pad, mojo_str_join (returns "" for an empty list), mojo_repr_float
 # ("nan"/"inf"). mojo_repr_int is absent too (its comment says it reuses a buffer).
+# mojo_char_to_str is absent on purpose: it returns one of 256 shared IMMORTAL
+# one-character strings (a malloc per character of every string scan was the
+# bulk of the self-hosted tokenizer's memory), so a free() of it would crash.
 _FRESH_STRING_RETURNS = frozenset([
-    'mojo_str_cat', 'mojo_str_from_int', 'mojo_char_to_str', 'mojo_cstr_slice',
+    'mojo_str_cat', 'mojo_str_from_int', 'mojo_cstr_slice',
     'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
     'mojo_hex', 'mojo_oct', 'mojo_bin',
     # The str methods: each returns a copy the caller owns, never its receiver

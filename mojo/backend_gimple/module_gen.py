@@ -4051,9 +4051,15 @@ def gen_module_impl(self, stmts):
                             # `-Wpointer-to-int-cast` warning, not just a
                             # diagnostic).
                             try:
-                                _ov_path = self._parsed_import(s.module)[0]
+                                _ov_pi = self._parsed_import(s.module)
+                                _ov_path = _ov_pi[0]
                                 if _ov_path:
-                                    _ov_src = open(_ov_path).read()
+                                    # The source `_parsed_import` already read and
+                                    # cached for this module, not a fresh
+                                    # `open(...).read()` per imported symbol (each
+                                    # read was a whole file that nothing freed:
+                                    # ~800 MB on `--dump-full fire.py`).
+                                    _ov_src = _as_str(_ov_pi[1])
                                     if len(re.findall(
                                             rf'\b(?:fn|def)\s+{re.escape(_rs_nm)}\s*\(',
                                             _ov_src)) > 1:
@@ -4614,7 +4620,9 @@ def gen_module_impl(self, stmts):
                     else:
                         _ret_type = self._resolve_type(m.return_type)
                 else:
-                    _saved_var_types = dict(self.var_types)
+                    _saved_var_types = self.var_types
+                    _scratch_mark_sm: int = self._scan_scratch_top
+                    self.var_types = self._scratch_dict_copy(_saved_var_types)
                     self.var_types['self'] = f"{s.name} *"
                     for _pn, _pt in real_params:
                         self.var_types[_pn] = self._resolve_type(_pt)
@@ -4636,6 +4644,7 @@ def gen_module_impl(self, stmts):
                         pass
                     _ret_type = self._infer_return_type(m.body)
                     self.var_types = _saved_var_types
+                    self._scan_scratch_top = _scratch_mark_sm
                 # Self-hosting bootstrap: the frozen GimpleGen signature
                 # table is authoritative — override this pass's per-instance
                 # inference so `_struct_method_signatures`, the method
@@ -6514,7 +6523,8 @@ def gen_module_impl(self, stmts):
             # of the isinstance filter.
             s = _as_funcdef_node(s)
             _saved_vt_23e = self.var_types
-            self.var_types = dict(_saved_vt_23e)
+            _scratch_mark_23e: int = self._scan_scratch_top
+            self.var_types = self._scratch_dict_copy(_saved_vt_23e)
             # Index, don't unpack — see the identical fix + comment at the
             # earlier return-type-inference pass above.
             _p23e_params = s.params
@@ -6533,6 +6543,7 @@ def gen_module_impl(self, stmts):
             if s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.var_types = _saved_vt_23e
+            self._scan_scratch_top = _scratch_mark_23e
             self.func_return_types[s.name] = inferred
 
     for s in all_functions:
@@ -6794,7 +6805,8 @@ def gen_module_impl(self, stmts):
             _saved_vt_3b = self.var_types
             _saved_fcn_3b = self.current_func_name
             self.current_func_name = _p3b_s.name
-            self.var_types = dict(_saved_vt_3b)
+            _scratch_mark_3b: int = self._scan_scratch_top
+            self.var_types = self._scratch_dict_copy(_saved_vt_3b)
             # Index, don't unpack — see the identical fix + comment at the
             # earlier return-type-inference passes above.
             _p3b_params = _p3b_s.params
@@ -6816,6 +6828,7 @@ def gen_module_impl(self, stmts):
             if _p3b_s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.var_types = _saved_vt_3b
+            self._scan_scratch_top = _scratch_mark_3b
             self.current_func_name = _saved_fcn_3b
             self.func_return_types[_p3b_s.name] = inferred
 

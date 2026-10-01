@@ -2538,21 +2538,37 @@ UNREGISTERED = {
         'dropped-bracket case builds and RUNS on both architectures, and the '
         'fabricated-answer case (plain[3](5) printing plain(5)) is what the '
         'refusal exists for.',
-    'test_formal_os.py': 'formal/hostmods/os and os.path, run on both '
-        'architectures against CPython posixpath and the real filesystem. A '
-        'transcription of posixpath is right on the inputs you tried; this is '
-        'the half that asks.',
-    'test_formal_sys.py': 'formal/hostmods/sys and the module-call lowering it '
-        'is the first real user of, run on both architectures against '
-        'CPython sys — including a str that crosses the dylib boundary.',
-    'test_struct_formal.py': 'formal/hostmods/struct.mojo byte-for-byte '
-        'against CPython struct, on both architectures. A subtly wrong byte '
-        'packer writes malformed Mach-O and ELF headers that still link, so '
-        '"it built" is not evidence of anything here.',
-    'test_formal_frame_len.py': 'len() on a frame address is the struct\'s own '
-        '__len__(): 10 differential cases, each written twice — once as Mojo, '
-        'once as Python — and required to AGREE, on arm64 AND x86-64, with the '
-        'four refusals additionally requiring CPython to raise TypeError.',
+    # — the seven formal suites batch 1 brought in and nobody accounted
+    # for.  Each builds and RUNS images against CPython on both
+    # architectures, which is a measured cost per invocation; the estate
+    # check is what makes "nobody accounted for it" impossible, so they are
+    # listed rather than left out.  Six of the seven host a
+    # `formal/hostmods/*.mojo` module and are its only coverage.
+    'test_formal_json.py': 'formal/hostmods/json.mojo: the scanner and the '
+        'encoder, case for case against CPython\'s own json on both '
+        'architectures. Build-and-RUN.',
+    'test_formal_pathlib.py': 'formal/hostmods/pathlib.mojo, the pure half of '
+        'PurePosixPath, read for read against CPython on both architectures.',
+    'test_formal_small_hosts.py': 'formal/hostmods/{io,typing}.mojo, and the '
+        'measurement that an annotation-erasing path cannot keep a name used '
+        'as a VALUE. Build-and-RUN on both architectures.',
+    'test_formal_value_model.py': 'The value model itself: what a word is, '
+        'which is the premise every other formal suite rests on. Both '
+        'architectures, against CPython.',
+    'test_formal_x86_64_dylib.py': 'x86-64 module dylibs end to end — the '
+        'one shape the x86-64 backend has that arm64 does not, so nothing '
+        'else covers it.',
+    'test_formal_method_param_field.py': "A method PARAMETER's field type read "
+        'from its DECLARED type, which is what closed a 17-file family; both '
+        'architectures.',
+    'test_formal_receiver_position.py': 'The receiver-position family: which '
+        'argument a frame receiver lands in, on both architectures. Build-and-'
+        'RUN plus the refusals that must stay refusals.',
+    'test_string_literal_lexing.py': 'The LEXER: escapes, the line model, tab '
+        'expansion, CR, an unterminated literal, and a backslash line '
+        'continuation inside a raw literal \u2014 build-and-run against CPython '
+        'where the case has an oracle. Two front-end bugs that changed what a '
+        'program MEANS rather than what it prints.',
     'test_formal_comptime_string.py': 'A comptime string MATERIALIZED: a '
         'module-level `comptime` bound to a string reaches the image as the '
         'bytes it is, on both architectures, with the escapes decoded rather '
@@ -2565,42 +2581,6 @@ UNREGISTERED = {
         'sentence (bugs/FORMAL_mlir_refusal_preemption.md). Build-only, but '
         'twice per case, because a backend that answers differently about one '
         'construct is the defect this file exists for.',
-    'test_formal_toplevel.py': 'A module\'s top-level statements RUN, as the '
-        'body of the entry: every case builds the image, EXECUTES it and '
-        'compares stdout and exit status with CPython on the same text, plus '
-        'the shapes that cannot be lowered exactly (a file-level return, '
-        'global, break, yield, await) and the dylib path\'s refusal of a body.',
-    'test_formal_hashlib.py': 'formal/hostmods/hashlib.mojo (six CommonCrypto '
-        'digests, BLAKE2b from RFC 7693) against the hashlib in this process, '
-        'on arm64 AND x86-64. An oracle rather than a table of digests: '
-        'sha256(b"abc") has one answer forever and a table of them is wrong the '
-        'moment someone transposes a character.',
-    'test_formal_time.py': 'formal/hostmods/time.mojo on libSystem\'s five '
-        'clocks, on arm64 AND x86-64. Every value is a CLOCK READING, so each '
-        'case is asserted as a RELATION against this process\'s own time and '
-        'never as a stored number; the ns-to-double conversion, which is pure '
-        'arithmetic rather than a reading, is checked against exact rationals '
-        'rather than ns / 1e9, which double-rounds above 2**53.',
-    # Spelled with the decorator's NAME split, and the reason is this file:
-    # `test_dataclasses_formal.py`'s corpus discovery is a textual scan for the
-    # decorator's source spelling, so writing it out in full here made
-    # `test_suite.py` ITSELF a corpus member — one more file for that test to
-    # build, decided by a sentence in a registry table. It is excluded from
-    # nothing and should be in nothing.
-    'test_dataclasses_formal.py': 'The dataclass decorator as a compile-time '
-        'transform: every execution case is run TWICE on the same text — once '
-        'as a formal arm64 image that is executed, once by this process\'s own '
-        'python3 — and the two must agree, because the two failures that '
-        'motivated the whole feature (a bare struct == comparing two frame '
-        'ADDRESSES, and frozen=True accepted silently) both ran and were '
-        'wrong. The refused subset is pinned by its MESSAGE.',
-    'test_formal_argparse.py': 'formal/hostmods/argparse.mojo against '
-        'CPython\'s own argparse: one table of parser declarations and command '
-        'lines drives two generated programs, and stdout, stderr and exit '
-        'status must be identical — so THE PARSE IS CPYTHON\'S rather than a '
-        'transcription agreeing with itself. arm64 AND x86-64.',
-
-    # ── the interpreter, which is the oracle everything else is compared to ──
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '
         'myinterpreter.mojo, which is the reference every compiled-path answer '
         'is measured against.',
