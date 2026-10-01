@@ -2446,7 +2446,17 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # fell all the way to the final "unsupported type" fallback,
         # so len(any_string) always silently returned 0. Found via
         # len(c_code) on a real compiled program's C output.
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
+        # A FRESH string temp (`len(mk(i))`, `len(s[1:3])`, `len("a" + b)`)
+        # is a malloc block nothing else can name, and the length is all this
+        # call reads — so it is freed here, the same bargain the container
+        # branch above makes, and AFTER the length has been read (the call is
+        # emitted first: freeing before it is a use-after-free, which is what
+        # the first version of this did). `_owned_free_runtime_fn` answers ''
+        # for a `char *`, which is why the branch it now takes is spelled out.
+        _len_t = gen._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
+        if gen._is_fresh_container_operand(node.args[0], av):
+            gen._free_fresh_container(av, at)
+        return 'int64_t', _len_t
     _dsub_len = gen._dict_subclass_of(at)
     if _dsub_len and not gen._struct_defines_method(_dsub_len, '__len__'):
         dp = gen._new_val('MojoDict *', f"{av}->_data")
@@ -4623,13 +4633,24 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         gen._emit(f'  {_envp}->{_cn} = {_cv};')
     _fnv = gen._new_val('void *', f'(void *){lifted_name}')
     _bm = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
-                         [('void *', _fnv), ('void *', gen._new_val('void *', _envp))])
-    _bmv = gen._new_val('void *', f'(void *){_bm}')
+                        [('void *', _fnv), ('void *', gen._new_val('void *', _envp))])
+    _val = gen._new_val('void *', f'(void *){_bm}')
     # Same reason as the non-capturing case just above: a call through this
     # value goes through the homogenized `int64_t` helper, so the return
     # type has to travel with the value or it is lost.
-    gen._callable_ret_types[_bmv] = ret_type
-    return 'void *', _bmv
+    gen._callable_ret_types[_val] = ret_type
+    # This value, and the `_envp` it carries, are one allocation unit: the env
+    # is the `malloc` one instruction above and nothing else holds either half.
+    # Marked so the ownership machinery can free the pair with
+    # `mojo_closure_free` when the binding this lands in provably cannot
+    # escape (ownership_destruct.lambda_value_owned) — a captured lambda is
+    # otherwise a `malloc(sizeof env)` plus a `malloc(sizeof MojoBoundMethod)`
+    # plus a `_reg_bound_method` entry per creation, ~74 B/iteration measured
+    # over 100k and 400k iterations. The value MARKED is the one RETURNED (it
+    # is `_tN = (void *) _tM`, a different temp from the `_call_expr`'s), since
+    # that is what a declaration's `_decl_rhs_val` records.
+    gen._closure_vals.add(_val)
+    return 'void *', _val
 
 
 def _lower_async_closure_construct(gen, key: tuple, node: gimple_ctypes.CallExpr) -> tuple[str, str]:

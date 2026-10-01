@@ -172,6 +172,35 @@ def _is_constructor_expr(node):
     return False
 
 
+def _is_fresh_string_expr(node) -> bool:
+    """True iff `node` is an EXPRESSION whose value is a brand-new heap
+    allocation the receiver/caller can never name — so a callee that returns it
+    hands its caller sole ownership, exactly as `analyze_returns_fresh` already
+    concludes for a container display.
+
+    Every form here was read in the lowering, not inferred from a type:
+      - `a + b` — `mojo_str_cat` always copies (doc/MEMORY.html §4.2), and on
+        a list the same spelling is `mojo_list_concat`, a fresh list. Either
+        way the result is not an alias of an operand. A non-container `+` (two
+        ints) is an `int64_t`, which the declaration gate never frees, so
+        accepting it is inert rather than wrong.
+      - an f-string — its accumulator is built by `_emit_str_cat` and is fresh
+        by the same argument.
+      - `s[a:b]` — `mojo_cstr_slice` is on the runtime's fresh-string list and
+        `mojo_list_slice` on its fresh-container one.
+
+    Deliberately NOT accepted, each because it can return its own argument and a
+    `free()` of that is a crash: `str(s)`/`String(s)` (the identity for a
+    string — emit_calls.py's `fname_raw == 'str'` branch returns `ev`
+    unchanged), a bare string method call (the receiver rules in
+    `receiver_results_consumed` decide those, per call site, and the receiver
+    may not even be a string), and any other call (whether it is fresh is
+    exactly the question being asked)."""
+    if isinstance(node, (N.TstringLiteral, N.SliceExpr)):
+        return True
+    return isinstance(node, N.BinaryOp) and node.op == '+'
+
+
 def _is_maybe_fresh_expr(node) -> bool:
     """A right-hand side that MAY build a brand-new container the assigned name
     would solely own: a call (a runtime function such as `.split()`/`.keys()`,
@@ -662,7 +691,8 @@ def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
                 # even if y itself was otherwise a clean single-assignment
                 # constructor, x now holds the same pointer.
                 facts.disqualify(value.name)
-            facts.note_assign(name, is_ctor, _is_constructor_expr(value))
+            facts.note_assign(name, is_ctor,
+                               _is_constructor_expr(value) or _is_fresh_string_expr(value))
             _scan_expr(value, facts, funcs, methods)
         else:
             # Non-identifier target (subscript/member): its RHS is now
@@ -1301,7 +1331,7 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
         v = r.value
         if v is None:
             return False
-        if _is_constructor_expr(v):
+        if _is_constructor_expr(v) or _is_fresh_string_expr(v):
             continue
         nm = _moved_name(v)
         if nm == '':
@@ -1468,6 +1498,204 @@ def _name_uses_consumed(node, name: str, consumed: bool = False) -> bool:
         if not _name_uses_consumed(getattr(node, f.name), name, False):
             return False
     return True
+
+
+def list_elements_owned(fn_body, name: str) -> bool:
+    """True iff a list local `name` that owns its own string ELEMENTS
+    (`mojo_str_split`/`mojo_str_splitlines`, whose every element is a fresh
+    allocation made by the function that built the list) may be torn down with
+    the element strings included, without leaving a dangling pointer anywhere.
+
+    The list is the only owner of the allocations, but the PROGRAM can still
+    hand an element pointer out, and then the list is no longer the owner of
+    that element's lifetime: `kept.append(parts[0])` stores a pointer the free
+    then invalidates, and the read comes back as the pointer's bits. So this
+    asks a strictly narrower question than the container analyses do — may any
+    ELEMENT of `name` be named at all? — and the answer is deliberately the
+    smallest one that is still useful:
+
+      - the declaration's own target (`var name = ...`, `name = ...`) is not a
+        use;
+      - `len(name)`, `repr/str/print/bool/hash/id(name)` read the list's
+        length or its contents and hand nothing back;
+      - `name` as a statement of its own, and as an operand of `==`/`!=`/`<`/
+        `>`/`<=`/`>=` (which compare, and build no new list);
+      - `not name` and a condition.
+
+    Everything else is rejected, which is the fail-closed direction: a missed
+    free leaks a few bytes, a wrong one is a use-after-free. So `parts[0]`,
+    `for p in parts:`, `list(parts)`, `parts[:]`, `parts + other`, `sorted
+    (parts)`, `kept.extend(parts)` and every method call on `parts` all keep
+    the plain `mojo_list_free` and the pre-existing leak. That is the same
+    trade doc/MEMORY.html section 7 records for nested list literals ("Left
+    leaking on purpose") and for a dict/set's `key_views_consumed` above; this
+    is the LIST-element counterpart, and the leak it does close — the
+    ~48 B/iteration of `String("a b c").split(" ")` measured over 100k and
+    400k iterations in bugs/CODEGEN_call_result_container_never_freed.md — is
+    the `len()`-and-drop shape, which is the common one."""
+    return _list_str_uses_ok(fn_body, name)
+
+
+# Read-only builtins that read a container without handing any of its contents
+# back. `str` is here (unlike `_NONRETAINING_BUILTINS`, where it is not): for a
+# LIST `str(x)` is `repr(x)`, which builds a new string from the contents; the
+# string-identity case that excluded it there is a different question.
+_LIST_READ_BUILTINS = frozenset(['len', 'repr', 'str', 'print', 'bool',
+                                 'hash', 'id'])
+# Comparison operators only. `+`/`*` are absent on purpose: `parts + other`
+# builds a list that SHARES the element pointers.
+_LIST_SAFE_CMP = frozenset(['==', '!=', '<', '>', '<=', '>='])
+
+
+def _list_str_uses_ok(node, name: str, seen: bool = False) -> bool:
+    """`seen` is True when this subtree has already been accepted by a
+    recognised read-only parent (the argument of `len(name)`, an operand of a
+    comparison), so a bare `name` inside it is a use that is fine rather than
+    one that hands an element out."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if not _list_str_uses_ok(item, name, False):
+                return False
+        return True
+    if not _is_node(node):
+        return True
+    # The binding itself: the target is not a use of the value.
+    if isinstance(node, N.VarDecl) and _as_str(node.name) == name:
+        return _list_str_uses_ok(node.value, name, False)
+    if (isinstance(node, (N.AssignStmt, N.AugAssignStmt))
+            and isinstance(node.target, N.IdentExpr)
+            and _as_str(node.target.name) == name):
+        return _list_str_uses_ok(node.value, name, False)
+    if isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr) \
+            and _as_str(node.func.name) in _LIST_READ_BUILTINS:
+        for a in node.args:
+            if not _list_str_uses_ok(a, name, True):
+                return False
+        for kw in (node.kwargs or []):
+            if not _list_str_uses_ok(kw[1], name, True):
+                return False
+        return True
+    if isinstance(node, N.ExprStmt):
+        return _list_str_uses_ok(node.value, name, True)
+    if isinstance(node, N.BinaryOp) and node.op in _LIST_SAFE_CMP:
+        return (_list_str_uses_ok(node.left, name, True)
+                and _list_str_uses_ok(node.right, name, False))
+    if isinstance(node, N.CompareChain):
+        for o in node.operands:
+            if not _list_str_uses_ok(o, name, True):
+                return False
+        for op in (node.ops or []):
+            if op not in _LIST_SAFE_CMP:
+                return False
+        return True
+    if isinstance(node, N.UnaryOp) and node.op == 'not':
+        return _list_str_uses_ok(node.operand, name, True)
+    if isinstance(node, (N.IfStmt, N.WhileStmt, N.TernaryExpr)):
+        for f in dataclasses.fields(node):
+            v = getattr(node, f.name)
+            if not _list_str_uses_ok(v, name, f.name == 'condition'):
+                return False
+        return True
+    if isinstance(node, N.IdentExpr):
+        return seen or _as_str(node.name) != name
+    for f in dataclasses.fields(node):
+        v = getattr(node, f.name)
+        if v is None:
+            continue
+        if not _list_str_uses_ok(v, name, False):
+            return False
+    return True
+
+
+def lambda_value_owned(fn_body, name: str) -> bool:
+    """True iff the callable local `name` may be freed at scope exit TOGETHER
+    with the environment it captured, i.e. nothing can name it except the call
+    it is written for.
+
+    A capturing lambda's value is a `MojoBoundMethod` wrapping a `malloc`'d
+    environment: two allocations and a `_reg_bound_method` entry per creation,
+    ~74 B/iteration measured over 100k and 400k iterations
+    (bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md). That object dies
+    with the scope that made it only if the scope is its last holder, and
+    "holder" here is narrow: the ONLY acceptable mention of `name` after its
+    binding is as the CALLEE of a call (`f(x)`). Everything else can keep the
+    pointer past the free —
+      `g = f`, `return f`, `kept.append(f)`, `f` in a list/tuple display,
+      `f` captured by another `lambda`/`def`, `f.attr`, `f[0]`, or a call
+      through a container it was put into — and is rejected.
+
+    The binding itself must be a `lambda` expression and there must be exactly
+    one: a second assignment is a second value with an independent lifetime,
+    and a non-lambda RHS is some other callable whose allocation the free does
+    not know the shape of (a bare function pointer, or a bound method whose
+    `self` is somebody's receiver — that one is `mojo_bound_method_free`, not
+    this, see runtime/fire_runtime.c).
+
+    Deliberately separate from the container candidate analysis rather than
+    folded into it: a function containing a `lambda` is excluded from that one
+    outright (`_is_free_eligible_function`), because inside a closure the
+    receiver rules that make `d[k]`/`d.x`/`d[a:b]`/`for x in d` safe are not
+    safe, and lifting that exclusion is a separate piece of work. This rule
+    asks nothing about containers, so it holds on a body the container analysis
+    refuses to look at."""
+    return _lambda_uses_ok(fn_body, name)
+
+
+def _lambda_uses_ok(node, name: str, as_callee: bool = False) -> bool:
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if not _lambda_uses_ok(item, name, False):
+                return False
+        return True
+    if not _is_node(node):
+        return True
+    if isinstance(node, N.VarDecl) and _as_str(node.name) == name:
+        return isinstance(node.value, N.LambdaExpr)
+    if (isinstance(node, (N.AssignStmt, N.AugAssignStmt))
+            and isinstance(node.target, N.IdentExpr)
+            and _as_str(node.target.name) == name):
+        return False        # a rebinding: a second value, independently owned
+    if isinstance(node, N.CallExpr):
+        if not _lambda_uses_ok(node.func, name, True):
+            return False
+        for a in node.args:
+            if not _lambda_uses_ok(a, name, False):
+                return False
+        for kw in (node.kwargs or []):
+            if not _lambda_uses_ok(kw[1], name, False):
+                return False
+        return True
+    if isinstance(node, N.IdentExpr):
+        return as_callee or _as_str(node.name) != name
+    if isinstance(node, (N.FunctionDef, N.LambdaExpr)):
+        # A nested scope that MENTIONS `name` captures it into its environment,
+        # and that environment can outlive this scope — the exact hazard this
+        # rule exists to prevent. Reject on the mention, whatever shape it has
+        # inside (a call position included).
+        return not _mentions_name(node, name)
+    for f in dataclasses.fields(node):
+        v = getattr(node, f.name)
+        if v is None:
+            continue
+        if not _lambda_uses_ok(v, name, False):
+            return False
+    return True
+
+
+def _mentions_name(node, name: str) -> bool:
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if _mentions_name(item, name):
+                return True
+        return False
+    if not _is_node(node):
+        return False
+    if isinstance(node, N.IdentExpr):
+        return _as_str(node.name) == name
+    for f in dataclasses.fields(node):
+        if _mentions_name(getattr(node, f.name), name):
+            return True
+    return False
 
 
 def _key_view_source(it, name: str) -> str:

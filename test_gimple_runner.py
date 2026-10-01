@@ -2035,6 +2035,244 @@ def main():
     print(total)
 """, "33\n75\n8\n242\n3200000\n")
 
+    # ── A capturing lambda's value, and the environment it captured, are ONE
+    # allocation unit (doc/MEMORY.html §3.B): a `malloc(sizeof env)` plus a
+    # `malloc(sizeof MojoBoundMethod)` plus a `_reg_bound_method` entry per
+    # creation, ~74 B/iteration, now flat at 100k and 400k. Four consumers of
+    # that ownership are in one program: a lambda in a LOOP BODY (freed at the
+    # end of the body and on every `break`/`continue` that leaves it), a
+    # function-level one, a non-capturing one (a bare static function pointer,
+    # which allocates nothing and must NOT be freed), and one raised past by an
+    # exception (freed by the cleanup thunk the declaration pushed, not by the
+    # skipped free). The second program is the fail-closed half: a closure
+    # stored in a list, captured by another lambda, or aliased must stay alive.
+    test_gimple_bounded_memory("gimple_owned_closure_env_is_freed", """\
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var f = lambda x: x + i
+        t += f(1)
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def once() -> Int:
+    var g = lambda x: x * 3
+    return g(5)
+
+def boom(n: Int) -> Int:
+    var f = lambda x: x + n
+    if n > 2:
+        raise ValueError("no")
+    return f(10)
+
+def main():
+    print(work(3))
+    print(work(9))
+    print(once())
+    var total = 0
+    for r in range(300000):
+        total += work(6) % 1000 + once()
+    print(total)
+    var hits = 0
+    for r in range(20000):
+        try:
+            hits += boom(9)
+        except ValueError as e:
+            hits += 1
+    print(hits)
+""", "6\n15\n15\n9000000\n20000\n", 40)
+
+    test_gimple_stdout("gimple_closure_that_escapes_is_not_freed", """\
+def escape_list(kept: List, base: Int) -> Int:
+    var t = 0
+    for i in range(4):
+        var f = lambda x: x + base
+        kept.append(f)
+        t += f(1)
+    return t
+
+def escape_rebind() -> Int:
+    var f = lambda x: x + 1
+    var g = f
+    return g(2)
+
+def capture_chain() -> Int:
+    var f = lambda x: x + 1
+    var h = lambda y: f(y) + 1
+    return h(3)
+
+def main():
+    var kept: List = []
+    print(escape_list(kept, 10))
+    print(len(kept))
+    # CALL each stored closure AFTER escape_list returned: freeing it with its
+    # scope would dispatch through a freed pointer here, and the base is a
+    # PARAMETER precisely so that every stored closure answers the same number
+    # and the two engines' answers can be compared.
+    var seen = 0
+    for k in range(len(kept)):
+        var fv = kept[k]
+        seen += fv(1)
+    print(seen)
+    print(escape_rebind())
+    print(capture_chain())
+    var acc = 0
+    for r in range(20000):
+        var kk: List = []
+        acc += escape_list(kk, 10) % 1000 + escape_rebind() + capture_chain()
+    print(acc)
+""", "44\n4\n44\n3\n5\n1040000\n")
+
+    # ── A callee that provably returns a FRESH STRING hands ownership to its
+    # caller, exactly as one returning a fresh container always has
+    # (analyze_returns_fresh, which until now accepted only a container
+    # display). The three shapes are the ones the analysis reads off the
+    # lowering rather than infers from a type: a `+` (mojo_str_cat always
+    # copies), a local bound to a `+`, and a slice (mojo_cstr_slice). Both
+    # consumers of that ownership are in the same program: bound to a local and
+    # freed at scope exit, and consumed on the spot by `len` (which reads the
+    # length and nothing else). The second program is the other side of the
+    # rule: a callee that returns its own ARGUMENT, or a plain literal it never
+    # owned anything of, must NOT be freed — `str(s)` is the identity for a
+    # string, so freeing a returned `str(s)` is a crash. The runner scribbles
+    # freed memory, so a wrong free makes the comparisons (printed 3rd) fail
+    # rather than usually pass.
+    test_gimple_bounded_memory("gimple_fresh_returning_string_functions_are_owned", """\
+def mk(i: Int) -> String:
+    return "n" + String(i)
+
+def via_local(i: Int) -> String:
+    var s = "m" + String(i)
+    return s
+
+def via_slice(i: Int) -> String:
+    return ("abcdef")[1:3]
+
+def main():
+    print(mk(3))
+    print(via_local(9))
+    print(via_slice(0))
+    var total = 0
+    for r in range(600000):
+        total += len(mk(r % 100)) + len(via_local(r % 100)) + len(via_slice(0))
+    var bound = 0
+    for r in range(600000):
+        var a = mk(r % 100)
+        var b = via_local(r % 100)
+        var c = via_slice(0)
+        bound += len(a) + len(b) + len(c)
+    print(total)
+    print(bound)
+""", "n3\nm9\nbc\n4680000\n4680000\n", 40)
+
+    test_gimple_stdout("gimple_returned_string_that_is_not_fresh_is_not_freed", """\
+def alias(s: String) -> String:
+    return s
+
+def identity(s: String) -> String:
+    return str(s)
+
+def make() -> String:
+    return "kept-by-caller"
+
+def work(kept: List[String]) -> Int:
+    var t = 0
+    for i in range(4):
+        kept.append(alias("zz"))
+        kept.append(identity("yy"))
+        kept.append(make())
+        var c = String("q=") + String(i)
+        t += len(c)
+    return t
+
+def main():
+    var kept: List[String] = []
+    print(work(kept))
+    print(len(kept))
+    var hits = 0
+    for k in range(len(kept)):
+        if kept[k] == "zz":
+            hits += 1
+        if kept[k] == "yy":
+            hits += 10
+        if kept[k] == "kept-by-caller":
+            hits += 100
+    print(hits)
+""", "12\n12\n444\n")
+
+    # ── A list that owns its own string ELEMENTS (doc/MEMORY.html §3.B). A
+    # `split()` result's elements are fresh allocations made by the runtime
+    # function that built the list and by nothing else, but
+    # `mojo_list_append_str` stores the pointer it is given, so
+    # `mojo_list_free` released the container and left every string behind —
+    # ~48 B/iteration, measured over 100k and 400k iterations and now flat.
+    # The second program is the fail-closed half: `parts[0]` appended to a
+    # list the caller keeps hands an element pointer out of the list, and
+    # freeing the elements would dangle it, so the analysis
+    # (ownership_destruct.list_elements_owned) must refuse the element free
+    # there. The runner scribbles freed memory, so a wrong free shows up as
+    # the comparisons (printed 4th) failing rather than usually passing.
+    test_gimple_bounded_memory("gimple_split_result_element_strings_are_owned", """\
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var parts = String("a b c").split(" ")
+        t += len(parts)
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def lines(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var parts = String("x\\ny\\nz").splitlines()
+        t += len(parts)
+    return t
+
+def main():
+    print(work(3))
+    print(work(9))
+    print(lines(6))
+    var total = 0
+    for r in range(300000):
+        total += work(6) % 1000 + lines(4)
+    print(total)
+""", "9\n15\n18\n8100000\n", 40)
+
+    test_gimple_stdout("gimple_split_elements_that_escape_are_not_freed", """\
+def work(kept: List[String]) -> Int:
+    var t = 0
+    for i in range(4):
+        var parts = String("a b c").split(" ")
+        t += len(parts)
+        kept.append(parts[0])
+        var one = parts[1]
+        kept.append(one)
+    return t
+
+def main():
+    var kept: List[String] = []
+    print(work(kept))
+    print(len(kept))
+    var hits = 0
+    for k in range(len(kept)):
+        if kept[k] == "a":
+            hits += 1
+        if kept[k] == "b":
+            hits += 10
+    print(hits)
+    var total = 0
+    for r in range(20000):
+        var kk: List[String] = []
+        total += work(kk) % 1000
+    print(total)
+""", "12\n8\n44\n240000\n")
+
     # ── Strings bound to locals (doc/MEMORY.html section 3.B). A local bound
     # to a provably FRESH string (a `+` result, `String(i)`, a slice) is owned and
     # freed at scope exit, but only when every use is a read: `len`, a comparison,
@@ -4396,6 +4634,45 @@ fn main():
     print(v[0])
     print(v[1])
 """, "(7, 0.5)\n7\n0.5\n7\n0.5\n0.5\n[7, 0.5]\n(4, 5)\n4\n5\n")
+
+    # The per-slot kinds travel with the VALUE, keyed by the live list's
+    # address in a runtime side table — and that table's DELETE was clearing
+    # the slot outright instead of closing the probe gap, so freeing one list
+    # stripped the kinds off every other live list that shared its probe
+    # cluster. Heap MojoLists are 64 bytes apart (sizeof is 56, malloc's
+    # size class rounds up), so a bare `addr & mask` home function put EVERY
+    # kinds row in one cluster and the collision was the norm, not a
+    # coincidence: `pick()` below frees its first local on return, and the
+    # list it RETURNS is allocated 64 bytes later, so its repr came back
+    # through the no-kinds fallback — which reads each slot with
+    # mojo_list_get_int and hands a double's IEEE-754 bit pattern to
+    # strlen. It segfaulted. Both halves are pinned here: the printed repr
+    # and element reads (which go through mojo_list_get_boxed, so they need
+    # the row), and the survival of a second, longer-lived list in the same
+    # function (the direct-collision shape, without a callee boundary).
+    test_gimple_stdout("gimple_kinds_survive_a_sibling_list_being_freed", """\
+fn mixed(x: Float64, s: String) -> List:
+    return [x, 1, s]
+
+fn drop_one() -> List:
+    var first = mixed(1.5, "aa")
+    var kept = mixed(9.5, "zz")
+    return kept
+
+fn main():
+    var b = drop_one()
+    print(b)
+    var i = 0
+    print(b[i])
+    var j = 1
+    print(b[j])
+    print(b[2] == "zz")
+    var a = mixed(2.5, "yy")
+    var c = mixed(3.5, "xx")
+    print(a)
+    print(c)
+    print(list(a), list(c))
+""", "[9.5, 1, 'zz']\n9.5\n1\nTrue\n[2.5, 1, 'yy']\n[3.5, 1, 'xx']\n[2.5, 1, 'yy'] [3.5, 1, 'xx']\n")
 
     test_gimple_stdout("gimple_struct_uniform_formats_still_uniform", """\
 fn main():

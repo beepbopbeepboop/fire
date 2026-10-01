@@ -10,14 +10,15 @@ move tracking, a real borrow checker, and ASAP destruction — the complete
 model real Mojo uses to get Rust-class performance without a GC, not just
 enough syntax to parse it.
 
-Written 2026-09-15 while investigating
-`bugs/CODEGEN_container_no_deallocation_unbounded_growth.md` and
-`bugs/CODEGEN_container_free_registry_dangling_entries.md` — those two
-bugs' root fix (deciding exactly when a compiled program may free a
-container) is a strict subset of what a real ownership system gives for
-free. This doc is the long-term, correct answer; those two bug docs stay
-as the pragmatic short-term fix and get explicitly superseded in Phase 3
-below.
+Written 2026-09-15 while fixing the compiled path's container lifetime
+(the loop-local `{}`/`[]`/`set()` leak, and the address registries whose
+entries outlived the objects they identified — both since fixed and
+regression-tested, and their bug docs deleted per the fully-fixed-is-
+deleted rule). Deciding exactly when a compiled program may free a
+container is a strict subset of what a real ownership system gives for
+free, so this doc is the long-term, correct answer to the same question;
+Phase 3 below is its pragmatic short-term form, and the two now differ
+in scope rather than in intent.
 
 ## TODO — live tracking checklist
 
@@ -369,7 +370,7 @@ their removal, not their accommodation:
 - Anywhere a future phase finds another one of these — a cast that's
   "correct" only because nothing ever exercises the case it'd get wrong,
   a stub that silently no-ops (`mojo_set_discard` was exactly this until
-  today — see `bugs/CODEGEN_container_free_registry_dangling_entries.md`),
+  the container-registry fix),
   a shared body copy-pasted across two conceptually-different operations —
   fix it in place rather than routing around it. Consistent with this
   project's standing "no triage, fix the bugs" policy (memory:
@@ -638,12 +639,9 @@ Once those gaps are closed, the plan below still applies:
 - A binding that IS moved out at some point needs the free call placed
   only on the paths where it WASN'T moved (flow-sensitive, using the same
   data Phase 1 already computed) — this is strictly more precise than
-  the ad hoc "does it escape anywhere in the function, if so never free
-  it" conservative rule sketched in
-  `bugs/CODEGEN_container_no_deallocation_unbounded_growth.md`'s "where
-  the fix goes" section. Recommend abandoning that doc's standalone
-  escape-analysis plan once this phase lands — implement the fix here
-  instead, and close that bug doc against this one.
+  "does it escape anywhere in the function, if so never free it", which
+  is the conservative rule loop-local containers were first fixed under
+  and which this phase is.
 - Nested/loop-body-scoped bindings (the `leak_check.mojo` repro's actual
   per-iteration `d`/`s`/`l`) fall out of this naturally: each loop
   iteration is its own binding lifetime, so a container created and never
@@ -1053,12 +1051,10 @@ completion early.
 
 ## Relationship to other in-flight docs
 
-- `bugs/CODEGEN_container_no_deallocation_unbounded_growth.md` and
-  `bugs/CODEGEN_container_free_registry_dangling_entries.md` — the
-  pragmatic short-term fix for the immediate leak; Phase 3 above is the
-  correct long-term replacement for the first doc's ad hoc escape
-  analysis. Keep both bug docs open and cross-referenced to this doc until
-  Phase 3 actually lands.
+- `doc/MEMORY.html` §3/§7 — the measured state of what the compiled path
+  actually frees today, and the gaps ordered by value. Phase 3 below is
+  the long-term answer to the same question; where the two disagree,
+  MEMORY.html's is the one that was measured.
 - `doc/COROUTINE.html` — closest precedent in this codebase for how to
   stage a large semantic/codegen project safely.
 - `msl-offload-longterm-goal` (memory) — Phase 6's stack-allocation payoff

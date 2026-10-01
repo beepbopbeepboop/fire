@@ -227,7 +227,10 @@ def test_every_declaration_is_seen():
     # of the function-pointer dispatch helpers (`mojo_fnptr_call_d0..d4`), plus
     # the sort primitive the `list.sort()` fix moved four orderings onto.
     # Again taken from the call, not from the arithmetic.
-    for header, want in (('fire_runtime.h', 526),
+    # 526 -> 531 (2026-10-01, `memory-ownership`): the two frees for the two
+    # things a bound method can be — `mojo_bound_method_free` and
+    # `mojo_closure_free` — and their cleanup thunks. Taken from the call.
+    for header, want in (('fire_runtime.h', 531),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

@@ -148,6 +148,17 @@ int64_t mojo_vararg_call_5(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t
 int64_t mojo_vararg_call_6(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5);
 int64_t mojo_vararg_call_7(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6);
 int64_t mojo_vararg_call_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7);
+
+/* The two frees for the two things a bound method can be — `self` belongs to
+ * only one of them, so they cannot be one function. `mojo_bound_method_free`
+ * is a METHOD taken as a value: the receiver is not ours, only the wrapper,
+ * and its `_reg_bound_method` entry MUST be discarded or a later allocation
+ * at the same address is dispatched as a bound method (a dangling registry
+ * entry, the same shape as the container registries' `_destroy` helpers).
+ * `mojo_closure_free` is a CAPTURING LAMBDA, whose `self` is the environment
+ * the constructor allocated with it. */
+void mojo_bound_method_free(MojoBoundMethod *bm);
+void mojo_closure_free(void *bm);
 static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
     return ((int64_t (*)(void *))bm->fn)(bm->self);
 }
@@ -518,6 +529,14 @@ void mojo_cleanup_push_dict_stack(void *p);
 void mojo_cleanup_push_list_stack(void *p);
 void mojo_cleanup_push_set_stack(void *p);
 void mojo_cleanup_push_ptr(void *p);   /* a struct instance: unwinding free()s the block */
+/* A list that SOLELY owns its string elements (every one freshly allocated by
+ * the runtime function that built it) — see mojo_list_free_owned_strs. A
+ * list of strings is usually BORROWED, so this is chosen by the owner, never
+ * inferred from the list's element type. */
+void mojo_cleanup_push_list_strs(void *p);
+/* A closure's bound method and its environment are one allocation unit; this
+ * is the unwind thunk that frees both (see mojo_closure_free). */
+void mojo_cleanup_push_closure(void *p);
 /* Pop the `n` most-recently-pushed thunks WITHOUT invoking them -- call
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */
@@ -639,6 +658,12 @@ double      mojo_box_double(int64_t v);
 int64_t     mojo_box_int(int64_t v);
 char       *mojo_repr_boxed(int64_t v);
 void      mojo_list_free(MojoList *l);
+/* A list that SOLELY owns its string elements: frees every element as a
+ * `char *` and then the list. NOT the default free for a list of strings —
+ * `mojo_list_append_str` borrows, so the elements of a list built by
+ * `extend`, or read out of a dict, are somebody else's. Only the owner may
+ * choose this; see mojo/backend_gimple/emit_infra.py's `_OWNS_STR_ELEMS`. */
+void      mojo_list_free_owned_strs(MojoList *l);
 /* mojo_list_init/mojo_list_destroy: the in-place halves of mojo_list_new/
  * mojo_list_free, for a stack-declared MojoList (doc/OWNERSHIP_MODEL.md
  * Phase 6) -- init/destroy never touch the MojoList* itself with

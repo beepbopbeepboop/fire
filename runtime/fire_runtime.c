@@ -53,7 +53,9 @@ void mojo_exc_pop(void)
  * stack address — undefined behavior, corrupting the heap allocator). */
 typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
                MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
-               MOJO_CLEANUP_PTR   /* a plain malloc/calloc block: a struct instance */
+               MOJO_CLEANUP_PTR,   /* a plain malloc/calloc block: a struct instance */
+               MOJO_CLEANUP_LIST_STRS, /* a list that owns its string elements */
+               MOJO_CLEANUP_CLOSURE   /* a bound method plus the env it owns */
              } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
@@ -87,6 +89,8 @@ void mojo_cleanup_push_dict_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_DIC
 void mojo_cleanup_push_list_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STACK, p); }
 void mojo_cleanup_push_set_stack(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET_STACK, p); }
 void mojo_cleanup_push_ptr(void *p)        { _mojo_cleanup_push(MOJO_CLEANUP_PTR, p); }
+void mojo_cleanup_push_list_strs(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STRS, p); }
+void mojo_cleanup_push_closure(void *p)    { _mojo_cleanup_push(MOJO_CLEANUP_CLOSURE, p); }
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -124,6 +128,8 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_LIST_STACK: mojo_list_destroy((MojoList *)ptr); break;
             case MOJO_CLEANUP_SET_STACK:  mojo_set_destroy((MojoSet *)ptr);  break;
             case MOJO_CLEANUP_PTR:        free(ptr);                         break;
+            case MOJO_CLEANUP_LIST_STRS:  mojo_list_free_owned_strs((MojoList *)ptr); break;
+            case MOJO_CLEANUP_CLOSURE:    mojo_closure_free(ptr);            break;
         }
     }
 }
@@ -663,7 +669,20 @@ static struct {
     _KindRow *rows;
     uint64_t  cap;    /* power of two, 0 until first add */
     uint64_t  used;
+    int       shift;  /* 64 - log2(cap), as in _PtrReg */
 } _reg_kinds;
+
+/* Home slot for `addr`. The one-multiply hash and the high-bit shift are
+ * `_PtrReg`'s (_pr_home) for the same reason: a BARE `addr & mask` — which
+ * is what this table used — gives every pair of heap MojoLists the same home
+ * slot, because `sizeof(MojoList)` is 56 and malloc hands out 64-byte
+ * blocks, so consecutive allocations are 64 apart and congruent mod any
+ * power-of-two table size. Every live kinds row therefore sat in one probe
+ * cluster, which is both a linear-time probe and — the bug this fixes — a
+ * table whose DELETION could strand its neighbours (see _kinds_forget). */
+static inline uint64_t _kinds_home(uint64_t addr) {
+    return ((addr >> 3) * 0x9E3779B97F4A7C15ULL) >> _reg_kinds.shift;
+}
 
 static void _kinds_grow(void)
 {
@@ -672,10 +691,12 @@ static void _kinds_grow(void)
     uint64_t ocap = _reg_kinds.cap;
     _reg_kinds.rows = (_KindRow *)calloc((size_t)ncap, sizeof(_KindRow));
     _reg_kinds.cap  = ncap;
+    _reg_kinds.shift = 64;
+    for (uint64_t c = ncap; c > 1; c >>= 1) _reg_kinds.shift--;
     _reg_kinds.used = 0;
     for (uint64_t i = 0; i < ocap; i++) {
         if (!old[i].addr) continue;
-        uint64_t j = old[i].addr & (ncap - 1);
+        uint64_t j = _kinds_home(old[i].addr);
         while (_reg_kinds.rows[j].addr) j = (j + 1) & (ncap - 1);
         _reg_kinds.rows[j] = old[i];
         _reg_kinds.used++;
@@ -688,7 +709,7 @@ static _KindRow *_kinds_row(uint64_t addr)
 {
     if (!_reg_kinds.cap || !addr) return NULL;
     uint64_t mask = _reg_kinds.cap - 1;
-    uint64_t i = addr & mask;
+    uint64_t i = _kinds_home(addr);
     for (;;) {
         if (!_reg_kinds.rows[i].addr) return NULL;
         if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
@@ -707,7 +728,7 @@ static _KindRow *_kinds_row_for_write(uint64_t addr, int *fresh)
         *fresh = 1;
     }
     uint64_t mask = _reg_kinds.cap - 1;
-    uint64_t i = addr & mask;
+    uint64_t i = _kinds_home(addr);
     while (_reg_kinds.rows[i].addr) {
         if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
         i = (i + 1) & mask;
@@ -760,12 +781,36 @@ void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
 
 static void _kinds_forget(uint64_t addr)
 {
-    _KindRow *r = _kinds_row(addr);
-    if (!r) return;
-    free(r->boxes);
-    r->addr = 0;
-    r->kinds = NULL;
-    r->boxes = NULL;
+    if (!_reg_kinds.used) return;
+    uint64_t mask = _reg_kinds.cap - 1;
+    uint64_t i = _kinds_home(addr);
+    while (_reg_kinds.rows[i].addr != addr) {
+        if (!_reg_kinds.rows[i].addr) return;    /* not registered */
+        i = (i + 1) & mask;
+    }
+    free(_reg_kinds.rows[i].boxes);
+    /* Backward-shift deletion, the same algorithm (and the same reason) as
+     * _pr_del: clearing the slot outright would leave a hole that every
+     * LATER member of this probe cluster can no longer be found through, so
+     * one list's free would silently strip the element kinds off every other
+     * live list whose home slot it shared — and a heterogeneous list read
+     * with no kinds reads a double's IEEE-754 bit pattern as an int64_t,
+     * which the repr path then hands to strlen. Real, measured, and the
+     * shape of the dangling-registry bug this table was written without. */
+    uint64_t j = i;
+    for (;;) {
+        j = (j + 1) & mask;
+        if (!_reg_kinds.rows[j].addr) break;
+        uint64_t k = _kinds_home(_reg_kinds.rows[j].addr);
+        int in_range = (i <= j) ? (i < k && k <= j) : (i < k || k <= j);
+        if (!in_range) {
+            _reg_kinds.rows[i] = _reg_kinds.rows[j];
+            i = j;
+        }
+    }
+    _reg_kinds.rows[i].addr = 0;
+    _reg_kinds.rows[i].kinds = NULL;
+    _reg_kinds.rows[i].boxes = NULL;
     _reg_kinds.used--;
 }
 
@@ -1238,6 +1283,47 @@ int64_t mojo_vararg_call_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t
 
 
 
+
+/* Two frees for the two things a `MojoBoundMethod` can be, because `self`
+ * belongs to only one of them:
+ *
+ *  - `mojo_bound_method_free` — a METHOD taken as a value (`f = self.m`,
+ *    `readline.set_completer(self.complete)`). `self` is the receiver object,
+ *    owned by whoever holds it; only the wrapper is ours. Its REGISTRY entry is
+ *    discarded here, which is the whole reason this function exists and is
+ *    what the container registries already do in their `_destroy` helpers: an
+ *    address left in `_reg_bound_method` outlives its object, `malloc` hands
+ *    that address straight back out for something else, and
+ *    `mojo_is_bound_method` then reports a plain function pointer as a
+ *    bound method — so `mojo_fnptr_call_N` dispatches through a
+ *    `((int64_t (*)(void *))bm->fn)(bm->self)` on two words of whatever the
+ *    new object is. That is the dangling-registry shape of
+ *    bugs/CODEGEN_container_free_registry_dangling_entries.md, and it is what
+ *    makes freeing a bound method safe to do at all.
+ *  - `mojo_closure_free` — a CAPTURING LAMBDA. There `self` is the
+ *    `malloc(sizeof(env))` emit_calls' closure constructor allocated one
+ *    instruction earlier and filled with the captured values, and nothing
+ *    else holds either half, so the pair is one allocation unit.
+ *
+ * Neither is `mojo_bound_method_new`'s default free: a bound method that
+ * escapes (handed to a callee that stores it, returned, appended) must stay
+ * alive, and codegen only reaches these for a value it has proven cannot.
+ */
+void mojo_bound_method_free(MojoBoundMethod *bm)
+{
+    if (!bm) return;
+    _pr_del(&_reg_bound_method, (uint64_t)(uintptr_t)bm);
+    free(bm);
+}
+
+void mojo_closure_free(void *bmv)
+{
+    MojoBoundMethod *bm = (MojoBoundMethod *)bmv;
+    if (!bm) return;
+    free(bm->self);
+    mojo_bound_method_free(bm);
+}
+
 /* mojo_list_init/mojo_list_destroy: see mojo_set_init/mojo_set_destroy's
  * comment just above (same Phase 6 rationale, same refactor shape). */
 void mojo_list_init(MojoList *l)
@@ -1267,6 +1353,31 @@ void mojo_list_free(MojoList *l)
 {
     mojo_list_destroy(l);
     free(l);
+}
+
+/* A list of STRINGS that the list SOLELY owns — every element freshly
+ * allocated by the function that built the list, and by nothing else.
+ * `mojo_list_append_str` stores the pointer it is given and never copies it
+ * (see its definition above), so a plain `mojo_list_free` on such a list
+ * releases the container and leaves every element behind: that is the
+ * ~48 B/iteration of `String("a b c").split(" ")` in
+ * bugs/CODEGEN_call_result_container_never_freed.md, where the list itself
+ * was already being freed and only the strings inside it were not.
+ *
+ * The counterpart rule is what makes this safe: a list of strings is USUALLY
+ * borrowed (string literals, `d[k]` read back out of a dict, the elements of
+ * a list built by `extend`), and freeing those is a crash. So this is never
+ * the default free for a `MojoList *` — codegen picks it only for a value it
+ * has matched to one of the runtime functions in `_OWNS_STR_ELEMS`
+ * (mojo/backend_gimple/emit_infra.py), each of which was read to allocate
+ * every element it appends and to append nothing it did not allocate.
+ * `mojo_str_rsplit` is deliberately NOT in that set: it hands its result the
+ * very same pointers its own intermediate list holds. */
+void mojo_list_free_owned_strs(MojoList *l)
+{
+    if (!l) return;
+    for (int64_t i = 0; i < l->len; i++) free((void *)(intptr_t)l->data[i]);
+    mojo_list_free(l);
 }
 
 static void _list_grow(MojoList *l)
@@ -4182,6 +4293,7 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
     int64_t n = mojo_list_len(all);
     if (maxsplit < 0 || maxsplit >= n - 1) {
         for (int64_t i = 0; i < n; i++) mojo_list_append_str(l, mojo_list_get_str(all, i));
+        mojo_list_free(all);      /* the strings moved to `l`; the list did not */
         return l;
     }
     /* Merge the leftmost (n - maxsplit) tokens back together with sep
@@ -4207,6 +4319,11 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
      * struct method's forward-declared parameter list. */
     mojo_list_append_str(l, merged);
     for (int64_t i = n_keep; i < n; i++) mojo_list_append_str(l, mojo_list_get_str(all, i));
+    /* `all` is a scratch list whose ELEMENTS `l` now shares (the merge above
+     * copies them into `merged`; the tail is moved by pointer), so only the
+     * list's own struct and buffer are released here — the strings belong to
+     * `l`, which is the returned value. */
+    mojo_list_free(all);
     return l;
 }
 
