@@ -1,10 +1,11 @@
-# FORMAL_arm64_known_proof_gaps: the three arm64 examples whose proof is a documented gap
+# FORMAL_arm64_known_proof_gaps: the arm64 examples whose proof is a documented gap
 
-The arm64 formal suite is **40 pass / 3 known-gap / 0 fail**. The three gaps are
-listed in `EXPECTED_FAILURES` in `test_formal.py`, and that list is the
-authority on whether they are still gaps — a stale entry is reported by the
-harness's own check. This document says *why* each one is hard and what closing
-it needs, which the inline comments do not.
+The arm64 formal suite is **39 pass / 6 known-gap / 0 fail** (measured
+2026-10-01, `python3 test_formal.py`). The six gaps are listed in
+`EXPECTED_FAILURES` in `test_formal.py`, and that list is the authority on
+whether they are still gaps — a stale entry is reported by the harness's own
+check. This document says *why* each one is hard and what closing it needs,
+which the inline comments do not.
 
 Per the harness's own contract: an entry here means "known unproven, for the
 stated reason" — **not** "passing". Nothing is ever stubbed with `sorry` to go
@@ -47,17 +48,53 @@ split has to be folded back first — and the nesting depth is data-dependent.
 That is recorded here so nobody restarts the ladder. The right fix is to teach
 `mem_read_write_below` the split form so that nothing needs collapsing at all.
 
+## `countdown` and `wge` — the generated loop MODEL, not the machine
+
+These two are the `while n > 0` / `while n >= 1` spellings of one shape, and the
+shape is a MODEL, not a lowering. The measurement that settles it (and that the
+`CODEGEN_arm64_cmp_flags_and_loop_signedness.md` entry now records) is that a
+negative counter really does leave the loop immediately and is returned
+unchanged — so `countdown_go`'s `| 0 => 0 | k+1 => countdown_go k` is the wrong
+function of the source for exactly the inputs the sign bit selects.
+
+`wge` is the same gap as `countdown` (`≥ 1` rather than `> 0`); `wdiff`
+(`while n != 0`) is NOT affected, because equality is signedness-independent,
+and it passes with no hole. Both are in `EXPECTED_FAILURES` with the reason.
+
+**Owner:** `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` §"Still open 3",
+which names the three generator sites and the statements each has to become.
+This document does not repeat them; the two are one piece of work and the
+other one is the precise version.
+
+## `subscript_var` — a runtime index has no domain in the model
+
+`a = [10,20,30]; i = 1; return a[i]`. The program builds, runs and returns 20
+on both architectures, and the x86-64 generator proves it. On arm64 the
+*machine* half is proved — every `LDR`/`STR` through a non-SP base gets a correct
+step RESULT lemma, and the block certificates build. What is missing is the
+*source* half, and it is not a dataflow question: the semantic model is
+`UInt64 → UInt64`, so a list has no domain in it and `a[i]` has no value; and
+the list's storage (a blob whose first word is its count) is never related to
+the source literal.
+
+**Owner:** `FORMAL_wide_receiver_by_reference.md`, which records both halves
+(a list domain in the model, and a `Frame.frameToEnv`-shaped fact about the
+blob). Left out of the sections above only because it is that document's
+subject, not this one's.
+
 ## Relationship to the `B.cond` work
 
-These three are **pre-existing** and independent of
-`CODEGEN_arm64_cmp_flags_and_loop_signedness.md`. That work took the suite from
-30 pass / 10 fail to 40 / 0 without touching them, and its 13 remaining sorries
-are a separate matter again (two sites, one root cause: `while_dec_exit_contract`
-is written register-shaped). Three distinct problems, and the counts should not
-be conflated:
+These gaps are **pre-existing** and independent of
+`CODEGEN_arm64_cmp_flags_and_loop_signedness.md`'s CODEGEN half. That work took
+the suite from 30 pass / 10 fail to 40 / 0 without touching them. Three
+distinct problems, and the counts should not be conflated:
 
 | | count | owner |
 |---|---|---|
-| known gaps (fail, documented reason) | 3 | this document |
-| sorries in passing proofs | 13, in 9 of 43 | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` |
-| passing proofs with no assumption | 34 of 40 | — |
+| known gaps (fail, documented reason) | 6 | this document (`either`/`both` = 1 shape, `fib` = 1, `countdown`/`wge` = 1, `subscript_var` = 1) |
+| sorries in passing proofs | 2, both in `sum_range` | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` ("Still open 3", item 2: the range loop's `loop_cond_flag` states an UNSIGNED order) |
+| passing proofs carrying no `sorry` at all | 38 of 39 | — |
+
+The `either`/`both` and `fib` entries above are the original three gaps of this
+document; `countdown`, `wge` and `subscript_var` were added later and are
+recorded in `test_formal.py`'s inline comments with the same contract.

@@ -13,7 +13,8 @@ route them. Everything untagged is context, not a request.
 
 | fact | evidence |
 |---|---|
-| `formal-dylib` is **RED** | 10 PASS / 1 FAIL, `TimeoutExpired 600s` on `fire.py dylib --formal`. This is **intended**: `d9443ed` committed the emitter deliberately broken so it is visible rather than lost. |
+| `formal-dylib` is **RED** | 11 PASS / 1 FAIL (measured 2026-10-01, `python3 test_formal_dylib.py`; the 2026-10-01 tree has one more passing case than the 10 recorded below). The FAIL is `default path emits a checked proof`: `default (prove) dylib build failed: … lean timed out`. |
+| That red is **cached, and caching makes it stick** | `formal/lean.py::check_proof_cached` publishes FAIL verdicts as well as PASS ones, so the timeout is replayed in ~0.1 s on every later run and no amount of re-running on a quieter machine re-derives it. A direct `lean` run on the emitted file (`.tmp/dy/proved_proof.lean`, 210 KB, from `def triple(n): return n * 3`) did not finish in **30 minutes** on this box, so the red is real rather than a stale artefact — but it is also not cheap to re-measure, which is why it needs a deliberate measurement rather than a rerun. |
 | `Total` is **proved** for acyclic, call-free exports | `DylibExport.total_of_halts` + the generator's CFG walk. 0 errors, 0 holes on `triple`. |
 | `Total` is **true but unproved** for looping exports | `e0af987` made `exportFuel` n-dependent, so it stopped being false. A walk scoped to acyclic/call-free is what a loop is not, so no proof exists. |
 | The one admitted `sorry` in a plain dylib proof is gone | the emitter derives the spec from the **source** AST, so `_spec` is a proved contract, not an obligation. |
@@ -22,6 +23,14 @@ route them. Everything untagged is context, not a request.
 **Do not make `formal-dylib` green by reverting `d9443ed`.** A green test that
 does not do what we want is worse than a red that needs fixing: a red gets
 fixed, a green lie is technical debt.
+
+**Not the arm64 proof generator's bridge work.** `generate_dylib_proof` is a
+self-contained 117-line function that calls none of `_go_defs_for`,
+`emit_runs`, `_gen_dec_while_block`, `_gen_countdown_loop`, `_COND_LEMMA` or
+`_VALUE_SIMP`, and the emitted dylib proof contains no `sKey` and no
+`eval_eq_mojo` at all (checked by reading both). So the two generator changes
+made on 2026-10-01 for the example suite (`003a4696`, `8c1011ae`) cannot have
+moved this, and a future bisect of this red should not start there.
 
 ---
 
