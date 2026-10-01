@@ -7305,6 +7305,136 @@ WAVE7_G2_CASES = [
      "    return h.at(1) + h.size()\n", 88, None),
 ]
 
+# `a == b` on two FRAME ADDRESSES, which used to be a flag-setting compare of
+# two words and therefore an answer about ADDRESSES: CPython's INHERITED
+# `__eq__`, correct for a struct that declares none and a silent bypass of the
+# one that does.  Three rows because the question has three answers and a fix
+# that gets two of them right is the same defect again.
+#
+# The full case set for this construct, including the CPython-oracle comparison
+# and the two refusals, is `test_formal_eq_dispatch.py`.  These three are here
+# because this file is the registered suite job and a construct nothing in it
+# exercises is a construct nothing in it can regress.
+EQ_DISPATCH_CASES = [
+    # The reproducer: `__eq__` that ignores its argument, reached through the
+    # operator and through the explicit spelling in the same printf, because the
+    # two are the same question asked twice and CPython makes them equal.
+    # Pre-change on BOTH backends: `eq=0 direct=1`.
+    ("eq_operator_reaches_a_declared_eq",
+     "class Plain:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x = p\n"
+     "        self.y = q\n"
+     "    def __eq__(self, other):\n"
+     "        return True\n"
+     "def main(n):\n"
+     "    var a = Plain(1, 2)\n"
+     "    var b = Plain(3, 4)\n"
+     "    printf(\"eq=%d direct=%d\\n\", 1 if a == b else 0,\n"
+     "           1 if a.__eq__(b) else 0)\n"
+     "    return 0\n", 0, "eq=1 direct=1"),
+    # The GUARD, and the direction the fix must not move: no declared dunder, so
+    # CPython's inherited IDENTITY comparison stands, which on this path is the
+    # address compare that was always there.  `a == a` is 1, `a == b` is 0 for
+    # two live objects, and `a == c` is 0 for two objects holding equal field
+    # values.  A rewrite that fired on every comparison rather than on a
+    # declared dunder would get the last two wrong.
+    ("eq_no_declared_dunder_stays_identity",
+     "class Bare:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x = p\n"
+     "        self.y = q\n"
+     "def main(n):\n"
+     "    var a = Bare(1, 2)\n"
+     "    var b = Bare(3, 4)\n"
+     "    var c = Bare(1, 2)\n"
+     "    printf(\"same=%d diff=%d cross=%d\\n\", 1 if a == a else 0,\n"
+     "           1 if a == b else 0, 1 if a == c else 0)\n"
+     "    return 0\n", 0, "same=1 diff=0 cross=0"),
+    # AGREE-OR-REFUSE.  `v` holds an `A` or a `B` depending on the branch, and
+    # only `B` declares a dunder, so which call the comparison lowers to depends
+    # on the path and this analysis has no path sensitivity.  Pre-change this
+    # BUILT and compared two addresses.
+    ("eq_two_candidate_structs_are_refused",
+     "class A:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x = p\n"
+     "        self.y = q\n"
+     "class B:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    z: int\n"
+     "    def __init__(self, p, q, r):\n"
+     "        self.x = p\n"
+     "        self.y = q\n"
+     "        self.z = r\n"
+     "    def __eq__(self, other):\n"
+     "        return True\n"
+     "def main(n):\n"
+     "    var v = A(1, 2)\n"
+     "    if n:\n"
+     "        v = B(1, 2, 3)\n"
+     "    printf(\"r=%d\\n\", 1 if v == v else 0)\n"
+     "    return 0\n",
+     "refuse:compares two FRAME ADDRESSES", None),
+    # A NAME THAT STOPS BEING A FRAME.  The holder set is additive, so
+    # `r = 5` after `r = R()` leaves every `r.<field>` lowered as a load at
+    # `[5 + 8·slot]`; measured on both architectures from a green build, SIGSEGV
+    # exit 139 where the source says 5.  The refusal names the binding that
+    # disagrees, because "r is a frame" and "r is a word" are the whole
+    # disagreement and the reader has to be told which line settles it.
+    ("holder_rebound_from_a_word_is_refused",
+     "class R:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "def main(n):\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r = 5\n"
+     "    return r.a\n",
+     "refuse:r is assigned 5 in main()", None),
+    # A LOCAL READ BEFORE IT HAS BEEN ASSIGNED, on a name that is also a
+    # module-level binding.  The right-hand `G` does NOT resolve in module scope:
+    # a name assigned anywhere in a function body is local to that body from its
+    # first line, so CPython raises UnboundLocalError and the program has no
+    # number.  What this path did was read the local's uninitialised register —
+    # 78152773 on arm64 and 11 on x86-64 from identical source.  It is also where
+    # bugs/FORMAL_local_shadows_module_global's proposed fix is corrected:
+    # making the gate order-dependent would answer 6, a number CPython never
+    # produces.
+    ("a_local_read_before_its_assignment_is_refused",
+     "G = 5\n"
+     "def bump():\n"
+     "    G = G + 1\n"
+     "    return G\n"
+     "def main(n):\n"
+     "    return bump()\n",
+     "refuse:G is read in bump() at `G + 1`", None),
+    # The sibling the filing did not mention: the same name WRITTEN through a
+    # `global` declaration, which the language allows and the value model has
+    # nowhere for.  There is no storage a write could outlive a frame in, so both
+    # emitters treat the declaration as a no-op — CPython answers 6 and 6 where
+    # this path answered 10601485 and 5 on arm64 and 11 and 5 on x86-64.
+    ("a_mutated_module_global_is_refused",
+     "G = 5\n"
+     "def bump():\n"
+     "    global G\n"
+     "    G = G + 1\n"
+     "    return G\n"
+     "def rd():\n"
+     "    return G\n"
+     "def main(n):\n"
+     "    return bump() + rd()\n",
+     "refuse:G is declared `global` in bump() and assigned there", None),
+]
+
 
 # ── SILENT WRONG ANSWERS in the arm64 lowering ─────────────────────────────
 #
@@ -7719,10 +7849,18 @@ REFUSAL_CASES = [
      None),
     # The same defect at MODULE level, where CPython's error is NameError
     # rather than UnboundLocalError. Both spellings are in the diagnostic.
+    # The EXPECTED WORDS are `model.read_before_store_refusal`'s as the branch
+    # rewrote it, and the rewrite is an improvement rather than a loosened
+    # assertion: this program has TWO facts about `x` — the module body assigns
+    # it, so it is a local from its first line, and it is also a module-level
+    # binding — and the old sentence reported neither, while the new one names
+    # the collision, quotes CPython's own error, and gives the two measured
+    # wrong answers (11 on x86-64, 78152773 on arm64) the old one could not.
+    # The refusal is the same refusal; pinned on a phrase only the new text has.
     ("read_before_store_at_module_level_refused",
      "x = x + 1\n"
      "printf(\"x=%d\", x)\n",
-     "refuse:is read at line 1 before anything in this function stores it",
+     "refuse:does NOT resolve in module scope until after the assignment",
      None),
     # The AUGMENTED spelling, which reads more like ordinary code than
     # `x = x + 1` does and is the one most likely to be missed.
@@ -8208,6 +8346,7 @@ def main():
                   + TYPE_VALUE_DTYPE_CASES + TYPE_VALUE_REFUSALS \
                   + TYPE_VALUE_TAG_CASES + ORIGIN_OF_CASES \
                   + ORIGIN_OF_REFUSALS
+                  + EQ_DISPATCH_CASES
                   + [X86_ONLY_1SLOT_BUG_CASE])
     # The CPython-pair group is a DIFFERENT SHAPE (three columns: name, Mojo
     # text, CPython text), so it is selected and dispatched separately rather

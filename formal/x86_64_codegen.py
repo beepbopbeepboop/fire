@@ -3691,16 +3691,34 @@ class X86_64Codegen:
         self._emit_call_exit(1)
         self.asm.label(end_label)
 
-    def _emit_for_unpack(self, tnames: list, blob_reg: Reg, tag: str) -> None:
-        """Bind a tuple target's names from the blob pointer in `blob_reg`.
+    def _emit_for_unpack(self, targets: list, blob_reg: Reg, tag: str) -> None:
+        """Bind a tuple target's elements from the blob pointer in `blob_reg`.
 
-        The element must itself be a `[count][e0…]` blob whose count matches
-        the target's arity; a mismatch exits(1), the same signal `a, b = rhs`
-        gives."""
+        Each element of the outer blob `[count][e0…]` must itself be a
+        `[count][e0…]` blob whose count matches the target's arity; a mismatch
+        exits(1), the same signal `a, b = rhs` gives.
+
+        An entry of `targets` is either a STORE KEY — a name, or a `h.<field>`
+        slot key, which `_store_var` dispatches on — or a NESTED GROUP, a list of
+        entries, which is a second unpack against the element at that position.
+        Both are needed for one construct: arm64's `_tup_slot` answers the same
+        question with `("nested", …)` against a name, and a flattening — which is
+        what this used to do, counting a nested group's elements into the OUTER
+        arity check — made `a, (b, c) = 1, (2, 3)` compare the blob's count of 2
+        against a target count of 3 and exit(1) with nothing printed, where arm64
+        and CPython both answer a=1 b=2 c=3.
+
+        R10 is the blob base across the loop, and the two things that could
+        disturb it are both handled rather than assumed: a NESTED group is
+        emitted between a `push`/`pop` of R10 because the recursive call takes
+        R10 for its own base, and a STORE KEY cannot disturb it — every arm of
+        `_store_var` with `src == RAX` writes RAX, R11 or memory and never R10
+        (the one arm that does, `src == Reg.R11`, is not reachable from here).
+        """
         fn = self.func_name
         self.asm.emit(encode_mov_r64_r64(Reg.R10, blob_reg))
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))
-        self.asm.emit(encode_cmp_r64_imm32(Reg.R11, len(tnames)))
+        self.asm.emit(encode_cmp_r64_imm32(Reg.R11, len(targets)))
         self._if_counter += 1
         uid = self._if_counter
         ok_label = f"{fn}_fu{uid}_ok"
@@ -3710,9 +3728,14 @@ class X86_64Codegen:
         self.asm.label(bad_label)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
-        for i, name in enumerate(tnames):
+        for i, target in enumerate(targets):
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R10, 8 * (i + 1)))
-            self._store_var(name, Reg.RAX)
+            if isinstance(target, list):
+                self.asm.emit(encode_push_r64(Reg.R10))
+                self._emit_for_unpack(target, Reg.RAX, f"{tag}_n{i}")
+                self.asm.emit(encode_pop_r64(Reg.R10))
+            else:
+                self._store_var(target, Reg.RAX)
 
     # ── expressions (result in RAX) ──────────────────────────────────
 
@@ -4503,26 +4526,72 @@ class X86_64Codegen:
             "x86-64 path: a slice is a materialized copy here, so writing "
             "through one would have to write back into its source blob")
 
+    def _tuple_target_key(self, el):
+        """One element of a tuple-assignment target, as something `_store_var`
+        can store into — a name, a frame-slot key, or a nested list of either.
+
+        The three shapes of `a, b = …` / `h.x, h.y = …` / `a, (b, c) = …`, and
+        one function deciding all three so a shape cannot be handled in one and
+        missed in the other.  arm64's `_tup_slot` is the same table with the
+        same three answers.
+
+        A `MemberExpr` whose key the slot tables do not name is REFUSED, and
+        through the same `model.field_access_refusal` the single-assignment
+        branch uses, because it is the same shape and not a tuple-specific one:
+        a field of an object formal has no model for.  arm64 would have reached
+        `_store_var` and fallen through into a register nobody allocated (the
+        `mov x19, src` the single-assignment branch's comment records), so
+        refusing here is the SHARED answer and not an x86-64-only one.
+        """
+        if isinstance(el, F.IdentExpr):
+            return el.name
+        if isinstance(el, F.MemberExpr):
+            key = _member_slot_key(el)
+            spelled = key or M.member_chain_text(el)
+            root = spelled.split(".", 1)[0] if spelled else "this"
+            if key is None or (key not in self._frame_slots
+                               and key not in self._frame_nested_slots):
+                raise CodegenError(M.field_access_refusal(
+                    spelled, self.func_name or "<module>", root,
+                    root in self._frame_holders))
+            return key
+        if isinstance(el, (F.ListExpr, F.TupleExpr)):
+            return [self._tuple_target_key(e) for e in el.elements]
+        raise CodegenError(
+            "tuple assignment targets must be plain names or fields on the "
+            f"formal x86-64 path (got {type(el).__name__})")
+
     def _emit_tuple_assign(self, stmt) -> None:
         """`a, b = rhs` — the RHS must be a `[count][e0…]` blob.
 
         The count is checked against the target arity and a mismatch
-        exits(1), the same signal an out-of-range subscript gives."""
-        names = []
+        exits(1), the same signal an out-of-range subscript gives.
+
+        A target element is whatever `_store_var` can store into, which is the
+        WHOLE of what makes the two architectures one implementation here: a
+        plain name gets its register or spill slot, and a `h.<field>` target
+        gets the frame-slot store the single-assignment branch above already
+        emits (`mov [holder + 8*slot], value`) — the same store, through the same
+        `_store_var`, so a tuple unpack and a plain store cannot disagree about
+        where a field's value lands.  arm64's `_store_tup_slot` reaches the same
+        two shapes and its `_store_var` does the same dispatch, which is why
+        this needs no new instruction and no new rule: it needed the TARGET
+        SHAPE to be passed through instead of refused.
+
+        A NESTED target group is a second unpack against the element at its
+        position, and `_emit_for_unpack` takes one as a nested list.  It used to
+        be flattened — `names.extend(...)` per element — which is what the arity
+        check then counted, so `a, (b, c) = 1, (2, 3)` compared a blob count of
+        2 against a target count of 3 and exited(1) with nothing printed, while
+        arm64 answered `a=1 b=2 c=3` and CPython agrees with arm64.
+        """
+        keys = []
         for el in stmt.target.elements:
-            if isinstance(el, F.IdentExpr):
-                names.append(el.name)
-            elif isinstance(el, (F.ListExpr, F.TupleExpr)):
-                names.extend(e.name for e in el.elements
-                             if isinstance(e, F.IdentExpr))
-            else:
-                raise CodegenError(
-                    "tuple assignment targets must be plain names on the "
-                    f"formal x86-64 path (got {type(el).__name__})")
-        if not names:
+            keys.append(self._tuple_target_key(el))
+        if not keys:
             raise CodegenError("tuple assignment needs at least one target")
         self._emit_expr(stmt.value)
-        self._emit_for_unpack(names, Reg.RAX,
+        self._emit_for_unpack(keys, Reg.RAX,
                               f"{self.func_name}_ta{self._while_counter}")
 
     def _emit_slice_parts(self, obj, start, stop, step) -> None:

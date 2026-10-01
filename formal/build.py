@@ -1293,6 +1293,9 @@ def compile_formal(source_path: str, output: str = None,
         M.publish_global_slots(slots)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
+        check_frame_holder_rebinds(functions)
+        check_construction_mismatches(functions)
+        check_shadowed_global_reads(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         check_dataclass_constructs(stmts, functions)
         # …and the fifth of the late checks, HERE for the same reason: a
@@ -1473,6 +1476,9 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
         M.publish_global_slots(slots)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
+        check_frame_holder_rebinds(functions)
+        check_construction_mismatches(functions)
+        check_shadowed_global_reads(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         # …and the fourth of the four, HERE for the same two reasons: this is
         # the dylib path, and a `@dataclass` option this backend cannot lower
@@ -1934,6 +1940,44 @@ def _check_declared_parameter(functions, callee, position, pname, want,
 _expr_spelling = M.expr_spelling
 
 
+def _expr_spelling(node) -> str:
+    """The source's own spelling of an expression, as far as a name needs one.
+
+    A refusal that quotes `CallExpr` where the source wrote `mid(1)` sends the
+    reader to the AST to find the call, which is the opposite of what a
+    diagnostic quoting a call site is for.  A shape with no short spelling is
+    named by its type, which is at least a true statement and is obviously a
+    placeholder to anyone who reads it.
+
+    The OPERATOR arms came later than the rest and the reason is a message that
+    read `G is read in bump() at BinaryOp` — a true statement, a placeholder,
+    and useless, because the reader's question is which read.  Every refusal that
+    quotes a value goes through this one function, so the fix belongs here rather
+    than in each caller."""
+    if isinstance(node, F.IdentExpr):
+        return node.name
+    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
+        return f"{node.func.name}({', '.join(_expr_spelling(a) for a in (node.args or []))})"
+    if isinstance(node, F.MemberExpr):
+        return _member_chain(node)
+    if isinstance(node, F.BinaryOp):
+        return (f"{_expr_spelling(node.left)} {node.op} "
+                f"{_expr_spelling(node.right)}")
+    if isinstance(node, F.UnaryOp):
+        return f"{node.op}{_expr_spelling(node.operand)}"
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return (f"{'(' if isinstance(node, F.TupleExpr) else ''}"
+                f"{', '.join(_expr_spelling(e) for e in node.elements)}"
+                f"{')' if isinstance(node, F.TupleExpr) else ''}")
+    if isinstance(node, F.SubscriptExpr):
+        return f"{_expr_spelling(node.obj)}[{_expr_spelling(node.index)}]"
+    for attr in ("value", "name"):
+        v = getattr(node, attr, None)
+        if isinstance(v, (str, int, float, bool)):
+            return str(v)
+    return type(node).__name__
+
+
 def _call_spelling(call, arg, position, pname) -> str:
     """`f(2, 3)` — the call as the source spells it, for the disagreement.
 
@@ -1988,6 +2032,14 @@ def _call_receivers(fn):
         if isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr):
             out.add(id(node.func))
     return out
+
+
+# How many times the holder fixpoint below is allowed to saturate-and-rewrite.
+# The pair converges in two on anything measured (the second round exists for
+# the `__eq__` second-parameter edge and for a `len` reached through a rewritten
+# call); the bound is a backstop that raises rather than the alternative, which is
+# a hang in the compiler on a program whose rewrite is not monotone.
+_HOLDER_FIXPOINT_ROUNDS = 4
 
 
 def _frame_receivers(functions: list, structs_by_name: dict,
@@ -2119,146 +2171,163 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             elif not M.struct_is_one_field(pst):
                 continue
             declared_holders[fn.name][pname] = pst
-        for name, sts in _constructor_bindings(fn, framed).items():
+        for name, sts in _constructor_bindings(
+                fn, framed, [f.name for f in functions]).items():
             holders[fn.name].add(name)
             hstruct[fn.name].setdefault(name, []).extend(sts)
-    changed = True
-    while changed:
-        changed = False
-        for fn in functions:
-            hs = holders[fn.name]
-            for node in M.iter_nodes(fn.body):
-                target = value = None
-                if isinstance(node, F.VarDecl):
-                    target, value = node.name, node.value
-                elif isinstance(node, F.AssignStmt) \
-                        and isinstance(node.target, F.IdentExpr):
-                    target, value = node.target.name, node.value
-                if target and isinstance(value, F.IdentExpr) \
-                        and value.name in hs and target not in hs:
-                    # a copy: the same frame under a second name
-                    hs.add(target)
-                    hstruct[fn.name][target] = list(hstruct[fn.name][value.name])
-                    changed = True
-                # A call to a function that RETURNS A FRAME binds a frame
-                # address, and this is the edge that makes the returned-frame
-                # convention a whole-image property rather than a per-file one:
-                # `q = make()` puts a frame address in `q`, so `q.x` is a frame
-                # read and `q` has to be in the holder table for the codegen to
-                # emit a load instead of a register move.
-                #
-                # It is inside the fixpoint rather than after it because it
-                # DEPENDS on what the fixpoint decides: which functions return
-                # a frame is itself read out of the holder table, so the two
-                # questions have to be asked together until neither answer
-                # moves.  It is keyed on the BINDING node — a `VarDecl` or an
-                # `AssignStmt` — and not on the `CallExpr`, because those are
-                # two different nodes in this walk and the binding is the one
-                # that says the address outlives the call.
-                #
-                # `M.call_callee_name` and NOT `value.func.name`, for the same
-                # reason the edge below uses it: a comptime specialization
-                # `make[T]()` names the same function `make` does, and reading
-                # the name off the node would make this edge blind to every
-                # generic frame-returning constructor.
-                if target and isinstance(value, F.CallExpr):
-                    frame_fn = M.call_callee_name(value.func)
-                    st = returns_frame.get(frame_fn) if frame_fn else None
-                    if st is not None and target not in hs:
+    for _round in range(_HOLDER_FIXPOINT_ROUNDS):
+        grew = False
+        changed = True
+        while changed:
+            changed = False
+            for fn in functions:
+                hs = holders[fn.name]
+                for node in M.iter_nodes(fn.body):
+                    target = value = None
+                    if isinstance(node, F.VarDecl):
+                        target, value = node.name, node.value
+                    elif isinstance(node, F.AssignStmt) \
+                            and isinstance(node.target, F.IdentExpr):
+                        target, value = node.target.name, node.value
+                    if target and isinstance(value, F.IdentExpr) \
+                            and value.name in hs and target not in hs:
+                        # a copy: the same frame under a second name
                         hs.add(target)
-                        hstruct[fn.name].setdefault(target, []).append(st)
-                        changed = True
-                if not isinstance(node, F.CallExpr):
-                    continue
-                # `model.call_callee_name`, and NOT `node.func.name`: a
-                # comptime specialization `f[T](r)` names the same function `f`
-                # does, contributes no call-time argument of its own, and so
-                # lands the frame on `f`'s parameter at exactly the position
-                # the bare spelling would. Reading the name off the node instead
-                # made this edge blind to every generic call, which is what left
-                # `_check_frame_escapes` with nothing to follow — and a blind
-                # edge here is the SILENT direction: had the escape check been
-                # lifted without this, `f`'s parameter would have read as an
-                # ordinary word and `r.a` a load eight bytes from wherever it
-                # pointed.  One recogniser, four readers
-                # (`_check_frame_escapes` and `_check_holder_agreements` as
-                # well, and the returned-frame edge above), because the four
-                # have to agree about which function a call is.
-                #
-                # It subsumes the `or not isinstance(node.func, F.IdentExpr)`
-                # guard this edge used to carry: `call_callee_name` answers
-                # None for a callee that is not a plain or generic name, which
-                # is the same set, and ONE recogniser for "which function is
-                # this call" is the property the comment above is about.
-                target_fn = M.call_callee_name(node.func)
-                if target_fn is None:
-                    continue
-                # EVERY argument position, not just the first, and a keyword
-                # resolved BY NAME — the position a keyword lands in is the
-                # parameter list's business, and reading it off the
-                # concatenated `args + kwargs` list would follow a frame
-                # address into the wrong parameter.
-                #
-                # The lifetime reasoning this needs, and it is the whole
-                # reason it is safe: a frame belongs to the function that
-                # created it, and an address only ever travels DOWN an active
-                # call chain, so the creator of a holder that arrived as an
-                # argument is an ancestor of the callee and its frame is live
-                # for every instant of the callee's activation. The callee may
-                # therefore read and write through it — which is the same
-                # licence a method receiver has, and the same one the
-                # cross-module hand-off relies on. What it may NOT do is let
-                # the word leave, because then it outlives the call and the
-                # creator may be gone: `return y`, a container, a field, a
-                # subscript and a module-level name are all refused by name in
-                # `_check_frame_escapes`.
-                #
-                # `r[1] == 0` is kept: a field read is a VALUE and not an
-                # address, so only a bare name hands the frame over.
-                #
-                # `plist` is the callee's OWN parameter list, and the edge is
-                # only taken for a position that list has: a callee this image
-                # does not have has no parameter to make a holder, and that is
-                # the opaque case `_check_frame_escapes` says so about. It is
-                # `function_param_shape(fn).names`, so it holds the RUNTIME
-                # parameters in order and a comptime parameter is not in it —
-                # which is right, because the brackets are passed ahead of these
-                # (`model.incoming_args`) and so occupy no call-time position.
-                plist = params_of.get(target_fn)
-                if not plist:
-                    continue
-                for pos, pname, _kw in _frame_argument_slots(node, plist):
-                    if pos >= len(plist):
+                        hstruct[fn.name][target] = list(hstruct[fn.name][value.name])
+                        changed = grew = True
+                    # A call to a function that RETURNS A FRAME binds a frame
+                    # address, and this is the edge that makes the returned-frame
+                    # convention a whole-image property rather than a per-file one:
+                    # `q = make()` puts a frame address in `q`, so `q.x` is a frame
+                    # read and `q` has to be in the holder table for the codegen to
+                    # emit a load instead of a register move.
+                    #
+                    # It is inside the fixpoint rather than after it because it
+                    # DEPENDS on what the fixpoint decides: which functions return
+                    # a frame is itself read out of the holder table, so the two
+                    # questions have to be asked together until neither answer
+                    # moves.  It is keyed on the BINDING node — a `VarDecl` or an
+                    # `AssignStmt` — and not on the `CallExpr`, because those are
+                    # two different nodes in this walk and the binding is the one
+                    # that says the address outlives the call.
+                    #
+                    # `M.call_callee_name` and NOT `value.func.name`, for the same
+                    # reason the edge below uses it: a comptime specialization
+                    # `make[T]()` names the same function `make` does, and reading
+                    # the name off the node would make this edge blind to every
+                    # generic frame-returning constructor.
+                    if target and isinstance(value, F.CallExpr):
+                        frame_fn = M.call_callee_name(value.func)
+                        st = returns_frame.get(frame_fn) if frame_fn else None
+                        if st is not None and target not in hs:
+                            hs.add(target)
+                            hstruct[fn.name].setdefault(target, []).append(st)
+                            changed = grew = True
+                    if not isinstance(node, F.CallExpr):
                         continue
-                    r = _root_ident(pname)
-                    if not (r and r[0] in hs and r[1] == 0):
+                    # `model.call_callee_name`, and NOT `node.func.name`: a
+                    # comptime specialization `f[T](r)` names the same function `f`
+                    # does, contributes no call-time argument of its own, and so
+                    # lands the frame on `f`'s parameter at exactly the position
+                    # the bare spelling would. Reading the name off the node instead
+                    # made this edge blind to every generic call, which is what left
+                    # `_check_frame_escapes` with nothing to follow — and a blind
+                    # edge here is the SILENT direction: had the escape check been
+                    # lifted without this, `f`'s parameter would have read as an
+                    # ordinary word and `r.a` a load eight bytes from wherever it
+                    # pointed.  One recogniser, four readers
+                    # (`_check_frame_escapes` and `_check_holder_agreements` as
+                    # well, and the returned-frame edge above), because the four
+                    # have to agree about which function a call is.
+                    #
+                    # It subsumes the `or not isinstance(node.func, F.IdentExpr)`
+                    # guard this edge used to carry: `call_callee_name` answers
+                    # None for a callee that is not a plain or generic name, which
+                    # is the same set, and ONE recogniser for "which function is
+                    # this call" is the property the comment above is about.
+                    target_fn = M.call_callee_name(node.func)
+                    if target_fn is None:
                         continue
-                    callee = plist[pos]
-                    if not callee or callee in holders.get(target_fn, ()):
+                    # EVERY argument position, not just the first, and a keyword
+                    # resolved BY NAME — the position a keyword lands in is the
+                    # parameter list's business, and reading it off the
+                    # concatenated `args + kwargs` list would follow a frame
+                    # address into the wrong parameter.
+                    #
+                    # The lifetime reasoning this needs, and it is the whole
+                    # reason it is safe: a frame belongs to the function that
+                    # created it, and an address only ever travels DOWN an active
+                    # call chain, so the creator of a holder that arrived as an
+                    # argument is an ancestor of the callee and its frame is live
+                    # for every instant of the callee's activation. The callee may
+                    # therefore read and write through it — which is the same
+                    # licence a method receiver has, and the same one the
+                    # cross-module hand-off relies on. What it may NOT do is let
+                    # the word leave, because then it outlives the call and the
+                    # creator may be gone: `return y`, a container, a field, a
+                    # subscript and a module-level name are all refused by name in
+                    # `_check_frame_escapes`.
+                    #
+                    # `r[1] == 0` is kept: a field read is a VALUE and not an
+                    # address, so only a bare name hands the frame over.
+                    #
+                    # `plist` is the callee's OWN parameter list, and the edge is
+                    # only taken for a position that list has: a callee this image
+                    # does not have has no parameter to make a holder, and that is
+                    # the opaque case `_check_frame_escapes` says so about. It is
+                    # `function_param_shape(fn).names`, so it holds the RUNTIME
+                    # parameters in order and a comptime parameter is not in it —
+                    # which is right, because the brackets are passed ahead of these
+                    # (`model.incoming_args`) and so occupy no call-time position.
+                    plist = params_of.get(target_fn)
+                    if not plist:
                         continue
-                    holders[target_fn].add(callee)
-                    hstruct[target_fn][callee] = \
-                        list(hstruct[fn.name][r[0]])
-                    changed = True
-        # The OTHER half of the same fixpoint: which functions RETURN a frame.
-        # It has to be here and not after the loop because the edge above reads
-        # it — `q = make()` is a holder only if `make` is known to return a
-        # frame — and because it reads the holder table the same loop is still
-        # growing.  The two questions therefore have to be asked together until
-        # neither answer moves, which terminates because frame-ness only ever
-        # GROWS: a return value is a frame either because a name holds one (the
-        # holder table, monotone) or because it is a call to a function already
-        # known to return one (also monotone).
-        for fn in functions:
-            status, st = _frame_return_status(fn, holders[fn.name],
-                                              hstruct[fn.name], returns_frame)
-            fn._frame_return_status = status
-            if status == _RETURN_FRAME and returns_frame.get(fn.name) is not st:
-                changed = True
-            if status == _RETURN_FRAME:
-                returns_frame[fn.name] = st
-            elif returns_frame.pop(fn.name, None) is not None:
-                changed = True
+                    for pos, pname, _kw in _frame_argument_slots(node, plist):
+                        if pos >= len(plist):
+                            continue
+                        r = _root_ident(pname)
+                        if not (r and r[0] in hs and r[1] == 0):
+                            continue
+                        callee = plist[pos]
+                        if not callee or callee in holders.get(target_fn, ()):
+                            continue
+                        holders[target_fn].add(callee)
+                        hstruct[target_fn][callee] = \
+                            list(hstruct[fn.name][r[0]])
+                        changed = grew = True
+            # The OTHER half of the same fixpoint: which functions RETURN a frame.
+            # It has to be here and not after the loop because the edge above reads
+            # it — `q = make()` is a holder only if `make` is known to return a
+            # frame — and because it reads the holder table the same loop is still
+            # growing.  The two questions therefore have to be asked together until
+            # neither answer moves, which terminates because frame-ness only ever
+            # GROWS: a return value is a frame either because a name holds one (the
+            # holder table, monotone) or because it is a call to a function already
+            # known to return one (also monotone).
+            for fn in functions:
+                status, st = _frame_return_status(fn, holders[fn.name],
+                                                  hstruct[fn.name], returns_frame)
+                fn._frame_return_status = status
+                if status == _RETURN_FRAME and returns_frame.get(fn.name) is not st:
+                    changed = grew = True
+                if status == _RETURN_FRAME:
+                    returns_frame[fn.name] = st
+                elif returns_frame.pop(fn.name, None) is not None:
+                    changed = grew = True
+        moved = (_rewrite_len_on_frame_receivers(functions, holders,
+                                          hstruct)
+                 + _rewrite_eq_on_frame_receivers(functions, holders,
+                                                 hstruct))
+        if not (grew or moved):
+            break
+    else:
+        raise CodegenError(
+            f"the holder analysis did not settle in {_HOLDER_FIXPOINT_ROUNDS} "
+            f"rounds: an operator rewrite is still introducing frames at each "
+            f"one, which means the rewrite is not monotone and the fixpoint it "
+            f"feeds has no fixed point. That is a compiler bug, not a program "
+            f"error")
+
     # The whole image's table, published on every function, and the reason it
     # is published rather than passed: the CALLER of a frame-returning function
     # is a different function from the one that returns it, and the emitters
@@ -2282,14 +2351,23 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     #     the frame as its first argument — which is the shape the by-reference
     #     design exists for, and needs nothing new to be right about.
     #
-    # No second fixpoint run is needed afterwards, and that is a fact rather
-    # than an omission: the rewrite introduces exactly one edge, `Struct___len__`
-    # reached with a frame in argument 0, and `Struct___len__`'s first parameter
-    # is already a holder because it is a method of a framed struct
-    # (`struct_receivers` above).  If that ever stopped being true,
-    # `_check_holder_agreements` at the end of this function is what would say
-    # so, by name, at the call site.
-    _rewrite_len_on_frame_receivers(functions, holders, hstruct)
+    # …and the fixpoint and the two rewrites above it are ONE fixpoint rather
+    # than three passes, because the rewrites feed it.  `len` introduces one
+    # edge, `Struct___len__` with a frame in argument 0, whose parameter is
+    # already a holder, so for `len` a second saturation was never needed and
+    # none happened.  `a == b` introduces an edge at argument 0 AND at argument
+    # 1: `S___eq__(a, b)` hands `b` to the method's SECOND parameter, and that
+    # parameter is a holder only because the fixpoint has seen the call.  The
+    # `__eq__` that reads the field it is given — `self.x == other.x`, which is
+    # what an equality method is for — was refused by name ("`other.x` is a
+    # field access through `other`, and this path has no way to say what
+    # `other` holds") until the round after the one that made the call.  Both
+    # rewrites are idempotent and only ever add, so the pair converges, and
+    # `_HOLDER_FIXPOINT_ROUNDS` is the bound that says so out loud rather than
+    # leaving a non-monotone rewrite to hang.  If that bound is ever reached,
+    # `_check_holder_agreements` at the end of this function is what would
+    # otherwise have said the parameter is not a holder, by name, at the call
+    # site.
     for fn in functions:
         hs = holders[fn.name]
         if not hs:
@@ -2574,7 +2652,9 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # function can see.  `params_of` is complete before the fixpoint runs,
         # so it is complete here.
         _check_frame_escapes(fn, hs, by_name, param0, owners, structs_by_name,
-                             set(_constructor_bindings(fn, framed)), rets,
+                             set(_constructor_bindings(
+                                 fn, framed,
+                                 [f.name for f in functions])), rets,
                              holders, hstruct, params_of)
         _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
         fn._frame_holders = hs
@@ -2612,6 +2692,282 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # skipped — see `_check_holder_agreements` for the program that measures it.
     _check_holder_agreements(functions, holders, hstruct, params_of,
                              declared_holders, structs_by_name)
+    _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
+                            returns_frame)
+    _park_construction_mismatches(functions, framed)
+
+
+
+def _park_construction_mismatches(functions, framed) -> None:
+    """PARK a `C(...)` the EMITTERS lower as a type conversion but which names a
+    local FRAMED struct — provided the name is then used as a receiver.
+
+    This is the other half of `_constructor_bindings`' guard.  The guard stops
+    the analysis claiming a frame for a call the emitters do not lower as one;
+    this says WHY, by name, because the alternative is a diagnostic that is
+    false.  The emitter's own `model.field_access_refusal` answers `a.f` with
+    "'a' is bound here as a parameter", and for a local bound from a conversion
+    that is not what happened: `a` holds the address of an interned `char *`.
+    A refusal whose stated reason is entirely false is the worst outcome on this
+    path (`bugs/FORMAL_frame_receiver_handoff.md` §4), and the analysis is the
+    only place that knows the difference, so it is the analysis that has to say
+    it.
+
+    **Only when the name is used as a RECEIVER.**  `var s = String()` on its own
+    is a `char *` and is correct on this path — that is the whole of
+    `bugs/FORMAL_string_value_model.md`'s decision, and a program that builds one
+    of those and never writes a field through it must keep building.  So the
+    finding needs a `MemberExpr` rooted at the name, which is the use that has no
+    reading.
+
+    The reproducer, which is the stdlib's own three-field `String` verbatim:
+
+    ```
+    struct String:
+        var _ptr_or_data: Pointer[UInt8]
+        var _len_or_data: Int
+        var _capacity_or_data: Int
+        def size(self) -> Int: return self._len_or_data
+    def main(n: Int) -> Int:
+        var a = String()
+        a._len_or_data = 5
+        return a.size()
+    ```
+
+    Before the guard, on both architectures: SIGBUS, exit 138, in read-only
+    `__TEXT` — the emitter produced the address of the interned empty string and
+    the analysis turned the field store into a store through it.
+    """
+    fns = [f.name for f in functions]
+    for fn in functions:
+        used_as_receiver = set()
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.MemberExpr):
+                continue
+            r = _root_ident(node)
+            if r is not None and r[1] >= 1:
+                used_as_receiver.add(r[0])
+        if not used_as_receiver:
+            continue
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            target = value = None
+            if isinstance(node, F.VarDecl):
+                target, value = node.name, node.value
+            elif isinstance(node, F.AssignStmt) and isinstance(node.target,
+                                                              F.IdentExpr):
+                target, value = node.target.name, node.value
+            if not target or not isinstance(value, F.CallExpr) \
+                    or not isinstance(value.func, F.IdentExpr):
+                continue
+            callee = value.func.name
+            if callee not in framed or target not in used_as_receiver:
+                continue
+            if M.call_lowers_as_framed_construction(
+                    callee, framed, len(value.args or [])
+                    + len(value.kwargs or []), fns):
+                continue
+            fn._construction_mismatch = (target, callee,
+                                         M.struct_field_summary(framed[callee]))
+            return
+
+
+def check_construction_mismatches(functions) -> None:
+    """Raise the construction/analysis disagreement
+    `_park_construction_mismatches` parked.
+
+    The fifth late frame check, at the entry points for the reason the other
+    four are: `_prepare_functions` runs before `_resolve_imports`, so a refusal
+    from inside it preempts the import diagnosis.  One finding is enough — a
+    program with two is one defect with two lines."""
+    for fn in functions:
+        finding = getattr(fn, "_construction_mismatch", None)
+        if finding is None:
+            continue
+        target, callee, summary = finding
+        raise CodegenError(M.construction_mismatch_refusal(
+            target, callee, summary, fn.name))
+
+
+def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
+                         returns_frame: dict = None) -> bool:
+    """Whether `value` is one of the three things that can put a FRAME in a name.
+
+    The list is the recognition's own, and it is short because the recognition
+    is: `formal/build.py`'s `_frame_receivers` makes a name a holder from a
+    method receiver of a framed struct, a construction of a framed struct, a
+    copy of another holder, and a callee parameter some call site reaches with a
+    frame address.  Three of those four are ASSIGNMENTS with a value, and they
+    are the two spellings below plus a constructor call:
+
+      * `S(...)` where `S` is a framed struct this module declares — the
+        construction, whose result IS the address of a fresh block;
+      * another holder's name — a copy, which copies the address;
+      * (a method's receiver is a PARAMETER, so it is not a value at all.)
+
+    `alias` is the struct the enclosing method is a method of, under the name
+    `Self`, because `self = Self(...)` is how a Mojo constructor rebinds its own
+    receiver and is in real stdlib code (`memory/alloc.mojo`,
+    `runtime/tracing.mojo`) — so `Self(...)` is a construction, and without the
+    alias every one of those files would be refused for rebinding a name to a
+    fresh frame of its own type.
+
+    A call to one of this module's own FUNCTIONS is on the list in exactly ONE
+    case, and it is the case the returned-frame convention created: a function
+    the image's own analysis has settled RETURNS A FRAME, so `q = make()` puts a
+    frame address in `q` and reading `q.x` is a frame read.  That is evidence,
+    not a guess — it is the same `returns_frame` table the emitter asks at the
+    call site to decide whether to reserve a block, so a rebind check and a
+    codegen cannot disagree about which calls hand back a frame.
+
+    Every OTHER call is deliberately NOT on the list, and the reason is the one
+    this docstring gave before the convention existed, unchanged: a call to an
+    ordinary function says nothing about frames, the function's return is
+    whatever its body returns, and a frame that outlived the function that built
+    it is the use-after-free the escape checks exist for.  Allowing every call
+    here would make the check silent for the shape it is most needed for — and
+    with the convention in place the shape it is most needed for is the OTHER
+    one, so the distinction is now the whole content of the rule.
+    """
+    if isinstance(value, F.IdentExpr):
+        return value.name in holders
+    if isinstance(value, F.CallExpr):
+        callee = M.call_callee_name(value.func)
+        if callee is not None and returns_frame and callee in returns_frame:
+            return True
+    if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
+        name = value.func.name
+        if alias is not None and name == "Self":
+            return M.struct_is_framed(alias)
+        st = (structs_by_name or {}).get(name)
+        return st is not None and M.struct_is_framed(st) \
+            and M.type_constructor_kind(name) is None
+    return False
+
+
+def _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
+                         returns_frame: dict = None) -> None:
+    """PARK every name this function holds a frame for and also assigns a word to.
+
+    The mirror image of the one-name-two-shapes defect wave 3 fixed, and
+    invisible to that fix by construction: `model.struct_frame_slot_candidates`
+    asks whether two FRAME layouts agree on a slot, and there is only one layout
+    here.  The second binding is not a frame at all, so the candidate set is
+    `[R]` and nothing contradicts it — there is simply a second binding whose
+    value is a word.  Measured, both architectures, from a green build:
+
+    ```
+    class R:
+        def __init__(self):
+            self.a = 0
+            self.b = 0
+    def main(n):
+        r = R()
+        r.a = 7
+        r = 5
+        return r.a
+    ```
+
+    → SIGSEGV, exit 139, where the source says 5.
+
+    **Parked, not raised, and that is the whole design.**  A refusal raised from
+    here would come from inside `_prepare_functions`, which runs BEFORE
+    `_resolve_imports`, so it would be reported in place of the import diagnosis
+    — the defect `check_frame_field_blob_premises` and
+    `check_construction_shapes` are placed outside that window to avoid, measured
+    at 67 and 14 files of this repository respectively, and `mojo/middle/
+    closures.py` moved from `not-answerable/host-import` to `codegen` when a new
+    channel was added there.  So the finding lands on `fn._frame_holder_rebinds`
+    and `check_frame_holder_rebinds` raises it from the entry points, beside
+    those two.
+
+    The finding is `(name, value spelling, the spelling that made it a holder)`,
+    because the message has to name the binding that DISAGREES: the two readings
+    are "`r` is a frame" and "`r` is a word", and the reader has to be told which
+    line settles it rather than being handed the conclusion.
+
+    `r = 5` inside a CONDITIONAL is the same finding, and is not special-cased:
+    the analysis has no path sensitivity, which is the same statement
+    `struct_dunder_dispatch_candidates` and `struct_frame_slot_candidates` make
+    when they refuse rather than pick, and it is why a store to a name that only
+    one path binds as a frame is refused here too.
+
+    **The method's own receiver is EXCLUDED, and it has to be.**  `self = Self(…)`
+    is how a Mojo constructor rebinds its own receiver, and it is in real stdlib
+    code — five occurrences across `memory/alloc.mojo` and
+    `runtime/tracing.mojo` alone — so a check that flagged it would refuse nine
+    stdlib files for rebinding a name to a fresh frame of its own type, which is
+    the opposite of the defect.  `self = <a word>` is a different thing again
+    (the caller's slot still points at the old frame, so the method's effect
+    does not reach its caller) and it is not this check's to decide; the escape
+    checks are where a receiver that stops being the caller's object belongs.
+    The exclusion is by NAME from `model.struct_receivers`, so `out self` and
+    `inout self` are covered by the same rule rather than by a second one.
+    """
+    owners = M.method_owner_names(list((structs_by_name or {}).values()))
+    for fn in functions:
+        hs = holders.get(fn.name) or ()
+        if not hs:
+            continue
+        by_name = hstruct.get(fn.name) or {}
+        owner = owners.get(fn.name)
+        receivers = set(M.struct_receivers(owner)) if owner is not None else set()
+        findings = []
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if isinstance(node, F.AssignStmt):
+                if isinstance(node.target, F.IdentExpr):
+                    targets = [node.target]
+                elif isinstance(node.target, (F.TupleExpr, F.ListExpr)):
+                    targets = list(node.target.elements)
+                else:
+                    targets = []
+                values = (list(node.value.elements)
+                          if isinstance(node.value, (F.TupleExpr, F.ListExpr))
+                          else [node.value])
+            elif isinstance(node, F.VarDecl):
+                if node.value is None:
+                    continue
+                targets, values = [node.name], [node.value]
+            else:
+                continue
+            if not targets or len(targets) != len(values):
+                # A target/value arity this path does not pair up (a starred
+                # element, a group) is the tuple-store pass's question, not this
+                # one's; saying "one name is rebound" about a pairing that does
+                # not exist would be a claim about a construct it did not read.
+                continue
+            for target, value in zip(targets, values):
+                if not isinstance(target, F.IdentExpr) or target.name not in hs:
+                    continue
+                if target.name in receivers:
+                    continue
+                if _value_may_be_a_frame(value, structs_by_name, hs, owner,
+                                        returns_frame):
+                    continue
+                cands = by_name.get(target.name) or ()
+                findings.append((
+                    target.name, _expr_spelling(value),
+                    ", ".join(f"{st.name}()" for st in cands)
+                    or "a frame this function was given",
+                    tuple(cands)))
+        if findings:
+            fn._frame_holder_rebinds = findings
+
+
+def check_frame_holder_rebinds(functions) -> None:
+    """Raise the name-rebound-from-a-word findings `_collect_holder_rebinds` parked.
+
+    The fourth late frame check, and it is at the entry points for the measured
+    reason the other three are: `_prepare_functions` runs before the imports
+    resolve, so a refusal raised from inside it preempts the import diagnosis,
+    which is the answer that says whether the file is reachable at all.  One
+    finding is raised rather than all of them, because a program with three of
+    them has one defect with three lines and the first is enough to act on."""
+    for fn in functions:
+        for name, value_spelling, frame_spelling, cands in (
+                getattr(fn, "_frame_holder_rebinds", ()) or ()):
+            raise CodegenError(M.holder_rebound_from_a_word_refusal(
+                fn.name, name, value_spelling, frame_spelling,
+                cands))
 
 
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:
@@ -2763,7 +3119,7 @@ def _erase_identity_intrinsics(node):
     return node
 
 
-def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> None:
+def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> int:
     """`len(h)` → `Struct___len__(h)`, for every `h` that holds a frame.
 
     The `len` half of the by-reference hand-off, and the reason it is a REWRITE
@@ -2801,6 +3157,7 @@ def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> None:
     the blob-count lowering that has always worked; rewriting it would call a
     struct's `__len__` on a word that is a value.
     """
+    moved = 0
     for fn in functions:
         hs = holders.get(fn.name) or ()
         by_name = hstruct.get(fn.name) or {}
@@ -2839,6 +3196,193 @@ def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> None:
                 (node, M.method_function_name(owner, M.DUNDER_LEN)))
         for node, callee in pending:
             node.func = F.IdentExpr(name=callee)
+        moved += len(pending)
+    return moved
+
+
+def _replace_nodes(root, replacements: dict) -> None:
+    """Swap each child of `root` that `replacements` names, in place.
+
+    A pass that has to turn one NODE into a differently-shaped node — a
+    `BinaryOp` into a `CallExpr` — cannot do it by mutating the node it found,
+    because the fields it would have to write do not exist on the shape it is
+    replacing.  It has to reach the parent, which is why this exists and why
+    `M.iter_nodes` is not enough: that walk yields a node and then recurses into
+    it, so a rewrite applied during the walk is a walk that mutates what it is
+    walking.  Collect first, replace second, exactly as
+    `_rewrite_len_on_frame_receivers` does.
+
+    Keyed by `id()` because the nodes are dataclasses with no `__eq__` of their
+    own — `id` is the identity the walk has, and every key here comes from a node
+    the walk is currently holding, so no node can be collected and freed between
+    being found and being replaced.
+    """
+    if isinstance(root, (list, tuple)):
+        for i, child in enumerate(root):
+            new = replacements.get(id(child))
+            if new is not None:
+                root[i] = new
+            else:
+                _replace_nodes(child, replacements)
+        return
+    if not hasattr(root, "__dataclass_fields__"):
+        return
+    for name in root.__dataclass_fields__:
+        child = getattr(root, name)
+        new = replacements.get(id(child))
+        if new is not None:
+            setattr(root, name, new)
+        elif isinstance(child, (list, tuple)):
+            _replace_nodes(child, replacements)
+        elif hasattr(child, "__dataclass_fields__"):
+            _replace_nodes(child, replacements)
+
+
+def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
+                      hs) -> object:
+    """The call that answers `left op right`, or None to leave the operator be.
+
+    The decision is `model.struct_dunder_dispatch_candidates` and nothing here
+    decides it again; this reads its answer out of the table, refuses the
+    disagreement by name, and builds the call the ordinary call path then
+    handles.  `None` is the answer for every shape this pass deliberately does
+    not touch, and each is a shape where the pre-existing lowering is either
+    CORRECT or already refused by something closer to the mistake:
+
+      * an operand that is not a BARE NAME — `f(h) == h`, `h.x == h`.  The
+        holder table is keyed by name, and a name is the only thing here that can
+        say what a word holds; guessing past it is the bug this file exists to
+        stop;
+      * a name with no candidates, which is a plain word, so its `==` is the
+        word compare that has always run;
+      * no candidate declaring the dunder, which is CPython's INHERITED
+        identity `__eq__` — and a frame's address compare already IS that, so
+        leaving it alone is the right answer and not a gap.
+    """
+    if not isinstance(left, F.IdentExpr) or not isinstance(right, F.IdentExpr):
+        return None
+    if left.name not in hs or right.name not in hs:
+        return None
+    cands = list(by_name.get(left.name) or ()) + list(by_name.get(right.name)
+                                                  or ())
+    if not cands:
+        return None
+    owner, dunder, negate, (disagree, rows) = \
+        M.struct_dunder_dispatch_candidates(cands_l, cands_r, op)
+    if disagree:
+        raise CodegenError(M.eq_dispatch_candidates_disagree(
+            f"{left.name} {op} {right.name}",
+            sorted({st.name for st in cands}), rows))
+    if owner is None:
+        return None
+    call = F.CallExpr(
+        func=F.IdentExpr(name=M.method_function_name(owner, dunder)),
+        args=[left, right])
+    if not negate:
+        return call
+    return F.UnaryOp(op="not", operand=call)
+
+
+def _rewrite_eq_on_frame_receivers(functions, holders, hstruct) -> int:
+    """`a == b` → `Struct___eq__(a, b)`, for two names that hold the same frame.
+
+    The COMPARISON half of what `_rewrite_len_on_frame_receivers` does for
+    `len`, and it is here for exactly the reason that function's call site gives:
+    the operator carries no type, so nothing can decide WHOSE `__eq__` it is until
+    the holder analysis has run, and rewriting it before then would replace a
+    word compare with a call to a method the type may not have.
+
+    Why it was a WRONG ANSWER and not a refusal: `a == b` on two frame
+    addresses is a flag-setting compare of two words, and the words are
+    ADDRESSES, so the operator answers "are these the same object" — which is
+    CPython's INHERITED `__eq__` and is correct for a struct that declares none.
+    A struct that DOES declare one is the case the language sends to the method
+    and the lowering bypassed: measured, a class whose `__eq__` returns
+    unconditionally True gave `eq=0 direct=1`, where CPython gives
+    `eq=1 direct=1` — the method was found, called and ignored by the operator,
+    and a program that took the wrong branch said nothing about it.
+
+    BOTH operands must be names this analysis believes hold a frame of the SAME
+    single struct, and that is the whole of the safety argument, so it is worth
+    spelling out rather than leaving to the code:
+
+      * both being holders is what makes the rewritten call SAFE.  The callee is
+        the struct's own method, its first parameter is that struct's receiver,
+        and a receiver is a frame address by definition — so the call is the
+        shape the by-reference design exists for and `_check_frame_escapes`
+        follows it into a parameter it recognises.  Rewriting `h == 5` instead
+        would hand a word that may not be a frame to a method that dereferences
+        it, and `h`'s own name can be rebound to a word elsewhere in the same
+        function (`bugs/FORMAL_holder_rebound_from_a_word.md`), so "may not be"
+        is a measured fact about this pass, not a hypothetical;
+      * the SAME struct is what makes it CORRECT.  Python resolves
+        `a == b` through `type(a)`, and the two agreeing means there is no
+        reflected-operand question to answer — which this path could not answer,
+        since `NotImplemented` has no representation;
+      * a disagreement is REFUSED rather than resolved, for the reason
+        `struct_frame_slot_candidates` gives: the call would be one of two and
+        the program would build, run and answer with the other one.
+
+    The chain spelling (`a == b == c`) is one `F.CompareChain` and lowers here
+    as the `and` of its pairwise comparisons, which is what the language says a
+    chain is.  Only when EVERY operand is a bare name: the rewrite re-reads the
+    middle operands, and a name read twice is the same load twice, while an
+    operand with a call in it would be called twice where the language calls it
+    once.  A chain with a call in it is left alone — see the remainder named in
+    `bugs/FORMAL_eq_does_not_dispatch_to_a_user_dunder.md`.
+
+    Returns how many operators it rewrote, which is what lets the caller run
+    this and the holder fixpoint as ONE fixpoint: a round that neither grew a
+    holder nor moved an operator has nothing left to do, and a round that DID
+    move one may have introduced a call the next round's fixpoint has to follow.
+    """
+    moved = 0
+    for fn in functions:
+        hs = holders.get(fn.name) or ()
+        by_name = hstruct.get(fn.name) or {}
+        if not hs:
+            continue
+        pending = []
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if isinstance(node, F.BinaryOp) and node.op in ("==", "!=") \
+                    and isinstance(node.left, F.IdentExpr) \
+                    and isinstance(node.right, F.IdentExpr):
+                call = _eq_dispatch_call(
+                    node, node.op, node.left, node.right,
+                    by_name.get(node.left.name) or (),
+                    by_name.get(node.right.name) or (), by_name, hs)
+                if call is not None:
+                    pending.append((id(node), call))
+                continue
+            if not isinstance(node, F.CompareChain) or len(node.ops) < 2:
+                continue
+            if any(op not in ("==", "!=") for op in node.ops):
+                continue
+            if not all(isinstance(o, F.IdentExpr) for o in node.operands):
+                continue
+            links, lowered = [], True
+            for i, op in enumerate(node.ops):
+                left, right = node.operands[i], node.operands[i + 1]
+                call = _eq_dispatch_call(
+                    node, op, left, right, by_name.get(left.name) or (),
+                    by_name.get(right.name) or (), by_name, hs)
+                if call is None:
+                    lowered = False
+                    break
+                links.append(call)
+            if not lowered:
+                continue
+            # `and`, folded left, so the leftmost comparison is evaluated first
+            # and a false one short-circuits the rest — the chain's own rule,
+            # reached by the same short-circuit `and` every other one uses.
+            whole = links[0]
+            for link in links[1:]:
+                whole = F.BinaryOp(op="and", left=whole, right=link)
+            pending.append((id(node), whole))
+        for node_id, call in pending:
+            _replace_nodes(fn.body, {node_id: call})
+        moved += len(pending)
+    return moved
 
 
 def _rewrite_len_on_nested_frames(fn, by_name, structs_by_name) -> None:
@@ -3402,7 +3946,7 @@ def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
             _park_frame_return(fn, message)
 
 
-def _constructor_bindings(fn, framed) -> dict:
+def _constructor_bindings(fn, framed, functions=()) -> dict:
     """`{name: [struct, …]}` for locals bound from a framed struct's constructor.
 
     A LIST per name, and that is the fix for a miscompile rather than a
@@ -3414,7 +3958,39 @@ def _constructor_bindings(fn, framed) -> dict:
 
     The empty list is meaningful and not an oversight: a name bound from a
     constructor this path does NOT frame holds a plain word, and remembering
-    that is what stops a later `x.f` from being read as a frame slot."""
+    that is what stops a later `x.f` from being read as a frame slot.
+
+    **`model.call_lowers_as_framed_construction`, and that is the guard that
+    makes this list agree with the emitters.**  Being in `framed` is necessary
+    and not sufficient: a call to a name the emitters route to a type
+    CONVERSION before they reach `_emit_struct_constructor` produces a plain
+    word, and recording it as a construction binding would make the name a
+    three-slot frame HOLDER anyway — so `x.f = v` becomes a store at
+    `[word + 8·slot]`.  Measured, both architectures, from a green build:
+
+    ```
+    struct String:                        # three fields, exactly as the stdlib has it
+        var _ptr_or_data: Pointer[UInt8]
+        var _len_or_data: Int
+        var _capacity_or_data: Int
+        def size(self) -> Int: return self._len_or_data
+    def main(n: Int) -> Int:
+        var a = String()
+        a._len_or_data = 5
+        return a.size()
+    ```
+
+    → SIGBUS, exit 138, in read-only `__TEXT`, because the store's base is the
+    address of an interned `""`.  With the guard the name is a plain word, and
+    `a._len_or_data = 5` is `model.field_access_refusal` — a build error naming
+    the field and the name, which is the answer this backend owes rather than a
+    fault at an address it did not mean to touch.
+
+    `functions` is the image's compiled function names, which the predicate reads
+    for the one case where a name is both a function and a struct: the emitters
+    skip the type-constructor interception for a name they compiled, so the call
+    IS a construction there, and a pass that disagreed on that would refuse a
+    program that builds."""
     out = {}
     for node in M.iter_nodes(fn.body):
         target = value = None
@@ -3426,6 +4002,10 @@ def _constructor_bindings(fn, framed) -> dict:
         if not target or not isinstance(value, F.CallExpr):
             continue
         if isinstance(value.func, F.IdentExpr) and value.func.name in framed:
+            if not M.call_lowers_as_framed_construction(
+                    value.func.name, framed, len(value.args or [])
+                    + len(value.kwargs or []), functions):
+                continue
             # De-duplicated, order kept: `x = A()` twice on two paths is ONE
             # candidate, and a refusal that printed "a A, A receiver" because it
             # counted a binding twice would be reporting the walk rather than
@@ -4645,6 +5225,169 @@ def _fold_target_queries_in(node, count: list):
     return None
 
 
+def _bound_before_first_statement(stmts) -> set:
+    """Names a function's body binds NOT by an assignment: a `global`
+    declaration, a loop target, a `with … as` alias, a comprehension variable.
+
+    Every one of these is a name that is either not a local at all
+    (`global`) or is local and ALREADY BOUND before the first statement's value
+    is evaluated.  A read of one of them is legal, and a check that flagged it
+    would be refusing correct code — which is the failure mode
+    `bugs/FORMAL_a_frame_holder_rebound_from_a_word.md` records for the receiver
+    exclusion, and the reason this is a named helper rather than a condition
+    repeated at each use."""
+    out = set()
+    for node in M.iter_nodes(stmts):
+        if isinstance(node, (F.AssignStmt, F.VarDecl, F.AugAssignStmt)):
+            continue
+        if isinstance(node, F.GlobalStmt):
+            for n in (getattr(node, "names", None) or ()):
+                out.add(n.name if hasattr(n, "name") else n)
+            continue
+        target = getattr(node, "target", None)
+        if isinstance(target, F.IdentExpr):
+            out.add(target.name)
+        elif isinstance(target, (F.TupleExpr, F.ListExpr)):
+            for e in target.elements:
+                if isinstance(e, F.IdentExpr):
+                    out.add(e.name)
+        if isinstance(node, F.WithStmt):
+            for item in (getattr(node, "items", None) or ()):
+                alias = getattr(item, "alias", None)
+                if isinstance(alias, F.IdentExpr):
+                    out.add(alias.name)
+    return out
+
+
+def _assign_target_names(node) -> list:
+    """The plain names one assignment statement binds, or [] for any other shape."""
+    if isinstance(node, F.AssignStmt):
+        if isinstance(node.target, F.IdentExpr):
+            return [node.target.name]
+        if isinstance(node.target, (F.TupleExpr, F.ListExpr)):
+            return [e.name for e in node.target.elements
+                    if isinstance(e, F.IdentExpr)]
+        return []
+    if isinstance(node, F.VarDecl):
+        return [node.name]
+    if isinstance(node, F.AugAssignStmt) and isinstance(node.target,
+                                                        F.IdentExpr):
+        # An augmented assignment READS before it writes, so a name reached only
+        # this way is a read-before-assign of exactly the same kind — and CPython
+        # raises on it too.
+        return [node.target.name]
+    return []
+
+
+def _declared_global_names(stmts) -> set:
+    """The names a function's body declares `global`."""
+    out = set()
+    for node in M.iter_nodes(stmts):
+        if not isinstance(node, F.GlobalStmt):
+            continue
+        for n in (getattr(node, "names", None) or ()):
+            out.add(n.name if hasattr(n, "name") else n)
+    return out
+
+
+def _collect_shadowed_global_reads(functions) -> None:
+    """PARK the two ways a function and a module-level binding of the same name
+    come to disagree: reading a local it has not assigned, and writing a global
+    it has declared.
+
+    1. `G = 5` at module level, then `def bump(): G = G + 1; return G`.  The
+       right-hand `G` does not resolve in module scope — a name assigned anywhere
+       in a function body is local to that body from its first line — so CPython
+       raises `UnboundLocalError` and the program has no number.  This path reads
+       the name's local home, which has no value, and answers whatever the
+       register allocator left there: measured, 11 on x86-64 and 78152773 on
+       arm64, from identical source, with the module's `G` correctly left at 5.
+    2. `def bump(): global G; G = G + 1; return G`.  This one the language
+       allows and the value model has nowhere for: there is no `__DATA` slot to
+       redirect the write into, so the emitters treat `global` as a no-op and the
+       assignment lands in a local.  Measured, CPython 6 and 6; this path 10601485
+       and 5 on arm64, 11 and 5 on x86-64.
+
+    **The read half is scoped to the module-global case, and the measurement is
+    why.**  The language's rule is general — reading any local before its first
+    assignment raises — and enforcing the general form was measured at **233
+    sites in 57 files of this repository** and **8 in 5 stdlib files** (a
+    syntactic scan with a call's callee, a `global` declaration and every
+    loop/with/comprehension target already excluded), which is a coverage cost of
+    a different order from the one site this fixes.  With the name ALSO bound at
+    module level the collision is unambiguous — the source is visibly asking
+    about the module's binding, and the alternative reading is the one CPython
+    rejects — and the same scan finds **0 sites in 319 repository files and 0 in
+    294 stdlib files**.  The general remainder is written down in
+    `bugs/FORMAL_a_local_read_before_its_first_assignment.md`.
+
+    Parked rather than raised, for the reason the other five late frame checks
+    are: `_prepare_functions` runs before `_resolve_imports`, so a refusal from
+    inside it preempts the import diagnosis.
+    """
+    globals_ = set(M.module_symbols())
+    if not globals_:
+        return
+    for fn in functions:
+        stmts = list(getattr(fn, "body", None) or ())
+        if not stmts:
+            continue
+        declared_globals = _declared_global_names(stmts) & globals_
+        prebound = _bound_before_first_statement(stmts)
+        prebound |= set(M.function_param_shape(fn).names or ())
+        assigned = set()
+        for node in M.iter_nodes(stmts):
+            assigned |= set(_assign_target_names(node))
+        if declared_globals & assigned:
+            fn._mutated_module_global = sorted(declared_globals & assigned)[0]
+            return
+        candidates = (assigned & globals_) - prebound - declared_globals
+        if not candidates:
+            continue
+        bound = set(prebound)
+        for node in M.iter_nodes(stmts):
+            names = _assign_target_names(node)
+            if not names:
+                continue
+            value = getattr(node, "value", None)
+            if value is None:
+                continue
+            # A tuple target's value is evaluated before ANY store, so a read of
+            # a tuple target's own name there is legal; a plain `x = x + 1` is
+            # not, and is the finding.
+            own = (set() if isinstance(getattr(node, "target", None),
+                                       F.IdentExpr)
+                   else set(names))
+            callee_names = {n.func.name for n in M.iter_nodes(value)
+                            if isinstance(n, F.CallExpr)
+                            and isinstance(n.func, F.IdentExpr)}
+            for n in M.iter_nodes(value):
+                if not isinstance(n, F.IdentExpr):
+                    continue
+                if n.name not in candidates or n.name in bound:
+                    continue
+                if n.name in own or n.name in callee_names:
+                    continue
+                fn._shadowed_global_reads = [(n.name, _expr_spelling(value))]
+                break
+            if getattr(fn, "_shadowed_global_reads", None):
+                break
+            bound |= set(names)
+
+
+def check_shadowed_global_reads(functions) -> None:
+    """Raise the read-before-assign and mutated-global findings
+    `_collect_shadowed_global_reads` parked.  The sixth late check, at the entry
+    points, for the reason the other five are."""
+    for fn in functions:
+        mutated = getattr(fn, "_mutated_module_global", None)
+        if mutated is not None:
+            raise CodegenError(M.mutated_module_global_refusal(
+                mutated, fn.name))
+        for name, value_spelling in (
+                getattr(fn, "_shadowed_global_reads", ()) or ()):
+            raise CodegenError(M.shadowed_module_global_read_refusal(
+                fn.name, name, value_spelling))
 def _materialize_entry_dunder_name(functions: list) -> int:
     """Replace a read of `__name__` in the MODULE BODY with `"__main__"`.
 
@@ -5678,6 +6421,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # to be visible to the substitution or the module constant would replace
     # the function's OWN name.
     _substitute_module_constants(functions)
+    _collect_shadowed_global_reads(functions)
     _materialize_entry_dunder_name(functions)
     # A COMPILE-TIME IDENTITY becomes its operand before anything downstream
     # reads the tree, and immediately before `_frame_receivers` for the reason

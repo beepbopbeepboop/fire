@@ -8564,6 +8564,55 @@ def dtype_member_refusal(spelled: str, member: str) -> str:
             f"which is the same word the bare type name is. Naming the type "
             f"instead of the member (Int8 rather than DType.int8) is the same "
             f"value and always works")
+
+
+def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
+                                       functions=()) -> bool:
+    """Whether a call to `callee` reaches `_emit_struct_constructor` on EITHER
+    backend.
+
+    The emitters route a call in one order and it is worth writing the order down
+    once, here, because the build pass has to answer the SAME question the
+    emitter answers and the two disagreeing about it is the collision in
+    `bugs/FORMAL_string_constructor_collision`:
+
+    ```
+    if name not in functions and not type_constructor_prefers_local_struct(…)
+       and type_constructor_kind(name) is not None:   # a type CONVERSION
+    if name in structs:                                # a struct CONSTRUCTION
+    ```
+
+    So the answer is "a struct construction" exactly when the name is a local
+    declaration AND the type-constructor interception did not take it first.  A
+    file that declares `struct String` and calls `String()` is the case the whole
+    function exists for: `String` is in the STRING and IDENTITY tables, the
+    interception is not overridden for those two (deliberately — see
+    `type_constructor_prefers_local_struct`'s second bullet), so the emitter
+    produces the address of an interned `char *` while the build pass's
+    `_constructor_bindings` sees a call to a name in `framed_struct_names` and
+    makes the target a three-slot frame HOLDER.  The store then lands in
+    read-only text and the program dies with SIGBUS, exit 138, on both
+    architectures.
+
+    `functions` is the image's compiled function names, and it is the one input
+    the emitter reads that is not a table: a name that is BOTH a function and a
+    struct skips the interception and falls through to the construction branch.
+    It is a parameter rather than a module global because the same predicate is
+    asked by the build pass (which has the function list) and by nobody else,
+    and a module-level table for one caller's list would be a second thing to
+    keep in step.
+
+    A name that is not a local declaration is `False` and not a refusal here: a
+    call to a type this module does not declare is not a construction of
+    anything, and the emitter's own answer about it is unchanged.
+    """
+    if (structs or {}).get(callee) is None:
+        return False
+    if callee in (functions or ()):
+        return True
+    if type_constructor_prefers_local_struct(callee, structs, nargs):
+        return True
+    return type_constructor_kind(callee) is None
 def type_constructor_prefers_local_struct(callee_name: str, structs: dict,
                                           nargs: int) -> bool:
     """Whether THIS MODULE's own `struct N` beats `N`'s place in
@@ -9537,19 +9586,31 @@ def struct_frame_slot_candidates(structs, name):
 # `Int` here exactly as it does in the source, and that is ordinary value
 # lowering.
 DUNDER_LEN = "__len__"
+# The COMPARISON dunders, which are the second spelling of the same idea: an
+# operator is a method of the receiver's own struct, called by name, and the
+# spelling in the source is `a == b` rather than `a.__eq__(b)`.
+DUNDER_EQ = "__eq__"
+DUNDER_NE = "__ne__"
 
 
-def dunder_len_method(struct_def):
-    """This struct's `__len__`, or None when it declares none it could be reached by.
+def dunder_receiver_method(struct_def, name: str):
+    """This struct's method called `name`, or None when none could be reached.
 
     A method declared with NO parameters has no receiver, by the same rule
     `struct_receivers` applies to a field read and
     `formal/build.py`'s `_receiverless_methods` applies to a call: there is
-    nothing for a frame address to be handed to, so it cannot answer `len(x)`.
-    A `@staticmethod` is excluded for the same reason and by the same helper.
+    nothing for a frame address to be handed to, so it cannot answer `len(x)`
+    or `a == b`.  A `@staticmethod` is excluded for the same reason and by the
+    same helper.
+
+    ONE function for the whole family rather than one per dunder, because the
+    predicate is about the DECLARATION's shape and not about which operator the
+    method answers: three copies of `name != X or staticmethod or no params` is
+    three places for the rule to change, and a `__eq__` that quietly accepted a
+    parameterless declaration would be called with a receiver it cannot name.
     """
     for m in struct_methods(struct_def):
-        if m.name != DUNDER_LEN:
+        if m.name != name:
             continue
         if "staticmethod" in _decorator_names(m):
             continue
@@ -9557,6 +9618,16 @@ def dunder_len_method(struct_def):
             continue
         return m
     return None
+
+
+def dunder_len_method(struct_def):
+    """This struct's `__len__`, or None when it declares none it could be reached by.
+
+    The `__len__` spelling of `dunder_receiver_method`, kept as its own name
+    because every existing caller reads better saying `dunder_len_method` than
+    saying `dunder_receiver_method(st, DUNDER_LEN)`, and because it is the one
+    of the family that existed before the family did."""
+    return dunder_receiver_method(struct_def, DUNDER_LEN)
 
 
 def struct_dunder_len_candidates(structs):
@@ -9600,6 +9671,96 @@ def struct_dunder_len_candidates(structs):
     if owners and (len(owners) > 1 or have != len(rows)):
         return (None, (True, rows))
     return ((owners.pop() if owners else None), (False, rows))
+
+
+# `a == b` is `type(a).__eq__(a, b)`, and `a != b` is `type(a).__ne__(a, b)` —
+# with the language's own fallback, so the two are ONE question with two
+# spellings rather than two questions.  The dunder each operator reaches, in the
+# order it is tried: `!=` looks for `__ne__` and, finding none, for the negation
+# of `__eq__`, which is what `object` does and therefore what a struct that
+# declares only `__eq__` inherits.
+EQ_DISPATCH_DUNDERS = {"==": ((DUNDER_EQ, False),),
+                       "!=": ((DUNDER_NE, False), (DUNDER_EQ, True))}
+
+
+def struct_dunder_dispatch_candidates(left_structs, right_structs, op: str):
+    """`(owner, dunder, negate, disagreeing)` — the struct whose dunder answers
+    `a op b`.
+
+    The `struct_dunder_len_candidates` contract over a fact with one extra
+    dimension, and the same answer for the same reason: WHICH struct, decided by
+    AGREE-OR-REFUSE over every struct either name could hold.  The two candidate
+    lists go in as ONE list, deduplicated by struct name, because the question is
+    a property of the pair of names rather than of either alone: a call whose
+    receiver might be `S` and might be `T` is not an `S.__eq__` with a fallback
+    to `T`, it is one call or the other depending on the path taken, and this
+    analysis has no path sensitivity.
+
+    `dunder` is the name the answer was found under and the caller MUST call
+    that one, not the operator's own: `!=` reaches `HasNe___ne__` when the struct
+    declares a `__ne__` and `HasNe___eq__` under a `not` when it does not, and a
+    caller that spelled the call from `op` would call `__eq__` for both — which
+    is the wrong method for the first, and answers `a == b` for the second.
+    `negate` says the operator is `!=` reached through the `__eq__` fallback, so
+    the caller wraps the call in the language's `not`, which is the whole of that
+    fallback.
+
+    `owner is None` with no disagreement is the answer "this type has no
+    comparison operator", and it is NOT a refusal: it is what makes CPython's
+    INHERITED identity `__eq__` correct, and it is the same reason the frame
+    length rewrite leaves a struct that declares no `__len__` alone.  On this
+    path a frame's own address compare is already that identity, so leaving the
+    operator alone is not a gap — it is the right answer for a struct with no
+    dunder, and the case that would break it is a dunder on a DIFFERENT struct
+    than the one the addresses are, which is what the disagreement arm is for.
+    """
+    structs, seen = [], set()
+    for st in list(left_structs or []) + list(right_structs or []):
+        if st.name not in seen:
+            seen.add(st.name)
+            structs.append(st)
+    for dunder, negate in EQ_DISPATCH_DUNDERS.get(op, ()):
+        rows, owners, have = [], set(), 0
+        for st in structs:
+            found = dunder_receiver_method(st, dunder)
+            rows.append((st.name, found is not None))
+            if found is not None:
+                owners.add(st.name)
+                have += 1
+        if not owners:
+            continue
+        if len(owners) > 1 or have != len(rows):
+            return (None, dunder, negate, (True, rows))
+        return (owners.pop(), dunder, negate, (False, rows))
+    return (None, None, False, (False, [(st.name, False) for st in structs]))
+
+
+def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows) -> str:
+    """Why `a == b` has no single dunder to call, when the candidates disagree.
+
+    The agree-or-refuse refusal for the comparison half, and a different message
+    from `frame_len_candidates_disagree` because the answer is a different shape:
+    there is nothing to READ that is missing here, there is a CALL that would be
+    one of two, and the two are the two answers the program would give on the two
+    paths.  `rows` is `[(struct_name, declares_it), …]` from
+    `struct_dunder_dispatch_candidates` and the refusal names every row, for
+    the reason its sibling gives: "they disagree" without saying which is which
+    sends the reader to look at the wrong declaration.
+    """
+    who = ", ".join(struct_names) if struct_names else "this struct"
+    return (
+        f"{spelled} compares two FRAME ADDRESSES, so the answer is the frame's "
+        f"own struct's `__eq__` — which means WHICH struct is the whole of the "
+        f"question, and {who} does not settle it: "
+        + "; ".join(f"{sn} declares one"
+                    if has else f"{sn} declares none"
+                    for sn, has in rows)
+        + ". Each name holds a different frame on each path that binds it, and "
+          "this analysis has no path sensitivity to say which one is live at "
+          "this comparison, so the call this would lower to is one of two and "
+          "the program would build, run, and answer with whichever struct's "
+          "`__eq__` the other path would have called. Give each name one "
+          "binding, or give every candidate the same `__eq__`")
 
 
 def frame_len_candidates_disagree(spelled: str, struct_names, rows) -> str:
@@ -9672,6 +9833,218 @@ def frame_len_refusal(spelled: str, struct_names) -> str:
         f"field you mean (`len({spelled}.xs)` where the field is a list), or "
         f"give the struct a `__len__` — `len(x)` is `x.__len__()`, and a "
         f"method of the receiver's own struct is a call this backend makes")
+
+
+def mutated_module_global_refusal(name: str, fn_name: str) -> str:
+    """Why a function cannot WRITE a module global it declares `global`.
+
+    The design decision this path already made and this message reports is in
+    the comment above `GlobalSymbol`: a module-level name is either FOLDED — its
+    value is literal-only, substituted at every read, and needs no storage
+    because nothing ever stores it — or it is a real mutable-or-computed global
+    with nowhere to live, because a formal value lives in a function's own stack
+    scratch and that scratch is reclaimed when the function returns.  There is no
+    `__DATA` slot to redirect a write into, and the emitters say so where the
+    declaration is handled: `formal/arm64_codegen.py`'s `GlobalStmt` branch is
+    "the declaration is a no-op and the following AssignStmt still targets the
+    local", with the same words in x86-64's.
+
+    So `global G; G = G + 1` writes a LOCAL, and the module's `G` keeps the value
+    it was folded with — and the two architectures disagree about the local while
+    both are wrong.  Measured, on
+
+    ```
+    G = 5
+    def bump():
+        global G
+        G = G + 1
+        return G
+    def read():
+        return G
+    ```
+
+    CPython answers 6 and 6.  This path answers **10601485 and 5** on arm64 and
+    **11 and 5** on x86-64: the write landed in a register, the read of the
+    module's name still folds to the 5 it was bound with, and the two
+    architectures cannot agree on the first number because it was never
+    computed.  A program that prints two numbers and gets four wrong ones, two of
+    them architecture-dependent, is the shape this backend's refusals exist for.
+
+    Declaring `global` is not the mistake — it is the only correct spelling for
+    what the source means, and the analysis is what has nowhere to put it.  So
+    the message says what the path can do instead: fold the value at module level
+    and read it, or move the computation into a function and pass the result in.
+    """
+    return (
+        f"{name} is declared `global` in {fn_name}() and assigned there, so the "
+        f"program means to WRITE the module's {name} — and this path has no "
+        f"storage for that. A formal value lives in a function's own stack "
+        f"scratch and that scratch is reclaimed when the function returns, so "
+        f"there is no location a write to a module-level name could outlive; a "
+        f"module-level name whose value the build can FOLD is substituted at "
+        f"every read and needs no storage precisely because nothing ever stores "
+        f"it, and this assignment is that store. The declaration is not the "
+        f"mistake — it is the only correct spelling for what the source means, "
+        f"and the analysis is what has nowhere to put it. Measured: CPython "
+        f"answers 6 and 6 for a `global {name}` increment read twice, and this "
+        f"path answers 10601485 and 5 on arm64 and 11 and 5 on x86-64 — the "
+        f"write landed in a register, the module's {name} still folds to the "
+        f"value it was bound with, and the two architectures cannot agree on "
+        f"the first number because it was never computed. Make the module-level "
+        f"binding a literal (or literal-only arithmetic on literals) and read "
+        f"it, or move the computation into a function and pass the result in")
+
+
+def shadowed_module_global_read_refusal(fn_name: str, name: str,
+                                       value_spelling: str) -> str:
+    """Why a function cannot read a module global it also assigns.
+
+    **The premise this corrects is worth stating, because the obvious reading of
+    the program is wrong.**  For
+
+    ```
+    G = 5
+    def bump():
+        G = G + 1
+        return G
+    ```
+
+    the right-hand `G` does NOT resolve in module scope.  A name assigned
+    anywhere in a function body is LOCAL to that body from the first line — that
+    is Python's rule, it is decided when the function is compiled, and it is why
+    CPython raises here:
+
+    ```
+    UnboundLocalError: cannot access local variable 'G' where it is not
+    associated with a value
+    ```
+
+    (measured, CPython 3.14, the same text).  So there is no number this program
+    has, and the only honest answer is that it does not lower.  What this path
+    does instead is read the name's LOCAL home, which has never been initialised,
+    and answer whatever the register allocator left there: measured on this tree,
+    `main` printed the local as **11** on x86-64 and as **78152773** on arm64,
+    with the module's `G` correctly left at 5 in both.  Two architectures, two
+    numbers, neither of them written by the source — and the difference between
+    them is register allocation, which is the signature of a value that was never
+    computed.
+
+    The read is left unsubstituted because `_substitute_module_constants` treats
+    the name as a local of this function, which it is; that is correct, and it is
+    also why the read has no value to give.
+
+    The repair named is the one the language offers, and it is not "make the gate
+    order-dependent": a name that is local throughout cannot be made to read from
+    the module before its first assignment, because there is no such reading.
+    `global G` says the module's `G` IS the local, which is a different program
+    and the right one to write when that is what is meant.
+    """
+    return (
+        f"{name} is read in {fn_name}() at `{value_spelling}`, before anything in "
+        f"that function has assigned it — and {name} IS a local of {fn_name}() "
+        f"from its first line, because the function assigns it, and it is also a "
+        f"module-level binding of this module. That is the collision: the read "
+        f"has no home. The language's own answer is UnboundLocalError (measured, "
+        f"CPython: \"cannot access local variable '{name}' where it is not "
+        f"associated with a value\"), because a name assigned anywhere in a "
+        f"function body is local to that body throughout — it does NOT resolve "
+        f"in module scope until after the assignment, and there is no ordering "
+        f"that makes this read valid. What this path did instead is read the "
+        f"local's register, which holds whatever the allocator left there: "
+        f"measured, {fn_name}() returned 11 on x86-64 and 78152773 on arm64, two "
+        f"numbers and neither of them written by the source. Either declare "
+        f"`global {name}`, which makes the module's binding the local and is a "
+        f"different program, or read the module-level name from a function that "
+        f"does not also assign it")
+
+
+def holder_rebound_from_a_word_refusal(fn_name: str, name: str,
+                                       value_spelling: str,
+                                       frame_spelling: str,
+                                       structs) -> str:
+    """Why a name that holds a frame address cannot also hold a plain word.
+
+    One message for both backends and for the build pass, because the defect is
+    a property of the ANALYSIS and not of an instruction: a name enters the
+    holder set and nothing ever removes it, so every field access through it is
+    still lowered as `base + 8·slot` after a binding that left a word there.
+    `r = R(); r.a = 7; r = 5; return r.a` therefore loads from address 5 —
+    measured, SIGSEGV exit 139 on arm64 and on x86-64, from a green build.
+
+    The two spellings go in the message because the reader has to be told WHICH
+    line settles it, and the two readings — "`r` is a frame" and "`r` is a word"
+    — are the whole disagreement.  `frame_spelling` is the binding that made the
+    name a holder, which is the one that also settles what every OTHER access
+    through the name is lowered as, so naming it tells the reader what the
+    conflicting store is about to invalidate.
+
+    The three allowed values are named too, because "why is THIS one refused"
+    is the question a reader has after reading a list of other assignments in
+    the same function that were not.
+    """
+    who = ", ".join(sorted({st.name for st in (structs or ())})) or "a struct"
+    return (
+        f"{name} is assigned {value_spelling} in {fn_name}(), and {name} also "
+        f"holds the address of a {who} frame — {frame_spelling} binds it to one, "
+        f"and this path has no way to say that a later binding changes what the "
+        f"name is. Every field access through {name} is already lowered as a load "
+        f"at `[base + 8·slot]` on the strength of the first binding, so after "
+        f"this store the load reads address `{value_spelling} + 8·slot`: "
+        f"measured, the program builds, runs, and dies with SIGSEGV (exit 139) "
+        f"on both architectures, which is a fault rather than a wrong number only "
+        f"because the word happened not to be mapped. A value that may be a "
+        f"frame is one of three things and this is not any of them: a CONSTRUCTION "
+        f"of a framed struct (`{name} = S(...)`), a COPY of another holder "
+        f"(`{name} = other`), or a parameter of a method of a framed struct. Use "
+        f"a different name for the word, or copy the value out of {name} first")
+
+
+def construction_mismatch_refusal(target: str, callee: str, summary: str,
+                                  fn_name: str) -> str:
+    """Why `{target} = {callee}(…)` and `{target}.<field>` are two answers to one
+    name, and which of them the emitters picked.
+
+    The stdlib's own `String` is the case this exists for, and its own comment
+    says why the name is ambiguous: `std/collections/string/string.mojo` declares
+    three fields AND lowers its methods under the `char *` reading, with a flag
+    in the top of the capacity field choosing between the two forms at run time.
+    So both readings are in force in one file, and a program that writes a field
+    through the name is asking a question this path has one answer for.
+
+    WHICH answer the emitters pick is the load-bearing half and it is the
+    counterintuitive one: the string and identity tables win.  `String()` is
+    intercepted as a string CONVERSION before `_emit_struct_constructor` is
+    reached — `type_constructor_prefers_local_struct` deliberately does not
+    override those two tables, because for `Pointer` the identity conversion is
+    the one hand-off in the family that is correct — so the value is the address
+    of an interned NUL-terminated `char *`, and `{target}.<field> = v` would be
+    a store at `[interned_address + 8·slot]` in read-only `__TEXT`.  Measured on
+    both architectures, before this refusal existed: SIGBUS, exit 138, from a
+    green build, on a fourteen-line program with no imports.
+
+    The message says both answers, names the emitters' choice, and gives the two
+    things the source can do: give the local a different name, or do not write a
+    field through a value this path is holding as text.
+    """
+    return (
+        f"{target} = {callee}(...) binds {target} to a value this path holds as "
+        f"TEXT, and {target}.<field> asks for a frame: {callee} is declared "
+        f"here as a struct of {summary}, so the field has a slot, and {callee} "
+        f"is also a type this path lowers as a conversion, so the call is a "
+        f"conversion and {target} is the address of a NUL-terminated `char *`. "
+        f"The emitters pick the conversion — {callee}() is intercepted before "
+        f"any struct construction is reached, because the identity and string "
+        f"tables are deliberately not overridden by a local declaration (see "
+        f"`model.type_constructor_prefers_local_struct`) — and the two readings "
+        f"of the name are then in force at once: the field store is emitted at "
+        f"the interned address plus 8·slot, which is read-only text. Measured, "
+        f"on both architectures before this check existed: the program builds, "
+        f"runs, and "
+        f"dies with SIGBUS (exit 138), on the fourteen lines of {fn_name}() and "
+        f"no imports. Give the local a name of its own that is not {callee}'s, "
+        f"or keep the value as text and do not write a field through it — a "
+        f"`{callee}` local is a three-slot frame OR a `char *` on this path and "
+        f"never both at once")
 
 
 # ── A field's DECLARED type: agree, or refuse ─────────────────────────────
