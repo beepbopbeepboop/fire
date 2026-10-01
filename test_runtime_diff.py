@@ -265,6 +265,23 @@ BUILTIN_PROGRAMS = {
             print(g())
             print(k())
     """),
+    # The natural missing-key guard, and it was INVERTED on the compiled
+    # path: `d.get(k)` lowers to `mojo_dict_get_str`, which returns NULL for an
+    # absent key, and `None` — a singleton, with no NULL to compare against —
+    # was routed through `mojo_char_to_str((char)0)`, i.e. compared against
+    # the one-character string NUL. So the branch that tells "absent" from
+    # "present" answered the wrong way (CPython True, compiled False), exit 0,
+    # no diagnostic. `print(d.get("MISSING"))` printed whatever printf does
+    # with a NULL `%s` ("(null)") rather than `None`, which is the same
+    # misreading in a second place.
+    "dict_get_none_guard": textwrap.dedent("""\
+        def main():
+            a = {"A": "1"}
+            print(a.get("MISSING"))
+            print(a.get("MISSING") == None)
+            print(a.get("A") == None)
+            print(a.get("MISSING") is None)
+    """),
     "struct_def": textwrap.dedent("""\
         struct Point:
             var x: Int
@@ -743,6 +760,7 @@ BUILTIN_PROGRAMS = {
 # `def add(a: Int, b: Int) -> Int:` a legal Python annotation, so it runs.)
 CPYTHON_COMPARABLE = {
     "minimal_main", "function_def", "method_call_result",
+    "dict_get_none_guard",
 }
 
 

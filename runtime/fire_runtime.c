@@ -277,8 +277,16 @@ void mojo_print_init(void) {
 #endif
 
 void mojo_print(char *str) {
-    /* Use printf directly (no Python dependency) */
-    printf("%s", str);
+    /* Use printf directly (no Python dependency).
+     *
+     * A NULL `char *` prints "None", not whatever printf does with a NULL
+     * `%s` (glibc and Darwin both print the parenthesised "(null)", which is
+     * a string no source wrote). On this path a NULL string IS `None`: the
+     * container misses return NULL — `mojo_dict_get_str` on an absent key is
+     * what `d.get(k)` lowers to — so `print(d.get("MISSING"))` has to say
+     * `None` the way CPython does. Printing "(null)" for it made the value
+     * recognisable as wrong only if you already knew it was wrong. */
+    printf("%s", str ? str : "None");
     fflush(stdout);
 }
 
@@ -289,7 +297,9 @@ void mojo_print(char *str) {
  * shape at compile time and picks mojo_print vs this, so no FILE* value
  * ever needs to flow through the generated code at all. */
 void mojo_print_stderr(char *str) {
-    fprintf(stderr, "%s", str);
+    /* The same NULL-means-None rule as `mojo_print` above, for the same
+     * reason: the two are the same statement with a different FILE*. */
+    fprintf(stderr, "%s", str ? str : "None");
     fflush(stderr);
 }
 
