@@ -5573,6 +5573,67 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     Lowers to a C++ range-for or indexed loop over the iterable.
     Only supports iterable as a simple identifier or call expression."""
     target = s.target
+    # `for <var> in <g>:` where `g` is a compiled-generator HANDLE local
+    # (bound by `g = <compiled generator>(...)`, tracked in
+    # `_cpp_generator_var_api`; same-module, an aliased import, or a
+    # FOREIGN module's — see `_cpp_resolve_generator_call_api`). Drives the
+    # identical `{base}_resume`/`{base}_value` protocol `next(g)`
+    # (`_cpp_next_on_generator_expr`) and `yield from g`
+    # (`_cpp_yield_from`) already use, including the exhaustion-vs-
+    # escaped-exception disambiguation both of those share, so all three
+    # consumption forms of one generator handle now agree.
+    #
+    # Before this, such a loop fell through to the generic C++ range-for
+    # over the bare handle text and g++ rejected it with "'begin' was not
+    # declared in this scope" — `MojoGenerator *` is an opaque runtime
+    # handle with no begin/end, so there was no representation at all.
+    # Real: `c_common/tables.py`'s `read_table` consuming
+    # `strutil._iter_significant_lines(infile)` — once that FOREIGN
+    # generator's handle is resolvable at all, the `for` half of the
+    # read-it-fully idiom is what a real program does with it next.
+    #
+    # The handle is deliberately NOT destroyed on exhaustion: same
+    # documented never-frees convention every other generator-handle
+    # consumer in this emitter follows. A `for/else` is refused rather than
+    # approximated — this emitter's break-flag protocol is shared with the
+    # generic path and wiring a generator loop into it is a separate,
+    # unexercised change.
+    if (isinstance(target, str) and ',' not in target
+            and not s.else_body
+            and isinstance(s.iterable, gimple_ctypes.IdentExpr)
+            and s.iterable.name in getattr(gen, '_cpp_generator_var_api', {})):
+        _gi_api = gen._cpp_generator_var_api[s.iterable.name]
+        _gi_base = _gi_api['base']
+        _gi_vct = gimple_exprtypes._c_to_cpp_scalar_type(
+            _gi_api.get('value_ctype') or 'int64_t')
+        _gi_handle = gen._cpp_kw_param_renames.get(
+            s.iterable.name, s.iterable.name)
+        _gi_stop = gen._exc_type_id('StopIteration')
+        _gi_refs = getattr(gen, '_cpp_xmod_generator_refs', None)
+        if _gi_refs is not None:
+            _gi_refs.setdefault(_gi_base, {
+                'value_ctype': _gi_api.get('value_ctype', 'int64_t'),
+                'params': list(_gi_api.get('params') or [])})
+        if target not in declared:
+            declared[target] = _gi_vct
+            if gen._cpp_func_scope_decls is not None:
+                gen._cpp_func_scope_decls.append(f"{_gi_vct} {target};")
+        # A `_Bool`-valued generator's slot must be narrowed the same way
+        # `next()`'s `-> bool` lambda return does, or assigning the `_Bool`
+        # through a `bool`-typed local is at best a narrowing warning.
+        _gi_read = (f"{_gi_base}_value({_gi_handle})"
+                    if _gi_vct != 'bool'
+                    else f"(({_gi_base}_value({_gi_handle})) != 0)")
+        lines = [f"{indent}while ({_gi_base}_resume({_gi_handle})) {{",
+                 f"{indent}    {target} = {_gi_read};"]
+        for inner in s.body:
+            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+        lines.append(f"{indent}}}")
+        return lines
+    # `for <var> in <iterable>` where `<iterable>` is a plain list local —
+    # the generic indexed-loop lowering lives further down, after the
+    # container-literal / module-global cases; the generator-handle case
+    # above must precede it because a handle is never a list.
     # `for x in it:` where `it` is a resumable list-iterator local (bound by
     # `it = iter(<list>)`, tracked in `_cpp_list_iter_cursor`) — continue from
     # the shared cursor (which `next(it)` may already have advanced), and
