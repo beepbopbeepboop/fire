@@ -213,6 +213,12 @@ def element_count_index(kernel: str, count_idx: int) -> int:
     return count_idx
 
 
+#: Per-kernel grid override, {kernel_name: (nthreads, ngroups)} as C
+#: expressions. Empty unless the synthesiser populates it, so every existing
+#: kernel keeps the inferred 0,0 grid and its generated C is unchanged.
+_GRID: dict = {}
+
+
 def emit_launch_wrappers(kernels: dict) -> str:
     """The per-kernel host wrapper each host call site targets.
 
@@ -261,9 +267,23 @@ def emit_launch_wrappers(kernels: dict) -> str:
         else:
             lines.append('    void *_mg_scalars[1];')
             lines.append('    static const uint8_t _mg_widths[] = {8};')
+        # Grid shape. The default 0,0 means "the runtime infers it": the
+        # threadgroup count from the largest buffer's element count and the
+        # width from the device max (fire_metal.m: `tg = ngroups > 0 ? ... :
+        # ceil(max(sizes)/tptg)`, `use = nthreads > 0 ? ... : tptg`). That is
+        # right for a kernel with ONE THREAD PER OUTPUT ELEMENT, which is every
+        # kernel this tree had until now.
+        #
+        # It is wrong for a tensor-core GEMM, where 32 lanes cooperate on one
+        # 8x8 output tile, so a grid of m*n threads would be ~32x too many and
+        # 31 of every 32 would exit immediately. Both values are overridable in
+        # the runtime already, so this needs no ABI change -- only for a kernel
+        # to ask.
+        _grid = _GRID.get(_kn)
+        _nthr, _ngrp = _grid if _grid else (0, 0)
         lines.append('    _mg_run("%s", %d, _mg_bufs, _mg_sizes, %d, _mg_scalars,'
-                     ' _mg_widths, 0, 0);'
-                     % (_kn, len(_bufs), len(_scals)))
+                     ' _mg_widths, %s, %s);'
+                     % (_kn, len(_bufs), len(_scals), _nthr, _ngrp))
         lines.append('}')
         lines.append('')
     return '\n'.join(lines)
