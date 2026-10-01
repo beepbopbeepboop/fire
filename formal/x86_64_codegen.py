@@ -5464,12 +5464,20 @@ class X86_64Codegen:
         # almost always literals like `flush=True`. A known callee gets them
         # bound to their parameters' registers.
         args = list(e.args) if is_extern else self._bind_call_args(name, e)
-        if is_extern and isinstance(e.func, F.SubscriptExpr):
+        if is_extern and not is_extern_call \
+                and isinstance(e.func, F.SubscriptExpr):
             # A BRACKETED callee this unit does not compile, refused with the
             # SAME shared text arm64 asks (`model.specialization_call_refusal`)
             # so the two architectures cannot answer differently about one
             # construct. Without it the brackets are dropped on the extern path
             # too, and `plain[3](5)` is emitted as `plain(5)`.
+            #
+            # `and not is_extern_call`, for arm64's reason and because the two
+            # would otherwise disagree: `is_extern` is `is_extern_call or …` on
+            # this backend too, so without the guard this arm refuses every
+            # `external_call["sym", T](…)` as a specialization, naming the C
+            # symbol — and the two architectures would then differ on the very
+            # construct this shared text exists to keep them agreeing about.
             raise CodegenError(M.specialization_call_refusal(name))
 
         if len(args) > len(ARG_REGS):

@@ -426,7 +426,17 @@ REFUSALS = [
      "    v: Int = bump()\n"
      "    print(v)\n"
      "    return 0\n",
-     "before anything in this function stores it"),
+     # The EXPECTED WORDS are `model.shadowed_module_global_read_refusal`'s,
+     # and the refusal is the SAME one this row was written for — a read of a
+     # local before its first assignment, which CPython raises on — now reached
+     # through the module-global check rather than the general read-before-store
+     # one, because the name is also a module binding and that check is the one
+     # scoped to that case (measured: the general form is 233 sites in 57 files
+     # of this repository, this one is 0 in 319). The new text names the
+     # collision, quotes CPython's error and gives the two measured wrong
+     # answers; the old sentence named neither.
+     "is read in bump() at `G + 1`, before anything in that function has "
+     "assigned it"),
 ]
 
 

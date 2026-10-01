@@ -5089,8 +5089,26 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
         return node
     if isinstance(node, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
         # The target is a store: leave it, and walk the value side only.
-        _apply_module_constant_sites(
-            getattr(node, "value", None), sites, stores)
+        #
+        # …through `_rewrite_child`, which RETURNS a replacement, and not
+        # through this function, which rewrites in place. That is the whole
+        # difference and it was a live bug: a bare `IdentExpr` has no child
+        # slots to rewrite (its fields are `name`, `line` and `col`, all
+        # scalars), so handing one to the in-place walk walked straight through
+        # it and left the name in place. Every other position reached the
+        # replacement — a list element is matched in the list branch, and every
+        # other single child goes through `_rewrite_child` — so the substitution
+        # silently covered `return G`, `print(G)` and `G + 1` and missed
+        # `x = G`, `x: Int = G` and `h.a = G`. The consequence is the `has no
+        # home` refusal, on both architectures, for a construct the build
+        # answers. Pinned by `test_formal_globals.py`'s
+        # `read_global_as_an_assignment_value` and
+        # `read_global_into_a_field_store`, the second of which is the one that
+        # matters — a `MemberExpr` store target is the shape this backend uses
+        # for every struct field write, so the uncovered position was reached by
+        # ordinary code rather than by an assignment to a bare local.
+        node.value = _rewrite_child(getattr(node, "value", None), sites,
+                                    stores)
         return
     for name in getattr(node, "__dataclass_fields__", {}):
         setattr(node, name,
@@ -5339,8 +5357,21 @@ def _collect_shadowed_global_reads(functions) -> None:
         for node in M.iter_nodes(stmts):
             assigned |= set(_assign_target_names(node))
         if declared_globals & assigned:
-            fn._mutated_module_global = sorted(declared_globals & assigned)[0]
-            return
+            # …and only for a name with NO `__DATA` slot, which is the same rule
+            # `_module_constant_sites` states and for the same reason: a slotted
+            # name is one some function writes through `global`, its value
+            # changes while the program runs, and the write has somewhere real to
+            # go. Case 2 in the docstring was written when there was no slot to
+            # redirect the write into and it says so;
+            # `formal-module-globals` landed the slot, so refusing it now refuses
+            # a program this path computes exactly. Measured: it was 6 of
+            # `test_formal_globals.py`'s 17 cases before this gate and 0 after,
+            # and the image answers CPython (`G = 5` with
+            # `global G; G = G + 1` called twice, read back after: 7).
+            writable = declared_globals & assigned - set(M.module_slots() or ())
+            if writable:
+                fn._mutated_module_global = sorted(writable)[0]
+                return
         candidates = (assigned & globals_) - prebound - declared_globals
         if not candidates:
             continue
@@ -5768,15 +5799,23 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # one. `imported_callee_refusal` keeps the case it is right
                 # about: a bracketed callee whose base name is not a function
                 # here for any OTHER reason, which is what is left after this.
-                # The two exclusions are the two bracketed callees this tree
+                # The three exclusions are the three bracketed callees this tree
                 # already has a BETTER answer for, and asking here without them
-                # replaced both: `List[Int]()` with
+                # replaced all three: `List[Int]()` with
                 # `specialization_call_refusal` (it is the one bracketed callee
                 # both backends lower, and the arm that lowers it is
-                # `empty_blob_constructor` below) and an MLIR dialect
-                # subscript with it (the dialect refusal further down names the
-                # construct, which is the whole point of it). A construct
-                # refusal asked here has to be the LAST one, not the first.
+                # `empty_blob_constructor` below); an MLIR dialect subscript with
+                # it (the dialect refusal further down names the construct,
+                # which is the whole point of it); and an `external_call`
+                # TEMPLATE with it, which is the sharpest of the three — the
+                # template is not a specialization at all, it is a call to a C
+                # symbol with a declared return type, it is lowered, and
+                # `multi_index_refusal_for` above already answers for it.
+                # Measured: without the third, 9 of
+                # `test_formal_external_call.py`'s 29 cases were refused as
+                # "calls a name this unit does not compile", naming
+                # `external_call`. A construct refusal asked here has to be the
+                # LAST one, not the first.
                 #
                 # `root_ident.name` and not `model.subscript_callee_name`:
                 # that one takes the CALL, and `iter_nodes` hands this loop the
@@ -5787,7 +5826,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 base_name = root_ident.name
                 if (base_name not in _callee_defs(functions)
                         and not M.empty_blob_constructor(base_name)
-                        and not base_name.startswith(M.MLIR_DIALECT_PREFIX)):
+                        and not base_name.startswith(M.MLIR_DIALECT_PREFIX)
+                        and not M.is_external_call_template(sub)):
                     why = M.specialization_call_refusal(base_name)
             if why is not None:
                 bracketed[id(root_ident)] = why

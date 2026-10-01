@@ -5763,7 +5763,7 @@ class ARM64Codegen:
             if ct_params:
                 bound = self._specialization_args(e, ct_params)
                 args = bound + list(args)
-        elif isinstance(e.func, F.SubscriptExpr):
+        elif not is_extern_call and isinstance(e.func, F.SubscriptExpr):
             # A BRACKETED callee this unit does not compile. The branch above
             # is the only place a specialization's brackets are turned into
             # arguments, so without this the brackets are silently DROPPED and
@@ -5771,6 +5771,17 @@ class ARM64Codegen:
             # built, ran and printed a number the source never wrote. The
             # shared text is `model.specialization_call_refusal`, which x86-64
             # asks too.
+            #
+            # `and not is_extern_call`, and that is load-bearing rather than
+            # belt-and-braces: `is_extern` is `is_extern_call or name not in
+            # self._functions`, so an `external_call["setenv", Int32](…)` is
+            # `is_extern` TOO — and this arm, keyed on `is_extern` and the
+            # bracket, then refused the whole `external_call` construct as a
+            # specialization, naming the C symbol `setenv` as a generic. The
+            # construct is not a specialization and it is lowered, ten lines
+            # above, by the same `is_extern_call` flag every other arm in this
+            # function is gated on. Measured: 9 of `test_formal_external_call.py`'s
+            # 29 cases, on both architectures, before this guard.
             raise CodegenError(M.specialization_call_refusal(name))
         # Flatten `*star` / reject `**dst` before the arity check so a
         # single list literal expands to its elements (common: f(*[a,b])).
