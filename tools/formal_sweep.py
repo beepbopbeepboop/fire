@@ -194,7 +194,13 @@ EXIT STATUS
      `tool` failure, no `unknown` verdict
   1  at least one of those (a real finding, a backend that fell over, or a
      file the sweep could not answer for a reason that is its own problem)
-  2  the sweep did not run (no input files)
+  2  the sweep did not run (no input files, or another sweep of the same
+     architecture holds the lock)
+  3  the sweep was INTERRUPTED (SIGINT/SIGTERM). Everything it classified was
+     printed and published, and the summary says how much of the scope it
+     reached. Its own status rather than 1's because "you stopped it" and "it
+     found something" are different facts, and a caller retrying on 1 alone
+     would retry a run that needs no retrying
 
 `not-answerable` never affects the exit status in either direction: it is a
 permanent property of the source and the target, so failing a run over it (or
@@ -202,6 +208,36 @@ passing one because of it) would both be wrong. This is a deliberate change
 from the older contract, where any FAIL at all meant exit 1 — with 170
 permanent facts in the FAIL bucket that contract could not distinguish "the
 backend regressed" from "this file imports os".
+
+
+SURVIVING, and why a sweep needs to
+------------------------------------
+Two things here exist because of one measured failure, and both are worth
+stating as mechanisms rather than as features.
+
+A sweep is `jobs` compiler processes at once, and a compiler process recurses
+through a module closure. Nothing about that is bounded, so ONE file could take
+the whole run down with it — and on 2026-10-01 one did: the arm64 sweep died of
+an external SIGKILL and its output file was the 5-line header and nothing else,
+so 623 files produced no classifications at all
+(`bugs/FORMAL_sweep_killed.md`). The fix is the per-file ceiling
+(`-M`, MEMCAP_GB): every build runs under `tools/memcap.py`, a file that exceeds
+it is killed and classified `tool`/`memory-killed` WITH its measured peak, and
+the sweep continues. It is not a timeout wearing another name: a timeout says
+raise -t, a memory kill says this file's build is a different shape from every
+other one and running it wider will not help. Measured on the tree where the
+sweep was killed, no file exceeded 0.2 GB and the whole -j18 sweep peaked at
+1.97 GB, so the 4 GB default is an order of magnitude above everything observed
+— it is here for the file nobody has run yet.
+
+And a run that is killed anyway must not lose what it already knows. Results are
+printed as each file is classified, and printed with an explicit flush, because
+a redirected stdout is a block-buffered FILE: the previous design built the whole
+table and printed it after the pool drained, so an interrupted run printed
+nothing at all however far it had got, which is precisely what made the 2026-10-01
+kill undiagnosable. A partial run publishes a ledger under its own extension
+and marks itself partial, so the next run's history diff is against the last
+COMPLETE run and a missing file is never reported as a verdict that changed.
 
 Verdicts are cached in the CAS (cas.formal_build_key: source bytes + the
 formal backend's own sources + the interpreter + the build flags + this tool's
@@ -246,6 +282,7 @@ import datetime
 import json
 import os
 import re
+import signal
 import struct
 import subprocess
 import sys
@@ -253,11 +290,16 @@ import tempfile
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cas
+import procrun
 from formal import macho_linker as ML
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRE = os.path.join(REPO, "fire.py")
+# The per-file memory ceiling, as an EXECUTABLE and not a copy of one: see
+# MEMCAP_GB below for why this is tools/memcap.py and not a private watchdog.
+MEMCAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memcap.py")
 
 # Every build flag that changes the artifact, and therefore the cache key
 # (cas.formal_build_key folds them in). The arch is one of them: the two
@@ -350,6 +392,26 @@ DIRTY = frozenset((CLASS_CODEGEN, CLASS_CODEGEN_DEP, CLASS_CRASH,
 CAUSE_TIMEOUT = "timeout"
 CAUSE_UNREADABLE = "unreadable"
 CAUSE_TOOL_ERROR = "tool-error"
+# The build was KILLED for memory, by this tool's own per-file ceiling. This is
+# the cause that makes the sweep survivable at all, and it is its own label
+# rather than a flavour of `timeout` because the two demand opposite responses:
+# a timeout says raise -t, a memory kill says this file's build is a different
+# shape from every other one, and re-running it wider will not help.
+#
+# 2026-10-01: the arm64 sweep died of an external SIGKILL with nothing in its
+# output but the 5-line header, so not one file was classified — see
+# bugs/FORMAL_sweep_killed.md. One file's build being able to take the whole run
+# down with it is what that made possible, and the fix is the ceiling that
+# produces this label: the file is killed, classified, and the sweep continues.
+CAUSE_MEMORY = "memory-killed"
+# The image BUILDS, but this host cannot check whether its imports resolve,
+# because they are dylibs of the other architecture and dlopen can only load
+# this process's own. Not a finding about the image and not a fact about the
+# target: it is a gap in the RUN, and the fix is to run the sweep on a host of
+# the image's architecture. Its own label because the neighbouring classes give
+# the opposite advice — an `unresolved-extern` says the link line is wrong,
+# which would send someone to fix an image that is already correct.
+CAUSE_FOREIGN_ARCH = "unverifiable-here"
 # The build driver raised instead of refusing a construct. Which side of the
 # line that falls on is decided by the DEEPEST frame of the traceback, not by
 # the message: fire.py prints `build: {e}` for a FormalBuildError *and* for
@@ -1502,6 +1564,48 @@ _MEMO: dict = {}            # (dylib path, name) -> bool, for the whole run
 _CPU_NAMES = {ML.CPU_TYPE_ARM64: "arm64", ML.CPU_TYPE_X86_64: "x86_64"}
 
 
+def _host_cputype():
+    """The CPU type of the PROCESS doing the probing, or None if unreadable.
+
+    Read from the running interpreter's own Mach-O header rather than from
+    `platform.machine()`, because the question is not "what is this machine
+    called" but "what will this process's dlopen accept" — and those are the
+    same question with one fewer way to be wrong (a Rosetta-translated shell on
+    an arm64 host reports the translated name).
+
+    This is the fourth fact the probe needs, and until 2026-10-01 it was missing:
+    the probe `dlopen`s each library on the image's link line, and dlopen can
+    only ever load a library of THIS process's architecture. So on an arm64
+    host, an x86-64 image's own perfectly good x86-64 dylibs could not be
+    opened, and the resulting OSError was reported as the finding
+    `dyld cannot load <path> here: ... (mach-o file, but is an incompatible
+    architecture (have 'x86_64', need 'arm64'))` — a claim about the image,
+    derived entirely from a limitation of the instrument. Measured: it is the
+    whole of the arm64-vs-x86-64 pass difference, all 7 files, every one of them
+    an image that builds and links correctly for its architecture
+    (bugs/FORMAL_sweep_work_map_2026-10-01.md §4).
+    """
+    global _HOST_CPUTYPE
+    if _HOST_CPUTYPE is _UNSET:
+        _HOST_CPUTYPE = None
+        for exe in (sys.executable, sys.prefix):
+            types = _macho_cputypes(exe) if exe and os.path.exists(exe) else set()
+            if len(types) == 1:
+                _HOST_CPUTYPE = next(iter(types))
+                break
+    return _HOST_CPUTYPE
+
+
+_UNSET = object()
+_HOST_CPUTYPE = _UNSET
+
+
+def _host_arch_name() -> str:
+    """This process's architecture, in the spelling the report uses."""
+    host = _host_cputype()
+    return _cpu_name(host) if host is not None else "unknown-architecture"
+
+
 def _cpu_name(cputype: int) -> str:
     return _CPU_NAMES.get(cputype, f"cpu type {cputype}")
 
@@ -1532,40 +1636,77 @@ def _macho_cputypes(path: str) -> set:
         return set()
 
 
-def _loadable_for(path: str, cputype: int) -> str:
-    """"" for a library this image's dyld could load, else why not.
+def _loadable_for(path: str, cputype: int):
+    """`(state, foreign, why)` for a library this image's dyld could load.
 
-    dlopen is deliberately NOT the test — it is happy to load a library built
-    for the other architecture, which is precisely the case dyld refuses
-    ("Library not loaded: … (mach-o file, but is an incompatible architecture
-    (have 'arm64', need 'x86_64'))") and precisely the case that would turn
-    this probe into a false PASS. The architecture is checked first, from the
-    file's own header; cpusubtype is not, because dyld accepts a mismatch
-    there and matching it more strictly would invent findings.
+    THREE states, and the third is the one that was missing until 2026-10-01.
+    `foreign` is the architecture a host would need in order to answer at all,
+    and is None for the other two:
 
-    libSystem short-circuits to "loadable" without either check: it is answered
-    from the host process (see the block comment above), and on this system
-    /usr/lib/libSystem.B.dylib is a shared-cache stub with no header to read —
-    so the arch test below would report every image as unloadable, which is the
-    false-finding direction.
+      ("loadable",   None, "")     the image could load it, and it does export
+      ("unloadable", None, why)    the image could NOT load it — a real failure
+      ("unprovable", arch, why)    this PROCESS cannot find out, because the
+                                   library is not of the host's architecture
+
+    dlopen is deliberately NOT the test for the second — it is happy to load a
+    library built for the other architecture, which is precisely the case dyld
+    refuses and precisely the case that would turn this probe into a false PASS.
+    The architecture is checked first, from the file's own header; cpusubtype is
+    not, because dyld accepts a mismatch there and matching it more strictly
+    would invent findings.
+
+    The third state is separate from the second because "this image cannot load
+    it" and "I cannot check whether this image can load it" are different facts
+    and the tool conflated them. A `dlopen` failure on a library of the HOST's
+    architecture is a fact about the image (the image's dyld runs in the same
+    world). A `dlopen` failure on a library of the OTHER architecture says
+    nothing at all about the image — the image's dyld would be a different
+    process on a different slice, and the honest answer is that the probe cannot
+    answer, not that the image is broken. Reporting it as a load failure filed
+    7 correct x86-64 images as `not-answerable/unresolved-extern` on an arm64
+    host.
+
+    libSystem short-circuits to "loadable" without any of the checks: it is
+    answered from the host process (see the block comment above), and on this
+    system /usr/lib/libSystem.B.dylib is a shared-cache stub with no header to
+    read — so the arch test below would report every image as unloadable, which
+    is the false-finding direction.
     """
     if path == _LIBSYSTEM:
-        return ""                       # ordinal 1, answered from the host
+        return "loadable", None, ""       # ordinal 1, answered from the host
     types = _macho_cputypes(path)
     if not types:
-        return f"cannot read a Mach-O header at {path}"
+        return "unloadable", None, f"cannot read a Mach-O header at {path}"
     if cputype not in types:
         have = "/".join(sorted(_cpu_name(t) for t in types))
-        return (f"{path} is built for {have}, which this "
+        return ("unloadable", None,
+                f"{path} is built for {have}, which this "
                 f"{_cpu_name(cputype)} image cannot load")
+    host = _host_cputype()
+    if host is None:
+        # Cannot establish what this process can dlopen, so the dlopen below
+        # would be an uninterpretable result either way. Refusing to answer is
+        # the direction that cannot invent a finding.
+        return ("unprovable", None,
+                f"cannot establish this host's architecture, so whether "
+                f"{path} could be loaded here is unknown")
+    if host not in types:
+        foreign = "/".join(sorted(_cpu_name(t) for t in types))
+        return ("unprovable", foreign,
+                f"{path} is built for {foreign}, which this "
+                f"{_cpu_name(host)} HOST cannot dlopen — so this probe cannot "
+                f"say whether the image's own dyld could load it. Not a "
+                f"finding about the image: re-run the sweep on a {foreign} "
+                f"host, or take the verdict as unproven rather than as a "
+                f"failure")
     if path in _LIBS:
-        return _LIBS[path]
+        return ("loadable" if not _LIBS[path] else "unloadable"), None, _LIBS[path]
     try:
         _LIBS[path] = ""
         ctypes.CDLL(path)
     except OSError as e:
         _LIBS[path] = f"dyld cannot load {path} here: {e}"
-    return _LIBS[path]
+    return ("unloadable" if _LIBS[path] else "loadable"), None, _LIBS[path]
 
 
 def _exports(path: str, name: str) -> bool:
@@ -1586,32 +1727,44 @@ def _exports(path: str, name: str) -> bool:
     return _MEMO[key]
 
 
-def _resolvable(ordinal: int, name: str, dylibs: list, cputype: int) -> str:
-    """Why dyld cannot bind `name` from dylib `ordinal`, or "" if it can.
+def _resolvable(ordinal: int, name: str, dylibs: list, cputype: int):
+    """`(state, foreign, why)` for whether dyld can bind `name` from `ordinal`.
 
     See the block comment above: the answer is read out of the image's own load
     commands and bind stream, and looked up in the one library dyld would use.
-    "" is the only success value, so a caller cannot mistake a partial answer
-    for a resolution.
+    `("resolved", None, "")` is the only success, so a caller cannot mistake a
+    partial answer — including "this host cannot find out" — for a resolution.
     """
     if not dylibs:
-        return "the image has no load commands"
+        return "unresolved", None, "the image has no load commands"
     if ordinal < 1 or ordinal > len(dylibs):
-        return (f"the bind names dylib ordinal {ordinal}, which the image's "
+        return ("unresolved", None,
+                f"the bind names dylib ordinal {ordinal}, which the image's "
                 f"{len(dylibs)} load command(s) do not define")
     path = dylibs[ordinal - 1]
-    bad = _loadable_for(path, cputype)
-    if bad:
-        return f"{bad}; nothing in it binds"
+    state, foreign, bad = _loadable_for(path, cputype)
+    if state == "unprovable":
+        # Propagated as itself rather than folded into "unresolved": the caller
+        # files the two differently, and that difference is the whole point.
+        return state, foreign, bad
+    if state == "unloadable":
+        return state, None, f"{bad}; nothing in it binds"
     if not _exports(path, name):
-        return f"{name} is not exported by {path}"
-    return ""
+        return "unresolved", None, f"{name} is not exported by {path}"
+    return "resolved", None, ""
 
 
 # A name the image binds that no loadable library provides, and the reason —
 # so the printed finding says WHICH library was consulted and what was wrong
 # with it, rather than only how many names there were.
-Missing = collections.namedtuple("Missing", "name why")
+#
+# `unprovable` is a third answer beside "dyld cannot bind this" and "dyld binds
+# this": it means the sweep ran on a host that cannot answer, so the name is
+# neither bound nor unbound as far as this run knows. Carried on the record
+# rather than encoded in the message, because run_one files the two differently
+# and a caller that had to tell them apart by reading prose would eventually
+# read them the same way round.
+Missing = collections.namedtuple("Missing", "name why unprovable foreign")
 
 
 def _unresolved_imports(binary: bytes) -> list:
@@ -1621,6 +1774,11 @@ def _unresolved_imports(binary: bytes) -> list:
     would, at the first call to it): that is not coverage and is not a codegen
     finding, so it is reported in its own class. See the block comment above
     for what this does and does not prove.
+
+    `Missing.unprovable` marks the names this host could not check at all; see
+    _loadable_for's third state. Both kinds are returned so a caller can see
+    that a name was looked for, and the caller is what decides that one is a
+    finding and the other is a gap in the run.
     """
     dylibs = _load_dylib_names(binary)
     if not dylibs and binary[:4] not in _MACHO_MAGICS:
@@ -1630,10 +1788,15 @@ def _unresolved_imports(binary: bytes) -> list:
         # failure of the reader itself. Said out loud instead.
         return [Missing("<unreadable image>",
                         f"{len(binary)} bytes with no Mach-O header, so what "
-                        f"it binds could not be read at all")]
+                        f"it binds could not be read at all", False, None)]
     cputype = struct.unpack_from("<i", binary, 4)[0]
-    return [Missing(name, why) for ordinal, name in _binds(binary)
-            for why in [_resolvable(ordinal, name, dylibs, cputype)] if why]
+    out = []
+    for ordinal, name in _binds(binary):
+        state, foreign, why = _resolvable(ordinal, name, dylibs, cputype)
+        if state == "resolved":
+            continue
+        out.append(Missing(name, why, state == "unprovable", foreign))
+    return out
 
 
 def _verdict_bytes(ok, detail):
@@ -1654,8 +1817,92 @@ def _verdict_from_bytes(raw):
 Verdict = collections.namedtuple(
     "Verdict", "ok detail cause cached cls reason")
 
+# What one build invocation produced. A named type rather than a
+# subprocess.CompletedProcess with attributes hung off it, because the two facts
+# that are not on a CompletedProcess (`mem_killed`, `peak_gb`) are the two a
+# reader of this file has to be unable to miss: they are why a file has no
+# verdict, and what it cost. `returncode`/`stdout`/`stderr` carry their usual
+# meanings, and `stdout`+`stderr` are the BUILD's streams — memcap's own
+# accounting is read off them in _run_build and not passed on, so nothing
+# downstream can match a `memcap:` line as if the build had printed it.
+BuildRun = collections.namedtuple(
+    "BuildRun", "returncode stdout stderr mem_killed peak_gb")
 
-def run_one(path, timeout, flags) -> Verdict:
+
+# ── Per-file memory ceiling ──────────────────────────────────────────────────
+# The sweep launches `jobs` builds at once and, until 2026-10-01, ran each one
+# with nothing between it and the machine. That is the structural reason the
+# arm64 sweep could be killed outright by one file: 18 unbounded children, no
+# per-file ceiling, and a build driver that will happily recurse through a
+# module closure. Measured on that tree, no single file exceeded 0.2 GB and the
+# whole -j18 sweep peaked at 1.97 GB — so the ceiling below is generous by an
+# order of magnitude against every file measured, and it is here for the file
+# nobody has run yet rather than to bound anything observed.
+#
+# It is deliberately the SHARED implementation (tools/memcap.py, whose
+# measurement and kill are in tools/procrun.py) rather than a second copy of a
+# process walk here: a second RSS-threading-and-killing implementation is a
+# second set of ways to get the tree walk wrong, and `formal-sweep` is
+# registered in the suite under a `small` memclass precisely because memcap is
+# what enforces it.
+#
+# `MEMCAP_GB` is measured against the per-file peaks above and the 3-4 GB
+# standard in bugs/PERF_memory_over_4gb_is_a_bug.md: over 4 GB for one file's
+# build is a debt, so 4 GB is both a real bound and a claim worth making.
+MEMCAP_GB = 4.0
+
+
+def _build_argv(path, out, flags, mem_gb):
+    """The argv for one file's build, under `memcap` when a ceiling is set.
+
+    `mem_gb` <= 0 means no ceiling, and then this is the bare build. That is a
+    real mode rather than a degenerate one: a ceiling of 0 would also be read as
+    "off" by memcap itself, so the two would agree by accident, and a caller that
+    passes 0 deserves the un-capped build it asked for rather than a child that
+    is killed instantly.
+    """
+    build = [sys.executable, FIRE, "build", *flags, "-o", out, path]
+    if not mem_gb or mem_gb <= 0:
+        return build
+    return [sys.executable, MEMCAP, "--limit-gb", str(mem_gb),
+            "--label", os.path.basename(path), "--"] + build
+
+
+def _run_build(path, out, flags, timeout, mem_gb):
+    """Run one file's build under its memory ceiling. Returns a BuildRun.
+
+    The child gets its own process group (`start_new_session`), which is what
+    makes both bounds here whole-tree rather than direct-child: `subprocess.run`'s
+    timeout SIGKILLs the process it started, and a build that has spawned a
+    compiler of its own would leave that compiler running and still holding the
+    memory the kill was meant to release. Under memcap that is moot — memcap
+    walks and kills the tree itself — but the timeout fires on the memcap
+    wrapper, and the wrapper's own group is this one, so the two bounds nest
+    correctly rather than fighting.
+
+    `mem_killed` is the whole point of the exercise and it is carried as a
+    FIELD rather than left to be re-derived from the exit code, because the exit
+    code cannot carry it: memcap's 125 is also what a build that exits 125 by
+    itself produces, and procrun.memcap_verdict exists to refuse exactly that
+    conflation. The peak travels with it so the report can name the number the
+    ceiling was measured against rather than only saying a kill happened.
+    """
+    argv = _build_argv(path, out, flags, mem_gb)
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                          cwd=REPO, start_new_session=True)
+    mem_killed, peak = False, None
+    if mem_gb and mem_gb > 0:
+        # memcap's own accounting goes to stdout, where it would otherwise be
+        # mistaken for the build's message. It is read here, off the CHILD's
+        # streams, rather than stripped from what the classifier sees: the
+        # classifier must not be able to match a `memcap:` line as a build
+        # refusal, and the build's real message is the one it should read.
+        mem_killed, peak = procrun.memcap_verdict(
+            (proc.stdout or "") + (proc.stderr or ""))
+    return BuildRun(proc.returncode, proc.stdout, proc.stderr, mem_killed, peak)
+
+
+def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
     """Build one file and classify the outcome. See Verdict.
 
     `cause` is non-None when the outcome is not one of the build's own
@@ -1685,7 +1932,10 @@ def run_one(path, timeout, flags) -> Verdict:
     stale entry harmless if it ever survives.
     A timeout is a property of this machine's load, not of the source, so it is
     never published — it would otherwise pin a file at "timeout" until the key
-    changed.
+    changed. Neither is a memory kill, for the same reason and one more: the
+    ceiling that produced it is a flag on THIS run, so publishing would pin a
+    file at "memory-killed" under a key that says nothing about which flag set
+    it.
     """
     def verdict(ok, detail, cause, cached):
         cls, reason = classify(ok, detail, cause, source, path)
@@ -1720,10 +1970,7 @@ def run_one(path, timeout, flags) -> Verdict:
         # -o into a temp dir so we don't scatter .aout across the tree
         with tempfile.TemporaryDirectory(prefix="formal_sweep_") as td:
             out = os.path.join(td, "a.out")
-            proc = subprocess.run(
-                [sys.executable, FIRE, "build", *flags, "-o", out, path],
-                capture_output=True, text=True, timeout=timeout, cwd=REPO,
-            )
+            proc = _run_build(path, out, flags, timeout, mem_gb)
             if proc.returncode == 0:
                 with open(out, "rb") as f:
                     binary = f.read()
@@ -1735,15 +1982,57 @@ def run_one(path, timeout, flags) -> Verdict:
             linked = [d for d in _load_dylib_names(binary) if d != _LIBSYSTEM]
             cause = None
             if missing:
-                names = sorted({m.name for m in missing})
+                # Split first, because the two kinds need different files. A
+                # name the probe could not check (this host cannot dlopen a
+                # library of the image's architecture) is NOT a fact about the
+                # image, and reporting it as one is how 7 correct x86-64 images
+                # came to be filed `not-answerable/unresolved-extern` on an arm64
+                # host. If every unprovable name is unprovable, the file gets no
+                # verdict at all and says why; if some are real, the real ones
+                # are the finding and the unchecked ones are counted beside it,
+                # because a reader has to know the finding is not the whole
+                # story.
+                unprovable = [m for m in missing if m.unprovable]
+                real = [m for m in missing if not m.unprovable]
+                names = sorted({m.name for m in real or unprovable})
+                if not real:
+                    need = unprovable[0].foreign or "matching"
+                    return verdict(
+                        False,
+                        f"builds, but this {_host_arch_name()} host cannot "
+                        f"check the {len(unprovable)} import(s) it binds "
+                        f"({', '.join(names[:3])}"
+                        + (" ..." if len(names) > 3 else "")
+                        + f"): they are in a {need} dylib, which only a {need} "
+                        f"process can dlopen. The image's own dyld would load "
+                        f"them; verifying that needs a {need} host, so this run "
+                        f"reports no verdict rather than a failure "
+                        f"[{unprovable[0].why}]",
+                        CAUSE_FOREIGN_ARCH, False)
                 ok, detail = False, (
-                    f"builds, but {len(missing)} import(s) dyld cannot "
+                    f"builds, but {len(real)} import(s) dyld cannot "
                     f"resolve: {', '.join(names[:3])}"
                     + (" ..." if len(names) > 3 else "")
-                    + f" [{missing[0].why}]")
+                    + f" [{real[0].why}]"
+                    + (f" ({len(unprovable)} further name(s) could not be "
+                       f"checked from this host at all — see "
+                       f"'{CAUSE_FOREIGN_ARCH}')" if unprovable else ""))
             else:
                 ok, detail = True, ""
         else:
+            # A memory kill outranks every reading of the message. memcap
+            # SIGKILLed the tree, so there is no build message to read — whatever
+            # the child managed to print before it died is not a verdict about
+            # the source, and classifying it as one (a `codegen` row, via the
+            # silent-death fallback below) would file a machine fact as a finding
+            # about this file. It is checked FIRST, and it names the peak, so
+            # the report says what happened rather than only that something did.
+            if proc.mem_killed:
+                return verdict(
+                    False,
+                    f"killed at the {mem_gb:g} GB per-file ceiling"
+                    + (f" (peak {proc.peak_gb:.1f} GB)" if proc.peak_gb else ""),
+                    CAUSE_MEMORY, False)
             err = (proc.stderr or proc.stdout or "").strip()
             # keep the last non-empty line — that's the formal build's message
             lines = [ln for ln in err.splitlines() if ln.strip()]
@@ -1815,6 +2104,7 @@ def run_one(path, timeout, flags) -> Verdict:
 # arch, and it moves when the scope moves (so a narrowed sweep does not diff
 # itself against a wider one).
 LEDGER_EXT = ".ledger"
+LEDGER_PARTIAL_EXT = ".ledger.partial"
 LEDGER_MAGIC = b"formal-sweep-ledger-v1"
 
 
@@ -1838,13 +2128,27 @@ def load_ledger(arch: str, files):
     return data
 
 
-def publish_ledger(arch: str, files, verdicts: dict) -> None:
+def publish_ledger(arch: str, files, verdicts: dict, partial=False) -> None:
+    """Record this run's path -> class, for the next run to diff against.
+
+    `partial=True` writes a DIFFERENT extension, and that is the whole design of
+    the interrupted case rather than a detail of it. A partial run classified
+    some files and never reached others, so a class "change" against it is
+    mostly the arithmetic of what was not run — diffing a complete run against
+    one would report hundreds of files as having moved when nothing about them
+    changed. Writing it under its own extension means load_ledger (which looks
+    for the complete one) cannot see it at all, so the next run's report_history
+    is a diff against the last COMPLETE run and says so, and a reader who wants
+    the partial record goes and reads the partial file, which is named for what
+    it is.
+    """
     body = json.dumps(
-        {"arch": arch, "total": len(verdicts),
+        {"arch": arch, "total": len(verdicts), "partial": bool(partial),
          "when": datetime.datetime.now().isoformat(timespec="seconds"),
          "verdicts": verdicts},
         sort_keys=True).encode("utf-8")
-    cas.publish(ledger_key(arch, files), LEDGER_EXT, body)
+    cas.publish(ledger_key(arch, files),
+                LEDGER_PARTIAL_EXT if partial else LEDGER_EXT, body)
 
 
 def report_history(prev, verdicts: dict) -> None:
@@ -1916,9 +2220,162 @@ CLASS_BLURB = {
                  "compiler, in no rate, exit 1 — never cached, so it re-runs",
     CLASS_UNKNOWN: "a build message this tool does not recognise — the "
                    "classifier needs updating, not the backend",
-    CLASS_TOOL: "no verdict reached: timeout, unreadable file, or an internal "
-                "exception in the sweep or build driver",
+    CLASS_TOOL: "no verdict reached: the build timed out, blew this tool's "
+                "per-file memory ceiling, was unreadable, or the sweep or build "
+                "driver raised",
 }
+
+
+# ── Running the pool, and surviving not finishing it ──────────────────────────
+def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
+    """Classify every file, printing each as it lands. True if interrupted.
+
+    Prints, does not returns, because the printing is the point: an interrupted
+    run has to leave the files it classified on the output, and the only way to
+    guarantee that is to write them down at the moment they are known rather than
+    reconstructing them from a dict afterwards.
+
+    A signal handler rather than only a `try`, because the two interruptions are
+    not the same event. SIGINT/SIGTERM is a person or a watchdog asking the run
+    to stop, and the handler turns it into a clean drain: the pool is shut down
+    without waiting for the builds still in flight (they are the slow part, and
+    the caller has already decided they are not wanted), whatever had finished
+    is published, and the exit status says the run was cut short. A SIGKILL
+    cannot be caught at all — that is why the per-file ceiling above exists, to
+    make sure the only thing a SIGKILL can take is the tool's OWN process and
+    not a build that had already been classified and thrown away.
+    """
+    stop = threading.Event()
+
+    def _on_signal(signum, _frame):
+        # Signal handlers must not do work; set the flag and let the loop notice.
+        # A second signal is left to the default disposition so an operator who
+        # wants out NOW gets out, rather than being held by a handler that is
+        # only going to drain politely.
+        if stop.is_set():
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+            return
+        stop.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _on_signal)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+            futs = {ex.submit(run_one, p, timeout, flags, mem_gb): p
+                    for p in files}
+            for fut in concurrent.futures.as_completed(futs):
+                path = futs[fut]
+                try:
+                    v = fut.result()
+                except Exception as e:
+                    # run_one catches its own failures; this is the belt to that
+                    # braces, and a whole sweep must not die because one future
+                    # did. It is reported as `tool`, never as a verdict.
+                    v = Verdict(False, f"sweep worker raised: {e}"[:200],
+                                CAUSE_TOOL_ERROR, False, CLASS_TOOL,
+                                CAUSE_TOOL_ERROR)
+                results[path] = v
+                if v.cls != CLASS_PASS:
+                    print(f"{v.cls.upper()}: {rel(path)}  ({v.detail})",
+                          flush=True)
+                if stop.is_set():
+                    return True
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, signal.SIG_DFL)
+    return False
+
+
+def _report_partial(arch, files, results) -> None:
+    """Say what an interrupted run managed to classify, and publish it.
+
+    The counts are over the files that were classified, NOT over `files`, and
+    the two are printed as separate numbers on purpose. A partial run that
+    reported "623 files: PASS=113" would be claiming a denominator it does not
+    have; the honest form is "113 of 623 classified" with the tally over the
+    113. A reader comparing the two numbers can see exactly how much of the sweep
+    the interruption cost, which is the fact that makes a partial run worth
+    reading at all.
+    """
+    done = [p for p in files if p in results]
+    counts = {}
+    for p in done:
+        counts[results[p].cls] = counts.get(results[p].cls, 0) + 1
+    print("", file=sys.stderr)
+    print(f"[{arch}] INTERRUPTED: {len(done)} of {len(files)} files "
+          f"classified; the rest were not reached and nothing is claimed about "
+          f"them", file=sys.stderr)
+    for cls in CLASS_ORDER:
+        if counts.get(cls):
+            print(f"    {cls:<28} {counts[cls]:>4}", file=sys.stderr)
+    if counts.get(CLASS_TOOL):
+        print(f"  of the {counts[CLASS_TOOL]} in `tool`, "
+              f"{sum(1 for p in done if results[p].cause == CAUSE_MEMORY)} "
+              f"hit this tool's per-file memory ceiling", file=sys.stderr)
+    sys.stderr.flush()
+    # Publish the partial ledger under a key that says PARTIAL, so it can never
+    # be read as a complete run's history by the next one. Same shape, so
+    # load_ledger finds it and report_history can still say what moved; the
+    # `partial` flag is what a reader (and report_history) check before
+    # treating a class change as a fact about the tree.
+    try:
+        publish_ledger(arch, files, {rel(p): results[p].cls for p in done},
+                       partial=True)
+    except Exception as e:            # noqa: BLE001
+        print(f"  (could not publish the partial ledger: {e})", file=sys.stderr)
+
+
+# ── One sweep per architecture ───────────────────────────────────────────────
+# Keyed by ARCH, not by scope and not by the file list, and both exclusions are
+# deliberate. Not by scope: a narrowed sweep (`-j6 <20 paths>` while bisecting)
+# and a full one write the same dylibs and the same ledger, so a scope key would
+# let exactly the pair that collides run together. Not by the file list: the
+# dylib a sweep writes depends on the module a file IMPORTS, so two disjoint
+# file lists still meet in the middle (and the owner's own two-at-once run was
+# an arm64 and an x86-64 sweep, which this key correctly allows).
+#
+# The lock is `flock`, like formal/imports.py's `_dylib_lock` and for the same
+# two reasons: advisory, and released by the kernel when the holder dies, so a
+# killed sweep cannot wedge the next one. It is a LOCKFILE, so a second sweep
+# can say which pid holds it instead of only that it is busy.
+def sweep_lock_path(arch: str) -> str:
+    return os.path.join(cas.CAS_DIR, f"formal-sweep-{arch}.lock")
+
+
+# The held lock fd. Module-level and never closed, on purpose: the lock is held
+# for the life of the process, and there is no code path that should release it
+# early (releasing it would let a second sweep start while this one is still
+# writing dylibs). Naming it here rather than returning it from _claim_arch says
+# "this is held forever" instead of "the caller must remember to keep this".
+_HELD_LOCK = None
+
+
+def _claim_arch(arch: str, files) -> bool:
+    """Take this architecture's sweep lock, or return False if it is held.
+
+    Like formal/imports.py's `_dylib_lock`: `flock` is advisory and
+    per-open-file-description, so the kernel releases it when the holder dies and
+    a killed sweep cannot wedge the next one. A lockFILE rather than the ledger
+    itself, because the ledger is replaced (so a second process would acquire a
+    lock on a file the first is about to unlink) and because a reader can then be
+    told which pid holds it.
+    """
+    import fcntl
+
+    global _HELD_LOCK
+    os.makedirs(cas.CAS_DIR, exist_ok=True)
+    fd = os.open(sweep_lock_path(arch), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    os.ftruncate(fd, 0)
+    os.write(fd, ("%d\n%s\n" % (os.getpid(), " ".join(files[:3]))).encode())
+    os.fsync(fd)
+    _HELD_LOCK = fd
+    return True
 
 
 def main():
@@ -1946,6 +2403,22 @@ def main():
                          "or pass paths positionally to choose exactly)")
     ap.add_argument("--no-stdlib", action="store_true",
                     help="sweep this repo only (the pre-stdlib default)")
+    ap.add_argument("-M", "--mem-gb", type=float, default=MEMCAP_GB,
+                    metavar="GB",
+                    help="per-file memory ceiling for ONE file's build, in GB "
+                         f"(default {MEMCAP_GB:g}; 0 disables it). A file that "
+                         "exceeds it is killed, classified in `tool` as "
+                         f"'{CAUSE_MEMORY}' with the measured peak, and the "
+                         "sweep CONTINUES — one file's build cannot take the "
+                         "run down with it. Not cached: a memory kill is a "
+                         "property of this run's ceiling, not of the source")
+    ap.add_argument("--allow-concurrent", action="store_true",
+                    help="sweep even if another sweep of the SAME architecture "
+                         "is running. They share the formal module-dylib "
+                         "directory and the ledger, and a manifest there is "
+                         "rewritten in place, so a reader in one can see the "
+                         "other's half-written JSON. Different architectures "
+                         "are independent and never need this")
     ap.add_argument("paths", nargs="*",
                     help="files or dirs (default: this repo plus the stdlib's "
                          f"{','.join(DEFAULT_STDLIB_SUBTREES)}/ — the roots "
@@ -1996,30 +2469,75 @@ def main():
         sys.exit(2)
     print(f"Total: {len(files)} files", file=sys.stderr)
 
+    # One sweep per architecture, at a time. Taken AFTER the scope is resolved
+    # (so the message can name what the other run is sweeping) and BEFORE any
+    # build starts, because a lock acquired after the first build has run has
+    # already lost the race it exists to arbitrate.
+    if not args.allow_concurrent:
+        held = _claim_arch(arch, files)
+        if not held:
+            print(f"another {arch} sweep is already running on this machine "
+                  f"(lock: {sweep_lock_path(arch)}). Two sweeps of the SAME "
+                  f"architecture share the formal module-dylib output "
+                  f"directory (~/.gmojo/cas/formal-imports/{arch}/) and the "
+                  f"ledger, and a manifest there is rewritten in place, so a "
+                  f"reader in one sweep can see the other's half-written "
+                  f"JSON — which is what a `json.decoder.JSONDecodeError` in "
+                  f"the `tool` class is "
+                  f"(bugs/FORMAL_sweep_tool_json_decode_error.md). Two sweeps "
+                  f"of DIFFERENT architectures are independent (separate dylib "
+                  f"directories, separate cache keys) and are allowed; pass "
+                  f"--allow-concurrent to override this one anyway.",
+                  file=sys.stderr)
+            sys.exit(2)
+
     jobs = max(1, args.jobs)
+    mem_gb = args.mem_gb
+    # The ceiling is in the HEADER, not only in --help, for the same reason the
+    # root list is: a run whose log does not say what bound it cannot be
+    # compared with a run that had a different bound. A `tool` row saying
+    # "killed at the 4 GB per-file ceiling" is only readable next to a header
+    # that says the ceiling was 4 GB.
     print(f"Sweeping {len(files)} files through build --formal "
-          f"[{arch}] ({jobs} workers, {args.timeout}s timeout)...",
-          file=sys.stderr)
+          f"[{arch}] ({jobs} workers, {args.timeout}s timeout, "
+          + (f"{mem_gb:g} GB per-file ceiling..." if mem_gb > 0
+             else "NO per-file memory ceiling...")
+          + ")", file=sys.stderr)
     print("Every file is classified (pass / codegen / codegen-dependency / "
           "not-answerable / backend-crash / tool / unknown); the two codegen "
           "classes are the gaps in the backend, and only the first of them is "
           "in the file itself.", file=sys.stderr)
+    print("Results are printed as each file is classified, so an interrupted "
+          "run keeps what it classified (and exits 3).", file=sys.stderr)
 
     results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-        futs = {ex.submit(run_one, p, args.timeout, flags): p
-                for p in files}
-        for fut in concurrent.futures.as_completed(futs):
-            path = futs[fut]
-            try:
-                results[path] = fut.result()
-            except Exception as e:
-                # run_one catches its own failures; this is the belt to that
-                # braces, and a whole sweep must not die because one future
-                # did. It is reported as `tool`, never as a verdict.
-                results[path] = Verdict(
-                    False, f"sweep worker raised: {e}"[:200], CAUSE_TOOL_ERROR,
-                    False, CLASS_TOOL, CAUSE_TOOL_ERROR)
+    # Every file that did not pass is printed AS IT IS CLASSIFIED, not at the
+    # end. That is the difference between a sweep that is interrupted and a
+    # sweep that produced nothing: this loop used to fill a dict and print
+    # after the pool drained, so a run killed at file 600 of 623 left an output
+    # file with a header and no classifications at all — 2026-10-01's arm64
+    # sweep, whose whole log was the 5-line header, because the process died
+    # before the one print statement that would have named a single file.
+    #
+    # `flush=True` on every line matters as much as the streaming: a redirected
+    # stdout is a block-buffered FILE, so without it the lines would sit in a
+    # buffer and an interrupted run would lose them anyway, which is the exact
+    # failure this is here to fix. Ordering is arrival order, and that is
+    # DELIBERATE: the deterministic order (`files`) is still what every count,
+    # the headline, the family breakdown and the ledger are computed over, so
+    # the parts a reader diffs run-to-run are unchanged. Only the interleaving
+    # of the per-file lines moves, and the ledger — not this list — is the
+    # run-to-run diff (see LEDGER).
+    if _stream_results(files, jobs, args.timeout, flags, mem_gb, results):
+        # An interrupted run is still a run: it publishes what it classified,
+        # marked partial, so the next run's report_history has something to
+        # compare against instead of calling itself the first classified run.
+        # Exit 3, distinct from 1 (findings) and 2 (did not run), because "you
+        # killed it" and "it found something" and "it never started" are three
+        # different facts and a caller that has to tell them apart should not
+        # have to read the log to do it.
+        _report_partial(arch, files, results)
+        sys.exit(3)
 
     # Every file gets exactly one class, and the classes sum to the file count
     # by construction: one entry per file, one class per entry. run_one has
@@ -2039,25 +2557,22 @@ def main():
     codegen_dep = counts[CLASS_CODEGEN_DEP]
     answerable = passed + codegen + codegen_dep
 
-    # Every file that did not pass is still printed, one line each, under its
-    # class. Nothing that used to print as `FAIL:` stops printing: a file
-    # reclassified out of FAIL is still here, with the class that says where
-    # it went, and report_history() below names the move in both directions.
+    # Every file that did not pass was already printed, one line each under its
+    # class, by _stream_results as it was classified — so this block only
+    # BUILDS the table the summary reads, and prints nothing per file. The
+    # reason that is the right split is in _stream_results: a per-file line
+    # printed after the pool drains is a per-file line an interrupted run never
+    # prints.
     #
-    # `detail` is printed WHOLE, deliberately, and this is the settled
-    # position rather than an oversight (it was ~20 KB for a 263-field
-    # diagnostic; that generator now bounds its own text and the longest line
-    # in a 280-file run is under 800 bytes, with the whole report ~70 KB).
-    # `reason` above is the bounded one-line form, and it is what the per-class
-    # breakdown uses. Truncating here would hide the actionable half of a
-    # message from the one class the report exists for — and it would buy
-    # nothing: the full text is in the CAS entry this same run published
-    # (cas.lookup(cas.formal_build_key(...), ".result")), and for a build
-    # refusal it is the build's own message, reproducible with the `fire.py
-    # build --formal` line this file prints at the top of the run.
-    for r, cls, _reason, detail in rows:
-        print(f"{cls.upper()}: {r}  ({detail})")
-
+    # `detail` is printed WHOLE, deliberately, and this is the settled position
+    # rather than an oversight (it was ~20 KB for a 263-field diagnostic; that
+    # generator now bounds its own text and the longest line in a 280-file run
+    # is under 800 bytes, with the whole report ~70 KB). `reason` is the bounded
+    # one-line form, and it is what the per-class breakdown uses. Truncating
+    # would hide the actionable half of a message from the one class the report
+    # exists for — and it would buy nothing: the full text is in the CAS entry
+    # this same run published (cas.lookup(cas.formal_build_key(...),
+    # ".result")), and for a build refusal it is the build's own message.
     print(f"[{arch}] {total} files: PASS={passed} not-pass={total - passed}")
     for cls in CLASS_ORDER:
         if not counts[cls]:
@@ -2233,9 +2748,41 @@ def main():
               f"was measured against")
     if counts[CLASS_TOOL]:
         print(f"  note: {counts[CLASS_TOOL]} file(s) got no verdict at all "
-              f"(timeout/unreadable/tool error) and are in NO rate; a "
-              f"too-small -t is the usual cause — this run used "
+              f"(timeout/unreadable/memory-killed/tool error) and are in NO "
+              f"rate; a too-small -t is the usual cause — this run used "
               f"-t {args.timeout}")
+    # Counted from `results` by CAUSE, not by matching the detail text: the
+    # cause is a field the classifier set, and re-deriving the count from the
+    # message it formatted is the second implementation of the same question.
+    mem_killed = sum(1 for p in files
+                     if results[p].cause == CAUSE_MEMORY)
+    if mem_killed:
+        # Said separately and by name, because the causes in that bucket need
+        # opposite responses and lumping them tells a reader to raise -t for a
+        # file whose problem is that its build does not fit in the ceiling.
+        print(f"  of those, {mem_killed} hit THIS TOOL's per-file memory "
+              f"ceiling of {mem_gb:g} GB and were killed — one file's build "
+              f"cannot take the run down; each is a real cost finding about "
+              f"that file (see bugs/PERF_memory_over_4gb_is_a_bug.md) and is "
+              f"NOT cached, so re-running re-measures it")
+    foreign_arch = sum(1 for p in files
+                       if results[p].cause == CAUSE_FOREIGN_ARCH)
+    if foreign_arch:
+        # Said in the summary, not only on the rows, because it changes what the
+        # headline IS. These files are in no rate, so the rate is unchanged —
+        # but a reader comparing this arch's PASS count with another host's is
+        # comparing a floor with a number, and the difference is exactly this
+        # many files. The honest way to say that is in the sentence a reader
+        # will actually read.
+        print(f"  note: {foreign_arch} file(s) built, but this "
+              f"{_host_arch_name()} host could not check whether their "
+              f"imports resolve (the dylibs are another architecture's, and "
+              f"dlopen only loads this process's own). They are in `tool`, in "
+              f"NO rate, and NOT cached — so the {passed} pass(es) above is a "
+              f"FLOOR for this arch on this host, and re-running the sweep on a "
+              f"host of each image's architecture is what turns it into a "
+              f"number. This is the instrument's limit, not a defect in those "
+              f"images")
     if counts[CLASS_CRASH]:
         print(f"  note: {counts[CLASS_CRASH]} file(s) made the BACKEND RAISE "
               f"rather than refuse a construct. A crash is a bug in the "
