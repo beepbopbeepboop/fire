@@ -4330,16 +4330,22 @@ CONSTRUCTION_REFUSALS = [
      "    return x.g\n",
      "refuse:whose body this path does not inline: `In1(…)`, a construction of a struct whose receiver is a frame",
      None),
-    # (8) The SAME construction into a field DECLARED with that struct's type,
-    # and the message is a different one — the placement's.  `f` is a field this
-    # constructor brings a nested frame up in, so storing a word over it is what
-    # `construction_nested_slot_refusal` is for, and that is the more useful of
-    # the two: it names the slot and what a read through it would compute.  It
-    # is a separate case because two refusals for one family is exactly what
-    # "the needle is the fact that is wrong" is for, and because the ORDER
-    # matters: the placement check runs after the walk, so a bare-parameter
-    # store into a placed slot is answered by the placement and a computed one
-    # by the walk.
+# (8) The SAME construction into a field DECLARED with that struct's type,
+    # and the message is a different one — the frame's.  `f` is declared `In3`,
+    # a struct of this module whose receiver is a frame, so the parameter is a
+    # FRAME HOLDER (the declared type is the evidence; there is no call site
+    # that hands it one, because `In4.__init__` is called by nobody here) and
+    # `self.f = f` parks a frame address in a field.  That is
+    # `frame_return_refusal`'s sibling for a store, and it is the more useful of
+    # the two messages because it names the LIFETIME question: the slot belongs
+    # to the frame that created THAT object and nothing here can say the two
+    # lifetimes agree.  It used to be answered by the placement instead
+    # (`construction_nested_slot_refusal`, "a store over a placed nested frame"),
+    # which was right about the slot and silent about the address being stored
+    # in it; the ORDER moved because the frame analysis runs before the
+    # construction checks and now recognises the parameter.  Still a refusal, and
+    # a separate case because two refusals for one family is exactly what "the
+    # needle is the fact that is wrong" is for.
     ("constr_refuse_an_init_store_over_a_placed_nested_frame",
      "struct In3:\n"
      "    var a: Int\n"
@@ -4355,9 +4361,8 @@ CONSTRUCTION_REFUSALS = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var x = In4(In3(1, 2), 3)\n"
-     "    return x.g\n",
-     "refuse:as field 'f' is refused on this path: 'f' is declared as a In3",
-     None),
+     "    return x.g",
+     "refuse:is stored in the field 'self.f'", None),
     # The guard on the other side of the same line: a ZERO-argument `S()` on a
     # struct that declares `__init__` is NOT one of the refusals above. There
     # are no arguments for the count to select an overload with, so it stays
@@ -5631,24 +5636,30 @@ POINTER_DEREF_REFUSALS = [
 #
 # Wave 6 (F1) closed it, and closed it the only way that does not pick a
 # winner: a field access through a name bound as a PARAMETER has no layout on
-# either architecture, so BOTH now refuse by name, from the same
-# `model.field_access_refusal`, and the two architectures can no longer answer
-# this program differently.  The case stays — as a refusal — because the
-# divergence it recorded was real and its replacement is exactly the assertion
-# that says so on both backends.
+# either architecture, so BOTH refused by name, from the same
+# `model.field_access_refusal`, and the two architectures could no longer answer
+# this program differently.  The case stayed — as a refusal — until the
+# DECLARED TYPE could establish what the parameter holds
+# (`bugs/FORMAL_method_param_field_access.md`): `h: One` says `h` IS a `One`,
+# and a one-field struct's receiver is its field, so `h.v` is `h` and the
+# program is answerable.  So the case is now what it should have been from the
+# start, which is the assertion the whole family wants: `raw(o) == 4242` on
+# BOTH backends, against a 4242 written into the field.  Before the change
+# x86-64 read an immediate 0 and returned the wrong number; the refusal was the
+# honest interim answer and this is the real one.
 X86_ONLY_1SLOT_BUG_CASE = (
-    "one_field_struct_field_read_is_correct_on_arm64",
-    "struct One:\n"
-    "    var v: Int64\n"
-    "def raw(h: One) -> Int:\n"
-    "    return Int(h.v)\n"
-    "def main(n: Int) -> Int:\n"
-    "    var o = One()\n"
-    "    o.v = 4242\n"
-    "    if raw(o) == 4242:\n"
-    "        return 1\n"
-    "    return 0\n",
-    "refuse:is a field access through 'h', and this", None)
+   "one_field_struct_field_read_is_correct_on_arm64",
+   "struct One:\n"
+   "    var v: Int64\n"
+   "def raw(h: One) -> Int:\n"
+   "    return Int(h.v)\n"
+   "def main(n: Int) -> Int:\n"
+   "    var o = One()\n"
+   "    o.v = 4242\n"
+   "    if raw(o) == 4242:\n"
+   "        return 1\n"
+   "    return 0\n",
+   1, None)
 
 
 # ── WHERE A NAME LIVES: module scope, and how a call's arguments bind ──────

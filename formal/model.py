@@ -5079,6 +5079,47 @@ def frame_holder_disagreement_refusal(callee: str, position, param,
             f"or nowhere")
 
 
+def frame_declared_parameter_refusal(callee, position, param, struct_name,
+                                    shape, sites) -> str:
+    """A parameter classified from its DECLARED type, reached with the wrong
+    shape at a call site.
+
+    The sibling of `frame_holder_disagreement_refusal`, and it exists because
+    that one cannot say this.  Its rule is "the call sites must agree with each
+    other", which is enough while a parameter is a holder only because some
+    call site handed it a frame: there is then at least one frame-side site to
+    compare the others against.  A parameter classified by its DECLARED TYPE
+    has no such site — that is the whole construct, `Slice.__eq__(self, other:
+    Self)` in a module where nothing calls it — so a program that does call it
+    with a plain word leaves the frame-side list empty, and "empty" read as
+    agreement compiles a field read into `ldr [word, #8k]`.
+
+    So the rule here is "every call site agrees with the DECLARATION", and the
+    declaration is named because it is the evidence being contradicted: the
+    reader is looking at a call site, and what tells them what the callee was
+    compiled to expect is the parameter's own annotation.  `shape` says what the
+    declaration compiled it to, in the words of the two cases, so the reader
+    does not have to know which of the two rules applied to see the mismatch.
+
+    Each site is spelled as the source spells it and paired with what this image
+    can see it is, because "the wrong shape" is true of `f(g())` and of `f(r2)`
+    where `r2` is some other struct's frame, and those want different repairs.
+    The repair for both is the same shape — pass a value of the declared type at
+    every call site — and the message says so last, after the reader can see
+    which sites are the ones to look at.
+    """
+    pairs = "; ".join(f"{spelling} passes {why}" for spelling, why in sites)
+    return (f"{callee}() declares {param!r} as {struct_name}, so it is compiled "
+            f"with {param!r} as {shape} — and every call site in this image hands "
+            f"it something else: {pairs}. Reading a field through a word that is "
+            f"not the thing the declaration promised is a load from wherever that "
+            f"word points, which is a wrong answer rather than a failure, so it "
+            f"is refused rather than emitted. Call {callee}() on a "
+            f"{struct_name} value at every call site — a local built from "
+            f"{struct_name}(), or a field declared as {struct_name} — which is "
+            f"the same program with a value this path can place")
+
+
 def frame_return_refusal(owner, received: bool, struct_names) -> str:
     """A frame address RETURNED.  `owner` is the struct whose method the
     returning function is, or None for a plain function; `received` says the
@@ -7734,6 +7775,24 @@ def struct_is_framed(struct_def) -> bool:
     return struct_field_count(struct_def) > 1 and wide_receiver_by_reference()
 
 
+def struct_is_one_field(struct_def) -> bool:
+    """True when this struct's whole state is the ONE field `self` names.
+
+    `struct_fits_one_word` alone is not the question, because it is also true of
+    a struct with NO fields, and "the receiver IS its field" has no field to be
+    when there is none.  Spelled once because three decisions ask it — the
+    local-constructor binding in `_one_word_field_map`, a method's own `self`,
+    and a parameter's declared type — and they must not come apart: they all
+    rewrite `x.<field>` to `x`, and a rewrite one of them makes and another does
+    not is a program whose field and its value are two different words.
+
+    It is deliberately not the complement of `struct_is_framed`: a struct of
+    several fields under `WIDE_RECEIVER_BY_REFERENCE=0` is neither, and a
+    caller asking which of the two representations its receiver gets is
+    `struct_is_framed` with `wide_receiver_by_reference` read there."""
+    return struct_fits_one_word(struct_def) and struct_field_count(struct_def) == 1
+
+
 def struct_frame_slots(struct_def) -> list:
     """The slot contents of a framed receiver, in slot order.
 
@@ -8071,12 +8130,22 @@ def _strip_type_args(text: str) -> str:
     return text if cut is None else text[:cut]
 
 
-def annotation_base_name(ann) -> str | None:
+def annotation_base_name(ann, self_type: str | None = None) -> str | None:
     """The bare type name a declared type names, or None if it names nothing.
 
     `List[Self.T]` → `List`, `PhiloxRandom[10]` → `PhiloxRandom`,
     `Random[Self.rounds]` → `Random`, `unsafe Pointer[Int32]` → `Pointer`,
     `ref[Inner]` → `Inner`, `Self.T` → `T`, `Int32` → `Int32`.
+
+    `self_type` is the struct a bare `Self` stands for, for the one caller that
+    knows it: a method of `S` writing `other: Self`. With it, `Self`,
+    `out Self` and `ref[Self]` reduce to `S`'s own name; without it they reduce
+    to None exactly as before, which is what every FIELD declaration wants —
+    `Self` on a field of a class body is the class, and the caller asking about
+    a field is the holder analysis, which has the struct in hand and passes it.
+    `Self.T` is deliberately NOT affected, because a type-parameter access names
+    a parameter rather than the enclosing struct and that answer is the same one
+    the field path gives.
 
     The type ARGUMENTS are dropped rather than compared, and that is the safe
     direction for a specific reason: `List[Int]` and `List[String]` are different
@@ -8100,7 +8169,10 @@ def annotation_base_name(ann) -> str | None:
         after a field.  `Self.origin` IS a type-parameter access and reduces to
         `origin`, which is a parameter and names no struct here.
       * a decoration with nothing after it (`out Self`, `mut`), and a
-        function-typed declaration.
+        function-typed declaration.  The one exception is the `self_type`
+        argument above: a bare `Self` is not a decoration in front of nothing,
+        it IS the enclosing struct, and refusing to reduce it is what left
+        `other: Self` in `Slice.__eq__` unreadable.
 
     Every one of those is the UNAGREED direction, so a doubtful annotation can
     only ever remove a name from the typed set.
@@ -8117,6 +8189,8 @@ def annotation_base_name(ann) -> str | None:
         changed = False
         for deco in _TYPE_DECORATIONS:
             if text == deco:
+                if deco == "Self" and self_type and self_type.isidentifier():
+                    return self_type
                 return None
             if text.startswith(deco) and text[len(deco):len(deco) + 1] in (" ", "["):
                 text = text[len(deco):].strip()
@@ -8153,6 +8227,48 @@ def annotation_base_name(ann) -> str | None:
     if not text.isidentifier() or text in _TYPE_DECORATIONS:
         return None
     return text
+
+
+def parameter_declared_structs(fn, decls: dict, owner=None) -> dict:
+    """`{parameter name: StructDef}` — the parameters whose DECLARED TYPE names
+    a struct of THIS module.
+
+    The PARAMETER half of `frame_field_type_candidates`'s question.  That
+    function asks "a field's declared type names a struct of this module whose
+    receiver is a frame", which is how `self.in1.total()` gets its nested frame
+    placed; asked about a parameter it is the same question with the same
+    answer, and it is the evidence for `other.start` in
+    `Slice.__eq__(self, other: Self)`.
+
+    It is a DECLARATION, and that is a different kind of evidence from the call
+    site the holder fixpoint follows, in the way the caller needs to know: a
+    declared type names the LAYOUT the callee was written against, so it holds
+    at every call site whether or not this image contains one, whereas a word
+    travelling into a parameter says what ONE call site passed.  So the two
+    disagreeing is not a contradiction to be resolved by preferring one, it is
+    the thing to refuse — which is the caller's job, not this function's.
+
+    `owner` is the struct whose method `fn` is, and is what a bare `Self`
+    reduces to (`annotation_base_name`'s `self_type`); it is None for a plain
+    function, where `Self` names nothing.
+
+    Every doubtful case answers None and so seeds nothing: no annotation at all,
+    a name that is not a struct of this module, a starred parameter (`*args` is
+    a TUPLE of the type, one word here, and a frame address is not what the
+    declaration promises), and a name that has more than one spelling.
+    """
+    shape = function_param_shape(fn)
+    starred = {n for n in (shape.vararg, shape.kwarg) if n}
+    self_type = getattr(owner, "name", None) or None
+    out = {}
+    for pname, ann in shape.fixed:
+        if not pname or pname in starred or pname in out:
+            continue
+        base = annotation_base_name(ann, self_type=self_type)
+        st = decls.get(base) if base else None
+        if st is not None:
+            out[pname] = st
+    return out
 
 
 def struct_field_declared_type(struct_def, name) -> tuple:
