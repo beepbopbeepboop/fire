@@ -1485,10 +1485,10 @@ _CONTAINER_LITERAL_CTYPES: dict = {
     'TupleExpr': 'MojoList *',   # a tuple lowers to a real MojoList
 }
 
-def _each_binding(body: list):
-    """Every statement in `body` that can BIND a local, recursing through
-    control flow and never into a nested `FunctionDef` (which has its own
-    locals and its own return inference -- the same boundary
+def _each_binding(body: list) -> list:
+    """Every statement in `body` that can BIND a local, as a LIST, recursing
+    through control flow and never into a nested `FunctionDef` (which has its
+    own locals and its own return inference -- the same boundary
     `mutated_free_names` uses).
 
     ONE walker for the three local-type overlays below. Each of them used to
@@ -1498,30 +1498,45 @@ def _each_binding(body: list):
     overlay is strictly more evidence of the same kind -- it exists to give
     `_quick_type` a better type for a local, and a binding inside an `elif`
     is exactly as real as one inside the `else`.
+
+    Deliberately NOT a generator (it used to be, and so did the nested
+    `walk`): a `yield`/`yield from` function compiles to a REAL
+    stack-switching coroutine in this codegen, and this file is in the
+    self-host closure, so a coroutine here is one the compiled compiler
+    cannot lower in place -- its symbols would be referenced but never
+    defined, and the binary this very module is compiled into segfaults on
+    the first real walk. `test_selfhost.py`'s `closure_coroutines_are_lowerable`
+    names the pair exactly ("the stack-switch lowering left _each_binding,
+    walk"), and `mojo/middle/coro.py`'s `_walk` is the same conversion for
+    the same reason, with the fuller reasoning (a `mojo_raise()` from a
+    try/except elsewhere in this pipeline can longjmp across a suspended
+    coroutine's separate fiber stack). Same pre-order sequence either way.
     """
+    out: list = []
     def walk(stmts):
         for s in (stmts or []):
             if isinstance(s, gimple_ctypes.FunctionDef):
                 continue
-            yield s
+            out.append(s)
             if isinstance(s, gimple_ctypes.IfStmt):
-                yield from walk(s.then_body)
-                yield from walk(getattr(s, 'else_body', None))
+                walk(s.then_body)
+                walk(getattr(s, 'else_body', None))
                 for _cond, eb in (getattr(s, 'elifs', None) or []):
-                    yield from walk(eb)
+                    walk(eb)
             elif isinstance(s, (gimple_ctypes.WhileStmt,
                                 gimple_ctypes.ForStmt)):
-                yield from walk(getattr(s, 'body', None))
-                yield from walk(getattr(s, 'else_body', None))
+                walk(getattr(s, 'body', None))
+                walk(getattr(s, 'else_body', None))
             elif isinstance(s, gimple_ctypes.WithStmt):
-                yield from walk(s.body)
+                walk(s.body)
             elif isinstance(s, gimple_ctypes.TryStmt):
-                yield from walk(s.body)
+                walk(s.body)
                 for h in (getattr(s, 'handlers', None) or []):
-                    yield from walk(getattr(h, 'body', None))
-                yield from walk(getattr(s, 'else_body', None))
-                yield from walk(getattr(s, 'finally_body', None))
-    yield from walk(body)
+                    walk(getattr(h, 'body', None))
+                walk(getattr(s, 'else_body', None))
+                walk(getattr(s, 'finally_body', None))
+    walk(body)
+    return out
 
 
 
