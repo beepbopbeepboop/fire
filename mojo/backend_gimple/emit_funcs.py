@@ -41,6 +41,7 @@ from gimple_codegen import _selfhost_impl_py_files
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
+from mojo.middle.module_shared import module_qualifier
 
 # Re-export shared helpers from mojo.middle.funcs_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -1540,6 +1541,14 @@ def _local_def_pts(gen, bare_name: str):
     if m is None:
         return None
     if bare_name in m:
+        # Re-assert the DEFINITION-side truth on the memo hit too (see
+        # _record_home_def_pts): the write is one dict assignment guarded by
+        # an existing key, so it costs nothing here, while leaving it to the
+        # first — memoizing — call loses the entry permanently for every
+        # importer if that one call ran before the name's own qualifier was
+        # resolvable, which is precisely the failure the store exists to
+        # prevent.
+        _record_home_def_pts(gen, bare_name, m[bare_name])
         return m[bare_name]
     node = getattr(gen, '_local_def_nodes', {}).get(bare_name)
     if node is None:
@@ -1551,15 +1560,44 @@ def _local_def_pts(gen, bare_name: str):
     if not pts:
         return None
     m[bare_name] = pts
-    # Record the DEFINITION-side truth for this (home, name) pair into the
-    # whole-program-shared store so every importer's `_imported_def_pts`
-    # hashes the SAME suffix the emitted definition uses (see this
-    # function's docstring for the log_match failure this closes).
-    _home_store = getattr(gen, '_home_def_param_types', None)
-    if _home_store is not None:
-        _q = getattr(gen, 'module_name', None) or ''
-        _home_store[_pair_key(_q.replace('.', '_').replace('-', '_'), bare_name)] = list(pts)
+    _record_home_def_pts(gen, bare_name, pts)
     return pts
+
+
+def _record_home_def_pts(gen, bare_name: str, pts: list) -> None:
+    """Publish `bare_name`'s DEFINITION-side parameter ctypes into the
+    whole-program-shared `_home_def_param_types` store, under the qualifier
+    the definition's own emitted symbol was built from — so every importer's
+    `_imported_def_pts` hashes the SAME suffix that definition uses (this is
+    the log_match failure `_local_def_pts`'s own docstring describes).
+
+    That qualifier must be the one `_func_qualifier` returns: the exact
+    computation gen_func and `_register_free_generator` use for the emitted
+    `base`/symbol prefix. The version that used to be inlined here spelled it
+    `module_name.replace('.', '_').replace('-', '_')`, which DOUBLE-COUNTED
+    the leading depth dot of a relative-import module: `._common` became
+    `__common`, while every importer resolved the same module as `_common`
+    (`node.module.lstrip('.').replace(...)` at FromImportStmt time). The store
+    entry was therefore written under a key NOTHING looks up, the importer's
+    tier-0 read always missed, and it fell through to tier 2's all-int64_t
+    snapshot — a DIFFERENT overload hash from the one the definition emitted.
+    Real: `implicit declaration of function
+    '_common_set_capture_groups_37bd8e'; did you mean
+    '_common_set_capture_groups_6aabcf'?` (that 37bd8e suffix happened to
+    coincide with an unrelated `_global._parse_next`), which refused
+    c_parser/parser/__init__.py outright — see
+    bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md.
+
+    The spelling RULE is `module_qualifier` (one copy, see its docstring);
+    this call is about picking the RIGHT module, not sanitizing a fifth way.
+    Never overwrites an existing entry: the first definition to publish wins,
+    matching the memoized `pts` this is always called with anyway."""
+    store = getattr(gen, '_home_def_param_types', None)
+    if store is None or not pts:
+        return
+    key = _pair_key(_func_qualifier(gen, bare_name), bare_name)
+    if key not in store:
+        store[key] = list(pts)
 
 
 def _imported_def_pts(gen, bare_name: str):
@@ -1604,7 +1642,14 @@ def _imported_def_pts(gen, bare_name: str):
         return None
 
     def _sanitize(q):
-        return q.replace('.', '_').replace('-', '_') if q else q
+        # `module_qualifier`, not a fourth spelling of the rule: this half
+        # receives an ALREADY-sanitized FromImportStmt home (`_common`), so
+        # its own lstrip is a no-op here — but keeping it means the read
+        # side stays correct even for a home recorded with a leading dot,
+        # which is the same class of drift that kept `_local_def_pts`'s
+        # write side from ever matching this one (see
+        # _record_home_def_pts).
+        return module_qualifier(q)
 
     # Tier order deliberately mirrors _func_qualifier (scope stack, then
     # _own_imported_func_home, then shared _imported_func_home) so both
@@ -1896,28 +1941,18 @@ def _func_qualifier(gen, bare_name: str) -> str:
     # dotted submodule's file at all; before that fix this tier was
     # never reached for a dotted import in the first place).
     def _sanitize_qualifier(q):
-        # Strip LEADING dots before the '.'->'_' substitution: a raw
-        # relative-import spelling (`.base`, from `_link_inline_modules`'
-        # link-mode fallback — see `_compile_imported_module`'s temp_gen
-        # `module_name=module_name`, which passes `stmt.module` through
-        # completely unresolved) would otherwise sanitize to `_base`
-        # (leading underscore) here, while `_emit_stdlib_import_externs`'
-        # OWN relative-import resolution (`_resolve_relative`, run
-        # against the SAME statement) already strips the dots before
-        # this function ever sees the name and produces plain `base` —
-        # two internally-consistent but MUTUALLY DISAGREEING spellings
-        # of the identical module for the identical bare name. A call
-        # site resolving one way and the definition resolving the other
-        # way emits a reference to an undeclared identifier that (being
-        # a bare, non-function name in a `(void *)` cast) silently
-        # compiles to a null pointer instead of erroring — see
-        # bugs/CODEGEN_link_mode_from_submodule_import_symbol_value_
-        # call_segfault.md. Stripping leading dots here makes every
-        # qualifier path converge on the same plain-name spelling
-        # regardless of which one happened to run first.
-        key = q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
+        # `module_qualifier` (mojo/middle/module_shared.py) owns the
+        # string rule — leading dots stripped BEFORE the '.'->'_'
+        # substitution, since a raw relative-import spelling (`.base`)
+        # would otherwise sanitize to `_base` while the import statement's
+        # own resolution already produced plain `base`. See its docstring
+        # for the full failure mode that drift caused and for the three
+        # other copies this one replaced. Kept as a one-line wrapper only
+        # to layer on the per-compile `_inline_module_qualifiers` remap,
+        # which needs a `gen`.
+        key = module_qualifier(q)
         resolved = gen._inline_module_qualifiers.get(key, key)
-        return resolved.lstrip('.').replace('.', '_').replace('-', '_') if resolved else resolved
+        return module_qualifier(resolved)
     # NOT an early `if self-hosting file: return ''` short-circuit here
     # (removed — see git history / bugs doc): that unconditionally bare-ified
     # EVERY reference made from within any self-hosting-flagged file,

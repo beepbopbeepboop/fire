@@ -21,6 +21,7 @@ from gimple_codegen import _selfhost_impl_py_files
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+from mojo.middle.module_shared import module_qualifier
 
 def _from_import_name_is_submodule(gen, module: str, name: str) -> bool:
     """True when `from module import name` binds a real SUBMODULE FILE
@@ -859,26 +860,16 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     # an undefined symbol). See _func_qualifier's own comment for the
     # same fix applied to the free-function case.
     def _sanitize_qualifier(q):
-        # Strip LEADING dots before the '.'->'_' substitution: a raw
-        # relative-import spelling (`.base`, from `_link_inline_modules`'
-        # link-mode fallback — see `_compile_imported_module`'s temp_gen
-        # `module_name=module_name`, which passes `stmt.module` through
-        # completely unresolved) would otherwise sanitize to `_base`
-        # (leading underscore) here, while `_emit_stdlib_import_externs`'
-        # OWN relative-import resolution (`_resolve_relative`, run
-        # against the SAME statement) already strips the dots before
-        # this function ever sees the name and produces plain `base` —
-        # two internally-consistent but MUTUALLY DISAGREEING spellings
-        # of the identical module for the identical bare name. A call
-        # site resolving one way and the definition resolving the other
-        # way emits a reference to an undeclared identifier that (being
-        # a bare, non-function name in a `(void *)` cast) silently
-        # compiles to a null pointer instead of erroring — see
-        # bugs/CODEGEN_link_mode_from_submodule_import_symbol_value_
-        # call_segfault.md. Stripping leading dots here makes every
-        # qualifier path converge on the same plain-name spelling
-        # regardless of which one happened to run first.
-        return q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
+        # `module_qualifier` (mojo/middle/module_shared.py) owns the string
+        # rule — leading dots stripped BEFORE the '.'->'_' substitution,
+        # since a raw relative-import spelling (`.base`) would otherwise
+        # sanitize to `_base` while `_emit_stdlib_import_externs`' own
+        # relative-import resolution already produced plain `base`. See that
+        # function's docstring for the full failure mode the divergence
+        # caused and the three other copies this one replaces. Kept as a
+        # one-line wrapper so the struct- and free-function qualifiers read
+        # identically instead of re-spelling the chain.
+        return module_qualifier(q)
     # NOT an early self-hosting-file bare short-circuit — see the free-
     # function sibling `_func_qualifier`'s matching comment: unconditionally
     # bare-ifying every struct reference from a self-hosting-flagged file
