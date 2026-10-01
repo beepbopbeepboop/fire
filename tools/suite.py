@@ -950,16 +950,27 @@ class Spec:
     artifact  a binary this step produces, cached by the content of its real
               inputs (see ArtifactCache); `inputs` are the files, on top of the
               self-host closure, that its key folds in
+    dep     this registration is a DEPENDENCY of other tests, not a test in
+              its own right, and deliberately belongs to no bucket. It is the
+              one honest way out of "every registered test is in a bucket"
+              (checked in test_suite.py), and it is a per-spec opt-out rather
+              than a name list in the checker for exactly that reason: a list
+              in the checker is an excuse table, and an excuse table is what
+              bugs/TEST_registered_tests_in_no_bucket_never_run.md is about.
+              The checker refuses a `dep` that NOTHING depends on, so the
+              marker cannot become a way to be ungated — it can only be the
+              statement that this is run, as a dependency, on purpose.
+              `prooflib` is the one: 27 MB, ~80 s, sixteen jobs `deps` on it.
     """
     __slots__ = ('name', 'cmd', 'driver', 'mem', 'memwhy', 'deps', 'extra',
                  'extraglob', 'cache', 'j', 'excl', 'reject', 'timeout',
                  'cwd', 'env', 'desc', 'artifact', 'inputs', 'expect',
-                 'disabled')
+                 'disabled', 'dep')
 
     def __init__(self, name, cmd, driver='cmd', mem=None, memwhy='', deps=(),
                  extra=(), extraglob=(), cache=False, j=False, excl=False,
                  reject=None, timeout=None, cwd=None, env=None, desc='',
-                 artifact=None, inputs=(), expect='', disabled=''):
+                 artifact=None, inputs=(), expect='', disabled='', dep=False):
         self.name, self.cmd, self.driver, self.mem = name, cmd, driver, mem
         self.deps, self.extra, self.cache = tuple(deps), tuple(extra), cache
         self.extraglob = tuple(extraglob)
@@ -970,6 +981,7 @@ class Spec:
         self.expect = expect
         self.disabled = disabled
         self.memwhy = memwhy
+        self.dep = dep
         if driver not in ('cmd', 'mem', 'make'):
             raise ValueError(f"{name}: unknown driver {driver!r}")
         if driver == 'mem' and mem is None:
@@ -1186,7 +1198,7 @@ test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
      desc='interpreter vs JIT: identical stdout and exit code')
-test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True,
+test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
                              'mojo/middle/metal_ops.py',
                              'mojo/backend_gimple/device_select.py',
@@ -1327,7 +1339,25 @@ test('examples-parse', [PY, 'test_examples_parse.py'], cache=True,
 # is silence -- and `expect=` is how a red is declared rather than silenced.
 # The anti-rot then FAILS any of these that starts passing, which is the
 # signal worth having.
-test('x86-examples', [PY, 'test_x86_64_examples.py'],
+#
+# …and every one of them is in a BUCKET now, which is the other half of the
+# same sentence. All of this block was registered in one commit and bucketed in
+# none, so `--list` printed `[]` in the bucket column for nineteen of them and
+# no run in the tree executed them:
+# `bugs/TEST_registered_tests_in_no_bucket_never_run.md` (the unmarked group)
+# and `bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md` (the `expect=`-
+# marked one, where the damage is worse because a marker nobody can observe
+# going stale is immortal). Both are closed by this registration's buckets plus
+# the `dep=True` field and its check in test_suite.py, which is the part that
+# stops the next one arriving the same way.
+#
+# The `mem=` on each row below is the ratchet's, from a measured run: every one
+# of these is 0.0-0.2 GB, and at 0.2 GB the 1.5x rule that assigns a class puts
+# them all at the floor, `tiny`. They were all `small` (8 GB) before, which is
+# 40-80x their peak — see the "at the floor" list `make check-list` prints, and
+# note that a class is a claim on the machine, so an 8 GB claim from eleven
+# 0.2 GB jobs is eighty-four gigabytes of budget spent on nothing.
+test('x86-examples', [PY, 'test_x86_64_examples.py'], mem='tiny',
      deps=['preflight'],
      desc='the x86-64 examples build, run and agree with the source')
 test('arm64-encoders', [PY, 'test_arm64_encoders.py'], mem='tiny',
@@ -1351,6 +1381,7 @@ test('ownership-destruct', [PY, 'test_ownership_destruct.py'], mem='tiny',
 # silently dropping the binding (codepoint.mojo compiled with `char` and
 # `num_bytes` bound to nothing).
 test('new-syntax-parse', [PY, 'test_new_syntax_parsing.py'], cache=True,
+     mem='tiny',
      # `fire_compiler.py` is the file under test and is NOT in GIMPLE_SOURCES
      # (that list is the CODEGEN sources); without it in the key, editing the
      # parser replayed a recorded PASS.
@@ -1358,7 +1389,7 @@ test('new-syntax-parse', [PY, 'test_new_syntax_parsing.py'], cache=True,
             + GIMPLE_SOURCES),
      desc="the new-modular syntax parses, and still does NOT parse where it "
           "must not (ellipsis, float literals, attribute access)")
-test('x86-containers', [PY, 'test_x86_64_containers.py'],
+test('x86-containers', [PY, 'test_x86_64_containers.py'], mem='tiny',
      deps=['preflight'],
      expect="the `with-statement` case is refused by the FORMAL backend's "
             "read-before-store rule: `with 7 as y: x = y` binds y, and the "
@@ -1370,43 +1401,43 @@ test('x86-containers', [PY, 'test_x86_64_containers.py'],
             "bugs/FORMAL_a_local_read_before_its_first_assignment.md",
      desc='`with ... as` is refused by the read-before-store rule')
 test('mutable-async-capture', [PY, 'test_mutable_async_capture.py'],
-     deps=['preflight'],
+     mem='tiny', deps=['preflight'],
      expect='async capture of a mutable binding — behaviour gap, not registered before this',
      desc='async capture of a mutable binding — behaviour gap, not registered before this')
 test('transitive-closure-capture', [PY, 'test_transitive_closure_capture.py'],
-     deps=['preflight'],
+     mem='tiny', deps=['preflight'],
      expect='closure capture through a transitive import — behaviour gap',
      desc='closure capture through a transitive import — behaviour gap')
 test('gimple-async-runner', [PY, 'test_gimple_async_runner.py'],
-     deps=['preflight'],
+     mem='tiny', deps=['preflight'],
      expect='36 failing: the gimple async runner, an area with no gate coverage until now',
      desc='36 failing: the gimple async runner, an area with no gate coverage until now')
 test('coro-future-await', [PY, 'test_coro_future_await.py'],
-     deps=['preflight'],
+     mem='tiny', deps=['preflight'],
      expect='17 failing: `await` on a Future in the coroutine runtime',
      desc='17 failing: `await` on a Future in the coroutine runtime')
 test('async-void-return', [PY, 'test_async_void_return.py'],
-     deps=['preflight'],
+     mem='tiny', deps=['preflight'],
      expect='3 failing: an async function with no return value',
      desc='3 failing: an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'],
-     deps=['preflight'],
+     mem='tiny', deps=['preflight'],
      expect='3 failing: TaskGroup',
      desc='3 failing: TaskGroup')
 test('async-with-lock-guard', [PY, 'test_async_with_lock_guard.py'],
-     deps=['preflight'],
+     mem='tiny', deps=['preflight'],
      expect='2 failing: `async with` holding a lock guard across a suspension',
      desc='2 failing: `async with` holding a lock guard across a suspension')
 test('nested-async-generic', [PY, 'test_nested_async_generic.py'],
-     deps=['preflight'],
+     mem='tiny', deps=['preflight'],
      expect='2 failing: a generic inside a nested async',
      desc='2 failing: a generic inside a nested async')
 test('coro-detached-async', [PY, 'test_coro_detached_async.py'],
-     deps=['preflight'],
+     mem='tiny', deps=['preflight'],
      expect='2 failing: a detached coroutine task',
      desc='2 failing: a detached coroutine task')
 test('async-runtime-scaffold', [PY, 'test_async_runtime_scaffold.py'],
-     deps=['preflight'],
+     mem='tiny', deps=['preflight'],
      expect='1 of 2: toolchain/runtime proof for step A of compiled-path async/await',
      desc='1 of 2: toolchain/runtime proof for step A of compiled-path async/await')
 
@@ -1841,12 +1872,13 @@ test('prooflib', [PY, '-c',
                   'L.ensure_library(L.find_lean(), '
                   'os.path.join(L._default_root(), "lib"))'],
      mem='module', timeout=2400,
+     dep=True,
      memwhy='unmeasured: the only job in the registry run by an EXTERNAL tool '
             '(Lean, a 27 MB .olean), so there is no peak to size a class from '
             'and `module` is the standing guess. Over the 4 GB line because we '
             'do not know, not because 24 GB was measured — one `make gate` '
             'replaces this with a number. See ' + MEM_DEBT_DOC,
-     desc='build lib/*.olean once — 27MB, ~80s, and 16-way duplicated '
+      desc='build lib/*.olean once — 27MB, ~80s, and 16-way duplicated '
           'without this step')
 
 test('formal', [PY, 'test_formal.py'], j=True,
@@ -2398,13 +2430,23 @@ BUCKETS = {
               # …and the pure-Python reference the Metal path is measured
               # against, which needs no compiler at all and so belongs on the
               # side of the line where the everyday loop can afford it. 14.3 s.
-              # `metalgpu`, the other half of that pairing, is registered and in
-              # NO bucket — filed as
-              # bugs/TEST_registered_tests_in_no_bucket_never_run.md rather than
-              # added here, because whether it passes needs a real GPU and a
-              # full codegen run, which is not a thing a registration can be
-              # assumed to be true of.
               'llm-reference',
+              # `metalgpu`, the other half of that pairing. It was registered
+              # and in NO bucket because "whether it passes needs a real GPU
+              # and a full codegen run, which is not a thing a registration
+              # can be assumed to be true of"
+              # (bugs/TEST_registered_tests_in_no_bucket_never_run.md) — and
+              # the honest answer to that was to run it, not to keep it out.
+              # Measured green on a machine with a Metal device: 102 tests,
+              # 49.9 s, 0.4 GB. It is `cache=True`, so an unchanged tree
+              # replays that PASS, and the GPU layer
+              # (`@unittest.skipUnless` + `skipTest('no Metal device on this
+              # machine')`) SKIPS itself where there is no device — "no GPU" is
+              # a property of the machine, not a defect — so the bucket does
+              # not become a claim that every machine has one. 49.9 s is the
+              # most wall time any single member of this bucket adds, and it is
+              # stated here rather than discovered as a surprise slowdown.
+              'metalgpu',
               # …and the four that were REGISTERED and in no bucket at all, so
               # the estate check counted them as covered while no run executed
               # them. Measured green one at a time before being named here
@@ -2414,7 +2456,19 @@ BUCKETS = {
               # HTML-staleness check, which is precisely the thing a doc edit
               # should be caught by.
               'cli-usage-text', 'ownership-destruct', 'md2html',
-              'arm64-encoders'],
+              'arm64-encoders',
+              # …and two more of the same kind, measured the same way before
+              # being named. `new-syntax-parse` is the parser suite the whole
+              # new-modular syntax landed with, and it had been registered and
+              # ungated since the day it was written: 87 passed, 1.1 s, 0.0 GB,
+              # beside `examples-parse`, the other parser suite, which is 0.1 s
+              # and does no compiler work at all.
+              # `x86-examples` is the 45 `formal/examples/*.mojo` built for
+              # BOTH backends and compared against each other, so it is the
+              # only differential arm64-vs-x86-64 evidence for the examples —
+              # measured 45/45 in 29.6 s at 0.1 GB. It is in `x86` too, where
+              # the rest of the x86-64 picture already is.
+              'new-syntax-parse', 'x86-examples'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -2479,8 +2533,59 @@ BUCKETS = {
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,
             # which is the same hole as the five in `check`.
-            'x86-decode'],
-    'coroutine': ['coro', 'coro-nested-capture'],
+            'x86-decode',
+            # …and the 45 examples built for both backends and compared with
+            # each other, which is the only arm64-vs-x86-64 differential the
+            # examples have. 29.6 s, 0.1 GB, 45/45. In `check` as well, and
+            # the reason to name a cheap test in two buckets is the reason
+            # `formal-os` and friends are named twice: expansion schedules each
+            # test once per run, so it costs nothing and both lists stay whole.
+            'x86-examples',
+            # `x86-containers` is the one member of this list that is NOT in
+            # `check`, and it is here for a cost reason rather than a
+            # correctness one: 60 whole programs per backend, each one built
+            # and executed, measured at 4 minutes and 0.1 GB. `formal-argparse`
+            # at 43 s is already "past what the everyday inner loop is for" and
+            # that is the precedent; this is six times that. It is
+            # `expect=`-marked for one case (`with 7 as y: x = y`, refused by
+            # the read-before-store rule) and the marker is the reason it must
+            # be RUN somewhere: a known failure that nothing runs can never be
+            # observed going green, which is the whole argument of
+            # bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md.
+            'x86-containers'],
+    # The compiled-path async/await and coroutine cluster: eleven
+    # `expect=`-marked suites that were registered and in no bucket, so the
+    # gate walked past ~69 declared failing cases and reported nothing. All
+    # eleven are here rather than in `check` for one reason stated once: they
+    # are `expect=`-marked, and an `expect` in `check` puts a permanently-
+    # EXPECTED line in the tally a developer reads to know their tree is fine
+    # (the same reasoning that keeps `formal-toplevel` and `formal-struct` in
+    # `proofs` only). `coroutine` is in `gate`, so this IS gated — it is just
+    # gated somewhere whose tally is a list of known reds rather than a
+    # green/red verdict on the everyday loop.
+    #
+    # Measured one at a time under `tools/memslot.py --gb 8` before being named,
+    # which is also what set their `mem` to `tiny` (0.0-0.2 GB each, against
+    # the `small`/8 GB they carried while ungated):
+    #   gimple-async-runner  1.2 s  0.0 GB   2 passed, 36 failed
+    #   coro-detached-async  2.2 s  0.1 GB   2 failed
+    #   async-with-lock-guard 2.7 s 0.1 GB   2 failed
+    #   mutable-async-capture 2.7 s 0.1 GB   behaviour gap
+    #   transitive-closure-capture 2.7 s 0.1 GB  behaviour gap
+    #   async-void-return    3.3 s  0.1 GB   3 failed
+    #   nested-async-generic 3.3 s 0.1 GB    2 failed
+    #   taskgroup            3.2 s  0.2 GB   3 failed
+    #   async-runtime-scaffold 1.7 s 0.2 GB  1 of 2
+    #   coro-future-await   11.6 s  0.1 GB  17 failed
+    # 34.6 s in total, against a gate whose slowest everyday members are
+    # minutes each, so the added wall time is stated here rather than left to
+    # be discovered.
+    'coroutine': ['coro', 'coro-nested-capture',
+                  'gimple-async-runner', 'coro-detached-async',
+                  'async-with-lock-guard', 'mutable-async-capture',
+                  'transitive-closure-capture', 'async-void-return',
+                  'nested-async-generic', 'taskgroup',
+                  'async-runtime-scaffold', 'coro-future-await'],
     'smoke': ['preflight', 'suite-self-test', 'memslot'],
     'ab': ['ab-clean', 'ab-aside', 'ab-bside', 'ab-compare'],
 }

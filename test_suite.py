@@ -3252,6 +3252,117 @@ def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
           f'empty patterns: {empty}')
 
 
+def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
+    """Being named is not being run, and only the bucket column knows which.
+
+    `test_every_test_file_is_registered` above asks "is every `test_*.py` in the
+    repo named by a registered spec?". It reads `cmd`, and it CANNOT tell a
+    registration that is EXECUTED from one that is merely present: a spec in no
+    bucket is named, so the estate counted it as covered, while `make check`,
+    `make gate` and every other bucket walked straight past it. Nineteen tests
+    were in that state — eleven of them `expect=`-marked, which is the worse
+    half, because a marker nobody can observe going stale is immortal. The
+    write-ups are `bugs/TEST_registered_tests_in_no_bucket_never_run.md` (the
+    unmarked group) and
+    `bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md` (the `expect=`-
+    marked one, with the anti-rot argument), both closed by the buckets landed
+    with this check.
+
+    The opt-out is a per-spec `dep=True`, not a name list here, and the reason
+    is the same one the `--list` ratchets above give: a list inside the checker
+    is an excuse table, and an excuse table is what those two docs are about.
+    `prooflib` is the one legitimate case — 27 MB, ~80 s, a `deps` of sixteen
+    proof-checking jobs, and deliberately in no bucket so `make check` does not
+    pay for it (CLAUDE.md, "Shared expensive dependencies").
+
+    And the opt-out is EARNED, which is the clause that stops `dep=True` from
+    being a way to be ungated: a registration that claims to be a dependency
+    and that nothing declares a `deps` on is refused. The marker can therefore
+    only ever be the statement "this is run, as a dependency, on purpose" — it
+    cannot be "this is not run". That is also why `dep` is not consulted for
+    the vacuity floor: with a synthetic sandbox spec in the checks below, the
+    rule is exercised on a registry that is deliberately not the real one.
+    """
+    in_a_bucket = set()
+    # `expand_bucket` is the runner's own answer to "what does this bucket
+    # reach", transitivity and de-duplication included, and it is reused rather
+    # than re-implemented: two implementations of that question is the
+    # disagreement this check exists to catch, in the other direction.
+    for bucket in suite.BUCKETS:
+        in_a_bucket.update(suite.expand_bucket(bucket))
+    in_a_bucket = {n for n in in_a_bucket if n in suite.REGISTRY}
+
+    declared_deps = set()
+    for spec in suite.REGISTRY.values():
+        declared_deps.update(getattr(spec, 'deps', ()) or ())
+
+    check('the buckets: the rule is not vacuous — most tests are in one',
+          len(in_a_bucket) >= 100,
+          f'only {len(in_a_bucket)} of {len(suite.REGISTRY)} registered tests '
+          f'are in any bucket, so a rule that reads buckets is reading almost '
+          f'nothing and would pass on a registry of one')
+    check('the buckets: every registered test is in one, or declares dep=True',
+          not [n for n, s in sorted(suite.REGISTRY.items())
+               if n not in in_a_bucket and not getattr(s, 'dep', False)],
+          'these are registered and in no bucket, so no run in this tree '
+          'executes them and --list prints `[]` in the only column that says '
+          'so: '
+          + ', '.join(n for n, s in sorted(suite.REGISTRY.items())
+                      if n not in in_a_bucket
+                      and not getattr(s, 'dep', False)))
+    check('the buckets: a dep=True is earned — something depends on it',
+          not [n for n, s in sorted(suite.REGISTRY.items())
+               if getattr(s, 'dep', False) and n not in declared_deps],
+          'dep=True claims "I am run as a dependency"; these are depended on '
+          'by nothing, so the claim is empty and the marker is a way to be '
+          'ungated: '
+          + ', '.join(n for n, s in sorted(suite.REGISTRY.items())
+                      if getattr(s, 'dep', False) and n not in declared_deps))
+
+    # The rule on a registry built for the purpose, because a check that can
+    # only be exercised by the real one is a check that goes red the first time
+    # somebody registers a test and cannot say why. `Sandbox` ADDS to the real
+    # registry rather than replacing it, so the assertion is scoped to the five
+    # synthetic names — otherwise it would be re-asserting the two checks above
+    # over the whole tree, which is how a check ends up passing for the wrong
+    # reason.
+    synthetic = ('gated', 'ungated', 'as_dep', 'claimed_dep', 'needs_it')
+    with Sandbox(gated=dict(cmd=ok_cmd('pass')),
+                 ungated=dict(cmd=ok_cmd('pass')),
+                 as_dep=dict(cmd=ok_cmd('pass'), dep=True),
+                 claimed_dep=dict(cmd=ok_cmd('pass'), dep=True),
+                 needs_it=dict(cmd=ok_cmd('pass'), deps=['as_dep'])):
+        saved = dict(suite.BUCKETS)
+        try:
+            suite.BUCKETS['probe'] = ['gated']
+            reached = {n for n in suite.expand_bucket('probe')
+                       if n in suite.REGISTRY}
+            check('the buckets: a bucket reaches a test and nothing else',
+                  reached == {'gated'}, f'got {sorted(reached)}')
+            ungated = sorted(n for n in synthetic
+                             if n not in reached
+                             and not getattr(suite.REGISTRY[n], 'dep', False))
+            check('the buckets: an ungated registration is named by the rule',
+                  ungated == ['needs_it', 'ungated'],
+                  f'got {ungated}: the rule must catch the ungated one, exempt '
+                  f'the two that declared dep=True, and — the case that is easy '
+                  f'to get wrong — still catch `needs_it`, which HAS a deps and '
+                  f'is nevertheless in no bucket. Depending on something is not '
+                  f'the same as being run.')
+            earned = sorted(n for n in synthetic
+                            if getattr(suite.REGISTRY[n], 'dep', False)
+                            and n not in {d for s in suite.REGISTRY.values()
+                                          for d in getattr(s, 'deps', ()) or ()})
+            check('the buckets: a dep=True nothing depends on is named too',
+                  earned == ['claimed_dep'],
+                  f'got {earned}: `claimed_dep` declares dep=True and nothing '
+                  f'depends on it, which is the loophole, and the rule has to '
+                  f'reach it')
+        finally:
+            suite.BUCKETS.clear()
+            suite.BUCKETS.update(saved)
+
+
 def _module_const_paths(src, tree):
     """`<NAME> = os.path.join(..., 'build', '<name>')` -> {NAME: that source text}.
 
@@ -3465,9 +3576,10 @@ def main():
                test_checked_run_key_covers_what_it_names,
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
-               test_every_test_file_is_registered,
-               test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
-               test_no_test_preflights_on_an_unbuildable_artifact,
+                test_every_test_file_is_registered,
+                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
+                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
+                test_no_test_preflights_on_an_unbuildable_artifact,
                # The memory-campaign tests. They were DEFINED and never CALLED
                # — three functions, 300-odd lines, nothing in this list — which
                # is the same defect as a test file in no bucket: the coverage
