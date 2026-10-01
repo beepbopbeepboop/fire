@@ -175,6 +175,14 @@ HOST_MODELLED = frozenset((
     #     already answers are NOT answered again there — see the module's own
     #     docstring, which names each one.
     "glob", "fnmatch", "secrets", "uuid",
+    #   `ast`  — `formal/hostmods/ast.mojo`, the TOKENIZER and a lexical
+    #     validator, not a tree: `parse`, `parse_reason`, `tokenize`,
+    #     `tokenize_from`, `token_bound` and `token_name`, with token kinds,
+    #     positions and counts compared against CPython's own `tokenize` by
+    #     `test_ast_formal.py`. What it cannot do is build a tree, because a
+    #     value on this path is one 64-bit word and a node is not one: the
+    #     subset, the 21 measured ways `parse` differs from CPython's verdict,
+    #     and the f-string collapsing are in `bugs/FORMAL_ast_module_subset.md`.
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is

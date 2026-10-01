@@ -1598,6 +1598,17 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'],
      desc='formal import surface')
+# The hostmod claim: `ast` left HOST_MODELLED, and this is what says the module
+# behind it is CPython's tokenizer rather than a plausible one — every case run
+# through the built arm64 image AND through this process's `tokenize`, with the
+# known parse gaps PINNED rather than skipped. In `check` and not in `proofs`
+# because it needs no `prooflib` (it asserts without Lean) and costs about four
+# seconds, which is the same class as the other two formal claims in that
+# bucket: `formal-link-accounting` says the NAME left the host set, this says
+# the module that replaced it is right.
+test('formal-ast', [PY, 'test_ast_formal.py'],
+     deps=['preflight'],
+     desc='formal/hostmods/ast.mojo tokenizes and validates like CPython\'s')
 # No j=True: test_formal_sweep.py is a plain unittest.main() and has no -j of
 # its own, so forwarding one makes it exit 2 on "unrecognized arguments".
 # `j` is a claim about the tool, not a request — test_formal.py, which does
@@ -1697,7 +1708,8 @@ BUCKETS = {
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
               'rthdrscan', 'ptrreg', 'runtimedylib', 'sqliteruntime',
-              'formal-sweep-truth', 'formal-link-accounting', 'silentnoop',
+              'formal-sweep-truth', 'formal-link-accounting', 'formal-ast',
+              'silentnoop',
               'refusal-taxonomy', 'returned-frame-layout'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus

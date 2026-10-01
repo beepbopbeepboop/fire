@@ -1763,6 +1763,27 @@ CASES = [
      "    s = \"abc\"\n"
      "    printf(\"%d %d\\n\", s[0], s[2])\n"
      "    return 0\n", 0, "97 99"),
+    # A SHIFT by more than 31 on arm64. `encode_lsl_xd_xn_imm` is a UBFM with
+    # the amount in a 6-bit field at bit 16, and its base constant carried
+    # 0xd3780000 — three of those six bits already set — so the OR of the
+    # amount could not clear them: `1 << 32` computed `1 << 8`, `1 << 40`
+    # computed `1 << 8` and `1 << 63` computed `1 << 7`, with no diagnostic of
+    # any kind, and 0 through 7 were the only amounts that came out right. The
+    # amounts here are 7 and 8 (the boundary the encoding gets right by
+    # accident, and the first one after it), 32 and 40 (both wrong before the
+    # base was corrected), and the composite `(1 << 32) >> 32`, which is 1 now
+    # and was 0. The right shifts are the guard: a different encoder (SBFM,
+    # base 0x93400000) that must keep working.
+    # `%lld` and not `%d`, because this runtime's `%d` prints the low 32 bits
+    # of a word (`printf("%d|%lld", 1 << 32, 1 << 32)` prints `0|4294967296`,
+    # measured) and a 32-bit print of a 33-bit answer cannot tell a correct
+    # shift from a wrong one that happens to be small.
+    ("shift_amount_above_31_is_the_amount_asked_for",
+     "def main(n):\n"
+     "    printf(\"%lld %lld %lld %lld %lld %lld %lld\", 1 << 7, 1 << 8,"
+     " 1 << 32, 1 << 40, (1 << 32) >> 32, 1024 >> 5, 1 >> 32)\n"
+     "    return 0\n",
+     0, "128 256 4294967296 1099511627776 1 32 0"),
 ]
 
 # ── what a method on a VALUE means, per RECEIVER KIND ──────────────────────
