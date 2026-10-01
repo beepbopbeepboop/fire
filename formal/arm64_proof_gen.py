@@ -5891,7 +5891,20 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
             rn = w & 0x1f
             tactics.append(f"unfold arm64_step")
             tactics.append(f"simp [h, hinsn, {fact_names}, hb]")
-            tactics.append(f"by_cases hp : s.x{rn} {('=' if idx == 16 else '≠')} 0")
+            # Split on `= 0` for BOTH encodings, not on the encoding's own
+            # sense.  The model does not keep the sense either: simp rewrites
+            # `arm64_reg rn s ≠ 0` into `arm64_reg rn s = 0` (via
+            # `not_ne_iff_eq`) as soon as `arm64_reg` is unfolded, so the goal
+            # a CBNZ leaves behind is guarded by an `= 0` test while a `by_cases
+            # … ≠ 0` has already fixed the case the other way round and cannot
+            # retire it.  Measured on `formal/examples/either.mojo` (the
+            # short-circuit `or`, whose CBNZ is the first branch whose sense is
+            # inverted relative to the `if`'s own): the `≠ 0` split left
+            # `if s.x0 = 0 then some … else some … = some (if s.x0 = 0 then …)`
+            # unsolved in `either_sr_18`, so the step-RESULT lemma for the
+            # branch itself did not typecheck — the failure named the model's
+            # `if`, with nothing pointing at the branch's polarity.
+            tactics.append(f"by_cases hp : s.x{rn} = 0")
             tactics.append(
                 f"all_goals simp [hp, arm64_reg, arm64_set_reg]")
         else:
