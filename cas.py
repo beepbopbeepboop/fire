@@ -107,9 +107,23 @@ for _p in sorted(_glob.glob(os.path.join(HERE, 'mojo', '**', '*.py'),
 # Runtime ABI: every cached object is compiled against this header (and links the
 # runtime). A change to either MUST invalidate the cache, or stale objects link
 # against a mismatched ABI. These live under runtime/, not next to the .py files.
+# fire_metal.m/.h were MISSING here, and that is not a theoretical gap: the
+# whole Metal runtime lives in them -- dispatch, pipeline creation, buffer
+# allocation, the copy-back. A change to any of it left every cache key
+# unchanged, so build/libmojostdlib.<arch>.dylib was served STALE and a
+# measurement of a "no improvement" change was really a measurement of the
+# previous binary. Caught by: instrumenting the runtime with an fprintf, seeing
+# no output, and asking why. A change that cannot be observed is a change that
+# was never tested, and the cache was hiding that.
+#
+# They are built by a different compiler (clang -fobjc-arc, not cc) and link
+# Metal rather than nothing, which is exactly why they were overlooked: nothing
+# in the C path includes them.
 _RUNTIME_SOURCES = [
     os.path.join('runtime', 'fire_runtime.h'),
     os.path.join('runtime', 'fire_runtime.c'),
+    os.path.join('runtime', 'fire_metal.h'),
+    os.path.join('runtime', 'fire_metal.m'),
 ]
 
 # In-process hit/miss instrumentation (and reset for tests).
@@ -148,6 +162,26 @@ def compiler_fingerprint() -> str:
                     h.update(f.read())
             except FileNotFoundError:
                 h.update(b'\0missing:' + name.encode())
+        # Environment variables that change the GENERATED CODE.
+        #
+        # These are invisible to a content-addressed cache by construction: the
+        # files on disk are identical for MOJO_GEMM_FUSE=0 and =1, so both
+        # fingerprints come out equal and the second run is served the first
+        # run's binary. That is not hypothetical -- it produced an A/B
+        # comparison in which BOTH arms reported the fused kernel's dispatch
+        # count, and the fusion "win" it appeared to show was measured against a
+        # stale artifact. Same class as fire_metal.m missing from
+        # _RUNTIME_SOURCES: a cache that cannot see an input will confidently
+        # serve the wrong binary.
+        #
+        # Only variables that affect emitted code belong here. One that merely
+        # tunes a threshold at runtime (MOJO_OFFLOAD_MIN_ELEMENTS) does NOT
+        # change the generated C, so it is deliberately absent -- adding it
+        # would invalidate the cache on every threshold experiment for nothing.
+        for _var in ('MOJO_GEMM_TENSOR_CORES', 'MOJO_GEMM_FUSE'):
+            h.update(b'\0env:' + _var.encode() + b'='
+                     + os.environ.get(_var, '').encode())
+
         # Fold in the compiler version as a coarse epoch + safety net: a new
         # commit (or a dirty tree) bumps it, invalidating across versions even if
         # a relevant file were missing from the list above.
@@ -490,10 +524,18 @@ def compile_key(source: str, do_imports: bool, filename: str = "",
     different MSL sidecar. Leaving it out would serve a cached GPU build to a
     `--no-gpu` request, which is exactly the silent-wrong-output class this
     cache exists to avoid."""
+    # The auto-offload trip-count floor is in the key for the same reason
+    # `auto_gpu` is: it changes the OUTPUT, because it decides whether the
+    # host keeps its loop or gains a dispatch. Measured, not reasoned about --
+    # with the floor at 0 a two-call program dispatched twice, and re-running
+    # it with the floor at 90000 served the CACHED floor-0 binary and still
+    # dispatched twice, because nothing in the key had moved. An override that
+    # silently does nothing is worse than no override.
     return 'compile/' + _hash(
         'mojo-compile-v1', ABI_VERSION, compiler_fingerprint(),
         stdlib_fingerprint(), source, 't' if do_imports else 'f',
         filename, deps_digest, 'gpu' if auto_gpu else 'nogpu',
+        'minel:' + os.environ.get('MOJO_OFFLOAD_MIN_ELEMENTS', ''),
     )
 
 

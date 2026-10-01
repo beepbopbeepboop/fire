@@ -645,10 +645,19 @@ int main(int argc, char **argv)
            "sk vs blockedC", "sk vs naiveC", "sk agree");
     {
         const int d = 128, dff = 256, layers = 6;
-        const int step_counts[] = {1, 10, 24, 100, 300, 1000};
+        /* The ladder used to stop at 1000, which is exactly the point where
+           the answer stops being interesting: one dispatch carrying N steps
+           amortises its ~190 us over N, so the win should keep GROWING with N
+           until the GPU saturates. Stopping at 1000 measured the start of that
+           curve and not its shape. Extended two orders of magnitude; the loop
+           bound is now derived from the array so adding an entry cannot leave
+           it silently unvisited (it was a literal 6). */
+        const int step_counts[] = {1, 10, 24, 100, 300, 1000, 3000, 10000,
+                                   30000, 100000};
+        const int nsteps_n = (int)(sizeof(step_counts) / sizeof(step_counts[0]));
         const size_t wcount = (size_t)layers * (4 * d * d + 2 * dff * d + d * dff);
         double *W = alloc(wcount);
-        for (int si = 0; si < 6; si++) {
+        for (int si = 0; si < nsteps_n; si++) {
             int n = step_counts[si];
             /* round every operand to bf16 FIRST so both paths see the same
                numbers and the comparison is about the arithmetic, not the

@@ -133,6 +133,22 @@ class LaunchArg(NamedTuple):
     is_buffer: bool
     width: int
     writable: bool = True
+    #: C expression giving THIS buffer's element count, for the pack and the
+    #: copy-back. None means "the kernel's first Int/Int64 parameter", which is
+    #: the historical single-length contract and still the right default.
+    #:
+    #: It exists because a GEMM has three buffers of three DIFFERENT lengths --
+    #: A is M*K, B is K*N, C is M*N -- and one count cannot express that.
+    #: Measured, that is not hypothetical: with every buffer cut to a single
+    #: count, A is truncated to the first parameter's value and the kernel
+    #: reads past it. Which is the same class of silent wrong answer as the
+    #: offset-index refusal in 9798ee7b, one level up: there the length was
+    #: right and the OFFSET was dropped; here the offset idea is fine and the
+    #: LENGTH is wrong.
+    #:
+    #: Defaulting to None keeps every existing kernel and every existing test
+    #: byte-identical; only kernels that ask for it get per-buffer lengths.
+    length: str | None = None
 
 
 class LaunchError(Exception):
@@ -197,7 +213,13 @@ def element_count_index(kernel: str, count_idx: int) -> int:
     return count_idx
 
 
-def emit_launch_wrappers(kernels: dict) -> str:
+#: Per-kernel grid override, {kernel_name: (nthreads, ngroups)} as C
+#: expressions. Empty unless the synthesiser populates it, so every existing
+#: kernel keeps the inferred 0,0 grid and its generated C is unchanged.
+_GRID: dict = {}
+
+
+def emit_launch_wrappers(kernels: dict, grids: dict | None = None) -> str:
     """The per-kernel host wrapper each host call site targets.
 
     `kernels` maps kernel name -> (params, count index) as produced by
@@ -220,11 +242,18 @@ def emit_launch_wrappers(kernels: dict) -> str:
         if _bufs:
             lines.append('    void *_mg_bufs[] = {%s};'
                          % ', '.join(n for n, _ in _bufs))
-            # Every buffer is cut to the kernel's element count. Writing past
-            # an output buffer because its own length was longer would be a
-            # heap corruption, so the count wins over any per-argument idea.
+            # A buffer's element count is its OWN `length` expression when the
+            # kernel gave it one, and the kernel's single Int parameter
+            # otherwise. The single-count rule is not abandoned: it is the
+            # default, and it is what protects the common case where writing
+            # past an output buffer because its own length was longer would be
+            # heap corruption. What it could not express is a kernel whose
+            # buffers genuinely differ -- a GEMM's A is M*K, B is K*N, C is
+            # M*N -- and truncating A to the first parameter is the same class
+            # of silent wrong answer as the dropped offset in 9798ee7b.
             lines.append('    int64_t _mg_sizes[] = {%s};'
-                         % ', '.join([params[count_idx][0]] * len(_bufs)))
+                         % ', '.join((a.length or params[count_idx][0])
+                                     for a in params if a.is_buffer))
         else:
             lines.append('    void *_mg_bufs[1]; int64_t _mg_sizes[1];')
         if _scals:
@@ -238,9 +267,33 @@ def emit_launch_wrappers(kernels: dict) -> str:
         else:
             lines.append('    void *_mg_scalars[1];')
             lines.append('    static const uint8_t _mg_widths[] = {8};')
+        # Grid shape. The default 0,0 means "the runtime infers it": the
+        # threadgroup count from the largest buffer's element count and the
+        # width from the device max (fire_metal.m: `tg = ngroups > 0 ? ... :
+        # ceil(max(sizes)/tptg)`, `use = nthreads > 0 ? ... : tptg`). That is
+        # right for a kernel with ONE THREAD PER OUTPUT ELEMENT, which is every
+        # kernel this tree had until now.
+        #
+        # It is wrong for a tensor-core GEMM, where 32 lanes cooperate on one
+        # 8x8 output tile, so a grid of m*n threads would be ~32x too many and
+        # 31 of every 32 would exit immediately. Both values are overridable in
+        # the runtime already, so this needs no ABI change -- only for a kernel
+        # to ask.
+        # Which buffers the kernel can WRITE. These are the MSL-side params,
+        # so the address space has already been lowered: `device const float *`
+        # is read-only and `device float *` is writable. That is the type's own
+        # claim rather than a guess about intent, and it is why this keys on
+        # `const` -- the Mojo spelling (ImmutAnyOrigin vs MutAnyOrigin) is not
+        # present here, and matching on it silently produced an all-zero mask
+        # and a result of 0.0 rather than an error.
+        _wr = [0 if 'const' in str(_t) else 1 for _n, _t in _bufs]
+        lines.append('    static const uint8_t _mg_writable[] = {%s};'
+                     % ', '.join(str(x) for x in _wr))
+        _grid = _GRID.get(_kn)
+        _nthr, _ngrp = _grid if _grid else (0, 0)
         lines.append('    _mg_run("%s", %d, _mg_bufs, _mg_sizes, %d, _mg_scalars,'
-                     ' _mg_widths, 0, 0);'
-                     % (_kn, len(_bufs), len(_scals)))
+                     ' _mg_widths, _mg_writable, %s, %s);'
+                     % (_kn, len(_bufs), len(_scals), _nthr, _ngrp))
         lines.append('}')
         lines.append('')
     return '\n'.join(lines)
@@ -380,7 +433,8 @@ def c_suffix(module_name: str) -> str:
 
 def emit_device_sidecar(parts: list[str], kernel_names: list[str],
                         kernels: dict | None = None,
-                        module_name: str = '') -> str:
+                        module_name: str = '',
+                        grids: dict | None = None) -> str:
     """The whole device sidecar as C text, ready to append to the module.
 
     `parts` and `kernel_names` are in the SAME order -- `module_gen` builds
@@ -419,6 +473,7 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('                          void *const *bufs, const int64_t *sizes,')
     lines.append('                          int64_t n_scalars, void *const *scalars,')
     lines.append('                          const uint8_t *widths,')
+    lines.append('                          const uint8_t *writable,')
     lines.append('                          int64_t nthreads, int64_t ngroups) {')
     lines.append('    _mg_init{sfx}();')
     lines.append('    if (!_mg_have_device{sfx}) {')
@@ -439,15 +494,18 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('    }')
     lines.append('    return (int64_t) mojo_metal_dispatch(name, n_bufs, bufs, sizes,')
     lines.append('                                    n_scalars, scalars, widths,')
-    lines.append('                                    nthreads, ngroups);')
+    lines.append('                                    writable, nthreads, ngroups);')
     lines.append('}')
     lines.append('')
     if kernels:
+        # Populated by the synthesiser for a tensor-core GEMM; empty
+        # otherwise, so every existing kernel keeps the inferred 0,0 grid.
+        _GRID.update(grids or {})
         # The pack/unpack helpers are NOT emitted here: they live in the
         # preamble, next to the `_mojo_at_<T>` pointer helpers, because a call
         # site in an ordinary function body needs them and those bodies are
         # emitted before this tail.
-        lines.append(emit_launch_wrappers(kernels))
+        lines.append(emit_launch_wrappers(kernels, grids))
     lines.append('/* The device kernels this module contains. Lets a host program, or a')
     lines.append('   test, ask what was offloaded instead of guessing. */')
     lines.append('static const char *_mg_kernels[] = {')

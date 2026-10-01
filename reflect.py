@@ -360,6 +360,16 @@ _CLIB_SYMS = frozenset({
     'strdup', 'strtol', 'strtod', 'atoi', 'atof', 'rand', 'srand', 'time',
     'open', 'close', 'read', 'write', 'fopen', 'fclose', 'fread', 'fwrite',
     'fgets', 'fputs', 'getline', 'setjmp', 'longjmp', 'signal',
+    # The two clock counters fire_runtime.h declares so compiled Mojo can TIME
+    # itself. They are declared there -- not in <time.h>, which also declares
+    # `time`, `strftime`, `localtime`, `gmtime`, `mktime` and `clock_gettime`
+    # and would drag every one of them into this comparison against the
+    # stdlib's own `external_call` declarations -- but they are LIBSYSTEM's
+    # definitions, not the runtime's, so advertising them in the dylib export
+    # table is a lie the dylib test reports as
+    # "declared with no definition in this dylib". Same rule as every other
+    # name above, for the same reason: the C library provides it.
+    'clock_gettime_nsec_np', 'mach_absolute_time',
 })
 
 

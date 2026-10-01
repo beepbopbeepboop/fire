@@ -127,6 +127,12 @@ class ARM64JIT:
             # cached GPU binary: measured, `--no-gpu --jit` still reported
             # `d 1` because the flag reached no part of this path.
             f"autogpu={'1' if self.auto_gpu else '0'}",
+            # The auto-offload trip-count floor changes the produced BINARY for
+            # the same reason: it decides whether the host keeps its loop or
+            # gains a dispatch. Same defect found and fixed in cas.compile_key
+            # -- measured, the override appeared to do nothing because the
+            # cached binary predated it.
+            f"minel={os.environ.get('MOJO_OFFLOAD_MIN_ELEMENTS', '')}",
             _toolchain_id(),
             f"compiler={_compiler_id()}",   # codegen-source fingerprint + version
         ])

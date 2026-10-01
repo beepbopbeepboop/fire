@@ -313,7 +313,9 @@ class MetalEmitter:
     # -- statements --------------------------------------------------------
 
     def _stmt(self, st) -> None:
-        if isinstance(st, ReturnStmt):
+        if isinstance(st, RawMslStmt):
+            self._emit(st.text)
+        elif isinstance(st, ReturnStmt):
             # A compute kernel's return type is void; a `return` with a
             # value in one is a real error, not something to drop.
             if getattr(st, 'value', None) is not None:
@@ -639,6 +641,35 @@ class MetalEmitter:
         raise MetalUnsupported(
             f'kernel {self.name}: no MSL lowering for {name}(). On a device '
             'only metal:: intrinsics and the builtins are callable.')
+
+
+class RawMslStmt:
+    """A statement emitted VERBATIM into the kernel body.
+
+    Not an AST node, deliberately. It lives in the backend, so `fire_compiler`
+    has no way to produce one and a PROGRAM CANNOT write raw MSL: there is no
+    syntax that reaches it. The only constructor is called by the synthesiser,
+    for a kernel the compiler itself generated. That is the safety property
+    that makes a raw-text escape hatch defensible here -- it is a backend
+    capability, not a hole in the language.
+
+    It exists for one shape: a tensor-core GEMM. `simdgroup_matrix` and
+    `simdgroup_multiply_accumulate` have no Mojo spelling, and giving them one
+    would mean a new type in the type resolver, a new local-declaration form,
+    and a new expression form -- all to carry a computation that is not
+    expressible as a loop over a buffer at all. A GEMM's MMA state is a
+    per-lane register tile, not a value in memory, and pretending otherwise
+    would produce a kernel that compiles and computes nothing.
+
+    The text is the compiler's own MSL, already verified bit-exact against a
+    naive triple loop by test_llm/gemm_tiled.m. What this buys is that it
+    becomes reachable FROM MOJO, by writing the naive triple loop.
+    """
+
+    __slots__ = ('text',)
+
+    def __init__(self, text: str):
+        self.text = text
 
 
 def _msl_float_literal(value) -> str:

@@ -249,11 +249,28 @@ class TestRenderedDocuments(unittest.TestCase):
         stopped being recognised and the diagram reflowed into a paragraph.
         """
         htm = self._html('doc/METAL.html')
-        seg = htm[htm.find('<pre>'):htm.find('</pre>')]
-        for probe in ('Mojo source', 'identify kernels', 'xcrun metal / metallib',
-                      'foo.metallib', "binary for THIS Mac's GPU",
-                      'GIMPLE C  (already done)'):
-            self.assertIn(probe, seg, f'diagram lost {probe!r}')
+        probes = ('Mojo source', 'identify kernels', 'xcrun metal / metallib',
+                  'foo.metallib', "binary for THIS Mac's GPU",
+                  'GIMPLE C  (already done)')
+        # Find the fence that HOLDS the diagram rather than assuming it is the
+        # first <pre> in the file. It used to be, and the assumption was free
+        # while the document was one screen long; once the measured write-up
+        # went above the plan, the first fence became a code sample and this
+        # test failed on a diagram that was present and correct. Scanning every
+        # fence is not a loosening -- the "reproduced exactly" claim is now
+        # checked harder, by requiring that exactly ONE fence carries the whole
+        # diagram, so it cannot be split across two and still pass.
+        segs = re.findall(r'<pre>.*?</pre>', htm, re.S)
+        self.assertTrue(segs, 'doc/METAL.html has no <pre> at all')
+        hits = [s for s in segs if all(p in s for p in probes)]
+        self.assertEqual(
+            len(hits), 1,
+            'expected exactly one <pre> holding the whole pipeline diagram, '
+            'found %d (probes missing from whichever: %r)'
+            % (len(hits), [p for p in probes
+                           if not any(p in s for s in segs)]))
+        for probe in probes:
+            self.assertIn(probe, hits[0], f'diagram lost {probe!r}')
 
     def test_status_blockquote_is_present(self):
         """The blockquote whose first line was once dropped.
