@@ -84,6 +84,18 @@ def discover_roots(base: Path) -> list:
     return preferred + rest
 
 
+_NEXT_ON_STRUCT = (
+    "`next(<user-defined iterator struct>)` has no lowering, and the "
+    "receiver's type is not inferred: `var it = peekable(list)` types `it` "
+    "as `int64_t`, not `_PeekableIterator *`, because inferring an imported "
+    "generic function's return type through `Self.<member>` is not "
+    "implemented. Until 2026-10-01 this file PASSED here while its C called "
+    "a `next` symbol nothing defines — this check is `gcc -fgimple "
+    "-fsyntax-only`, which cannot see that, and nothing else links the "
+    "`test/` tree. `next(<struct>)` does lower when the receiver's type IS "
+    "resolvable. See "
+    "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md")
+
 EXPECTED_FAILURES = {
     # UPDATE (this session, continued): `create_task`/`create_raising_task`
     # await-composition (`await create_task(<call>) + await create_task(
@@ -156,6 +168,51 @@ EXPECTED_FAILURES = {
     # `_ = time_function(test_atomic)` / `_ = lock^` where `_` is boxed
     # because the nested async `inc()` reassigns it via
     # `_ = counter.fetch_add(1)`).
+    #
+    # 2026-10-01 — the `next(<user-defined iterator struct>)` family. 21
+    # files, all of them `test/` or stdlib iterators, that this check
+    # reported PASS while their generated C carried a call to a `next`
+    # symbol nothing defines. `_lower_call` now REFUSES an unlowered
+    # `next(...)` rather than emitting it, which is what turned a silent
+    # wrong artifact into a named failure — so these moved from a false
+    # green to a declared red. The refusal is right and stays; the shape
+    # behind it is not implemented, because `var iter = peekable(list)`
+    # types `iter` as `int64_t` rather than `_PeekableIterator *` and
+    # inferring an imported generic function's return type through
+    # `Self.<member>` is its own project. `next(<struct>)` DOES lower
+    # whenever the receiver's type is resolvable; and the `for` loop over
+    # these same objects was already a `mojo_unsupported_iter` no-op for
+    # the identical reason. Full analysis, the 3-undefined-`next` +
+    # 23-`mojo_unsupported_iter` measurement, and the next step:
+    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md
+    #
+    # A dict, not a set: the summary at the bottom prints each entry's
+    # REASON beside its path, and a bare set could only ever satisfy the
+    # membership tests. It was empty until now, so nothing had ever
+    # exercised that.
+    'std/collections/string/iterators.mojo': _NEXT_ON_STRUCT,
+    'std/itertools/itertools.mojo': _NEXT_ON_STRUCT,
+    'test/collections/string/test_iterators.mojo': _NEXT_ON_STRUCT,
+    'test/collections/test_set.mojo': _NEXT_ON_STRUCT,
+    'test/collections/test_span.mojo': _NEXT_ON_STRUCT,
+    'test/iter/test_chain.mojo': _NEXT_ON_STRUCT,
+    'test/iter/test_empty.mojo': _NEXT_ON_STRUCT,
+    'test/iter/test_enumerate.mojo': _NEXT_ON_STRUCT,
+    'test/iter/test_map.mojo': _NEXT_ON_STRUCT,
+    'test/iter/test_once.mojo': _NEXT_ON_STRUCT,
+    'test/iter/test_peek.mojo': _NEXT_ON_STRUCT,
+    'test/iter/test_zip.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_chain.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_count.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_cycle.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_drop.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_drop_while.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_peek.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_product.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_repeat.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_take.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_take_while.mojo': _NEXT_ON_STRUCT,
+    'test/python/test_python_object.mojo': _NEXT_ON_STRUCT,
 }
 
 def get_stdlib_path():
@@ -434,7 +491,20 @@ def main():
     if expected_failed:
         print("\nExpected (documented) failures:")
         for rel_path, error in expected_failed:
-            print(f"  {rel_path}  — {EXPECTED_FAILURES[str(rel_path)]}")
+            # Wrapped, and deduped to one line per reason: all 21 entries
+            # share one reason string, and printing it 21 times buries the
+            # paths this section exists to show. The reason is still printed
+            # in full — once — and the paths are the point.
+            print(f"  {rel_path}")
+        _seen_reasons = []
+        for rel_path, _error in expected_failed:
+            _r = EXPECTED_FAILURES[str(rel_path)]
+            if _r not in _seen_reasons:
+                _seen_reasons.append(_r)
+        print(f"  ({len(expected_failed)} file(s), "
+              f"{len(_seen_reasons)} distinct reason(s)):")
+        for _r in _seen_reasons:
+            print(f"    - {_r}")
 
     if unexpected_failed:
         print("\nUNEXPECTED failed files:")
@@ -444,7 +514,7 @@ def main():
                 print(f"    → {error}")
 
     if stale_expected:
-        print("\nSTALE EXPECTED_FAILURES entries (now passing — remove from the set):")
+        print("\nSTALE EXPECTED_FAILURES entries (now passing — remove from the dict):")
         for rel_path in stale_expected:
             print(f"  {rel_path}")
 

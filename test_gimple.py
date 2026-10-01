@@ -3,6 +3,7 @@
 Each test compiles generated C with gcc -fgimple -fsyntax-only to
 verify the output is accepted by the GIMPLE parser.
 """
+import re
 import subprocess
 import tempfile
 import os
@@ -7328,6 +7329,130 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_handwritten_selfhost_signature_tables_match_the_source():
+        """The hand-written C signature tables must match the Python they
+        describe — checked against the SOURCE, not against a comment.
+
+        `_SELFHOST_SIGS` (gimple_codegen) declares what
+        `fire_compiler.Parser._parse_expr`, `myinterpreter.Interpreter
+        .execute`, `py_tokenize` &c. look like in C, and `runtime/
+        fire_runtime.h` declares `py_tokenize` and `compile_to_gimple` a
+        second time. Nothing connected either of them to the definitions the
+        compiler actually infers, so all four copies of the same facts drifted
+        from all three of them independently, and the drift was invisible
+        until a whole self-host closure had been generated and handed to gcc:
+
+          * `Parser__parse_expr` was `int64_t` in every copy while its
+            definition is emitted `UnaryOp *` — 2 `conflicting types` errors
+            plus a `-Wint-conversion` at each of ~40 call sites, both across
+            modules (the bad decl is emitted once per IMPORTER) and inside
+            fire_compiler.py itself.
+          * `py_tokenize(src, filename="")` was declared with ONE parameter in
+            both copies — 25 `too many arguments to function 'py_tokenize'`
+            errors, one per call site in the closure.
+          * `jit_compile_and_execute` was `int64_t` in
+            `_SELFHOST_FUNC_RETURN_TYPES` and `_Bool` in the emitted
+            declaration.
+
+        A hand-written table the compiler cannot check is a table that will
+        drift again. This derives the arity — and, for the two Parser/
+        Interpreter methods, the return TYPE — from the real function objects
+        with `inspect`, so a signature change fails here, in `make check`,
+        instead of after a 30-minute `fire.py fire --dump-full` plus a gcc
+        run. The header is compared against the same source because it is the
+        only copy a NON-self-host module's generated C sees."""
+        global _PASS, _FAIL
+        name = "handwritten_selfhost_signature_tables_match_the_source"
+        import inspect
+        import fire_compiler
+        import myinterpreter
+
+        # bare name -> the real function object it must describe. `py_tokenize`
+        # is a module-level function so it lives in `_KNOWN_SIGS`; the rest are
+        # struct methods, which the self-host forward-decl block spells out in
+        # `_SELFHOST_SIGS`.
+        subjects = {
+            'py_tokenize': (gimple_codegen.GimpleGen._KNOWN_SIGS,
+                            fire_compiler.py_tokenize),
+            'Parser_parse_module': (
+                gimple_codegen._SELFHOST_SIGS,
+                fire_compiler.Parser.parse_module),
+            'Parser___init__': (
+                gimple_codegen._SELFHOST_SIGS,
+                fire_compiler.Parser.__init__),
+            'Parser_with_filename': (
+                gimple_codegen._SELFHOST_SIGS,
+                fire_compiler.Parser.with_filename),
+            'Parser__parse_expr': (
+                gimple_codegen._SELFHOST_SIGS,
+                fire_compiler.Parser._parse_expr),
+            'Interpreter___init__': (
+                gimple_codegen._SELFHOST_SIGS,
+                myinterpreter.Interpreter.__init__),
+            'Interpreter_execute': (
+                gimple_codegen._SELFHOST_SIGS,
+                myinterpreter.Interpreter.execute),
+        }
+        problems = []
+        for bare, (table, fn) in subjects.items():
+            if bare not in table:
+                problems.append(f"{bare}: absent from its signature table")
+                continue
+            _ret, params = table[bare][0], table[bare][1]
+            real = inspect.signature(fn)
+            want = len([
+                p for p in real.parameters.values()
+                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
+            got = len(params)
+            if want != got:
+                problems.append(
+                    f"{bare}: table declares {got} C parameter(s), the "
+                    f"source takes {want} ({list(real.parameters)}) — a "
+                    f"DEFAULTED parameter still occupies a C parameter slot")
+            # `_parse_expr` is the Pratt loop's expression parser: every branch returns
+        # some AST node, so the definition the codegen emits is a NODE POINTER
+        # and a table entry of `int64_t` truncates it (and, being emitted as a
+        # forward declaration once per importing module, also disagrees with
+        # the definition in every one of them). Its return is UNANNOTATED in
+        # the source, so this is the one place the check is on the table's own
+        # shape rather than on a type derived from the source — which is the
+        # whole point: nothing else in the pipeline compares the two.
+        _pex = gimple_codegen._SELFHOST_SIGS.get('Parser__parse_expr')
+        if _pex is None:
+            problems.append("Parser__parse_expr: absent from _SELFHOST_SIGS")
+        elif not _pex[0].endswith('*'):
+            problems.append(
+                f"Parser__parse_expr: table return type is {_pex[0]!r}, but "
+                f"the method returns an AST node — the table needs the "
+                f"pointer type the definition is emitted with")
+        # The header's hand-written compiler entry points, against the same
+        # source. Only the ones the compiled path calls on ordinary code are
+        # listed; the rest of the file is runtime plumbing, not a mirror of
+        # any Python def.
+        hdr_path = os.path.join(_RUNTIME_INC, 'fire_runtime.h')
+        with open(hdr_path) as fh:
+            hdr = fh.read()
+        hdr_decl = re.search(
+            r'^\s*MojoList\s*\*\s*py_tokenize\s*\(([^)]*)\)\s*;',
+            hdr, re.M)
+        if hdr_decl is None:
+            problems.append("fire_runtime.h: no py_tokenize declaration")
+        else:
+            got = len([p for p in hdr_decl.group(1).split(',') if p.strip()])
+            want = len(gimple_codegen.GimpleGen._KNOWN_SIGS['py_tokenize'][1])
+            if got != want:
+                problems.append(
+                    f"fire_runtime.h: py_tokenize declared with {got} "
+                    f"parameter(s), _KNOWN_SIGS says {want}")
+        if problems:
+            print(f"FAIL  {name}:")
+            for p in problems:
+                print(f"  {p}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -7532,6 +7657,7 @@ outer([10, 20, 30])
     test_gen_taking_middle_helper_is_never_reached_by_a_local_import()
     test_dotted_import_two_hop_attribute_call()
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
+    test_handwritten_selfhost_signature_tables_match_the_source()
     test_every_funcptr_initializer_has_a_definition()
 
     print()
