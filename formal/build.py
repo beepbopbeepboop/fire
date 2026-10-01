@@ -1289,8 +1289,22 @@ def compile_formal(source_path: str, output: str = None,
         # (`bugs/FORMAL_module_state_no_storage.md`).
         symbols = _publish_imported_constants(functions, symbols,
                                               import_manifests)
+        # The link line as the CALL will resolve it: this program's own
+        # `link_dylibs` first, then the imports `_resolve_imports` just built.
+        # `check_imported_frame_handoffs` reads a per-parameter frame-holder
+        # contract out of these, and it must read the SAME resolution the
+        # emitted call binds — the order and the first-wins precedence are what
+        # `dylib_syms` and `dylib_export_tables` already use, so passing the two
+        # lists in that order is what keeps the contract consulted and the
+        # contract used the same one. The dedup is the same test the merge below
+        # applies, because a library already on the line must not contribute a
+        # second, later-wins entry.
+        _have = {d["install_name"] for d in linked}
+        _line = list(linked) + [d for d in import_manifests
+                                if d["install_name"] not in _have]
         _run_late_checks(stmts, functions, structs, symbols, slots,
-                         imported_modules(stmts) if import_dylibs else None)
+                         imported_modules(stmts) if import_dylibs else None,
+                         _line)
     except CodegenError as e:
         raise FormalBuildError(str(e))
     if import_dylibs:
@@ -1386,8 +1400,8 @@ def compile_formal(source_path: str, output: str = None,
 
 
 def _formal_module_functions(source_path: str, link_dylibs: list = None,
-                             arch: str = "arm64",
-                             fmt: str = None) -> tuple[str, list]:
+                             arch: str = "arm64", fmt: str = None,
+                             link_manifests: list = None) -> tuple[str, list]:
     """The functions and structs of a MODULE, for the library build.
 
     `link_dylibs` is the program's dependency set: a module's own build has to
@@ -1396,7 +1410,12 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     because the dylib is an image for the machine that will link it — the same
     pair `formal/imports.py` keys its build cache on, and the reason a module
     compiled for one target and linked into another was wrong rather than
-    refused."""
+    refused.
+
+    `link_manifests` is `load_dylib_manifests`'s answer for `link_dylibs`,
+    passed in so the late frame checks can read a per-parameter frame-holder
+    contract off the link line without re-reading every manifest once per source
+    file of the library."""
     try:
         with open(source_path) as f:
             source = f.read()
@@ -1453,8 +1472,16 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     # `codegen` finding to `backend-crash`.
     from formal.imports import imported_modules
     try:
+        # `link_manifests` is `compile_formal_dylib`'s own `linked`, passed in
+        # rather than re-read from `link_dylibs` here: a library is compiled
+        # from SEVERAL sources and this function runs once per source, so
+        # re-reading would parse every manifest once per file of the library.
+        # A module dylib needs the link line for the same reason an executable
+        # does — its own functions can hand a frame to a function in one of ITS
+        # imports, and `check_imported_frame_handoffs` is what decides that.
         _run_late_checks(stmts, functions, structs, symbols, slots,
-                         imported_modules(stmts) if link_dylibs else None)
+                         imported_modules(stmts) if link_dylibs else None,
+                         link_manifests or [])
     except CodegenError as e:
         raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
@@ -1465,7 +1492,7 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
 
 def _run_late_checks(stmts: list, functions: list, structs: list,
                      symbols: dict, slots: dict,
-                     imported_module_names) -> None:
+                     imported_module_names, link_line=None) -> None:
     """Publish this unit's module-level tables, then run every late check.
 
     ONE function for the two front ends, and the reason is a measured drift
@@ -1537,6 +1564,15 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     check_shadowed_global_reads(functions)
     check_construction_shapes(functions, by_name)
     check_frame_return_shapes(functions)
+    # The ONE late check that can also be an ANSWER rather than a report, which
+    # is why it is here and not in the group above: a frame address reaching a
+    # callee compiled into another module is decided from the contract that
+    # module's manifest published, and when the contract says the parameter is a
+    # frame holder of a struct this image also has, the hand-off is followed and
+    # nothing is raised.  It needs `link_line` — the link line's manifests —
+    # which is why it is the one check with a new argument rather than one of
+    # the five that only need this unit's own tables.
+    check_imported_frame_handoffs(functions, link_line or [])
     # A `@dataclass` option this backend cannot lower is a fact about the FILE
     # rather than about the image, so it belongs with this group rather than
     # with the construct checks that only an executable's codegen can answer.
@@ -2114,6 +2150,18 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     _IMAGE_FUNCTIONS = tuple(functions)
     framed = M.framed_struct_names(structs)
     if not framed:
+        # A module with no framed struct has no frame anywhere in it, which is a
+        # DEFINITE answer about every parameter — each is an ordinary word —
+        # and not the absence of one.  The distinction is load-bearing for the
+        # contract this publishes: `def bump(x: Int, by: Int)` in a module that
+        # declares no struct is exactly the case where a consumer must be told
+        # "that slot is a plain word" rather than "nothing is known about it",
+        # and publishing nothing there made the consumer report the second for
+        # the first.  The holder tables stay empty, which is what the rest of
+        # this function would have computed.
+        for fn in functions:
+            fn._frame_param_contract = [None] * len(
+                M.function_param_shape(fn).names)
         return
     owners = M.method_owner_names(structs)
     # {BARE method name: [struct, …]}, which is the other direction and is not
@@ -2710,6 +2758,31 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         fn._frame_holders = hs
         fn._frame_nested_slots = nested_slots
         fn._frame_slots = slots
+        # THE PER-PARAMETER CONTRACT, and it is the answer to a question an
+        # IMPORTING module cannot answer for itself: "did your compilation
+        # make parameter 2 a frame holder, and of which struct?"  That is a
+        # fact about a compilation this process did not perform, and the
+        # refusal an importing module used to raise said so — which was true
+        # and unhelpful, because the information EXISTS, on the other side of
+        # the module boundary, in this table.
+        #
+        # Published here rather than derived at the manifest writer because
+        # here is where the fixpoint has just settled it, and a second
+        # derivation would be a second recognition of "is this parameter a
+        # frame holder" — the pair of recognitions that agrees until the day
+        # it does not, which is the failure mode `_frame_candidates` exists to
+        # prevent and which this must not reintroduce one function along.
+        #
+        # POSITIONALLY, keyed on the parameter list rather than by name, because
+        # that is what a CALL SITE has: the importing module knows the argument
+        # index and has no idea what the callee called its parameters. The
+        # value is the SET of structs the parameter might be a holder of, for
+        # the same reason `hstruct` is a set rather than one struct — a set of
+        # one is the ordinary case and a set of two is a disagreement the
+        # consumer is entitled to see.
+        fn._frame_param_contract = _parameter_frame_contract(
+            fn, params_of.get(fn.name) or (), holders.get(fn.name) or (),
+            (hstruct.get(fn.name) or {}), declared_holders.get(fn.name) or {})
         # `by_name` itself, published, and the reason is a CONSTRUCTION rather
         # than a field read: a copy construction `S(x)` needs to know what `x`
         # IS, and the holder analysis is the only thing in the compiler that
@@ -2746,6 +2819,62 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             returns_frame)
     _park_construction_mismatches(functions, framed)
 
+
+def _parameter_frame_contract(fn, params, holders, hstruct, declared) -> list:
+    """`[holder, holder, …]` — one entry per PARAMETER, in call-site order.
+
+    The question an importing module cannot answer about a callee in another
+    module: is parameter *i* a frame address, and of which struct? The answer
+    has to be published by the module that compiled the callee, because it is a
+    fact about THAT compilation — the holder fixpoint above saw that module's
+    call sites and this module's callee will not.
+
+    **Positional, and it must stay positional.** A call site has an argument
+    index; it has no idea what the callee named its parameters, and a
+    name-keyed table could not be consulted by one that renamed them (or, for a
+    method, that lifted `S_m` and passes `self` at position 0 under whatever
+    the receiver rewrite spelled it). The parameter NAME rides along in each
+    entry only so a refusal can quote it, which is what makes the diagnostic
+    readable — nothing consults it.
+
+    Three kinds of entry, and the distinction is the whole content:
+
+      * `[names]` — the parameter is a frame holder of one of those structs.
+        A consumer that is handed a frame of one of them may follow the
+        address; a consumer handed anything else has a real disagreement.
+      * `["one-word"]` — the parameter is declared as a ONE-FIELD struct of
+        this module, so its "receiver IS its field" and a frame address is
+        the wrong category entirely. It is `declared` and not `holders` that
+        says so, and the two are not exclusive: a framed DECLARATION seeds
+        both, because `declared` records the evidence rather than a different
+        classification, which is why the holder test comes first.
+      * `None` — an ordinary word. Nothing in this module ever hands it an
+        address, so it was compiled to read the word as a value.
+
+    A struct whose holder candidacy is EMPTY (`hstruct` has the name mapped to
+    `[]`) is not a holder at all — `model.struct_frame_slot_candidates` uses
+    that to mean "bound from a constructor this path does not frame" — and is
+    reported as `None` rather than as a holder of nothing, because "a holder of
+    no known struct" and "an ordinary word" are the same instruction to a
+    consumer and a third spelling of it would be a way for the two to drift.
+    """
+    out = []
+    for pname in params:
+        cands = hstruct.get(pname) or ()
+        names = [st.name for st in cands]
+        if names and pname in holders:
+            out.append(names)
+        elif pname in declared:
+            # Only reachable for a ONE-FIELD struct.  A framed declaration
+            # seeds BOTH `holders` and `declared` (the fixpoint does not make
+            # the two exclusive — `declared` records the EVIDENCE, not a
+            # different classification), so the framed case was already answered
+            # by the branch above and arriving here means the struct does not
+            # need a frame: its receiver IS its field.
+            out.append(["one-word"])
+        else:
+            out.append(None)
+    return out
 
 
 def _park_construction_mismatches(functions, framed) -> None:
@@ -3972,6 +4101,83 @@ def _bracket_callee_roots(body) -> set:
     return out
 
 
+def _defer_imported_frame_handoff(fn, callee, position, call, argument,
+                                  by_name) -> None:
+    """PARK a frame address reaching a callee compiled into ANOTHER module.
+
+    Nothing is raised here, and the finding is not lost: `_prepare_functions`
+    runs BEFORE `_resolve_imports`, so at this point no imported module has been
+    compiled and no manifest exists to read a per-parameter frame-holder
+    contract out of.  Raising here is what the pass used to do, and it is a
+    refusal raised before the imports resolve — reported in place of the import
+    diagnosis, which is the more fundamental fact about the file (67 files of
+    this repository import a CPython host module, so for those the import is
+    the answer and this one is a detail).
+
+    So the site is recorded and `check_imported_frame_handoffs` decides it from
+    the link line at the entry points.  The recorded tuple is everything the
+    decision needs and nothing it cannot have:
+
+      * `callee` and `position` — which parameter of which function, which is
+        what the manifest's `frame_params` list is indexed by;
+      * `spelling` — how the source writes the argument, so a refusal quotes
+        the reader's own text rather than a re-rendering of it;
+      * `structs` — the struct NAMES the argument is a frame of here, which is
+        what the contract's names are compared against.  Empty is meaningful
+        and is not the same as absent: it means this image cannot say what its
+        own argument is, which is one of the four `why_absent` answers.
+
+    Parking is unconditional — no shape is filtered here — because the decision
+    needs the link line to make ANY of its four answers, and filtering before
+    that would be filtering on a fact not yet in hand.
+    """
+    fn._imported_frame_handoffs = list(
+        getattr(fn, "_imported_frame_handoffs", ()) or ()) + [(
+            callee, position,
+            [st.name for st in (by_name.get(argument.name) or [])],
+            _call_spelling(call, argument, position, None))]
+
+
+def check_imported_frame_handoffs(functions, link_line) -> None:
+    """Raise the cross-image frame-address refusals `_check_frame_escapes` parked.
+
+    The sixth of the late frame checks, and the same reason as the other five: a
+    refusal raised before the imports resolve is reported in place of the import
+    diagnosis.  What makes this one different from all of them is that it can
+    also be an ANSWER — `model.resolve_frame_parameter_contract` returns
+    `(True, None)` when the callee module's own manifest says the parameter is a
+    frame holder of a struct this image also has, and then nothing is raised and
+    the hand-off is followed.  That is the whole point of the contract: five of
+    the six late checks can only report, and this one decides.
+
+    `link_line` is `load_dylib_manifests`'s entries in LINK ORDER, which is the
+    order that resolved the CALL — the same `setdefault`-first-wins precedence
+    `dylib_syms` uses, so the contract consulted is the contract the emitted
+    call binds.  Consulted through `dylib_export_lookup`, the one resolver both
+    emitters use for a callee spelling, rather than by a bare-name lookup of our
+    own: a dotted callee (`mod.f`, the spelling `import mod` binds) has to be
+    answered from the module that owns the export, and a second resolution that
+    could bind a different library's `f` is exactly the silently-wrong binding
+    that module identity exists to prevent.
+
+    The first refusal wins and the rest are not reported, which is the same rule
+    every other check here follows: one finding is enough, and a reader who
+    fixes it will find the next.
+    """
+    by_name, by_module, forwarded = M.dylib_export_tables(
+        dylib_export_lists(link_line))
+    for fn in functions or ():
+        for callee, position, structs, spelling in (
+                getattr(fn, "_imported_frame_handoffs", ()) or ()):
+            entry = M.dylib_export_lookup(by_name, by_module, callee,
+                                          forwarded)
+            follow, refusal = M.resolve_frame_parameter_contract(
+                [entry] if entry is not None else [], position, structs,
+                spelling, callee)
+            if not follow:
+                raise CodegenError(refusal)
+
+
 def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
     """Refuse a frame-returning callee with no argument register left.
 
@@ -4497,14 +4703,22 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                     # `_method_exports`, which is the other half — the export
                     # that makes the symbol bindable at all.
                     #
-                    # …but only at the RECEIVER.  Further along, the argument
+# …but only at the RECEIVER.  Further along, the argument
                     # lands on one of that method's own parameters, and whether
-                    # the imported module's analysis made it a frame holder is
-                    # a fact about THAT module's compilation, which this pass
-                    # has not read and cannot: its body is in the dylib.  So
-                    # this is the opaque case, and it is refused as opaque
-                    # rather than as a position.
+                    # the imported module's analysis made it a frame holder is a
+                    # fact about THAT module's compilation — which is now
+                    # PUBLISHED, in that module's manifest, by the same
+                    # `_export_frame_contract` the free-function case reads.  So
+                    # this is no longer the opaque case: it is parked and decided
+                    # from the contract, by the same late check and for the same
+                    # reason — `_prepare_functions` runs before the imports
+                    # resolve, so a refusal raised here is reported in place of
+                    # the import diagnosis.
                     if i == 0:
+                        continue
+                    if isinstance(a, F.IdentExpr) and a.name in holders:
+                        _defer_imported_frame_handoff(
+                            fn, callee, i, node, a, by_name)
                         continue
                     _refuse_holder_use(
                         fn, a, holders, by_name, "",
@@ -4528,7 +4742,7 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                     # three are the CALLER's: `imported` is
                     # `formal.imports.imported_bound_names`' table for this
                     # module and `star_imports` its
-                    # `star_imported_modules`, both read from the import
+                    # `star_imports`, both read from the import
                     # statements because `_resolve_imports` has not run yet,
                     # and `fn.comptime_params` is this function's own `def[…]`.
                     # Without them `_b64encode` (imported, and therefore
@@ -4547,16 +4761,64 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                     # half of the cross-module question the method case already
                     # answers for the RECEIVER.
                     comptime_params = getattr(fn, "comptime_params", None) or ()
+                    # The classifier is asked TWICE, and the comparison is the
+                    # decision.  Once with the cross-image facts and once
+                    # without: the arms that decide about the ARGUMENT — a
+                    # variadic builtin, a C entry point, a value-only callee, a
+                    # type constructor — do not read those facts, so both calls
+                    # answer identically and the answer is the whole of what
+                    # stops this program.  Only when the two DIFFER is the
+                    # fifth case the one that answered, and that is the arm the
+                    # link line's contract now decides.
+                    #
+                    # Asking the classifier for the fifth case DIRECTLY is the
+                    # mistake this avoids, and it was made here first: it skips
+                    # every arm above it, so `print(p)` — which is compiled, and
+                    # variadic, and wants a value — was reported as "a name with
+                    # no definition in hand", false of it and a reader sent
+                    # looking for a missing export of a builtin.  Two calls
+                    # rather than a second table of the classifier's own order,
+                    # because a hand-kept copy of that order is a second
+                    # recognition of it and the two would come apart.
+                    names = _names(a)
+                    _cpt = fn.name if callee in comptime_params else None
                     reason = M.frame_receiver_escape_refusal(
-                        callee, _names(a),
+                        callee, names,
                         imported_from=(imported or {}).get(callee),
-                        comptime_param_of=(fn.name
-                                           if callee in comptime_params
-                                           else None),
+                        comptime_param_of=_cpt,
                         star_imported_from=star_imports[0] if star_imports
                         else None)
-                    if reason is not None:
+                    if reason is None:
+                        continue
+                    # The SAME call with the two IMPORT facts removed and
+                    # everything else held fixed — `comptime_param_of` in both,
+                    # because a compile-time parameter is decided without them
+                    # and must not be mistaken for a cross-image arm.  When the
+                    # two agree, the arms that decide about the ARGUMENT
+                    # answered and the answer is the whole of what stops this
+                    # program.
+                    plain = M.frame_receiver_escape_refusal(
+                        callee, names, comptime_param_of=_cpt)
+                    if (plain is not None and plain == reason) \
+                            or not isinstance(a, F.IdentExpr) \
+                            or a.name not in holders:
                         _refuse_holder_use(fn, a, holders, by_name, "", reason)
+                        continue
+                    # The fifth case, and the callee is bound by a `from … import
+                    # …` or a `from … import *` in THIS file — so the callee is
+                    # compiled into another module, which published a
+                    # per-parameter frame-holder contract in its manifest
+                    # (`_export_frame_contract`).  The decision needs that
+                    # manifest, and `_prepare_functions` runs BEFORE
+                    # `_resolve_imports` compiles the modules, so the site is
+                    # PARKED here and `check_imported_frame_handoffs` decides it
+                    # from the link line at the entry points — the same
+                    # park-then-decide-late shape `_defer_subscript_escape`
+                    # uses, and for the same measured reason: a refusal raised
+                    # from here is reported in place of the import diagnosis,
+                    # which is the more fundamental fact about the file.
+                    _defer_imported_frame_handoff(fn, callee, i, node, a,
+                                                  by_name)
                     continue
                 # 4. A function of this image, and its parameter list is in
                 #    hand.  Either the parameter IS a frame holder — which is
@@ -7026,6 +7288,16 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     `pkg.f(...)` reached the link audit as a dangling symbol instead of a
     refusal that could name the module.
 
+    Each export entry carries `frame_params` — the per-parameter frame-holder
+    contract `_formal_exports` publishes off `fn._frame_param_contract`. It is
+    the one thing in a manifest that is not a SYMBOL, and it is what lets a
+    consumer decide a frame-address hand-off across the module boundary instead
+    of refusing it as unknowable: the callee module's own compilation says
+    which of its parameters are frame addresses and of which struct, and that
+    is a fact about a compilation the consumer did not perform and cannot
+    re-derive. `bugs/FORMAL_callee_no_def_ceiling_zero.md` records what it is
+    worth.
+
     `constants` is the module-level name → folded LITERAL table, and it is the
     one thing a dylib publishes that is not a symbol. It exists because a
     literal needs no storage: there is exactly one value of a folded
@@ -7049,7 +7321,8 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
         "exports": [{"module": e["module"], "name": e["name"],
                      "symbol": e["symbol"], "arity": e.get("arity"),
                      "signature": e.get("signature", ""),
-                     "kind": e.get("kind")}
+                     "kind": e.get("kind"),
+                     "frame_params": e.get("frame_params") or []}
                     for e in exports],
     }
     with open(path, "w") as f:
@@ -8127,6 +8400,7 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                 "arity": len(fn.params),
                 "signature": signature,
                 "kind": "method",
+                "frame_params": _export_frame_contract(fn),
             })
             continue
         if fn.name not in exported:
@@ -8141,8 +8415,38 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
             "arity": len(fn.params),
             "signature": entry.get("signature", ""),
             "kind": entry.get("kind"),
+            "frame_params": _export_frame_contract(fn),
         })
     return out
+
+
+def _export_frame_contract(fn) -> list:
+    """The per-parameter frame-holder contract this export publishes, or [].
+
+    Read off `fn._frame_param_contract`, which `_frame_receivers` published
+    from the holder fixpoint — the same table the emitters read `self` from
+    for a field load, so what a consumer is told is what the callee's own code
+    was compiled to do rather than a second opinion about it.
+
+    `[]` when the function has no contract table, which is the honest "this
+    compilation could not classify it": a FunctionDef that never went through
+    `_frame_receivers` (a synthetic one, say) rather than a function whose
+    parameters are all ordinary words — that case publishes a list of `None`s,
+    which is a different and much more useful thing to say.
+
+    The names are the callee module's own struct names, and a consumer
+    compares them against the structs it has in hand. Two modules declaring
+    different `P`s is a real possibility on this path and the contract makes it
+    VISIBLE rather than assumed, which is the property that makes following the
+    address sound: `base + 8k` means the same thing on both sides only because
+    both computed it from the same field list, and "the same field list" is
+    exactly what the consumer checks.
+    """
+    contract = getattr(fn, "_frame_param_contract", None)
+    if contract is None:
+        return []
+    return [[st for st in entry] if isinstance(entry, list) else None
+            for entry in contract]
 
 
 def _record_link_deps(manifest_path: str, linked: list) -> None:
@@ -8394,7 +8698,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         module, functions, module_source, file_structs, file_slots, \
             file_constants = \
             _formal_module_functions(source_path, link_dylibs, arch=arch,
-                                     fmt="macho")
+                                     fmt="macho", link_manifests=linked)
         structs_by_file[source_path] = file_structs
         for name, value in file_constants.items():
             constants.setdefault(name, value)
