@@ -124,7 +124,39 @@ struct-typed field is.** Two answers, and they are not equivalent:
     the representation that makes an argument-initialised field sound, and it is
     a layout change: the field stops being one slot and becomes N.
 
-## The next step
+## Status, 2026-10-01 (`work/formal2-re-and-slice`): the DERIVATION is fixed; the row's terminal cause is not this
+
+The frame-holder refusal itself was real, and it was a SYMPTOM. Measured on
+`bd757a63`:
+
+* `Optional` measured **2** fields because its second "field" was its private
+  method `_write_to` — counted by `formal/model.py`'s derived-field walk, which
+  exempts `self.m()` but not `self.m[T]()`. `Optional` is a ONE-word value
+  (`struct_is_one_field`), so every `Optional` receiver was being treated as a
+  frame address. **That is fixed**: 31 structs across the stdlib and this
+  repository have a narrower field set, 30 of them for exactly this reason, and
+  the 13-file census drops from 33 structs-in-29-files to 3 (the three being the
+  sibling VALUE-position shape, deliberately untouched).
+* **But the row did not move.** `builtin_slice.mojo` now refuses with
+  `self.step.or_else() is an Optional unwrap`, which is what its 13 dependents
+  already reported, and re-sweeping all 13 before and after shows them
+  unchanged: **0 gained a PASS.** So this doc's headline was measuring one step
+  removed from the terminal cause, which is what its own text hints at when it
+  says the row is "blocked on a two-field `Optional` in a stdlib struct's field
+  list" — the two fields were not the blocker, the unwrap is.
+
+The refusal's own next step (answer "what a struct-typed field is") turns out not
+to be the question either: the field representation this doc asks about is
+**frame address vs inline copies**, and for `Slice.start: Optional[Int]` neither
+is needed, because `Optional` is one word. The real question is a
+representation for `Optional` ITSELF, which is
+`bugs/FORMAL_stdlib_optional_needs_a_representation.md`, and that doc measures
+one layer further down again — the unwrap's tag lives in `Variant`, which reaches
+it through `__mlir_op`, which this path refuses. **Keep this doc for the
+measurement that made the derivation question visible; the next step is the
+other one.**
+
+## The next step (as originally written)
 
 Answer that question in `FORMAL_wide_receiver_by_reference.md` — the field
 representation, frame-address or inline-copies — and both shapes fall out of it,
