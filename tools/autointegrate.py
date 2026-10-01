@@ -156,20 +156,15 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=180):
         except SystemExit as e:
             log("could not start the batch fixer: %s" % e); return False
         log("PIECE-FIX attempt %d: %s started on the merged tree (failing: %s)" % (attempt, name, ",".join(failed)))
-        t0 = time.time()
-        while time.time() - t0 < timeout_min * 60:
-            time.sleep(20)
-            tasks = C.load()
-            family = [n for n in tasks if n == name or n.startswith(name + "-r")]       # unstick restarts it as NAME-rN
-            if not any(C.state_of(tasks[n]) == "running" for n in family):
-                break
+        wait_family(name)                                      # unstick restarts a stalled one as NAME-rN; no wall-clock cap
         tasks = C.load()
         family = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
-        done = [n for n in family if C.ahead(tasks[n]) > 0 and tasks[n].get("state") != "abandoned"]
-        for n in family:                                       # timed out: stop it
+        for n in family:
             if C.state_of(tasks[n]) == "running":
                 try: os.killpg(tasks[n]["pid"], 15)
                 except OSError: pass
+            snapshot_tree(tasks[n], "the fixer exited with uncommitted work")
+        done = [n for n in family if C.ahead(tasks[n]) > 0 and tasks[n].get("state") != "abandoned"]
         qtext = " ".join(q for n in family for q in C.questions(tasks[n]))
         global SUSPECT
         SUSPECT = next((m for m in merged if m in qtext), None)
@@ -189,6 +184,64 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=180):
         log("  batch+fixes: rc=%d %s" % (rc, " | ".join(l for l in out.splitlines() if l.startswith(("GREEN", "RED")))[:200]))
         if rc == 0 and "GREEN" in out:
             return True
+    return False
+
+
+def snapshot_tree(t, why):
+    """Commit whatever a worker left uncommitted, so its branch is integrable (the integrator refuses a dirty tree)."""
+    wt = t["worktree"]
+    C.git("add", "-A", cwd=wt, check=False)
+    if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=wt).returncode != 0:
+        C.git("commit", "-q", "-m", "WIP snapshot by controller: " + why, cwd=wt, check=False)
+
+
+def family_running(name):
+    tasks = C.load()
+    return any(C.state_of(tasks[n]) == "running" for n in tasks if n == name or n.startswith(name + "-r"))
+
+
+def wait_family(name, cap_h=12):
+    """Wait for a worker (and any -rN restart of it) while it is alive. NOT a time-box: the cap is a 12 h backstop only; a
+    stalled or network-killed worker is restarted by `unstick`. (A 3 h cap once killed a merger 13 of 27 merges in.)"""
+    t0 = time.time()
+    while time.time() - t0 < cap_h * 3600 and family_running(name):
+        time.sleep(20)
+
+
+def settle(st, red, merged, failed, rc, out):
+    """Everything after a batch's gate: green lands; red -> piece-fix on the merged tree -> (only then) isolate and bisect.
+    Returns True if the integrator was busy."""
+    tail = [l for l in out.splitlines() if l.startswith(("GREEN", "RED", "CONFLICT", "the red did NOT"))]
+    log("batch result rc=%d merged=%d failed jobs=%s %s" % (rc, len(merged), failed or "-", " | ".join(tail)[:200]))
+    if "another integrator" in out:
+        return True
+    if "nothing to integrate" in out:
+        log("ERROR: the integrator refused what it was given (nothing to integrate): not treating that as success")
+        for n in merged: red[n] = head_sha(n)
+        json.dump(st, open(STATE, "w"))
+        return False
+    if rc != 0 and merged:
+        if not failed:
+            log("red but no failing job could be named: setting the whole batch aside for a human")
+            for n in merged: red[n] = head_sha(n)
+        elif fix_forward(merged, failed, os.path.join(I.INTEG, "gate.log")):
+            log("PIECE-FIX landed the whole batch (%d branches + the fixes)" % len(merged))
+        else:
+            log("piece-fix did not get it green: isolating the one hard issue")
+            if SUSPECT and SUSPECT in merged and probe([n for n in merged if n != SUSPECT], failed):
+                k = merged.index(SUSPECT)
+                log("confirmed: without %s the failing jobs pass" % SUSPECT)
+            else:
+                k = bisect_first_bad(merged, failed)
+            culprit = merged[k]
+            log("first bad branch: %s (the %d before it pass %s)" % (culprit, k, ",".join(failed)))
+            red[culprit] = head_sha(culprit)
+            why = "breaks " + ",".join(failed) + " when merged after " + (merged[k - 1] if k else "master")
+            try:
+                enqueue_fixer(culprit, why + "\n" + failed_jobs(os.path.join(I.INTEG, "gate.log")))
+            except Exception as e:
+                log("could not queue a fixer for %s: %s" % (culprit, e))
+        json.dump(st, open(STATE, "w"))
     return False
 
 
@@ -221,19 +274,14 @@ def merge_conflicts(M, X, timeout_min=180):
     except SystemExit as e:
         log("could not start the conflict merger: %s" % e); return None
     log("CONFLICT-MERGE: %s started on the merged tree to merge %d conflicting branches: %s" % (name, len(X), ", ".join(X)[:200]))
-    t0 = time.time()
-    while time.time() - t0 < timeout_min * 60:
-        time.sleep(20)
-        tasks = C.load()
-        family = [n for n in tasks if n == name or n.startswith(name + "-r")]
-        if not any(C.state_of(tasks[n]) == "running" for n in family):
-            break
+    wait_family(name)
     tasks = C.load()
     family = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
     for n in family:
         if C.state_of(tasks[n]) == "running":
             try: os.killpg(tasks[n]["pid"], 15)
             except OSError: pass
+        snapshot_tree(tasks[n], "the merger exited with uncommitted work")
     done = [n for n in family if C.ahead(tasks[n]) > 0]
     if not done:
         log("CONFLICT-MERGE produced no commits"); return None
@@ -260,6 +308,23 @@ def main():
                     busy = True; break
         did = False
         if not busy:
+            # ADOPT: a merger/fixer that is still working (or finished) when this loop (re)starts is NOT thrown away and redone.
+            pend = [n for n, t in sorted(C.load().items(), key=lambda kv: kv[1]["slot"])
+                    if re.match(r"batchmerge-\d+(-r\d+)*$", n) and t.get("state") not in ("integrated", "abandoned", "superseded")
+                    and (C.state_of(t) == "running" or C.ahead(t) > 0) and red.get(n) != head_sha(n)]
+            if pend:
+                name = pend[-1]; did = True
+                log("ADOPT: merger %s (%s)" % (name, "still working: waiting for it" if family_running(name) else "finished"))
+                wait_family(name)
+                for n in [x for x in C.load() if x == name or x.startswith(name + "-r")]:
+                    snapshot_tree(C.load()[n], "the merger exited with uncommitted work")
+                fam = sorted((x for x in C.load() if x == name or x.startswith(name + "-r")), key=lambda x: C.load()[x]["slot"])
+                tgt = [x for x in fam if C.ahead(C.load()[x]) > 0][-1:]
+                if tgt:
+                    rc, out = run_integrate("--only", *tgt)
+                    if settle(st, red, parse(out, "MERGED"), parse(out, "FAILED_JOBS"), rc, out):
+                        busy = True
+                    continue
             # THE ALGORITHM: merge EVERY finished branch (priority order), run the gate ONCE, land everything if it is green.
             batch = [n for n in sorted(I.pick_candidates(quiet=True), key=C.priority_key)
                      if not I.infra_only(C.load()[n]["branch"]) and red.get(n) != head_sha(n)]
@@ -290,34 +355,8 @@ def main():
                     else:
                         rc, out = run_integrate("--only", *target)
                         merged, failed = (parse(out, "MERGED"), parse(out, "FAILED_JOBS"))
-                tail = [l for l in out.splitlines() if l.startswith(("GREEN", "RED", "CONFLICT", "the red did NOT"))]
-                log("batch result rc=%d merged=%d failed jobs=%s %s" % (rc, len(merged), failed or "-", " | ".join(tail)[:200]))
-                if "another integrator" in out:
+                if settle(st, red, merged, failed, rc, out):
                     busy = True
-                elif rc != 0 and merged:
-                    # Only if it goes wrong: step back and BISECT. The failing jobs ARE the test case: probe halves with just them.
-                    if not failed:
-                        log("red but no failing job could be named: setting the whole batch aside for a human"); 
-                        for n in merged: red[n] = head_sha(n)
-                    elif fix_forward(merged, failed, os.path.join(I.INTEG, "gate.log")):
-                        log("PIECE-FIX landed the whole batch (%d branches + the fixes)" % len(merged))
-                    else:
-                        log("piece-fix did not get it green: isolating the one hard issue")
-                        if SUSPECT and SUSPECT in merged and probe([n for n in merged if n != SUSPECT], failed):
-                            k = merged.index(SUSPECT)     # the fixer named it and the failing jobs pass without it: one probe, no bisect
-                            log("confirmed: without %s the failing jobs pass" % SUSPECT)
-                        else:
-                            k = bisect_first_bad(merged, failed)
-                        culprit = merged[k]
-                        log("first bad branch: %s (the %d before it pass %s)" % (culprit, k, ",".join(failed)))
-                        red[culprit] = head_sha(culprit)
-                        why = "breaks " + ",".join(failed) + " when merged after " + (merged[k - 1] if k else "master")
-                        try:
-                            enqueue_fixer(culprit, why + "\n" + failed_jobs(os.path.join(I.INTEG, "gate.log")))
-                        except Exception as e:
-                            log("could not queue a fixer for %s: %s" % (culprit, e))
-                    json.dump(st, open(STATE, "w"))
-                    # the next iteration re-batches everything except the culprit: one gate lands the rest
         if a.once:
             return
         if busy or not did:
