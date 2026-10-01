@@ -258,6 +258,40 @@ cause on the tree that nobody owns, and its ceiling is Stage 5 (§1.2), not a
 bug.
 
 
+## 1.1b Re-audited 2026-10-01 on the new-modular stdlib: a ninth terminal module was a BUG, and it is closed
+
+§1.1 and §1.1a measured `../modular/mojo/stdlib/std`. The sweep's default root
+moved to `../new-modular/Mojo/stdlib/std` (252 files), and on THAT tree this
+family has a terminal module the audit never had: **`std/traits/anytype.mojo`**,
+5 files, and it is not a limit.
+
+It declares `trait AnyType:` and nothing else, and it was refused with the
+sentence "declares no function and no type at all — only module-level
+constants". It declares a type, and every read of `AnyType` in the stdlib is a
+type position. Two things were wrong, and only one was the message:
+
+* `formal/imports.py`'s `declared_kinds` filed a `TraitDef` as neither a
+  function nor a type, so a package re-exporting a trait reached
+  `compile_formal_dylib` with kind `"unknown"` — which is not `"type"`, so it
+  landed in the re-exported-FUNCTION set that must be provided AS A SYMBOL. A
+  trait has no symbol.
+* `compile_formal_dylib` refused a trait-only module outright. It now lowers one
+  through `_namespace_library`, exactly as it already lowered a pure re-export
+  package: a real dylib, no code, an EMPTY export trie, traits recorded under
+  the manifest's own `traits` key.
+
+Why the empty trie is the design and not a shortcut, and the two directions that
+keep it honest, are in `formal/build.py`'s `_namespace_library` and pinned by
+`test_formal_trait_module.py` (6 cases; 4 of them fail on the tree before the
+change). Eleven of the new stdlib's 252 files are trait-only.
+
+**The family count on the new tree, measured with
+`python3 tools/formal_sweep.py --arch arm64` over the 12 files the two named
+terminal modules block:** the `anytype.mojo` row is **5 files before, 0 after**,
+and all five land on `builtin_slice.mojo`'s Optional-unwrap refusal — the next
+real finding, and progress, not a build. `stat.mojo` is unmoved and remains the
+true limit §1.2 owns.
+
 ## 1.2 What would close it, and what it costs
 
 `doc/ABI.md` §Generics is the load-bearing citation and it is explicit:
