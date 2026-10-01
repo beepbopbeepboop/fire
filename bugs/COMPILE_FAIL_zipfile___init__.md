@@ -1,5 +1,43 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-30, branch work/compile-fail-stdlib-misc — this file's OWN compile unit is now CLEAN; the whole-program build is refused by one honest, precisely-root-caused ambiguity message)
+
+Re-ran everything on this branch rather than trusting the entries below.
+
+**`Lib/zipfile/__init__.py` itself contributes ZERO `error:` lines.** Not
+"no errors reached" — its compile unit is inline-compiled into the
+whole-program unit and gcc accepts it. The file is still not BUILT,
+because the program it belongs to is refused as a unit:
+
+```
+Error building: cannot compile module: 'open' is ambiguous — this program
+transitively imports two different sibling modules that both define a free
+function named 'open', ... and no enclosing `from X import ...` statement
+in the current lexical scope binds the name for this specific reference.
+```
+
+`zipfile/__init__.py` never imports `open`; its bare `open(...)` uses
+(line 266) are the BUILTIN. The ambiguity is manufactured by six
+unrelated siblings' transitive import registrations (`codecs`, `tokenize`,
+`bz2`, `lzma`, `compression.zstd._zstdfile`, …), all with
+`record_scope=False`, colliding on one shared `_own_imported_func_home`
+key. Root-caused with an instrumented `_note_own_func_home` trace, and
+filed as `bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md`
+with the tier fix it needs. NOT attempted here: it is a change to
+`_func_qualifier`'s tier order, which
+`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
+owns and which several recent entries here flag as easy to regress into a
+SILENT wrong call.
+
+Also landed this session and relevant to this file:
+`b501954c` removed a crash that refused this file outright — see
+`bugs/COMPILE_FAIL_importlib_resources_readers.md`'s entry for the shape.
+`fire.py build` on `Lib/zipfile/__init__.py` now gets all the way to that
+one refusal instead of dying in an `AttributeError`.
+
+Doc kept open. The remaining work is the `'open'` ambiguity, which is now
+a single, named, understood blocker rather than a wall of errors.
+
 ## Status (2026-09-07, end-to-end runtime investigated — blocked on `.py` link-mode module resolution + memoryview-in-generator, both architectural)
 
 The task was "make a real zip round-trip (`from zipfile import ZipFile`,

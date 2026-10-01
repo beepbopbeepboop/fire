@@ -1,5 +1,41 @@
 # COMPILE_FAIL: Lib/ctypes/macholib/dyld.py
 
+## Status (2026-09-30, branch work/compile-fail-stdlib-misc — THREE refused generators down to ONE, and its own compile unit has been clean for several rounds)
+
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/ctypes/macholib/dyld.py`
+(119 s, peak 0.4 GB). `macholib/dyld.py` and `macholib/framework.py`
+contribute **zero** `error:` lines — the whole-program build is now
+refused by a single module-level generator refusal, and it names ONE
+function instead of three:
+
+```
+cannot compile module: function(s) dyld_default_search (generator
+function(s), contain a `yield`/`yield from`) ...
+Unsupported shape(s): dyld_default_search: every `yield` must carry a
+value, and all values must agree on one scalar type
+(int64_t/double/_Bool).
+```
+
+`dyld_executable_path_search` and `dyld_override_search` are no longer in
+the refused set at all; `dyld_image_suffix_search` (the closure `_inject`
+generator) is not either. So the 2026-08-06 five-bullet cluster below is
+confirmed resolved in full, and the remaining blocker is one function's
+yield-slot agreement, not a corpus.
+
+`dyld_default_search`'s own yields are `name`, `os.path.join(path,
+framework['name'])` and `os.path.basename(name)` — all strings in real
+Python. The reason it cannot be typed is the same shape as the
+`_convert_egg_info_reqs_to_simple_reqs` gap in
+`bugs/COMPILE_FAIL_importlib_metadata___init__.md`: the element type of
+`framework['name']` (a subscript of a value returned by a foreign
+`framework_info`) is not threaded into the generator body's yield-slot
+inference, so `_generator_yield_ctype` cannot pin one scalar type and
+refuses honestly rather than miscompiling. Feature-sized (struct-typed
+subscript element typing through a cross-module return), deliberately NOT
+attempted.
+
+Doc kept open on that one generator.
+
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/macholib/dyld.py`
 
 ## Status (2026-08-26, wtOpencode_dyld): FOUR shared codegen fixes landed — total closure errors 167 → 102; dyld.py's own unit still ZERO errors; end-to-end rc=1 remains, now blocked ONLY by other docs' tracked hard-bug classes
