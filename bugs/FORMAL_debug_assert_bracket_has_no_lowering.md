@@ -12,22 +12,25 @@ that claim, and the measurement says its own value is small — §3.
 `formal/build.py` bound `callees` twice, so the subscript-callee exemption that
 makes `List[Self.T]()` build was dead code; `69f20418`'s fix was voided by a
 merge. With that repaired (`e4ee0de7`), the terminal cause of the eighty
-dependents moves. Measured on eight of them, x86-64, **cold CAS both sides**
-(`GMOJO_HOME` at an empty directory, per `FORMAL_sweep_cache_ignores_imports.md`):
+dependents moves. Measured on **27 of the 80** — every third file of the
+census, so every import route into `binary_heap.mojo` is represented — x86-64,
+**cold CAS on both sides** (`GMOJO_HOME` at an empty directory, per
+`FORMAL_sweep_cache_ignores_imports.md`):
 
 ```
-$ python3 tools/formal_sweep.py --arch x86_64 -j 4 -t 90 $(cat .tmp/dep8.txt)
+$ python3 tools/formal_sweep.py --arch x86_64 -j 6 -t 90 $(cat .tmp/dep24.txt)
 ```
 
 | | before | after |
 |---|---|---|
-| all 8 files | `binary_heap.mojo: BinaryHeap___init__: 'List' has no home: the module-level symbol table is empty for this unit …` | `binary_heap.mojo: debug_assert[…](…) calls a name this unit does not compile, so the brackets cannot be bound.` |
-| class | `codegen/dependency` x8 | `codegen/dependency` x8 |
-| coverage | 0/8 | 0/8 |
+| all 27 files | `binary_heap.mojo: BinaryHeap___init__: 'List' has no home: the module-level symbol table is empty for this unit …` | `binary_heap.mojo: debug_assert[…](…) calls a name this unit does not compile, so the brackets cannot be bound.` |
+| class | `codegen/dependency` x27 | `codegen/dependency` x27 |
+| coverage | 0/27 | 0/27 |
+| by family | `binary_heap.mojo: other refusal x27` | `binary_heap.mojo: other refusal x27` |
 
-**8 of 8 moved, all onto the same message.** So `L[T]()` is no longer what any
-of them is blocked by, and the row is now this one. (The file itself:
-`test_formal_type_application.py`.)
+**27 of 27 moved, all onto one message, and it is the same one in all 27.** So
+`L[T]()` is no longer what any of them is blocked by, and the row is now this
+one. (The fix itself: `test_formal_type_application.py`.)
 
 ## 2. Why `debug_assert` is refused — and it is not a specialization problem
 
@@ -164,6 +167,6 @@ python3 tools/memslot.py --gb 8 --label probe -- \
     python3 fire.py build --formal --no-prove .tmp/t5.mojo -o .tmp/t5.arm64
 python3 tools/memslot.py --gb 8 --label probe -- \
     python3 fire.py build --formal --no-prove .tmp/bh_nodebugassert.mojo -o .tmp/bh2.arm64
-python3 tools/memslot.py --gb 8 --label probe -- \
-    python3 tools/formal_sweep.py --arch x86_64 -j 4 -t 90 $(cat .tmp/dep8.txt)
+python3 tools/memslot.py --gb 8 --label sw24 -- \
+    python3 tools/formal_sweep.py --arch x86_64 -j 6 -t 90 $(cat .tmp/dep24.txt)
 ```
