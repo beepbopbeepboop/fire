@@ -4265,12 +4265,65 @@ def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tu
     return ret_type, gen._call_expr(ret_type, fname_c, full_arg_pairs)
 
 
+def _ast_child_nodes(value, out: list) -> None:
+    """APPEND to `out` the AST nodes directly reachable from ONE field value: a
+    node, or the nodes inside a list / tuple / dict of them.
+
+    All three containers have to be opened, not just `list`:
+    `CallExpr.kwargs` and `DictExpr.pairs` are lists of 2-TUPLES
+    (`[('x', <expr>)]`, `[(<key>, <value>)]`) and `FunctionDef.param_defaults`
+    is a dict of name -> default expression. A walk that only descended
+    `list` pushed the tuples themselves and stopped.
+
+    Appends to a caller-supplied list rather than yielding, because this file
+    is in the subset the self-hosted compiler lowers and that subset has no
+    generators (see CLAUDE.md / test_selfhost.py)."""
+    if value is None or isinstance(value, (str, bytes, int, float)):
+        return
+    if isinstance(value, (list, tuple)):
+        for _x in value:
+            _ast_child_nodes(_x, out)
+        return
+    if isinstance(value, dict):
+        for _x in value.values():
+            _ast_child_nodes(_x, out)
+        return
+    out.append(value)
+
+
 def _ast_walk(body):
     """Yield every AST node under `body`. A local, structural walk: the
     lambda-capture check below only needs IdentExpr/AssignStmt/ForStmt/
     VarDecl/NamedExpr shapes, and reuses this file's existing node imports
     rather than the middle-tier walkers (whose results are self-hosted-boxed
-    and would cost more than they explain here)."""
+    and would cost more than they explain here).
+
+    `_AST_CHILD_FIELDS` must name EVERY field that can hold a child node, and
+    it did not: 17 of the 53 AST dataclasses had a child-bearing field missing
+    from it, including `TernaryExpr.condition`, `IfStmt.condition`,
+    `WhileStmt.condition`, `SubscriptExpr.index`, `ForStmt.iterable`,
+    `CallExpr.kwargs`, `CompareChain.operands`, `Comprehension.element`,
+    `DictExpr.pairs`, `MultiAssignStmt.targets`, `SliceExpr.start/stop/step`,
+    `MatchStmt.subject/cases` and `TryStmt.handlers`. A name that appears ONLY
+    in one of those is invisible here, and this walk feeds the LAMBDA'S
+    CAPTURE LIST (`_lower_LambdaExpr`, below): the name is not put in the env,
+    the body reads it as the hard 0 the `ct param or undeclared` fallback
+    emits, and the program answers with a plausible wrong value and exit 0.
+    Real, measured (`sorted(d, key=lambda k: d[k] if p else 0)` came out
+    unsorted), and the whole class is one edit.
+
+    The invariant is pinned by `test_gimple.py`'s
+    `ast_walk_reaches_every_name_in_a_lambda_body`, which asserts the walk sees
+    everything `_used_idents_node` — this codebase's other name-collecting
+    walk, generic over dataclass fields by construction — sees. Put THAT there
+    rather than a list of field names, so a field added or renamed later fails
+    there instead of as a silent wrong answer somewhere.
+
+    Scalar fields (`line`, `col`, `name`, `op`, `raw`, ...) are deliberately
+    NOT listed: they are str/int and `_ast_child_nodes` drops them anyway, so
+    naming them would only make the list harder to check.
+    `fire_compiler.py`'s AST node definitions are the authority for which
+    fields exist."""
     # A lambda's `body` is a single EXPRESSION, not a statement list, so
     # normalize before walking.
     if body is None:
@@ -4279,16 +4332,33 @@ def _ast_walk(body):
     while stack:
         n = stack.pop()
         yield n
-        for _attr in ('body', 'value', 'target', 'args', 'func', 'obj',
-                      'left', 'right', 'then_val', 'else_val', 'operand',
-                      'key', 'val', 'elements', 'params', 'handler', 'finalbody'):
-            _v = getattr(n, _attr, None)
-            if _v is None:
-                continue
-            if isinstance(_v, list):
-                stack.extend(x for x in _v if hasattr(x, '__class__') and not isinstance(x, (str, bytes, int, float)))
-            elif hasattr(_v, '__class__') and not isinstance(_v, (str, bytes, int, float)):
-                stack.append(_v)
+        for _attr in _AST_CHILD_FIELDS:
+            _kids = []
+            _ast_child_nodes(getattr(n, _attr, None), _kids)
+            stack.extend(_kids)
+
+
+
+# Every field of every AST dataclass in fire_compiler.py that can hold a child
+# NODE (a dataclass instance, or a list/tuple/dict of them). `test_gimple.py`'s
+# ast_walk_covers_every_child_field recomputes this from the dataclass
+# definitions and fails if a field is added, renamed or missed here — the list
+# is derived, not remembered.
+_AST_CHILD_FIELDS = (
+    # expressions
+    'value', 'left', 'right', 'operand', 'func', 'args', 'kwargs', 'obj',
+    'index', 'attrs', 'start', 'stop', 'step', 'condition', 'then_val',
+    'else_val', 'operands', 'elements', 'key', 'val', 'pairs', 'captures',
+    'param_convs',
+    # statements
+    'body', 'target', 'targets', 'name', 'then_body', 'else_body', 'elifs',
+    'iterable', 'handlers', 'handler', 'finalbody', 'finally_body', 'items',
+    'cases', 'subject', 'msg', 'generators', 'element', 'names',
+    'name_alias_strs', 'module', 'alias', 'extra', 'decorators', 'params',
+    'methods', 'fields', 'bases', 'comptime_aliases', 'comptime_params',
+    'param_defaults', 'expr', 'clauses', 'exc_type', 'conditions',
+    'patterns', 'guard',
+)
 
 
 def _bound_names(gen) -> set:

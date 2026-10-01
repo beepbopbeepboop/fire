@@ -1603,6 +1603,88 @@ def main():
 main()
 """, "15\n")
 
+    # A captured local that the lambda body only mentions inside an AST FIELD
+    # the capture walk did not visit. `_ast_walk` (emit_calls.py — the walk
+    # `_lower_LambdaExpr` derives the capture list from) named 16 child
+    # attributes and missed 17 of the 53 AST dataclasses' child-bearing ones,
+    # `TernaryExpr.condition` among them. A name reachable ONLY through a
+    # missed field is not put in the closure env at all, and the body then
+    # reads it through the `ct param or undeclared` fallback, which is a hard
+    # 0 — so the value silently became falsey and every truthiness test on it
+    # took the wrong branch. `sorted`'s all-equal-keys stable order is what
+    # made the symptom read as "sorted() didn't sort".
+    #
+    # Repeated, and the dict is a MODULE GLOBAL rather than a local on
+    # purpose: a dict passed as an unannotated parameter is typed `MojoList *`
+    # and `sorted()` then mis-dispatches, which is a different bug with its
+    # own doc (CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md) and
+    # would mask this one. Every line below is a DIFFERENT missed field, so a
+    # fix that patches only `condition` cannot pass.
+    test_gimple_stdout_repeated("gimple_lambda_capture_through_unwalked_fields", """\
+D = {"b": 2, "a": 1}
+
+
+def t_ternary(p):
+    return sorted(D, key=lambda k: D[k] if p else 0)
+
+
+def t_subscript_index(p, k):
+    return sorted(D, key=lambda kk: D[kk] + (0 if p[k] else 0))
+
+
+def t_compare(p, q):
+    return sorted(D, key=lambda kk: D[kk] if p < q else 0)
+
+
+def t_kwargs(p):
+    return sorted(D, key=lambda kk: len(p) if p.strip() else 0)
+
+
+def t_comprehension(p):
+    return sorted(D, key=lambda kk: D[kk] + len([c for c in p]))
+
+
+def t_slice(p):
+    return sorted(D, key=lambda kk: D[kk] + len(p[1:2]))
+
+
+def t_dict_pairs(p):
+    return sorted(D, key=lambda kk: D[kk] + len({"z": p}))
+
+
+print(t_ternary("x"))
+print(t_ternary(""))
+print(t_subscript_index({"a": 1}, "a"))
+print(t_compare("a", "b"))
+print(t_kwargs("  "))
+print(t_comprehension("ab"))
+print(t_slice("abcd"))
+print(t_dict_pairs("q"))
+""", "['a', 'b']\n['b', 'a']\n['a', 'b']\n['a', 'b']\n['b', 'a']\n"
+       "['a', 'b']\n['a', 'b']\n['a', 'b']\n")
+
+    # The reported shape itself, as its own case: `sorted` over a dict whose
+    # ordering depends on a captured string. Both the truthy and the falsey
+    # value are in it, because the falsey one is the only answer a broken
+    # capture can produce and it is ALSO the correct answer for an empty
+    # string — so a test with only the empty string would pass either way.
+    test_gimple_stdout("gimple_lambda_captured_string_truthiness", """\
+def f():
+    p = "x"
+    d = {"b": 2, "a": 1}
+    return sorted(d, key=lambda k: d[k] if p else 0)
+
+
+def g():
+    p = ""
+    d = {"b": 2, "a": 1}
+    return sorted(d, key=lambda k: d[k] if p else 0)
+
+
+print(f())
+print(g())
+""", "['a', 'b']\n['b', 'a']\n")
+
     # The default-argument capture form still works, and a parameter must NOT
     # be treated as capturing without a real default: the old
     # `default is None and pname in var_types` fallback gave every parameter
