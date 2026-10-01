@@ -7778,6 +7778,110 @@ def variadic_named_args(symbol: str):
     return VARIADIC_LIBC.get(symbol.lstrip("_"))
 
 
+# ── The symbol a C name binds to on THIS TARGET ───────────────────────────
+#
+# One call to `readdir(3)` is two different functions, and which one the source
+# means is decided by the TARGET and not by the source at all. macOS's C library
+# exports the whole directory-and-stat entry-point family TWICE: once for a
+# 32-bit `ino_t` (`readdir`) and once for a 64-bit one (`readdir$INODE64`), with
+# a `struct dirent` / `struct stat` laid out to match. `<sys/dirent.h>` picks
+# between them with `#if __DARWIN_64_BIT_INO_T`, so a C program compiled for a
+# 64-bit target — which is every program clang builds for arm64 AND for
+# x86_64 — calls the `$INODE64` one and never sees the other. A Mojo source
+# spells the bare name and there is no header to redirect it, so the BINDING is
+# this backend's job, and getting it wrong is a silent wrong answer rather than
+# a link error: both symbols exist on x86_64, so the image loads and runs.
+#
+# Measured, on this tree, for `readdir` on a directory holding three files:
+#
+#     x86_64, `_readdir`         38bf3e03 0c00 0401 2e000000 37bf3e03 ...
+#     x86_64, `_readdir$INODE64` 38bf3e03 0000 0000 00000000 2000 0100 042e ...
+#
+# which is `struct dirent`'s two layouts exactly: 4-byte `d_ino`, `d_reclen` at
+# 4, `d_type` at 6, `d_namlen` at 7, `d_name` at 8 for the first, and 8-byte
+# `d_ino`, `d_seekoff`, `d_reclen` at 16, `d_namlen` at 18, `d_type` at 20 and
+# `d_name` at 21 for the second (the `__DARWIN_STRUCT_DIRENTRY` spelling in the
+# same header). `os.listdir` read `d_name` at 21 and got `.` for the 12th byte
+# of the other layout, so it returned `cc.txt` where CPython returns `ccc.txt`
+# and a count one too high — `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_
+# pointer_reads_the_wrong_bytes.md`, whose first three candidate causes (the
+# byte read, the element read, the copy) were all measured and all wrong.
+#
+# WHY IT IS x86_64-ONLY and why the table is not applied on arm64: arm64 has no
+# 32-bit `ino_t`, so libsystem_c exports no `$INODE64` twin there and the bare
+# name IS the 64-bit-inode function — measured by the linker, which refuses
+# `_readdir$INODE64` for `arm64-macos` ("Undefined symbols for architecture
+# arm64"), and by every arm64 stat case agreeing with CPython. Emitting the
+# `$INODE64` spelling there would trade a silent wrong answer for a link
+# failure. `libsystem_kernel` is the exception that proves the rule by
+# exporting both for arm64 — the bare `stat` there is an alias of the
+# `$INODE64` one — which is why this is a table of names rather than a rule.
+#
+# The set is what `libSystem.B.tbd` exports with a `$INODE64` twin for the
+# `x86_64-macos` target, both libraries' lists together, so it cannot go stale
+# for a host module that starts calling one of them:
+#
+#     SDK/usr/lib/libSystem.B.tbd, every `- targets: [ … x86_64-macos … ]`
+#     block whose `symbols:` list holds a `$INODE64` name
+#
+# The `_b` spellings are libsystemc's Block-walking internals and no Mojo source
+# can name them; they are here because the table is the platform's fact and a
+# partial copy of a fact is how the next one goes wrong.
+INODE64_DUAL_LIBC = frozenset({
+    # libsystem_c.dylib
+    "opendir", "opendir2", "readdir", "readdir_r", "readdir_unlocked",
+    "rewinddir", "seekdir", "telldir", "fdopendir", "scandir", "scandirat",
+    "scandir_b", "scandirat_b", "alphasort", "fdscandir", "fdscandir_b",
+    "fts_open", "fts_open_b", "fts_read", "fts_close", "fts_children",
+    "fts_set", "glob", "glob_b", "ftw", "nftw", "getmntinfo",
+    "getmntinfo_r_np", "fstatx_np", "lstatx_np", "statx_np",
+    # libsystem_kernel.dylib
+    "stat", "lstat", "fstat", "fstatat", "statfs", "fstatfs",
+})
+
+INODE64_SUFFIX = "$INODE64"
+
+
+def target_libc_symbol(name: str, arch: str, fmt: str) -> str:
+    """The symbol an unbound C callee spelled `name` binds to on this target.
+
+    `name` arrives as the SOURCE spells it (a bare C identifier), `arch` and
+    `fmt` as `formal.build._make_codegen` was called with. The answer is `name`
+    unchanged except where the platform spells the same function two ways — see
+    `INODE64_DUAL_LIBC` above, which is the whole of that.
+
+    `fmt` is a parameter rather than an `os.uname()` test because the ELF image
+    this backend also emits targets a C library with no such duality (glibc has
+    one `readdir` and one `stat`, both 64-bit-ino), and a `sys.platform` probe
+    would silently disable the fix on the machine that needed it most.
+
+    A name this does not recognise is returned untouched, which is the right
+    answer for every C function outside the table: only the names listed have a
+    second spelling to choose between."""
+    if fmt != "macho" or arch != "x86_64":
+        return name
+    return name + INODE64_SUFFIX if name in INODE64_DUAL_LIBC else name
+
+
+def libc_source_name(symbol: str) -> str:
+    """The name the SOURCE spells for a symbol this tree may have re-spelled.
+
+    The inverse direction of `target_libc_symbol`, and needed because the two
+    questions "is this symbol one the C library provides?" and "which function
+    did the source mean?" are asked by DIFFERENT processes about the same
+    string: the linker audit asks a host `dlsym`, which can only answer for the
+    host's architecture. Asked about `readdir$INODE64` on an arm64 host — where
+    that symbol does not exist, because arm64 has no 32-bit `ino_t` — the
+    answer is "nothing provides this", which is false about the machine the
+    image will run on. So the audit strips the suffix and asks about the name
+    the source used, which every macOS host does provide under one spelling or
+    the other."""
+    bare = symbol.lstrip("_")
+    if bare.endswith(INODE64_SUFFIX):
+        return bare[:-len(INODE64_SUFFIX)]
+    return bare
+
+
 # ── print() ───────────────────────────────────────────────────────────────
 #
 # `print` writes to stdout, which is the one piece of observable behaviour a
