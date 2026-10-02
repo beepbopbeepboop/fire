@@ -4223,6 +4223,41 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
         gen._dict_callable_ret[dict_val] = ''
 
 
+def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
+                              val_ctype: str, val: str, val_node) -> None:
+    """The one dict store of an integer-ish VALUE, shared by the dict literal
+    (`_lower_dict_literal`), the dict comprehension (`_lower_dict_compr`),
+    the subscript store `d[k] = v` and the two `d[k] = v` shapes that reach a
+    dict through an opaque int-typed receiver — five copies of the same three
+    lines, which is how they came to disagree.
+
+    A Python bool and the integer 1/0 are the same int64_t slot here (see
+    `_lower_BoolLiteral`), so the store's TYPE cannot tell them apart; the
+    expression can, and `is_python_bool_expr` is the one predicate that says
+    so. When it does, the store goes through `mojo_dict_set_bool`, which tags
+    THAT slot `_DictSlot.kind == 3` — the dict's repr then prints True/False
+    for that value alone. This replaced a whole-dict registry
+    (`mojo_mark_dict_bool_values`, since deleted): one bool value made every
+    OTHER value in the same dict print as True/False too, so
+    `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
+
+    `note_dict_callable_ret` runs first for both branches — a stored callable
+    keeps its return type whatever its slot kind is.
+
+    The store goes through `_emit_call`, NOT a raw `gen._emit`, because that
+    is what resolves the placeholder key `_char_to_cstr` handed out: an
+    integer key arrives as a raw machine word and `_apply_kw_keys` rewrites the
+    call to the `_kw` twin (`mojo_dict_set_int_kw(d, 3, v)`). A raw emit skips
+    that and hands the runtime `(char *)3` as a key to hash, which segfaults."""
+    gen._note_dict_callable_ret(dict_val, val)
+    vv64 = gen._to_int64(val_ctype, val)
+    _suffix = 'bool' if gimple_exprtypes.is_python_bool_expr(gen, val_node) else 'int'
+    _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
+    gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _suffix,
+                   [('MojoDict *', dict_val), (key_ctype, key_val),
+                    ('int64_t', vv64)])
+
+
 def _gen_print(gen, args: list, kwargs: list = None):
     # print(..., file=sys.stderr): kwargs used to be silently dropped
     # entirely (the file= expression was never even inspected), so every

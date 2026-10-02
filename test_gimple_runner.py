@@ -1815,6 +1815,88 @@ def main():
 main()
 """, "15\n")
 
+    # A captured local that the lambda body only mentions inside an AST FIELD
+    # the capture walk did not visit. `_ast_walk` (emit_calls.py — the walk
+    # `_lower_LambdaExpr` derives the capture list from) named 16 child
+    # attributes and missed 17 of the 53 AST dataclasses' child-bearing ones,
+    # `TernaryExpr.condition` among them. A name reachable ONLY through a
+    # missed field is not put in the closure env at all, and the body then
+    # reads it through the `ct param or undeclared` fallback, which is a hard
+    # 0 — so the value silently became falsey and every truthiness test on it
+    # took the wrong branch. `sorted`'s all-equal-keys stable order is what
+    # made the symptom read as "sorted() didn't sort".
+    #
+    # Repeated, and the dict is a MODULE GLOBAL rather than a local on
+    # purpose: a dict passed as an unannotated parameter is typed `MojoList *`
+    # and `sorted()` then mis-dispatches, which is a different bug with its
+    # own doc (CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md) and
+    # would mask this one. Every line below is a DIFFERENT missed field, so a
+    # fix that patches only `condition` cannot pass.
+    test_gimple_stdout_repeated("gimple_lambda_capture_through_unwalked_fields", """\
+D = {"b": 2, "a": 1}
+
+
+def t_ternary(p):
+    return sorted(D, key=lambda k: D[k] if p else 0)
+
+
+def t_subscript_index(p, k):
+    return sorted(D, key=lambda kk: D[kk] + (0 if p[k] else 0))
+
+
+def t_compare(p, q):
+    return sorted(D, key=lambda kk: D[kk] if p < q else 0)
+
+
+def t_kwargs(p):
+    return sorted(D, key=lambda kk: len(p) if p.strip() else 0)
+
+
+def t_comprehension(p):
+    return sorted(D, key=lambda kk: D[kk] + len([c for c in p]))
+
+
+def t_slice(p):
+    return sorted(D, key=lambda kk: D[kk] + len(p[1:2]))
+
+
+def t_dict_pairs(p):
+    return sorted(D, key=lambda kk: D[kk] + len({"z": p}))
+
+
+print(t_ternary("x"))
+print(t_ternary(""))
+print(t_subscript_index({"a": 1}, "a"))
+print(t_compare("a", "b"))
+print(t_kwargs("  "))
+print(t_comprehension("ab"))
+print(t_slice("abcd"))
+print(t_dict_pairs("q"))
+""", "['a', 'b']\n['b', 'a']\n['a', 'b']\n['a', 'b']\n['b', 'a']\n"
+       "['a', 'b']\n['a', 'b']\n['a', 'b']\n")
+
+    # The reported shape itself, as its own case: `sorted` over a dict whose
+    # ordering depends on a captured string. Both the truthy and the falsey
+    # value are in it, because the falsey one is the only answer a broken
+    # capture can produce and it is ALSO the correct answer for an empty
+    # string — so a test with only the empty string would pass either way.
+    test_gimple_stdout("gimple_lambda_captured_string_truthiness", """\
+def f():
+    p = "x"
+    d = {"b": 2, "a": 1}
+    return sorted(d, key=lambda k: d[k] if p else 0)
+
+
+def g():
+    p = ""
+    d = {"b": 2, "a": 1}
+    return sorted(d, key=lambda k: d[k] if p else 0)
+
+
+print(f())
+print(g())
+""", "['a', 'b']\n['b', 'a']\n")
+
     # The default-argument capture form still works, and a parameter must NOT
     # be treated as capturing without a real default: the old
     # `default is None and pname in var_types` fallback gave every parameter
@@ -5701,12 +5783,13 @@ print(str(x))
 """, "True\nFalse\nTrue\nTrue\n1\n0\nTrue\nTrue\nTrue\n")
 
     # A bool stored as a dict VALUE is a plain `int` slot by the time it is
-    # stored, so the dict is MARKED (mojo_mark_dict_bool_values) and
-    # mojo_is_bool_dict picks the bool formatter for its whole repr. The mark
-    # used to require a literal RHS, so every other bool expression — a name
-    # holding a bool, a comparison — printed `{'k': 1}` while print() on the
-    # same value said True. `{'k': 1}` (a genuine int) is in the same test so
-    # the mark cannot turn into a blanket "this dict holds 0/1".
+    # stored, so the store goes through `mojo_dict_set_bool`, which tags THAT
+    # one `_DictSlot.kind == 3` and the dict repr reads the tag. The tag used
+    # to be a whole-DICT flag (mojo_mark_dict_bool_values, since deleted), so
+    # one bool value made every OTHER value print as True/False too — the last
+    # two lines here are the regression that shape caused, and they are why
+    # this test has a mixed dict in it at all. `{'k': 1}` (a genuine int) is
+    # here too so the tag cannot become a blanket "this dict holds 0/1".
     test_gimple_stdout("gimple_dict_of_bool_values", """\
 b = True
 print({'k': b})
@@ -5716,7 +5799,54 @@ print({'k': 1})
 d = {}
 d['a'] = b
 print(d)
-""", "{'k': True}\n{'k': True}\n{'k': False}\n{'k': 1}\n{'a': True}\n")
+d['n'] = 5
+print(d)
+print({'ok': True, 'count': 3})
+""", "{'k': True}\n{'k': True}\n{'k': False}\n{'k': 1}\n{'a': True}\n"
+       "{'a': True, 'n': 5}\n{'ok': True, 'count': 3}\n")
+
+    # A `bool`-ANNOTATED struct field. `_TYPE_MAP` maps `'bool'` to `'int'`
+    # on purpose (see struct_bool_fields' docstring), so the field's lowered
+    # C type is an ordinary integer and its LAYOUT carries no trace of the
+    # bool-ness — every spelling below printed 1/0 while the same value
+    # compared (`b.flag == True`) was right, because a comparison makes its
+    # own `_Bool`. The annotation is recorded per struct
+    # (`gen.struct_bool_fields`, already consulted by the generated
+    # `_mojo_repr_<Sn>`) and read back by the ONE shared predicate,
+    # `is_python_bool_expr`, so print / repr / str / the %-formats / the
+    # f-strings / the dict store / the list literal cannot disagree about the
+    # same field — which is the whole point of that predicate.
+    #
+    # `b.n` (an `int` field) and `%d` of the bool are in the test
+    # deliberately: they are RIGHT, and a fix that made them print True/False
+    # or 1 would pass every other assertion in this file.
+    test_gimple_stdout("gimple_bool_annotated_struct_field", """\
+class Box:
+    def __init__(self, flag: bool, n: int):
+        self.flag = flag
+        self.n = n
+
+
+b = Box(True, 5)
+c = Box(False, 5)
+print(b.flag)
+print(c.flag)
+print(repr(b.flag))
+print(str(b.flag))
+print('%r' % (b.flag,))
+print('%s' % (b.flag,))
+print('%d' % (b.flag,))
+print(f'{b.flag}')
+print(f'{b.flag!r}')
+print(b.n)
+print({'k': b.flag})
+print([b.flag])
+print([b.flag, c.flag])
+print({'flag': b.flag, 'n': b.n})
+if b.flag:
+    print('then')
+""", "True\nFalse\nTrue\nTrue\nTrue\nTrue\n1\nTrue\nTrue\n5\n"
+       "{'k': True}\n[True]\n[True, False]\n{'flag': True, 'n': 5}\nthen\n")
 
     # §4.2b: print({1, 2}) printed the set's own ADDRESS -- print had no
     # MojoSet * dispatch branch at all (len()/iteration on the same value

@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _signed_int64
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _signed_int64
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 _WALK_AST_MAX_DEPTH = 900
 
@@ -423,6 +423,49 @@ def _local_literal_ctype(value) -> str | None:
         return '_Bool'
     return None
 
+def _receiver_ctypes(gen, node) -> list:
+    """Every C type this backend has RECORDED for the receiver expression
+    `node`, most authoritative first. For a bare name these are the four
+    places a name's type can live, and they genuinely disagree in coverage:
+
+    - `_quick_type` reads `var_types`, which covers a local and a parameter
+      but NOT a module-level GLOBAL (`b = Box(True, 5)` at module scope has no
+      `var_types` entry, so `_quick_type` answers the `int64_t` default);
+    - `_global_var_types` is where a module-level name's own declaration is
+      recorded;
+    - `_param_struct_types` is where a parameter's struct identity is kept when
+      the C signature had to ABI-box it to a scalar and `_quick_type` can only
+      see the box;
+    - `_actual_types` is where a value's real type is recorded after it was
+      stored into an `int64_t` slot.
+
+    An EMPTY list is the honest answer for an expression none of them describes,
+    and every caller treats it as "cannot tell" rather than guessing — which is
+    why the answer here is a LIST and not a single winner: a field lookup
+    keyed on the struct name can accept any of them, and a wrong winner would
+    silently answer about the wrong struct."""
+    if isinstance(node, IdentExpr):
+        out = []
+        try:
+            out.append(gen._quick_type(node))
+        except Exception:
+            pass
+        _gvt = getattr(gen, '_global_var_types', None) or {}
+        if node.name in _gvt:
+            out.append(_gvt[node.name])
+        _pst = getattr(gen, '_param_struct_types', None) or {}
+        if node.name in _pst:
+            out.append(f'{_as_str(_pst[node.name])} *')
+        _at = getattr(gen, '_actual_types', None) or {}
+        if node.name in _at:
+            out.append(_at[node.name])
+        return out
+    try:
+        return [gen._quick_type(node)]
+    except Exception:
+        return []
+
+
 def is_python_bool_expr(gen, node) -> bool:
     """Does this AST expression hold a Python `bool` VALUE, as distinct from a
     plain int?
@@ -435,6 +478,22 @@ def is_python_bool_expr(gen, node) -> bool:
     lowered type. Those names are recorded in `gen._bool_valued` by
     `_record_bool_valued` (emit_stmts.py) for exactly this purpose.
 
+    A FIELD read is the other shape with nothing left to look at, and for the
+    same reason: `_TYPE_MAP` maps `'bool'` to `'int'` (deliberately — see
+    `struct_bool_fields`' own docstring), so a `flag: bool` field's lowered
+    type is an ordinary integer and `gen._quick_type` cannot tell it from an
+    `int` field. `gen.struct_bool_fields` already records which fields carry a
+    `bool` annotation (module_gen.py populates it where the annotation is still
+    readable — the struct-field scan for a class-body declaration, and
+    `_gmi_collect_self_assigns` for the `self.flag = flag` shape that carries
+    the annotation on the `__init__` PARAMETER — and the reflection repr
+    consults it) so this is the SAME evidence the struct's own
+    `_mojo_repr_<Sn>` uses, read here instead of re-derived. Without this arm
+    every spelling of a bool field printed `1`/`0` — `print(b.flag)`,
+    `repr(b.flag)`, `f'{b.flag}'`, `'%r' % (b.flag,)`, `{'k': b.flag}` and
+    `[b.flag]` — while the same value compared (`b.flag == True`) was right,
+    because the comparison produces its own `_Bool`.
+
     One predicate, so `print`, a dict store and a list literal cannot disagree
     about the same value — which they did: `print(b)` formatted as True/False
     while `{'k': b}` stored a value the dict repr then rendered as `1`.
@@ -445,6 +504,13 @@ def is_python_bool_expr(gen, node) -> bool:
         return True
     if isinstance(node, IdentExpr) and node.name in getattr(gen, '_bool_valued', ()):
         return True
+    if isinstance(node, MemberExpr):
+        _bf = getattr(gen, 'struct_bool_fields', None)
+        if _bf:
+            for _ct in _receiver_ctypes(gen, node.obj):
+                _sn = _struct_name_of(_ct)
+                if _sn and node.member in (_bf.get(_sn) or ()):
+                    return True
     try:
         return gen._quick_type(node) == '_Bool'
     except Exception:

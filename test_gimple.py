@@ -6923,6 +6923,94 @@ main()
         print(f"PASS  {name}  ({len(cases)} shapes)")
         _PASS += 1
 
+    def test_ast_walk_reaches_every_name_in_a_lambda_body():
+        """`_ast_walk` must not lose a name, because `_lower_LambdaExpr`
+        derives a lambda's CAPTURE LIST from it.
+
+        It walked a hand-written list of 16 attribute names, and 17 of the AST
+        dataclasses had a child-bearing field missing from it —
+        `TernaryExpr.condition`, `IfStmt.condition`, `WhileStmt.condition`,
+        `SubscriptExpr.index`, `ForStmt.iterable`, `CallExpr.kwargs`,
+        `CompareChain.operands`, `Comprehension.element`/`generators`,
+        `DictExpr.pairs`, `MultiAssignStmt.targets`, `SliceExpr.start/stop/step`,
+        `MatchStmt.subject`/`cases`, `TryStmt.handlers`/`else_body`/
+        `finally_body`, `WithItem.expr`, `MatchCase.patterns`/`guard`,
+        `ExceptHandler.exc_type`, `DecoratorArgs.clauses`,
+        `Generator.conditions`. (`IfStmt`/`WhileStmt.condition`,
+        `TryStmt`'s handlers and `MatchStmt`'s cases are statement-level and a
+        lambda body is an EXPRESSION, so they cannot reach this walk from a
+        lambda; they are here only because the walk is also what a nested
+        `def`'s own body walk would use.) A captured local reachable ONLY
+        through one of
+        those was never put in the closure env, and the lambda body read it
+        through the `ct param or undeclared` fallback — a hard 0. Silent: exit
+        0 and a plausible wrong value (`sorted(d, key=lambda k: d[k] if p
+        else 0)` came out unsorted).
+
+        The expectation is `_used_idents_node`, not a written-down list of
+        field names: it is this codebase's other name-collecting walk and it
+        walks GENERICALLY over dataclass fields (rule 2 in its docstring, added
+        precisely because "a node type with no explicit branch" was an
+        under-approximation), so "the structural walk sees everything the
+        generic one does" is the invariant, and it fails by itself the next
+        time a field is added or renamed. One case per previously-missed
+        field, so a fix that patches only `condition` cannot pass.
+
+        The two walks differ deliberately in ONE respect and the cases respect
+        it: both stop at a nested `FunctionDef`/`LambdaExpr` boundary for
+        `_used_idents_node` but not for `_ast_walk`, so no case here contains
+        a nested closure."""
+        global _PASS, _FAIL
+        name = "ast_walk_reaches_every_name_in_a_lambda_body"
+        from mojo.backend_gimple.emit_calls import _ast_walk
+        from mojo.middle.types import _used_idents_node
+        # label -> a lambda body whose free names sit under a DIFFERENT field
+        cases = {
+            'ternary_condition': ('1 if cap else 0', {'cap'}),
+            'subscript_index': ('d[cap]', {'d', 'cap'}),
+            # `x` is the KEYWORD NAME (a str in the pair), not a reference,
+            # so it is correctly not an IdentExpr and is not expected.
+            'call_kwargs': ('f(x=cap)', {'f', 'cap'}),
+            'compare_chain_operand': ('cap < q', {'cap', 'q'}),
+            # `c` is the comprehension's OWN binding, not a free name, so it
+            # is not expected here — `_used_idents_node` subtracts generator
+            # targets and this case asserts against that answer too.
+            'comprehension_element': ('[cap for c in s]', {'cap', 's'}),
+            'comprehension_generators': ('[z for z in cap]', {'z', 'cap'}),
+            'dict_pairs': ('{cap: q}', {'cap', 'q'}),
+            'slice_start_stop_step': ('cap[1:2:3]', {'cap'}),
+            'unary_operand': ('-cap', {'cap'}),
+            'boolop_operands': ('cap and q', {'cap', 'q'}),
+            'member_chain': ('cap.real', {'cap'}),
+            'nested_call_arg': ('f(g(cap))', {'f', 'g', 'cap'}),
+        }
+        import fire_compiler as _F
+        missing = []
+        for label, (expr, want) in sorted(cases.items()):
+            # Parse the expression as a real lambda body so the node under test
+            # is the AST the capture walk actually sees.
+            src = f'zz = lambda: {expr}\n'
+            mod = _F.Parser(_F.py_tokenize(src)).parse_module()
+            lam = None
+            for st in mod:
+                if isinstance(st, _F.AssignStmt) and isinstance(st.value, _F.LambdaExpr):
+                    lam = st.value
+            if lam is None:
+                missing.append(f'{label}: no LambdaExpr parsed from {src!r}')
+                continue
+            seen = {n.name for n in _ast_walk(lam.body)
+                    if isinstance(n, _F.IdentExpr)}
+            generic = _used_idents_node(lam.body)
+            lost = (generic | want) - seen
+            if lost:
+                missing.append(f'{label}: {sorted(lost)} invisible to _ast_walk')
+        if missing:
+            print(f"FAIL  {name}: " + '; '.join(missing))
+            _FAIL += 1
+            return
+        print(f"PASS  {name}  ({len(cases)} shapes)")
+        _PASS += 1
+
     def test_user_defined_dunder_repr_value():
         """The same thing with the VALUE checked, on BOTH pipelines
         (single-TU and link mode — they are separate codegen paths and this
@@ -8115,6 +8203,7 @@ print(resumes_after_next([7, 8, 9]))
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_handwritten_selfhost_signature_tables_match_the_source()
     test_every_funcptr_initializer_has_a_definition()
+    test_ast_walk_reaches_every_name_in_a_lambda_body()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

@@ -4583,6 +4583,11 @@ class GimpleGen:
         return ginf._gen_print(self, args, kwargs)
     def _note_dict_callable_ret(self, dict_val: str, value_text: str) -> None:
         return ginf.note_dict_callable_ret(self, dict_val, value_text)
+    def _emit_dict_int_value_store(self, dict_val: str, key_ctype: str,
+                                   key_val: str, val_ctype: str, val: str,
+                                   val_node) -> None:
+        return ginf.emit_dict_int_value_store(self, dict_val, key_ctype, key_val,
+                                              val_ctype, val, val_node)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
     def _eval_const_bool(self, node) -> bool | None:

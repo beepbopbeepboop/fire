@@ -4454,27 +4454,6 @@ static uint64_t _str_hash(char *s)
     return h;
 }
 
-/* A dict whose values are all Python bools (e.g. `flags[name] = True`) has
- * no runtime marker distinguishing that from any other int64_t-valued dict
- * — like the None/int and tuple/list ambiguities elsewhere in this runtime,
- * generic repr() (_mojo_generic_elem_repr, via _mojo_repr_dict) can't tell a
- * real boxed 0/1 boolean apart from a genuine small int, so it always
- * printed 0/1 instead of False/True. Marked explicitly wherever codegen
- * knows (from the RHS's static type) that a `dict[key] = True_or_False`
- * assignment is storing a real bool; checked by _mojo_repr_dict to choose
- * the right value formatting for the whole dict. */
-static _PtrReg _reg_bool_dict;
-
-void mojo_mark_dict_bool_values(MojoDict *d) {
-    if (!d) return;
-    _pr_add(&_reg_bool_dict, (uint64_t)(uintptr_t)d);
-}
-
-int mojo_is_bool_dict(MojoDict *d) {
-    if (!d) return 0;
-    return _pr_has(&_reg_bool_dict, (uint64_t)(uintptr_t)d);
-}
-
 static _PtrReg _reg_dict;
 
 int mojo_is_registered_dict(int64_t addr) {
@@ -4575,7 +4554,6 @@ void mojo_dict_init(MojoDict *d)
 void mojo_dict_destroy(MojoDict *d)
 {
     _pr_del(&_reg_dict, (uint64_t)(uintptr_t)d);
-    _pr_del(&_reg_bool_dict, (uint64_t)(uintptr_t)d);
     for (int64_t i = 0; i < d->cap; i++) _slot_free_key(&d->slots[i]);
     if (d->slots != d->inl) free(d->slots);
 }
@@ -4822,6 +4800,18 @@ void mojo_dict_set_str(MojoDict *d, char *key, char *v)
     _dict_set_raw(d, key, (int64_t)(uintptr_t)v, 2);
 }
 
+/* A Python bool is a 0/1 int64_t here (see _lower_BoolLiteral), so it needs
+ * its own _DictSlot.kind to stay distinguishable from a genuine 0/1 int once
+ * it is a slot — same reason `kind` exists for double and char * above. This
+ * replaces a whole-DICT registry (`mojo_mark_dict_bool_values`, since deleted)
+ * that answered for every value at once, so `{'name': p.name, 'ok': p.ok}`
+ * rendered the int as True/False too. Per-slot is the shape the slot's `kind`
+ * already had; only the one value stored through this setter changes. */
+void mojo_dict_set_bool(MojoDict *d, char *key, int v)
+{
+    _dict_set_raw(d, key, v ? 1 : 0, 3);
+}
+
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
@@ -4894,6 +4884,11 @@ void mojo_dict_set_bytes_double(MojoDict *d, MojoBytes *key, double v)
 
 void mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v)
 { _dict_set_bytes_raw(d, key, (int64_t)(uintptr_t)v, 2); }
+
+/* The bytes-key twin of mojo_dict_set_bool: same value, same slot kind, its
+ * own key DOMAIN (see mojo_dict_set_bytes_int). */
+void mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v)
+{ _dict_set_bytes_raw(d, key, v ? 1 : 0, 3); }
 
 static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key)
 {

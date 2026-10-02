@@ -878,7 +878,6 @@ def _emit_reflection_dispatch(self, parts):
                "}\n"
                "static char * _mojo_repr_dict (MojoDict *d) {\n"
                "  if (!d) return \"{}\";\n"
-               "  int _is_booldict = mojo_is_bool_dict(d);\n"
                "  char *_buf = strdup(\"{\");\n"
                "  int64_t *_order = mojo_dict_order_indices(d);\n"
                "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
@@ -886,7 +885,13 @@ def _emit_reflection_dispatch(self, parts):
                "    if (_oi > 0) _buf = mojo_str_cat(_buf, \", \");\n"
                "    _buf = mojo_str_cat(_buf, mojo_repr_str(mojo_dict_slot_key(d, _i)));\n"
                "    _buf = mojo_str_cat(_buf, \": \");\n"
-                "    if (_is_booldict)\n"
+                "    if (d->slots[_i].kind == 3)\n"
+                "      /* A Python bool value (mojo_dict_set_bool): the same 0/1\n"
+                "       * int64_t a real int stores, so only this per-SLOT tag\n"
+                "       * separates them. The tag was once a whole-DICT flag,\n"
+                "       * which meant one bool value reformatted every OTHER\n"
+                "       * value too — `{'name': p.name, 'ok': p.ok}` printed\n"
+                "       * `{'name': True, 'ok': True}`. */\n"
                 "      _buf = mojo_str_cat(_buf, d->slots[_i].val ? \"True\" : \"False\");\n"
                 "    else if (d->slots[_i].kind == 2)\n"
                 "      /* A str value stored via mojo_dict_set_str carries its\n"
@@ -3673,6 +3678,15 @@ def gen_module_impl(self, stmts):
             already = set(self.struct_field_types[s.name].keys())
             for method in s.methods:
                 pm = {}
+                # Parameter names whose annotation says `bool`. Kept beside
+                # `pm` rather than folded into it because `_resolve_type`
+                # deliberately maps `'bool'` to `'int'` (see _TYPE_MAP), so
+                # the ctype dict cannot tell a bool parameter from an int one;
+                # `_gmi_collect_self_assigns` turns this set into
+                # `struct_bool_fields` entries, which is what makes
+                # `self.flag = flag` from a `flag: bool` parameter print as
+                # True/False instead of 1/0.
+                pbool = set()
                 _defaults = getattr(method, 'param_defaults', {}) or {}
                 for _mpj in (method.params or []):
                     # Indexed loop + `_as_str`, NOT `for pname, ptype in
@@ -3686,6 +3700,8 @@ def gen_module_impl(self, stmts):
                     ptype = _mpj[1]
                     if pname != 'self':
                         if ptype:
+                            if _as_str(ptype).strip() == 'bool':
+                                pbool.add(pname)
                             pm[pname] = self._resolve_type(ptype)
                         elif pname in _defaults:
                             _dv = _defaults[pname]
@@ -3701,7 +3717,7 @@ def gen_module_impl(self, stmts):
                         else:
                             pm[pname] = 'int64_t'
                 new_fields = {}
-                _gmi_collect_self_assigns(self, s.name, method.body, pm, new_fields)
+                _gmi_collect_self_assigns(self, s.name, method.body, pm, new_fields, pbool)
                 for _nf_k in new_fields:
                     fn = _as_str(_nf_k)
                     ft = _as_str(new_fields[_nf_k])
