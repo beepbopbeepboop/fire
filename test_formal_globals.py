@@ -467,6 +467,98 @@ CASES = [
                    "    h: Int = get_hits()\n"
                    "    print(h)\n"
                    "    return 0\n"}, "3\n"),
+
+    # ── module-level `comptime` constants ──
+    # A MODULE-level `comptime` binding has no `__DATA` slot and is not meant
+    # to: it is a compile-time constant, so the build substitutes its value at
+    # every read site in the unit (`build.py:_substitute_module_constants`) and
+    # the slot question never arises. `collect_module_symbols` decides which
+    # names are in that category by asking whether the initialiser FOLDS.
+    #
+    # It used to fold only a literal, so a constant written over another one was
+    # refused — and refused with a message telling the reader to do exactly
+    # that. `comptime_fold_refusal`'s text says: "Make the initializer a literal
+    # (or an expression of literals and other `comptime` names)". The second
+    # half did not work at module level; it does at function scope
+    # (`mojo/middle/comptime.py:eval_const` resolves operand names out of the
+    # bindings recorded so far for that function), so one half of the language's
+    # own promise was implemented and the other was not.
+    #
+    # The source is `std/utils/_serialize.mojo`'s, verbatim in shape and in
+    # spelling, because that is where the sweep found it:
+    #
+    #     comptime _kCompactMaxElemsToPrint = 7
+    #     comptime _kCompactElemPerSide = _kCompactMaxElemsToPrint // 2
+    #
+    # Two operators in one line, and they needed two separate repairs in two
+    # different folders: the reference to the earlier name is
+    # `collect_module_symbols` walking its own table in source order, and `//`
+    # is in neither folder's operator table. Before, the file was refused on
+    # arm64 and on x86-64 alike with "'_kCompactElemPerSide' is a `comptime`
+    # binding declared at module level, and it does not fold to a compile-time
+    # constant".
+    #
+    # The interpreter is a third engine here for free: `fire.py run` handles
+    # `comptime` at module level, so this row needs no keyword-stripped copy of
+    # itself to have a reference answer, and 3 is what CPython would print for
+    # `7 // 2` too.
+    ("module_comptime_constant_over_another_module_constant",
+     "comptime _kCompactMaxElemsToPrint = 7\n"
+     "comptime _kCompactElemPerSide = _kCompactMaxElemsToPrint // 2\n"
+     "\n"
+     "def main(n):\n"
+     "    per_side: Int = _kCompactElemPerSide\n"
+     "    print(per_side)\n"
+     "    return 0\n", "3\n"),
+
+    # The same shape with `+ - *` instead of `//`, so a reader can tell which
+    # half of the two repairs this file's row above needed. It also pins the
+    # value being the SUBSTITUTED one rather than the name: 7 + 7 + 7 = 21, and
+    # a read that came back as the address of a slot would not be 21.
+    ("module_comptime_constant_arithmetic_chain",
+     "comptime _A = 7\n"
+     "comptime _B = _A * 2\n"
+     "comptime _C = _B + _A\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = _C\n"
+     "    print(v)\n"
+     "    return 0\n", "21\n"),
+
+    # THE CONTROL FOR THE REFUSAL BELOW, and it is the half that makes that
+    # refusal correct rather than merely cautious. `bump` assigns `G` and
+    # declares NOTHING, so per CPython's scope rule (decided at compile time
+    # from the whole body — see `local_shadow_of_global_read_before_store_...`
+    # above) `G` inside `bump` is a LOCAL. The module's `G` is therefore
+    # read-only at module level, `bump()` cannot have changed it, and `_B` is
+    # exactly 5 + 1. The interpreter, CPython and both images agree on 6.
+    #
+    # This is the direction a too-broad gate gets wrong: refusing here would be
+    # safe and would also refuse a program whose answer this build can state,
+    # which is the same mistake the `+ - *` row above would hide if `//` were
+    # the only operator tested.
+    #
+    # `bump` is a METHOD, and that is half of what this row is for. A gate that
+    # read only the module's top-level statements would not see a `global G`
+    # inside a `class`, and `model.collect_module_symbols` walks with
+    # `iter_nodes` precisely so it does not. The method's `self` receiver has
+    # nothing to do with which NAME is written: the module is the scope either
+    # way.
+    ("module_comptime_constant_over_a_locally_shadowed_name",
+     "G = 5\n"
+     "\n"
+     "class C:\n"
+     "    def bump(self):\n"
+     "        G = 100\n"
+     "\n"
+     "comptime _B = G + 1\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C()\n"
+     "    c.bump()\n"
+     "    v: Int = _B\n"
+     "    print(v)\n"
+     "    return 0\n", "6\n"),
 ]
 
 # Cases that must be REFUSED, and why each one is a refusal rather than a wrong
@@ -554,6 +646,98 @@ REFUSALS = [
      # answers; the old sentence named neither.
      "is read in bump() at `G + 1`, before anything in that function has "
      "assigned it"),
+
+    # THE HALF THAT KEEPS THE TWO ROWS ABOVE HONEST. Resolving a module-level
+    # initializer's operand names against the names bound SO FAR is what makes
+    # `comptime _B = _A // 2` fold, and the question a reader has to be able to
+    # answer is which names it resolves. Three of the four ways a name can fail
+    # to be resolvable are pinned by the rows below; the fourth (a name bound
+    # LATER) is this one, and it is the one that is easy to get wrong in the
+    # direction that fabricates.
+    #
+    # `comptime _B = _A + 1` appears BEFORE `comptime _A = 7`. The module-level
+    # sequence runs top to bottom, so at the point `_B` is initialised `_A` has
+    # no value yet — CPython raises `NameError: name '_A' is not defined`, and
+    # the interpreter agrees. A folder that consulted the WHOLE module instead
+    # of the part before this statement would fold `_B` to 8 and print a number
+    # for a program that has none.
+    #
+    # It is here rather than in the cases above because the answer is not a
+    # number: it is the refusal that says the build does not know, which is the
+    # only correct one.
+    ("module_comptime_constant_over_a_later_name_refused",
+     "comptime _B = _A + 1\n"
+     "comptime _A = 7\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = _B\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "does not fold to a compile-time constant"),
+
+    # THE ORDERING THE ROW ABOVE CANNOT SEE, and the one that would FABRICATE.
+    # `_B` is still reading an EARLIER name, so the "bound so far" rule alone
+    # admits it — and `known[G]` is 5, so the fold would be 6. It is wrong,
+    # because a module body may CALL a function:
+    #
+    #     G = 5
+    #     def bump():
+    #         global G
+    #         G = 100
+    #     bump()                       # runs before _B's initializer
+    #     comptime _B = G + 1          # CPython: 101
+    #
+    # "Bound so far" is a statement about the module-level SEQUENCE, and the
+    # sequence is not the only thing that runs before the read: `bump()` is, and
+    # its write lands first. So a name any function declares `global` is not
+    # resolvable here, whatever the table holds for it — which is what
+    # `model.collect_module_symbols`'s `functions_writing_globals` gate decides,
+    # and the same reader `collect_global_slots` uses for the same reason.
+    #
+    # Refusing is not the cautious choice here, it is the only correct one: 6 is
+    # a number no source wrote and nothing would catch it.
+    ("module_comptime_constant_over_a_function_written_name_refused",
+     "G = 5\n"
+     "\n"
+     "def bump():\n"
+     "    global G\n"
+     "    G = 100\n"
+     "\n"
+     "comptime _B = G + 1\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = _B\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "does not fold to a compile-time constant"),
+
+    # THE SAME QUESTION ASKED ABOUT A METHOD, and the reason it is a separate
+    # row rather than a comment on the one above. `global_names_bound_in` and
+    # `collect_global_slots` both read the module's top-level `FunctionDef`
+    # list, and `collect_module_symbols` does not: it walks with `iter_nodes`,
+    # so a `global G` inside a `class` counts. Measured before that walk was in
+    # place — `class C: def bump(self): global G; G = 100` left `G` resolvable
+    # and `comptime _B = G + 1` folded to 6, where a module body that called
+    # `c.bump()` first would make the true value 101.
+    #
+    # The receiver is the point: `self` has no bearing on which NAME is
+    # written, and a reader who assumes the gate is about "functions" will miss
+    # that a method is one.
+    ("module_comptime_constant_over_a_method_written_name_refused",
+     "G = 5\n"
+     "\n"
+     "class C:\n"
+     "    def bump(self):\n"
+     "        global G\n"
+     "        G = 100\n"
+     "\n"
+     "comptime _B = G + 1\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = _B\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "does not fold to a compile-time constant"),
 ]
 
 

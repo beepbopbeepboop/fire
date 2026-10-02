@@ -18456,17 +18456,33 @@ def module_constant_literal(name: str):
 # The literal-only expression folder. Deliberately tiny and deliberately
 # literal-only: its whole job is to decide "can the build KNOW this value", and
 # every operator added here is one more way for a fold to be wrong. `-` and `+`
-# on integers and `+ - *` between integers is the closure that covers the
+# on integers and `+ - * //` between integers is the closure that covers the
 # module-level constants in this repository (`_PASS = 0`, `_CMP_OPS = 6`,
-# `_BIN_OPS = 8`, `CASE_TIMEOUT = 30 * 2`); `~` is F3's operator surface and is
-# deliberately NOT here, so a module constant folded with it lands in the
-# "cannot fold" refusal rather than in a second, disagreeing implementation.
+# `_BIN_OPS = 8`, `CASE_TIMEOUT = 30 * 2`, and `std/utils/_serialize.mojo`'s
+# `_kCompactElemPerSide = _kCompactMaxElemsToPrint // 2`); `~` is F3's operator
+# surface and is deliberately NOT here, so a module constant folded with it
+# lands in the "cannot fold" refusal rather than in a second, disagreeing
+# implementation.
+#
+# `//` is the same operator `mojo/middle/comptime.py:fold_arith` gained, and
+# for the same reason, and the two must not drift: that folder decides what a
+# FUNCTION's own `comptime NAME = …` binds, this one decides what a
+# MODULE-level one binds, and `comptime_fold_refusal`'s text tells the reader
+# to write "an expression of literals and other `comptime` names" — which is
+# one folder's rule spoken for both. Python's `//` is floor division and the
+# backends' runtime division is truncation toward zero (`_emit_div_shift_pow`
+# says so), so for a NEGATIVE literal the two disagree by design; a compile-time
+# fold has to answer the SOURCE's question, and this is the source's operator.
+# A literal-zero divisor raises out of the lambda and is caught one line below,
+# the same shape `fold_arith` uses, so a module constant divided by zero lands
+# in the refusal rather than in a `ZeroDivisionError` traceback.
 _FOLD_BINOPS = {"+": lambda a, b: a + b,
                 "-": lambda a, b: a - b,
-                "*": lambda a, b: a * b}
+                "*": lambda a, b: a * b,
+                "//": lambda a, b: a // b}
 
 
-def fold_literal_expr(node):
+def fold_literal_expr(node, names=None):
     """The value of `node` when it is literal-only, else None.
 
     None means "the build does not know this", which is a refusal and not a
@@ -18476,7 +18492,22 @@ def fold_literal_expr(node):
     `None` folds to the word 0, which is the representation rather than an
     approximation (see NONE_WORD), and it is the one folded value that is not
     interchangeable with the integer 0 it is spelled as —
-    `refuse_none_comparisons` is what keeps the two apart."""
+    `refuse_none_comparisons` is what keeps the two apart.
+
+    `names` is the ONE caller-supplied thing, and it exists for
+    `fold_module_value` alone: a `{name: already-folded value}` a module-level
+    initializer may read. Every other caller passes nothing and gets exactly
+    the previous behaviour, because a name is a value only where the build has
+    already decided what that name's value is — and one place does: the
+    module-level table `collect_module_symbols` builds in source order. A
+    literal folder with a free name in it is the thing that produced a
+    fabricated word, so the parameter is deliberately narrow rather than a
+    general "resolve names" hook."""
+    if isinstance(node, F.IdentExpr) and names:
+        known = names.get(node.name)
+        if isinstance(known, (int, str)) and not isinstance(known, bool):
+            return known
+        return None
     if isinstance(node, F.IntLiteral):
         try:
             return int(node.value)
@@ -18490,23 +18521,23 @@ def fold_literal_expr(node):
             and isinstance(node.value, str):
         return node.value
     if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
-        v = fold_literal_expr(node.operand)
+        v = fold_literal_expr(node.operand, names)
         if isinstance(v, int) and not isinstance(v, bool):
             return -v if node.op == "-" else v
         return None
     if isinstance(node, F.BinaryOp) and node.op in _FOLD_BINOPS:
-        a = fold_literal_expr(node.left)
-        b = fold_literal_expr(node.right)
+        a = fold_literal_expr(node.left, names)
+        b = fold_literal_expr(node.right, names)
         if isinstance(a, int) and isinstance(b, int) \
                 and not isinstance(a, bool) and not isinstance(b, bool):
             try:
                 return _FOLD_BINOPS[node.op](a, b)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, ZeroDivisionError):
                 return None
     return None
 
 
-def fold_module_value(node):
+def fold_module_value(node, names=None):
     """The value of a module-level INITIALIZER this build knows, or None.
 
     Two folders, deliberately separate and deliberately in this order.
@@ -18524,8 +18555,19 @@ def fold_module_value(node):
     about to act on. What the build cannot state — a CPU feature, the target's
     own triple spelling — comes back as None, which is the same "does not know"
     the literal folder returns, so the caller keeps one code path and a
-    non-folding binding keeps its existing refusal."""
-    folded = fold_literal_expr(node)
+    non-folding binding keeps its existing refusal.
+
+    `names` is passed straight through to `fold_literal_expr` and is the
+    module-level table's own already-folded values, so an initializer may read
+    a name an EARLIER module-level statement bound. That is not a second
+    resolution rule: it is the same rule `mojo/middle/comptime.py:eval_const`
+    applies to a function-local `comptime` binding, which resolves its operand
+    names out of the bindings already recorded for the same function — and the
+    module level is the same fact about the same source shape, at the same
+    point in the same order. Before, one of the two halves existed and the other
+    did not, and the message told the reader to write exactly the half that was
+    missing."""
+    folded = fold_literal_expr(node, names)
     if folded is not None:
         return folded
     got = target_template(node)
@@ -18582,8 +18624,80 @@ def collect_module_symbols(stmts: list) -> dict:
     A module-level `if`/`for`/`try` is NOT descended into for bindings: the
     build cannot know which arm ran, so a name bound in one is `rebound` unless
     it was already bound. That is a refusal rather than a fold, and it is the
-    honest one — a fold from a conditional is a guess."""
+    honest one — a fold from a conditional is a guess.
+
+    ONE MORE THING IS WALKED IN, and it is the order of this loop that makes it
+    safe: `known` accumulates the folded value of every name bound SO FAR, and
+    an initializer may read one. The module-level sequence runs top to bottom,
+    so at the point a later statement executes, an earlier binding's value is
+    exactly the value that name has — the same premise `mojo/middle/comptime.py`
+    relies on for a function's own `comptime` bindings, where `eval_const`
+    resolves operand names out of the table recorded so far for that function.
+    Before this, the module level had the folder and not the resolution, so
+
+        comptime _kCompactMaxElemsToPrint = 7
+        comptime _kCompactElemPerSide = _kCompactMaxElemsToPrint // 2
+
+    was refused as "does not fold to a compile-time constant" — for
+    `std/utils/_serialize.mojo`, and while `comptime_fold_refusal`'s own text
+    told the reader to write "an expression of literals and other `comptime`
+    names". Only names already in `known` resolve, and only ones with a folded
+    non-`None` value: a `rebound` name whose last binding did not fold, an
+    `imported` name (its value lives in another image) and a `declared` name
+    are all absent, which is the honest answer for each. A `None`-valued
+    binding is excluded too, because its folded word is `NONE_WORD` — the
+    integer 0 wearing `None`'s spelling — and `7 + <that>` folding to 7 is
+    exactly the conflation `refuse_none_comparisons` exists to prevent.
+
+    AND ONE MORE IS DELIBERATELY LEFT OUT, which is what makes the "so far"
+    above sound rather than merely plausible: a name some FUNCTION writes through
+    `global` never enters `known`, however it was bound at module level.
+
+        G = 5
+        def bump():
+            global G
+            G = 100
+        bump()
+        comptime B = G + 1        # CPython: 101
+
+    `known[G]` is 5, and 5 + 1 is 6. The module-level sequence is not the only
+    thing that runs before that initializer: a module body may CALL a function,
+    and the caller's write lands before the read. So a name that `bump` writes
+    is excluded from resolution and `B` is refused, which is the honest answer
+    for a program this build cannot order. `functions_writing_globals` is the
+    reader, and it is the same one `collect_global_slots` uses for the same
+    reason — the value is stated at module level and the writes are stated
+    inside the bodies, so the question needs both lists — which is also why the
+    gate keys on the `global` DECLARATION and not on the assignment targets: a
+    function that assigns `G` without declaring it global binds a local that
+    shadows the module's, and such a name really is read-only at module level."""
     table: dict = {}
+    known: dict = {}
+    # EVERY FunctionDef at any depth, not the top-level ones. A `global G`
+    # inside a method is a write to the module's `G` exactly as one inside a
+    # free function is — the module is the scope either way, and the method's
+    # `self` receiver has nothing to do with which name is written — so a gate
+    # that read only the top-level list would let `class C: def bump(self):
+    # global G` through and fold a later initializer against a value that
+    # method can change. `iter_nodes` reaches a nested def and a def inside a
+    # `StructDef`'s body, which is the whole of what "any depth" has to mean
+    # here.
+    written = set(functions_writing_globals(
+        [n for n in iter_nodes(stmts or []) if isinstance(n, F.FunctionDef)]))
+
+    def remember(name, folded, value) -> None:
+        """`known[name] = folded`, unless the name is one of the four cases.
+
+        A name a FUNCTION writes through `global` is never resolvable (see the
+        section note); a `None`-valued binding is not, because its folded word
+        is `NONE_WORD` rather than the integer it is spelled as. Both are
+        absences rather than values, so this is the one place the rule is
+        written and `pop` is what says "not known"."""
+        if name in written or is_none_expr(value):
+            known.pop(name, None)
+        else:
+            known[name] = folded
+
     for stmt in (stmts or []):
         kind = type(stmt).__name__
         if kind in ("ImportStmt", "FromImportStmt"):
@@ -18599,17 +18713,20 @@ def collect_module_symbols(stmts: list) -> dict:
         if value is None and isinstance(stmt, F.VarDecl):
             table[name] = GlobalSymbol(name, None, "declared", None,
                                        getattr(stmt, "line", 0) or 0)
+            known.pop(name, None)
             continue
         if isinstance(stmt, F.AugAssignStmt):
             table[name] = GlobalSymbol(name, None, "rebound", None,
                                        getattr(stmt, "line", 0) or 0)
+            known.pop(name, None)
             continue
-        folded = fold_module_value(value)
+        folded = fold_module_value(value, known)
         if folded is None:
             table[name] = GlobalSymbol(
                 name, None,
                 "comptime" if _comptime_statement(stmt) else "rebound",
                 None, getattr(stmt, "line", 0) or 0)
+            known.pop(name, None)
             continue
         prior = table.get(name)
         if prior is not None and prior.site not in ("imported", "declared"):
@@ -18620,11 +18737,13 @@ def collect_module_symbols(stmts: list) -> dict:
             table[name] = GlobalSymbol(
                 name, folded_literal_node(folded, value), "rebound", None,
                 getattr(stmt, "line", 0) or 0)
+            remember(name, folded, value)
             continue
         table[name] = GlobalSymbol(name, folded_literal_node(folded, value),
                                    "assigned", None,
                                    getattr(stmt, "line", 0) or 0,
                                    is_none_expr(value))
+        remember(name, folded, value)
     return table
 
 
