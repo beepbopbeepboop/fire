@@ -6699,6 +6699,9 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
             sites[f"{st.name}.{name}"] = (
                 st, "comptime" if name in M.struct_comptime_aliases(st)
                 else "constant")
+    for path, (st, kind, member) in _enum_member_sites(
+            structs_by_name, bound).items():
+        sites[path] = (st, kind, member)
     def publish(holder, st, comptime_only):
         """Every read of `st`'s class-level values through `holder`.
 
@@ -7037,6 +7040,37 @@ def _holder_class_constant_bases(by_name: dict, structs_by_name: dict) -> dict:
         if all(c is first for c in cands[1:]):
             out[name] = first
     return out
+
+
+def _enum_member_refusal(struct_def, name: str, accessor: str, default):
+    """The message for an enum member's accessor whose VALUE is not a literal.
+
+    Kept beside `_constant_literal` because it is the same refusal about the same
+    value: `S.NAME.value` is answered from the constant `NAME` holds, so a
+    `NAME` this path cannot materialize makes the accessor unanswerable too. It
+    is worded for the two-node spelling (`S.NAME.value`) rather than reusing the
+    bare-`S.NAME` text verbatim, because the reader is looking at a line that
+    says `.value` and a message about `S.NAME` alone sends them to edit the wrong
+    token.
+
+    The `name` accessor is NOT here and does not need to be: it is the constant's
+    spelling, which is a fact about the declaration site and not about its value.
+    That asymmetry is CPython's too — `Reg.A.value` fails for a computed value and
+    `Reg.A.name` still answers — which is why the rewrite tries `name` first."""
+    spelled = M.expr_spelling(default) if default is not None else "nothing at all"
+    reason = ("a `comptime` binding's value is written in the class body and is "
+              "often a CALL or a COMPUTATION rather than a literal, and this "
+              "path has no comptime evaluator to run one"
+              if _constant_kind(struct_def, name) == "comptime" else
+              "a class-level constant's value is written in the class body, and "
+              "this path has no module-global storage to read it back out of")
+    return (f"{struct_def.name}.{name}.{accessor} reads the `{accessor}` of an "
+            f"`enum` member whose value is `{spelled}` — and a formal value is "
+            f"one 64-bit word with nowhere to keep a non-literal one: {reason}. "
+            f"Write the value at the use site (a literal, or an assignment the "
+            f"compiler can see), which is the same program with a "
+            f"representation. The member's `.name` is answerable either way: it "
+            f"is the constant's spelling, not its value.")
 
 
 def _constant_literal(struct_def, name: str):
@@ -9215,6 +9249,57 @@ def _first_unanswerable_mlir(value):
 
 
 
+def _enum_member_sites(structs_by_name: dict, bound: set) -> dict:
+    """`{access path: (struct, kind, 'value'|'name')}` for every ENUM accessor read.
+
+    The `.value` / `.name` half of the census, and it exists because of a measured
+    SILENT WRONG ANSWER rather than a refusal. Before it, on this tree, arm64:
+
+        class Reg(Enum):
+            RAX = 0
+            R15 = 15
+        def main() -> int:
+            printf("%d %d\\n", Reg.R15.value, Reg.RAX.value)   # prints 0 0
+            return 0
+
+    CPython prints `15 0`. The cause is ordering, and it is not the backends': a
+    read of `Reg.R15` is a class-level constant and `_apply_constant_sites`
+    substitutes the literal `15` for it, so the tree reaching the emitter holds
+    `15.value` — a `MemberExpr` whose object is a literal, and the arm that
+    handles "a field read through a base this image cannot classify" evaluates
+    the base for its side effects and returns 0 (the comment there says so). The
+    constant was answered correctly one node too early and the accessor was then
+    answered as if the member were storage.
+
+    That is the worst shape a backend bug can have here, and it is why the fix is
+    in the SHARED rewrite rather than in either emitter: `formal/x86_64.py` reads
+    `Reg.RAX.value` and `Reg.R15.value` in its register-number arithmetic
+    (`_rm_disp`, `_modrm`, the RAX..R15 range assertions), so an image built with
+    the answer wrong there computes wrong machine code, prints it, and exits 0.
+
+    Only an ENUM's members get this (`model.struct_is_enum`), because `value` and
+    `name` are attributes the enum machinery adds: on any other class CPython
+    raises `AttributeError` (`'int' object has no attribute 'value'`, measured on
+    this tree's 3.14), and answering it there would be inventing an attribute.
+
+    `kind` is the constant's own kind, carried through so the refusal arm can say
+    whether the value it cannot materialize is a `comptime` binding or an
+    assignment — the same distinction the bare `S.NAME` read makes.
+    """
+    sites = {}
+    for st in structs_by_name.values():
+        if st.name in bound:
+            continue
+        if not M.struct_is_enum(structs_by_name, st.name):
+            continue
+        for name, _default in M.struct_class_constants(st):
+            kind = ("comptime" if name in M.struct_comptime_aliases(st)
+                    else "constant")
+            for accessor in ("value", "name"):
+                sites[f"{st.name}.{name}.{accessor}"] = (st, kind, accessor)
+    return sites
+
+
 def _apply_constant_sites(node, sites: dict, disputed: dict = None):
     """The substitution itself, over a statement tree, in place.
 
@@ -9256,6 +9341,28 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
             return tuple(items)
         node[:] = items
         return node
+    if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.MemberExpr) \
+            and isinstance(node.obj.obj, F.IdentExpr):
+        # `S.NAME.value` / `S.NAME.name` on an ENUM, which is TWO nodes and is
+        # therefore missed by the arm below (its object is a MemberExpr, not the
+        # IdentExpr that arm requires). Left alone it is worse than missed: the
+        # arm below substitutes `Reg.R15` -> `15` on the INNER node, and the
+        # outer one then reaches the emitter as `15.value`, which reads 0 where
+        # CPython reads 15. So this arm has to come FIRST, and it consumes the
+        # whole two-node path. See `_enum_member_sites` for the measurement.
+        inner = sites.get(f"{node.obj.obj.name}.{node.obj.member}.{node.member}")
+        if inner is not None:
+            st, kind, accessor = inner
+            if node.member == "name":
+                # The member's `name` is the constant's own spelling, which is a
+                # fact about the DECLARATION SITE and not about its value, so it
+                # is answerable even where the value is not (see below).
+                return F.StringLiteral(value=node.obj.member)
+            literal, default = _constant_literal(st, node.obj.member)
+            if literal is not None:
+                return literal
+            raise CodegenError(_enum_member_refusal(
+                st, node.obj.member, accessor, default))
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
         why = (disputed or {}).get(f"{node.obj.name}.{node.member}")
         if why is not None:
