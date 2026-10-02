@@ -3152,17 +3152,24 @@ UNREGISTERED = {
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '
         'myinterpreter.mojo, which is the reference every compiled-path answer '
         'is measured against.',
-    'test_myinterpreter_simple.py': 'The same interpreter reached through '
-        'module loading rather than run_mojo_main, which is the path the '
-        'compiled path actually uses.',
-    'test_myinterpreter_validation.py': "The interpreter's output validated "
-        "against Python's OWN tokenizer. The strongest cheap parity check "
-        "available and the only one that is not this project grading itself.",
-    'test_phase2_parser.py': 'The interpreter executes the parser and the ASTs '
-        'are compared, which is the check that a parser change is semantics-'
-        'preserving rather than merely accepted.',
-    'test_phase2_parser_simple.py': 'The minimal form of the above: the '
-        'interpreter can execute parser.mojo at all.',
+    # `test_myinterpreter_simple.py`, `test_phase2_parser.py` and
+    # `test_phase2_parser_simple.py` were here until 2026-10-02, and were all
+    # DELETED with their excuses rather than repaired. Every one of them opened
+    # `mojo/ast_nodes.mojo`, `mojo/tokenizer.mojo` and `mojo/parser.mojo`, and
+    # `mojo/` has no `.mojo` files at all: the tokenizer and parser became
+    # `fire_compiler.py` and `ast_nodes` was deleted outright. They died at
+    # their first `open()` and reported success while doing it — the `coro`
+    # story from CLAUDE.md, one file over. The doc that catalogued them
+    # (`bugs/UNTESTED.md` Tier 3) named both options and said deletion was the
+    # defensible one: a test of a module that no longer exists is not a slow
+    # test, it is a wrong claim.
+    #
+    # `test_myinterpreter_validation.py` was the fourth, and the one worth
+    # having: it compares the interpreter's `py_tokenize` with the imported
+    # one. It was in exactly the same state — dead at its first `open()` — and
+    # it was REPOINTED at `fire_compiler.py` rather than deleted, so the
+    # strongest cheap parity check in the tree now exists and runs. Registered
+    # as `interp-tokenizer-oracle`.
 
     # ── the dispatch solver, four phase-ordered files ──
     'test_dispatch_solver.py': 'DispatchSolver phase A, the table planner. '
@@ -3256,7 +3263,8 @@ UNREGISTERED = {
         'on anything. Registering it would add a job that can only fail when '
         'a SUBPROCESS fails, which is what the bootstrap stages themselves '
         'already report. Found by widening the estate check to this file\'s '
-        'spelling; see bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md.',
+        'spelling; see `is_test_file_name`\'s own docstring for the four '
+        'files the old single-spelling walk left outside the inventory.',
 
     'test_imports.py': 'That import statements generate extern declarations. '
         'A missing extern is a link failure attributed to something else.',
@@ -3325,7 +3333,7 @@ def is_test_file_name(fn: str) -> bool:
     Derived here and read by `_test_files_in_repo` and by nothing else, so the
     two walks (`test_suite.py`'s and `checked_run.expand_globs`') cannot
     disagree about what a test file is — the failure
-    `bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md` records.
+    `is_test_file_name`'s own docstring records.
     The matching cache-key half is `suite-self-test`'s `extraglob`, which must
     name BOTH patterns; `test_the_estate_check_is_in_a_gate_and_can_see_its_
     own_subject` is what keeps the two in step.

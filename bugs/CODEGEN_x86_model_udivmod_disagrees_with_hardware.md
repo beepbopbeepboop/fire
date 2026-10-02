@@ -105,9 +105,11 @@ that it produces the right number.
 
 ## Related
 
-- The reason this was invisible is its own bug:
-  `bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md` (closed with
-  the widening of the estate check's subject set).
+- The reason this was invisible is its own bug: the estate check's walk
+  counted `test_*.py` and not `*_test.py`, so this file was in no spec and in
+  no `UNREGISTERED`. Fixed by `test_suite.py`'s `is_test_file_name` and by
+  the registration above, both in the same commit as the first run of this
+  file; `scripts/bootstrap_full_test.py` is the other file that widened.
 - `formal/x86_64_model_test.py`'s own docstring is the right description of
   why this class of bug survives a typechecker: "A machine model that has only
   been typechecked is worth very little: it can be wrong in ways Lean's kernel

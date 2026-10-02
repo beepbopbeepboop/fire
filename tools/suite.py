@@ -423,6 +423,7 @@ MEASURED_PEAK_GB = {
     'ptrreg':                      (0.4,  'measured'),
     'ptrreg-boxed-str':            (0.2,  'measured'),
     'runtimediff':                 (0.3,  'measured'),
+    'interp-tokenizer-oracle':     (0.1,  'measured'),   # 67 texts, ~1 s
     'modcache':                    (0.3,  'measured'),
     'stdlib-dylib':                (0.2,  'measured'),
     'bootstrap-stage1-dumps':      (1.2, 'derived'),    # from stage1-transitive
@@ -1245,6 +1246,35 @@ test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
      desc='interpreter vs JIT: identical stdout and exit code')
+# The interpreter's OWN output, against a directly-imported one: it runs
+# `fire_compiler.py`'s `py_tokenize` twice, once imported and once reached
+# THROUGH `myinterpreter.py`'s `Interpreter` executing that file's own source,
+# and requires identical token streams AND identical exception types and
+# messages over 67 corpus texts (18 snippets plus 49 whole files).
+#
+# It is the only check of its kind and the reason it exists is that an
+# interpreter bug produces a WRONG ANSWER, not an exception: the compiled path
+# is then wrong in the same direction and every engine-vs-engine diff in the
+# tree stays clean. That is how `@classmethod`'s `cls` binding the first real
+# ARGUMENT, and `@deco` being parsed and then never applied at all, stayed
+# invisible (`bugs/UNTESTED.md` 3.2 -- and what `interporacle` was written for).
+#
+# It ran by NOTHING until 2026-10-02: it loaded `mojo/ast_nodes.mojo`,
+# `mojo/tokenizer.mojo` and `mojo/parser.mojo`, none of which exists, and
+# reported success while dying at its first `open()`. Repointed at
+# `fire_compiler.py` rather than deleted, and the corpus grew from eight
+# hand-written snippets to whole real files.
+#
+# `extra` names BOTH subjects, not just the test: the oracle is "the same
+# function through two engines", so a change to either `fire_compiler.py`'s
+# tokenizer or `myinterpreter.py`'s evaluation of it is exactly an input.
+# Measured 0.1 GB peak through memcap's own report, one run alone under
+# `tools/memslot.py --gb 8`, about a second -- `tiny`.
+test('interp-tokenizer-oracle', [PY, 'test_myinterpreter_validation.py'],
+     mem='tiny', cache=True,
+     extra=['test_myinterpreter_validation.py', 'fire_compiler.py',
+            'myinterpreter.py', 'formal/examples'],
+     desc='the interpreter\'s tokenizer vs the imported one, over 67 texts')
 test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
                              'mojo/middle/metal_ops.py',
@@ -2530,6 +2560,7 @@ test('ab-compare', [PY, 'tools/ab_compare.py'], deps=['ab-bside'],
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
+              'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out red group of the

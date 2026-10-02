@@ -17,6 +17,101 @@ equivalent for the 45 example files a cached test is *about*.
 
 ---
 
+## Status, 2026-10-02 (this pass — §3.2's four dead-at-import tests are closed, one of them by becoming real coverage)
+
+§3.2 said four tests die at import naming `mojo/ast_nodes.mojo` and
+`mojo/parser.mojo`, neither of which exists, and called that "the `coro`
+failure verbatim, from CLAUDE.md: the same class, four more files, and the
+`coro` one was found by accident". All four are now closed.
+
+**Three were deleted**, with their `UNREGISTERED` excuses, because there was
+nothing to repair: `mojo/` has no `.mojo` files at all (the tokenizer and
+parser became `fire_compiler.py`, `ast_nodes` was deleted outright), so
+`test_myinterpreter_simple.py`, `test_phase2_parser.py` and
+`test_phase2_parser_simple.py` could only ever have asserted something about
+files that do not exist. §3.2's Tier 3 said deletion is the defensible option
+and named the reason — "a test of a module that no longer exists is not a slow
+test, it is a wrong claim" — and `test_myinterpreter.py` already runs the
+interpreter end to end and passes, so nothing was lost with them. One of the
+three additionally **exited 0 while printing `✗ Failed to load modules`**, so
+they were also three instances of §3.3.
+
+**The fourth was repaired, and it is the one worth having.** §3.2's own words:
+"`test_myinterpreter_validation.py` is the expensive one to delete — it
+validates the interpreter's output against Python's own tokenizer, and that
+check is worth having *somewhere*. It is the strongest cheap parity check in
+the tree and nothing runs it." It now exists and runs.
+
+It compares `fire_compiler.py`'s `py_tokenize` with ITSELF, reached two ways:
+imported directly, and reached **through `myinterpreter.py`'s `Interpreter`
+executing `fire_compiler.py`'s own source** — built exactly the way `fire.py
+run` builds every program it interprets, so the function under test is the
+interpreter's own rendering of that code and not a re-import. The corpus grew
+from eight hand-written snippets to **67 texts: 18 snippets plus 49 whole real
+files** (every `formal/examples/*.mojo`, `fire_compiler.py`,
+`myinterpreter.py`, `gimple_codegen.py`, `version.py`), because a tokenizer's
+hard cases are the ones a snippet never reaches.
+
+It is the only check of its kind, and §3.2 explains why that matters: an
+interpreter bug produces a wrong ANSWER rather than an exception, so the
+compiled path ends up wrong in the same direction and every engine-vs-engine
+diff in the tree stays clean. That is how `@classmethod`'s `cls` binding the
+first real ARGUMENT, and `@deco` being parsed and then never applied at all,
+stayed invisible.
+
+**It found a bug on its first run**, which is the argument for the whole
+exercise: 66 of 67 matched and the 67th raised `NameError: name 'SyntaxError'
+is not defined`. `myinterpreter.py`'s scope defined `Exception`, `ValueError`,
+`TypeError`, `RuntimeError`, `KeyboardInterrupt`, `EOFError` and
+`StopIteration` — and **not `SyntaxError`**, which `fire_compiler.py` raises
+from five sites. So the interpreter's copy of the tokenizer could not REPORT a
+lex error, which is the one thing a tokenizer has to be able to do. Fixed by
+defining the rest of the standard exception hierarchy; the 24 names are now in
+scope.
+
+The comparison also had to grow a second half for that to be visible: it
+compares what each route **did**, not only what it returned, so two routes that
+both raise must raise the same exception TYPE and the same message. A compare
+that returned "both raised" would have reported 67/67 on the day the
+interpreter's scope had no `SyntaxError` in it — which is §3.3's shape one
+level down, a swallowed exception.
+
+Registered as `interp-tokenizer-oracle` in `check`/`gate`, `mem='tiny'` from a
+measured 0.1 GB, `extra` naming both subjects rather than just the test (the
+oracle is "the same function through two engines", so a change to either side
+is an input), 67/67.
+
+### The census, re-measured
+
+    the estate: 141 test files, 85 of them run by a registered spec,
+                54 declared with a reason, 2 undeclared, 0 dangling
+
+The 2 undeclared are `test_formal_read_before_store.py` and
+`test_formal_receiver_spelling.py`, which arrived with a merged branch and are
+`bugs/TEST_estate_check_red_on_two_form3_test_files.md` — another worker's
+claim, and pre-existing on this branch's base.
+
+The census also now counts **both spellings** of "test file", which is
+`bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md` (closed and
+deleted with the fix). Four files were outside the inventory entirely before
+that, and one of them — `formal/x86_64_model_test.py`, the only check on
+`lib/X86.lean` that EXECUTES a machine model instead of typechecking it — ran
+by nothing. It is registered now (`formal-x86-machine-model`) and on its first
+run found a real model bug: `udivmod` disagrees with the hardware, real 4,
+model 7905747460161236410. Filed as
+`bugs/CODEGEN_x86_model_udivmod_disagrees_with_hardware.md` with the emitted
+bytes, which rule out the obvious explanation.
+
+### §5's other items are unchanged
+
+Registering the 50 is done and was not this pass's work; §3.1's cached-test
+hole and §4.1's test-that-writes-to-the-tree were closed on 2026-10-01. §3.3's
+*general* form — a check that a file which reports its verdict in its own
+stdout cannot be relied on for one — is still not written as a mechanism.
+`tools/memcap.py` and `tools/procrun.py` still have no test of their own, and
+`procrun` is still invisible to the orphan walk because neither is a test file
+under either spelling.
+
 ## Status, 2026-10-01
 
 Two of the four §5 items are closed and the census has moved; the rest stands.

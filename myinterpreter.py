@@ -18,6 +18,7 @@ import platform
 import operator
 import math
 import collections
+import builtins
 import threading
 from dataclasses import dataclass
 import fire_compiler as N
@@ -3142,6 +3143,43 @@ class Interpreter:
         self.scope.define('RuntimeError', RuntimeError)
         self.scope.define('StopIteration', StopIteration)
         self.scope.define('Error', MojoError)
+        # …and the rest of the standard exception hierarchy, which the block
+        # above was missing in a way that turned a diagnostic into a DIFFERENT
+        # one. `fire_compiler.py` — this compiler's own source, which the
+        # interpreter executes whenever it interprets a program — raises
+        # `SyntaxError` from five sites (`replace_multiline_strings`'s
+        # "unterminated string literal", the `yield`/`await`-outside-a-
+        # generator refusal, the for/with target refusal, and two in the
+        # parser), and `SyntaxError` was not in scope. So the interpreter
+        # reached `raise SyntaxError(...)` and raised
+        # `NameError: name 'SyntaxError' is not defined` instead: the
+        # interpreter's copy of the tokenizer could not REPORT a lex error,
+        # which is the one thing a tokenizer has to be able to do.
+        #
+        # Found by `test_myinterpreter_validation.py`, which runs
+        # `fire_compiler.py`'s `py_tokenize` through the interpreter and
+        # compares it with the imported one — that file's reason for existing
+        # is that an interpreter bug produces a wrong answer rather than an
+        # exception, and this one did: 66 of 67 corpus texts matched and the
+        # 67th raised the wrong exception TYPE.
+        #
+        # Names, not aliases of anything Mojo-specific: the interpreter
+        # defines the PYTHON exception class, so `except SyntaxError` in a
+        # program the interpreter runs catches what the raise produced. The
+        # same is already true of the six above, and these are simply the
+        # rest of `builtins` that a real program or the compiler's own source
+        # can name.
+        for _exc_name in ('SyntaxError', 'IndentationError', 'TabError',
+                          'IndexError', 'KeyError', 'AttributeError',
+                          'NameError', 'UnboundLocalError', 'ArithmeticError',
+                          'ZeroDivisionError', 'OverflowError',
+                          'FloatingPointError', 'AssertionError',
+                          'NotImplementedError', 'RecursionError',
+                          'SystemError', 'StopAsyncIteration',
+                          'ImportError', 'ModuleNotFoundError',
+                          'LookupError', 'MemoryError', 'OSError',
+                          'IOError', 'FileNotFoundError', 'SystemExit'):
+            self.scope.define(_exc_name, getattr(builtins, _exc_name))
         # More standard builtins + exceptions that real stdlib files reference
         # at module scope (found via fault_tolerance.py comparing `mojo run`
         # to CPython — e.g. keyword.py's frozenset, _pyrepl/types.py's object,
