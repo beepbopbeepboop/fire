@@ -80,14 +80,21 @@ RUN_TIMEOUT = 60
 Q3 = '"' * 3          # a triple-quote run
 SQ3 = "'" * 3
 
-# (name, the literal's source text, expected value or None to mean "whatever
-# CPython computes", expected_ours_value)
+# (name, the literal's source text, OUR expected value, CPython's expected
+# value or None for "no cross-check")
 #
-# `ours` is the byte-exact content: source text between the delimiters, with no
-# escape processing. It is spelled out for every row rather than derived,
-# because "byte-exact" is a contract a reader has to be able to check by eye.
-# A row whose value is a real newline is written '\n' in the table below and
-# comes from a source line break.
+# `ours` (the THIRD column) is the byte-exact content: source text between the
+# delimiters, with no escape processing. It is spelled out for every row rather
+# than derived, because "byte-exact" is a contract a reader has to be able to
+# check by eye. A row whose value is a real newline is written '\n' in the
+# table below and comes from a source line break.
+#
+# The fourth column is the oracle: when it is given, `check_continuation`
+# requires BOTH sides to equal it, so a row carrying one is a row the two
+# engines agree on and a row leaving it `None` is a labelled divergence. The
+# two are not interchangeable and reading the table as (ours, theirs) is the
+# mistake that made the first version of the raw-literal rows below assert a
+# divergence that no longer existed.
 LITERALS = [
     # ── the plain shapes: one STRING token, content is what is between ──────
     ("triple_plain",        Q3 + "abc" + Q3,                "abc"),
@@ -300,22 +307,41 @@ CONTINUATIONS = [
     # between them. Both sides read this as two adjacent literals, so the
     # concatenation is the parser's and the value must be `xb`.
     ("quote_run_then_text", 'a = "x\\\n""b"',           "xb",    "xb"),
-    # ── the two rows where this path's answer is NOT CPython's ──
+    # ── RAW literals: the pair is CONTENT, and this path agrees with CPython ──
     #
-    # A RAW literal keeps the pair (it is content: CPython's token text for it
-    # is 'r"a\\\nb"'), and this path cannot, because a value only reaches the
-    # token stream with a newline in it through the placeholder
-    # `replace_multiline_strings` builds — and the join runs after it. The row
-    # is spelled out anyway, because a divergence that is pinned is a fact and
-    # one that is not is a surprise. Next step, in full:
-    # bugs/CODEGEN_backslash_continuation_in_a_raw_literal.md.
-    ("raw_keeps_the_pair_in_cpython_only", 'a = r"a\\\nb"',
-     "ab", None),
-    # The same rule on a TRIPLE-quoted span, which IS placeholdered and so does
-    # keep the pair — and CPython deletes it there, because a triple-quoted
-    # literal is not raw either. Pre-existing, unchanged by the join, and part
-    # of the same no-escape-processing contract as `"\n"` being four
-    # characters rather than one.
+    # A raw literal keeps a backslash-newline pair — it is content: CPython's
+    # token text for `r"a\<nl>b"` is `'r"a\\\nb"'`. This path used to delete it
+    # anyway, because the line-joining pass had no way to keep it: a value only
+    # reaches the token stream with a newline in it through the placeholder
+    # `replace_multiline_strings` builds, and the join runs after it. The join
+    # now asks a SECOND question, "is this literal raw?", and when it is, routes
+    # the pair through the same placeholder mechanism — the first placeholder
+    # that lands in the MIDDLE of a token rather than standing for a whole one,
+    # so the lex loop gained the STRING-token substitution arm that goes with
+    # it.
+    #
+    # The rule in one sentence, because the whole bug was the exception to it:
+    # "the pair is deleted unless the literal is raw", and that sentence is a
+    # rule about token TEXT, which is what this path's values are stated over.
+    ("raw_keeps_the_pair", 'a = r"a\\\nb"', "a\\\nb", "a\\\nb"),
+    ("raw_upper_R_keeps_the_pair", "a = R'a\\\nb'", "a\\\nb", "a\\\nb"),
+    # Two continuations in one raw literal: the placeholder text contains no
+    # quote, so the second pass through the join finds the literal open again.
+    ("raw_two_continuations", 'a = r"a\\\nb\\\nc"', "a\\\nb\\\nc",
+     "a\\\nb\\\nc"),
+    # A `b` prefix is dropped by this front end (no bytes type), so the value
+    # here is a `str` and CPython's is a `bytes` — a different question from
+    # what the pair is worth, which is kept in both, so the CPython column is
+    # `None` exactly as the `bytes_prefix` row above leaves it.
+    ("raw_bytes_prefix", 'a = rb"a\\\nb"', "a\\\nb", None),
+    # ── the one row where this path's answer is NOT CPython's ──
+    #
+    # The same rule on a TRIPLE-quoted span, which IS placeholdered before the
+    # join and so does keep the pair — and CPython deletes it there, because a
+    # triple-quoted literal is not raw either. Pre-existing, unchanged by
+    # either fix, and part of the same no-escape-processing contract as
+    # `"\n"` being four characters rather than one. CPython says `abcd`; the
+    # CPython column is left `None` because this path says otherwise.
     ("triple_keeps_the_pair_here_too", 'a = """ab\\\ncd"""',
      "ab\\\ncd", None),
 ]
