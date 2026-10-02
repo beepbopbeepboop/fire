@@ -5377,8 +5377,27 @@ VALUE_METHOD_RECEIVERS = {
 # worth saying because wave 4's D4 found the binding half of this problem
 # (`_PhiloxWrapper._rng: PhiloxRandom[10]` behind an import alias) and it does
 # NOT apply to the one construct the sweep reaches.
+# `OptionalPointer`, `MutPointer`, `ImmPointer`, `OpaquePointer`,
+# `MutOpaquePointer` and `ImmOpaquePointer` are the `comptime` type ALIASES
+# `std/memory/pointer.mojo:130-200` declares for the same pointer under a
+# shorter name (`OptionalPointer[mut, T, origin] = Optional[Pointer[T, origin]]`),
+# and they are here for the reason `_CPointer` is: a declared return type is a
+# type EXPRESSION and the alias is a module-level `comptime` binding this path
+# does not resolve, so the NAME is the whole of the evidence there is.  The
+# `//` in each declaration separates the keyword-only `mut` from the positional
+# `T`, so the pointee is still the first positional type argument — which is
+# what the four call sites in the tree agree on (`std/os/env.mojo:78`
+# `OptionalPointer[UInt8, ImmUntrackedOrigin]` for `char *`, `std/pwd/_linux.mojo:48`
+# `OptionalPointer[_C_Passwd, UntrackedOrigin[mut=True]]` for `struct passwd *`,
+# `std/memory/memory.mojo:477` and `:483` with `mut=True` spelled as a keyword).
+# `OptionalPointer` was measured refusing a real stdlib module:
+# `external_call['getenv', OptionalPointer[UInt8, ImmUntrackedOrigin]]` is an
+# `Optional[Pointer]`, which is one word with 0 meaning None — the same answer
+# `_CPointer` already gives for the same C function.
 POINTER_TYPE_CTORS = ("Pointer", "UnsafePointer", "_CPointer", "CPointer",
-                      "DTypePointer", "Reference")
+                      "DTypePointer", "Reference", "OptionalPointer",
+                      "MutPointer", "ImmPointer", "OpaquePointer",
+                      "MutOpaquePointer", "ImmOpaquePointer")
 
 # A pointee base name -> `(width in bytes, signed)`.  One table, read by both
 # backends through `dereference_lowering`, so the two architectures cannot

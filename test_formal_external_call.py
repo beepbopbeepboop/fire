@@ -449,6 +449,33 @@ def model_cases():
                 spec('def f(s):\n    return external_call["getenv", '
                      '_CPointer[UInt8, UntrackedOrigin[mut=False]]](s)\n'),
                 ("getenv", M.EXTERN_RETURN_WORD, None)))
+    # THE SAME C FUNCTION, SPELLED THE WAY `std/os/env.mojo:78` spells it.
+    # `OptionalPointer` is a `comptime` type ALIAS
+    # (`std/memory/pointer.mojo:163`,
+    # `OptionalPointer[mut, T, origin] = Optional[Pointer[T, origin]]`), and a
+    # declared return type is a type EXPRESSION that this path reads by NAME
+    # because it does not resolve a module-level `comptime` binding to its
+    # target.  So the alias not being in the name table was a refusal of a real
+    # stdlib module over a spelling of the pointer the table already had:
+    # `getenv` returns `char *`, which is one word with 0 meaning None, and
+    # `env.mojo`'s own `if not ptr:` is what reads it.
+    out.append(("spec_getenv_optional_pointer_alias_is_a_word",
+                spec('def f(s):\n    return external_call["getenv", '
+                     'OptionalPointer[UInt8, ImmUntrackedOrigin]](s)\n'),
+                ("getenv", M.EXTERN_RETURN_WORD, None)))
+    # …and the LOAD half, which is the one that would be a wrong answer rather
+    # than a refusal if the alias's parameter order were read wrongly: the
+    # `//` in the alias declaration separates the keyword-only `mut` from the
+    # positional `T`, so the pointee is the first POSITIONAL type argument.
+    # The four call sites in the tree agree, and the second and third spellings
+    # are `std/memory/memory.mojo:477` and `std/pwd/_linux.mojo:48`.
+    out.append(("optional_pointer_pointee_is_the_first_positional_arg",
+                M.pointee_args("OptionalPointer[UInt8, ImmUntrackedOrigin]"),
+                ["UInt8", "ImmUntrackedOrigin"]))
+    out.append(("optional_pointer_keyword_mut_is_not_the_pointee",
+                M.pointee_args("OptionalPointer[mut=True, NoneType, "
+                               "MutAnyOrigin]"),
+                ["NoneType", "MutAnyOrigin"]))
     out.append(("spec_void",
                 spec('def f():\n    external_call["abort", NoneType]()\n'),
                 ("abort", M.EXTERN_RETURN_VOID, None)))
