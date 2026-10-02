@@ -1735,7 +1735,8 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     check_dataclass_constructs(stmts, functions)
     check_module_symbols(functions, by_name,
                          imported_module_names=imported_module_names,
-                         link_line=link_line)
+                         link_line=link_line,
+                         import_aliases=_import_aliases(stmts))
 
 
 def _struct_methods(stmts: list) -> list:
@@ -7997,31 +7998,58 @@ def _module_published_names(module: str, link_line) -> set:
         M.dylib_export_module(forwarded, module))
 
 
-def _link_line_publishes(link_line, name: str) -> bool:
-    """Does ANY library on this link line publish `name`, by definition or by
-    re-export?
+def _link_line_publishes(link_line, name: str, aliases: dict = None) -> bool:
+    """Does this link line bind a bare callee spelled `name`?
 
     The complement of "which names does the module that IMPORTED this one
     publish", and asked of the SAME tables — `model.dylib_export_tables` over
     `dylib_export_lists(link_line)` — for the reason
-    `_module_published_names` gives. A bare callee is bound through the flat
-    `by_name` table and nothing else (`dylib_extern_symbol`'s first arm), so
-    "will this call have a symbol" is exactly "is this name in `by_name`", and
-    answering it with a second reading of the manifests would be a second
-    answer to a question the emitter already asks.
+    `_module_published_names` gives.
 
-    Deliberately ANY rather than the importing module: a bare `from mod import
-    f` binds by bare name across every library on the line, first one winning
-    (`dylib_syms`' own `setdefault` in link order), so a name published by a
-    DIFFERENT library on the line does bind and refusing it would break a
-    working program. This predicate answers "does any library publish it",
-    which is the question that decides whether the emitted `BL` has a target.
+    **It asks `dylib_aliased_export`, which is what the EMITTER asks, and not the
+    flat `by_name` table alone.** The narrower reading of this predicate was the
+    one that shipped, and it refused correct programs: a bare callee is NOT bound
+    through `by_name` and nothing else. `dylib_extern_symbol`'s bare arm asks
+    `dylib_aliased_export` FIRST, which resolves through the module the name was
+    imported FROM — its own export table, then what that module FORWARDS. So a
+    bare call binds through `forwarded` as readily as through `by_name`, and the
+    two places `forwarded` is populated are a package that re-exports and a
+    package that re-exports under an ALIAS.
+
+    `aliases` is `formal/imports.py`'s `import_bindings`, the same table the
+    codegen is handed, and it is needed because the flat map cannot say which
+    module owns a name at all. Asking the same function the emitter asks is the
+    whole of the safety here: a second and narrower reading of the manifests is a
+    second answer to a question the emitter already answers, and the two
+    disagreed about exactly one construct.
+
+    Measured: `leaf/__init__.mojo` with `def base(x)`, `pkg/__init__.mojo` with
+    `from leaf import base as aliased`, `prog.mojo` with `from pkg import
+    aliased` — correct Mojo that builds, runs and prints `a=42 b=42|` on
+    `master`. `aliased` is not a key in `by_name` (the flat map is keyed by the
+    DEFINING name, `base`), so asking only `by_name` refused it with the
+    export-rule message about a module that publishes it under BOTH spellings.
+    `test_formal_imports.py`'s `an ALIASED re-export binds under both spellings`
+    is the regression test, and it was the only thing in the tree that could see
+    this — which is the argument for reading the manifest questions off the one
+    function the emitters use rather than off a second reading of the manifests
+    here.
+
+    `by_name` is still asked, and asked FIRST, because it is the WEAKER of the
+    two: a bare `from mod import f` binds by bare name across every library on
+    the line, first one winning (`dylib_syms`'s own `setdefault` in link order),
+    so a name published by a DIFFERENT library on the line does bind and refusing
+    it would break a working program. `dylib_aliased_export` is the stronger and
+    more specific of the two, which is why the emitter tries it first.
     """
     if not link_line:
         return False
-    by_name, _by_module, _forwarded = M.dylib_export_tables(
+    by_name, by_module, forwarded = M.dylib_export_tables(
         dylib_export_lists(link_line))
-    return name in (by_name or {})
+    if name in (by_name or {}):
+        return True
+    return M.dylib_aliased_export(by_name, by_module, name, aliases,
+                                  forwarded) is not None
 
 
 def _bracketed_export_gap(base_name: str, fn_name: str, link_line):
@@ -8061,7 +8089,8 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line):
         return None
     return M.imported_callee_refusal(base_name, sym, fn_name)
 def check_module_symbols(functions: list, structs_by_name: dict = None,
-                         imported_module_names=None, link_line=None) -> None:
+                         imported_module_names=None, link_line=None,
+                         import_aliases: dict = None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
 
     A LATE check, called beside `check_frame_field_blob_premises` and
@@ -8789,14 +8818,18 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # `imported` (so a libc call, a local and a name this unit
                 # compiles are all untouched), and no library on the line
                 # publishes it (which is the question that decides whether the
-                # emitted `BL` has a target at all).
+                # emitted `BL` has a target at all). `import_aliases` goes with
+                # it because the flat map is keyed by the DEFINING name and so
+                # cannot say which module owns `cname` — see
+                # `_link_line_publishes`.
                 cname = node.name
                 csym = M.module_symbol(cname)
                 if (id(node) in bare_callees and link_line
                         and cname not in structs_by_name
                         and csym is not None
                         and getattr(csym, "site", None) == "imported"
-                        and not _link_line_publishes(link_line, cname)):
+                        and not _link_line_publishes(link_line, cname,
+                                                      import_aliases)):
                     raise CodegenError(M.imported_callee_refusal(
                         cname, csym, fn.name))
                 continue
