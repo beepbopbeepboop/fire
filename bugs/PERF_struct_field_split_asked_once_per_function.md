@@ -23,6 +23,18 @@ Standalone, `build --formal --no-prove` on that file: **40.3s CPU**, ~95-137s
 wall on a host at load ~66 on 18 cores. Every other file in the sample is
 between 3 and 25s CPU.
 
+**The same 26 files on x86-64, same tree, `-j4 -t 120`: 25 of 26 as well**, with
+the same one file outstanding. The cause is in the SHARED model
+(`formal/model.py`'s derivations and `formal/build.py`'s site census, which run
+before either backend's emitter is reached), so one fix moves both
+architectures — but the x86-64 sweep is the only evidence that it does, and the
+cause was shared by construction: the 2026-10-02 logs show 361 arm64 and 360
+x86-64 timeouts out of 644 files each, the same 361/360 shape. (The x86-64 log's
+`tool` class also holds 7 files this arm64 HOST cannot adjudicate — it cannot
+dlopen an x86-64 dylib — which is a property of the host, not of the backend,
+and is unrelated to this.)
+
+
 ## The shape that is left
 
 `formal/model.py`'s `_split_declaration` derives a struct's whole field set, and
