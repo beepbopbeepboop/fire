@@ -597,6 +597,35 @@ def _put_le64(tv: Pointer[UInt8], v) -> int:
     return 0
 
 
+def fs_flock(fd, operation) -> int:
+    """`flock(fd, operation)`: 0 on success, -1 on failure.
+
+    **HERE AND NOT IN `formal/hostmods/fcntl.mojo` BECAUSE OF THE NAME
+    COLLISION RULE AT THE TOP OF THIS FILE**, and it is the rule's first
+    example again: `flock` is a libc function AND the name `fcntl.mojo`'s API
+    wants, so a module that defined `def flock(fd, operation)` and called
+    `flock(fd, operation)` inside it would emit a call to ITSELF with the
+    wrong arity. `getcwd`, `chdir`, `remove` and `rename` are all in the same
+    position and are all wrapped here for the same reason.
+    """
+    return flock(fd, operation)
+
+
+def fs_fcntl(fd, cmd, arg) -> int:
+    """`fcntl(fd, cmd, arg)`: 0 on success, -1 on failure.
+
+    THREE FIXED ARGUMENTS AND NO FOURTH, which is `fcntl(2)`'s own shape once
+    the variadic tail is gone: the command is the second parameter and the
+    argument is the third, and `fcntl` is called with three arguments for every
+    command here. **The variadic ARGUMENT IS A POINTER for `F_SETLK` and
+    friends, and that is not spelt** — see `formal/hostmods/fcntl.mojo`'s
+    `lockf` docstring, which is where the consequence is written down. The
+    commands reachable through this wrapper are the ones whose argument is an
+    integer: `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`.
+    """
+    return fcntl(fd, cmd, arg)
+
+
 def fs_mkdir(p, mode) -> int:
     """`mkdir(p, mode)`: 0 on success, -1 with EEXIST if it is already there."""
     return mkdir(p, mode)

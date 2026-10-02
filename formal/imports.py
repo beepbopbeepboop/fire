@@ -389,6 +389,28 @@ HOST_MODELLED = frozenset((
 # files they imported "not a stdlib or sibling module", which is a statement
 # about module RESOLUTION and is simply false of a CPython standard-library
 # module with no Mojo source.
+# `fcntl` WAS IN NEITHER TIER, which is why its note is here and not in one of
+# them: the sweep classified `import fcntl` as `not-answerable/host-import`
+# because no `fcntl.mojo` existed for the resolver to find, not because a set
+# said so — and `_is_host_module` returns False for it, so the refusal a caller
+# got was "not a stdlib or sibling module, and no such file exists", the same
+# message any unresolvable import gets. `formal/hostmods/fcntl.mojo` is
+# `flock(2)` and the whole of CPython's integer surface — 30 constants, each
+# read out of CPython's own `fcntl` by `test_formal_fcntl.py`, and the lock
+# itself over a take/retake/release sequence including the case a POSIX
+# record-lock implementation gets wrong (a SECOND descriptor of the same file
+# is refused, because a `flock` is per open file description). Worth saying
+# plainly: **it moves ZERO files to PASS**, since all three files that want
+# `fcntl` also want `subprocess` and move to that instead — the same accounting
+# `bugs/FORMAL_platform_reachable_row_measured.md` §2 records for `platform`.
+# What is absent is at the top of that file, and one absence is a SPELLING
+# rather than a fact about the target: the third argument of `fcntl(2)` does not
+# arrive, so `getfd`/`setfd`/`getfl`/`setfl` would be a `setfd` that reports
+# success and changes nothing —
+# `bugs/FORMAL_a_variadic_call_drops_its_third_argument.md`. A second measured
+# fact worth keeping: **macOS's `flock` and `F_SETLK` SHARE a lock space**, the
+# opposite of Linux, so a reader who assumes Linux gets this backwards.
+
 HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED
 
 
