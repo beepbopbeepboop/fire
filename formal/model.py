@@ -2574,7 +2574,34 @@ def _build_cfg(body) -> tuple:
     # emitted with an empty pending list opens its own unreachable first block,
     # and every block after it then inherits the universe.
     entry = new([])
-    entry.succs += run(body, [], [entry.index])
+    # `run`'s RETURN VALUE IS NOT THE ENTRY'S SUCCESSOR LIST, and adding it
+    # there invented an edge no program takes. Every edge into the body is
+    # already recorded, by the `open_block` inside `take`: the first straight-
+    # line statement's block is opened from `pending`, which starts as
+    # `[entry.index]`, so `entry -> first block` exists before `run` returns.
+    # What `run` returns is the set of blocks from which control leaves the
+    # RUN — for a body ending in a `return` that is `[]`, and for a body whose
+    # last statement follows a loop or a branch it is that statement's block.
+    #
+    # So `entry.succs += run(...)` added `entry -> LAST block`, a path no source
+    # takes, and it was not harmless: the entry has no statements of its own, so
+    # its OUT set is exactly the parameters, and a block the entry points at has
+    # the entry in the INTERSECTION over its predecessors. Every name stored
+    # before the last control-flow statement then looked unstored at it.
+    # Measured, on `std/collections/binary_heap.mojo`'s `_heapify_up` — `var
+    # element = …` at line 80, then `while pos > start:`, then a read of
+    # `element` at line 94 — refused as "'element' is read at line 94 before
+    # anything in this function stores it", which CPython does not do and which
+    # took the whole `std/collections` closure (and every stdlib module that
+    # imports it) out of the build.
+    #
+    # The direction of the change is the safe one, and it is the same one
+    # `_definitely_stored` documents: an edge is removed, never added, so the
+    # fixpoint's IN sets only ever GROW. A name this can stop reporting is one
+    # that EVERY real predecessor of its block stores, which is the definition
+    # of definitely-stored — so this cannot hide a defect, only stop refusing
+    # programs that do not have one.
+    run(body, [], [entry.index])
     for b in blocks:
         for d in b.succs:
             if d is not None and 0 <= d < len(blocks):

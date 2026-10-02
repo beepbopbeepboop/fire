@@ -134,6 +134,35 @@ CASES = [
     ("store_before_loop_ok",
      "    t = 0\n    for i in range(3):\n        t = t + i\n"
      "    return t\n", "ok"),
+    # THE SAME SHAPE WITH THE READ NOT IN A `return`, which is the whole of
+    # the difference between this row and the one above, and it was a false
+    # refusal until 2026-10-02. `_build_cfg` added the entry block's successor
+    # to the block `run` RETURNED, and `run` returns the block control leaves
+    # by — so for a body whose last statement follows a control-flow statement
+    # and is not itself one (`return`/`raise`/`break`/`continue` return `[]`,
+    # which is why every `return`-terminated case above was green), the entry
+    # gained an edge to the LAST block of the body. The entry holds no
+    # statements, so its OUT set is the parameters and every name stored before
+    # the last control-flow statement stopped being definitely stored at it.
+    # Measured on `std/collections/binary_heap.mojo`'s `_heapify_up`, where it
+    # took the whole `std/collections` closure — and every stdlib module that
+    # imports it — out of the build.
+    ("store_before_loop_read_in_a_call_ok",
+     "    t = 0\n    while n > 0:\n        n = n - 1\n    sink(t)\n", "ok"),
+    ("store_before_loop_with_a_break_read_in_a_call_ok",
+     "    e = n\n    i = n\n    while i > 0:\n        if i > 3:\n"
+     "            break\n        i = i - 1\n    sink(e)\n", "ok"),
+    ("store_before_if_read_in_a_call_ok",
+     "    t = n\n    if n:\n        t = t + 1\n    sink(t)\n", "ok"),
+    # The soundness direction for the same position: with the spurious edge
+    # gone, the join's IN set is the intersection over its REAL predecessors,
+    # so a name stored only in a loop body still reads as unstored there.
+    ("loop_body_store_read_in_a_call_refused",
+     "    for i in range(n):\n        t = i\n    sink(t)\n", "refuse"),
+    # ... and a name nothing stores on any path is still reported, in the
+    # position the fix moved: a call in the trailing block.
+    ("unstored_read_in_a_call_after_a_loop_refused",
+     "    while n > 0:\n        n = n - 1\n    sink(q)\n", "refuse"),
     # A statically NON-EMPTY iterable, so the body provably ran and the store
     # in it dominates. Without `_loop_body_always_runs` this would be refused,
     # which is a false refusal of `for i in range(3): total = i` followed by
