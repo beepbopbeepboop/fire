@@ -664,9 +664,36 @@ def _paren_wrapped(target) -> bool:
             and target.strip().endswith(')'))
 
 
-def is_tuple_target(target) -> bool:
+def is_tuple_target(target: str) -> bool:
     """Does this `for`/comprehension target string unpack, or bind the whole
     item to one name?
+
+    **The `target: str` annotation is LOAD-BEARING on the self-hosted path, and
+    must not be "tidied" away as documentation.** Both this function and
+    `for_target_slots` are free functions of a self-host file, imported by name
+    — and under an ALIAS — by `mojo/middle/types.py`, `mojo/middle/boundnames.py`,
+    `mojo/backend_gimple/emit_infra.py`, `mojo/backend_gimple/cpp_core.py` and
+    `myinterpreter.py`. A cross-module free-function call's C symbol is
+    `<defining module>_<name>_<hash of the caller's view of the parameter C
+    types>`, and the two sides derive that parameter list from DIFFERENT
+    evidence: inside this file the body proves `target` is a string (`char *`),
+    while an importer that only has the signature sees an UNANNOTATED parameter
+    and defaults it to `int64_t`. The suffixes then disagree and the closure
+    does not link:
+
+        Undefined symbols for architecture arm64:
+          "_fire_compiler_is_tuple_target_9f63a2", referenced from:
+              _mojo_middle_types__unpack_target_leaf_names_d719e0 in fire.o
+              ...
+
+    `_9f63a2` is `int64_t`; the definition is emitted `_d719e0`, `char *`. The
+    annotation is the one piece of evidence both sides share, so it is what
+    makes the two agree — exactly as `_split_top_level_commas(s: str)` right
+    above already is, which is why that one has never had this problem.
+    (`_NO_OVERLOAD_MANGLE` + `_SELFHOST_SIGS` is the other mechanism, and it
+    does NOT reach this case: `_func_mangleable` is consulted with the name as
+    the CALL SITE spells it, so an aliased import misses the pinned bare name
+    and is mangled anyway. Measured, both spellings.)
 
     Two spellings say "unpack": the SURROUNDING PARENS, or a top-level comma
     with no parens at all (which is what `_parse_generator_target` produces
@@ -686,8 +713,11 @@ def is_tuple_target(target) -> bool:
     1-element group that really had a comma, so `"a"` and `"(a)"` are
     distinct again and this is the ONE place that says which is which.
 
-    Non-string targets (an ordinary assignment target node) are not for-loop
-    targets at all and answer False."""
+    Every caller passes a string already (each strips or guards with
+    `isinstance(..., str)` first), so the annotation describes the real
+    contract; the guard below is left for the one value that is a string but
+    not a target at all — `""`, which `_declared_vars_body` hands over for a
+    non-string assignment target — and for a node reaching here from outside."""
     if not isinstance(target, str):
         return False
     t = target.strip()
@@ -696,8 +726,8 @@ def is_tuple_target(target) -> bool:
     return len(_split_top_level_commas(t)) > 1
 
 
-def for_target_slots(target) -> list:
-    """The TOP-LEVEL slot strings of a `for`/comprehension target, in order.
+def for_target_slots(target: str) -> list:
+    """The TOP-_LEVEL slot strings of a `for`/comprehension target, in order.
 
     Bracket-aware: a nested target's own commas do not split the outer list,
     so `"(a, (b, c))"` yields `['a', '(b, c)']` — the nested group stays
@@ -710,7 +740,12 @@ def for_target_slots(target) -> list:
     than ignoring it.
 
     Non-string targets answer `[]`: this is for-loop-target text only, and a
-    caller wanting names for an assignment target node has the node."""
+    caller wanting names for an assignment target node has the node.
+
+    `target: str` is load-bearing here for the reason spelled out at
+    `is_tuple_target`: an unannotated cross-module free-function parameter is
+    `int64_t` at the call site and `char *` at the definition, which mangles
+    the two to different C symbols and breaks the self-host link."""
     if not isinstance(target, str):
         return []
     t = target.strip()

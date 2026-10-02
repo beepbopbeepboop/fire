@@ -4938,21 +4938,43 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     Single source of truth for key coercion + per-type setter dispatch."""
     kt, kv = gen.lower_expr(key_expr)
     vt, vv = gen.lower_expr(val_expr)
+    # A bytes key is its OWN key domain in the runtime (see `_DictSlot.keykind`).
+    # Decided from the key's lowered type BEFORE the conversion chain below,
+    # because two of those arms re-type `kt` and one of them is this one.
+    _bytes_key = kt == 'MojoBytes *'
     # Load global string literals into temps before passing to dict functions
+    #
+    # EVERY branch below that produces a `char *` key must re-type `kt` with
+    # it, because `kt` is what the store is EMITTED with. A key whose C
+    # variable is `char *` while the type handed to the store says `int64_t` or
+    # `MojoDict *` used to be harmless — `_emit_call`'s coercion for a
+    # mismatched argument was a `(char *)(void *)(int64_t)` round trip, which is
+    # the identity on a pointer — and is no longer, because that coercion now
+    # routes an untracked word through `mojo_cstr_or_int_str` instead of
+    # reinterpreting it. So a stale `kt` here became
+    # `mojo_dict_set_int(d, mojo_cstr_or_int_str(<char *>), v)`:
+    # "passing argument 1 ... makes integer from pointer without a cast", a
+    # hard GCC error that took the whole self-host closure down. It fired on
+    # `{**lm, **lmaps.get(s.name, {})}` in mojo/middle/coro.py, where the
+    # second `**` packs a `dict.get(...)` — an int64_t — and stringifies it.
+    #
+    # `_lower_dict_compr` gets this right for the same reason
+    # (`kt, kv = gen._char_to_cstr(kt, kv)`), which is the shape to copy.
     if kv.startswith('_slit_'):
         kv_tmp = gen._new_val('char *', f"{kv}")
         kv = kv_tmp
+        kt = 'char *'
     elif kt in ('int', 'int64_t', '_Bool'):
         # Runtime dict keys are always char *; convert non-string keys
         # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
         # of C-casting the int to char* which produces NULL for 0.
         kv = gen._new_val('char *', f"mojo_str_from_int({kv})")
+        kt = 'char *'
     elif kt == 'MojoBytes *':
-        # A bytes key is its OWN key domain in the runtime (see
-        # _DictSlot.keykind) and must keep the MojoBytes pointer — the
-        # generic non-scalar-key branch below would `_repr_value` it into
-        # the char* str domain, which both loses the bytes type and aliases
-        # a str key of the same characters.
+        # A bytes key must keep the MojoBytes pointer — the generic
+        # non-scalar-key branch below would `_repr_value` it into the char*
+        # str domain, which both loses the bytes type and aliases a str key of
+        # the same characters.
         if kv.startswith('_slit_'):
             kv = gen._new_val('MojoBytes *', f"{kv}")
     elif kt != 'char *':
@@ -4978,7 +5000,7 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # buffer is the already-proven-safe, unchanged behavior for
         # by far the most common dict-key type.
         kv = gen._repr_value(kt, kv)
-    _bytes_key = kt == 'MojoBytes *'
+        kt = 'char *'
     if _bytes_key:
         if vv.startswith('_slit_'):
             vv = gen._new_val('MojoBytes *', f"{vv}")
