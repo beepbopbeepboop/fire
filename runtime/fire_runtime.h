@@ -1324,6 +1324,11 @@ MojoDictIter  *mojo_dict_iter_new(MojoDict *d);
 int            mojo_dict_iter_next(MojoDictIter *it);     /* 1=has entry, 0=done */
 char *mojo_dict_iter_key(MojoDictIter *it);
 char *mojo_dict_slot_key(MojoDict *d, int64_t i);
+/* The double twin of that one: the emitted dict repr walks slots by index and
+ * a double slot's bits are a pointer-shaped word, so reading one back as an
+ * int64_t and handing it to the generic element reader SIGSEGV'd. See
+ * mojo_dict_slot_double's own comment in fire_runtime.c. */
+double mojo_dict_slot_double(MojoDict *d, int64_t i);
 int64_t mojo_dict_iter_key_int(MojoDictIter *it);
 int64_t        mojo_dict_iter_val_int(MojoDictIter *it);
 double         mojo_dict_iter_val_double(MojoDictIter *it);
@@ -1545,6 +1550,12 @@ int mojo_getattr(int obj, char *attr);
 void mojo_setattr(void *obj, char *attr, int64_t val);
 void mojo_delattr(void *obj, char *attr);
 char *mojo_str_cat(char *a, char *b);
+/* `mojo_str_cat` with `a` (which the caller owns) released. Declared here
+ * rather than kept file-local because the repr walkers the CODEGEN emits into
+ * every generated program are the same N-cat chain and were leaking the same
+ * N-1 buffers per printed container; see mojo_str_cat_free's own comment in
+ * fire_runtime.c. `b` is untouched, so a shared static on the right is safe. */
+char *mojo_str_cat_free(char *a, char *b);
 char *mojo_str_from_int(int64_t v);
 /* str(float) for a float dict key — see mojo_str_from_double's own comment in
  * fire_runtime.c for why the key has to be materialized as text at all. */

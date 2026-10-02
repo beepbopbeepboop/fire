@@ -1,12 +1,71 @@
 # PERF: every printed container leaks its intermediate `mojo_str_cat` buffers (~500 B per `print` of an 8-element list)
 
+## Status (2026-10-02 — the leak is FIXED; one bounded remainder is named below)
+
 Found 2026-10-01 while fixing `bugs/CODEGEN_tuple_dict_key_hashed_by_address.md`
 (deleted with that fix): the fix put a dict KEY's renderer on the same repr
 walkers, so what was a slow leak on a debug print became a per-lookup leak, and
 fixing it named the rest of the family. Standard:
 `bugs/PERF_memory_over_4gb_is_a_bug.md`.
 
-## What I ran
+## What is fixed
+
+Both places the report named, in one change and in ONE implementation of the
+rule rather than two:
+
+1. **`mojo_str_cat_free` is now a public runtime entry point** (it was the
+   file-local `_cat_free`), and declared in `fire_runtime.h`. It is public
+   precisely so the emitted walkers can call it: emitting a second copy into
+   the preamble would have been two implementations of one rule in two
+   languages, which is what this doc's own "why the choice is worth making
+   deliberately" paragraph was about. `test_runtime_header_scan.py`'s ledger
+   carries the two new names.
+2. **Every walker named in (1) below releases its chain and its owned
+   per-slot strings**: `mojo_repr_list_ints`, `_doubles`, `_bools`,
+   `_bytes`, `_intlists`, `_slotkinds` and `_mojo_repr_pairlist` in
+   `runtime/fire_runtime.c`; `_mojo_repr_list`, `_mojo_repr_pair`,
+   `_mojo_repr_dict`, `_mojo_repr_set` and the per-struct `_mojo_repr_{sn}`
+   dumps in `mojo/backend_gimple/module_gen.py`.
+3. **The two SHARED returns were normalised rather than free()-ed.**
+   `mojo_repr_obj` (a shared static) and `mojo_repr_bool` (literals) stay
+   exactly as they are — a `free()` of either is a crash, and both have
+   callers in other workers' write sets — so the walkers that must not free
+   them say so in a comment, and the emitted `_mojo_generic_elem_repr` (whose
+   `"None"` and `mojo_repr_obj` returns were the reason its callers could not
+   free their per-slot strings at all) now `strdup`s those two answers, the
+   same remedy `_key_slot_str` already applies on the dict-key path.
+
+Measured on `gimple_printed_container_does_not_grow`
+(`test_gimple_runner.py`), which prints SEVEN container shapes 60 000 times —
+one per walker — under `MallocScribble`, so a `free()` of a shared buffer is a
+wrong answer rather than silent heap corruption:
+
+| tree | peak RSS |
+|---|---|
+| HEAD (`bc17a62b`, before this change) | **87.2 MB** |
+| this change | **12.8 MB** |
+
+and the text of every walker is pinned separately by
+`gimple_container_repr_text_is_unchanged`, because a repr that printed the
+wrong thing and leaked nothing would pass the memory case.
+
+## What is NOT fixed, named precisely
+
+* **The per-FIELD strings of a struct dump.** `_mojo_repr_{sn}`'s cat chain now
+  releases its left operand (the O(F^2) part), but each field's `val_expr` is
+  left alone: those expressions are one of a dozen shapes whose ownership
+  differs (a `mojo_repr_*` helper owns its return; a `"True"`/`"None"` literal
+  does not), and a wrong `free()` there is a crash rather than a leak. It
+  wants the same treatment the dict walker just got: an explicit owned/not-owned
+  answer per field shape, threaded through `part_exprs`.
+* **`_mojo_dispatch_repr`.** Its result is freed by nobody, so there is nothing
+  to release today; it would need an owner before it could be freed.
+
+Both are strictly smaller than what is fixed (one string per field / per call,
+against one buffer per element of every container printed) and both are noted
+in the comments where the code is.
+
+## What was run (the original report, kept)
 
 ```console
 $ python3 -c "import test_gimple_runner as T; T.test_gimple_bounded_memory(
@@ -36,43 +95,30 @@ arguments alone (`runtime/fire_runtime.c`). Every repr walker is a chain of it:
 
 An N-element list leaks N+1 buffers per repr, each sized to the text so far.
 
-## What is fixed, and what is not
+## A SIGSEGV found on the way, and fixed
 
-Fixed in the same commit as the tuple-key fix, for the two walkers that commit
-put on the key path: `mojo_repr_list_kinds` (whose per-slot strings were leaked
-as well as its buffers) and the new `_container_key_str`. Both go through a
-`_cat_free(a, b)` helper (`runtime/fire_runtime.c`) that releases the left
-operand, and the measurement that motivated it is pinned by
-`gimple_tuple_dict_key_lookup_does_not_grow` in `test_gimple_runner.py`
-(1.7 MB peak, was 93.6 MB before).
+`print({"c": 3.5})` — a dict literal with ONE float value — was a SIGSEGV on
+`bc17a62b` (measured on a pristine `git archive bc17a62b` extraction, so it is
+not a change in flight). The emitted `_mojo_repr_dict` reads a `kind == 2` slot
+back as a string and a `kind == 3` slot as a bool, and sent everything else to
+`_mojo_generic_elem_repr`, which treats `val > 65536` as a pointer and
+dereferences it through `mojo_read_type_tag_safe`. A double's IEEE-754 bits are
+exactly such a word — 3.5 is `0x400C000000000000` — and that predicate's guard
+only rejects words below 2 GiB. Fixed with the branch the runtime's
+`mojo_repr_list_kinds` already has for a float list slot, and one new accessor
+(`mojo_dict_slot_double`, the double twin of `mojo_dict_slot_key`, because the
+emitted repr walks slots by INDEX and `mojo_dict_get_double` takes a KEY).
+`gimple_container_repr_text_is_unchanged` pins it.
 
-**Not fixed**, and this doc is the record: the other walkers, in two places that
-must both change for a program to stop leaking.
+A second, unrelated pre-existing crash sits on the same shape and is NOT fixed
+here: `{"d": True}` does not COMPILE at all (five emitter sites still call the
+deleted `mojo_mark_dict_bool_values`) —
+`bugs/COMPILE_FAIL_dict_literal_with_a_bool_value_emits_a_deleted_runtime_entry_point.md`.
 
-1. `runtime/fire_runtime.c`: `mojo_repr_list_ints`, `mojo_repr_list_doubles`,
-   `mojo_repr_list_bools`, `mojo_repr_list_bytes`, `mojo_repr_list_intlists`,
-   `mojo_repr_list_pairs`, `mojo_repr_list_pairs_s`, `mojo_repr_list_pairs_d`
-   — all the same shape, so `_cat_free` plus a `free()` of each per-slot string
-   is mechanical. `mojo_repr_obj` returns a SHARED static and must stay on the
-   right of the cat.
-2. `mojo/backend_gimple/module_gen.py`: the EMITTED `_mojo_repr_list` (line ~817)
-   and `_mojo_repr_pair` (line ~864), plus `_mojo_repr_set` in the same
-   preamble. These are C source text emitted into every generated program, so
-   `_cat_free` has to be reachable from there: either promote the helper to
-   `mojo_str_cat_free` in `fire_runtime.h` (a public entry point, so
-   `test_runtime_header_scan.py`'s expected set needs it) or emit a local
-   `static char *_cat_free` in the same preamble. The second keeps the runtime
-   header unchanged, and it is what I would do — but it means the same helper
-   exists twice, in two languages, which is why the choice is worth making
-   deliberately rather than by default.
-
-A `print` of a container in a loop is not an exotic program: it is what a
-compiler's `--dump` does, what a logging path does, and what the leak hunt's own
-instrumentation would do to itself.
-
-## Next step
+## Original next step, for the record
 
 Do (2) first, since it is the copy every generated program carries, then (1).
-Both are behaviour-preserving apart from the memory, so the standard for this
-one is byte-identical generated C before vs after: `cmp` the artifact for a
-program that prints a list, a nested list, a set and a pair.
+The "byte-identical generated C" standard in the last section of the original
+version of this doc does not apply to a fix that changes the emitted text by
+construction; what it asks for — same printed text — is pinned by
+`gimple_container_repr_text_is_unchanged` instead.

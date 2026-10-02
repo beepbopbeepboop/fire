@@ -895,14 +895,24 @@ def _emit_reflection_dispatch(self, parts):
         for i, pe in enumerate(part_exprs):
             sep = ', ' if i > 0 else ''
             if sep:
-                cat_chain = f'mojo_str_cat({cat_chain}, ", ")'
+                cat_chain = f'mojo_str_cat_free({cat_chain}, ", ")'
             name_lit, val_e = pe.split(', ', 1)
-            cat_chain = f'mojo_str_cat({cat_chain}, {name_lit})'
-            cat_chain = f'mojo_str_cat({cat_chain}, {val_e})'
-        cat_chain = f'mojo_str_cat({cat_chain}, ")")'
+            cat_chain = f'mojo_str_cat_free({cat_chain}, {name_lit})'
+            # The chain releases its LEFT operand, which is always a buffer
+            # this chain built -- that is the whole of the per-print leak for
+            # a struct dump with F fields (O(F^2) bytes), and it is the same
+            # fix `mojo_str_cat_free`'s own comment in runtime/fire_runtime.c
+            # describes. The RIGHT operand (`val_e`) is left alone on purpose:
+            # it is one of a dozen expressions whose ownership differs (a
+            # `mojo_repr_*` helper owns its return, a `"True"`/`"None"` literal
+            # does not), and a wrong `free()` here is a crash rather than a
+            # leak. Those per-field strings are the remaining half of this
+            # family and are not what this change claims.
+            cat_chain = f'mojo_str_cat_free({cat_chain}, {val_e})'
+        cat_chain = f'mojo_str_cat_free({cat_chain}, ")")'
         refl_parts.append(
             f"static char * _mojo_repr_{sn} ({sn} *obj) {{\n"
-            f"  if (!obj) return \"None\";\n"
+            f"  if (!obj) return strdup(\"None\");\n"
             f"  return {cat_chain};\n"
             f"}}\n"
         )
@@ -928,7 +938,7 @@ def _emit_reflection_dispatch(self, parts):
         refl_parts.append(
             f"static char * _mojo_elem_repr_{sn} (int64_t v) {{\n"
             f"  {sn} *o = ({sn} *)(intptr_t)v;\n"
-            f"  if (!o) return \"None\";\n"
+            f"  if (!o) return strdup(\"None\");\n"
             + (f"  return {_erep} (o);\n" if _erep_ok
                else f"  return _mojo_repr_{sn} (o);\n")
             + f"}}\n"
@@ -1019,7 +1029,9 @@ def _emit_reflection_dispatch(self, parts):
                # each cast is guarded by its own `mojo_is_registered_list`/
                # `_dict` runtime check immediately above it.
                "static char * _mojo_generic_elem_repr (int64_t val) {\n"
-               "  if (val == 0) return \"None\";\n"
+               "  /* OWNS its return, on EVERY branch — see the note below the\n"
+               "     function body. */\n"
+               "  if (val == 0) return strdup(\"None\");\n"
                "  if (val > 65536) {\n"
                "    if (mojo_is_registered_list(val))\n"
                "      return _mojo_repr_list((MojoList *)(intptr_t)val);\n"
@@ -1031,6 +1043,21 @@ def _emit_reflection_dispatch(self, parts):
                "  }\n"
                "  return mojo_repr_int(val);\n"
                "}\n"
+               # The two returns above and below the dispatch switch are the
+               # only ones that were NOT owned: `mojo_repr_obj` hands back a
+               # shared static, and "None" is a literal. Every walker in the
+               # four functions below therefore had to leave its per-slot
+               # string alone, which is why a printed N-element container
+               # leaked N of them on top of the N+1 cat buffers:
+               # bugs/PERF_printed_container_repr_leaks_its_cat_buffers.md.
+               # Copying the two non-owned answers on the way out is the same
+               # remedy `_key_slot_str` already applies on the dict-key path
+               # (runtime/fire_runtime.c), for the same reason.
+               #
+               # `_mojo_dispatch_repr` and the per-struct `_mojo_repr_{sn}`
+               # dumps keep their shared returns: no walker frees either of
+               # them, so there is nothing to release, and this change does not
+               # get to invent a second ownership story for them.
                "static char * _mojo_repr_list (MojoList *lst) {\n"
                "  /* A list that carries its own per-slot element kinds — a\n"
                "     `struct.unpack` result for a format that MIXES int/float/\n"
@@ -1047,11 +1074,11 @@ def _emit_reflection_dispatch(self, parts):
                "  if (mojo_list_get_kinds(lst))\n"
                "    return mojo_repr_list_kinds(lst, 0);\n"
                "  int _is_tup = lst && mojo_is_tuple(lst);\n"
-               "  if (!lst) return _is_tup ? \"()\" : \"[]\";\n"
+               "  if (!lst) return strdup(_is_tup ? \"()\" : \"[]\");\n"
                "  int64_t _n = mojo_list_len(lst);\n"
                "  char *_buf = strdup(_is_tup ? \"(\" : \"[\");\n"
                "  for (int64_t _i = 0; _i < _n; _i++) {\n"
-               "    if (_i > 0) _buf = mojo_str_cat(_buf, \", \");\n"
+               "    if (_i > 0) _buf = mojo_str_cat_free(_buf, \", \");\n"
                "    int64_t _e = mojo_list_get_int(lst, _i);\n"
                "    /* The list's own ELEMENT REPR, when the codegen recorded\n"
                "       one: this list's elements are a registered struct, and the\n"
@@ -1064,19 +1091,20 @@ def _emit_reflection_dispatch(self, parts):
                "       means this list says nothing and the path below is\n"
                "       unchanged. */\n"
                "    char *_re = mojo_list_repr_elem(lst, _e);\n"
-               "    if (_re) { _buf = mojo_str_cat(_buf, _re); free(_re); continue; }\n"
+               "    if (_re) { _buf = mojo_str_cat_free(_buf, _re); free(_re); continue; }\n"
                "    /* A registered 2-element element is a runtime-built PAIR\n"
                "       (zip / dict.items() / enumerate) and prints through the\n"
                "       pair walker, which gets slot 0 right where the generic\n"
                "       element repr cannot (see _mojo_repr_pair's own comment). */\n"
-               "    _buf = mojo_str_cat(_buf,\n"
-               "      (_e > 65536 && mojo_is_registered_list(_e)\n"
+               "    char *_es = (_e > 65536 && mojo_is_registered_list(_e)\n"
                "       && mojo_list_len((MojoList *)(intptr_t)_e) == 2)\n"
                "        ? _mojo_repr_pair((MojoList *)(intptr_t)_e)\n"
-               "        : _mojo_generic_elem_repr(_e));\n"
+               "        : _mojo_generic_elem_repr(_e);\n"
+               "    _buf = mojo_str_cat_free(_buf, _es);\n"
+               "    free(_es);\n"
                "  }\n"
-               "  if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, \",\");\n"
-               "  return mojo_str_cat(_buf, _is_tup ? \")\" : \"]\");\n"
+               "  if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, \",\");\n"
+               "  return mojo_str_cat_free(_buf, _is_tup ? \")\" : \"]\");\n"
                "}\n"
                "/* One 2-slot pair-list as `(a, b)`. Lives HERE, beside\n"
                "   _mojo_generic_elem_repr, because it reuses that function's\n"
@@ -1091,37 +1119,41 @@ def _emit_reflection_dispatch(self, parts):
                "   `[(None, 2), (1, 3)]`. A first slot that IS a string (a dict\n"
                "   key) or a container still goes through the generic reader. */\n"
                "static char * _mojo_repr_pair (MojoList *p) {\n"
-               "  if (!p) return \"()\";\n"
+               "  if (!p) return strdup(\"()\");\n"
                "  int64_t _n = mojo_list_len(p);\n"
                "  char *_b = strdup(\"(\" );\n"
                "  for (int64_t _i = 0; _i < _n; _i++) {\n"
-               "    if (_i > 0) _b = mojo_str_cat(_b, \", \");\n"
+               "    if (_i > 0) _b = mojo_str_cat_free(_b, \", \");\n"
                "    int64_t _v = mojo_list_get_int(p, _i);\n"
-               "    if (_i == 0 && !(_v > 65536))\n"
-               "      _b = mojo_str_cat(_b, mojo_repr_int(_v));\n"
-               "    else\n"
-               "      _b = mojo_str_cat(_b, _mojo_generic_elem_repr(_v));\n"
+               "    char *_s = (_i == 0 && !(_v > 65536))\n"
+               "      ? mojo_repr_int(_v) : _mojo_generic_elem_repr(_v);\n"
+               "    _b = mojo_str_cat_free(_b, _s);\n"
+               "    free(_s);\n"
                "  }\n"
-               "  if (_n == 1) _b = mojo_str_cat(_b, \",\");\n"
-               "  return mojo_str_cat(_b, \")\");\n"
+               "  if (_n == 1) _b = mojo_str_cat_free(_b, \",\");\n"
+               "  return mojo_str_cat_free(_b, \")\");\n"
                "}\n"
                "static char * _mojo_repr_dict (MojoDict *d) {\n"
-               "  if (!d) return \"{}\";\n"
+               "  if (!d) return strdup(\"{}\");\n"
                "  char *_buf = strdup(\"{\");\n"
                "  int64_t *_order = mojo_dict_order_indices(d);\n"
                "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
                "    int64_t _i = _order[_oi];\n"
-               "    if (_oi > 0) _buf = mojo_str_cat(_buf, \", \");\n"
-               "    _buf = mojo_str_cat(_buf, mojo_repr_str(mojo_dict_slot_key(d, _i)));\n"
-               "    _buf = mojo_str_cat(_buf, \": \");\n"
+               "    if (_oi > 0) _buf = mojo_str_cat_free(_buf, \", \");\n"
+               "    char *_k = mojo_repr_str(mojo_dict_slot_key(d, _i));\n"
+               "    _buf = mojo_str_cat_free(_buf, _k);\n"
+               "    free(_k);\n"
+               "    _buf = mojo_str_cat_free(_buf, \": \");\n"
+                "    char *_s;\n"
                 "    if (d->slots[_i].kind == 3)\n"
                 "      /* A Python bool value (mojo_dict_set_bool): the same 0/1\n"
                 "       * int64_t a real int stores, so only this per-SLOT tag\n"
                 "       * separates them. The tag was once a whole-DICT flag,\n"
                 "       * which meant one bool value reformatted every OTHER\n"
                 "       * value too — `{'name': p.name, 'ok': p.ok}` printed\n"
-                "       * `{'name': True, 'ok': True}`. */\n"
-                "      _buf = mojo_str_cat(_buf, d->slots[_i].val ? \"True\" : \"False\");\n"
+                "       * `{'name': True, 'ok': True}`. A literal, so `_s` is not\n"
+                "       * owned and must not be freed. */\n"
+                "      _s = d->slots[_i].val ? \"True\" : \"False\";\n"
                 "    else if (d->slots[_i].kind == 2)\n"
                 "      /* A str value stored via mojo_dict_set_str carries its\n"
                 "       * pointer in `val` with kind==2; `_mojo_generic_elem_repr`\n"
@@ -1129,26 +1161,43 @@ def _emit_reflection_dispatch(self, parts):
                 "       * string values printed as garbage/0 (the `param_convs=`\n"
                 "       * / `comptime_aliases=` / `_CONST_NAME` .ast divergence).\n"
                 "       * Emit the real quoted string instead. */\n"
-                "      _buf = mojo_str_cat(_buf, mojo_repr_str((char *)(intptr_t)d->slots[_i].val));\n"
+                "      _s = mojo_repr_str((char *)(intptr_t)d->slots[_i].val);\n"
+                "    else if (d->slots[_i].kind == 1)\n"
+                "      /* A DOUBLE value stores its IEEE-754 bits in `val` with\n"
+                "       * kind==1, and those bits are a pointer-shaped word: 3.5 is\n"
+                "       * 0x400C000000000000, which `_mojo_generic_elem_repr` sends\n"
+                "       * to `mojo_read_type_tag_safe`, and that dereferences it (its\n"
+                "       * own guard only rejects words below 2 GiB). So `print({\"c\":\n"
+                "       * 3.5})` was a SIGSEGV, not a wrong number. Read it back\n"
+                "       * through the accessor's own width, which is the same answer\n"
+                "       * `mojo_repr_list_kinds`' 'd' branch gives for a list slot.\n"
+                "       */\n"
+                "      _s = mojo_repr_float(mojo_dict_slot_double(d, _i));\n"
                 "    else\n"
-                "      _buf = mojo_str_cat(_buf, _mojo_generic_elem_repr(d->slots[_i].val));\n"
+                "      _s = _mojo_generic_elem_repr(d->slots[_i].val);\n"
+                "    _buf = mojo_str_cat_free(_buf, _s);\n"
+                "    /* Only the kind==3 branch is a LITERAL; everything else is a\n"
+                "       * repr helper's heap return and is ours to release. */\n"
+                "    if (d->slots[_i].kind != 3) free(_s);\n"
                "  }\n"
                "  free(_order);\n"
-               "  return mojo_str_cat(_buf, \"}\");\n"
+               "  return mojo_str_cat_free(_buf, \"}\");\n"
                "}\n"
                "static char * _mojo_repr_set (MojoSet *s) {\n"
-               "  if (!s || s->used == 0) return \"set()\";\n"
+               "  if (!s || s->used == 0) return strdup(\"set()\");\n"
                "  char *_buf = strdup(\"{\");\n"
                "  int64_t *_order = mojo_set_order_indices(s);\n"
                "  for (int64_t _oi = 0; _oi < s->used; _oi++) {\n"
                "    int64_t _i = _order[_oi];\n"
-               "    if (_oi > 0) _buf = mojo_str_cat(_buf, \", \");\n"
-               "    _buf = mojo_str_cat(_buf, s->slots[_i].tag == 1\n"
+               "    if (_oi > 0) _buf = mojo_str_cat_free(_buf, \", \");\n"
+               "    char *_s = s->slots[_i].tag == 1\n"
                "        ? mojo_repr_str(s->slots[_i].val_s)\n"
-               "        : mojo_repr_int(s->slots[_i].val_i));\n"
+               "        : mojo_repr_int(s->slots[_i].val_i);\n"
+               "    _buf = mojo_str_cat_free(_buf, _s);\n"
+               "    free(_s);\n"
                "  }\n"
                "  free(_order);\n"
-               "  return mojo_str_cat(_buf, \"}\");\n"
+               "  return mojo_str_cat_free(_buf, \"}\");\n"
                "}\n"
             )
         )

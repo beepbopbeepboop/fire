@@ -3110,6 +3110,121 @@ def main():
 main()
 """, "4\n299999\n", 40)
 
+    # Printing a container is not an exotic program: it is what a compiler's
+    # `--dump` does, what a logging path does, and what this file's own leak
+    # instrumentation would do to itself. Every repr walker is a chain of
+    # `mojo_str_cat`, each of which allocates a new buffer and leaves both
+    # arguments alone, so an N-element container leaked N+1 buffers sized to
+    # the text so far (~500 B per `print` of an 8-element list, measured at
+    # 99.7 MB for 200000 of them) plus one string per element. Both halves
+    # exist in TWO places — the runtime's `mojo_repr_list_*` family and the
+    # `_mojo_repr_list`/`_pair`/`_dict`/`_set` the codegen emits into every
+    # generated program — and a fix in only one of them leaves the program
+    # growing, which is why every shape is printed here rather than just the
+    # one the report measured.
+    #
+    # Each shape is here for a different walker, and between them they cover
+    # every branch whose ownership had to be decided: `xs` is the uniform-int
+    # runtime walker, `ys` the nested-int-list one, `ps` the pair-list one
+    # (runtime-built by `zip`, so its slots go through `mojo_repr_int` /
+    # `mojo_repr_str`), `fs` the float one, `d` the emitted `_mojo_repr_dict`,
+    # `st` the emitted `_mojo_repr_set`, and `mix` the emitted `_mojo_repr_list`
+    # over a heterogeneous list. `MallocScribble` (set by the harness) is what
+    # turns a `free()` of one of the two SHARED buffers this runtime returns —
+    # `mojo_repr_obj`'s static and `mojo_repr_bool`'s literals — into a wrong
+    # answer instead of a silent heap corruption, so a wrong branch here is a
+    # red rather than a crash three allocations later.
+    #
+    # The peak, not the stdout, is the assertion. The text itself is pinned
+    # separately by `gimple_container_repr_text_is_unchanged` below, because a
+    # repr that printed the wrong thing and leaked nothing would pass this.
+    # `{1, 2, 3}` in `_PRINTED` covers the emitted `_mojo_repr_set`; a float in a
+    # dict is here rather than only in the text case because it is the branch
+    # that used to be a SIGSEGV (`mojo_dict_slot_double`'s own comment), and a
+    # shape that crashes cannot be in a loop at all.
+    _PRINTED = ('[1, 2, 3, 4, 5, 6, 7, 8]\n'
+                '[[1, 2], [3, 4]]\n'
+                "[(0, 'a'), (1, 'b')]\n"
+                '[1.0, 2.5]\n'
+                "{'a': 1, 'b': 'two', 'c': 3.5}\n"
+                '{1, 2, 3}\n'
+                "[1, 'two', None]\n")
+    test_gimple_bounded_memory("gimple_printed_container_does_not_grow", """\
+def main():
+    xs = [1, 2, 3, 4, 5, 6, 7, 8]
+    ys = [[1, 2], [3, 4]]
+    ps = list(zip([0, 1], ["a", "b"]))
+    fs = [1.0, 2.5]
+    d = {"a": 1, "b": "two", "c": 3.5}
+    st = {1, 2, 3}
+    mix = [1, "two", None]
+    for i in range(60000):
+        print(xs)
+        print(ys)
+        print(ps)
+        print(fs)
+        print(d)
+        print(st)
+        print(mix)
+main()
+""", _PRINTED * 60000, 40)
+
+    # The text of every walker above, printed ONCE, against CPython. Separate
+    # from the memory case because the memory case would still pass if a repr
+    # printed something else and leaked nothing, and because this is the half
+    # of the fix that a `free()`-the-wrong-buffer mistake shows up in.
+    #
+    # `print([1, 'two', None, True, 2.5])` is NOT here: a `True` in a MIXED
+    # list prints `1` on this tree, which is
+    # bugs/CODEGEN_bool_annotated_struct_field_prints_as_int.md's open item,
+    # not this fix, and pinning the wrong text here would make it look settled.
+    # `[True, False]` (all-bool, so it routes to `mojo_repr_list_bools`) is
+    # here. A bool DICT value is not, for a different reason:
+    # `{"d": True}` still emits a call to the deleted
+    # `mojo_mark_dict_bool_values`, so the program does not compile at all
+    # (bugs/COMPILE_FAIL_dict_literal_with_a_bool_value_emits_a_deleted_
+    # runtime_entry_point.md) — so this case would be red for a bug that is
+    # not this one. That doc's "coverage to add with the fix" names this case
+    # as the place to put the bool dict back; the `_mojo_repr_dict` `kind == 3`
+    # branch it would exercise is already marked non-owned in the comment
+    # above that branch in `mojo/backend_gimple/module_gen.py`.
+    test_gimple_stdout("gimple_container_repr_text_is_unchanged", """\
+def main():
+    print([1, 2, 3, 4, 5, 6, 7, 8])
+    print([1.0, 2.5, 3.0])
+    print([True, False])
+    print([[1, 2], [3, 4]])
+    print([(5, 6), (7, 8)])
+    print([(1, "a"), (2, "b")])
+    print([(1.5, 2)])
+    print({"a": 1, "b": "two", "c": 3.5, "e": None})
+    print({1, 2, 3})
+    print({"x", "y"})
+    print((1, 2, 3))
+    print([(1,), (2,)])
+    print((5,))
+    print(zip([0, 1], ["a", "b"]))
+    print(b"ab".split(b"a"))
+    d = {"f": 3.5}
+    print(d["f"])
+main()
+""", "[1, 2, 3, 4, 5, 6, 7, 8]\n"
+       "[1.0, 2.5, 3.0]\n"
+       "[True, False]\n"
+       "[[1, 2], [3, 4]]\n"
+       "[(5, 6), (7, 8)]\n"
+       "[(1, 'a'), (2, 'b')]\n"
+       "[(1.5, 2)]\n"
+       "{'a': 1, 'b': 'two', 'c': 3.5, 'e': None}\n"
+       "{1, 2, 3}\n"
+       "{'x', 'y'}\n"
+       "(1, 2, 3)\n"
+       "[(1,), (2,)]\n"
+       "(5,)\n"
+       "[(0, 'a'), (1, 'b')]\n"
+       "[b'', b'b']\n"
+       "3.5\n")
+
     # ── `with C():` with no `as` target still runs `__exit__`
     # (bugs/CODEGEN_with_no_as_target_drops_exit.md, deleted with that fix).
     # The five index-parallel lists `_gen_stmt_WithStmt` accumulates per with
