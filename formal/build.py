@@ -3586,9 +3586,41 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # A parameter's being a frame holder is a fact about the whole image, and
     # the call site that disagrees with it can be in a function the loop above
     # skipped — see `_check_holder_agreements` for the program that measures it.
+    #
+    # `by_name_returns_frame` and NOT the identity-keyed `returns_frame`, and
+    # that is a fix rather than a style choice: the question this check asks at
+    # a call site is "does a CALL to this NAME hand back a frame", which is the
+    # JOIN over that name's definitions, and `_frame_valued_calls` hands the
+    # table straight to `model.frame_returning_predicate`, whose contract is
+    # `(callee_name, bound_name)`. Handed the identity-keyed table it looks up
+    # a NAME in a dict filed under `id(fn)` and finds nothing, so the
+    # returned-frame case of that function was DEAD: every call to a
+    # frame-returning function read as "this site hands over something this
+    # analysis cannot place", and a parameter declared as that struct was
+    # refused for disagreeing with every call site when every one of them was
+    # handing over exactly the frame the declaration promised.
+    #
+    # Measured, both architectures, before and after:
+    #
+    #     struct Opt:  var v: Int;  var has: Int          # two fields → a frame
+    #     struct Box:  var inner: Opt
+    #         def set(out self, o: Opt): self.inner = o
+    #     def mk(v: Int) -> Opt:                          # RETURNS a frame
+    #         var o = Opt();  o.v = v;  o.has = 1;  return o
+    #     def main(n):
+    #         var b = Box();  b.set(mk(41))
+    #         printf("v=%d h=%d", b.inner.v, b.inner.has)
+    #
+    # was "Box_set() declares 'o' as Opt … every call site in this image hands
+    # it something else: Box_set(b, mk(41)) passes a call to 'mk'" — refusing
+    # the very shape `_frame_valued_calls`'s own docstring says it recognises,
+    # and naming the callee that was handing over the frame. Now builds and
+    # prints `v=41 h=1`. The sibling call five lines below already passed the
+    # by-name table, which is what is why this one was the odd one out rather
+    # than why both were wrong.
     _check_holder_agreements(functions, holders, hstruct, params_of,
                              declared_holders, structs_by_name,
-                             _name_defs, returns_frame)
+                             _name_defs, by_name_returns_frame)
     _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
                             by_name_returns_frame)
     _park_construction_mismatches(functions, framed)

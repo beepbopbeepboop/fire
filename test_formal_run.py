@@ -5429,6 +5429,120 @@ ONE_WORD_NESTED_CASES = [
      107, None),
 ]
 
+# ── a DECLARED frame parameter handed a frame-RETURNING call ────────────────
+#
+# `_frame_valued_calls`'s own docstring says a parameter declared as a framed
+# struct is corroborated by "a construction, or a frame-returning call", and
+# lists `formal/types.py`'s `mask_of(IntType(w, False))` as the false refusal
+# that fixing it was worth. The returned-frame half of that was DEAD: the check
+# handed the identity-keyed `returns_frame` to `model.frame_returning_predicate`,
+# whose contract is `(callee_name, bound_name)`, so every lookup of a name in a
+# dict filed under `id(fn)` missed and the callee read as returning nothing.
+#
+# The consequence is a refusal that names the callee which WAS handing over the
+# frame — the most actionable-looking wrong refusal this family produces, because
+# the reader's next move is to go and check an export or a definition that is
+# right there.
+DECLARED_FRAME_RETURN_CASES = [
+    # The minimal shape: `peek` declares `o: Opt` (two fields, so a frame
+    # address) and its only call site hands it `mk(4)`, which returns one.
+    # 41 is `o.v * 10 + o.has` = 4*10 + 1, and CPython agrees.
+    ("declared_frame_parameter_given_a_frame_returning_call",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "def peek(o: Opt) -> Int:\n"
+     "    return o.v * 10 + o.has\n"
+     "\n"
+     "def mk(v: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return peek(mk(4))\n", 41, None),
+    # The value must be the FRAME's, not the callee's scratch. `mk(n)` writes `n`,
+    # `n+1`, `n+2` into the block it reserved and returns its address, and
+    # `peek` reads all three back as decimal DIGITS, so the answer's digits are
+    # `n`, `n+1`, `n+2` in order and every misread word rearranges them.
+    #
+    # 98 is `n = 10`, which is what the formal startup stub passes as the entry
+    # argument when the build was given no `-n` (measured: a program that prints
+    # its `n` and is built the way `run_case` builds this one prints 10). The
+    # three-digit answer is 1122 and the exit status is a BYTE, so 1122 % 256 =
+    # 98 — stated rather than hidden because the arithmetic does not fit a byte,
+    # and 98 is the only part of it a reader can check against a run. A `peek`
+    # reading the middle slot alone gives 10, the first alone 100, and the two
+    # outer slots swapped 210: none of those is 98.
+    ("declared_frame_parameter_frame_returned_through_a_call_boundary",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "def peek(o: Opt) -> Int:\n"
+     "    return o.v * 100 + o.has * 10 + o.w\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = n + 1\n"
+     "    o.w = n + 2\n"
+     "    return o\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return peek(mk(n))\n", 98, None),
+    # TWO call sites, both agreeing, one of them a frame-RETURNING call — so this
+    # is the case that would still be refused if the fix were "a call to a
+    # frame-returning function is always fine" rather than "it is one of the
+    # four shapes this analysis places". 81 is `peek(mk(8))` (8*10 + 1) and 30
+    # is `peek(o)` where `o` is a local `Opt()` carrying 3 and the zero its
+    # construction left; 111 is their sum.
+    ("declared_frame_parameter_two_agreeing_sites_one_returned",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "def peek(o: Opt) -> Int:\n"
+     "    return o.v * 10 + o.has\n"
+     "\n"
+     "def mk(v: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Opt()\n"
+     "    o.v = 3\n"
+     "    return peek(o) + peek(mk(8))\n", 111, None),
+    # …and the SAME program with one site handing a WORD, which is the guard the
+    # first two cannot be. It refuses, and the refusal names `peek(7)` — the
+    # site that actually disagrees — rather than the frame-returning call beside
+    # it. That is the property worth pinning: before the fix both sites were
+    # reported, because the returned-frame one was invisible; a fix that lifted
+    # the refusal wholesale would satisfy the two positives above and fail here.
+    ("declared_frame_parameter_a_word_beside_a_returned_call_is_refused",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "def peek(o: Opt) -> Int:\n"
+     "    return o.v * 10 + o.has\n"
+     "\n"
+     "def mk(v: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return peek(mk(5)) + peek(7)\n",
+     "refuse:passes the literal 7", None),
+]
+
 # ── wave 5 (E2): the three CONSTRUCTION shapes ─────────────────────────────
 #
 # `S()`, `S(a, b, …)` and `S(x)` are three lowerings, and until now only the
@@ -10438,7 +10552,8 @@ def main():
                   + ASSIGNED_TYPE_CASES + ASSIGNED_TYPE_REFUSALS \
                   + INIT_FIELD_TYPE_CASES \
                   + INIT_FIELD_TYPE_REFUSALS \
-                  + ONE_WORD_NESTED_CASES
+                  + ONE_WORD_NESTED_CASES \
+                  + DECLARED_FRAME_RETURN_CASES
                   + OVERLOAD_LAYOUT_CASES + OVERLOAD_REFUSALS
                   + OVERLOAD_DISPATCH_REFUSALS
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
