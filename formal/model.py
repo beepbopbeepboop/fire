@@ -8268,17 +8268,6 @@ def _kind_of_simple(e) -> str | None:
     return None
 
 
-# The node types that are a blob whatever their contents. A name bound to one
-# of these is refused rather than defaulted to a word, because the word it
-# holds is an address into the frame and printing that as a number is a lie.
-_CONTAINER_NODES = (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr,
-                    F.Comprehension)
-
-
-def _is_container_literal(e) -> bool:
-    return isinstance(e, _CONTAINER_NODES)
-
-
 class ValueKinds:
     """What the names of one function hold, decided from its source.
 
@@ -9955,37 +9944,6 @@ def struct_field_name(field) -> object:
     return None
 
 
-# `comptime NAME = expr` in a struct body is a CLASS-SCOPE BINDING, and it is in
-# `StructDef.comptime_aliases` rather than in `StructDef.fields` — the parser puts
-# it there (`fire_compiler._parse_struct`, a `ComptimeVarStmt` is neither a
-# `VarDecl` nor an `AssignStmt`), the interpreter reads it when it builds the
-# class (`myinterpreter.execute_StructDef`: `comptime_aliases[name] = eval_expr(...)`
-# — once, at struct-definition time, with no instance in hand), and the compiled
-# path read it through `gimple_codegen`'s `_struct_comptime_aliases`. NOTHING on
-# the formal path read it: `grep -rn comptime_aliases formal/` finds this comment
-# and nothing else, so a `comptime` class member was in no table here at all —
-# not the field census, not `struct_class_constants`, not the constant-substitution
-# rewrite. The consequence was measured and is a silent WRONG ANSWER, not a
-# refusal, because the receiver sweep below counts any name a method reaches as a
-# field: a one-word struct whose method reads `self.LIMIT` where `comptime LIMIT = 10`
-# measures ONE field, reads the slot nothing ever writes, and prints 0 where the
-# source says 10 (both architectures). See `struct_class_constants` for where the
-# names are classified, and `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`.
-#
-# The accessor, because the dict is read from the class-constant split, the
-# substitution's site census and a diagnostic, and three `getattr(…, None) or {}`
-# spellings of the same default is three places to keep in step.
-def struct_comptime_aliases(struct_def) -> dict:
-    """`{name: value node}` — the class body's `comptime NAME = expr` bindings.
-
-    In declaration order, which is the order the dict was built in and the order
-    a class body writes them in. Not a field list and not a constant list: what
-    a name in here IS — a class value, or per-instance state the program
-    overwrites — is decided by `_split_declaration`, which is the one place that
-    asks."""
-    return dict(getattr(struct_def, "comptime_aliases", None) or {})
-
-
 # The class-level assignment that DECLARES fields rather than making one, and
 # the two names a `__slots__` tuple may carry that are not storage at all
 # (Python adds them itself to a class that wants weak references or a
@@ -10655,6 +10613,27 @@ def _split_declaration(struct_def):
     return (fields, constants)
 
 
+
+# `comptime NAME = expr` in a struct body is a CLASS-SCOPE BINDING, and it is in
+# `StructDef.comptime_aliases` rather than in `StructDef.fields` — the parser puts
+# it there (`fire_compiler._parse_struct`, a `ComptimeVarStmt` is neither a
+# `VarDecl` nor an `AssignStmt`), the interpreter reads it when it builds the
+# class (`myinterpreter.execute_StructDef`: `comptime_aliases[name] = eval_expr(...)`
+# — once, at struct-definition time, with no instance in hand), and the compiled
+# path read it through `gimple_codegen`'s `_struct_comptime_aliases`. NOTHING on
+# the formal path read it: `grep -rn comptime_aliases formal/` finds this comment
+# and nothing else, so a `comptime` class member was in no table here at all —
+# not the field census, not `struct_class_constants`, not the constant-substitution
+# rewrite. The consequence was measured and is a silent WRONG ANSWER, not a
+# refusal, because the receiver sweep below counts any name a method reaches as a
+# field: a one-word struct whose method reads `self.LIMIT` where `comptime LIMIT = 10`
+# measures ONE field, reads the slot nothing ever writes, and prints 0 where the
+# source says 10 (both architectures). See `struct_class_constants` for where the
+# names are classified, and `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`.
+#
+# ONE reader: the dict is wanted by the class-constant split, the substitution's
+# site census and a diagnostic, and three `getattr(struct_def, …) or {}` spellings
+# of the same default are three places to keep in step.
 def struct_comptime_aliases(struct_def) -> dict:
     """The struct's `comptime NAME = …` bindings: `{name: value node}`.
 
@@ -11882,253 +11861,6 @@ def struct_field_declared_type(struct_def, name) -> tuple:
                 f"there is no single answer, and one of them would be a guess",
                 True)
     return (annotation_base_name(anns[0]), anns[0], None, True)
-
-
-# The second evidence source for a field's type, and the one that unblocks the
-# largest remaining group in the sweep: a class that ASSIGNS its fields in
-# `__init__` and declares none.  Both shapes are ordinary Python and both are
-# the whole field set (`struct_field_names` already counts the `self.<name>`
-# reads, which is why such a class measures as a multi-field framed struct at
-# all) — so the slot exists, the frame exists, and the only thing missing was
-# the name of the type in it.
-#
-# Why the assignment is EVIDENCE rather than a guess, and the answer is premise
-# (B2) rather than anything about `__init__`.  `S()` does not run `__init__` on
-# this path (`FRAME_FIELD_BLOB_PREMISE_B2`): every slot's value is the
-# constructor's, and for a typed-nested field the constructor's value is the
-# nested frame it PLACES.  So what `__init__` says about the field's type is not
-# a description of a store that happens — it is the only place the source NAMES
-# the type, and the type is all the decision needs.  That is also why a
-# conditional, repeated or `None`-defaulted assignment inside `__init__` is not a
-# problem here while it would be in any other inference: the value that matters
-# never comes from those lines.
-#
-# What it is NOT allowed to be is a type this module cannot lay out.  The
-# inference names a struct only when `decls` has it, so it can never turn an
-# unknown name into "provably a plain value" — `field_type_is_value`'s
-# dangerous direction — by accident.  A call to something else, a name, a
-# literal, an augmented assignment: all of them yield no evidence, which is the
-# absent answer, and the field stays refused with the disagreement spelled.
-def _init_field_assignments(struct_def) -> dict:
-    """`{field_name: [value_node, …]}` — what `__init__` assigns to each field.
-
-    `__init__` alone, every spelling of `self.<name> = …` it uses, and the
-    UNION of a field's assignments rather than the last one seen: unanimity is
-    decided by `struct_init_field_types`, and it can only be decided over all
-    of them.
-
-    Both assignment spellings matter and only one of them is a `MemberExpr`
-    target of a plain `AssignStmt`: `self.a, self.b = limit, [], 0` parses as an
-    `AssignStmt` whose TARGET is a `TupleExpr` of `MemberExpr`, so a scan
-    looking for `target: MemberExpr` reads a class as assigning nothing at all.
-    `MultiAssignStmt` (`a = b = v`) and a chained `self.a = self.b = v` come out
-    of the same `iter_nodes` walk for the same reason: a chained assignment is a
-    chain of `AssignStmt` nodes in this AST, so reading only the outermost one
-    would miss every target past the first.
-
-    An `AugAssignStmt` contributes the FIELD and no value: `self.n += 1` in
-    `__init__` says the slot is a counter and says nothing about its type.
-    """
-    out: dict = {}
-    for m in struct_methods(struct_def):
-        if m.name != "__init__":
-            continue
-        receivers = struct_receivers(struct_def)
-
-        def record(name, value):
-            out.setdefault(name, []).append(value)
-
-        def target_names(target):
-            """The field names one assignment target binds, or [] if none does.
-
-            A target is a field access only when its base is a receiver NAME, so
-            `self.x`, `(self.x, self.y)` and `self.x, = v` are fields and
-            `p[i]`, `a.b` and a bare local are not — the last of which is what
-            keeps `self.x = y` from claiming a field named `y`.
-            """
-            if isinstance(target, F.MemberExpr):
-                return ([target.member]
-                        if isinstance(target.obj, F.IdentExpr)
-                        and target.obj.name in receivers else [])
-            if isinstance(target, (F.TupleExpr, F.ListExpr)):
-                return [n for el in getattr(target, "elements", None) or []
-                        for n in target_names(el)]
-            return []
-
-        for node in iter_nodes(getattr(m, "body", None)):
-            if isinstance(node, (F.AssignStmt, F.MultiAssignStmt)):
-                targets = [node.target] if isinstance(
-                    node, F.AssignStmt) else list(node.targets or [])
-                for t in targets:
-                    names = target_names(t)
-                    if isinstance(t, (F.TupleExpr, F.ListExpr)):
-                        values = list(getattr(node.value, "elements", None) or [])
-                        if isinstance(node.value, (F.TupleExpr, F.ListExpr)) \
-                                and len(values) == len(names):
-                            # The tuple form pairs them positionally, which is
-                            # what the language guarantees; an arity that does
-                            # not match is a parse this does not understand, so
-                            # it contributes nothing rather than a guess.
-                            for n, v in zip(names, values):
-                                record(n, v)
-                        continue
-                    for n in names:
-                        record(n, node.value)
-    return out
-
-
-# The type NAME an assigned value provably has, for the rows the classifier can
-# settle.  A key that is absent is the untyped direction; the value is what
-# `struct_field_declared_type` hands back as the "annotation", which is why each
-# one is spelled as a bare identifier — a message quoting it reads as a type, and
-# `annotation_base_name` on it returns the same name.
-#
-# `int` and `str` are the PYTHON spellings, not this project's (`Int`,
-# `String`), and that is deliberate in both directions.  These names are only
-# ever consumed to answer "is this a FRAME of this unit", where "the name is not
-# a struct this unit declares" IS the answer — so the spelling must be one that
-# CANNOT name a struct of this unit, which is what
-# `init_literal_type_names_are_not_structs` below enforces.  Spelling it `Int`
-# instead would make it a lookup that could HIT a struct of this module named
-# `Int`, which is a different claim about the same source text.
-_INIT_ASSIGNED_BASE_NAMES = {
-    F.ListExpr: "list", F.TupleExpr: "tuple", F.SetExpr: "set",
-    F.DictExpr: "dict", F.StringLiteral: "str", F.IntLiteral: "int",
-    F.FloatLiteral: "float", F.BoolLiteral: "bool",
-}
-
-
-# The names `_INIT_ASSIGNED_BASE_NAMES` spells a LITERAL with, and the reason
-# they are looked up in `structs_declared` rather than in the struct table.
-#
-# `self.x = []` says the slot holds a list, and a list on this path is a
-# frame-allocated blob, never a frame address — so the answer for a literal is
-# decided without consulting a struct table at all.  It has to be, because the
-# spelling is a PYTHON builtin name and a module is free to declare a struct
-# called `list`: without this guard, a `struct list` anywhere in the unit would
-# turn every `self.x = []` in it into "a nested frame", and the constructor would
-# place a frame in a slot that holds a blob.  That is the silently-wrong
-# direction, and the guard is the whole of it.
-#
-# The Mojo spellings (`List`, `Int`, `String`, …) are deliberately NOT here:
-# they are ordinary type names that a struct of this unit may well be called,
-# and `decls.get("List")` answering is then CORRECT.  Measured over this
-# repository and `../modular/mojo/stdlib/std` (714 structs): zero structs named
-# after any name in this set, so this is a guard and not a compatibility shim.
-_INIT_LITERAL_TYPE_NAMES = frozenset(_INIT_ASSIGNED_BASE_NAMES.values())
-
-
-def structs_declared(base, decls: dict):
-    """`decls`'s StructDef for a type name, or None — refusing a builtin name.
-
-    The ONE lookup every "is this a frame of this unit" question makes, and the
-    reason it is a function rather than `decls.get` at each site: a type name
-    that is a Python builtin cannot be a struct of this unit on this path, so
-    the lookup must return None for it even if a module declared something by
-    that name.  `init_literal_type_names_are_not_structs` says why, and
-    `assigned_value_base_name` is the only producer of such a name.
-    """
-    if not isinstance(base, str) or base in _INIT_LITERAL_TYPE_NAMES:
-        return None
-    return (decls or {}).get(base)
-
-
-def assigned_value_base_name(value, decls: dict = None):
-    """The type NAME an assigned value provably holds, or None.
-
-    The classifier the second evidence source is built on, and its `None` is the
-    answer for anything the source does not settle — see the note above for the
-    cases and for why each omission is the safe direction.
-
-    `decls` is `{name: StructDef}` for the structs THIS MODULE DECLARES, and it
-    is what makes the CONSTRUCTOR row conditional.  `self.x = Inner()` says the
-    slot holds an `Inner`, and if `Inner` is one of this unit's framed structs
-    that is a nested frame the constructor places; `self.x = make()` says the
-    slot holds whatever `make` RETURNS, which is not a type at all and could be
-    an `Inner`, a list, or an int.  Confusing the two is the mistake this
-    parameter exists to prevent, and it is not a small one: a bare `make` read as
-    "a type that is not a struct of this unit" answers the frame question
-    "provably not a frame" about a slot that may well hold one.
-
-    So WITHOUT `decls` the constructor row contributes nothing.  That is the safe
-    direction, and it is the same one the whole rule is arranged around: an
-    absent answer removes a name from the typed set, and a name that is not in the
-    typed set can neither place a frame nor suppress a frame diagnostic.
-    """
-    kind = _INIT_ASSIGNED_BASE_NAMES.get(type(value))
-    if kind is not None:
-        # `type()` rather than `isinstance` because `BoolLiteral` and
-        # `IntLiteral` are separate dataclasses and a subclass that changed its
-        # meaning would silently take the wrong row.
-        return kind
-    if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
-        # A subscripted callee is not reached here (`value.func` is an
-        # `IdentExpr`), so `Pointer[Int]()` and `Int(x)` stay apart.
-        name = value.func.name
-        if decls is None or not name.isidentifier():
-            return None
-        return name if structs_declared(name, decls) is not None else None
-    if isinstance(value, F.IdentExpr) and value.name == "None":
-        return "None"
-    return None
-
-
-def struct_init_field_types(struct_def, decls: dict = None) -> dict:
-    """`{field_name: (base, spelling)}` — the type `__init__`'s assignments AGREE on.
-
-    Unanimity or nothing, exactly as `ValueKinds._bind` binds a local name:
-    every assignment of a field has to classify, and they have to classify the
-    same way.  One that does not (`self.x = argv if argv else []`), or one that
-    classifies to nothing (`self.x = make()`, without `decls`), or two that
-    classify differently (`self.x = Scope()` and `self.x = None`) leave the field
-    out of the answer — which is what puts it back on `_NOT_TYPED` and on
-    today's refusal.
-
-    Every field assigned NOTHING at all is left out too, so this is a map of the
-    fields `__init__` says something about rather than a census of them.  The
-    class-level default, the annotation and the field SET are the other three
-    sources and each of them is somebody else's function.
-
-    `decls` is `assigned_value_base_name`'s and its absence is why a
-    constructor-only field is untyped for a caller that cannot supply it.
-    """
-    out = {}
-    for name, values in _init_field_assignments(struct_def).items():
-        bases = {assigned_value_base_name(v, decls) for v in values}
-        if len(bases) != 1:
-            continue
-        base = bases.pop()
-        if base is None:
-            continue
-        out[name] = (base, base)
-    return out
-
-
-def struct_init_field_type_why(struct_def, name, decls: dict = None) -> str:
-    """Why `__init__` said nothing classifiable about `name` — for a refusal.
-
-    The negative half of `struct_init_field_types`, and it exists because a
-    refusal that says "no evidence" sends the reader looking for evidence the
-    tool cannot read.  It says which of the three shapes it is: never assigned,
-    assigned something this classifier cannot reduce to a type, or assigned two
-    different things.
-    """
-    values = _init_field_assignments(struct_def).get(name)
-    if not values:
-        return ("__init__ does not assign it at all, so the only things naming "
-                "it are __slots__ or another method's read of it")
-    bases = [assigned_value_base_name(v, decls) for v in values]
-    named = {b for b in bases if b is not None}
-    if not named:
-        return ("__init__ assigns it values this path cannot reduce to a type "
-                "— a name, a member, a ternary, a comprehension, or a call to "
-                "a function this module does not declare as a type — so there "
-                "is no type to read")
-    if len(named) > 1:
-        return (f"__init__ assigns it {len(bases)} different types "
-                f"({', '.join(sorted(named))}), so there is no single answer")
-    return (f"__init__ assigns it a type this path cannot classify "
-            f"({bases[0]!r}), alongside an assignment it can")
 
 
 def struct_field_assigned_type(struct_def, name, decls: dict) -> tuple:
