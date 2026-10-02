@@ -693,6 +693,161 @@ CASES = [
      "    return take(make_q(7))\n",
      None, None, None,
      "passes a Q frame from make_q()"),
+
+    # ── a `@staticmethod` gets NO receiver, on either side of a call ──────────
+    #
+    # `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md`. Two
+    # readers in `formal/build.py` consulted only the parameter list and between
+    # them gave a `@staticmethod` a receiver on BOTH sides: the definition was
+    # compiled as if it took one, and the call site passed one, for a function
+    # whose parameter list has neither. The two call sites disagreed visibly —
+    # `R__single(self, counter)` is two arguments to a one-parameter function —
+    # and the arity check caught it, so this was never a wrong answer. What it
+    # cost was a refusal reported against the WRONG argument, since position 0
+    # of the call was the receiver the definition read as its first parameter.
+    #
+    # Both spellings are here because `_rewrite_method_calls` lifts
+    # `recv.m(a)` to `Struct_m(recv, a)` and drops the receiver for a name in
+    # `receiverless`, and the two sides of the bug were in two DIFFERENT
+    # readers: `_receiverless_methods` decided whether to pass one, and the
+    # holder fixpoint decided what the callee's `self` was bound to. A fix to
+    # only one of them still builds a two-argument call or still compiles a
+    # receiver the call never supplies, and each of those fails differently.
+    #
+    # The oracles are transcriptions, so a case cannot pass by agreeing with a
+    # wrong expectation: `staticmethod` is spelled `@staticmethod` on the class
+    # and is a plain function at module scope in the transcription.
+    ("staticmethod_called_on_the_class_takes_no_receiver",
+     "struct K:\n"
+     "    var a: Int\n"
+     "\n"
+     "    @staticmethod\n"
+     "    def twice(x: Int) -> Int:\n"
+     "        return x + x\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var k = K()\n"
+     "    k.a = 20\n"
+     "    return K.twice(k.a)\n",
+     "class K:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "    @staticmethod\n"
+     "    def twice(x):\n"
+     "        return x + x\n"
+     "k = K()\n"
+     "k.a = 20\n"
+     "raise SystemExit(K.twice(k.a))\n",
+     40, None, None),
+    ("staticmethod_called_through_an_instance_takes_no_receiver",
+     "struct K:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return K.twice(self.a)\n"
+     "\n"
+     "    @staticmethod\n"
+     "    def twice(x: Int) -> Int:\n"
+     "        return x + x\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var k = K()\n"
+     "    k.a = 20\n"
+     "    return k.get()\n",
+     "class K:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "    def get(self):\n"
+     "        return K.twice(self.a)\n"
+     "    @staticmethod\n"
+     "    def twice(x):\n"
+     "        return x + x\n"
+     "k = K()\n"
+     "k.a = 20\n"
+     "raise SystemExit(k.get())\n",
+     40, None, None),
+    # A `@staticmethod` AND an instance method on one class, called both ways,
+    # which is the pairing that makes each reader's half visible: with the
+    # holder fixpoint unfixed the instance method's `self` is right and the
+    # staticmethod's is a phantom, and with `_receiverless_methods` unfixed the
+    # staticmethod's call gains an argument. A fix that dropped receivers for
+    # EVERY method would pass both of the cases above and fail this one, which
+    # is why it is here rather than being redundant.
+    ("an_instance_method_still_gets_its_receiver",
+     "struct K:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a + 1\n"
+     "\n"
+     "    @staticmethod\n"
+     "    def twice(x: Int) -> Int:\n"
+     "        return x + x\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var k = K()\n"
+     "    k.a = 20\n"
+     "    return k.get() + K.twice(3)\n",
+     "class K:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "    def get(self):\n"
+     "        return self.a + 1\n"
+     "    @staticmethod\n"
+     "    def twice(x):\n"
+     "        return x + x\n"
+     "k = K()\n"
+     "k.a = 20\n"
+     "raise SystemExit(k.get() + K.twice(3))\n",
+     27, None, None),
+    # A `@staticmethod` on a struct of MORE THAN ONE FIELD, which is the shape
+    # the filing's reproducer has and the one that reached the filed refusal
+    # text. `counter.a` in the body is a load at `base + 8k` off a frame the
+    # function does not have, so the parameter's DECLARED type is what has to be
+    # believed — which is this file's subject, and the reason the staticmethod
+    # cases live here rather than in a receiver-position file. Kept at two
+    # fields and a scalar parameter on purpose: the filing's `Vec` reproducer
+    # needs a NESTED frame placed, which is a separate construct
+    # (`formal/model.py`'s `struct_nested_frame_fields` wants a plain struct
+    # name and the field is spelled `SIMD[.uint32, 4]`), so pinning THAT here
+    # would be asserting a fix nobody made.
+    ("staticmethod_on_a_multifield_struct_body_reads_its_parameter",
+     "struct Vec:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct K:\n"
+     "    var v: Vec\n"
+     "    var n: Int\n"
+     "\n"
+     "    @staticmethod\n"
+     "    def add(x: Int, y: Int) -> Int:\n"
+     "        return x + y\n"
+     "\n"
+     "    def total(self) -> Int:\n"
+     "        return K.add(self.n, 1)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var k = K()\n"
+     "    k.n = 41\n"
+     "    return k.total()\n",
+     "class Vec:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "class K:\n"
+     "    def __init__(self):\n"
+     "        self.v = Vec()\n"
+     "        self.n = 0\n"
+     "    @staticmethod\n"
+     "    def add(x, y):\n"
+     "        return x + y\n"
+     "    def total(self):\n"
+     "        return K.add(self.n, 1)\n"
+     "k = K()\n"
+     "k.n = 41\n"
+     "raise SystemExit(k.total())\n",
+     42, None, None),
 ]
 
 
