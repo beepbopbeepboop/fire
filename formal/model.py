@@ -255,12 +255,35 @@ MLIR_DIALECT_PREFIX = "__mlir_"
 # dialect itself — a store has no result, a trap never returns, an ownership
 # marker asserts something about a reference — so "no representation in a 64-bit
 # word" is TRUE of them and the reader is not sent to rewrite anything.
+#
+# MEMBERSHIP IS MEASURED, not assumed: these 15 are the operations the stdlib
+# corpus uses as a STANDALONE statement at EVERY one of their sites (joining
+# continuation lines so a multi-line call is classified on the statement it
+# belongs to), which is the strongest statement a corpus can make about an
+# operation — every call site discards it. Two entries are there on the same
+# evidence rather than on judgement: `kgen.param.assert` and `lit.materialize_into`
+# each appear once as a statement whose result nothing reads.
+#
+# An operation NOT in this table is not thereby an effect: `pop.atomic.rmw` reads
+# `var res = __mlir_op.`pop.atomic.rmw`[…]` in `std/atomic/atomic.mojo:326` and
+# returns the old value, so it is a value-denoting operation and belongs with the
+# unclassified remainder rather than here. That distinction is the reason the
+# class is a set of names and not a pattern over the prefix.
 MLIR_EFFECT_OPS = frozenset((
-    "llvm.intr.trap", "llvm.intr.debugtrap",
-    "lit.ownership.mark_initialized",
-    "pop.store", "pop.global_alloc", "pop.aligned_free",
+    # ownership / lifetime markers: assert something about a reference
+    "lit.ownership.mark_initialized", "lit.ownership.mark_destroyed",
+    # traps: never return
+    "llvm.intr.trap", "llvm.intr.debugtrap", "kgen.param.assert",
+    # memory effects: a store and a free have no result
+    "pop.store", "pop.fence", "pop.aligned_free", "pop.global_alloc",
     "pop.stack_allocation",
+    # coroutine steps
     "co.destroy", "co.await", "co.set_byref_error_result",
+    "co.suspend", "co.suspend.end",
+    # codegen bookkeeping and inline assembly: both are statements about the
+    # BUILD, not computations in the image
+    "kgen.codegen.reachable", "lit.materialize_into", "pop.inline_asm",
+    "rocdl.raw.ptr.buffer.load.lds",
 ))
 
 # ELEMENTWISE arithmetic: one operation applied to every element of its operand.
@@ -276,6 +299,59 @@ MLIR_ELEMENTWISE_OPS = frozenset((
     "index.add", "index.sub", "index.mul", "index.divs", "index.shrs",
     "index.and",
 ))
+
+# An operation whose result TYPE is written in its own bracket, as `_type=` or as
+# a variant with no `_type=`. The missing fact is the same one for all of them and
+# it is a TYPE rather than a value, which is why they are a class of their own and
+# not a row each: `__mlir_type.…` and `__mlir_attr.`#pop.bin_op<add>`` inside the
+# bracket are dialect objects, and this path's only value is a 64-bit word.
+#
+# MEMBERSHIP IS MEASURED: these are the operations that, at EVERY site in the
+# stdlib corpus, carry such a bracket — `_type=`, `pred=`, `bin_op=`, `mask=`,
+# `weak=`, `intrin=`, a `variant` discriminant, or a `kgen.struct` index. 31
+# operations over 71 of the 259 sites. That is a property of the SOURCE SPELLING
+# rather than of this path, which is what makes it safe to key on the name: the
+# same spelling appears at every site, so a reader can find the bracket.
+MLIR_TYPED_RESULT_OPS = frozenset((
+    # casts and conversions: the result type IS the operation
+    "pop.cast", "pop.cast_to_builtin", "pop.cast_from_builtin",
+    "builtin.unrealized_conversion_cast", "pop.simd.splat",
+    "llvm.mlir.undef", "kgen.rebind",
+    # bitcasts: width and element type from the bracket
+    "pop.pointer.bitcast", "pop.bitcast", "pop.union.bitcast",
+    "pop.variant.bitcast", "lit.ref.from_pointer",
+    "pop.pointer_to_index", "lit.ref.to_pointer", "lit.ref.pack.from_pointer_pack",
+    # comparisons: a predicate, as `pop.cmp` is above but a second dialect's
+    "index.cmp",
+    # aggregates: an index, a mask or a discriminant, not a type alone
+    "kgen.struct.extract", "kgen.struct.replace", "kgen.struct.gep",
+    "kgen.variant.create", "kgen.variant.get", "kgen.variant.is",
+    "kgen.variant.discr_gep", "lit.ref.pack.extract",
+    "pop.array.get", "pop.array.repeat", "pop.array.replace",
+    "pop.simd.shuffle",
+    # atomics: the bin_op and the ordering are dialect attributes
+    "pop.atomic.rmw", "pop.atomic.cmpxchg",
+    # calls whose signature is a dialect type
+    "pop.external_call", "pop.call_llvm_intrinsic", "pop.global_alloc",
+    "pop.stack_allocation", "pop.aligned_alloc",
+    "co.get_callback_ptr", "co.get_results", "co.resume",
+    # bookkeeping with a type in its bracket
+    "kgen.source_loc", "kgen.compile_offload",
+))
+
+# A VECTOR operation: its operand is `!kgen.simd<LENGTH, DTYPE>` and its result
+# is N lanes, not a word. Decided by the `pop.simd.` prefix — a structural fact
+# of the operation's NAME rather than of any particular site's types, which is
+# what makes it safe to key on and what `MLIR_ELEMENTWISE_OPS` above deliberately
+# does NOT do for `pop.add` (that one is scalar or vector depending on its
+# operand, and the corpus has both).
+#
+# `reduce_and` / `reduce_or` are here rather than in the elementwise table
+# because they are the opposite direction: they take N lanes and produce ONE
+# scalar, so the operand is a vector and the result is a word — still not
+# answerable here, because reading N lanes needs the vector this path does not
+# hold, but a different fact from an elementwise widen.
+MLIR_VECTOR_OPS_PREFIX = "pop.simd."
 
 # An operation whose value could be a word but which needs a FACT this path does
 # not have, named per operation because each needs a DIFFERENT missing thing and
@@ -303,23 +379,46 @@ MLIR_UNGUARDED_OPS = {
                    "`MLIR_BOOL_METHODS` already names"),
     "pop.load": ("its width is its POINTEE's, and nothing here states a pointee "
                  "type for this receiver"),
-    "pop.pointer.bitcast": ("its width is its pointee's, and nothing here "
-                            "states a pointee type for this receiver"),
-    "pop.bitcast": ("its width and element type come from the `_type=` in its "
-                    "bracket, which is a dialect type rather than a value"),
     "pop.offset": ("it is POINTER arithmetic, so its scale is the pointee's "
                    "width and nothing here states one"),
-    "pop.external_call": ("its result type and its calling convention come from "
-                          "a dialect type this path does not have"),
-    "pop.inline_asm": ("it is INLINE ASSEMBLY, whose text and constraints are "
-                        "dialect attributes rather than values, and this path "
-                        "has no assembler to run them through"),
-    "pop.cast": ("its result type is the `_type=` in its bracket, which is a "
-                 "dialect type rather than a value"),
-    "pop.cast_to_builtin": ("its result type is the `_type=` in its bracket, "
-                            "which is a dialect type rather than a value"),
-    "pop.cast_from_builtin": ("its source type is the `_type=` in its bracket, "
-                              "which is a dialect type rather than a value"),
+    "pop.array.gep": ("it is a GEP into an aggregate, so the element width and "
+                      "the index scale are the aggregate's and nothing here "
+                      "states them"),
+    "pop.variant.discr_gep": ("it is a GEP onto a VARIANT's discriminant, so "
+                              "the offset and the width are the variant's "
+                              "layout and nothing here states either"),
+    "pop.string.size": ("its receiver is a dialect STRING object rather than a "
+                        "value this path holds, and a string's length is a "
+                        "property of the buffer that object points at, not of "
+                        "the word the reference is"),
+    "pop.string.address": ("its result is the ADDRESS of a dialect string "
+                           "object's buffer, which is a fact about a container "
+                           "this path does not build rather than about a word"),
+    "kgen.struct.load_indirect": ("it reads a struct out of a dialect VALUE PACK, "
+                                  "whose layout is a dialect type rather than a "
+                                  "word"),
+    "lit.ref.struct.ger": ("it reads a struct field out of a dialect "
+                           "REFERENCE, which is a compiler-internal object this "
+                           "path does not hold"),
+    "pop.dtype.to_ui8": ("it reads a dtype's encoding, which is a dialect dtype "
+                         "object rather than the value this path represents"),
+    "pop.dtype.from_ui8": ("it reads a dtype's encoding, which is a dialect "
+                           "dtype object rather than the value this path "
+                           "represents"),
+    "pop.noalias_pointer_cast": ("its result's provenance is a compiler-level "
+                                 "`noalias` fact about a pointer's users, which "
+                                 "no word records"),
+    "pop.global_constant": ("its value is the linker-resolved content of a "
+                            "symbol, and this path compiles each module to its "
+                            "own image rather than linking one against another"),
+    # The version triple: a dialect attribute with no representation, read at
+    # build time by the compiler that HAS MLIR and by nothing else.
+    "lit.mojo.version.major": ("the Mojo version is a compiler-build attribute, "
+                               "not a value any image holds"),
+    "lit.mojo.version.minor": ("the Mojo version is a compiler-build attribute, "
+                               "not a value any image holds"),
+    "lit.mojo.version.patch": ("the Mojo version is a compiler-build attribute, "
+                               "not a value any image holds"),
 }
 
 
@@ -382,6 +481,17 @@ def mlir_dialect_op_refusal(op: str) -> str:
             f"nameable and its operands are values, so what is missing is the "
             f"fact its result depends on — not a representation of the result"
         )
+    if op in MLIR_TYPED_RESULT_OPS:
+        return (
+            f"`{op}` is a dialect OPERATION whose RESULT TYPE is written in its "
+            f"own bracket — as `_type=`, or as a predicate, bin_op, mask, "
+            f"ordering or discriminant beside it — and that bracket holds a "
+            f"DIALECT object (`__mlir_type.…`, `__mlir_attr.`#kgen.…``) rather "
+            f"than a value. This path's only value is a 64-bit word, so the "
+            f"result's width and element type are a fact it has no source for. "
+            f"A deliberate deferral, not an impossibility: read the bracket at "
+            f"the use site instead"
+        )
     if op in MLIR_ELEMENTWISE_OPS:
         return (
             f"`{op}` is a dialect OPERATION applied ELEMENTWISE, so whether it "
@@ -393,6 +503,16 @@ def mlir_dialect_op_refusal(op: str) -> str:
             f"lanes, which is not a word at all. This path has no lowering "
             f"table that establishes the operand type, which is the missing "
             f"piece. A deliberate deferral, not an impossibility"
+        )
+    if op.startswith(MLIR_VECTOR_OPS_PREFIX):
+        return (
+            f"`{op}` is a dialect OPERATION over a VECTOR — its operand is "
+            f"`!kgen.simd<LENGTH, DTYPE>` and its result is N lanes, where this "
+            f"path's only value is one 64-bit word, so the element width and "
+            f"the lane count are a fact it has no source for. A deliberate "
+            f"deferral, not an impossibility: the operation is nameable and its "
+            f"operands are values, so what is missing is a representation of "
+            f"the vector, not of a word"
         )
     return (
         f"`{op}` is a dialect OPERATION, and this path has no lowering table "

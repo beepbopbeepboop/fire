@@ -674,6 +674,30 @@ own class's words on both backends and the ABSENCE of another class's.
 disagree about what an operation denotes; a per-emitter copy of them is the one
 way to make them, and there is none.
 
+The classification covers **all 259 sites over 104 operations**, with none left
+on the generic fallback, and `test_formal_mlir_precedence.py`'s
+`the_classification_covers_the_whole_corpus` re-measures that on every run —
+reading the class off the MESSAGE rather than off the tables, so a branch that
+exists but is unreachable fails. Measured:
+
+    113  typed-result   the RESULT TYPE is in the bracket (_type=, pred=, bin_op=,
+                         mask=, ordering=, a variant discriminant)
+     75  effect         no value at all — a store, a trap, an ownership marker
+     34  unguarded      a named fact this path lacks (a predicate, a pointee
+                         width, a BOOL kind, a GEP scale, the Mojo version)
+     24  elementwise    arithmetic whose word-or-vector answer is the OPERAND's
+     13  vector         over !kgen.simd<N, D> — N lanes, never a word
+
+Three of those classes have a MEMBERSHIP RULE that is measured rather than
+assembled by judgement, which is what keeps the tables from being a pile of
+opinions: **effect** is the 15 operations the corpus uses as a standalone
+statement at every one of their sites (and an operation absent from it is not
+thereby an effect — `pop.atomic.rmw` is read into `var res =` at
+`std/atomic/atomic.mojo:326`); **typed-result** is the 31 operations carrying a
+`_type=`/`pred=`/`bin_op=`/discriminant bracket at every site, a property of the
+spelling; **vector** is the `pop.simd.` prefix, which is structural in the name
+and is why `pop.add` is deliberately not in it.
+
 Two further corrections to the sweep row, both measured the same way and both in
 the census doc:
 

@@ -212,6 +212,43 @@ operation it reports that whether the result is a word or an N-lane vector "is a
 fact about its OPERANDS' type and not about the operation's name", and names the
 operand type as the missing piece. It does not claim these denote words.
 
+## The classification that landed, over all 259 sites
+
+`mlir_dialect_op_refusal` classifies **every one** of the 259 sites, which is a
+census rather than a handful of hand-picked rows — and `test_formal_mlir_precedence.py`'s
+`the_classification_covers_the_whole_corpus` re-measures it, reading the class off
+the MESSAGE rather than off the tables so a branch that exists but is unreachable
+fails. Measured:
+
+    259 sites over 104 operations, 0 reaching the fallback
+      113  typed-result   the RESULT TYPE is in the bracket (_type=, pred=,
+                         bin_op=, mask=, ordering=, a variant discriminant)
+       75  effect         no value at all — a store, a trap, an ownership
+                         marker, a free, a coroutine step, inline assembly
+       34  unguarded      a named fact this path lacks: a predicate, a pointee
+                         width, a BOOL kind, a GEP scale, the Mojo version
+       24  elementwise    arithmetic whose word-or-vector answer is the
+                         OPERAND's type (the 38-site question above)
+       13  vector         over !kgen.simd<N, D> — N lanes, never a word
+
+Three of these classes have a MEMBERSHIP RULE that is measured rather than
+assembled by judgement, and that is what stops the tables being a pile of
+opinions:
+
+  * **effect** — the 15 operations the corpus uses as a STANDALONE statement at
+    EVERY one of their sites (continuation lines joined first, so a multi-line
+    call is classified on the statement it belongs to). "Every call site discards
+    it" is the strongest statement a corpus can make about an operation. And an
+    operation absent from the set is not thereby an effect: `pop.atomic.rmw` is
+    read as `var res = __mlir_op.`pop.atomic.rmw`[…]` at
+    `std/atomic/atomic.mojo:326` and returns the old value.
+  * **typed-result** — the 31 operations carrying `_type=`/`pred=`/`bin_op=`/
+    `mask=`/a discriminant at every site. A property of the SPELLING, so it is
+    safe to key on the name: the reader can go and look at the bracket.
+  * **vector** — the `pop.simd.` prefix, which is structural in the name rather
+    than per-site, and is why `pop.add` is deliberately NOT here: the corpus has
+    it both ways depending on the operand.
+
 ## What is actually WRONG here, stated narrowly
 
 **Not the refusal.** It refuses, it does not fabricate a word, and that is the

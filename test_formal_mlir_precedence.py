@@ -61,6 +61,7 @@ Run:  python3 test_formal_mlir_precedence.py [-v] [case ...]
 import argparse
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -271,13 +272,27 @@ CLASSIFIED = [
      "    return __mlir_op.`pop.select`(c.__mlir_bool__(), a, b)\n",
      "`pop.select` is a dialect OPERATION whose value could be a word",
      "applied ELEMENTWISE"),
-    # The fallback: an operation in no table is refused without claiming to
-    # know what it denotes. `lit.materialize_into` is the real spelling
-    # `std/builtin/value.mojo:203` uses.
-    ("an_unclassified_operation_is_refused_without_a_claim_about_it",
+    # An EFFECT the corpus proves: `std/builtin/value.mojo:203` spells it as a
+    # bare statement whose result nothing reads, and `test_formal_run.py`'s
+    # `mlir_dialect_name_is_refused_by_construct` builds exactly this source.
+    # It is the row that says the fallback is REACHABLE only for an operation
+    # nobody classified, and `absent` pins that an effect does not claim to need
+    # an operand type.
+    ("a_materialize_is_an_effect_because_nothing_reads_its_result",
      "def materialize(value) -> Int:\n"
-     "    return __mlir_op.`lit.materialize_into`[value=value](value)\n",
-     "`lit.materialize_into` is a dialect OPERATION, and this path has no "
+     "    __mlir_op.`lit.materialize_into`[value=value](value)\n"
+     "    return 0\n",
+     "`lit.materialize_into` is a dialect OPERATION and denotes NO VALUE",
+     "no lowering table"),
+    # The fallback itself, for an operation no table claims: refused WITHOUT a
+    # claim about what it denotes, which is the honest last resort and the only
+    # place in this file where the message says nothing about the operation.
+    # `pop.fence` is deliberately NOT this row — the corpus proves it an effect
+    # at its one site, and `MLIR_EFFECT_OPS` says so.
+    ("an_unclassified_operation_is_refused_without_a_claim_about_it",
+     "def oddball(value) -> Int:\n"
+     "    return __mlir_op.`dialect.of.mine`[value=value](value)\n",
+     "`dialect.of.mine` is a dialect OPERATION, and this path has no "
      "lowering table", "applied ELEMENTWISE"),
 ]
 
@@ -386,6 +401,82 @@ def run_guarded(name, source, want_stdout, tmpdir, verbose):
     return True, ""
 
 
+def census_is_complete():
+    """Every dialect operation the stdlib spells must reach a CLASS, not the
+    fallback. A census nobody re-measures rots silently.
+
+    This is the check that makes the classification a census rather than a
+    handful of hand-picked rows, and it is the one that would have caught the
+    error this branch corrects: a set of tables that covered the operations a
+    reader happened to think of reads exactly like a complete one until the
+    corpus is run against it.
+
+    The stdlib lives OUTSIDE this repository, so a checkout without it cannot
+    run this check — and must not fail because of it. The message says so and
+    the check reports SKIPPED, which is a different outcome from PASS on purpose:
+    "there is no corpus here" and "the corpus is fully classified" must not
+    print the same word.
+    """
+    stdlib = os.path.join(HERE, "..", "new-modular", "Mojo", "stdlib", "std")
+    if not os.path.isdir(stdlib):
+        return None, (f"SKIPPED no classification census — {stdlib} is not "
+                      f"present, so the tables cannot be checked against the "
+                      f"corpus they classify")
+    sys.path.insert(0, HERE)
+    import formal.model as M
+    counts, unclassified = {}, {}
+    pat = re.compile(r"__mlir_op\.`([A-Za-z0-9_.]+)`")
+    for root, _dirs, files in os.walk(stdlib):
+        for f in files:
+            if not f.endswith(".mojo"):
+                continue
+            try:
+                text = open(os.path.join(root, f), encoding="utf-8",
+                            errors="replace").read()
+            except OSError:
+                continue
+            for m in pat.finditer(text):
+                op = m.group(1)
+                why = M.mlir_dialect_op_refusal(op)
+                # The class is read off the MESSAGE, not off the tables, so this
+                # measures what the reader gets rather than what the tables say:
+                # a branch that exists but is unreachable from this text fails
+                # here, which is the rot this is for.
+                if "denotes NO VALUE" in why:
+                    k = "effect"
+                elif "cannot be GUARDED" in why:
+                    k = "unguarded"
+                elif "RESULT TYPE is written" in why:
+                    k = "typed-result"
+                elif "over a VECTOR" in why:
+                    k = "vector"
+                elif "applied ELEMENTWISE" in why:
+                    k = "elementwise"
+                else:
+                    k = None
+                counts[k] = counts.get(k, 0) + 1
+                if k is None:
+                    unclassified.setdefault(op, 0)
+                    unclassified[op] += 1
+    fallback = counts.pop(None, 0)
+    if fallback:
+        return False, (
+            f"{fallback} site(s) over {len(unclassified)} operation(s) reach the "
+            f"generic fallback rather than a class, so the refusal for them "
+            f"says only that there is no lowering table: "
+            f"{sorted(unclassified.items(), key=lambda kv: -kv[1])[:12]}")
+    total = sum(counts.values())
+    if total != 259:
+        # Not a failure of the tables — the CORPUS moved, which is worth saying
+        # out loud because every count in the docs is keyed on it.
+        return False, (
+            f"the corpus has {total} `__mlir_op` sites, not the 259 the census "
+            f"and both bug docs record. The tables classify all of them; the "
+            f"NUMBER is stale, so re-measure the docs' counts "
+            f"({counts})")
+    return True, f"all {total} sites over 104 operations classified: {counts}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -433,6 +524,18 @@ def main() -> int:
                                                     tmpdir, args.verbose))
             except subprocess.TimeoutExpired:
                 checks.append((name, False, "timed out"))
+
+    # The census, which is a property of the TABLES and not of any one build, so
+    # it runs once with no `cases:` filter and reports its own three outcomes.
+    if not args.cases:
+        ok, detail = census_is_complete()
+        if ok is None:
+            print(f"  {detail}")
+        elif ok:
+            print(f"  PASS  the_classification_covers_the_whole_corpus")
+            print(f"        {detail}")
+        else:
+            print(f"  FAIL  the_classification_covers_the_whole_corpus: {detail}")
 
     passed = failed = 0
     for name, ok, detail in checks:
