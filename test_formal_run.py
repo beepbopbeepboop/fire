@@ -8176,6 +8176,71 @@ WAVE7_G2_CASES = [
      "def main(k: Int) -> Int:\n"
      "    return f(0) * 1000 / 10 + f(7) * 100 / 10 + f(9) * 10 / 10 + f(100) / 100\n",
      123, None),
+    # ── a module-level literal as `memset`'s BYTE argument ──
+    #
+    # `bugs/FORMAL_folded_module_constant_as_memset_argument.md`. A module-level
+    # name whose value the build FOLDS is substituted at every read BEFORE any
+    # emitter runs (`build._substitute_module_constants`), so it never needs a
+    # register, a spill slot or a `__DATA` slot of its own. That is what makes
+    # this row build, and it is worth stating because the failure it replaced
+    # was not a narrow one: `memset(pat + i, PAT_DASH, 1)` was REFUSED with
+    # "'PAT_DASH' has no home: the register allocator collected no home for
+    # it", and the refusal named whichever constant the allocator ran out of
+    # room for, so it tracked the NUMBER of folded constants in a module and
+    # read as a property of whichever one lost the race. `argparse.mojo` worked
+    # around it by spelling every such byte inline.
+    #
+    # The answer is checked through `memcmp` rather than through a subscript: a
+    # `malloc`'d buffer has no count field, so `buf[i]` is a different question
+    # and this case is not about it. Both must be 0 (equal), and the control
+    # below is a differing byte, so a `memcmp` that compares nothing cannot pass
+    # this row.
+    ("folded_module_constant_as_a_memset_byte",
+     "PAT_DASH = 45\n"
+     "PAT_A = 65\n"
+     "\n"
+     "def fill(pat, n):\n"
+     "    var i: Int = 0\n"
+     "    while i < n:\n"
+     "        memset(pat + i, PAT_DASH, 1)\n"
+     "        i = i + 1\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var got = malloc(64)\n"
+     "    var want = malloc(64)\n"
+     "    memset(want, PAT_DASH, 4)\n"
+     "    fill(got, 4)\n"
+     "    var same = memcmp(got, want, 4)\n"
+     "    memset(got, PAT_A, 2)\n"
+     "    memset(want, PAT_A, 2)\n"
+     "    var same2 = memcmp(got, want, 2)\n"
+     "    return same * 10 + same2\n",
+     0, None),
+    # GUARD for the row above, and it is what makes that row mean something: the
+    # SAME two programs with the constant spelled inline is the behaviour that
+    # was always correct, so if the folded spelling were silently substituting
+    # the wrong value this would still pass while the row above failed. `1` is a
+    # DIFFERENCE, so it can only be produced by a comparison that really looked.
+    ("memset_byte_spelled_inline_is_unchanged",
+     "def fill(pat, n):\n"
+     "    var i: Int = 0\n"
+     "    while i < n:\n"
+     "        memset(pat + i, 45, 1)\n"
+     "        i = i + 1\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var got = malloc(64)\n"
+     "    var want = malloc(64)\n"
+     "    memset(want, 45, 4)\n"
+     "    fill(got, 4)\n"
+     "    var same = memcmp(got, want, 4)\n"
+     "    memset(got, 65, 2)\n"
+     "    memset(want, 65, 2)\n"
+     "    var same2 = memcmp(got, want, 2)\n"
+     "    return same * 10 + (1 - same2)\n",
+     1, None),
     # ── a list literal longer than one instruction's immediate offset ──
     #
     # A blob element `i` is at byte `8*(i+1)` from the blob's base, and
