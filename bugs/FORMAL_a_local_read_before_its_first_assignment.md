@@ -163,11 +163,10 @@ emitters treat `global` as a no-op and the assignment lands in a local:
 
 Four wrong numbers, two of them architecture-dependent, from a program whose
 every line is ordinary.  `model.mutated_module_global_refusal` reports it, in the
-same pass.  This is the `bugs/FORMAL_module_global_string_elements.md` family's
-"a module-level name the build cannot fold is a real mutable-or-computed global
-with nowhere to live, and is REFUSED BY NAME" — applied to the case where the
-name *is* foldable and the program nonetheless writes it, which is the same fact
-seen from the other side.
+same pass.  This is the "a module-level name the build cannot fold is a real
+mutable-or-computed global with nowhere to live, and is REFUSED BY NAME" family —
+applied to the case where the name *is* foldable and the program nonetheless
+writes it, which is the same fact seen from the other side.
 
 ## What still has to keep working, and is pinned
 

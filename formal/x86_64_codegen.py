@@ -3145,10 +3145,17 @@ class X86_64Codegen:
 
         The blob is `[count][elem0]…` in the frame, so there is no room to
         grow one: the capacity is a compile-time number (`_scan_list_caps`) and
-        the store is checked against it, exiting(1) rather than writing past
-        the blob. Appending more times than the scan found — inside a loop —
-        stops the program instead of quietly corrupting the frame, the same
-        bargain every other bounded container operation on this path makes.
+        the store is checked against it, refusing to write past the blob.
+        Appending more times than the scan found — inside a loop — stops the
+        program instead of quietly corrupting the frame, the same bargain every
+        other bounded container operation on this path makes.
+
+        The stop is LOUD. It used to be a bare `exit(1)` with nothing on either
+        stream, which is the worst of the three answers this backend can give:
+        not a wrong number a reader can compare, not a named refusal they can
+        act on, but silence. `model.list_append_overflow_message` (shared with
+        arm64, so the two machines cannot name this limit differently) is
+        written to fd 2 first, through `write(2)`, and then the program stops.
 
         Returns 0, this model's `None`; `list.append` returns None, and
         returning the new count would be a value Python does not have."""
@@ -3186,6 +3193,9 @@ class X86_64Codegen:
         self._emit_jcc_bool(Reg.R8, COND_NE, oob)
         self._emit_jmp(ok)          # in range: skip the exit
         self.asm.label(oob)
+        self._emit_overflow_diagnostic(
+            M.list_append_overflow_message(
+                recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
         self._emit_call_exit(1)
         self.asm.label(ok)
         self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))   # count again
@@ -3197,6 +3207,28 @@ class X86_64Codegen:
         self._pop_slot(Reg.RAX)
         self._pop_slot(Reg.RAX)
         self._emit_mov_imm(Reg.RAX, 0)             # None
+
+    def _emit_overflow_diagnostic(self, text: str) -> None:
+        """`write(2, text, len)` — say WHICH bound was hit before stopping.
+
+        The arm64 twin of this (`ARM64Codegen._emit_overflow_diagnostic`), on
+        the same message from `formal/model.py`, and for the same reasons: the
+        two architectures printing two different sentences for one limit is how
+        a reader ends up looking for a construct one of them invented, and a
+        bare `exit(1)` was the worst answer this backend could give.
+
+        RAX/RCX/RDX/R8/R9/R10/R11 are all caller-saved and dead on this path —
+        the out-of-range branch discards the base and the value — so the whole
+        System V argument triple can be set without saving anything. RSP is
+        already 16-byte aligned (the append's own pushes are a multiple of it)
+        and is left where it was, so the pushed base and value stay readable
+        past the call."""
+        self.asm.emit(encode_lea_r64_rip(Reg.RSI, 0))
+        self.asm.emit_label_rip(self._intern_string(text), here_offset=-4)
+        self._emit_mov_imm(Reg.RDI, 2)                 # fd = stderr
+        self._emit_mov_imm(Reg.RDX, len(text))         # length
+        self._emit_mov_imm(Reg.RAX, 0)                 # AL = 0 (not varargs)
+        self._emit_extern_call("write")
 
     def _emit_file_write(self, e) -> None:
         """`f.write(s)` — `write(fd, s, strlen(s))` through the C library.

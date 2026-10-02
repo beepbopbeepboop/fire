@@ -326,14 +326,13 @@ CASES = [
      "    printf(\"%s\", NAME)\n"
      "    return 0\n", "bye\n"),
 
-    # A string ELEMENT inside a container global, which is the case
-    # `bugs/FORMAL_module_global_string_elements.md` was about. The word is a
-    # `char *` and the only `char *` to those bytes on this path is the INTERNED
-    # literal — so the initializer stores the address a `"a"` written anywhere
-    # in the program already has, rather than a copy of the bytes into `__DATA`.
-    # A copy would satisfy this row and be wrong: `printf("%s")` cannot tell two
-    # copies of the same text apart, which is exactly why a row that only checks
-    # output is not enough here, and why the dict row below is in the file.
+    # A string ELEMENT inside a container global. The word is a `char *` and the
+    # only `char *` to those bytes on this path is the INTERNED literal — so the
+    # initializer stores the address a `"a"` written anywhere in the program
+    # already has, rather than a copy of the bytes into `__DATA`. A copy would
+    # satisfy this row and be wrong: `printf("%s")` cannot tell two copies of
+    # the same text apart, which is exactly why a row that only checks output is
+    # not enough here, and why the dict row below is in the file.
     ("read_list_of_strings",
      "L = [\"a\", \"b\"]\n"
      "\n"

@@ -7514,6 +7514,33 @@ def _module_published_names(module: str, link_line) -> set:
         M.dylib_export_module(forwarded, module))
 
 
+def _link_line_publishes(link_line, name: str) -> bool:
+    """Does ANY library on this link line publish `name`, by definition or by
+    re-export?
+
+    The complement of "which names does the module that IMPORTED this one
+    publish", and asked of the SAME tables — `model.dylib_export_tables` over
+    `dylib_export_lists(link_line)` — for the reason
+    `_module_published_names` gives. A bare callee is bound through the flat
+    `by_name` table and nothing else (`dylib_extern_symbol`'s first arm), so
+    "will this call have a symbol" is exactly "is this name in `by_name`", and
+    answering it with a second reading of the manifests would be a second
+    answer to a question the emitter already asks.
+
+    Deliberately ANY rather than the importing module: a bare `from mod import
+    f` binds by bare name across every library on the line, first one winning
+    (`dylib_syms`' own `setdefault` in link order), so a name published by a
+    DIFFERENT library on the line does bind and refusing it would break a
+    working program. This predicate answers "does any library publish it",
+    which is the question that decides whether the emitted `BL` has a target.
+    """
+    if not link_line:
+        return False
+    by_name, _by_module, _forwarded = M.dylib_export_tables(
+        dylib_export_lists(link_line))
+    return name in (by_name or {})
+
+
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
@@ -7723,12 +7750,25 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         #      callee" is answerable here and nowhere else.
         callees = set()
         imported = imported_module_names or ()
+        # The BARE-NAMED callees, `f(x)`, kept apart from `callees` for the
+        # export refusal in the name-placement walk below — which is asked only
+        # of this set, because the other three spellings have answers of their
+        # own that must not be pre-empted by it. A MODULE root (`mod.f(x)`) is
+        # exempt because it is a library on the link line and `dylib_extern_symbol`
+        # resolves the chain from it; a BRACKETED callee (`f[x](x)`) already has
+        # `imported_callee_refusal` waiting in the `bracket_callees` arm; and an
+        # `external_call` template is not a name this mechanism is about at all.
+        # Asking about all four together refused working programs — measured, 6
+        # cases of `test_formal_module_attr.py` and 4 of `test_formal_imports.py`
+        # — so the set is what the question is asked of.
+        bare_callees: set = set()
         for c in M.iter_nodes(fn.body):
             if not isinstance(c, F.CallExpr):
                 continue
             func = c.func
             if isinstance(func, F.IdentExpr):
                 callees.add(id(func))
+                bare_callees.add(id(func))
             elif isinstance(func, F.MemberExpr):
                 # Case 2, through `model.dylib_module_reference` — the ONE
                 # recogniser of "this chain is rooted at an imported module".
@@ -8180,6 +8220,54 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             if id(node) in module_reads:
                 raise CodegenError(module_reads[id(node)])
             if id(node) in callees:
+                # A callee this unit does not compile is a LINK-TIME fact, not
+                # a missing local — that is why it is exempt at all. It is NOT
+                # however a licence to emit a `BL` against a name nothing
+                # defines, and for an IMPORTED callee the build knows the
+                # answer without asking the assembler, which is the half
+                # `_unaccounted_report` says is "asked nowhere in this backend".
+                #
+                # Asked HERE, before the exemption rather than in the
+                # `bracket_callees` arm below, because a bare `widen(5)` and a
+                # bracketed `widen[Int](5)` are the same call and must give the
+                # same answer. It was the bare spelling that reached the link
+                # audit — `bracket_callees` covers only the second, so the two
+                # spellings of one construct got two different diagnostics, and
+                # the one a reader is most likely to have written (`f(x)`) is
+                # the one that named the link line.
+                #
+                # Only `bare_callees`, not every name in `callees`: the other
+                # three spellings each have a better answer of their own (see
+                # where that set is built), and asking here without that
+                # restriction refused 10 working cases across two files.
+                #
+                # And not a CONSTRUCTOR: `Info()` on an imported struct is a
+                # bare callee too, but it is lowered from the struct
+                # DECLARATION the import carried (`_imported_structs` puts it
+                # in `structs_by_name`, which is what `compile(structs=…)`
+                # registers), so it binds no symbol and needs none. Asking
+                # without that exclusion refused a program with nothing wrong
+                # with it — measured, the two-file `Info()` reproducer: a
+                # module whose only declaration is `struct Info` plus one free
+                # function, and a program that writes `var info = Info()`.
+                #
+                # The remaining three conditions are all necessary and none is a
+                # guess: the build resolved this unit's imports (so an empty
+                # `link_line` is a caller that has not, and every existing
+                # verdict is kept), the name is a module symbol of site
+                # `imported` (so a libc call, a local and a name this unit
+                # compiles are all untouched), and no library on the line
+                # publishes it (which is the question that decides whether the
+                # emitted `BL` has a target at all).
+                cname = node.name
+                csym = M.module_symbol(cname)
+                if (id(node) in bare_callees and link_line
+                        and cname not in structs_by_name
+                        and csym is not None
+                        and getattr(csym, "site", None) == "imported"
+                        and not _link_line_publishes(link_line, cname)):
+                    raise CodegenError(M.imported_callee_refusal(
+                        cname, csym, fn.name))
                 continue
             name = node.name
             if name in placed or name in frame_slots \
@@ -8956,10 +9044,19 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # halves must agree on the same table or a call site stores an answer from a
     # method that did not hand one back.
     writebacks = M.one_field_mutating_methods(functions, method_owners)
+    # The modules THIS UNIT imports, for `_rewrite_method_calls`' receiver-shape
+    # refusal. Read from the same statements `imported_modules` reads everywhere
+    # else rather than threaded in, because `_prepare_functions` runs BEFORE
+    # `_resolve_imports` — it is the pass that has the statements and not the
+    # link line — and the question the refusal has to exclude is "is this chain
+    # rooted at a MODULE", which is a fact about the source spelling.
+    from formal.imports import imported_modules as _imported_modules
+    _this_unit_modules = tuple(_imported_modules(stmts) or ())
     for fn in functions:
         if fn.name in writebacks:
             _return_the_receiver(fn, writebacks[fn.name])
-        _rewrite_method_calls(fn.body, owners, wide, receiverless)
+        _rewrite_method_calls(fn.body, owners, wide, receiverless, fn.name,
+                              _this_unit_modules)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
         # gives. Everything else about it is `_rewrite_class_constants`.
@@ -9194,7 +9291,8 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
 
 
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,
-                          receiverless: set = None) -> None:
+                          receiverless: set = None, fn_name: str = None,
+                          imported=()) -> None:
     """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
 
     Rewriting the CALL rather than special-casing a method call in the
@@ -9219,13 +9317,24 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     puts a generic's comptime parameters first and arm64's `_emit_call` passes
     the bracket expressions first, so `Struct_m[T](recv, a)` and
     `Struct_m(recv, a)` reach the callee's parameters identically.  See
-    `_specialized_method_call`."""
+    `_specialized_method_call`.
+
+    A receiver that is NOT a bare name, with a method name that IS in `owners`,
+    is REFUSED — see `model.subscript_receiver_method_refusal`, which carries
+    the argument for why that has to happen here rather than being left to the
+    link audit. Before it, `bs[0].get()` compiled to a call against a symbol
+    spelled `get`."""
     if isinstance(node, list):
         for x in node:
-            _rewrite_method_calls(x, owners, wide, receiverless)
+            _rewrite_method_calls(x, owners, wide, receiverless, fn_name,
+                                  imported)
         return
     if isinstance(node, F.CallExpr):
         target = _method_call_target(node, owners)
+        if target is None:
+            why = _receiver_shape_refusal(node, owners, fn_name, imported)
+            if why is not None:
+                raise CodegenError(why)
         if target is not None:
             owner, member, receiver = target
             if (wide or {}).get(owner) is not None:
@@ -9253,7 +9362,66 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
             node.func = lifted
             return
     for name in getattr(node, "__dataclass_fields__", {}):
-        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless)
+        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless,
+                              fn_name, imported)
+
+
+def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):
+    """Why THIS `recv.m(...)` has no lift, or None when it has a better answer.
+
+    The recogniser is narrow on purpose, and every clause is there because a
+    wider one refuses programs that work. Measured, each of them was tried
+    first and cost something:
+
+      * the callee must be a `MemberExpr` whose base is NOT a bare name. A bare
+        name is `recv.m(...)`, which `_method_call_target` already lifts, and a
+        `SubscriptExpr` callee is `recv.m[T](...)` — the specialization, which
+        `specialization_call_refusal` and `imported_callee_refusal` both answer
+        with a better sentence and which this must not pre-empt;
+      * `m` must be in `owners`, i.e. exactly one struct in this module declares
+        it. Without that, `mod.f()` across a dylib boundary and every
+        `external_call` template come through here, and both are correct;
+      * `M.dylib_module_reference` must not claim the chain, which is the same
+        question `check_module_symbols` asks about the same spelling and must
+        get the same answer — it takes `imported_module_names`, which this
+        function does not have, so the caller passes the answer in.
+
+    `fn_name` is threaded rather than read off a global because the walk recurses
+    into nested functions and a message naming the wrong one is a message that
+    sends the reader to the wrong place.
+
+    The receiver must be a SUBSCRIPT, and that restriction is load-bearing
+    rather than cautious — measured, the two widenings each refused working
+    cases and pre-empted better sentences:
+
+      * "not a bare name" refused 24 working cases in `test_formal_run.py`. A
+        `MemberExpr` receiver is a field or a nested frame
+        (`self.in1.total()`, `h.mojo_value.write_to(...)`), and the field's
+        DECLARED type names the struct, so the case is answerable and is
+        answered — by `_check_frame_escapes`, `frame_opaque_position_refusal`
+        and the nested-frame refusals, several times over.
+      * "a subscript or a call result" still pre-empted
+        `frame_opaque_position_refusal`'s own sentence for `mk().take(r)`, which
+        is the SAME fact (a receiver whose type is not established) reached
+        through a path that already says so.
+
+    A subscript is the one shape with no answer anywhere: `bs[0]` is a value
+    the build has no name for at all, and it reaches the link audit as a call
+    against a symbol spelled after the METHOD.
+    """
+    func = call.func
+    if not isinstance(func, F.MemberExpr):
+        return None
+    recv = func.obj
+    if not isinstance(recv, F.SubscriptExpr):
+        return None
+    member = func.member
+    if owners.get(member) is None:
+        return None
+    if M.dylib_module_reference(recv, imported) is not None:
+        return None
+    return M.subscript_receiver_method_refusal(
+        member, M.receiver_shape_text(recv), owners, fn_name)
 
 
 def dylib_manifest_path(dylib_path: str) -> str:
@@ -10922,12 +11090,34 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # sources and each one's table numbers its own slots from zero.
     library_slots: dict = {}
     library_slot_owners: dict = {}
+    # The struct DECLARATIONS this library compiles, merged from every source
+    # it is built from, for `compile(structs=…)` below.
+    #
+    # It is missing here and the omission is a SILENT wrong answer, not a
+    # refusal: the codegen recognises an `S(...)` constructor by consulting
+    # `self._structs`, and with the table empty a constructor falls through the
+    # ordinary call path and becomes a BL against a symbol named `S` — which
+    # nothing defines, because a class crosses the boundary as a LAYOUT, not as
+    # a symbol (`reflect.emit_table_c` skips `SYM_TYPE` entries for exactly that
+    # reason). So a module that constructs its own struct anywhere in its own
+    # body failed to build as a dylib with "the library would bind 1 symbol(s)
+    # that nothing provides: S", which names the link line and not the
+    # constructor.
+    #
+    # It is a constructor call inside the LIBRARY, not a call on an imported
+    # class, and the difference is what makes this the whole of the fix: nothing
+    # crosses the boundary here at all. The library compiles its own source, and
+    # this file's `_formal_module_functions` already returned that file's
+    # StructDefs — they were collected into `structs_by_file` for
+    # `_method_exports` and then not handed to the emitter.
+    library_structs: list = []
     for source_path in source_paths:
         module, functions, module_source, file_structs, file_slots, \
             file_constants = \
             _formal_module_functions(source_path, link_dylibs, arch=arch,
                                      fmt="macho", link_manifests=linked)
         structs_by_file[source_path] = file_structs
+        library_structs.extend(file_structs)
         for name, value in file_constants.items():
             constants.setdefault(name, value)
         for name, slot in (file_slots or {}).items():
@@ -11096,7 +11286,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             ordered,
             base_addr=TEXT_BASE + dylib_code_offset(
                 install_name, False, dep_install, has_globals),
-            emit_startup=False)
+            emit_startup=False, structs=library_structs)
         external_syms = info.get("external_syms") or []
         if external_syms:
             # The dependency load commands are known BEFORE compiling, so the
@@ -11108,7 +11298,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                           has_globals)
             code, info = codegen.compile(ordered,
                                          base_addr=TEXT_BASE + code_file,
-                                         emit_startup=False)
+                                         emit_startup=False,
+                                         structs=library_structs)
             external_syms = info.get("external_syms") or []
             stub_addrs = externer_layout(len(code), external_syms, arch=arch,
                                         entryoff=code_file)["stub_addrs"]

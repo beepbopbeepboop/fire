@@ -7403,6 +7403,49 @@ def build_formal(src, out, backend=None, tmpdir=None, env=None):
     return p.returncode, (p.stderr or p.stdout or "")
 
 
+# Cases whose program must STOP AT RUN TIME, saying WHY on stderr.
+#
+# The other 600-odd cases in this file assert an exit status and a stdout, which
+# is the right assertion for a program that computes an answer. It cannot
+# express "the program refused to compute, and here is the limit it hit", and a
+# run-time stop used to have exactly no way to say so: the bound was checked at
+# run time and enforced with a bare `exit(1)`, so the whole observable was a
+# nonzero status and an empty stderr. A reader who hit that had nothing to go on
+# but the source, and every other bounded-container stop on this path names its
+# bound.
+#
+# So this group exists to pin the MESSAGE, on both architectures and byte for
+# byte against each other — two machines naming one limit differently is the
+# failure this file's CPython-pair group was created for, and a diagnostic
+# diverging by architecture is the same defect with a different subject.
+#
+# (name, mojo_source, want_exit, stderr_needles)
+STDERR_CASES = [
+    # `xs.append` in a loop, past the capacity the append-site scan reserved.
+    # One site, three executions, and the capacity is ONE — which is the whole
+    # bargain `formal/model.py`'s `BUILTIN_VALUE_METHODS` entry for `append`
+    # states, so the case is not a pathological program but the shape every
+    # loop that accumulates a list has.
+    #
+    # The three needles are chosen to be load-bearing rather than decorative:
+    # the name says which list, the capacity says which number was exceeded, and
+    # "append SITES" says the rule behind it — a message that said only "list
+    # overflow" would leave a reader unable to tell this from a frame-budget
+    # refusal (`frame_blob_refusal`), which has a different and differently
+    # fixable remedy.
+    ("list_append_overflow_is_loud",
+     "def main(n):\n"
+     "    xs = []\n"
+     "    var i = 0\n"
+     "    while i < 3:\n"
+     "        xs.append(7)\n"
+     "        i = i + 1\n"
+     "    printf(\"n=%d\", len(xs))\n"
+     "    return 0\n",
+     1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES"]),
+]
+
+
 # Cases that must be REFUSED with the by-reference receiver switched OFF.
 #
 # The switch (`formal/model.py`'s `wide_receiver_by_reference`,
@@ -7444,6 +7487,54 @@ WIDE_OFF_CASES = [
      "    p.set_a(5)\n"
      "    return q.get_a()\n", "refuse:2 field(s): a, b", None),
 ]
+
+
+def run_stderr_case(name, source, want_exit, needles, tmpdir, verbose):
+    """The program must stop at run time, exit `want_exit`, and SAY WHY.
+
+    Three assertions, in the order of how badly each has been missed before:
+    the exit status (the only thing the old behaviour asserted), the needles on
+    stderr (the thing it did not have at all), and the two architectures
+    producing the SAME stderr byte for byte.
+
+    That last one is not tidiness. `model.list_append_overflow_message` exists
+    so the two backends cannot name one limit differently, and the only way to
+    know they are calling it is to compare what came out — two emitters with two
+    copies of a sentence pass every needle and diverge on the fourth word.
+    """
+    src = os.path.join(tmpdir, name + ".mojo")
+    with open(src, "w") as f:
+        f.write(source)
+    seen = {}
+    for backend in ("arm64", "x86_64"):
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        rc, text = build_formal(src, out, backend=backend)
+        if rc != 0:
+            return False, (f"--backend={backend} did not build, so this case "
+                           f"cannot see the run-time stop: {text.strip()[-300:]}")
+        if not os.path.isfile(out):
+            return False, f"--backend={backend} built but wrote no binary"
+        run = subprocess.run([out], capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT)
+        if run.returncode != want_exit:
+            return False, (f"--backend={backend} exited {run.returncode}, "
+                           f"expected {want_exit}; stderr: "
+                           f"{run.stderr.strip()[-200:]}")
+        missing = [n for n in needles if n not in run.stderr]
+        if missing:
+            return False, (f"--backend={backend} stopped without saying "
+                           f"{missing!r}; stderr: {run.stderr.strip()[-300:]!r}. "
+                           f"A bare exit with nothing on either stream is the "
+                           f"defect this case exists for")
+        seen[backend] = run.stderr
+        if verbose:
+            print(f"      --backend={backend} exit={run.returncode} "
+                  f"stderr={run.stderr.strip()[:80]!r}")
+    if seen["arm64"] != seen["x86_64"]:
+        return False, (f"the two architectures named the limit differently:\n"
+                       f"      arm64:  {seen['arm64'].strip()[-300:]!r}\n"
+                       f"      x86_64: {seen['x86_64'].strip()[-300:]!r}")
+    return True, ""
 
 
 def run_wide_off_case(name, source, needle, tmpdir, verbose):
@@ -7985,7 +8076,8 @@ POINTER_DEREF_REFUSALS = [
 # `model.field_access_refusal`, and the two architectures could no longer answer
 # this program differently.  The case stayed — as a refusal — until the
 # DECLARED TYPE could establish what the parameter holds
-# (`bugs/FORMAL_method_param_field_access.md`): `h: One` says `h` IS a `One`,
+# (`formal/build.py`'s `_frame_receivers`, seeding a method's parameters from
+# `frame_field_type_candidates`): `h: One` says `h` IS a `One`,
 # and a one-field struct's receiver is its field, so `h.v` is `h` and the
 # program is answerable.  So the case is now what it should have been from the
 # start, which is the assertion the whole family wants: `raw(o) == 4242` on
@@ -11472,6 +11564,13 @@ def main():
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + MUTATING_RECEIVER_REFUSALS
+                  # STDERR_CASES is also a different shape (name, source, exit,
+                  # needles) and is selected here so the `--cases` filter knows
+                  # the name, then dispatched by `stderr_names` below. It is
+                  # listed in `everything` rather than beside `pair_names`
+                  # because it is still selected from `everything` and only its
+                  # RUNNER differs.
+                  + STDERR_CASES
                   + [X86_ONLY_1SLOT_BUG_CASE])
     # The CPython-pair group is a DIFFERENT SHAPE (three columns: name, Mojo
     # text, CPython text), so it is selected and dispatched separately rather
@@ -11504,6 +11603,7 @@ def main():
         return 2
     off_names = {c[0] for c in WIDE_OFF_CASES}
     module_names = {c[0] for c in CROSS_MODULE_CASES}
+    stderr_names = {c[0] for c in STDERR_CASES}
 
     passed = failed = 0
     # Before the builds, because it is the only group here that needs no
@@ -11549,6 +11649,10 @@ def main():
                 if name in off_names:
                     ok, detail = run_wide_off_case(
                         name, source, want_exit[len("refuse:"):], tmpdir,
+                        args.verbose)
+                elif name in stderr_names:
+                    ok, detail = run_stderr_case(
+                        name, source, want_exit, want_stdout, tmpdir,
                         args.verbose)
                 elif name in module_names:
                     ok, detail = run_module_case(

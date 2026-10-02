@@ -53,9 +53,12 @@ Two consequences, and they are separate, so they are measured separately:
 2. **A value cannot cross a dylib boundary at all unless it is one 64-bit
    word.** A list or a tuple is a blob carved out of the caller's frame, so
    handing one to another module hands over a frame address that is dead on
-   return. — **still true, and it is the honest remainder**: a slot fixes where a
-   value LIVES, not how it is NAMED across a boundary, and a dylib publishes
-   functions and folded constants rather than writable words.
+   return. — **still true for a WRITABLE word, and no longer true for a
+   container**: a returned `[3, 14, 0]` now crosses and reads by subscript on
+   both architectures (see (3) below), because it is `malloc`'d rather than
+   frame-resident. What remains true is what this clause is really about: a
+   slot fixes where a value LIVES, not how it is NAMED across a boundary, and a
+   dylib publishes functions and folded constants rather than writable words.
 
 ## Measured
 
@@ -156,18 +159,56 @@ Fixed in the same commit; all three store kinds are pinned, and the store's
 TARGET is still left alone (`mod.K = 5` writes another module's state, and
 substituting it would trade a refused store for a dropped one).
 
-**(3) A tuple cannot cross a dylib boundary — and the failure is a
-use-after-frame, not a refusal.** A module returning `(3, 14, 0)`, printed by the
-importer:
+**(3) A container crossing a dylib boundary — WAS a use-after-frame, printed as
+a number; FIXED (2026-10-01).** A module returning `(3, 14, 0)`, printed by the
+importer, used to give:
 
 ```
-3
 print(tupm.vi())   ->   6159887712
 ```
 
-That is the frame address, printed as a number. The same program does not even
-build when the call is in the same unit (`print() cannot tell whether IdentExpr
-is a string or a number`).
+That is the frame address, printed as a number. The same program did not even
+build when the call was in the same unit (`print() cannot tell whether
+IdentExpr is a string or a number`).
+
+**Measured again on this tree, both architectures:**
+
+```
+# tupr.mojo
+def triple() -> List[Int]:
+    return [3, 14, 0]
+
+# tr.mojo
+from tupr import triple
+def main() -> Int:
+    var t = triple()
+    printf("%d %d %d\n", t[0], t[1], t[2])
+    return 0
+
+arm64   3 14 0     x86_64  3 14 0     CPython  3 14 0
+```
+
+So this is no longer a silent wrong answer, and it is the item on this list
+that was the most dangerous to leave: a frame address printed as a plausible
+number is indistinguishable from a computation, so every downstream read of it
+was wrong rather than absent.
+
+**What is still missing is narrower than the item claimed, and the narrowing
+is measured:** a `malloc`'d blob crosses and reads by SUBSCRIPT, but `len()` of
+one does not, because the path has no KIND that says "this word is a heap
+allocation with a run-time length":
+
+```
+printf("%d\n", len(t))
+    -> len() of a value classified as 'int', and an integer has no length:
+       there is no count to read at offset 0, and the word there is the
+       integer itself
+```
+
+That is item (1) of "What is still missing" below, unchanged, and it is the
+`BLOB_KIND` annotation channel `dylib_export_return_kind` already reads for
+`char *`. The representation is not the gap — the subscript works, so the blob
+and its count-word are read correctly — the KIND is.
 
 **(4) `sys.argv` additionally has no SOURCE on this path.** The entry stub
 (`ARM64Codegen.compile`, and `X86_64Codegen`'s twin) loads the test input into

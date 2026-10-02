@@ -2974,7 +2974,7 @@ UNREGISTERED = {
     'test_formal_mlir_precedence.py': 'WHICH of the two MLIR refusals answers a '
         'template, and that the answer is the same on both backends: seven '
         'cases, each asserted to refuse on BOTH architectures with the same '
-        'sentence (bugs/FORMAL_mlir_refusal_preemption.md). Build-only, but '
+        'sentence (formal/build.py`s `first_mlir` pre-pass). Build-only, but '
         'twice per case, because a backend that answers differently about one '
         'construct is the defect this file exists for.',
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '

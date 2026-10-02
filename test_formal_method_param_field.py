@@ -2,7 +2,7 @@
 """A METHOD PARAMETER'S FIELD, established by its DECLARED TYPE and nothing
 else: build the image, run it, and compare with CPython.
 
-`bugs/FORMAL_method_param_field_access.md` is the finding.  A method's other
+A method's other
 parameters were never seeded as frame holders, so `other.start` in
 
     struct Slice(Equatable):

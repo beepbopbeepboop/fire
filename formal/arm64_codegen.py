@@ -4522,10 +4522,17 @@ dylib_exports: list = None, globals_base: int = None,
 
         The blob is `[count:i64][elem0]…` in the frame, so there is no room to
         grow one: the capacity is a compile-time number (`_scan_list_caps`)
-        and the store is checked against it, exiting(1) rather than writing
-        past the blob. Appending more times than the scan found — inside a
-        loop — therefore stops the program instead of quietly corrupting the
-        frame, the same bargain `xs[i]` out of range makes.
+        and the store is checked against it, refusing to write past the blob.
+        Appending more times than the scan found — inside a loop — therefore
+        stops the program instead of quietly corrupting the frame, the same
+        bargain `xs[i]` out of range makes.
+
+        The stop is LOUD. It used to be a bare `exit(1)` with nothing on either
+        stream, which is the worst of the three answers this backend can give:
+        not a wrong number a reader can compare, not a named refusal they can
+        act on, but silence. `model.list_append_overflow_message` (shared with
+        x86-64, so the two machines cannot name this limit differently) is
+        written to fd 2 first, through `write(2)`, and then the program stops.
 
         Returns 0, which is this model's `None`: `list.append` returns None,
         and nothing in the language can observe the difference between that and
@@ -4572,11 +4579,40 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
         self.asm.label(oob)
+        self._emit_overflow_diagnostic(
+            M.list_append_overflow_message(
+                recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
         self.asm.emit(encode_movz_xd_imm(0, 1))
         self.asm.emit(encode_movz_xd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
         self.asm.label(ok)
         self.asm.emit(encode_movz_xd_imm(0, 0))     # None
+
+    def _emit_overflow_diagnostic(self, text: str) -> None:
+        """`write(2, text, len)` — say WHICH bound was hit before stopping.
+
+        The shared half of every bounded-container stop on this path, and the
+        reason it goes through `write(2)` rather than the raw syscall the exit
+        beside it uses: the exit sequence above is the Darwin one this backend
+        already emits everywhere, but `write`'s syscall number is not what makes
+        this a good message — the fact that the same C library call works on
+        both platforms is, and `write` is the one call whose interface this
+        value model can satisfy with nothing but an interned label and an
+        immediate.
+
+        SP is 16-byte aligned here (the append's own `stp` pushed a multiple of
+        16), which is what AAPCS and the C library both assume at a call, so no
+        extra adjustment is needed and the pushed base/value stay readable.
+        X0-X2 are free: the values the append needed are already in X4 (base)
+        and the out-of-range path discards them.
+        """
+        label = self._intern_string(text)
+        _emit_sub_imm(self.asm, 31, 31, 16)
+        self.asm.emit_adrp_add(1, label)
+        self.asm.emit(encode_movz_xd_imm(0, 2))              # fd = stderr
+        self.asm.emit(encode_movz_xd_imm(2, len(text)))      # length
+        self._emit_extern_call("write", 3)
+        _emit_add_imm(self.asm, 31, 31, 16)
 
     def _emit_file_write(self, e: F.CallExpr) -> None:
         """`f.write(s)` — `write(fd, s, strlen(s))` through the C library.
