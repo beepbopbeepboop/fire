@@ -7577,6 +7577,107 @@ d = {'a': 1}
 print(str(d))
 """, "[1, 2, 3]\n[1, 2, 3]\n{1, 2}\n{'a': 1}\n")
 
+    # A user class named `Parser`, imported across a module boundary. `Parser`
+    # is a struct name this compiler hardcodes for its OWN parser
+    # (`fire_compiler.Parser`: `_tok` / `_pos` / `_filename` /
+    # `_pending_decs` / `_known_traits`), and the hardcoding used to be
+    # unconditional — so a user's `Parser` was MERGED into that layout and
+    # every one of its methods resolved against `fire_compiler.Parser`, whose
+    # `__init__` has a different signature. The generated struct was:
+    #
+    #   typedef struct Parser { ... _tok; _pos; _filename; _pending_decs;
+    #                                 _known_traits; struct Parser * toks; }
+    # and the call sites referenced `fire_compiler_Parser_peek`, which
+    # nothing defined.
+    #
+    # Both halves are asserted by RUNNING rather than by inspecting the C,
+    # because the merge's symptom is a wrong-offset field read, which prints a
+    # plausible wrong value rather than failing: this program's `p.toks[1]`
+    # reads offset 6 of a 5-field struct. The re-export variant below covers
+    # the harder disambiguation (the class crosses TWO module boundaries, via
+    # a base class, so neither the defining module's name nor the importing
+    # module's is enough).
+    _check_agrees_with_cpython("user_struct_named_parser_survives_the_selfhost_name", {
+        'pcol_def.py': "class Parser:\n"
+                       "    def __init__(self, tokens):\n"
+                       "        self.toks = tokens\n"
+                       "    def peek(self):\n"
+                       "        return self.toks[0]\n",
+        'pcol_main.py': "from pcol_def import Parser\n"
+                        "def use(src):\n"
+                        "    psr = Parser(src)\n"
+                        "    if not psr.peek():\n"
+                        "        return None\n"
+                        "    return psr\n"
+                        "p = use([1, 2])\n"
+                        "print(p.peek())\n"
+                        "print(p.toks[1])\n",
+    }, 'pcol_main.py')
+
+    # Same name, but the class is RE-EXPORTED through a third module and
+    # inherits from a base class defined in a fourth — the real instance's
+    # shape (`Cases/cases_generator/parsing.py`'s `class Parser(PLexer)`,
+    # re-exported by `parser.py`). Three modules and four hops, so a
+    # qualifier resolved from either end alone gets it wrong.
+    _check_agrees_with_cpython("user_struct_named_parser_survives_a_re_export_and_a_base", {
+        'pcol_base.py': "class PLexer:\n"
+                        "    def __init__(self, t):\n"
+                        "        self.t = t\n",
+        'pcol_parsing.py': "from pcol_base import PLexer\n"
+                           "class Parser(PLexer):\n"
+                           "    def peek(self):\n"
+                           "        return self.t[0]\n",
+        'pcol_facing.py': "from pcol_parsing import Parser\n",
+        'pcol_main.py': "from pcol_facing import Parser\n"
+                        "p = Parser([5, 6])\n"
+                        "print(p.peek())\n"
+                        "print(p.t[1])\n",
+    }, 'pcol_main.py')
+
+    # ...and the structural half, which is what makes a run-level assertion
+    # above able to mean anything: the emitted struct must carry NONE of
+    # `fire_compiler.Parser`'s own five field names, must carry the user's,
+    # and the method symbols must be mangled with the DEFINING module's
+    # qualifier. A merge or a wrong qualifier shows up here as a field or a
+    # symbol the user never wrote, with no gcc error at all.
+    #
+    # Scoped to the five selfhost names rather than "only the user's fields",
+    # because the cross-module registration has a SEPARATE defect of its own
+    # (an `__init__` parameter name leaking in as a field — see
+    # `bugs/CODEGEN_imported_class_gets_ctor_params_as_fields.md`), and an
+    # assertion about that would be red for a reason this test is not about.
+    def _parser_struct_and_symbols():
+        global _PASS, _FAIL
+        with tempfile.TemporaryDirectory() as wd:
+            open(os.path.join(wd, 'pcol_def.py'), 'w').write(
+                "class Parser:\n"
+                "    def __init__(self, tokens):\n"
+                "        self.toks = tokens\n"
+                "    def peek(self):\n"
+                "        return self.toks[0]\n")
+            entry = os.path.join(wd, 'pcol_main.py')
+            open(entry, 'w').write("from pcol_def import Parser\n"
+                                   "print(Parser([9]).peek())\n")
+            from gimple_codegen import compile_to_gimple
+            c = compile_to_gimple(open(entry).read(), do_imports=True,
+                                  filename=entry)
+        m = re.search(r'typedef struct Parser \{(.*?)\} Parser;', c, re.S)
+        fields = set(re.findall(r'\b(\w+);', m.group(1))) if m else set()
+        merged = sorted(fields & {'_tok', '_pos', '_filename',
+                                  '_pending_decs', '_known_traits'})
+        syms = sorted({s for s in re.findall(r'\b(\w*Parser_\w+)\s*\(', c)})
+        bad_syms = [s for s in syms if s.startswith('fire_compiler_')]
+        if merged or bad_syms or 'toks' not in fields \
+                or not any(s.endswith('_Parser_peek') for s in syms):
+            print("FAIL  user_struct_named_parser_emits_its_own_layout_and_qualifier: "
+                  f"fields={sorted(fields)} merged={merged} symbols={syms}")
+            _FAIL += 1
+        else:
+            print("PASS  user_struct_named_parser_emits_its_own_layout_and_qualifier")
+            _PASS += 1
+
+    _parser_struct_and_symbols()
+
 
 def main():
     gcc = find_gcc()
