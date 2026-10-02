@@ -556,6 +556,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._emitted_structs = gen._emitted_structs
                 temp_gen._struct_allocs_needed = gen._struct_allocs_needed  # share: reflection dispatch scoping (see gen_module) needs every allocated struct visible, not just the root module's own
                 temp_gen._str_pool = gen._str_pool
+                temp_gen._str_pool_declared = gen._str_pool_declared  # share: one forward declaration per _slit_N in the TU, not one per module (see its own declaration)
                 temp_gen._regex_patterns = gen._regex_patterns  # share: finditer() lowering (see BACKLOG-CODEGEN.md §4f)
                 temp_gen._regex_progs = gen._regex_progs        # share: bubble compiled regex data up to root preamble
                 temp_gen._regex_progs_defined = gen._regex_progs_defined  # share: avoid duplicate emission across recursive paths
