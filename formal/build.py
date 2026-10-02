@@ -8894,6 +8894,18 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 if why is not None:
                     raise CodegenError(
                         M.global_value_refusal(name, fn.name, why))
+                # The other half of the same discipline, and it is a different
+                # question: a slot the MODULE BODY fills has an initializer that
+                # RUNS rather than one the linker lays out, so "has an
+                # initializer" is not "has it yet". The module body is the entry,
+                # so only a call written in it above the store can get here
+                # first — and a load that beats the store reads the zero.
+                # `module_slot_readable_in` turns that order into a verdict and
+                # `module_slot_unreadable_refusal` names what fills it, because
+                # the number this would print (0) is not a diagnosis.
+                if not M.module_slot_readable_in(gslot, fn):
+                    raise CodegenError(
+                        M.module_slot_unreadable_refusal(gslot, fn))
                 continue
             sym = M.module_symbol(name)
             # A TYPE read as a value is the same kind of misdirection as the

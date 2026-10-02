@@ -8981,27 +8981,41 @@ WAVE6_NAME_CASES = [
      "    return read_first() + helper()\n", 11, None),
     # The half that needs STORAGE.  `G = compute()` is a real global: its
     # value is not known before the program runs, so it has to live somewhere
-    # that outlives every frame, and every value a formal program can name
-    # lives in a function's own stack scratch.  Refused BY NAME, and for THAT
-    # reason — on the pre-change tree it read whatever register was left.
-    ("modsym_refuse_a_global_the_build_cannot_fold",
-     "G = compute()\n\n"
+    # that outlives every frame.  Refused BY NAME until the module BODY's store
+    # was recognised as the module's own write — on the tree before this it read
+    # whatever register was left.  The trailing `main()` is what makes the
+    # answer 10 rather than 0: a module body IS the entry (`entry_function`
+    # rule 1) and it calls `main` only if the source says so, which is
+    # CPython's own rule for a module-level call.
+    ("modsym_a_global_the_module_body_computes",
      "def compute() -> Int:\n"
-     "    return 5\n\n"
+     "    return 5\n"
+     "\n"
+     "G = compute()\n"
+     "\n"
      "def read_g() -> Int:\n"
-     "    return G\n\n"
+     "    return G\n"
+     "\n"
      "def main() -> Int:\n"
-     "    return read_g() * 2\n",
-     "refuse:is bound at module level, and this path has no module-global storage", None),
+     "    printf(\"%d\", read_g() * 2)\n"
+     "    return 0\n"
+     "\n"
+     "main()\n", 0, "10"),
     # The other storage shape: an AUGMENTED assignment at module level.  The
     # value is `5 + 2` only after the program has started, so folding it would
-    # be a guess about the order of two statements.
-    ("modsym_refuse_a_module_level_augmented_assignment",
+    # be a guess about the order of two statements.  7 and not 2 is the whole
+    # point: `G = 5` is a FOLDED constant the body would normally drop, and it
+    # is kept only because the body rebinds the name (`module_body`'s `rebound`
+    # rule).  A slot that starts at the zero an unwritten slot gives would
+    # answer 2 — a plausible number, and the wrong one.
+    ("modsym_a_module_level_augmented_assignment",
      "G = 5\n"
      "G += 2\n\n"
      "def main() -> Int:\n"
-     "    return G\n",
-     "refuse:is bound at module level, and this path has no module-global storage", None),
+     "    printf(\"%d\", G)\n"
+     "    return 0\n"
+     "\n"
+     "main()\n", 0, "7"),
     # A module-level `comptime` that does not fold.  `comptime` inside a
     # FUNCTION is a compile-time value the backend materializes at its read,
     # and this is a guard for that (`limit_comptime_over_a_runtime_parameter`

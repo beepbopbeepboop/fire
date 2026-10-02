@@ -443,6 +443,72 @@ CASES = [
      "    printf(\"%d\", c)\n"
      "    return 0\n", "1"),
 
+    # ── the MODULE BODY as the writer ──
+    # `G = compute()` at file level is a STORE, not a value the linker can lay
+    # out: the call is not known before the program runs. Before this row the
+    # build refused it with "this path has no module-global storage for it",
+    # which by then was false in every clause — there IS a `__DATA` slot per
+    # name — and the real blocker was that nothing wrote the slot. What writes
+    # it is the module's own top level, which this path already compiles into
+    # the synthetic function the startup stub ENTERS.
+    #
+    # The trailing `main(0)` is not decoration and never has been on this file:
+    # the module body IS the entry, so it runs its own statements first and
+    # calls `main` only because the source says so — CPython's rule for a
+    # module-level call. Every container row above carries the same call for the
+    # same reason.
+    #
+    # Both spellings of the read are here — the bare name in `main` and a
+    # function's own read of it — because they reach the slot by different
+    # paths: the first through `main`'s prologue, the second through a frame the
+    # caller built. A slot that was filled but not re-checked on the second path
+    # would answer the zero an unwritten slot gives.
+    ("module_body_computes_the_global",
+     "def compute() -> Int:\n"
+     "    return 40 + 2\n"
+     "\n"
+     "G = compute()\n"
+     "\n"
+     "def read_g() -> Int:\n"
+     "    return G\n"
+     "\n"
+     "def main(n):\n"
+     "    a: Int = G\n"
+     "    b: Int = read_g()\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "42\n42\n"),
+
+    # The interaction with the OTHER writer of the same slot. `G` now has two
+    # writers — the module body and `bump` — and one home, which is the whole
+    # of the single-home argument the storage capability rests on. 42 / 43 / 43
+    # and not 42 / 42 / 42 is what says the body's store is not overwritten by
+    # the prologue's lazy initializer when `bump` runs, and 42 first says the
+    # body's store survived into `main`.
+    ("module_body_then_a_function_writes_it",
+     "def compute() -> Int:\n"
+     "    return 40 + 2\n"
+     "\n"
+     "G = compute()\n"
+     "\n"
+     "def bump() -> Int:\n"
+     "    global G\n"
+     "    G = G + 1\n"
+     "    return G\n"
+     "\n"
+     "def main(n):\n"
+     "    a: Int = G\n"
+     "    b: Int = bump()\n"
+     "    c: Int = G\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    print(c)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "42\n43\n43\n"),
+
     # ── module boundaries ──
     # A dylib's `__DATA` is emitted with `emit_startup=False`, so there is no
     # startup stub to run an initializer from: the lazy per-function check is
@@ -554,6 +620,47 @@ REFUSALS = [
      # answers; the old sentence named neither.
      "is read in bump() at `G + 1`, before anything in that function has "
      "assigned it"),
+
+    # ── a body-filled slot read BEFORE the body writes it ──
+    # These two rows are the other half of
+    # `module_body_computes_the_global`, and they exist because the capability
+    # that row tests opens a way to compute a plausible wrong number: the slot
+    # is eight bytes of zeros until the module's top level stores into it, and
+    # zero is an answer a program can print. `model.module_slot_readable_in` is
+    # what refuses, and these pin that it still does — identically on both
+    # architectures, because a value model the two disagree about is not one
+    # value model.
+    #
+    # The module body is the ENTRY, so no function runs before its first
+    # statement, and a read from another function is therefore only premature
+    # when a CALL above the store puts one there. Here the store is below
+    # `read_g()`.
+    ("body_global_read_before_the_body_stores_it_refused",
+     "def compute() -> Int:\n"
+     "    return 5\n"
+     "\n"
+     "def read_g() -> Int:\n"
+     "    return G\n"
+     "\n"
+     "read_g()\n"
+     "G = compute()\n",
+     "before it reaches the assignment at statement"),
+
+    # The store's OWN value runs before the store completes, so `G = compute()`
+    # reads as "compute has not been called yet" for the duration of the call.
+    # This row is transitive on purpose — `read_g` is reached through
+    # `compute`, not called by it — because the direct case is the one a
+    # one-level check gets and the indirect one is the one it misses. Without
+    # the closure `read_g`'s load would read the zero and print 0.
+    ("body_global_read_from_the_computation_that_fills_it_refused",
+     "def read_g() -> Int:\n"
+     "    return G\n"
+     "\n"
+     "def compute() -> Int:\n"
+     "    return read_g() + 1\n"
+     "\n"
+     "G = compute()\n",
+     "is reachable from the store of 'G' itself"),
 ]
 
 
