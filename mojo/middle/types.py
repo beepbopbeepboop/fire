@@ -1206,6 +1206,44 @@ def _c_field_name(name: str) -> str:
     if safe in _C_KEYWORDS:
         return f'_{safe}'
     return safe
+
+def _env_field_ctype(ci, vname: str) -> str:
+    """The C type of closure `ci`'s ENV FIELD for `vname`.
+
+    A capture the closure (or, for a shared sibling env, any member of the
+    group) can REASSIGN is stored BY REFERENCE: `ClosureInfo.mut_names`
+    holds its name, and the field is a POINTER to the owner's heap box, not
+    the value. So the field's C type is the capture's declared type with one
+    `*` on top — `count = 0` captured by a sibling that does `count += 1`
+    is `int64_t * count`, not `int64_t count`.
+
+    Every site that DECLARES a field or STORES into one has to agree on
+    that, which is why the answer lives here rather than being spelled out
+    at each of them: a struct emitted with one spelling and filled with
+    another is a hard `-Wint-conversion` pair at every store, and the
+    store is a different file from the typedef.
+
+    Real, in `mojo/middle/offload.py`'s `rewrite_fused_loop`: `fusable`
+    and `walk` are siblings that call each other, so `discover_closures`
+    gives them ONE shared env whose `count` field is the by-reference
+    `int64_t *`, and `_lower_outer_closure_call` — the sibling-to-sibling
+    env copy — was loading `_env->count` into a temp typed from
+    `ci.captures` (`int64_t`). The struct was right and the code was
+    wrong, which gcc reports as a bare pointer/integer mismatch at
+    `fused = fusable(st)`, thousands of lines from either half.
+    """
+    for _cap in (getattr(ci, 'captures', None) or []):
+        if _as_str(_cap[0]) == vname:
+            _ct = _as_str(_cap[1])
+            if vname in (getattr(ci, 'mut_names', None) or ()):
+                return f'{_ct} *'
+            return _ct
+    # Not a declared capture: the only question left is whether the name is
+    # a by-reference one the capture list never spelled out.
+    if vname in (getattr(ci, 'mut_names', None) or ()):
+        return 'int64_t *'
+    return 'int64_t'
+
 _CPP_OPAQUE_PTR_STRUCTS = frozenset({'MojoList', 'MojoDict', 'MojoSet', 'MojoStr', 'MojoStrIter', 'MojoListIter', 'MojoDictIter', 'MojoSetIter', 'MojoGenerator', 'MojoAsync', 'MojoBoundMethod', 'PyObject', 'MojoCompletedProcess', 'MojoFileHandle'})
 _FIXED_RUNTIME_STRUCT_NAMES = frozenset({'MojoBoundMethod', 'MojoGenerator', 'MojoAsync'})
 

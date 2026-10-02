@@ -486,12 +486,33 @@ _SELFHOST_SIGS = {
         'void', ['Parser *', 'MojoList *'], 'fire_compiler'),
     'Parser_with_filename': (
         'Parser *', ['Parser *', 'char *'], 'fire_compiler'),
-    # Returns an AST node pointer, NOT int64_t: every branch of the
-    # Pratt loop returns some expression node, and the codegen infers
-    # `UnaryOp *` for the definition. Declaring it `int64_t` truncates
-    # the pointer on every call.
+    # `int64_t`, matching what the codegen's own return-type inference
+    # emits for the definition -- NOT a node pointer.
+    #
+    # It used to read `UnaryOp *` here, because at the time this table was
+    # written the inference DID produce `UnaryOp *`: `_parse_expr`'s `left`
+    # is first bound by the `not` branch's `left = UnaryOp(op="not", ...)`,
+    # and first-binding-wins typed the whole Pratt parser that way. The
+    # inference no longer says that, because `left` goes on to hold
+    # CompareChain/BinaryOp/WalrusExpr/TernaryExpr as the operator loop
+    # refines the expression, so no single node pointer describes it and the
+    # honest answer is the box (`_prebound_local_ctypes`' conflicting-binding
+    # rule -- the same rule `_scan_body_for_local_field_access` applies to
+    # fields). The table kept the stale answer, and a declaration that
+    # disagrees with the definition is what the self-host closure cannot
+    # survive: 2 "conflicting types for 'fire_compiler_Parser__parse_expr'"
+    # plus a `-Wint-conversion` at each of the ~24 call sites inside
+    # fire_compiler.py itself.
+    #
+    # `int64_t` is not a truncation here. A node value in this backend is a
+    # pointer, and a pointer round-trips through an `int64_t` slot on a
+    # 64-bit target; the caller's field reads then go through the ordinary
+    # `_mojo_dispatch_getattr` dynamic path the rest of the compiled world
+    # uses for a value whose node type is not statically known. Every OTHER
+    # Parser method here is `void`/`Parser *`/`MojoList *` because its
+    # returns really are one type each; `_parse_expr` is the one that is not.
     'Parser__parse_expr': (
-        'UnaryOp *', ['Parser *', 'int64_t'], 'fire_compiler'),
+        'int64_t', ['Parser *', 'int64_t'], 'fire_compiler'),
     # Unannotated single-definition helpers imported by
     # gimple_module_gen.py's `from gimple_codegen import ...` — see
     # _NO_OVERLOAD_MANGLE for why the bare name is pinned. Their sole
@@ -3097,7 +3118,15 @@ class GimpleGen:
         'Scope_get':             ('int',        ['Scope *', 'char *']),
         'Scope_set':             ('void',       ['Scope *', 'char *', 'int']),
         'Scope___init__':        ('void',       ['Scope *', 'Scope *']),
-        'py_tokenize':              ('MojoList *', ['char *', 'char *']),
+        # ONE parameter, matching `def py_tokenize(src: str)` and the pinned
+        # declaration in runtime/fire_runtime.h. The filename-carrying variant
+        # is `py_tokenize_named(src, filename)`, an ordinary function whose arity
+        # this codegen derives from its definition. This entry is read to coerce
+        # ARGUMENT types at a call site and to take a return type, never to emit
+        # a prototype, so a stale arity here is a coercion imprecision — but
+        # test_gimple.py checks it against the real signature anyway, because
+        # the header copy next to it IS a prototype and the two must agree.
+        'py_tokenize':              ('MojoList *', ['char *']),
         'Parser_parse_module':   ('MojoList *', ['Parser *']),
         'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),
         'interpret_and_execute': ('void',        ['char *', 'int']),
@@ -4100,6 +4129,8 @@ class GimpleGen:
         return gfn._parsed_import(self, module)
     def _note_struct_import_alias(self, module: str, alias: str, orig_name: str):
         return gfn._note_struct_import_alias(self, module, alias, orig_name)
+    def _note_struct_attr_alias(self, module: str, alias: str, member: str):
+        return gfn._note_struct_attr_alias(self, module, alias, member)
     def _local_sibling_module_exports(self, module: str):
         return gfn._local_sibling_module_exports(self, module)
     @staticmethod

@@ -608,6 +608,14 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `self` re-supplied, a plain fnptr must NOT. Reset per function:
     # local names recycle. See _lower_maybe_bound_call.
     gen._bm_tainted_locals: set = set()
+    # Names in THIS function bound to more than one distinct container kind,
+    # which therefore have no container pointer type and are declared as the
+    # int64_t box instead. Computed lazily by `mixed_container_locals` (it
+    # walks the body, which is only available once `_reset_func` has it) and
+    # cached here so the per-local declaration site asks once per function
+    # rather than once per local. Reset per function for the same reason as
+    # every map above: local names recycle.
+    gen._mixed_container_locals = None
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from
@@ -2235,6 +2243,82 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
 
 
 
+
+
+def mixed_container_locals(gen) -> set:
+    """The names in THIS function's body that are assigned values of more
+    than one distinct container kind (`MojoDict *` / `MojoList *` /
+    `MojoSet *`), which is computed once per function and cached.
+
+    A local rebound to a different container kind is NOT a retyping of one
+    slot, it is a name that has held values of no single C type — the exact
+    rule `infra_infer._prebound_local_ctypes` states for STRUCTS ("a name
+    is recorded only while every pointer-shaped binding of it agrees; a
+    disagreement disqualifies it and the int64_t box is the answer"), and
+    the same reason `_scan_body_for_local_field_access` refuses to mint
+    fields on a name rebound to different node types. A `MojoDict` and a
+    `MojoSet` are distinct runtime structs with distinct slot layouts
+    (DESIGN.html R2), so no container pointer describes both.
+
+    The consequence is not academic: the store site reads the local's
+    DECLARED type, first-decl-wins, so a name first bound to a dict and
+    then to a set stayed declared `MojoDict *` and the set store reached
+    `_sce_simple_emit`'s container-kind chokepoint — the one that refuses
+    rather than reinterpreting one struct's memory as another's — and the
+    whole module failed to compile with "cannot coerce MojoSet * to
+    MojoDict *". Real: `mojo/backend_gimple/module_gen.py`'s
+    `gen_module_impl`, where `_lens` is a dict at line 1257
+    (`self._device_launch_lengths.get(_nm) or {}`) and a set at line 6114
+    (`_lens = {len(e.elements) for e in _els}`) — one function, one name,
+    two container kinds, and the self-host closure could not be generated.
+
+    Answers from `gen._cur_func_body`, which `_reset_func` keeps for
+    exactly this kind of "how is this local used?" question (the lambda
+    beta-reduction reads it too), so no new AST walk infrastructure is
+    introduced. Cached per function because the declaration site asks once
+    per newly declared local and a large body has many of those; the cache
+    is cleared by `_reset_func`, since local names recycle between
+    functions.
+
+    Deliberately NOT consulted for a name assigned a container exactly
+    once. That is the overwhelmingly common case, and it keeps its real
+    container type — declaring it `int64_t` would send every later read
+    through dynamic dispatch for no reason. Only a genuine disagreement
+    costs the box."""
+    cached = getattr(gen, '_mixed_container_locals', None)
+    if cached is not None:
+        return cached
+    kinds: dict = {}
+
+    def note(name, ctype):
+        if ctype in gimple_ctypes._CONTAINER_KIND_TYPES:
+            kinds.setdefault(name, set()).add(ctype)
+
+    def walk(stmts):
+        for s in (stmts or []):
+            if isinstance(s, gimple_ctypes.FunctionDef):
+                continue
+            if isinstance(s, gimple_ctypes.AssignStmt):
+                if isinstance(s.target, gimple_ctypes.IdentExpr):
+                    note(s.target.name, gen._quick_type(s.value))
+            elif isinstance(s, gimple_ctypes.MultiAssignStmt):
+                _mv = gen._quick_type(s.value)
+                for t in (s.targets or []):
+                    if isinstance(t, gimple_ctypes.IdentExpr):
+                        note(t.name, _mv)
+            for attr in ('then_body', 'else_body', 'body', 'finalbody'):
+                walk(getattr(s, attr, None))
+            for _c, eb in (getattr(s, 'elifs', None) or []):
+                walk(eb)
+            for h in (getattr(s, 'handlers', None) or []):
+                walk(getattr(h, 'body', None))
+    walk(gen._cur_func_body)
+    mixed = set()
+    for _n, _ks in kinds.items():
+        if len(_ks) > 1:
+            mixed.add(_n)
+    gen._mixed_container_locals = mixed
+    return mixed
 
 
 def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: bool = False):
@@ -5252,10 +5336,24 @@ _OWNED_STACK_PUSH_RUNTIME_FN = {
 def _vetted_struct_ctor_name(gen, value) -> str:
     """`S` when `value` is a constructor call `S(...)` of a struct the ownership
     analysis vetted (its `__init__` retains nothing, no base class) and whose
-    layout codegen knows; '' otherwise."""
+    layout codegen knows; '' otherwise.
+
+    `S` is resolved through `gen._struct_import_aliases` FIRST, exactly as
+    `_lower_call` resolves it, because this reservation is frame storage for
+    the instance THAT constructor builds and the two have to name the same
+    struct. A name reached through an alias (`Alias = mod.Thing`, or
+    `from mod import Thing as Alias`) resolves to the aliased struct here and
+    to the same one in the constructor; resolving it in only one of the two
+    emits a reservation nothing ever initialises, typed after a struct the
+    function does not build — and when the alias happens to be spelled like a
+    struct type in the same translation unit (`Lit` for both
+    `mojo/middle/offload.py`'s local alias and `ast_rewriter.py`'s class),
+    the local shadows the type and gcc rejects the declaration outright
+    (`expected ';' before '_owned_storage2_node'`)."""
     if not (isinstance(value, CallExpr) and isinstance(value.func, IdentExpr)):
         return ''
-    sname = _as_str(value.func.name)
+    sname = (getattr(gen, '_struct_import_aliases', None) or {}).get(
+        _as_str(value.func.name), _as_str(value.func.name))
     if sname in gen._analysis_structs and sname in gen.struct_field_types \
             and sname not in gen._dict_subclass_structs:
         return sname
