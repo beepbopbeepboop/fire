@@ -2395,6 +2395,42 @@ test('formal-value-model', [PY, 'test_formal_value_model.py'], mem='tiny',
      extra=['test_formal_value_model.py', 'formal/build.py',
             'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='the value model\'s shapes, against CPython on both backends')
+# `read_before_store`'s DOMINANCE half, as a unit test rather than more rows in
+# `test_formal_run.py`. The analysis is decided before any code is emitted, and
+# its interesting shapes are the ones a "count the arms" heuristic gets wrong —
+# `try`/`except`/`else`/`finally` with a `return` in the `finally`, a `break` out
+# of one arm of a loop, a `match` with a wildcard arm, a `del` on one path. Each
+# as a build-and-run row is a compiler invocation; as a call into
+# `read_before_store` it is microseconds, so all 61 are here and the file costs
+# no builds at all — which is also why it belongs in `check` and not in `proofs`.
+# Measured before being named: 10.9 s, 0.0 GB, `PASS=61 FAIL=0`.
+test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
+     mem='tiny', cache=True, deps=['preflight'],
+     extra=['test_formal_read_before_store.py', 'formal/model.py'],
+     desc='a store dominates a read only when every path passes one')
+# ONE rule for "does this method take a receiver", which
+# `formal/build.py` asks in two places that had drifted apart
+# (`_receiverless_methods` and the frame-holder fixpoint in
+# `_annotate_frame_receivers`). Both consumers' failures were refusals rather
+# than wrong answers, which is the only reason the drift could sit unfixed: a
+# class spelling its receiver `this` was refused in both places at once.
+#
+# It DOES build and run images (`fire.py build --formal` per case), so it is the
+# shape the ~15 files carrying `_FORMAL_SUITE_REASON` in `test_suite.py`'s
+# `UNREGISTERED` describe — and the decision recorded in
+# bugs/TEST_estate_check_red_on_two_form3_test_files.md is to REGISTER it rather
+# than excuse it, on the measurement rather than on the shape: 6.0 s and 0.1 GB,
+# which is the same order as the four formal host-module suites already in
+# `check` (4-7 s, 0.04-0.06 GB). `formal`/`formal-run`/`formal-globals` pay
+# minutes; this pays seconds. `proofs` names it too, so that bucket stays the
+# whole formal picture in one list — expansion schedules each test once per run,
+# so naming a cheap test twice costs nothing (the reason `formal-os` and
+# friends are named twice).
+test('formal-receiver-spelling', [PY, 'test_formal_receiver_spelling.py'],
+     mem='tiny', cache=True, deps=['preflight'],
+     extra=['test_formal_receiver_spelling.py', 'formal/build.py',
+            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='one rule for "does this method take a receiver", on both backends')
 # An x86-64 MODULE dylib that calls out: it must build, sign, load and RUN.
 # Module dylibs are how every cross-module call reaches its definition on this
 # backend, so a defect here is a whole class of link failures.
@@ -2608,6 +2644,20 @@ BUCKETS = {
                # run, so being in `check` too costs nothing.
                'formal-dataclasses', 'formal-module-attr',
                'formal-os-backing',
+               # …and the two that arrived with the formal3 batch and were in
+               # NO bucket and NO `UNREGISTERED`, which is what the estate check
+               # in `suite-self-test` was reporting — and it is a FAIL on a test
+               # that is in `check`, so it was red in the everyday loop and not
+               # only in `make gate`. `formal-read-before-store` is a pure unit
+               # test of `model.read_before_store` against CPython (61 shapes, no
+               # builds); `formal-receiver-spelling` builds and runs three
+               # images. Both measured green one at a time before being named
+               # (10.9 s / 0.0 GB and 6.0 s / 0.1 GB), and both cost less than the
+               # four formal host-module suites already in this list. Registering
+               # rather than marking is the project's own rule; the doc that asked
+               # for it (bugs/TEST_estate_check_red_on_two_form3_test_files.md) is
+               # deleted with this.
+              'formal-read-before-store', 'formal-receiver-spelling',
                # The ten the batch merge left unregistered, so `proofs` is
                # where the whole formal picture is and these were the ten
                # missing pieces of it. `formal-value-model` and
@@ -2617,7 +2667,12 @@ BUCKETS = {
                'formal-method-param-field', 'formal-receiver-position',
                'formal-small-hosts', 'formal-specialization',
                'formal-target-queries', 'formal-value-model',
-               'formal-x86-dylib'],
+               'formal-x86-dylib',
+               # …and the two that were in no bucket AT ALL when the estate check
+               # found them, same reason as in `check`: `proofs` is the whole
+               # formal picture in one list. Cheap enough that naming them twice
+               # costs nothing, since expansion schedules each test once per run.
+               'formal-read-before-store', 'formal-receiver-spelling'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,
