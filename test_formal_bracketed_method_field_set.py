@@ -105,31 +105,43 @@ DIFF_CASES = [
     # THE TERMINAL CONSTRUCT, in miniature, and the case the whole file is
     # about.  `Cell` has ONE field, so it fits one word and its receiver IS that
     # field — exactly `Optional`'s shape, and exactly the shape this change
-    # recovers.  `bump[7]` writes `self._value`, and `total` reads it back; the
-    # bracket argument is given a distinct weight so a case that read a
-    # never-written slot would print a DIFFERENT NUMBER rather than crash.
+    # recovers.  `bump[7]` writes `self._value`; the bracket argument is given a
+    # distinct weight so a case that read a never-written slot would print a
+    # DIFFERENT NUMBER rather than crash.
+    #
+    # `bump` MUTATES AND RETURNS NOTHING, and that is load-bearing rather than
+    # incidental.  It used to `return self._value` and print the return value,
+    # which is the shape `model.one_field_mutating_methods` refuses by name —
+    # a one-field mutator hands its receiver back on every path, and one that
+    # ALSO returns a value has no single answer ("both changes its receiver and
+    # returns a value").  That rule landed after this row was written, so the
+    # row stopped being about the field set and became about the mutator rule;
+    # the program below is the same construct without the return, so it still
+    # asks the question this file is named for, and the refused shape is pinned
+    # separately as `refuse_a_one_field_mutator_that_also_returns_a_value` so
+    # the interaction between the two features is a row rather than an accident.
     ("bracketed_method_call_does_not_invent_a_field",
      "struct Cell:\n"
      "    var _value: Int\n"
-     "    def bump[T: Int](out self, k: Int) -> Int:\n"
+     "    def bump[T: Int](out self, k: Int):\n"
      "        self._value = self._value + T + k\n"
-     "        return self._value\n"
      "\n"
      "def main() -> Int:\n"
      "    var c = Cell()\n"
      "    c._value = 5\n"
-     '    printf("v=%d", c.bump[7](3))\n'
+     "    c.bump[7](3)\n"
+     '    printf("v=%d", c._value)\n'
      "    return 0\n",
      "class Cell:\n"
      "    def __init__(self):\n"
      "        self._value = 5\n\n"
      "    def bump(self, t, k):\n"
      "        self._value = self._value + t + k\n"
-     "        return self._value\n"
      "\n"
      "def main():\n"
      "    c = Cell()\n"
-     '    print("v=%d" % c.bump(7, 3), end="")\n'
+     "    c.bump(7, 3)\n"
+     '    print("v=%d" % c._value, end="")\n'
      "    return 0\n"
      "\n"
      "main()\n"),
@@ -519,6 +531,31 @@ REFUSALS = [
      '    printf("v=%d", go(h) * 10 + h.pad)\n'
      "    return 0\n",
      "outlives the frame it names"),
+
+    # THE ONE-FIELD MUTATOR THAT ALSO RETURNS A VALUE — the program
+    # `bracketed_method_call_does_not_invent_a_field` used to be before that row
+    # was reshaped, and it is here so the pair is one fact in two halves rather
+    # than a row that quietly stopped asking its question.
+    #
+    # `model.one_field_mutating_methods` is the rule: a one-field struct's
+    # mutator hands its receiver back on every path and the CALLER stores that
+    # back over the receiver expression, so the callee has one answer; one that
+    # also returns a value has two, and this path picks neither.  The bracketed
+    # specialization is beside the point and is kept because that is the shape
+    # the row was originally about — the refusal must not depend on the brackets.
+    ("refuse_a_one_field_mutator_that_also_returns_a_value",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "    def bump[T: Int](out self, k: Int) -> Int:\n"
+     "        self._value = self._value + T + k\n"
+     "        return self._value\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     '    printf("v=%d", c.bump[7](3))\n'
+     "    return 0\n",
+     "both changes its receiver and returns a value"),
 ]
 
 # ── x86-64's comptime ABI, pinned ───────────────────────────────────────────

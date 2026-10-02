@@ -12015,17 +12015,6 @@ def mutating_receiver_return_refusal(owner: str, member: str) -> str:
         f"`one_field_mutator_with_a_return_value_is_refused`.")
 
 
-    return (
-        f"{owner}.{member}() is a one-field struct's mutating method, so the "
-        f"value it hands back IS the receiver, and the caller stores that over "
-        f"the expression the receiver was read from. It is called here as a "
-        f"VALUE rather than as a statement of its own, so there is nowhere to "
-        f"store it — and reading the call's result instead would hand the "
-        f"caller the object's new contents, which is a different program from "
-        f"the one written. Call `{spelled}.{member}(...)` as a statement. "
-        f"(`formal/model.py`'s `receiver_writeback_name` is the rule.)")
-
-
 def mutating_receiver_value_refusal(owner: str, member: str, spelled) -> str:
     """The diagnostic for a mutator call in a VALUE position.
 

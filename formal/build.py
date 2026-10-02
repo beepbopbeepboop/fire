@@ -6086,6 +6086,20 @@ def _apply_receiver_writeback(node, writebacks: dict) -> None:
     REPLACES an element with a different node: iterating a list while changing
     its length is how a pass like this skips the statement after the one it
     just rewrote.
+
+    `model.call_callee_name` rather than `getattr(call.func, "name", None)`,
+    and the two spellings it accepts are the whole of the difference.  This pass
+    runs AFTER `_rewrite_method_calls`, which replaces the callee of `c.bump[7]`
+    with `Cell_bump` and leaves the specialization brackets ON it — so the
+    callee node here is a `SubscriptExpr` over an `IdentExpr` and has no `name`
+    of its own.  Reading `.name` found nothing, `writebacks.get(None)` was None,
+    and the call was left alone: `c.bump[7](3)` on a one-field struct built, ran
+    and left `c` at 5 where the source says 15 — the receiver the callee handed
+    back was dropped, and the program computed the wrong answer with no
+    diagnostic anywhere.  `call_callee_name` is the reader both emitters already
+    use for this question (`arm64_codegen._specialization_of` delegates to
+    `comptime.specialization_name`), so the write-back and the call it rewrites
+    now name the callee the same way.
     """
     if isinstance(node, list):
         i = 0
@@ -6094,7 +6108,7 @@ def _apply_receiver_writeback(node, writebacks: dict) -> None:
             if isinstance(item, F.ExprStmt) and isinstance(item.value,
                                                           F.CallExpr):
                 call = item.value
-                wb = writebacks.get(getattr(call.func, "name", None))
+                wb = writebacks.get(M.call_callee_name(call.func))
                 if wb is not None:
                     recv = call.args[0] if call.args else None
                     if not isinstance(recv, F.IdentExpr):
@@ -6112,7 +6126,7 @@ def _apply_receiver_writeback(node, writebacks: dict) -> None:
     if isinstance(node, F.ExprStmt):
         return                        # a statement: the list arm handled it
     if isinstance(node, F.CallExpr):
-        wb = writebacks.get(getattr(node.func, "name", None))
+        wb = writebacks.get(M.call_callee_name(node.func))
         if wb is not None:
             recv = node.args[0] if node.args else None
             raise CodegenError(M.mutating_receiver_value_refusal(
