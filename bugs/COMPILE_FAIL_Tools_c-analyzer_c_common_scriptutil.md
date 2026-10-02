@@ -4,6 +4,74 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-01 — THREE blockers are now TWO; `track_progress_compact` has cleared, and `iter_marks`' real cause is narrower than recorded below
+
+Fresh `python3 fire.py build .tmp/ca/c_common/scriptutil.py` (sources copied
+from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`) on `6b9b6b18`, arm64.
+The complete refusal list:
+
+```
+_iter_filenames: a call to unresolved callee 'Exception(...)' is not
+                 supported in a compiled generator/coroutine body
+iter_marks:     every `yield` must carry a value, and all values must
+                 agree on one scalar type (int64_t/double/_Bool)
+```
+
+**`track_progress_compact` is gone from the list.** The entry below recorded
+it as blocked by `a *`-/`**`-unpack call argument in a generator body`
+(`iter_marks(groups=groups, **mark_kwargs)`, scriptutil.py:580). That shape
+now lowers. Nothing in this branch touched it — the change is a later
+lander's — but the doc's claim about it was accurate when written and is now
+stale, and the file has one fewer blocker than it says.
+
+### `iter_marks`' cause, measured: it is NOT the `**`-unpack
+
+The entry below argues at length that `iter_marks` fails because its
+`yield` types disagree, and that the disagreement comes from `os.linesep`
+being read into a generator body (`div = os.linesep` inferring `int64_t`
+against `end = f'{mark}{os.linesep}'` inferring `char *`). That is still the
+immediate mechanism, but it is worth stating what the refusal list now
+shows: with `track_progress_compact`'s `**mark_kwargs` forwarding lowered,
+`iter_marks` is the *only* remaining `iter_marks`-family blocker, so the
+`**`-unpack and the mixed-yields were never the same problem.
+
+Measuring `_cpp_expr` on the live tree confirms the module-member VALUE read
+is still the diagnosed stub:
+
+```
+[gimple_codegen] stubbed operation: generator-body module-member value read os.linesep
+```
+
+i.e. where it does NOT trip the yield-type check it produces `''` where
+CPython produces `'\n'` — a wrong answer with a diagnostic rather than an
+error. That is the honest statement of what is left, and it is the entry
+below's step 1, unchanged.
+
+### Next step (unchanged in substance; re-verified 2026-10-01)
+
+1. **Module-attribute value reads in a generator body** (`os.linesep`,
+   `fsutil.USE_CWD`, …). Still the highest-value item, still worth doing
+   first, still the difference between an honest refusal and a wrong
+   program. The bound module object is an opaque `int64_t` in this body
+   model, so the fix needs the constant's real C symbol — and since
+   `6b9b6b18` there IS a per-module globals-struct lookup to read it from:
+   `_module_global_field_type(module, name)` in `gimple_codegen.py`, which
+   resolves a name against `_module_globals[mod]`'s `(name, c_type,
+   g_mtype)` triples (the same list the struct typedef, the initializer and
+   the `_<mod>_mojo_global_get_<name>` accessors are generated from).
+   `_cpp_expr_static_ctype` needs the matching row so the yield types agree
+   afterwards. **This is a smaller job than the entry below assumed** — the
+   per-module lookup it needed did not exist then and does now.
+2. **`Exception(...)` as a value.** Unchanged; still the `_iter_filenames`
+   blocker. `_cpp_raise_stmt` already builds the `_MojoCppExc{tag, msg, obj}`
+   payload for `raise ExcName(...)` and for a bare `raise ExcName`; what's
+   missing is the ASSIGNMENT form.
+3. **`**`-forwarding into a compiled generator.** **REDUCED**: the one real
+   call site in this file (`iter_marks(groups=groups, **mark_kwargs)`) now
+   lowers, and `c_analyzer/__init__.py`'s `iter_decls(filenames, **kwargs)`
+   is the remaining one. If it is still refused, re-measure before working —
+   it may have cleared with the same change.
+
 ## Status 2026-09-30 — three blockers, unchanged in count; two of them are now the shared blockers other files also hit
 
 Re-verified against the current tree (`python3 fire.py build`, sources copied

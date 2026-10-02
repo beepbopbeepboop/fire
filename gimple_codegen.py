@@ -4030,7 +4030,45 @@ class GimpleGen:
            recorded itself — e.g. gen_module_impl's late reconcile loop
            mirrors widened callee-return pointer types into the overlay)
            defers to the shared cdecl when one exists, else uses its own
-           value — byte-for-byte the prior behavior."""
+           value — byte-for-byte the prior behavior.
+        4. A non-dispatch CONTAINER own-conclusion (`MojoDict *` /
+           `MojoList *` / `MojoSet *`) boxes to `int64_t` even when a
+           shared cdecl entry exists, PROVIDED that entry is not itself a
+           container pointer. Rule 1 already handled the container-cdecl
+           case (dispatch tables); this rule handles the one it could
+           not, which is the SAME homonym class rule 2 fixes, read from
+           the other side.
+
+           Rule 2 narrows "a foreign homonym's pointer cdecl must not
+           re-type this module's own SCALAR conclusion". Its exact
+           mirror — "a foreign homonym's pointer cdecl must not re-type
+           this module's own CONTAINER conclusion" — was missing, and it
+           is not reachable by narrowing: a container own-conclusion
+           falls straight past rule 2 (own is not a scalar) into rule 3,
+           which deferred to ANY shared cdecl. So the one entry that
+           could re-type it was a foreign module's NON-container cdecl.
+
+           That is the Tools/c-analyzer shape: `c_analyzer/info.py`'s own
+           `UNKNOWN = _misc.Labeled('UNKNOWN')` is boxed `int64_t` on
+           `UNKNOWN`'s field, while `c_common/tables.py`'s unrelated
+           `UNKNOWN = '???'` cdecl'd `'char *'` into the shared dict.
+           Every consumer of this helper then disagreed with the frozen
+           field, in both directions at once: `_global_dst_ctype`
+           (assignment sites) coerced the RHS to `char *`, and
+           `_lower_IdentExpr` loaded the `int64_t` field through a
+           `char *` temp — 4 x "assignment to 'int64_t' from 'char *'
+           makes integer from pointer without a cast" plus 6 x
+           "non-trivial conversion in 'component_ref'" (bugs/
+           COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md).
+
+           The guard is `cdecl` NOT a container pointer rather than
+           `cdecl is None`, because a non-container shared cdecl can only
+           be a foreign homonym's conclusion or the `int64_t` box the
+           convention writes when `_gscan_declare_global` DID run — and
+           both mean the same boxed `int64_t` field this rule returns, so
+           keying on "not a container pointer" is what makes the
+           assignment site, the field freeze, and the read agree
+           regardless of WHICH module happened to be scanned first."""
         own = self._own_global_var_types.get(name)
         if own is None:
             return None
@@ -4040,23 +4078,69 @@ class GimpleGen:
             return cdecl
         if own in ('int64_t', 'double', '_Bool', 'char *'):
             return own
-        if (own in ('MojoDict *', 'MojoList *', 'MojoSet *') and cdecl is None
+        if (own in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                and not (cdecl is not None
+                         and cdecl in ('MojoDict *', 'MojoList *', 'MojoSet *'))
                 and name not in ('_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
                                  '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT',
                                  '_CMP_OPS')):
-            # A NON-dispatch CONTAINER own-conclusion with NO shared cdecl
-            # entry: the module-global C struct-field convention boxes these
-            # as `int64_t`. Returning the raw container type here declared
-            # `MojoList * arr` for a plain `arr = [1,2,3]` on the
-            # self-hosted compiled path — where `_gscan_declare_global`'s
-            # ListExpr branch didn't run to set the cdecl — vs stage1's
-            # boxed `int64_t arr` (array_ops_jit parity under
-            # MOJO_NO_SHIM=1). The hardcoded dispatch tables keep the bare
-            # pointer and are excluded (their `_gscan_declare_global`
-            # branch, when it runs, DOES set the cdecl; when it doesn't,
-            # this exclusion preserves the pre-existing raw-type return).
+            # A NON-dispatch CONTAINER own-conclusion whose shared cdecl is
+            # absent OR non-container: the module-global C struct-field
+            # convention boxes these as `int64_t`. Returning the raw container
+            # type here declared `MojoList * arr` for a plain
+            # `arr = [1,2,3]` on the self-hosted compiled path — where
+            # `_gscan_declare_global`'s ListExpr branch didn't run to set the
+            # cdecl — vs stage1's boxed `int64_t arr` (array_ops_jit parity
+            # under MOJO_NO_SHIM=1); and a FOREIGN module's non-container
+            # cdecl under the same bare name re-typed this module's own
+            # container global (rule 4 above). The hardcoded dispatch tables
+            # keep the bare pointer and are excluded (their
+            # `_gscan_declare_global` branch, when it runs, DOES set the
+            # cdecl; when it doesn't, this exclusion preserves the
+            # pre-existing raw-type return).
             return 'int64_t'
         return cdecl if cdecl is not None else own
+
+    def _module_global_field_type(self, module: str, name: str) -> tuple[str, str] | None:
+        """The `(c_type, mojo_type)` that module `module`'s OWN globals struct
+        declares for `name`, or None when that module declares no such field.
+
+        The per-module counterpart to `_own_overlay_global_ctype`, and needed
+        for the same reason with the same limitation fixed: that helper answers
+        "what type does THIS instance's own overlay conclude", which is the
+        right question for a BARE name (only ever this module's global). It
+        cannot answer the `submod.NAME` question, because there the field
+        belongs to a DIFFERENT module and this instance's overlay says nothing
+        about it.
+
+        `_module_globals[mod]` already holds the answer as its
+        `(name, c_type, g_mtype)` triples — it is the exact list the struct
+        typedef, the initializer, and the `_<mod>_mojo_global_get_<name>`
+        accessors are all generated from, so consulting it guarantees the read
+        agrees with the field by construction rather than by a second,
+        independently-drifting inference.
+
+        Without it, `submod.NAME` resolved the FIELD module-correctly (via
+        `_global_to_module`) but took the TYPE from the shared, name-keyed
+        `_global_var_types`, i.e. whichever of two same-named globals was
+        scanned first. Two modules each declaring their own `MARKER` — a list
+        in one, a string in the other — then read the *string* field through an
+        `int64_t` temp: "assignment to 'int64_t' from 'char *' makes integer
+        from pointer without a cast". The bare-name half of that same pair is
+        `_own_overlay_global_ctype`; this is the qualified half, and both are
+        needed or the two spellings of one name disagree.
+
+        Compared elementwise through `_as_str` like every other consumer of
+        `_module_globals`, since a tuple lowers to a MojoList on the
+        self-hosted compiled path and `==` would compare handles."""
+        entries = self._module_globals.get(module)
+        if not entries:
+            return None
+        from mojo.middle.module_shared import _as_str
+        for entry in entries:
+            if _as_str(entry[0]) == name:
+                return _as_str(entry[1]), _as_str(entry[2])
+        return None
 
     def _global_dst_ctype(self, name: str) -> str:
         """The destination C type for an assignment to a bare-name module

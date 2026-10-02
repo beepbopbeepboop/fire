@@ -669,9 +669,38 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         c_decl_type = gen._own_overlay_global_ctype(name)
         if c_decl_type is None:
             c_decl_type = gen._global_c_decl_types.get(name, ctype)
-        # Access global from module struct (use which module the global belongs to)
-        global_module = getattr(gen, '_global_to_module', {}).get(name, gen._current_module_ctx or "root")
-        safe_module = gimple_ctypes._c_field_name(global_module) if global_module else "root"
+        # Access global from THIS module's own struct — the same routing the
+        # WRITE side already uses, deliberately, at every one of its sites
+        # (`_gen_stmt_AssignStmt`'s `global x`/module-scope branches,
+        # `_write_dest` in emit_infra.py, and cpp_core's own generator-body
+        # module-global read), all of which carry the same explanation:
+        # `_global_to_module` is a SHARED, whole-transitive-tree, name-keyed
+        # "first module to claim this bare name wins" map, so when two
+        # genuinely different modules each declare their own same-named
+        # top-level global it points at whichever was scanned FIRST — not
+        # necessarily the one whose body is being emitted. A BARE (unqualified)
+        # name in real Python can only ever mean THIS module's own global
+        # (the qualification `othermod.name` is a MemberExpr, lowered
+        # separately above), so consulting that map here could only ever
+        # misroute.
+        #
+        # It did, and the read side was the half that was wrong: the gate
+        # above had ALREADY decided the name is ours (owner is None, or
+        # owner is this module, or `_owned_here` — this instance's own
+        # Phase-1.7 scan concluded it), yet the field reference then went
+        # and asked the shared map anyway. So a bare `UNKNOWN` inside
+        # c_analyzer/info.py (whose own `UNKNOWN` is a `_misc.Labeled(...)`
+        # struct, boxed `int64_t`) loaded `_c_common_tables_globals.UNKNOWN`
+        # — c_common/tables.py's unrelated `UNKNOWN = '???'`, a `char *` —
+        # into an `int64_t` local, while the WRITE for the very same name
+        # correctly landed in `_root_globals.UNKNOWN`. Read and write on one
+        # name, two different storage slots, and the read's type disagreed
+        # with the field it read: 4 x "assignment to 'int64_t' from 'char
+        # *' makes integer from pointer without a cast" plus 6 x "non-trivial
+        # conversion in 'component_ref'" (bugs/COMPILE_FAIL_Tools_c-analyzer_
+        # c_analyzer_info.md). With the write already pinned to this module,
+        # making the read agree is what closes the pair.
+        safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
         field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(name)}"
         if ctype == 'int64_t' and c_decl_type.endswith(' *'):
             # Global is declared as a pointer type at C level but we box it as int64_t.
@@ -1182,6 +1211,64 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # Lib_test_test_support.md's 2026-08-09 root-cause).
         _bound_mod = gen.imported_symbols.get(module_name, {}).get('module') \
             if module_name in gen.imported_symbols else None
+        # THIS module's own field triple is the authoritative answer for what
+        # `_<mod>_globals.NAME` actually holds — it is the exact
+        # (name, c_type, g_mtype) the struct typedef, the initializer and the
+        # `_<mod>_mojo_global_get_<name>` accessor were all generated from, so
+        # consulting it makes the read agree with the field BY CONSTRUCTION.
+        #
+        # It also replaces the shared `_global_var_types`/`_global_c_decl_types`
+        # lookups this branch used for both halves of the answer, because both
+        # of those are whole-transitive-tree, name-keyed "first module to claim
+        # this bare name wins" tables. `_global_to_module` IS one of them, and
+        # it gates this branch — so with two modules each declaring their own
+        # `MARKER`, only whichever was scanned first could be read through the
+        # `submod.` spelling at all, and its TYPE came from the shared dict
+        # regardless of which field was loaded.
+        #
+        # The shape is Tools/c-analyzer: `c_analyzer/info.py`'s own `UNKNOWN`
+        # (a boxed `_misc.Labeled`) versus `c_common/tables.py`'s unrelated
+        # `UNKNOWN = '???'` (`char *`) — a bare `UNKNOWN` and a qualified
+        # `tables.UNKNOWN` reading the SAME name as two different things
+        # (bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md). The bare
+        # half of that pair is `_own_overlay_global_ctype`; this is the
+        # qualified half.
+        _field_types = gen._module_global_field_type(_bound_mod, node.member) \
+            if _bound_mod else None
+        if _field_types is not None:
+            c_decl_type, gtype = _field_types
+            ctype = 'int64_t' if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *') else gtype
+            t = gen._new_temp(ctype)
+            if node.member in gen._actual_types and gen._actual_types[node.member].endswith(' *'):
+                gen._actual_types[t] = gen._actual_types[node.member]
+            else:
+                gen._actual_types[t] = gtype
+            if node.member in gen._dict_val_types:
+                gen._dict_val_types[t] = gen._dict_val_types[node.member]
+            if node.member in gen._elem_types:
+                gen._elem_types[t] = gen._elem_types[node.member]
+            safe_module = gimple_ctypes._c_field_name(_bound_mod) if _bound_mod else "root"
+            field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(node.member)}"
+            if ctype == 'int64_t' and c_decl_type.endswith(' *'):
+                raw_ptr = gen._new_val(c_decl_type, f'{field_ref}')
+                vp = gen._new_val('void *', f'(void *){raw_ptr}')
+                gen._emit(f'  {t} = (int64_t){vp};')
+            elif ctype.endswith(' *') and c_decl_type == 'int64_t':
+                # A pointer-semantic global (`char *` — e.g. a boxed path
+                # string like gimple_codegen._SELFHOST_DIR) stored in a boxed
+                # `int64_t` field: cast the load back to its real type so a
+                # later string op / `==` on `t` isn't a bare integer compare.
+                gen._emit(f'  {t} = ({ctype}){field_ref};')
+            else:
+                gen._emit(f'  {t} = {field_ref};')
+            return ctype, t
+        # FALLBACK for a module whose globals struct was never registered in
+        # `_module_globals` (an un-inlined stdlib marker like `os`/`sys`, where
+        # no field exists to read and the shape below is equally inapplicable).
+        # Both halves of the answer still come from the shared name-keyed dicts
+        # here — there is no per-module field to consult, so there is nothing
+        # for a homonym to disagree with. Reached only when the branch above
+        # found no field triple for `_bound_mod`.
         if (_bound_mod and node.member in gen._global_var_types
                 and getattr(gen, '_global_to_module', {}).get(node.member) == _bound_mod):
             gtype = gen._global_var_types[node.member]
