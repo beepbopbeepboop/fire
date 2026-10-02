@@ -336,6 +336,37 @@ def main():
 '''
 
 
+@case('multi_kind_parameter_returned_is_the_box')
+def _():
+    # `multi_kind_local_is_the_box_not_the_first_kind`, one indirection on:
+    # the multi-kind name is a PARAMETER. Both `return`s hand back the SAME
+    # local, so the disagreement lives in the local's bindings and never in
+    # the return statements — which is exactly what made this one slip
+    # through. The parameter's own type came from usage evidence
+    # (`_infer_param_types`, which cannot see a binding), the return type
+    # inherited it, and the CALL SITE then applied the `int64_t`-returning
+    # branch's default of "`_actual_types` says `MojoList *`" and formatted
+    # the dict through `mojo_repr_list_ints` — another container's memory, out
+    # of bounds. `{'a': 1}` printed as `[0]`, exit 0.
+    #
+    # Both branches are printed because the property is that the two
+    # CALL SITES agree with the source, not that one of them is right: a
+    # caller-side fix that only recognised the dict would pass with the list
+    # arm still guessing.
+    return '''def probe(box, kind):
+    if kind == 1:
+        box = [1, 2]
+    else:
+        box = {"a": 1}
+    return box
+
+
+def main():
+    print(probe(None, 1))
+    print(probe(None, 2))
+'''
+
+
 @case('next_iter_over_a_dict_items_expression')
 def _():
     # `next(iter(<expression>))`, where the expression is not a bare name.

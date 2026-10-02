@@ -2152,6 +2152,23 @@ def _gen_stmt_ReturnStmt(gen, node):
                 _seen.append(vtype)
                 if len(_seen) > 1:
                     gen._multi_kind_return_funcs[_fk] = True
+        elif (_fk and gen.func_ret_type == 'int64_t'
+                and v in ginf.multi_kind_locals(gen)):
+            # The returned value is a LOCAL BOUND TO CONTAINERS OF MORE THAN
+            # ONE KIND (`ginf.multi_kind_locals`, see
+            # `resolve_shared._infer_local_var_types`), so it lowers to the
+            # box and the `vtype in (...)` arm above never sees a second
+            # kind: `def probe(box, kind): if kind == 1: box = [1, 2] else:
+            # box = {"a": 1}; return box` returned `box` on BOTH paths, so
+            # the disagreement lives in the local, not in the returns.
+            #
+            # The call site then took the `int64_t`-returning branch's
+            # DEFAULT — `_actual_types[t] = 'MojoList *'` — and read the dict
+            # through `mojo_repr_list_ints`: another container's memory, out
+            # of bounds, printing `[0]` where CPython prints `{'a': 1}`. The
+            # registry dispatch is the answer the caller has to be told
+            # about, and this is the same fact from the callee's side.
+            gen._multi_kind_return_funcs[_fk] = True
         # Same for a multi-value return's PER-SLOT types: `return cfg, Model(cfg)`
         # is a heterogeneous tuple (two different struct pointers) whose
         # single joined element type is the useless int64_t, so a caller's

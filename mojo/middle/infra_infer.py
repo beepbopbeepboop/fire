@@ -1596,7 +1596,10 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
     a local rebound to a different STRUCT kind is not a retyping at all --
     it is a value of no single C type, and the honest answer is the box.
     So a name is recorded only while every pointer-shaped binding of it
-    agrees (see `_conflicting` below).
+    agrees (see `_conflicting` below), and a name whose bindings do NOT
+    agree is recorded as the box rather than dropped -- the box is the
+    answer, and recording it is the only way it reaches the consumer (the
+    `note` body's own comment says why dropping it was not the same thing).
 
     That exception is not a refinement, it is the whole ballgame for
     `fire_compiler.Parser._parse_expr`. Its `left` is first bound by the
@@ -1694,8 +1697,27 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
         if prev is not None and prev != cand:
             # Two pointer-shaped bindings of one name, and they disagree: the
             # name holds values of more than one C type, so there is no
-            # pointer type to record and the int64_t box is the answer.
-            del out[name]
+            # pointer type to record — and the answer is the box, which this
+            # now RECORDS rather than dropping.
+            #
+            # Dropping it used to mean "whatever `var_types` already says",
+            # and `var_types` is seeded for a PARAMETER from usage evidence
+            # alone (`_infer_param_types`), which cannot see a binding at all.
+            # So a parameter rebound to two container kinds took the guess:
+            # `def probe(box, kind): if kind == 1: box = [1, 2] else: box =
+            # {"a": 1}; return box` inferred `MojoList *`, and the caller
+            # then read the dict through `mojo_repr_list_ints` — another
+            # container's memory, out of bounds, printing `[0]` where CPython
+            # prints `{'a': 1}`. The box is what the docstring above already
+            # calls "the honest answer"; recording it is what makes it reach
+            # the consumer instead of being overwritten by a narrower guess.
+            #
+            # It stays a conflict for the rest of the walk (the name is never
+            # re-typed), and `_infer_return_type_with_locals` treats an
+            # `int64_t` entry here as authoritative over `var_types` — the
+            # join of two kinds cannot be beaten by any narrower answer, and
+            # every other ctype this function records is a real pointer.
+            out[name] = 'int64_t'
             conflicting.add(name)
             return
         out[name] = cand
@@ -1790,7 +1812,18 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     `Tools/wasm/wasi/__main__.py`).
 
     The overlay is temporary and additive: a name already in `var_types`
-    keeps the type an earlier pass decided for it."""
+    keeps the type an earlier pass decided for it — with ONE exception. An
+    `int64_t` entry is `_prebound_local_ctypes`' CONFLICT verdict (the only
+    way that function produces `int64_t`), i.e. this body binds the name to
+    two pointer types that disagree, and it overrides. The earlier entry is,
+    for a parameter, usage evidence from `_infer_param_types`, which cannot
+    see a binding at all and so cannot know the name is retyped; for a local
+    it is whatever a pre-pass guessed. Neither can be right once the body has
+    been read, and the narrower of the two answers is the dangerous one: a
+    function whose `return`s disagree inferred `MojoList *` and the caller
+    then read a `MojoDict` through `mojo_repr_list_ints`, out of bounds.
+    Every other ctype recorded here is a real pointer, so the rule cannot
+    fire for anything else."""
     _locals = _prebound_local_ctypes(gen, body)
     _dict_vals = _dict_value_locals(gen, body)
     if not _locals and not _dict_vals:
@@ -1799,7 +1832,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     _scratch_mark_ml: int = gen._scan_scratch_top
     _merged: dict = gen._scratch_dict_copy(_saved)
     for _n, _t in _locals.items():
-        if _n not in _merged:
+        if _n not in _merged or _t == 'int64_t':
             _merged[_n] = _t
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
