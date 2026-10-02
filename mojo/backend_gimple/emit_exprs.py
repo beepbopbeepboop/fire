@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 
 from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
@@ -1100,6 +1101,27 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # Check if obj is a simple identifier (module access)
     if isinstance(node.obj, gimple_ctypes.IdentExpr):
         module_name = node.obj.name
+        # The REAL module this identifier is bound to, for `import X as Y`.
+        # Every module-ATTRIBUTE special case below (`sys.argv`, `os.sep`,
+        # `signal.SIGTERM`, `__mlir_attr.*`, ...) is keyed on the canonical
+        # name, and `import os as _os` binds the local name `_os`, so all of
+        # them missed and the read fell to the generic dynamic-getattr
+        # dispatch -- a bare module marker is obj=NULL there, so `_os.sep`
+        # was a fatal runtime `AttributeError: sep`, silently different from
+        # `os.sep` which this same function handles as a constant.
+        #
+        # A SEPARATE name, not a reassignment of `module_name`: the uses below
+        # split cleanly, and only this half wants the canonical one. The
+        # struct/class/`cls`/`_func_attrs`/`var_types` branches further down
+        # all want the LOCAL binding, which for `import os as _os` is not in
+        # `struct_field_types` at all -- reassigning would make them fire on a
+        # name they cannot know anything about.
+        _canon = module_name
+        _bound = gen.imported_symbols.get(module_name)
+        if _bound:
+            _bm = _bound.get('module')
+            if _bm:
+                _canon = _as_str(_bm)
 
         # `cls.CLASSATTR` inside a classmethod: `cls` is a PARAM (so the
         # bare-type-name `ClassName.ATTR` branch further down is skipped —
@@ -1306,7 +1328,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
 
         # __mlir_attr.`literal` — a typed MLIR attribute used as a value
         # (integer constants like `0 : index`).  Lower to the constant.
-        if module_name == '__mlir_attr':
+        if _canon == '__mlir_attr':
             kind, val = gimple_ctypes.mlir.parse_attr(node.member)
             if kind in ('int', 'simd'):   # typed int / scalar-simd constant
                 t = gen._new_val('int64_t', f"(int64_t){val}")
@@ -1318,19 +1340,38 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             return 'int', t
 
         # Module attribute access: sys.argv, tokenizer.X, etc.
-        if module_name == 'sys' and node.member == 'argv':
+        if _canon == 'sys' and node.member == 'argv':
             # Return the argv list wired from C main(argc, argv)
             t = gen._new_temp('MojoList *')
             gen._emit(f"  {t} = mojo_get_argv();  /* sys.argv from C */")
             # Track element type so subscript uses mojo_list_get_str
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
-        if module_name == 'sys' and node.member == 'path':
+        if _canon == 'sys' and node.member == 'path':
             t = gen._new_temp('MojoList *')
             gen._emit(f"  {t} = mojo_list_new ();  /* sys.path stub */")
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
-        if module_name == 'sys' and node.member in ('stdout', 'stderr', 'stdin'):
+        if _canon == 'sys' and node.member == 'platform':
+            # `sys.platform` was reachable only as a comptime CONSTANT, in a
+            # condition: `comptime.eval_const` folds the `sys.platform`
+            # MemberExpr, and that is what makes `if sys.platform == 'win32':
+            # def f(): ...` work at all. Read as a VALUE there was no case for
+            # it, so `print(sys.platform)` fell to the generic dispatch, where a
+            # bare module marker is obj=NULL -- a fatal runtime `AttributeError:
+            # platform`. That is exactly what `./mojoc fire.py --dump-full` ended
+            # with, because `comptime.py`'s own `platform = sys.platform`
+            # fallback is such a read and comptime.py is inside the closure.
+            #
+            # Emitted as the same compile-time constant its own folding uses
+            # (`sys.platform` of the codegen process), so a condition and a
+            # value read cannot disagree, and as a literal rather than a runtime
+            # call, matching how the siblings here already work: `os.sep` and
+            # `signal.SIGTERM` are literals too.
+            t = gen._new_val('char *', gen._intern_string(
+                gimple_ctypes._c_escape(sys.platform)))
+            return 'char *', t
+        if _canon == 'sys' and node.member in ('stdout', 'stderr', 'stdin'):
             # The three standard stream FILE objects. This runtime has no
             # Python-file-object model, so each is represented as its POSIX
             # file descriptor (0/1/2 — the same identity libc's
@@ -1353,7 +1394,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             return 'int64_t', t
 
         # Special handling for os.path attribute access
-        if module_name == 'os' and node.member == 'path':
+        if _canon == 'os' and node.member == 'path':
             # The actual function call will be handled at the call site
             t = gen._new_temp('int')
             gen._emit(f"  {t} = 0;  /* os.path module marker */")
@@ -1379,10 +1420,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # the CallExpr-level rule ever got to match, silently disabling
         # all four existing rewrites. Codegen sees the post-rewrite tree,
         # so this case is unambiguous by construction.
-        if module_name == 'os' and node.member == 'environ':
+        if _canon == 'os' and node.member == 'environ':
             t = gen._new_val('MojoDict *', 'mojo_environ_dict ()')
             gen._dict_val_types[t] = 'char *'
-            return gimple_ctypes._module_attr_ctype(module_name, node.member), t
+            return gimple_ctypes._module_attr_ctype(_canon, node.member), t
 
         # os.sep / os.pathsep / os.curdir / os.pardir / os.linesep —
         # this platform is always POSIX ('/'), so all five are genuine
@@ -1395,7 +1436,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # from the generic dynamic-dispatch fallback (real:
         # Lib/mailbox.py:32's `linesep = os.linesep.encode('ascii')`,
         # whose global then also mis-typed against the mismatched RHS).
-        if module_name == 'os' and node.member in ('sep', 'pathsep',
+        if _canon == 'os' and node.member in ('sep', 'pathsep',
                                                    'curdir', 'pardir',
                                                    'linesep'):
             val = {'sep': '/', 'pathsep': ':', 'curdir': '.',
@@ -1418,7 +1459,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # across all POSIX platforms are listed; BSD/Linux-only members
         # (SIGUSR1/SIGCHLD/...) deliberately keep the honest AttributeError
         # rather than risk emitting a wrong number.
-        if module_name == 'signal' and node.member in (
+        if _canon == 'signal' and node.member in (
                 'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGABRT',
                 'SIGFPE', 'SIGKILL', 'SIGSEGV', 'SIGPIPE', 'SIGALRM',
                 'SIGTERM'):
@@ -5455,7 +5496,9 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # list for simplicity", per `_gen_compr_append`), `mojo_set_update` for a
     # set, `mojo_dict_update` for a dict. The latter two are per-element/per-pair
     # merges, which is what the set and dict cases need and what a list extend
-    # cannot express -- they were dropped here rather than guessed at.
+    # cannot express -- they were dropped here rather than guessed at, and all
+    # four park the remainder so the per-kind arm in `_gen_compr_append` does
+    # its own merge.
     if len(node.generators) > 1:
         gen._compr_pending_inner = gimple_ctypes.Comprehension(
             kind=node.kind, element=node.element, key=node.key,

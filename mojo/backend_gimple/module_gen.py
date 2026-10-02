@@ -49,6 +49,7 @@ import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
+from mojo.middle.methods_shared import _is_selfhost_source_file
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 # Re-export shared helpers from mojo.middle.module_shared via explicit imports.
@@ -214,100 +215,6 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             # ambiguity this pass exists to settle. Leave it alone.
             continue
         ipt.setdefault(fname, {})[pname] = call_type
-
-
-def _is_selfhost_source_dir(_dir: str) -> bool:
-    """Is `_dir` a directory holding a genuine checkout of this compiler's
-    own source (not necessarily THIS checkout)? Every real call site that
-    used to compare `_cur_abs == _SELFHOST_DIR` (or a `.startswith` prefix
-    of it) broke the moment the compiler's own `gimple_*.py`/fire_compiler.py
-    sources are compiled from a DIFFERENT checkout than the one currently
-    running as the driver — e.g. a downstream project (a GCC frontend)
-    vendoring a byte-identical copy of this compiler's backend at its own
-    path: `_SELFHOST_DIR` is hardcoded to wherever `gimple_codegen.py`
-    itself was loaded from, so an equality/prefix check against it is
-    FALSE for any other, otherwise-identical checkout (confirmed:
-    `/Users/mrs/net/gcc/gcc/fire`'s vendored copy). Same path-independent
-    signal `_run_pipeline`'s own `_selfhost_register_gimplegen` gate
-    already uses successfully (`_sh_sibling`): a `fire_compiler.py` living
-    right next to `_dir` is true only for a genuine compiler-source
-    directory, never for an ordinary user program's directory that
-    happens to contain a same-named file.
-
-    Defined HERE (not in gimple_codegen.py, its original home) and used
-    only within this file: a cross-module `from gimple_codegen import
-    _is_selfhost_source_dir` reference broke self-hosted with an
-    "unavailable in compiled mode (imported from an unresolved external/
-    relative module)" weak-stub fallback that always returned 0/False —
-    traced to `_local_sibling_module_exports`'s `gen._parsed_import(
-    'gimple_codegen')` itself returning a falsy path self-hosted (a
-    genuine, deeper self-hosted-only resolution gap for THIS one module
-    name, unrelated to this function specifically), even though the
-    shim's own compile resolves it fine. Every OTHER name imported from
-    gimple_codegen.py on the same import line is either a struct/class
-    type (never routed through this function-resolution path at all) or
-    a `gen`/`self`-first-param extracted GimpleGen helper already covered
-    by the separate, independently-working `_selfhost_extracted_fn_index`
-    mechanism — this plain, `str`-first-param utility function was the
-    only thing actually relying on the broken path. A local, single-file
-    definition sidesteps the whole cross-module resolution gap rather
-    than working around it."""
-    if not _dir:
-        return False
-    # NOT `_dir == _SELFHOST_DIR or _dir.startswith(_SELFHOST_DIR + os.sep)
-    # or ...`: this function's docstring already argues this equality-
-    # against-`_SELFHOST_DIR` signal is the WEAKER, position-dependent one
-    # (false for any vendored/downstream checkout) versus the sibling-file
-    # check below — and it is now additionally, actively BROKEN when this
-    # function itself runs self-hosted (i.e. compiled INTO `mojoc`, not run
-    # under the `python3 fire.py` shim). `_SELFHOST_DIR` is a module-level
-    # global defined in gimple_codegen.py; every cross-module *read* of a
-    # self-hosted module-level global falls back to its boxed int64_t
-    # "home" representation unless a separate pre-pass
-    # (`_seed_selfhost_module_globals`, gated by THIS function's own
-    # result) has already corrected its type for this call site — a
-    # chicken-and-egg gap this function cannot use to decide whether to run
-    # that very pre-pass. Confirmed via a direct debug print built into a
-    # rebuilt `mojoc`: reading `_SELFHOST_DIR` here evaluated to the bare
-    # integer `0`, not a path string, so `_dir.startswith(_SELFHOST_DIR +
-    # os.sep)` was really `_dir.startswith('0' + os.sep)`... and even after
-    # fixing `os.path.realpath` (BLOW.md's originally-suspected sole cause
-    # — real, but not sufficient) `_SELFHOST_DIR` still read back as the
-    # bare integer `0`, which Python's `+` coerces jointly with `os.sep`
-    # into `_dir.startswith(os.sep)` — trivially TRUE for every absolute
-    # path. Dropping the `_SELFHOST_DIR`-dependent checks entirely sidesteps
-    # this whole cross-module global-boxing gap rather than chasing it
-    # further; the sibling-file check the docstring already prefers needs
-    # no module-level global at all.
-    if os.path.isfile(os.path.join(_dir, 'fire_compiler.py')):
-        return True
-    # A subdirectory (`mojo/middle`, `mojo/backend_gimple`) of a genuine
-    # compiler-source tree: walk up to find the `fire_compiler.py` that
-    # marks the tree's root.
-    #
-    # `if not _cand: _cand = os.sep` (not `_cand = ... or os.sep`): for an
-    # absolute `_rdir` (`os.path.realpath` always returns one),
-    # `_rdir.split(os.sep)[:1]` joined back is `''` (`'/tmp'.split('/')[:1]
-    # == ['']`), and `os.path.isfile(os.path.join('', 'fire_compiler.py'))`
-    # silently degrades into a CWD-relative check instead of the intended
-    # filesystem-root one — invoking `./mojoc` from a CWD that happens to
-    # hold a `fire_compiler.py` (true for every dev checkout) would
-    # spuriously match here for an unrelated `_dir`. This was the
-    # mechanism BLOW.md originally (and incompletely) blamed; see the
-    # module docstring above and BLOW.md §0 for the fuller chain. The
-    # explicit `if not _cand:` (not `or os.sep`) deliberately avoids
-    # self-hosted `or` on strings — see CRASH.md's `and`/`or`
-    # mixed-operand miscompilation class.
-    _rdir = os.path.realpath(_dir)
-    for _p in range(len(_rdir.split(os.sep)), 0, -1):
-        _cand = os.sep.join(_rdir.split(os.sep)[:_p])
-        if not _cand:
-            _cand = os.sep
-        if os.path.isfile(os.path.join(_cand, 'fire_compiler.py')):
-            return True
-    return False
-
-
 
 
 def _free_func_param_ctypes(self, s) -> list:
@@ -1750,12 +1657,12 @@ def gen_module_impl(self, stmts):
     # computed inline here since that flag is set further below).
     if (self.do_imports or self.link_imports):
         _sg_cf = getattr(self, '_current_filename', None)
-        if _sg_cf:
-            _sg_abs = os.path.abspath(os.path.dirname(_sg_cf))
-            if _is_selfhost_source_dir(_sg_abs):
-                _seed_selfhost_module_globals(self)
-                _seed_selfhost_struct_dict_field_types(self)
-                _seed_selfhost_return_elem_types(self)
+        # The FILE, not its directory: see the `_is_selfhost_file` comment
+        # at the other call site below for why the dir variant was over-broad.
+        if _sg_cf and _is_selfhost_source_file(_sg_cf):
+            _seed_selfhost_module_globals(self)
+            _seed_selfhost_struct_dict_field_types(self)
+            _seed_selfhost_return_elem_types(self)
 
     imported_code = []
     imported_stmts = []
@@ -2258,8 +2165,17 @@ def gen_module_impl(self, stmts):
     }
 
     _cur_file = getattr(self, '_current_filename', None)
-    _is_selfhost_file = bool(_cur_file) and _is_selfhost_source_dir(
-        os.path.abspath(os.path.dirname(_cur_file)))
+    # `_is_selfhost_source_file`, not `_is_selfhost_source_dir`. The question
+    # is "is the file being compiled the compiler's own source?", and the file
+    # is right here. The dir variant walked UP looking for a `fire_compiler.py`
+    # ancestor, so it answered True for every descendant of this checkout —
+    # `.tmp/`, `build/`, `tools/`, `formal/`, anything — and a user program that
+    # merely sat inside the checkout was then handed the COMPILER's own
+    # AST-node struct layouts below (`Scope`, `Token`, `Parser`, ...). That
+    # was a 355-line difference in the generated C for a program with no AST
+    # in it at all, changing only because of where the file was written. See
+    # bugs/CODEGEN_selfhost_source_dir_claims_any_file_under_the_checkout.md.
+    _is_selfhost_file = _is_selfhost_source_file(_cur_file)
     if _is_selfhost_file:
         self.struct_field_types['Scope'] = {
             'parent': 'Scope *',
@@ -4972,6 +4888,25 @@ def gen_module_impl(self, stmts):
     # re-types parameters all over the backend, and a container entry there
     # has effects far past comparison.
     self._container_param_kinds: dict[str, dict[str, str]] = {}
+    # Function name -> the NAMES of its parameters left at the `int64_t`
+    # default whose call sites DISAGREE and include at least one string.
+    # That set is exactly the provably-may-be-string set: a slot is in it
+    # only because a `char *` literal was actually observed at one of its
+    # call sites and an `int64_t` at another. It is the ONLY input the
+    # runtime discriminator `mojo_cstr_or_int_str` may be applied to, because
+    # that discriminator is unsound for an arbitrary int64_t: a value in
+    # `[2^31, 2^47)` is pointer-SHAPED, so `print(2**40)` would hand a bare
+    # integer to `strlen` and trade a SIGSEGV for a worse one. Keyed by
+    # function name for the same reason `_container_param_kinds` is — a
+    # forwarding chain's second hop is a DIFFERENT slot with the same shape.
+    self._int64_may_hold_str: dict[str, set] = {}
+    # Functions whose RETURN VALUE may hold a string, by the same route (a
+    # `return` of a name in `_int64_may_hold_str`, or of another such
+    # function's result). The other half of the same property: the sets above
+    # are per-CALLING-scope names, and this is the whole-program answer for a
+    # call site's own result, which is where most consumers meet the value —
+    # `print(f(x))` never reads a parameter at all.
+    self._ret_may_hold_str: set = set()
     # Function name -> its parameter NAMES in order. Populated here, in the
     # same pass that fills `_inferred_param_types`, because that map is keyed
     # by param NAME while a call site identifies a callee's parameter only by
@@ -5859,6 +5794,33 @@ def gen_module_impl(self, stmts):
                     _record_param_elem(callee, pnames[i], _fe, _fne)
 
                 st = _arg_scalar_type(caller_name, a)
+                if not st:
+                    # An int/bool/None literal contributes NOTHING above, and
+                    # that silence is the bug this records against: `f(1)`
+                    # alongside `f("s")` yielded `_scalar_obs['f']['x'] ==
+                    # {'char *'}` — one OBSERVING call site, vacuously
+                    # unanimous, resolved to `char *`, while the int call site
+                    # contributed absence that counted as agreement. The
+                    # parameter then declared `char * f(char *)`, and
+                    # `mojo_print((char *)1)` strlen'd a small integer:
+                    # SIGSEGV (exit -11) for a program CPython prints
+                    # `1` / `s`. Silence is asymmetric by construction here:
+                    # `g(1.5)` and `g("s")` are typed correctly, and `g(1)`
+                    # lands on `int64_t` only because `{'int64_t'}` fails the
+                    # `_has_dbl or _has_cs` whitelist below — nobody observed
+                    # it as one.
+                    #
+                    # LOCAL to this walk, deliberately NOT in
+                    # `_arg_scalar_type`: its other four consumers (the
+                    # struct-pointer observer, the struct-METHOD contract and
+                    # the two constructor observers) each whitelist its
+                    # answers differently, so widening what it returns changes
+                    # all four. That is a separate decision, deliberately not
+                    # taken here.
+                    if isinstance(a, (gimple_ctypes.IntLiteral,
+                                       gimple_ctypes.BoolLiteral,
+                                       gimple_ctypes.NoneLiteral)):
+                        st = 'int64_t'
                 if st:
                     # Split the chained `_scalar_obs.setdefault(callee, {})
                     # .setdefault(pnames[i], set()).add(st)` into typed
@@ -6004,6 +5966,21 @@ def gen_module_impl(self, stmts):
             _has_dbl = 'double' in types
             _has_cs = 'char *' in types
             if len(types) != 1 or not (_has_dbl or _has_cs):
+                # Disagreeing call sites (or evidence for nothing) → left at
+                # the `int64_t` default. If one of the observers was a `char *`
+                # this slot provably MAY hold a string, and that is the only
+                # fact a consumer is allowed to act on: record it, so
+                # `_gen_print` can route it through `mojo_cstr_or_int_str`
+                # rather than casting the raw bits to `char *`.
+                #
+                # The `continue`s below (annotated parameter, or a
+                # `_infer_param_types` resolution this pass is not entitled
+                # to overturn) are NOT here on purpose — those slots are
+                # already typed by real evidence, not by the int64_t
+                # default, so they never need the discriminator. Only a slot
+                # actually left at `int64_t` is recorded.
+                if _has_cs and ann.get(pname) is None:
+                    self._int64_may_hold_str.setdefault(callee, set()).add(pname)
                 continue                         # not unanimous double / char *
             if ann.get(pname) is not None:
                 continue                         # respect explicit annotation
@@ -6049,6 +6026,111 @@ def gen_module_impl(self, stmts):
     # `gimple_dynamic_attribute_real_storage_and_attributeerror`). A method
     # call, by contrast, has exactly one lowering — the struct's own mangled
     # method — so there is nothing for the name-based fallback to get right.
+# Past 1.3d proper: propagate the may-hold-a-string property out of the
+    # slots recorded above. It is one property of a VALUE, and a value is not
+    # confined to the slot it arrived in -- `y = x` copies it, `return x`
+    # publishes it to every caller, and a caller hands its own property to the
+    # callee it calls. Without this, `print` only learns about a parameter read
+    # DIRECTLY (`print(x)`), so every shape that moves the value first printed
+    # the boxed pointer's decimal and exited 0 -- exactly the
+    # silent-wrong-value shape that recording the slot exists to prevent. That
+    # was measured for a local alias (`y = x`), a direct return (`return x`,
+    # printed at the call site), and a forwarding chain (`def g(x): return
+    # f(x)`), none of which the collection loop alone can reach: a callee like
+    # `f` in the third case has no call site of its own passing a literal, so
+    # it appears in no `_scalar_obs` entry at all.
+    #
+    # So this is an interprocedural fixed point with edges in three directions,
+    # each monotone in one direction only (a name is added, never removed):
+    #
+    #   forward-in-body       `y = x` within one function
+    #   backward-along-call   a caller's argument property becomes the callee's
+    #                         parameter property -- this is what carries `g`'s
+    #                         evidence into `f` in the forwarding chain
+    #   forward-along-call    a returned expression's property becomes the
+    #                         function's own return property
+    #
+    # Termination is by construction rather than by a visit budget: the only
+    # mutation anywhere is adding a name to one of a bounded number of sets,
+    # and a cycle (`def f(x): return f(x)`) simply never adds anything.
+    # Deliberately order-insensitive and conservative elsewhere: an assignment
+    # anywhere in the body adds its target, and a later overwrite is not
+    # subtracted. That is sound for the one consumer there is --
+    # `mojo_cstr_or_int_str` is exact for a small integer (it prints the
+    # integer) and wrong only for one in `[2^31, 2^47)`, and that bound is what
+    # the collection loop above exists to enforce by only ever seeding a slot a
+    # `char *` was really observed at.
+    _int_maybe = self._int64_may_hold_str
+    _ret_maybe: set = set()
+    # Per-function walk results, computed ONCE: the fixed point below re-scans
+    # them every round, and `_walk_ast` over every body of a 60-module closure
+    # is not something to repeat until convergence.
+    _calls: dict = {}        # fname -> [(callee, [arg nodes])]
+    _rets: dict = {}         # fname -> [returned expression nodes]
+    _copies: dict = {}       # fname -> [(target name, source name)]
+    _params: dict = {}       # fname -> [param names in order]
+    for _fname, _fn in _fn_by_name.items():
+        _params[_fname] = [_as_str(_pn) for _pn, _pt in (_fn.params or [])
+                           if not _as_str(_pn).startswith('*')]
+        _calls[_fname] = []
+        _rets[_fname] = []
+        _copies[_fname] = []
+        for _nd in _walk_ast(_fn.body):
+            if (isinstance(_nd, gimple_ctypes.AssignStmt)
+                    and isinstance(_nd.target, IdentExpr)
+                    and isinstance(_nd.value, IdentExpr)):
+                _copies[_fname].append((_as_str(_nd.target.name),
+                                        _as_str(_nd.value.name)))
+            elif isinstance(_nd, gimple_ctypes.ReturnStmt):
+                if _nd.value is not None:
+                    _rets[_fname].append(_nd.value)
+            elif (isinstance(_nd, gimple_ctypes.CallExpr)
+                    and isinstance(_nd.func, gimple_ctypes.IdentExpr)
+                    and _as_str(_nd.func.name) in _fn_by_name):
+                _calls[_fname].append((_as_str(_nd.func.name),
+                                       list(_nd.args or [])))
+
+    def _expr_may(fname, expr) -> bool:
+        """Does `expr`, read in `fname`'s own scope, carry the property?"""
+        if isinstance(expr, gimple_ctypes.IdentExpr):
+            return _as_str(expr.name) in _int_maybe.get(fname, ())
+        if (isinstance(expr, gimple_ctypes.CallExpr)
+                and isinstance(expr.func, gimple_ctypes.IdentExpr)):
+            return _as_str(expr.func.name) in _ret_maybe
+        return False
+
+    _changed = True
+    while _changed:
+        _changed = False
+        for _fname, _pairs in _copies.items():
+            _names = _int_maybe.setdefault(_fname, set())
+            for _t, _v in _pairs:
+                if _v in _names and _t not in _names:
+                    _names.add(_t)
+                    _changed = True
+        for _fname, _sites in _calls.items():
+            for _callee, _args in _sites:
+                _pn = _params.get(_callee)
+                if not _pn:
+                    continue
+                for _i, _a in enumerate(_args):
+                    if _i >= len(_pn):
+                        break
+                    if _expr_may(_fname, _a):
+                        _names = _int_maybe.setdefault(_callee, set())
+                        if _pn[_i] not in _names:
+                            _names.add(_pn[_i])
+                            _changed = True
+        for _fname, _exprs in _rets.items():
+            if _fname in _ret_maybe:
+                continue
+            for _e in _exprs:
+                if _expr_may(_fname, _e):
+                    _ret_maybe.add(_fname)
+                    _changed = True
+                    break
+    self._ret_may_hold_str = _ret_maybe
+
     _STRUCT_FALLBACKS = ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
                          'MojoStr *', 'char *', 'int', 'int64_t')
     for callee in sorted(_struct_obs):

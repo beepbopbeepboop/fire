@@ -683,9 +683,9 @@ class _OutputLock:
     same shape and the same reasoning as `formal/imports.py::_dylib_lock` (and
     the reason this helper is LOCAL to this module rather than shared with it:
     this file is in `mojoc`'s own compile closure — `cas.selfhost_inputs()`
-    lists it — and `_is_selfhost_source_dir`'s docstring in
-    `mojo/backend_gimple/module_gen.py` records a measured self-host failure
-    for exactly the cross-module function reference sharing one would mean).
+    lists it — and BLOW.md's root-cause record for the ~15.8 GB fixed
+    # compile-time blowup measured a self-host failure for exactly the
+    # cross-module function reference sharing one would mean).
 
     **Why a CLASS and not a `@contextlib.contextmanager` generator.** This was
     one, and it broke the self-host build at LINK time, so the shape is load-

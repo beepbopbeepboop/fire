@@ -1997,8 +1997,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # which stubs any unrecognized method to a literal `0` --
                 # every self-hosted `os.path.realpath(x)` silently returned
                 # NULL. Root cause of BLOW.md's ~15.8 GB/180 G-instruction
-                # fixed compile-time cost: `_is_selfhost_source_dir`
-                # (mojo/backend_gimple/module_gen.py) compares two
+                # fixed compile-time cost: the backend's
+                # `module_gen.py` self-host predicate compared two
                 # `os.path.realpath(...)` results, both of which came back
                 # 0 == 0 (trivially equal) for ANY input directory once
                 # compiled, so it always classified every compile as

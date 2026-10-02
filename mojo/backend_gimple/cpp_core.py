@@ -5673,15 +5673,29 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         if target not in declared:
             declared[target] = 'int64_t'
             lines.append(f"{indent}int64_t {target};")
-        # Same Python invariant as the GIMPLE
-        # `_gen_for_list_iter_cursor`: the cursor is the index of the next
-        # UNCONSUMED element, so the advance happens in the BODY as the
-        # element is read, not in the for-increment. A post-body advance
-        # would make a `next(it)` in the body re-read the element the loop
-        # just yielded (the
+        # The advance goes at the TOP of the body, not in the for-increment.
+        # Same Python invariant as the GIMPLE lowering's
+        # `_gen_for_list_iter_cursor`: `cur` is the index of the next
+        # UNCONSUMED element, so `next(it)` inside the body must read the
+        # element AFTER the one the loop just yielded, which is only true if
+        # the cursor has already moved by the time the body runs. With the
+        # advance in the for-increment, `cur` still pointed AT the current
+        # element while the body ran and `next(it)` re-read it — the identical
+        # off-by-one in both backends (the
         # `Tools/cases_generator/analyzer.py::check_escaping_calls` shape).
+        #
+        # Two statements, read then advance, rather than one
+        # `mojo_list_get_int(lst, cur++)`: the GIMPLE lowering emits the
+        # advance as its own statement, so writing it the same way here is
+        # what makes the two backends' emitted text comparable for this
+        # shape instead of differing in an incidental way.
+        #
+        # The for-increment is therefore empty. A `continue` in the body
+        # jumps to the condition, skipping the (now empty) increment, which
+        # is correct precisely because the advance already happened above.
         lines.append(f"{indent}for (; {_li_cur} < mojo_list_len({_li_list}); ) {{")
-        lines.append(f"{indent}    {target} = mojo_list_get_int({_li_list}, {_li_cur}++);")
+        lines.append(f"{indent}    {target} = mojo_list_get_int({_li_list}, {_li_cur});")
+        lines.append(f"{indent}    {_li_cur}++;")
         for inner in s.body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
         lines.append(f"{indent}}}")

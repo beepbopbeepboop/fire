@@ -4456,6 +4456,39 @@ def _repr_boxed_container(gen, value: str):
     return _res
 
 
+def _is_may_hold_str_param(gen, node) -> bool:
+    """Is `node` an expression that may hold a STRING in an `int64_t`?
+
+    Two shapes, both carrying the one property the runtime discriminator
+    `mojo_cstr_or_int_str` can be safely applied to — a `char *` was really
+    observed at one of this value's call sites, so a string is possible:
+
+      * an `IdentExpr` naming a PARAMETER of the enclosing function that Pass
+        1.3d left at the `int64_t` default because its call sites disagreed
+        (or a local that one of those parameters was assigned to — the same
+        property, propagated by `module_gen.py`'s alias/return fixed point);
+      * a `CallExpr` to a function whose RETURN value may hold a string.
+
+    The answer must be "yes" only for those: the discriminator asks "is this
+    int64_t a boxed `char *`?", which is unsound for a plain integer because
+    `[2^31, 2^47)` is pointer-shaped — so `print(2**40)` would hand a bare
+    integer to strlen and trade a SIGSEGV for a worse failure. That bound is
+    what the set in `_int64_may_hold_str` exists to enforce.
+
+    Keyed by `current_func_name` for the same reason `_container_param_kinds`
+    is: a forwarding chain's second hop is a different slot with the same
+    shape, so the name alone would be wrong for both."""
+    _names = getattr(gen, '_int64_may_hold_str', {})
+    if isinstance(node, IdentExpr):
+        _cf = _as_str(getattr(gen, 'current_func_name', '') or '')
+        _in = _names.get(_cf)
+        return bool(_in) and _as_str(node.name) in _in
+    if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
+        _rets = getattr(gen, '_ret_may_hold_str', None)
+        return bool(_rets) and _as_str(node.func.name) in _rets
+    return False
+
+
 def _gen_print(gen, args: list, kwargs: list = None):
     # print(..., file=sys.stderr): kwargs used to be silently dropped
     # entirely (the file= expression was never even inspected), so every
@@ -4515,7 +4548,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # a restored docstring value printed its address, and any Token built
     # from it carried that same wrong value into `.value`.
     resolved_parts = []
-    for atype, aval in parts:
+    for _pi, (atype, aval) in enumerate(parts):
         # A DYNAMIC tagged nested-generator-tuple element (see
         # _lower_IdentExpr's _tagged_dyn_src branch): the real kind is only
         # known at runtime, so emit a tag-dispatched repr — str passes the
@@ -4568,6 +4601,37 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 aval = _repr_boxed_container(gen, aval)
                 atype = 'char *'
                 resolved_parts.append((atype, aval))
+                continue
+            # A PARAMETER whose call sites DISAGREE, one of them a string.
+            # `_scalar_obs` leaves such a slot at the `int64_t` default (see
+            # `module_gen.py`'s Pass 1.3d application loop, which records it in
+            # `_int64_may_hold_str` at the same moment it declines to resolve
+            # it), and `_actual_types` has nothing to say about it: the value
+            # was never seen type-erased at any earlier point in THIS
+            # function. The two available wrong answers are a raw
+            # `(char *)bits` cast — `mojo_print (strlen(1))`, SIGSEGV — and
+            # formatting the bits as a decimal, which prints the pointer and
+            # exits 0. Neither is correct, and which one you get is not
+            # something the caller can reason about.
+            #
+            # Ask the runtime's own discriminator instead. GATED on
+            # `_int64_may_hold_str`, because that set is the only sound input:
+            # a `char *` was actually observed at one call site, so a string is
+            # possible. An arbitrary int64_t is not a sound input — a value in
+            # `[2^31, 2^47)` is pointer-SHAPED, so `print(2**40)` would hand a
+            # bare integer to strlen and trade this for a worse failure.
+            if _pi < len(args) and _is_may_hold_str_param(gen, args[_pi]):
+                _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                     [('int64_t', aval)])
+                gen._emit(f'  {print_fn} ({_rv});')
+                # REQUIRED, not optional: a boxed string comes back borrowed
+                # (the very same address) but an integer comes back as a
+                # pooled heap block this print now owns (see
+                # `mojo_cstr_or_int_release`'s contract and doc/MEMORY.html
+                # "Transient keys"). `mojo_print` copies out of it, so the
+                # release goes straight after the call.
+                gen._emit_call('void', '', 'mojo_cstr_or_int_release',
+                               [('int64_t', aval), ('char *', _rv)])
                 continue
             real = gen._get_actual_type(atype, aval)
             if real == 'char *':

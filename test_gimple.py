@@ -8804,6 +8804,263 @@ print({'p': 1} | {'q': 2})
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_next_inside_for_over_same_iterator_is_one_ahead():
+        """`next(it)` inside `for x in it:` must read the element AFTER the
+        one the loop just yielded.
+
+        `it = iter(<list>)` lowers to a shared list plus an int64_t cursor
+        (`_try_bind_list_iter`), and both the `for` lowering and the
+        `next()` lowering read `mojo_list_get(lst, cur)` and then advance
+        `cur`. Each is right alone; together they were an off-by-one,
+        because the `for` advance happened in its post block AFTER the
+        body, so while the body ran the cursor still pointed AT the
+        element the loop had just handed to its target — and `next(it)`
+        read exactly that one again. `walk([1, 2, 3, 4])` printed
+        `[1, 1, 3, 3]` (two elements consumed, each reported twice, and
+        half the iterations lost) where CPython prints `[1, 2, 3, 4]`.
+
+        It is silent and exit 0, and it is not a corner case: this is the
+        shape CPython's own
+        `Tools/cases_generator/analyzer.py::check_escaping_calls` uses.
+
+        Nested `def`s on purpose, for the same reason as the test above:
+        only a `__GIMPLE` body proves anything about the cast operand and
+        the literal-increment shapes these two lowerings share. Each helper
+        PRINTS from inside the closure rather than returning the list:
+        returning a `MojoList *` out of a nested def is a separate,
+        pre-existing defect (it prints a raw pointer decimal — reproduced
+        with no `next()` involved at all), and a regression test should not
+        depend on it.
+
+        The other four cases are in the same program because the fix moves
+        the advance from the loop's post block to the top of its body, and
+        each of those is a way that move could be wrong: `next(it, d)` on
+        exhaustion, a `continue` (whose target is the now-empty post block,
+        so it must not skip the advance), a `break`, and a string element
+        type rather than int64_t."""
+        global _PASS, _FAIL
+        name = "next_inside_for_over_same_iterator_is_one_ahead"
+        src = '''\
+def walk(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            out.append(next(it))
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def with_default(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            out.append(next(it, 0))
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def skipping(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            if x % 2 == 0:
+                continue
+            out.append(x)
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def stopping(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            if x == 3:
+                break
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def strings(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            out.append(next(it))
+        print('|'.join(out))
+    inner()
+
+walk([1, 2, 3, 4])
+with_default([9, 10])
+skipping([1, 2, 3, 4])
+stopping([1, 2, 3, 4])
+strings(['a', 'b'])
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'next_ahead.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **{'do_imports': True} if mode == 'single-TU'
+                        else {'link_mode': True})[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'na_{mode}.c')
+                exe = os.path.join(td, f'na_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_program_written_inside_the_checkout_is_not_the_compiler():
+        """A user program's LOCATION must not change its generated C.
+
+        `_is_selfhost_source_dir` answered "is this the compiler's own
+        source?" by walking UP from the file's directory looking for a
+        `fire_compiler.py` ancestor, so it said True for every file under
+        this checkout — `.tmp/`, `build/`, `tools/`, anything. Both of its
+        call sites then ran unconditionally: one registered the
+        COMPILER's own AST-node struct layouts (`Scope`, `Token`, `Parser`,
+        `ReturnValue`, ...) into the `struct_field_types` a user program is
+        member-access-typed against, the other re-tokenized the compiler's
+        own sources into that program's gen. Measured at the time: the same
+        program compiled from inside vs outside the checkout produced 355
+        lines of C difference, all but the `#line` directive being exactly
+        those typedefs — for a program containing no AST nodes at all.
+
+        This was the third copy of "is this the compiler's own source?"
+        answered by a position test, after the two that
+        `bugs/CODEGEN_link_mode_bare_submodule_marker_call_silent_wrong_
+        value.md`'s fix consolidated into `methods_shared._is_selfhost_
+        source_file`. Both call sites already HAD the filename in hand, so
+        the file-level predicate dropped in without the ancestor walk, and
+        `_is_selfhost_source_dir` went with them.
+
+        `TMPDIR` is `<repo>/.tmp` here, so a plain `TemporaryDirectory` is
+        the interesting case rather than a vacuous one — but that is
+        asserted, not assumed, or this test would quietly stop testing
+        anything on a machine with a different `TMPDIR`.
+        """
+        global _PASS, _FAIL
+        name = "a_program_written_inside_the_checkout_is_not_the_compiler"
+        tmp = os.path.abspath(tempfile.gettempdir())
+        if not tmp.startswith(_PROJECT_DIR + os.sep):
+            print(f"SKIP  {name}: TMPDIR {tmp} is outside {_PROJECT_DIR}, "
+                  f"so the condition under test cannot arise")
+            return
+        # Exactly the names the `_is_selfhost_file` block registers into
+        # `struct_field_types` / `struct_boxed_fields` / `_field_elem_types`.
+        # Deliberately NOT "every AST node name": a LARGER block alongside
+        # that one registers ~57 more UNCONDITIONALLY, for reasons of its
+        # own, and folding those in here would make this test fail for a
+        # different bug than the one it is pinning.
+        gated_structs = (
+            'BinaryOp', 'BoundClassMethod', 'BoundMethod', 'BreakException',
+            'CallExpr', 'CompareChain', 'ContinueException', 'Interpreter',
+            'MemberExpr', 'MojoClass', 'MojoFunction', 'MojoInstance',
+            'MojoOverloadSet', 'Parser', 'ReturnValue', 'Scope',
+            'TernaryExpr', 'Token', 'UnaryOp', '_AutoStubCheckNamespace',
+            '_AutoStubNamespace', '_AutoStubValue', '_ComplexFloat',
+            '_MojoBoundComptimeFunction', '_MojoComplex', '_MojoSortFn',
+            '_MojoSortPartial')
+        src = '''\
+import os
+
+
+def helper(a, b):
+    return a + b
+
+
+class Box:
+    def __init__(self, v):
+        self.v = v
+
+    def get(self):
+        return self.v
+
+
+def run(path):
+    b = Box(helper(1, 2))
+    d = {'k': b.get()}
+    return len(d) + len(os.path.basename(path))
+
+
+print(run('x/y.txt'))
+'''
+        builds = []
+        with tempfile.TemporaryDirectory() as td:
+            for sub in ('loc1', 'loc2'):
+                d = os.path.join(td, sub)
+                os.mkdir(d)
+                prog = os.path.join(d, 'prog.py')
+                with open(prog, 'w') as fh:
+                    fh.write(src)
+                builds.append(gimple_codegen._run_pipeline(
+                    src, filename=prog, do_imports=True)[0])
+
+        injected = sorted({s for s in gated_structs
+                           if ('typedef struct %s ' % s) in builds[0]})
+        if injected:
+            print(f"FAIL  {name}: a user program written under the checkout "
+                  f"was handed the COMPILER's own AST struct layouts "
+                  f"({', '.join(injected)}) — "
+                  f"bugs/CODEGEN_selfhost_source_dir_claims_any_file_under_"
+                  f"the_checkout.md")
+            _FAIL += 1
+            return
+        # The `#line` directive correctly carries each file's OWN path, so it
+        # is the one line allowed to differ between two directories.
+        strip = lambda c: [l for l in c.split('\n')
+                           if not l.startswith('#line ')]
+        if strip(builds[0]) != strip(builds[1]):
+            print(f"FAIL  {name}: the same program generated different C "
+                  f"depending only on which directory under the checkout "
+                  f"it was written in")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_cursor_advance_has_no_cast_operand_in_gimple()
     test_next_inside_for_over_same_iterator_advances_once()
     test_paren_name_vs_one_tuple_for_target_differ()
@@ -8811,6 +9068,8 @@ print({'p': 1} | {'q': 2})
     test_scalar_arity_min_max_params_are_not_containers()
     test_list_sort_in_a_method_body_is_gimple_legal()
     test_dict_union_right_operand_is_converted_at_runtime()
+    test_next_inside_for_over_same_iterator_is_one_ahead()
+    test_a_program_written_inside_the_checkout_is_not_the_compiler()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()

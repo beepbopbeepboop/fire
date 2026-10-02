@@ -755,6 +755,64 @@ def test_builtin_open_is_not_ambiguous_from_transitive_siblings() -> bool:
     return ok
 
 
+def test_unannotated_param_with_disagreeing_call_sites() -> bool:
+    """An UNANNOTATED parameter whose call sites disagree on the argument's
+    type — here int vs str — used to be typed `char *` and SIGSEGV.
+
+    `module_gen.py`'s Pass 1.3d resolves such a parameter to `char *` /
+    `double` when the set of types observed at its call sites is unanimous. It
+    observed a `char *` from `f("s")` and NOTHING from `f(1)`: `_arg_scalar_type`
+    answers for a float or a string literal and has no answer for an integer
+    one. So the set was `{'char *'}` — one *observing* call site, vacuously
+    unanimous — and `f(1)`'s silence counted as agreement. The parameter came
+    out `char * f(char *)`, `f(1)` passed `(char *)1`, and `mojo_print` strlen'd
+    a small integer: exit -11, no output, for a program CPython prints
+    `1` / `s`.
+
+    Two defects had to be fixed together, because fixing only the first turns a
+    crash into a silent wrong answer: an integer argument must count as an
+    observation (`int64_t`), and a slot that is then left at the `int64_t`
+    default while provably MAY hold a string needs the runtime's own
+    discriminator at the point a C string is required (`mojo_cstr_or_int_str`,
+    which asks `mojo_boxed_is_str`). That second half has to follow the value
+    wherever it goes, so all four shapes that move it are here: read directly,
+    copied to a local, returned and printed at the call site, and returned
+    through a forwarding hop.
+
+    **In this file, not `test_gimple_runner.py`, which is where
+    `bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md` said
+    this belonged.** Measured, and the reason is structural: that runner's
+    `compile_to_gimple` is the single-translation-unit path, where the whole-
+    program call-site walk never runs and the parameter is left at `int64_t`
+    by the default rather than by the bug. All four shapes passed there before
+    the fix and after it — a test there could not have failed. This file goes
+    through `driver.compile_program`, the pipeline `fire.py build` actually
+    uses, and both shapes exit -11 at the parent commit.
+    """
+    cases = [
+        # read directly
+        ('def g(x):\n    print(x)\n\n\ng(1)\ng("s")\n', '1\ns\n'),
+        # copied to a local first
+        ('def h(x):\n    y = x\n    print(y)\n\n\nh(1)\nh("s")\n', '1\ns\n'),
+        # returned and printed at the call site
+        ('def f(x):\n    return x\n\n\nprint(f(1))\nprint(f("s"))\n', '1\ns\n'),
+        # returned through a forwarding hop
+        ('def f(x):\n    return x\n\n\ndef g(x):\n    return f(x)\n\n\n'
+         'print(g(1))\nprint(g("s"))\n', '1\ns\n'),
+    ]
+    ok = True
+    for i, (src, want) in enumerate(cases):
+        with tempfile.TemporaryDirectory() as td:
+            rc, stdout = _build_and_run({'prog.py': src}, 'prog.py', td)
+            py_rc, py_stdout = _cpython_run(td, 'prog.py')
+        if not (rc == 0 and py_rc == 0 and stdout == py_stdout == want):
+            ok = False
+            print(f"  ✗ unannotated_param_disagreeing_call_sites[{i}]: "
+                  f"rc={rc} stdout={stdout!r} "
+                  f"(CPython rc={py_rc} {py_stdout!r}, want {want!r})")
+    return ok
+
+
 CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
@@ -770,6 +828,7 @@ CASES = [
     test_module_scoped_cross_module_ctor_arg_through_a_param,
     test_dotted_sibling_import_qualifier_agrees,
     test_builtin_open_is_not_ambiguous_from_transitive_siblings,
+    test_unannotated_param_with_disagreeing_call_sites,
 ]
 
 

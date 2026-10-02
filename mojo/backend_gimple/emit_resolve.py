@@ -2987,18 +2987,18 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         return
 
     if _inner is not None and node.kind == 'set':
-        # Same nesting, and the merge is one call rather than a loop:
-        # `mojo_set_update` walks the source's slots and re-adds each element
-        # under its OWN tag (`mojo_set_add_int` / `mojo_set_add_str`), so the
-        # result is deduplicated per element exactly as the single-clause
-        # `mojo_set_add_*` arm is, not concatenated. `for i in A for j in B`
-        # is `update({elt for j in B} for each i in A)`.
+        # A set comprehension with 2+ clauses. Same park-the-remainder shape
+        # as the list branch below, but the merge is a per-ELEMENT ADD, not a
+        # list extend: `mojo_set_update` walks the source's slots and re-adds
+        # each element under its OWN tag (`mojo_set_add_int` / `mojo_set_add_str`),
+        # so the result is deduplicated per element exactly as the single-clause
+        # `mojo_set_add_*` arm is, not concatenated. `for i in A for j in B` is
+        # `update({elt for j in B} for each i in A)`.
         gen._compr_pending_inner = None
         _ir = gen.lower_expr(_inner)
-        _it = _as_str(_ir[0])
-        _iv_raw = _as_str(_ir[1])
+        _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
-        if _it != 'MojoSet *':
+        if _it.endswith(' *') and _it != 'MojoSet *':
             _iv = gen._new_val('MojoSet *', f'(MojoSet *){_iv_raw}')
         gen._emit_call('void', '', 'mojo_set_update',
                        [('MojoSet *', res), ('MojoSet *', _iv)])
@@ -3018,12 +3018,17 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # expressions are lowered by the same `_char_to_cstr` + typed-set path
         # the single-clause case uses -- `for i in A for j in B` is
         # `update({k: v for j in B} for each i in A)`.
+        #
+        # Without this arm `{(i, j): i * j for i in range(2) for j in range(2)}`
+        # printed a TWO-entry dict whose keys were raw heap addresses baked
+        # into the generated C as decimal literals -- the ASLR-dependent class
+        # of wrong output, and the reason this case is worth its own arm rather
+        # than a widened list extend.
         gen._compr_pending_inner = None
         _ir = gen.lower_expr(_inner)
-        _it = _as_str(_ir[0])
-        _iv_raw = _as_str(_ir[1])
+        _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
-        if _it != 'MojoDict *':
+        if _it.endswith(' *') and _it != 'MojoDict *':
             _iv = gen._new_val('MojoDict *', f'(MojoDict *){_iv_raw}')
         gen._emit_call('void', '', 'mojo_dict_update',
                        [('MojoDict *', res), ('MojoDict *', _iv)])
@@ -3065,23 +3070,36 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         gen._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
         # Track element type so downstream for-loops use the right accessor
         gen._elem_types[res] = et
-        # An element that is ITSELF a list/tuple (`[[5, j] for j in range(3)]`)
-        # carries a SECOND map, `_nested_elem_types`: what the inner containers
-        # hold. The single-clause path recorded only `_elem_types` here, so the
-        # result was describable as "a list of lists" and nothing more —
-        # `_list_repr_fn`'s `mojo_repr_list_intlists` branch needs the nested
-        # entry to pick the accessor that reads an inner slot as an int, and
-        # without it the generic walker read slot 0 of the first inner list
-        # through its None-sentinel heuristic, so the int 0 of `[5, 0]` printed
-        # as `None`. Mirrors _lower_list_literal's per-element carry (the same
-        # two lines, for the same reason, on the literal path).
-        if et == 'MojoList *' and ev in gen._elem_types:
-            gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
-        # A comprehension of TUPLES (`[(n, f) for n, f in funcs]`) — carry
-        # the heterogeneous tuple's per-slot types so a later
-        # `for n, f in test_funcs:` reads each slot with the right accessor.
-        if et == 'MojoList *' and ev in gen._tuple_slot_types:
-            gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
+        # A comprehension whose element is a TUPLE or a nested LIST
+        # (`[(5, j) for j in range(3)]`, `[[5, y] for y in ys]`) has to
+        # record BOTH maps the equivalent list LITERAL records at
+        # emit_exprs.py's own "A list whose elements are TUPLES" branch —
+        # `_nested_elem_types` AND `_tuple_slot_types`. Carrying only the
+        # second was this bug, and it is silent and exit 0:
+        # `_list_repr_fn` picks the repr helper from `_nested_elem_types`,
+        # so a comprehension of tuples/lists fell to the generic
+        # `_mojo_repr_list`, whose None-sentinel heuristic renders a raw 0
+        # slot as `None`. Every non-zero slot happened to print, which is
+        # why only the ZEROS exposed it and why the bug looked like "the
+        # later slots lose their type": `[(5, j) for j in range(3)]`
+        # printed `[(5, None), (5, 1), (5, 2)]`.
+        #
+        # The doc's control case (`[[5, y] for y in ys]`, all values
+        # non-zero) is NOT actually correct, it is the same bug with the
+        # zeros absent: `[[5, y] for y in [0, 8]]` printed
+        # `[(5, None), (5, 8)]` — the zero AND the list element rendering
+        # as a tuple. Both are this one missing map.
+        #
+        # `setdefault` (as the literal path also uses) so the first
+        # iteration's answer is the one kept, exactly as the literal path
+        # behaves when a literal mixes shapes.
+        if et == 'MojoList *':
+            if ev in gen._elem_types:
+                # `_elem_types[res]` above stays 'MojoList *' (what res
+                # CONTAINS); `_nested_elem_types` says what those hold.
+                gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
+            if ev in gen._tuple_slot_types:
+                gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
     elif node.kind == 'set':
         # Index the 2-tuple, NOT `et, ev = gen.lower_expr(...)`: the
         # unpack boxes `et` on the self-hosted path, so `et == 'char *'`

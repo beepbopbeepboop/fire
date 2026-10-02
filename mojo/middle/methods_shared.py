@@ -114,7 +114,7 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     cur_abs = gimple_ctypes.os.path.abspath(cf)
     sd = gimple_codegen._SELFHOST_DIR
     # Path-INDEPENDENT sibling signal (`fire_compiler.py` at the tree root),
-    # mirroring gimple_module_gen._is_selfhost_source_dir. The bare
+    # mirroring `_is_selfhost_source_file` above. The bare
     # `_SELFHOST_DIR` equality/prefix check alone is FALSE when the compiler
     # is compiled from a DIFFERENT checkout than the one acting as driver —
     # a downstream GCC frontend vendoring a byte-identical copy at its own
@@ -123,7 +123,7 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     # `mojo.middle.solvers.LayoutSolver.HEAP`) missed this gate in that build and
     # fell through to the "class-as-value not modeled" stub / a
     # `_mojo_dispatch_setattr` on a bogus pointer. Re-derived locally rather
-    # than imported cross-module (see _is_selfhost_source_dir's own docstring
+    # than imported cross-module (see _is_selfhost_source_file's own docstring
     # for the self-hosted resolution gap that forces the duplication).
     _rcur = gimple_ctypes.os.path.realpath(cur_abs)
     _rsd = gimple_ctypes.os.path.realpath(sd)
@@ -135,8 +135,10 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
         # ancestor. This recognizes a SUBDIRECTORY (`mojo/middle`,
         # `mojo/backend_gimple`) reached through a SYMLINKED source root,
         # where `_SELFHOST_DIR` (realpath) and `cur_abs` (symlink path)
-        # never prefix-match. Same defect and same fix as gimple_module_gen.
-        # _is_selfhost_source_dir.
+        # never prefix-match. Same defect and same fix as
+        # `_is_selfhost_source_file` above — and unlike that one, which asks
+        # the file-level question and so needs no walk at all, this question
+        # is genuinely about the tree, hence the walk.
         _rparts = _rcur.split(gimple_ctypes.os.sep)
         for _p in range(len(_rparts), 0, -1):
             _cand = gimple_ctypes.os.sep.join(_rparts[:_p])

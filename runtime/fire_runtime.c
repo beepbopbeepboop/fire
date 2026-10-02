@@ -1981,9 +1981,29 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
          * quadratic - confirmed as the actual cause of a stage2-bootstrap
          * runaway (mojo_compiler.py's own py_tokenize scanning for a
          * closing triple-quote across mojo.py's ~900KB source, self-hosted,
-         * took 100% CPU and dozens of GB before this fix). */
-        len = 0;
-        while (len < stop && s[len]) len++;
+         * took 100% CPU and dozens of GB before this fix).
+         *
+         * The scan is `memchr` rather than the byte-at-a-time loop this
+         * used to be, which is the SAME value by definition (the offset of
+         * the first NUL within s[0..stop), or `stop` when there is none)
+         * and is what every libc already vectorises. Measured on the exact
+         * scanning shape above (see
+         * bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md): 14x on
+         * the same inputs, with a byte-for-byte equality check over every
+         * position confirming the two agree.
+         *
+         * It is a constant-factor win, NOT a complexity one, and the doc
+         * says why it cannot be more: a bare `char *` carries no length, so
+         * "is `start` inside this string?" cannot be answered without a
+         * scan from byte 0, and every caller of this function has to ask
+         * that question (a slice whose start is past the end has to be
+         * reported as the empty string). Making the scan start-relative,
+         * which would be linear, means reading s[start] before anything
+         * has established that index is in bounds. */
+        {
+            const char *nul = (const char *)memchr(s, '\0', (size_t)stop);
+            len = nul ? (int64_t)(nul - s) : stop;
+        }
     }
     if (stop == MOJO_SLICE_STOP_OMITTED) stop = len;
     if (start < 0) start += len;
@@ -2031,8 +2051,12 @@ int mojo_cstr_region_eq(char *s, int64_t start, int64_t stop, char *needle)
         if (start < 0) start += len;
         if (stop  < 0) stop  += len;
     } else {
-        len = 0;
-        while (len < stop && s[len]) len++;
+        /* Same value as the byte-at-a-time scan this replaced, for the
+         * same reason mojo_cstr_slice's does (see the note there): it is
+         * the offset of the first NUL in s[0..stop), or `stop`. memchr
+         * computes it ~14x faster on the tokenizers' scanning shape. */
+        const char *nul = (const char *)memchr(s, '\0', (size_t)stop);
+        len = nul ? (int64_t)(nul - s) : stop;
     }
     if (start < 0) start = 0;
     if (stop > len) stop = len;
@@ -6887,6 +6911,15 @@ static char *_mojo_repr_intlists(MojoList *l) {
         }
         MojoList *_in = (MojoList *)(intptr_t)_p;
         int64_t _m = mojo_list_len(_in);
+        /* Each INNER element is a tuple or a list in its own right, and
+         * `mojo_repr_list_ints`/`_doubles`/`_bytes` all open on
+         * `mojo_is_tuple(this)` for exactly that reason. This helper used
+         * to hardcode "[" / "]" for the inner pair, which made a list of
+         * TUPLES print as a list of lists: `[(5, 0), (5, 1)]` printed
+         * `[[5, 0], [5, 1]]`, and so did `[(5, j) for j in range(2)]`.
+         * The outer brackets stay "[" -- this helper is reached only for a
+         * list whose elements are containers, and a LIST OF TUPLES is
+         * itself a list. */
         int _in_tup = mojo_is_tuple(_in);
         _buf = mojo_str_cat(_buf, _in_tup ? "(" : "[");
         for (int64_t _j = 0; _j < _m; _j++) {
