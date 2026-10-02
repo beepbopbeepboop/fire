@@ -8386,6 +8386,71 @@ WAVE7_G2_CASES = [
      "def main(k: Int) -> Int:\n"
      "    return f(0) * 1000 / 10 + f(7) * 100 / 10 + f(9) * 10 / 10 + f(100) / 100\n",
      123, None),
+    # ── a module-level literal as `memset`'s BYTE argument ──
+    #
+    # `bugs/FORMAL_folded_module_constant_as_memset_argument.md`. A module-level
+    # name whose value the build FOLDS is substituted at every read BEFORE any
+    # emitter runs (`build._substitute_module_constants`), so it never needs a
+    # register, a spill slot or a `__DATA` slot of its own. That is what makes
+    # this row build, and it is worth stating because the failure it replaced
+    # was not a narrow one: `memset(pat + i, PAT_DASH, 1)` was REFUSED with
+    # "'PAT_DASH' has no home: the register allocator collected no home for
+    # it", and the refusal named whichever constant the allocator ran out of
+    # room for, so it tracked the NUMBER of folded constants in a module and
+    # read as a property of whichever one lost the race. `argparse.mojo` worked
+    # around it by spelling every such byte inline.
+    #
+    # The answer is checked through `memcmp` rather than through a subscript: a
+    # `malloc`'d buffer has no count field, so `buf[i]` is a different question
+    # and this case is not about it. Both must be 0 (equal), and the control
+    # below is a differing byte, so a `memcmp` that compares nothing cannot pass
+    # this row.
+    ("folded_module_constant_as_a_memset_byte",
+     "PAT_DASH = 45\n"
+     "PAT_A = 65\n"
+     "\n"
+     "def fill(pat, n):\n"
+     "    var i: Int = 0\n"
+     "    while i < n:\n"
+     "        memset(pat + i, PAT_DASH, 1)\n"
+     "        i = i + 1\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var got = malloc(64)\n"
+     "    var want = malloc(64)\n"
+     "    memset(want, PAT_DASH, 4)\n"
+     "    fill(got, 4)\n"
+     "    var same = memcmp(got, want, 4)\n"
+     "    memset(got, PAT_A, 2)\n"
+     "    memset(want, PAT_A, 2)\n"
+     "    var same2 = memcmp(got, want, 2)\n"
+     "    return same * 10 + same2\n",
+     0, None),
+    # GUARD for the row above, and it is what makes that row mean something: the
+    # SAME two programs with the constant spelled inline is the behaviour that
+    # was always correct, so if the folded spelling were silently substituting
+    # the wrong value this would still pass while the row above failed. `1` is a
+    # DIFFERENCE, so it can only be produced by a comparison that really looked.
+    ("memset_byte_spelled_inline_is_unchanged",
+     "def fill(pat, n):\n"
+     "    var i: Int = 0\n"
+     "    while i < n:\n"
+     "        memset(pat + i, 45, 1)\n"
+     "        i = i + 1\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var got = malloc(64)\n"
+     "    var want = malloc(64)\n"
+     "    memset(want, 45, 4)\n"
+     "    fill(got, 4)\n"
+     "    var same = memcmp(got, want, 4)\n"
+     "    memset(got, 65, 2)\n"
+     "    memset(want, 65, 2)\n"
+     "    var same2 = memcmp(got, want, 2)\n"
+     "    return same * 10 + (1 - same2)\n",
+     1, None),
     # ── a list literal longer than one instruction's immediate offset ──
     #
     # A blob element `i` is at byte `8*(i+1)` from the blob's base, and
@@ -9521,6 +9586,52 @@ REFUSAL_CASES = [
      "def main() -> int:\n"
      "    printf(\"x=%d\", 7)\n    return 0\n",
      "refuse:9 parameters exceeds the", None),
+    # ── THE IMPORT DIAGNOSIS OUTRANKS A FRAME REFUSAL ──────────────────────────
+    #
+    # `_prepare_functions` runs BEFORE `_resolve_imports`, and every frame
+    # refusal is raised from inside it. So a file that both trips a frame clause
+    # AND imports something used to be reported with the frame sentence — a
+    # `codegen` class, a gap in this backend in this file — when the import
+    # says the file is out of reach entirely. The reader is sent after a
+    # construct they could reach.
+    #
+    # The codebase has fixed this twice by hand (`check_frame_field_blob_premises`
+    # for 67 files of this repository, `check_construction_shapes` for 14 more)
+    # and the frame refusals were left inside. What is different now is that
+    # `_resolve_imports` needs nothing `_prepare_functions` produces, so the
+    # refusal is HELD rather than moved: same words, raised at the first point
+    # after the imports have had their say.
+    #
+    # `p.zz` is the frame clause: a member read through a frame receiver naming
+    # a field the struct does not declare, refused by `_frame_receivers` from
+    # inside the pipeline. The needle is the import sentence, so this case is
+    # asserting the ORDER and nothing else — the frame refusal is still there,
+    # it is just asked second.
+    ("an_import_outranks_a_frame_refusal",
+     "from copy import copy\n"
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return p.zz + n\n",
+     "refuse:is a host module (CPython standard library)", None),
+    # The CONTROL, and it is the half that makes the case above mean something:
+    # the SAME program without the import is refused by the frame clause, on
+    # both architectures. Without this row a change that deleted the frame
+    # refusal altogether would leave the row above green.
+    ("the_same_frame_refusal_still_fires_without_an_import",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return p.zz + n\n",
+     "refuse:P has no field 'zz'", None),
     # EIGHT arguments is the boundary and it must still WORK: the fix is a
     # refusal past the limit, not a smaller limit. Without this row a fix
     # that cut the ABI to 6 to match x86-64 would pass the two above.

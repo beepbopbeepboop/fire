@@ -4,7 +4,18 @@
 (`origin_of`, commit `14a2e42d`; and the subscript argument list, commit
 `30e5e2e9`, which is the neighbouring gap this document used to file and
 which has been closed), one remaining limit is filed, and the rest of rows 7
-and 8 is not work.** This is the measurement the work map asked for before
+and 8 is not work.** RE-CHECKED 2026-10-01, and the ceiling still holds: of the
+seven row-7 files this document's landing table ends with, every one is now
+refused by a DEPENDENCY before its own body is reached — `tuple`,
+`linked_list` and `set` on `builtin_slice.mojo`, `deque` on
+`binary_heap.mojo`, `unsafe_pointer` and `base64` on
+`formal dylib has no …` — so **neither row 7's nor row 8's sentence is any of
+their terminal causes any more.** 0 reach `pass`, as measured. Re-checked on the
+seven this document names by name, not on all 26; the other 19 were row-8 or
+row-3/1 files whose recorded terminal causes are documented permanent limits, and
+the 26 are re-derivable with the `tools/formal_sweep_causes.py` the map's author
+committed on `work/formal-sweep-next` rather than on this tree. This is the
+measurement the work map asked for before
 anything was built (§3 of `FORMAL_sweep_work_map_2026-09-30.md`, on
 `work/formal-sweep-next`), carried out on the 26 files those two rows name. The
 map's warning was that "files blocked" is an UPPER BOUND and that rows 2 and 3

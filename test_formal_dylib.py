@@ -226,6 +226,12 @@ def build_dylib(tmpdir, sources, out_name, extra_args=()):
         return out, f.read()
 
 
+def manifest_exports(dylib_path):
+    """`{name: export entry}`, straight out of the dylib's manifest."""
+    with open(dylib_path + ".manifest.json") as f:
+        return {e["name"]: e for e in json.load(f)["exports"]}
+
+
 def exported_symbol(dylib_path, name):
     """The boundary symbol a dylib advertises for `name`, from its manifest.
 
@@ -807,6 +813,61 @@ def test_dylib_calls_out_to_libSystem(tmpdir, shared):
     check(r.returncode == 42, f"returned {r.returncode}, expected 42")
 
 
+def test_frame_params_are_published_not_empty(tmpdir, shared):
+    """A module that takes a FRAME publishes a per-parameter frame contract.
+
+    The point is the *publication*, at the point of publication, and that is
+    where this was found: the four `byref_*` cases in `test_formal_run.py` were
+    red for four layers of the wrong reason. `frame_params` is the answer to a
+    question an importing module cannot answer for itself — "did your
+    compilation make parameter 0 a frame holder, and of which struct?" — and
+    `model.resolve_frame_parameter_contract` reads it POSITIONALLY, with three
+    separate "no contract" answers. `[]` collides with the "not exported at all"
+    one, whose message claims the manifest does not list the export, so a
+    consumer was sent to look for an export filter that was never the problem.
+
+    The defect behind it was four `.get(fn.name)` reads of tables filed under
+    `_fn_key(fn)` (`id(fn)`), so the parameter list arrived as `()` and the
+    contract was `[]` for every export of every module — a function with one
+    parameter publishing `[]` is the shape to assert against, and `arity` is
+    right there in the same entry to disagree with.
+
+    A `[]` is still LEGITIMATE for a function with no parameters, so this only
+    says what it can: where the manifest says there is a parameter, there is a
+    contract entry for it.
+    """
+    src = os.path.join(tmpdir, "byframe.mojo")
+    with open(src, "w") as f:
+        f.write("struct P:\n"
+                "    var a: Int\n"
+                "    var b: Int\n"
+                "def take_it(p: P) -> Int:\n"
+                "    return p.a * 10 + p.b\n")
+    out, _ = build_dylib(tmpdir, [src], "byframe.dylib")
+    exports = manifest_exports(out)
+    check("take_it" in exports,
+          f"the module exported {sorted(exports)}, expected take_it")
+    entry = exports["take_it"]
+    contract = entry.get("frame_params")
+    check(contract is not None,
+          "the export carries no `frame_params` at all, so a consumer "
+          "cannot tell a published contract from an absent one")
+    check(len(contract) == entry["arity"],
+          f"take_it takes {entry['arity']} parameter(s) and published a "
+          f"contract of {len(contract)}: {contract!r}. `frame_params` is "
+          f"positional — one entry per parameter, in call-site order — so a "
+          f"short one reads as 'no contract' for every parameter it omits")
+
+    # And the entry must actually SAY it is a holder, not just be there. A
+    # one-parameter function publishing `[None]` would mean the entry exists and
+    # the classification did not happen, which is the same defect wearing a
+    # different length.
+    holders = [c for c in contract if c and c[0] != "one-word"]
+    check(holders,
+          f"take_it takes a P receiver in position 0, so position 0 of the "
+          f"contract must name P as a frame holder; published {contract!r}")
+
+
 TESTS = [
     ("dylib structure and export trie", test_dylib_structure_and_exports),
     ("exported functions execute", test_exported_functions_execute),
@@ -822,6 +883,8 @@ TESTS = [
      test_dylib_is_built_for_the_requested_arch),
     ("executable links a dylib and runs", test_executable_links_a_dylib),
     ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
+    ("a frame parameter's contract is published, not empty",
+     test_frame_params_are_published_not_empty),
 ]
 
 

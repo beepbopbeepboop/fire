@@ -29,15 +29,15 @@ blocking the 13-file `builtin_slice.mojo` row: `Slice.start` is declared
 `Optional[Int]`, the backend believed that to be a frame, and it refused to let
 the ctor store one in a field.
 
-This is the OTHER HALF of the pair `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md`
-describes, and the half that is safe to fix.  That doc's defect B — a bare
-`self.helper` in VALUE position — is genuinely ambiguous (an instance attribute
-shadows a class method in Python) and is deliberately NOT touched here; three
-structs in this tree still count a method name as a field because of it, and
-`refuse_a_value_position_method_reference_is_still_refused` pins that they are
-still refused rather than silently reading zero.  What this file fixes is the
-shape where the name is unambiguously a CALL, which the existing exemption
-already said about and simply could not see.
+This is one half of a pair of defects in this derivation.  The other half — a
+bare `self.helper` in VALUE position — IS ambiguous (an instance attribute
+shadows a class method in Python), so it was settled by Python's own rule rather
+than by the exemption below: `model.struct_receiver_reads` DEMOTES a name the
+struct declares as a method and never stores into, and
+`a_method_name_the_struct_stores_into_is_still_a_field` is the other half of
+THAT (the store keeps it a field).  What the exemption below handles is the
+shape where the name is unambiguously a CALL, which it already said about and
+simply could not see.
 
 CENSUS, measured by parsing all 644 structs in this repository and under
 `../new-modular/Mojo/stdlib/std` and asking which ones have a method name in
@@ -367,11 +367,18 @@ FIELDSET_CASES = [
      "        return self.bump(2)\n",
      ["_value"]),
 
-    # A VALUE-POSITION method reference — the OTHER defect, deliberately left
-    # alone.  `self.helper` here is not a call, so it is a name this derivation
-    # has always counted; pinning the current behaviour is what stops a future
-    # change from "fixing" it into the layout and reading zero.
-    ("a_value_position_method_reference_is_still_counted",
+    # A VALUE-POSITION method reference, `self.helper` in a place that is not a
+    # call.  This is the OTHER defect of the pair named in this file's
+    # docstring, and it is a wrong answer: counting it invented a slot that
+    # nothing ever writes, so the read answered ZERO — a number the source never
+    # wrote, from a program that built, ran and exited.
+    #
+    # `model.struct_receiver_reads` DEMOTES it, so the derived set is `_value`
+    # alone and the read is refused by name instead
+    # (`refuse_a_value_position_method_reference_is_still_refused`, below).
+    # Before that demotion this row EXPECTED `["_value", "helper"]`, and it was
+    # asserting the bug.
+    ("a_value_position_method_reference_is_not_a_field",
      "struct Cell:\n"
      "    var _value: Int\n"
      "    def helper(self) -> Int:\n"
@@ -379,7 +386,63 @@ FIELDSET_CASES = [
      "    def go(self) -> Int:\n"
      "        var m = self.helper\n"
      "        return self._value\n",
+     ["_value"]),
+
+    # …and the other half of Python's rule, which is what makes the demotion
+    # above safe rather than merely conservative: an instance attribute
+    # SHADOWS the class's method, so a name the struct both declares as a
+    # method and STORES into IS a field and stays one.  Without this row a fix
+    # that demoted every method NAME would be a fix that deletes real storage,
+    # and it would build — a struct with one fewer field than the source says is
+    # a silent wrong answer, not a refusal.
+    #
+    # The store is in a DIFFERENT method from the read on purpose:
+    # `struct_receiver_stores` is asked over the whole struct precisely because
+    # `__init__` writes `self.helper` and `size` reads it back, so the read's own
+    # method carries no evidence either way.  A demotion that asked only the
+    # reading method would get this row wrong.
+    ("a_method_name_the_struct_stores_into_is_still_a_field",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "    def helper(self) -> Int:\n"
+     "        return 1\n"
+     "    def __init__(self):\n"
+     "        self.helper = 7\n"
+     "    def go(self) -> Int:\n"
+     "        return self.helper\n",
      ["_value", "helper"]),
+
+    # DEFECT A, the keyword argument, which was the other half of that doc and
+    # the direction this rule exists to get right: `CallExpr.kwargs` is
+    # `list[tuple[str, Expr]]`, and the walk read `list` alone, so each `x` was a
+    # tuple, a tuple has no `__dataclass_fields__`, and the whole expression was
+    # invisible.  So `self._untyped_callee` — the exact spelling
+    # `formal/arm64_codegen.py` uses — contributed nothing to ARM64Codegen's
+    # field set.
+    #
+    # A field MISSED is two real fields aliased into one slot, which is the one
+    # error the derivation's own docstring names.  `c` is the control: the same
+    # name in an ordinary argument position, which the walk always reached, so
+    # the pair says the gap was the keyword SPELLING and not the name.
+    ("a_field_carried_by_a_keyword_argument_is_a_field",
+     "struct Cell:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def check(self, op):\n"
+     "        return string_binary_refusal(op, self._untyped_callee, self.c)\n",
+     ["a", "b", "_untyped_callee", "c"]),
+
+    # The CONTROL for the row above, and it is what makes that row mean
+    # something: the same three names with no keyword argument at all.  If the
+    # kwarg row were passing because the walk had simply stopped seeing method
+    # bodies, this would fail.
+    ("a_field_in_an_ordinary_argument_position_is_a_field",
+     "struct Cell:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def check(self, op):\n"
+     "        return string_binary_refusal(self._untyped_callee, self.c)\n",
+     ["a", "b", "_untyped_callee", "c"]),
 ]
 
 # ── the refusals that must SURVIVE ──────────────────────────────────────────
@@ -389,15 +452,20 @@ REFUSALS = [
     # The bracketed call is now recognised as a CALL, which leaves the
     # value-position reference as the shape that has no representation — and it
     # must still be REFUSED rather than lowered to a load of a slot nothing ever
-    # writes.  This is `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md`
-    # defect B, deliberately NOT fixed by the change this file tests: that
-    # derivation counts a bare `self.helper` as a field, and lifting the
-    # refusal without lifting it would turn a wrong zero into a load of one.
+    # writes.  Both halves of that defect's fix are in: `model.struct_receiver_reads`
+    # DEMOTES the name out of the derived field set (see
+    # `a_value_position_method_reference_is_not_a_field`), so there is no slot
+    # left to load, and `build.check_value_position_method_reads` names the
+    # method.  This row is the REFUSAL half of that pair, and it is the one that
+    # has to hold: the demotion alone would let the read reach an emitter with no
+    # slot to read, and the refusal alone would leave a load of one.
     #
     # The shape is `self.helper` as a KEYWORD ARGUMENT's value rather than a
     # `return` of it, because that is the spelling the sweep reported
     # (`checker.check_temporal_monotionality`, `job.excl`) and the one
-    # `test_formal_run.py`'s `method_reference_is_not_a_frame_slot` pins.
+    # `test_formal_run.py`'s `method_reference_is_not_a_frame_slot` pins.  It is
+    # deliberately the kwarg SPELLING, which is defect A's position — the two
+    # defects are in one construct and this row is where they meet.
     ("refuse_a_value_position_method_reference_is_still_refused",
      "class Cell:\n"
      "    __slots__ = ('value', 'pad')\n"
@@ -564,7 +632,8 @@ def run_fieldset_case(case, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
         f.write(source)
-    stmts = F.Parser(F.py_tokenize(source, src)).with_filename(src).parse_module()
+    stmts = (F.Parser(F.py_tokenize_named(source, src))
+             .with_filename(src).parse_module())
     structs = [s for s in stmts if isinstance(s, F.StructDef)]
     if len(structs) != 1:
         return False, f"the case declares {len(structs)} structs, expected 1"

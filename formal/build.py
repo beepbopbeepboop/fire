@@ -1273,6 +1273,32 @@ def compile_formal(source_path: str, output: str = None,
     # dylib), and the executable's functions are the ones the linker is about to
     # act on.
     M.publish_target(M.target_for(arch, fmt))
+    # A REFUSAL from the function pipeline is PARKED, not raised, and that is
+    # the fix for a whole family rather than a convenience.
+    #
+    # `_prepare_functions` runs BEFORE `_resolve_imports`, and every frame
+    # refusal — the hand-off family, the return family, the container and field
+    # families — is raised from inside it. So a file that both trips a frame
+    # clause AND imports something was reported with the frame sentence, which
+    # is a `codegen` class: a gap in this backend, in this file. The reader is
+    # sent after a construct the file could reach, and the sweep's denominators
+    # count it as answerable-in-principle work. But the file imports a host
+    # module, and a file that does that is out of this backend's reach whatever
+    # its own codegen says.
+    #
+    # The codebase has already fixed this twice, by hand, for the two late
+    # checks now in `_run_late_checks`: `check_frame_field_blob_premises`
+    # (measured at 67 files of this repository) and `check_construction_shapes`
+    # (14 more). The frame refusals were left inside, so they still do it. What
+    # is different here is that `_resolve_imports` needs NOTHING this pipeline
+    # produces — it takes `(source_path, stmts, arch)`, all three already in
+    # hand — so the refusal can simply be held rather than moved.
+    #
+    # The refusal is still raised, with the same words, at the first point
+    # after the imports have had their say. Nothing is let through: a file whose
+    # imports resolve is refused exactly as before, and one whose imports do not
+    # is refused for the import, which is the more fundamental fact.
+    parked_prepare_refusal = None
     try:
         functions, structs, symbols, slots = _prepare_functions(
             stmts, synthetic=True, extra_structs=imported_structs)
@@ -1280,8 +1306,10 @@ def compile_formal(source_path: str, output: str = None,
         # A clean compile error. The function pipeline runs before codegen
         # proper, so a refusal raised there — a method whose receiver is wider
         # than a word, say — used to reach the user as a raw traceback instead
-        # of the one-line diagnostic every other refusal produces.
-        raise FormalBuildError(str(e))
+        # of the one-line diagnostic every other refusal produces. Held as a
+        # `FormalBuildError`'s message rather than raised, for the reason above.
+        parked_prepare_refusal = str(e)
+        functions = structs = symbols = slots = None
     ordered = functions
 
     # `import X` means X is a dependency. Each imported module is compiled in
@@ -1289,6 +1317,10 @@ def compile_formal(source_path: str, output: str = None,
     # link line with everything it itself needs, dependencies first. Without
     # this an import was silently dropped and its calls became BLs against
     # symbols nothing defines.
+    #
+    # …and this is reached even when the function pipeline refused, which is
+    # the whole point: it is the only thing here that can say whether this file
+    # is reachable at all.
     try:
         import_dylibs = _resolve_imports(source_path, stmts, arch)
     except ImportBuildError as e:
@@ -1328,6 +1360,19 @@ def compile_formal(source_path: str, output: str = None,
             f"module's symbols in .dynstr with nothing providing them. The "
             f"code generator does honour arch; the container is the missing "
             f"half. Build for macho, or lower the module into this image.")
+    # THE PARKED REFUSAL, and the ORDER is the whole fix: the import diagnosis
+    # above has had its say, and so has the ELF-container check above this, and
+    # both are facts about whether this file can be built HERE at all — which
+    # outranks a refusal about one construct in its body.  It is raised as a
+    # `FormalBuildError` because that is exactly what the old site converted it
+    # to, so a file whose imports resolve sees byte-identical output and a file
+    # whose imports do not is now told the more fundamental thing.
+    #
+    # …which also means this cannot be reached with `functions` unbound: the
+    # late checks below and the codegen after them both need the pipeline's
+    # output, so a parked refusal has to end the build here.
+    if parked_prepare_refusal is not None:
+        raise FormalBuildError(parked_prepare_refusal)
     # HERE and not inside `_prepare_functions`, which ran before the imports
     # resolved: a file that imports a host module is out of reach whatever its
     # codegen says, and this check fires on a third of the repository, so
@@ -1661,6 +1706,11 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # their own call site: a holder rebound from a word, a construction whose
     # shape does not match, and a module global shadowed by a local read.
     check_frame_holder_rebinds(functions)
+    # …and the one that names a value-position METHOD read for what it is. The
+    # field-set derivation already stopped it being a zero, so this is the
+    # diagnosis rather than a second verdict, and it is here rather than in the
+    # frame pass for the reason its docstring gives.
+    check_value_position_method_reads(functions, structs)
     check_construction_mismatches(functions)
     check_shadowed_global_reads(functions)
     check_construction_shapes(functions, by_name)
@@ -3421,9 +3471,26 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # the same reason `hstruct` is a set rather than one struct — a set of
         # one is the ordinary case and a set of two is a disagreement the
         # consumer is entitled to see.
+        # `_fn_key(fn)` on all four reads, and that is the whole fix: every one
+        # of these tables is FILLED by `_fn_key` (`params_of`, `holders`,
+        # `hstruct`, `declared_holders` are all `{_fn_key(fn): …}`), so reading
+        # them by `fn.name` returned `None` for every function — `_fn_key` is
+        # `id(fn)`, so a name is a key only by accident.  `params` then arrived as
+        # `()`, `_parameter_frame_contract` iterates `params`, and the published
+        # contract was `[]` for EVERY export of EVERY module.  A consumer
+        # (`model.resolve_frame_parameter_contract`) reads that positionally, so
+        # `position >= len(contract)` was `0 >= 0` and it answered
+        # "the manifest does not list it as an export" — a statement about the
+        # manifest that is false, because the manifest lists the export and
+        # publishes a contract; the contract is empty.  Every cross-module frame
+        # hand-off on this path was refused by that sentence.  The regression is
+        # the four `byref_*` cases in `test_formal_run.py`, which assert
+        # EXECUTION on both architectures rather than "it builds".
         fn._frame_param_contract = _parameter_frame_contract(
-            fn, params_of.get(fn.name) or (), holders.get(fn.name) or (),
-            (hstruct.get(fn.name) or {}), declared_holders.get(fn.name) or {})
+            fn, params_of.get(_fn_key(fn)) or (),
+            holders.get(_fn_key(fn)) or (),
+            (hstruct.get(_fn_key(fn)) or {}),
+            (declared_holders.get(_fn_key(fn)) or {}))
         # `by_name` itself, published, and the reason is a CONSTRUCTION rather
         # than a field read: a copy construction `S(x)` needs to know what `x`
         # IS, and the holder analysis is the only thing in the compiler that
@@ -3789,6 +3856,73 @@ def check_frame_holder_rebinds(functions) -> None:
             raise CodegenError(M.holder_rebound_from_a_word_refusal(
                 fn.name, name, value_spelling, frame_spelling,
                 cands))
+
+
+def check_value_position_method_reads(functions, structs) -> None:
+    """Raise a `<recv>.<name>` read that is a METHOD of the receiver's own struct.
+
+    `model.struct_receiver_reads` already REMOVES these names from the derived
+    field set, so the wrong answer is gone before this runs; what is left is the
+    diagnosis, and it is a separate check because the frame pass cannot give it:
+    the frame pass only sees reads whose base it has already classified as a
+    FRAME address, and a method reference is most often a read of a receiver that
+    is not one — a struct with a single field has its receiver BE that field. So
+    with the name no longer a field, no frame slot is asked for, and the read
+    reaches the emitter, which answers "this path has no way to say what `self`
+    holds" about a `self` whose struct this file declares two lines above.
+
+    Measured, on `u13c.py`: before the field-set fix the program built, ran and
+    exited 1 where the source's `o.size()` is a bound method and CPython raises
+    `TypeError` on the multiplication; with the field set corrected it is
+    refused, and this check is what makes the refusal name `helper` rather than
+    the base.
+
+    **It is asked of METHODS ONLY, and that is the whole of its soundness
+    argument.** A `<recv>.<name>` read where `recv` is not a receiver of this
+    function has no established struct behind it — a receiver's type is not
+    inferred on this path, which is the premise of every one of these refusals —
+    so asking the struct table the question would be asserting the very thing it
+    cannot know. A method body knows: it was lifted from that struct, and
+    `model.struct_receivers` is the same function that seeds its receiver as a
+    frame holder, so the receiver names here and the ones the frame pass uses
+    cannot drift apart.
+
+    **Python's own shadowing rule decides what fires**, via
+    `model.struct_receiver_stores`: a name the struct both declares as a method
+    and STORES into is an instance attribute and stays a field, so a read of it
+    is a field read and is not this check's — `u13b.py` is that case and it still
+    builds and computes what CPython computes. Only a name nothing stores into is
+    a method here, which is exactly the set `struct_receiver_reads` demoted, so
+    the two cannot disagree about which names are which.
+
+    **The walk is `iter_nodes` and that is a limitation, not a choice.** A
+    `MemberExpr` in a method's body cannot be told apart from one that is the
+    CALLEE of a call without a parent, so this check is asked of every demoted
+    read — and the only demoted names are ones the struct never stores into,
+    which a call cannot store into either. So the over-approximation cannot
+    refuse a program whose `self.helper` is a genuine field access: if it were,
+    something would have to store into it, and the demotion is exactly the
+    absence of that.
+    """
+    owners = M.method_owner_names(list(structs or ()))
+    for fn in functions:
+        owner = owners.get(fn.name)
+        if owner is None:
+            continue
+        receivers = M.struct_receivers(owner)
+        methods = {m.name for m in M.struct_methods(owner)
+                   if getattr(m, "name", None)}
+        demoted = methods - M.struct_receiver_stores(owner, receivers)
+        if not demoted:
+            continue
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.MemberExpr) \
+                    or not isinstance(node.obj, F.IdentExpr) \
+                    or node.obj.name not in receivers \
+                    or node.member not in demoted:
+                continue
+            raise CodegenError(M.value_position_method_refusal(
+                fn.name, node.obj.name, node.member, owner))
 
 
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:
