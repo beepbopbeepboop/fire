@@ -17291,6 +17291,100 @@ def member_chain_text(expr) -> str:
     return ".".join(parts)
 
 
+def receiver_shape_text(expr) -> str:
+    """The receiver EXPRESSION, spelled the way the source spells it.
+
+    The sibling of `member_chain_text` for the shapes that function cannot
+    print: a subscript (`messages[i]`), a call result (`make_x()`), a parenthesised
+    or otherwise parenthesised expression. `member_chain_text` renders those as
+    `…`, which is right for an access PATH and useless for a sentence about the
+    source — and a refusal whose whole job is to show the reader the expression
+    they wrote cannot be the one that cannot print it.
+    """
+    if isinstance(expr, F.SubscriptExpr):
+        base = receiver_shape_text(expr.obj)
+        idx = expr.index
+        if isinstance(idx, (F.TupleExpr, F.ListExpr)):
+            inner = ", ".join(receiver_shape_text(e) for e in idx.elements)
+            return f"{base}[{inner}]"
+        return f"{base}[{receiver_shape_text(idx)}]"
+    if isinstance(expr, F.CallExpr):
+        args = ", ".join(receiver_shape_text(a) for a in expr.args)
+        return f"{receiver_shape_text(expr.func)}({args})"
+    if isinstance(expr, F.MemberExpr):
+        return member_chain_text(expr)
+    if isinstance(expr, F.IdentExpr):
+        return expr.name
+    # A LITERAL, spelled as the source spells it. Without this a subscript
+    # prints its index as the node's class name — `bs[IntLiteral].get()` for
+    # `bs[0].get()` — which is a message about the compiler's data model in a
+    # sentence whose whole job is to quote the reader's own code back.
+    for cls, attr in ((F.IntLiteral, "raw"), (F.FloatLiteral, "raw"),
+                      (F.BoolLiteral, "value"), (F.StringLiteral, "value"),
+                      (F.NoneLiteral, None)):
+        if isinstance(expr, cls):
+            if attr is None:
+                return "None"
+            value = getattr(expr, attr, None)
+            return str(value) if value not in (None, "") else "0"
+    return type(expr).__name__
+
+
+def subscript_receiver_method_refusal(member: str, receiver_text: str,
+                                     owners: dict, fn_name: str) -> str:
+    """A method called on a receiver whose STRUCT is not established — refused by
+    name here rather than emitted as a dangling call.
+
+    `recv.m(a)` is lifted to `Struct_m(recv, a)` whenever `recv` is a bare name,
+    because then dispatch is BY NAME: `owners` says which struct declares `m`,
+    and a name two structs declare is ambiguous and is not lifted at all. A
+    receiver that is anything else — `bs[0].get()`, `cells[i].scaled(k)`,
+    `make_x().n` — has no such table entry, so the lift does not happen and the
+    dotted spelling falls through to the ordinary call path, which emits a call
+    against a symbol spelled after the METHOD NAME.
+
+    That is the failure this refusal exists for, and it is worse than a wrong
+    number because it is usually silent: the symbol either binds nothing, and
+    `_audit_bound_symbols` reports it at the LINK LINE (\"the image would bind 1
+    symbol(s) that nothing provides: get\" — a diagnosis about where the symbol
+    should have come from, for a defect in how the call was written), or it
+    collides with a real symbol — a C library function, a gimple runtime entry
+    point — and the image binds THAT and computes a plausible wrong answer with
+    nothing anywhere reporting a failure. The link audit catching the first case
+    is luck, not design.
+
+    So the message names the construct and the missing fact rather than the
+    symptom, and says what would establish it: the receiver's type. It does NOT
+    claim the receiver's type cannot be known — for `bs[0]` where `bs` is a list
+    literal of `Box()`, it is statically obvious and inferring it is real work
+    this function is not (it needs one \"what struct is this expression\"
+    predicate shared with `frame_opaque_position_refusal`, so the two cannot
+    disagree about when a receiver's type is known). Until that predicate
+    exists, this is the honest answer: refused, naming what is missing.
+
+    `owners` is asked only to establish that `member` IS a method of a struct in
+    this module — without that, every dotted call whose receiver is not a plain
+    name would be refused here, including `mod.f()` across a dylib boundary and
+    the `external_call` templates, both of which are correct and have their own
+    answers.
+    """
+    who = f"{fn_name}: " if fn_name else ""
+    owner = owners.get(member)
+    return (f"{who}`{receiver_text}.{member}(…)` cannot be lowered: dispatch "
+            f"here is BY NAME, so a method call is lifted to "
+            f"`{owner}_{member}(receiver, …)` from the name alone — and "
+            f"`{receiver_text}` is not a bare name, so there is no name to lift "
+            f"from. What is missing is the receiver's TYPE: this path has no "
+            f"inference that answers \"which struct does `{receiver_text}` "
+            f"hold?\", and dispatch is by name rather than by type, so the "
+            f"callee cannot be named. Declaring it is the same program with an "
+            f"answer — give the receiver a local of a declared struct type, or "
+            f"bind it to one (`var x = T()`, `def f(v: T)`) so the lift has a "
+            f"name to work from. The capability, and what a caller-spelled "
+            f"subscript receiver would need, is recorded in "
+            f"bugs/FORMAL_method_call_on_a_subscripted_receiver.md.")
+
+
 def subscript_chain_text(expr) -> str:
     """`q[0]`, `REGISTRY[s.name]`, spelled the way the source spells it.
 

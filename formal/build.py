@@ -8586,8 +8586,17 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and only the comparison is refused.
     refuse_none_comparisons(functions, structs_by_name,
                             _method_receiver_bases, method_owners)
+    # The modules THIS UNIT imports, for `_rewrite_method_calls`' receiver-shape
+    # refusal. Read from the same statements `imported_modules` reads everywhere
+    # else rather than threaded in, because `_prepare_functions` runs BEFORE
+    # `_resolve_imports` — it is the pass that has the statements and not the
+    # link line — and the question the refusal has to exclude is "is this chain
+    # rooted at a MODULE", which is a fact about the source spelling.
+    from formal.imports import imported_modules as _imported_modules
+    _this_unit_modules = tuple(_imported_modules(stmts) or ())
     for fn in functions:
-        _rewrite_method_calls(fn.body, owners, wide, receiverless)
+        _rewrite_method_calls(fn.body, owners, wide, receiverless, fn.name,
+                              _this_unit_modules)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
         # gives. Everything else about it is `_rewrite_class_constants`.
@@ -8790,7 +8799,8 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
 
 
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,
-                          receiverless: set = None) -> None:
+                          receiverless: set = None, fn_name: str = None,
+                          imported=()) -> None:
     """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
 
     Rewriting the CALL rather than special-casing a method call in the
@@ -8815,13 +8825,24 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     puts a generic's comptime parameters first and arm64's `_emit_call` passes
     the bracket expressions first, so `Struct_m[T](recv, a)` and
     `Struct_m(recv, a)` reach the callee's parameters identically.  See
-    `_specialized_method_call`."""
+    `_specialized_method_call`.
+
+    A receiver that is NOT a bare name, with a method name that IS in `owners`,
+    is REFUSED — see `model.subscript_receiver_method_refusal`, which carries
+    the argument for why that has to happen here rather than being left to the
+    link audit. Before it, `bs[0].get()` compiled to a call against a symbol
+    spelled `get`."""
     if isinstance(node, list):
         for x in node:
-            _rewrite_method_calls(x, owners, wide, receiverless)
+            _rewrite_method_calls(x, owners, wide, receiverless, fn_name,
+                                  imported)
         return
     if isinstance(node, F.CallExpr):
         target = _method_call_target(node, owners)
+        if target is None:
+            why = _receiver_shape_refusal(node, owners, fn_name, imported)
+            if why is not None:
+                raise CodegenError(why)
         if target is not None:
             owner, member, receiver = target
             if (wide or {}).get(owner) is not None:
@@ -8849,7 +8870,66 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
             node.func = lifted
             return
     for name in getattr(node, "__dataclass_fields__", {}):
-        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless)
+        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless,
+                              fn_name, imported)
+
+
+def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):
+    """Why THIS `recv.m(...)` has no lift, or None when it has a better answer.
+
+    The recogniser is narrow on purpose, and every clause is there because a
+    wider one refuses programs that work. Measured, each of them was tried
+    first and cost something:
+
+      * the callee must be a `MemberExpr` whose base is NOT a bare name. A bare
+        name is `recv.m(...)`, which `_method_call_target` already lifts, and a
+        `SubscriptExpr` callee is `recv.m[T](...)` — the specialization, which
+        `specialization_call_refusal` and `imported_callee_refusal` both answer
+        with a better sentence and which this must not pre-empt;
+      * `m` must be in `owners`, i.e. exactly one struct in this module declares
+        it. Without that, `mod.f()` across a dylib boundary and every
+        `external_call` template come through here, and both are correct;
+      * `M.dylib_module_reference` must not claim the chain, which is the same
+        question `check_module_symbols` asks about the same spelling and must
+        get the same answer — it takes `imported_module_names`, which this
+        function does not have, so the caller passes the answer in.
+
+    `fn_name` is threaded rather than read off a global because the walk recurses
+    into nested functions and a message naming the wrong one is a message that
+    sends the reader to the wrong place.
+
+    The receiver must be a SUBSCRIPT, and that restriction is load-bearing
+    rather than cautious — measured, the two widenings each refused working
+    cases and pre-empted better sentences:
+
+      * "not a bare name" refused 24 working cases in `test_formal_run.py`. A
+        `MemberExpr` receiver is a field or a nested frame
+        (`self.in1.total()`, `h.mojo_value.write_to(...)`), and the field's
+        DECLARED type names the struct, so the case is answerable and is
+        answered — by `_check_frame_escapes`, `frame_opaque_position_refusal`
+        and the nested-frame refusals, several times over.
+      * "a subscript or a call result" still pre-empted
+        `frame_opaque_position_refusal`'s own sentence for `mk().take(r)`, which
+        is the SAME fact (a receiver whose type is not established) reached
+        through a path that already says so.
+
+    A subscript is the one shape with no answer anywhere: `bs[0]` is a value
+    the build has no name for at all, and it reaches the link audit as a call
+    against a symbol spelled after the METHOD.
+    """
+    func = call.func
+    if not isinstance(func, F.MemberExpr):
+        return None
+    recv = func.obj
+    if not isinstance(recv, F.SubscriptExpr):
+        return None
+    member = func.member
+    if owners.get(member) is None:
+        return None
+    if M.dylib_module_reference(recv, imported) is not None:
+        return None
+    return M.subscript_receiver_method_refusal(
+        member, M.receiver_shape_text(recv), owners, fn_name)
 
 
 def dylib_manifest_path(dylib_path: str) -> str:
