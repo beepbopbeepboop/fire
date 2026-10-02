@@ -1262,7 +1262,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             if _callee_t == 'MojoBoundMethod *':
                 return gen._lower_bound_method_call_value(_callee_v, node)
             if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
-                return gen._lower_fnptr_call_value(_callee_t, _callee_v, node)
+                # `factory()(...)`, where the factory returns a callable: the
+                # callee's own return type rides on its CallExpr node (see
+                # `lower_expr`'s own comment) because the result has already
+                # been cast into `_callee_v` by the time this runs, so no
+                # value-keyed table can still match it.
+                return gen._lower_fnptr_call_value(
+                    _callee_t, _callee_v, node,
+                    getattr(node.func, '_callable_ret', 'int64_t'))
         # `SomeGeneric[ExplicitArg](args)` where SomeGeneric ALSO has
         # implicit/inferred bracket params this elaborator can't bind
         # (e.g. std.python.numpy.from_numpy_array[mut, //, dtype,
@@ -1328,7 +1335,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # read its type from, and guessing is what this bug was.
         if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-                and node.func.obj.name in gen._dict_callable_ret):
+                and (node.func.obj.name in gen._dict_callable_ret
+                     or node.func.obj.name in gen._global_dict_callable_ret)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
                 return gen._lower_bound_method_call_value(_callee_v, node)
@@ -1353,7 +1361,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # call to a `next` symbol that does not exist, so
                 # `fire.py --dump-full` compiled clean and then failed at
                 # `ld: undefined _next` out of this very function.
-                _vt = gen._dict_callable_ret.get(node.func.obj.name) or 'int64_t'
+                _vt = gen._dict_callable_ret.get(node.func.obj.name)
+                if _vt is None:
+                    # A dict held in a MODULE GLOBAL, read from `_toplevel`.
+                    # `_reset_func`'s seed excludes any name this function
+                    # binds itself, and `_toplevel` binds every module-level
+                    # name by definition — so only the never-reset
+                    # whole-program table can answer here. Same two-table
+                    # shape as `_lower_fnptr_call`'s global callee lookup.
+                    _vt = gen._global_dict_callable_ret.get(node.func.obj.name)
+                if not _vt:
+                    _vt = 'int64_t'
                 return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
@@ -4820,11 +4838,20 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         # Materialize the env exactly as the closing-lambda path below does;
         # a variadic lambda that ALSO captures is the same `self, then the
         # real parameters` convention, just with the tail packed.
-        _env_void = '0'
+        _env_void = gen._new_val('void *', '(void *)0')
         if _env_struct:
             _vp = gen._new_temp('void *')
+            _sz = gen._new_temp('int64_t')
+            # `sizeof(S)` and a bare `(void *)f` are both invalid GIMPLE
+            # operands (see GimpleGen._c_sizeof_helper / _c_fnaddr_helper),
+            # which is why the closing-lambda path a few lines below reaches
+            # both through tiny `static` accessors the body calls. Same two
+            # helpers here; this path previously spelled both out inline and
+            # so failed to compile only when its lambda was referenced from a
+            # `__GIMPLE`-tagged body.
+            gen._emit(f'  {_sz} = {gen._c_sizeof_helper(_env_struct)} ();')
+            gen._emit(f'  {_vp} = malloc ({_sz});')
             _envp = gen._new_temp(f'{_env_struct} *')
-            gen._emit(f'  {_vp} = malloc (sizeof({_env_struct}));')
             gen._emit(f'  {_envp} = ({_env_struct} *) {_vp};')
             _default_src = {pn: dv for pn, dv in node.params if dv is not None}
             for _cn, _ct in _env_fields:
@@ -4841,12 +4868,27 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                     _cv = gen._new_val('int64_t', f'(int64_t){_cn}')
                 gen._emit(f'  {_envp}->{_cn} = {_cv};')
             _env_void = gen._new_val('void *', f'(void *){_envp}')
-        _fnv = gen._new_val('void *', f'(void *){lifted_name}')
+        _fnv = gen._new_temp('void *')
+        gen._emit(f'  {_fnv} = {gen._c_fnaddr_helper(lifted_name)} ();')
+        _nfv = gen._new_val('int64_t', str(_n_fixed))
+        _kdv = gen._new_val('int64_t', str(_kind))
+        _hsv = gen._new_val('int64_t', str(1 if _env_struct else 0))
+        # The three counts go through `_new_val` as real temps, NOT as
+        # parenthesized literals. A parenthesized sub-expression is not a
+        # legal GIMPLE operand, so `(0)` here is a hard parse failure — but
+        # only inside a `__GIMPLE`-tagged body, which is why it went
+        # unnoticed: a `lambda *a: ...` referenced from an ordinary top-level
+        # or free function compiled fine (GCC lowers plain C to GIMPLE
+        # itself) and the same lambda inside a struct method or a nested
+        # `def` died with "expected expression before '(' token" and
+        # "invalid argument to gimple call". `_new_val`'s own cast handling
+        # is what makes `(int64_t)0` safe as a STATEMENT; an argument slot is
+        # where a cast is not.
         _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
                              [('void *', _fnv), ('void *', _env_void),
-                              ('int64_t', f'({_n_fixed})'),
-                              ('int64_t', f'({_kind})'),
-                              ('int64_t', f'({1 if _env_struct else 0})')])
+                              ('int64_t', _nfv),
+                              ('int64_t', _kdv),
+                              ('int64_t', _hsv)])
         # NOT in `_funcptr_builtins_needed`: the bare static function-pointer
         # form has the wrong signature for this shape, same as the env case.
         return 'void *', gen._new_val('void *', f'(void *){_vf}')
@@ -5064,6 +5106,25 @@ def _lower_fnptr_call(gen, fname_raw: str, var_ctype: str,
         fp_raw = gen._c_names.get(fname_raw, fname_raw)
         fp_type = var_ctype
     ret_type = gen.func_return_types.get(fname_raw, 'int64_t')
+    if ret_type == 'int64_t':
+        # A callable held in a MODULE GLOBAL. `_callable_ret_types` is keyed
+        # by the VALUE (`_tN`, or a local's C name), and the value a global
+        # callee reads back through is a fresh temp loaded out of
+        # `_root_globals`, so the NAME is the only key that survives the box
+        # — which is exactly why a `lambda: False` printed `0` at module
+        # scope while the same lambda bound to a local printed `False`.
+        # Both tables are consulted because they answer for different
+        # scopes: `_global_callable_ret_types` is the module-global one and
+        # never reset, while `_callable_ret_types` also carries this name
+        # when `_reset_func` seeded it for a function that does not rebind
+        # the global (`_toplevel` itself rebinds it, so it is excluded from
+        # that seed by the usual shadowing rule and only the global table
+        # can answer there).
+        _grt = gen._global_callable_ret_types.get(fname_raw)
+        if _grt is None:
+            _grt = gen._callable_ret_types.get(fname_raw)
+        if _grt is not None:
+            ret_type = _grt
     # A libm call's C return type is a property of the C FUNCTION, not of
     # this module's inference: `sqrt` is `double sqrt(double)` whatever the
     # argument infers as. Without this the call was typed int64_t and the

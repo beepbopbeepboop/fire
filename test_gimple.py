@@ -6923,6 +6923,194 @@ main()
         print(f"PASS  {name}  ({len(cases)} shapes)")
         _PASS += 1
 
+    def _cpython_stdout(src):
+        """CPython's stdout for `src`, or None if it does not run.
+
+        The oracle for the two tests below, so a change in what Python does
+        cannot turn either into a test that protects a wrong value."""
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'oracle_case.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+        if py.returncode != 0:
+            return None
+        return py.stdout
+
+    def _compiled_stdout(src, mode='single-TU'):
+        """Compile `src` and return its stdout, or None if it does not build.
+
+        Returns None for a COMPILE failure too, so a caller reports the mode
+        and the gcc stderr rather than a value comparison against nothing."""
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'case.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            c_src = gimple_codegen._run_pipeline(
+                src, filename=entry,
+                **({'do_imports': True} if mode == 'single-TU'
+                   else {'link_mode': True}))[0]
+            c_file = os.path.join(td, 'case.c')
+            exe = os.path.join(td, 'case.exe')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            cc = subprocess.run(
+                [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                 os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=300)
+            if cc.returncode != 0:
+                return ('BUILD-FAILED', cc.stderr)
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=30)
+        return run.stdout
+
+    def test_callable_return_type_survives_its_carrier():
+        """A callable's return type must reach the call site through every
+        carrier that can sit between them — with CPython's stdout as the
+        expectation, on BOTH pipelines.
+
+        `mojo_fnptr_call_N` is the homogenized `int64_t` convention: the
+        RIGHT thing for the box it hands back, and the callee is the one that
+        knows the real type. `_callable_ret_types` carries it, keyed by the
+        lowered VALUE — which every carrier below breaks, in its own way:
+
+        - a LAMBDA BOUND TO A LOCAL: the value survives, and the store
+          propagates the table through the name. Worked already.
+        - a MODULE GLOBAL: the store boxes it into an `int64_t` struct field
+          and the call site reads back a fresh temp, so no value key matches.
+          `e = lambda: False; print(e())` printed `0`.
+        - the same global read from inside a FUNCTION: the store happens in
+          `_toplevel`, which is emitted after every ordinary function, so the
+          per-function reset wiped whatever the store had recorded.
+        - a DICT OF CALLABLES (`d = {"k": lambda: False}`): a second table
+          (`_dict_callable_ret`), gated on the dict's NAME, with the same
+          never-reset twin needed for a global.
+        - a FACTORY (`def mk(): return lambda: 2.5`): the result is cast
+          into a fresh temp before the outer `mk()()` sees it, so the answer
+          has to ride on the CallExpr node rather than on any value.
+
+        Bodies of all three interesting kinds (`_Bool`, `double`, `char *`)
+        are in every shape: the widened answer is a plausible number or a
+        pointer decimal for each, so a shape that passed by coincidence
+        would not be distinguishable from one that passed.
+        """
+        global _PASS, _FAIL
+        name = "callable_return_type_survives_its_carrier"
+        src = '''\
+e = lambda: False
+print(e())
+g = lambda x: x > 1
+print(g(5))
+print(g(0))
+f = lambda: 1.5
+print(f())
+s = lambda: "hi"
+print(s())
+d = {"k": lambda: False}
+print(d["k"]())
+def use_globals():
+    print(e())
+    print(d["k"]())
+    print(g(2))
+use_globals()
+def mk():
+    return lambda: 2.5
+def use_factory():
+    print(mk()())
+use_factory()
+def mk_bool():
+    return lambda: False
+def use_bool_factory():
+    print(mk_bool()())
+use_bool_factory()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_variadic_lambda_lowers_as_gimple_in_every_body():
+        """A `lambda *args: ...` must emit only legal GIMPLE operands, in
+        every body its reference site can land in.
+
+        The shape it emitted — `(void *)f`, `sizeof(S)`, and the three
+        parenthesized counts as bare call ARGUMENTS — is fine in plain C and
+        is a hard parse failure inside a `__GIMPLE`-tagged body, where the
+        body must already BE GIMPLE: a cast or a parenthesized
+        sub-expression is not a legal operand there. That is why this went
+        unnoticed for so long — the same lambda compiled from an ordinary
+        top-level statement or a free function (GCC lowers plain C to
+        GIMPLE itself) and died from a struct method or a nested `def`:
+
+            .c: In function 'K_get':
+            .c:5:37: error: expected expression before '(' token
+            _t2 = mojo_vararg_fn_new (_t1, 0, <<< error >>>);
+
+        All three carriers are here, each with a capturing variant too (the
+        env path spelled `sizeof(S)` inline as well), and CPython is the
+        expectation for the values — a build failure and a wrong value are
+        different defects and this checks both.
+        """
+        global _PASS, _FAIL
+        name = "variadic_lambda_lowers_as_gimple_in_every_body"
+        src = '''\
+class K:
+    def __init__(self, n):
+        self.n = n
+    def plain(self):
+        return lambda *a: len(a)
+    def capturing(self):
+        return lambda *a: len(a) + self.n
+def _make():
+    def inner():
+        return lambda **k: len(k)
+    return inner
+def top():
+    return lambda *a: len(a)
+def main():
+    k = K(10)
+    print(top()(1, 2, 3))
+    print(k.plain()(1, 2, 3))
+    print(k.capturing()(1, 2, 3))
+    print(_make()()(a=1, b=2))
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_user_defined_dunder_repr_value():
         """The same thing with the VALUE checked, on BOTH pipelines
         (single-TU and link mode — they are separate codegen paths and this
@@ -7867,6 +8055,8 @@ outer([10, 20, 30])
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_handwritten_selfhost_signature_tables_match_the_source()
     test_every_funcptr_initializer_has_a_definition()
+    test_callable_return_type_survives_its_carrier()
+    test_variadic_lambda_lowers_as_gimple_in_every_body()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

@@ -1421,8 +1421,42 @@ class GimpleGen:
         # type_inference.md.
         self._global_elem_types: dict[str, str] = {}
         self._global_dict_val_types: dict[str, str] = {}
+        # Module-level GLOBAL name -> the return type of the CALLABLE stored
+        # in it (`e = lambda: False` at module scope), and module-level name
+        # -> the single callable return type stored in that dict (`d = {"k":
+        # lambda: False}`), '' for "more than one distinct type, so no
+        # answer". Same module-scope rationale as the two tables above:
+        # a module global's callable return type means the same thing in
+        # every function, unlike a recycled temp name, so it must survive
+        # _reset_func. Populated by gen_module's Phase 1.7 pre-scan (which
+        # runs BEFORE any function body is emitted, since a function that
+        # calls `e()` is emitted before `_toplevel` lowers the lambda) and
+        # consulted by _reset_func to re-seed the per-function
+        # _callable_ret_types/_dict_callable_ret.
+        #
+        # Without this, a lambda bound to a MODULE global lost its return
+        # type at the box: `e = lambda: False; print(e())` printed `0`, and
+        # `e = lambda: "hi"; print(e())` printed the pointer decimal --
+        # the same shapes that are correct for a lambda bound to a LOCAL,
+        # because the local store propagates _callable_ret_types through
+        # the name (see _gen_stmt_AssignStmt). See
+        # bugs/CODEGEN_lambda_bool_return_prints_as_int.md.
+        self._global_callable_ret_types: dict[str, str] = {}
+        self._global_dict_callable_ret: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
+        # Function name -> the return type of the CALLABLE it returns
+        # (`def mk(): return lambda: False`). Module scope for the same
+        # reason as `_return_slot_types` above: the point is to carry a
+        # callee's knowledge to a call site, and a per-function reset would
+        # discard a callee whose body was emitted before its caller's. The
+        # call site records it on the CallExpr NODE (not on the lowered
+        # value) because a call result is immediately cast to its lowered
+        # type — `f = mk()` then `f()` reads `_root_globals.f`, and
+        # `mk()()` casts the result into a fresh temp — so a value-keyed
+        # table cannot match it. See
+        # bugs/CODEGEN_lambda_bool_return_prints_as_int.md.
+        self._return_callable_ret_types: dict[str, str] = {}
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module
         # scope, NOT re-created per function the way the value-keyed
@@ -4273,6 +4307,15 @@ class GimpleGen:
         # freshness); the top-level RHS node is the one to remember.
         if node is self._decl_value_node:
             self._decl_rhs_val = _lv
+        # A call to a function that RETURNS A CALLABLE (`def mk(): return
+        # lambda: False`) carries that callable's return type on the node,
+        # for the `mk()(...)` callee branch in `_lower_call` to read. The
+        # value-keyed `_callable_ret_types` cannot serve there: the result is
+        # cast into a fresh temp before the outer call sees it.
+        if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
+            _frt = self._return_callable_ret_types.get(node.func.name)
+            if _frt:
+                node._callable_ret = _frt
         return _lt, _lv
     def _lower_IntLiteral(self, node) -> tuple[str, str]:
         return gex._lower_IntLiteral(self, node)
@@ -4559,6 +4602,8 @@ class GimpleGen:
         return ginf._gen_print(self, args, kwargs)
     def _note_dict_callable_ret(self, dict_val: str, value_text: str) -> None:
         return ginf.note_dict_callable_ret(self, dict_val, value_text)
+    def _note_global_callable_store(self, gname: str, value_text: str) -> None:
+        return ginf._note_global_callable_store(self, gname, value_text)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
     def _eval_const_bool(self, node) -> bool | None:

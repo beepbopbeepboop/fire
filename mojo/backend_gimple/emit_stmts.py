@@ -901,6 +901,7 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._elem_types[tname] = gen._elem_types[v]
                     if v in gen._nested_elem_types:
                         gen._nested_elem_types[tname] = gen._nested_elem_types[v]
+            gen._note_global_callable_store(tname, v)
             return
         # Genuine module-scope statement (we're generating THIS module's own
         # _toplevel()/_{module}_toplevel() body — see _in_toplevel_gen) whose
@@ -960,6 +961,7 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._actual_types[tname] = gen._actual_types[v]
             elif v in gen._actual_types:
                 gen._actual_types[tname] = gen._actual_types[v]
+            gen._note_global_callable_store(tname, v)
             return
         # Regular local variable assignment
         if tname not in gen.var_types:
@@ -2119,6 +2121,14 @@ def _gen_stmt_ReturnStmt(gen, node):
         # since unlike plain C it does not implicitly convert.
         if gen.current_func_name and v in gen._tuple_slot_types:
             gen._return_slot_types[gen.current_func_name] = gen._tuple_slot_types[v]
+        # Same idea for a returned CALLABLE: `def mk(): return lambda: False`
+        # hands back a `void *`, and the `mk()(...)` call site would then read
+        # the homogenized int64_t box. The lowered value is what
+        # `_lower_LambdaExpr` recorded the real type against, so this is the
+        # one site that can see it.
+        if gen.current_func_name and v in gen._callable_ret_types:
+            gen._return_callable_ret_types[gen.current_func_name] = \
+                gen._callable_ret_types[v]
         ret = gen.func_ret_type
         if ret == 'void':
             gen._emit(gimple_codegen._RETURN)

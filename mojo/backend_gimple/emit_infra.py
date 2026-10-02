@@ -550,7 +550,19 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_lower_LambdaExpr`) and read by `_lower_fnptr_call_value`.
     # Reset per function for the same reason _bound_method_ret_types is: temp
     # names (_tN) recycle across functions.
-    gen._callable_ret_types: dict[str, str] = {}
+    #
+    # Seeded from self._global_callable_ret_types (Phase 1.7, never reset)
+    # for the same reason `_elem_types` is seeded from `_global_elem_types`
+    # below: a MODULE global's callable return type means the same thing in
+    # every function, and the store that would record it (`_toplevel`) is
+    # emitted after every ordinary function, so without the seed the very
+    # call this table exists for — `e = lambda: False` at module scope, then
+    # `print(e())` inside a function — kept the widened int64_t answer.
+    gen._callable_ret_types = {}
+    for _gvk in gen._global_callable_ret_types:
+        _gvk_s = _as_str(_gvk)
+        if _gvk_s not in _reset_locally_bound:
+            gen._callable_ret_types[_gvk_s] = _as_str(gen._global_callable_ret_types[_gvk])
     # A DICT's lowered value -> the SINGLE callable return type stored into
     # it, or '' for "more than one distinct type, so no answer". The rule is
     # the same unanimity-or-nothing rule every other inference in this file
@@ -582,7 +594,23 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unanimity rule is unchanged and is now enforced where the value is
     # stored, where the store site actually knows.
     # Reset per function for the same reason as the maps above.
-    gen._dict_callable_ret: dict[str, str] = {}
+    gen._dict_callable_ret = {}
+    # Seeded from self._global_dict_callable_ret (Phase 1.7, never reset)
+    # for the same reason `_elem_types` is seeded from `_global_elem_types`
+    # just above: a module-level dict of callables means the same thing in
+    # every function, and without the seed a `d['k']()` inside any FUNCTION
+    # kept the homogenized int64_t answer — the store lives in `_toplevel`,
+    # which is emitted AFTER every ordinary function, so the per-function
+    # reset wiped whatever the store had recorded. A '' entry (the ambiguity
+    # answer) is carried across verbatim, and every consumer reads it
+    # `or 'int64_t'`, so seeding it is the pre-existing behaviour and never
+    # a new wrong one. Explicit loop + `_as_str`, NOT a dict comprehension
+    # over `.items()`: the same self-host boxing gap the `_elem_types` seed
+    # above records.
+    for _gck in gen._global_dict_callable_ret:
+        _gck_s = _as_str(_gck)
+        if _gck_s not in _reset_locally_bound:
+            gen._dict_callable_ret[_gck_s] = _as_str(gen._global_dict_callable_ret[_gck])
     # Builtin-container method bound as a first-class VALUE (`append =
     # l.append`, the classic accumulator-aliasing idiom) — key: the C
     # name of the temp/var holding the boxed value; value: (receiver
@@ -3944,6 +3972,31 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
         # type must not un-poison it, so the '' is sticky (`_cur and ...`
         # above never re-enters this branch once poisoned).
         gen._dict_callable_ret[dict_val] = ''
+
+
+def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
+    """A callable (or a dict of callables) stored into a MODULE GLOBAL keeps
+    its return type for a later call through that global's name.
+
+    The store boxes the value into an `int64_t` struct field, so the
+    per-function tables — which are keyed by the lowered VALUE — cannot
+    survive it. These two whole-program tables are keyed by NAME, which is
+    what a call through `_root_globals.<name>` still knows, and they are
+    never reset. Phase 1.7 already records the literal case
+    (`e = lambda: False`, `d = {"k": lambda: False}`) before any function is
+    emitted; this covers everything it cannot see — a callable returned by a
+    call, and any store that happens inside a function body.
+
+    Called from both module-global store paths (a `global`-declared write and
+    a `_toplevel` write), beside the `_dict_val_types`/`_elem_types`
+    propagation each already does. A value with no callable return type is a
+    no-op, so the common non-callable store costs two dict misses."""
+    _rt = gen._callable_ret_types.get(value_text)
+    if _rt:
+        gen._global_callable_ret_types[gname] = _rt
+    _drt = gen._dict_callable_ret.get(value_text)
+    if _drt is not None:
+        gen._global_dict_callable_ret[gname] = _drt
 
 
 def _gen_print(gen, args: list, kwargs: list = None):

@@ -1109,6 +1109,46 @@ def _gmi_is_ctor_container_ctype(t) -> bool:
     return False
 
 
+def _lambda_ret_type(gen, node) -> str:
+    """The C return type `_lower_LambdaExpr` will declare for this lambda.
+
+    That lowering builds the synthetic body `return <node.body>` and calls
+    `_infer_return_type` on it, which is `TypeLattice.join_all` over
+    `_quick_type` of that one expression. Computed here from the same two
+    facts, so the answer is the lifted definition's declared type by
+    construction rather than by coincidence -- and available without
+    lifting, which is what lets the Phase 1.7 pre-scan record it.
+
+    `void` (a `None` body) is normalized to `int64_t`, matching the
+    lifted definition: `_collect_return_types` yields the `void` string for
+    a value-less `return`, and `_lower_fnptr_call_value`'s `ret_type ==
+    'void'` arm already handles it, so it needs no special case here."""
+    if node.body is None:
+        return 'int64_t'
+    return _as_str(TypeLattice.join_all([_as_str(gen._quick_type(node.body))]))
+
+
+def _lambda_pairs_ret_type(gen, pairs) -> str:
+    """The single callable return type stored in a dict LITERAL of lambdas,
+    or '' when they disagree (or are not all lambdas).
+
+    The unanimity-or-nothing rule is `note_dict_callable_ret`'s, applied at
+    the one site that knows every element before the dict exists. '' is the
+    ambiguous answer, and every consumer reads it with `or 'int64_t'`, so
+    this can only preserve the pre-existing behaviour, never invent one."""
+    agreed = ''
+    for _pair in pairs:
+        _val = _pair[1]
+        if not isinstance(_val, LambdaExpr):
+            return ''
+        _rt = _lambda_ret_type(gen, _val)
+        if agreed == '':
+            agreed = _rt
+        elif agreed != _rt:
+            return ''
+    return agreed
+
+
 
 
 
@@ -7100,6 +7140,24 @@ def gen_module_impl(self, stmts):
             for _k, _v in _value.pairs[1:]:
                 _vt = TypeLattice.join(_vt, self._quick_type(_v))
             self._global_dict_val_types[_gname] = _vt
+            # A dict literal of LAMBDAS: what a later `d['k'](...)` call site
+            # needs is the callee's return type, and the dict's own value
+            # type (`void *`) does not carry it. Recorded with the same
+            # unanimity-or-nothing rule `note_dict_callable_ret` applies at a
+            # runtime store (a dict has one value slot, so the answer is only
+            # usable when every callable in it agrees).
+            self._global_dict_callable_ret[_gname] = \
+                _lambda_pairs_ret_type(self, _value.pairs)
+        elif isinstance(_value, LambdaExpr):
+            # `e = lambda: False` at module scope. The lambda's own C return
+            # type is `join_all([_quick_type(body)])` -- exactly what
+            # `_infer_return_type` computes for the synthetic
+            # `return <body>` body `_lower_LambdaExpr` builds -- so this
+            # records the lifted definition's declared return type without
+            # lifting anything. It has to be here, in the pre-scan, because
+            # a function that CALLS `e` is emitted before `_toplevel`
+            # lowers the lambda at all.
+            self._global_callable_ret_types[_gname] = _lambda_ret_type(self, _value)
 
     def _phase17_scan_try_branches(_try_stmt):
         """Collect {name: C type} for every AssignStmt/MultiAssignStmt
