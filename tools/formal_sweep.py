@@ -1686,7 +1686,10 @@ def _bind_symbols(binary: bytes) -> list:
 # this and a silent inversion.
 _LIBSYSTEM = ML.LIBSYSTEM_PATH.decode().rstrip("\0")
 _LIBS: dict = {}            # dylib path -> "" if it loads here, else the reason
-_MEMO: dict = {}            # (dylib path, name) -> bool, for the whole run
+_MEMO: dict = {}            # (dylib path, name) -> bool, for the whole run.
+                            # The dlopen arm's memo ONLY: a statically-read
+                            # table is memoised per LIBRARY in _EXPORT_TABLES
+                            # instead, since one parse answers every name in it.
 
 # The two CPU types this tool ever sees an image or a library built for, named
 # so the "why" a finding prints is readable. Anything else falls back to the
