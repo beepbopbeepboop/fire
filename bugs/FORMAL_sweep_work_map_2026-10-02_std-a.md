@@ -302,3 +302,25 @@ a light worker. It is the integrator's, and §2.3's change to which
 `method_owners` map `_frame_receivers` sees is a behaviour change beyond the
 crash (the census is no longer empty on most modules), so it is the one thing
 here that wants a full `make gate`.
+
+**The two `test_formal_method_param_field.py` failures are pre-existing and
+measured as such**, by reverting both this branch's `formal/` changes and
+re-running the two rows: identical failures on HEAD.
+
+```
+FAIL frame_returning_call_in_argument_position_agrees
+FAIL refuse_a_frame_returning_call_of_another_struct
+     --backend=arm64 refused … "Call take() on a P value at every call site"
+```
+
+Both are the frame-returning-call family, both name `test_formal_method_param_field.py`'s
+own CPython transcriptions, and `bugs/FORMAL_declared_parameter_against_its_call_sites.md`
+— whose Status reads "the decidable half is FIXED" — is the doc that lists
+`frame_returning_call_in_argument_position_agrees` as one of its own
+verification rows. So this is that doc's TEST side disagreeing with this tree,
+not a new finding, and `bug:FORMAL_declared_parameter_against_its_call_sites` is
+a live claim (`formal3-3-r2`), so it is recorded here rather than filed a second
+time and not fixed. **Whoever picks it up: the question is whether the fix's rows
+were never updated or the fix is not in this tree — a two-minute `git log -S`
+on `frame_holder_disagreement_refusal` answers it, and this document does not
+guess.**
