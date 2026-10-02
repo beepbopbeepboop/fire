@@ -1649,6 +1649,7 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # their own call site: a holder rebound from a word, a construction whose
     # shape does not match, and a module global shadowed by a local read.
     check_frame_holder_rebinds(functions)
+    check_receiver_rebinds(functions)
     check_construction_mismatches(functions)
     check_shadowed_global_reads(functions)
     check_construction_shapes(functions, by_name)
@@ -3432,6 +3433,12 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                              _name_defs, returns_frame)
     _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
                             by_name_returns_frame)
+    # …and the RECEIVER half of the same question, which the check above cannot
+    # ask because it deliberately skips receiver names (its two repairs — use a
+    # different name, copy the value out — do not exist for a receiver). Needs
+    # no holder set, which is why it is not folded into the call above: a
+    # receiver is not a name the holder analysis knows anything about.
+    _collect_receiver_rebinds(functions, structs_by_name)
     _park_construction_mismatches(functions, framed)
 
 
@@ -3636,6 +3643,110 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
         return st is not None and M.struct_is_framed(st) \
             and M.type_constructor_kind(name) is None
     return False
+
+
+def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
+    """PARK every method that rebinds its own receiver to something that is not
+    a construction of its own struct.
+
+    The receiver half of `_collect_holder_rebinds`, and separate because the
+    local rule's REPAIRS do not exist here: a receiver is not a name the caller
+    can re-declare, and "copy the value out of it first" is not a thing. That is
+    why the local check skips receiver names by NAME (from
+    `model.struct_receivers`, so `out self` and `inout self` are covered by the
+    same rule) — and skipping them there is what leaves this to be asked.
+
+    The rule is `_value_may_be_a_frame` with the receiver's OWN struct as the
+    alias, which is the function the local check already uses and deliberately
+    does not use for this: `self = Self(...)` is a construction (so a frame,
+    and fine), and `self = other_receiver` is a copy (so the address the caller
+    holds is the one still being written, also fine). Everything else — a word,
+    a call, a string — is this finding. It reuses the recognition rather than
+    reimplementing it, because a second copy of "what can be a frame" is how
+    the two came to disagree about `self = Self(...)` in the first place.
+
+    Parked on the function and raised by `check_receiver_rebinds`, like every
+    other finding in this family, so the refusal does not preempt the import
+    diagnosis (`_run_late_checks` is called after imports resolve)."""
+    owners = M.method_owner_names(list((structs_by_name or {}).values()))
+    for fn in functions:
+        owner = owners.get(fn.name)
+        if owner is None:
+            continue
+        receivers = M.struct_receivers(owner)
+        # A receiver rebound to ANOTHER RECEIVER is a copy of the same address,
+        # so the caller's slot already holds the address the method's field
+        # writes land through and there is no dropped store to report. A
+        # receiver is not in the holder set, so `_value_may_be_a_frame`'s "is
+        # the name a holder" answer does not apply to one — the question is
+        # asked from the DECLARATION instead, which is the same evidence
+        # `parameter_declared_structs` exists to give: a parameter typed
+        # `other: Self` (or `other: R`) is an address of the same frame layout
+        # whatever any call site passed, so a rebind to it copies rather than
+        # repoints.
+        same_type = {getattr(st, "name", None) for st in
+                     M.parameter_declared_structs(
+                         fn, structs_by_name, owner).values()}
+        # `owner` is what reduces a bare `Self`, and it is not always supplied:
+        # the call site that reaches this collector with the owner unresolved
+        # answers `{}` for a parameter typed `other: Self` while answering
+        # `{'other': R}` for one typed `other: R`. That is the right behaviour
+        # of a function asked a question it cannot answer, so the reduction is
+        # done HERE from the same place the declaration lives — the parameter
+        # tuple's own annotation — rather than by calling it again with a
+        # different owner and hoping the two agree. A parameter whose
+        # annotation names the receiver's own struct is a same-type copy
+        # whether or not `Self` was reduced for us.
+        own_name = getattr(owner, "name", None)
+        for p in (getattr(fn, "params", None) or ()):
+            pname, ann = (p[0], p[1]) if isinstance(p, (tuple, list)) \
+                else (p, None)
+            if pname in receivers or not ann:
+                continue
+            if own_name and M.annotation_base_name(ann, own_name) == own_name:
+                same_type.add(pname)
+        findings = []
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, (F.AssignStmt, F.VarDecl)):
+                continue
+            if isinstance(node, F.VarDecl):
+                target, value = node.name, node.value
+            else:
+                target = (node.target.name
+                          if isinstance(node.target, F.IdentExpr) else None)
+                value = node.value
+            if not isinstance(target, str) or target not in receivers:
+                continue
+            if value is None:
+                continue
+            if isinstance(value, F.IdentExpr):
+                if value.name in receivers:
+                    continue        # a copy of the receiver itself
+                if value.name in same_type:
+                    continue        # a parameter of the same struct: also a copy
+            if _value_may_be_a_frame(value, structs_by_name, receivers, owner):
+                continue            # a construction of the receiver's own struct
+            findings.append((target, _expr_spelling(value)))
+        if findings:
+            fn._receiver_rebinds = (findings, owner)
+
+
+def check_receiver_rebinds(functions) -> None:
+    """Raise the receiver-rebound findings `_collect_receiver_rebinds` parked.
+
+    One finding, for the reason `check_frame_holder_rebinds` raises one: a
+    method with three of them has one defect with three lines, and the first is
+    enough to act on. The message is `model`'s, so both backends word this
+    construct identically — a receiver's meaning is a property of the by-
+    reference design, not of an instruction either backend chose."""
+    for fn in functions:
+        findings, owner = getattr(fn, "_receiver_rebinds", (None, None))
+        if not findings:
+            continue
+        target, value_spelling = findings[0]
+        names = [owner] if owner is not None else []
+        raise CodegenError(M.receiver_rebound_from_a_word_refusal(
+            fn.name, target, value_spelling, names))
 
 
 def _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,

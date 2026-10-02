@@ -11619,6 +11619,73 @@ def holder_rebound_from_a_word_refusal(fn_name: str, name: str,
         f"a different name for the word, or copy the value out of {name} first")
 
 
+def receiver_rebound_from_a_word_refusal(fn_name: str, receiver: str,
+                                         value_spelling: str,
+                                         struct_names) -> str:
+    """Why a method cannot rebind its own receiver to a plain word.
+
+    The sibling of `holder_rebound_from_a_word_refusal`, and the reason it has
+    to be a separate message is that the LOCAL rule's two repairs do not exist
+    for a receiver: a receiver is not a name the caller can re-declare, and
+    "copy the value out of it first" is not a thing. So the local check
+    excludes the method's own receiver names — by NAME from
+    `struct_receivers`, which covers `out self` and `inout self` and every
+    other receiver spelling by the same rule — and what the exclusion leaves
+    open is this.
+
+    **The defect, measured.** A method's effect on a field reaches its caller
+    because the caller holds the SAME address the method dereferences; that is
+    the whole of the by-reference receiver. Rebinding the receiver points the
+    method at a different word, so the write does not reach the caller at all —
+    a silently dropped store with an address-shaped cause — and every later
+    field read through the receiver is a load at `base + 8·slot` where `base` is
+    whatever word was assigned:
+
+        struct R:
+            var a: Int
+            var b: Int
+            def rebind(self):
+                self = 5
+            def read(self):
+                return self.a      # a load at 5 + 8·0
+
+    CPython raises `TypeError` on the shape rather than answering it, and that
+    is worth saying in the message: the source is not a program that computes
+    something else, it is a program that does not mean what it looks like.
+
+    **What is allowed, and why each one is not this defect.** A receiver
+    rebound to a CONSTRUCTION of its own struct is the idiomatic Mojo
+    constructor (`self = Self(...)`, and `self = <expr>` where the expression
+    builds a frame of the receiver's own type): that is a fresh object, the
+    address the caller holds is the one being replaced wholesale, and there is
+    no dropped write to report. A receiver rebound to ANOTHER receiver — the
+    same address, copied — is fine for the same reason and deserves a note
+    because a rule of the form "never rebind a receiver" would break it for no
+    reason: it copies the address, the caller's slot already holds it, and the
+    method's field writes still land where the caller expects.
+
+    `struct_names` is the struct the receiver belongs to, so the message can
+    name it rather than making the reader re-derive it from the method."""
+    who = ", ".join(sorted({st.name for st in (struct_names or ())})) or "its own"
+    return (
+        f"{receiver} is assigned {value_spelling} in {fn_name}(), and "
+        f"{receiver} is this method's receiver, so it is the address the CALLER "
+        f"passed rather than a name either side can re-declare. A method's "
+        f"write to a field reaches its caller because the caller holds the same "
+        f"address this method dereferences; rebinding the receiver points the "
+        f"method at a different word, so the write never gets back to the "
+        f"caller at all — measured, the program builds, runs, and prints what "
+        f"the caller built the frame with — and every later field read through "
+        f"{receiver} is a load at `[base + 8·slot]` with base = "
+        f"{value_spelling}. CPython rejects this shape outright, so the source "
+        f"is not a program that computes a different answer, it is one that does "
+        f"not mean what it looks like. What a receiver may be assigned is a "
+        f"CONSTRUCTION of {who} (`{receiver} = Self(...)`, which is how a Mojo "
+        f"constructor rebinds its own object) or another receiver of the same "
+        f"type, which copies the address and leaves the caller's slot pointing "
+        f"where the writes land")
+
+
 def construction_mismatch_refusal(target: str, callee: str, summary: str,
                                   fn_name: str) -> str:
     """Why `{target} = {callee}(…)` and `{target}.<field>` are two answers to one

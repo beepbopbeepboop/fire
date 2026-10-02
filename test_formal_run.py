@@ -8728,6 +8728,103 @@ EQ_DISPATCH_CASES = [
      "    r = 5\n"
      "    return r.a\n",
      "refuse:r is assigned 5 in main()", None),
+    # THE RECEIVER HALF of the row above, and it is a separate rule because the
+    # rule above's two REPAIRS do not exist for a receiver: a receiver is not
+    # a name the caller can re-declare, and "copy the value out of it first" is
+    # not a thing. So the local check skips receiver names by NAME — which is
+    # what kept 9 stdlib files building, the ones that write `self = Self(...)`
+    # — and this is the question that skipping leaves open.
+    #
+    # The defect is a DROPPED STORE with an address-shaped cause: a method's
+    # write reaches its caller because the caller holds the same address the
+    # method dereferences, so rebinding the receiver points the method at a
+    # different word and the write never gets back. CPython rejects the shape
+    # outright, which is why the message says the source does not mean what it
+    # looks like rather than that it computes a different answer.
+    ("receiver_rebound_to_a_word_is_refused",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def rebind(self):\n"
+     "        self = 5\n"
+     "    def read(self):\n"
+     "        return self.a\n"
+     "def main(n):\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.rebind()\n"
+     "    return r.read()\n",
+     "refuse:self is assigned 5 in R_rebind()", None),
+    # The receiver spelled something other than `self`, which is why the rule
+    # reads the receiver SET rather than the literal name. Without this row a
+    # fix that hard-coded `self` would pass the one above.
+    ("receiver_rebound_under_another_spelling_is_refused",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def rebind(this):\n"
+     "        this = 5\n"
+     "def main(n):\n"
+     "    var r = R()\n"
+     "    r.rebind()\n"
+     "    return r.a\n",
+     "refuse:this is assigned 5 in R_rebind()", None),
+    # A CALL is a refusal too, and it is the shape a real rotation helper uses
+    # (`self = self.unsafe_offset(offset)` in stdlib `memory/pointer.mojo`), so
+    # this is the row that says the rule is not merely "not a literal".
+    ("receiver_rebound_to_a_call_is_refused",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def rebind(self):\n"
+     "        self = f()\n"
+     "def main(n):\n"
+     "    var r = R()\n"
+     "    r.rebind()\n"
+     "    return r.a\n",
+     "refuse:self is assigned f() in R_rebind()", None),
+    # THE GUARDS, and they are what make the three above mean something: a rule
+    # written as "never rebind a receiver" would refuse all of these, and nine
+    # real stdlib files with it.
+    #
+    # 1. a parameter DECLARED as the receiver's own type is a copy of the same
+    #    address, so it is not a rebinding to a different word. This is the
+    #    case the bug doc singles out: "a rule of the form 'never rebind the
+    #    receiver' would break it for no reason".
+    #
+    #    Deliberately checks only that it BUILDS and runs, and not what it
+    #    computes. The value a copy leaves behind is a separate question with
+    #    its own answer on this tree — see
+    #    bugs/FORMAL_receiver_copied_to_another_name_does_not_take_effect.md
+    #    — and pinning today's number here would make this row a claim about
+    #    that one, so what it asserts is the narrow thing it is a guard for.
+    ("receiver_rebound_to_a_same_type_parameter_still_builds",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def copy_from(out self, other: Self):\n"
+     "        self = other\n"
+     "def main(n):\n"
+     "    var r = R()\n"
+     "    r.copy_from(R())\n"
+     "    return r.a\n",
+     0, None),
+    # 2. a LOCAL is not a receiver, which is the other half of "the rule reads
+    #    the receiver SET": a fix that matched by position rather than by name
+    #    would refuse this.
+    ("a_local_rebound_inside_a_method_still_builds",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def set(self):\n"
+     "        var q = 5\n"
+     "        self.a = q\n"
+     "def main(n):\n"
+     "    var r = R()\n"
+     "    r.set()\n"
+     "    printf(\"a=%d\", r.a)\n"
+     "    return 0\n",
+     0, "a=5"),
     # A LOCAL READ BEFORE IT HAS BEEN ASSIGNED, on a name that is also a
     # module-level binding.  The right-hand `G` does NOT resolve in module scope:
     # a name assigned anywhere in a function body is local to that body from its
