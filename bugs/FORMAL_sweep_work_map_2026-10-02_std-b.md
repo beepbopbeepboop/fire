@@ -73,7 +73,7 @@ Measured: `std/builtin/builtin_slice.mojo` moves a level deeper (three
 `StridedSlice` methods stop being refused).
 
 **(b) `_frame_receivers` was handed the dispatch table where the owner table
-belongs** (`3bf697e7`). `_prepare_functions` passed `owners`
+belongs** (`3bf697e7`, `d27b676b`). `_prepare_functions` passed `owners`
 (`{method name: struct NAME}`, keys do not overlap with function names) where
 `method_owners` (`{Struct_method: StructDef}`) was meant, so
 `method_owners.get(fn.name)` almost always MISSED — until a module-level function
@@ -81,7 +81,12 @@ shared a name with a method in the same module AND held a frame struct, and then
 it handed a string to code that calls `.name` on it.
 `AttributeError: 'str' object has no attribute 'name'`, classified
 `backend-crash`: `std/math/math.mojo` (4035 lines) and `std/random/random.mojo`.
-Both now reach the import diagnosis, which is the more fundamental fact.
+Both now reach the import diagnosis, which is the more fundamental fact. This
+was a filed bug — `FORMAL_frame_receivers_is_handed_the_method_name_table.md` —
+so that doc is deleted by `d27b676b` and the local renamed `dispatch_owners` as
+it asked. `test_dataclasses_formal.py`'s corpus case, already red in every gate,
+is the independent check: **53 passed / 0 failed** with the fix, **52 / 1** with
+the call site put back, same traceback.
 
 **(c) a NULLABLE pointer extern return was refused for a width it does have**
 (`50cadc5a`). `external_call_return_kind` refused `OptionalPointer` /
@@ -112,7 +117,7 @@ whether the row is work or a dependency. Measured by
 | files | in-file | cause | terminal module | next step |
 |---|---|---|---|---|
 | 32 | 0 | `binary_heap.mojo` exports nothing (only the generic template `BinaryHeap`) | `std/collections/binary_heap.mojo` | **nothing — measured ceiling 0 for this slice, see §5.** `bugs/FORMAL_dylib_export_gate_ceiling.md` owns the decision not to change the export rule; `bugs/FORMAL_module_exports_nothing.md` says the refusal itself is true |
-| 3 | 0 | `StridedSlice___init__` returns a frame address, so it cannot go into a dylib | `std/builtin/builtin_slice.mojo` | fix (a) reached it; this is `bugs/FORMAL_returned_frame_caller_owned_block.md` — a dylib importer cannot reserve the caller's block, so the question is whether a one-field struct needs a caller-owned block at all |
+| 3 | 0 | `StridedSlice___init__` returns a frame address, so it cannot go into a dylib | `std/builtin/builtin_slice.mojo` | fix (a) reached it. A dylib importer binds the symbol and cannot reserve the block the object must be built in, so the open question is whether a ONE-FIELD struct needs a caller-owned block at all — it is one word, and the word is its field. `bugs/FORMAL_frame_receiver_handoff.md`'s "returned frame — the three limits" section is the account of the convention and of what it does not cover |
 | 1 | 0 | `__mlir_op` is an MLIR dialect construct | `std/sys/_assembly.mojo` | documented true limit (`bugs/FORMAL_known_limits.md` §1.1); nothing to do |
 | 1 | 1 | `value.write_repr_to()` — a method call on a **generic parameter's** value | `std/format/repr.mojo` | §6 |
 | 1 | 1 | `comptime num_coefficients = len(coefficients)` does not fold — the initialiser is over a **comptime parameter** | `std/math/polynomial.mojo` | §6 |
@@ -210,14 +215,20 @@ slice's to claim.
 ## 8. Traps, for whoever runs this next
 
 * **Do not run two arm64 sweeps against the same dylib directory.** They share
-  `~/.gmojo/cas/formal-imports/arm64/` and the manifest. The write is atomic now,
-  so the failure is not corruption, but a verdict read while another sweep is
-  publishing is a verdict about a half-built library.
+  `~/.gmojo/cas/formal-imports/arm64/` and its manifests. The write is atomic now
+  (`formal/build.py`'s `_write_json_atomic`: private temp + fsync + `os.replace`,
+  measured 0 torn reads in 12792 after the fix), so the failure mode is not
+  corruption — but `bugs/FORMAL_sweep_tool_json_decode_error.md` is the history of
+  what it was, and a verdict read while another sweep is still building a dylib is
+  a verdict about a half-built library.
 * **`GMOJO_HOME` is the whole isolation.** `formal/build.py` derives the dylib
   directory from `cas.cas_dir()`, so a separate `GMOJO_HOME` gives a separate
   `formal-imports/<arch>` AND a separate verdict cache. Use it for any probe that
-  changes a `.mojo` file — and note the sweep's own cache cannot see a stdlib
-  change at all (`FORMAL_sweep_cache_ignores_imports.md`).
+  changes a `.mojo` file. The sweep's verdict key does fold in the import closure
+  the build reads (`cas.formal_build_key`'s `_imports_digest`, per
+  `tools/formal_sweep.py --help`), but a separate `GMOJO_HOME` also means a COLD
+  cache, which is what makes the probe number trustworthy rather than a mix of
+  fresh and replayed verdicts.
 * **`MOJO_STDLIB` is the seam that reaches nested dylib builds**, but it did not
   reach all of them in run P (§5's caveat). Verify with one file before trusting
   a 40-file number.
@@ -225,6 +236,6 @@ slice's to claim.
   `std/math/math.mojo` alone is minutes. Run it in the background and do
   something else.
 * `std/python/bindings.mojo` builds from other workers' trees were still running
-  at 14+ hours when this ran — the hang
-  `bugs/FORMAL_bindings_mojo_build_never_terminates.md` names. They hold CPU and
-  nothing in this slice.
+  at 14+ hours when this ran. `bugs/FORMAL_sweep_killed.md` records that file as
+  a build that does not terminate at a flat 0.06 GB. They hold CPU and nothing in
+  this slice.
