@@ -2797,6 +2797,13 @@ class X86_64Codegen:
             ).format(dotted=_dotted(e.func)))
         _load, width, signed = how
         self._emit_expr(obj)                    # RAX = the address
+        if _load == "identity":
+            # A NULLABLE POINTER's `value()` is `Optional.value()`, the UNWRAP,
+            # and the receiver IS the pointer (`model.nullable_pointer_unwrap`).
+            # Nothing is emitted after the receiver: the answer is the word that
+            # is already in RAX. The load below would read the FIRST BYTE of the
+            # pointee instead, which is what this used to do — measured, SIGSEGV.
+            return
         base = Reg(0)
         dst = Reg(0)
         if width == 1:

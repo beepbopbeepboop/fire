@@ -5920,8 +5920,32 @@ VALUE_METHOD_RECEIVERS = {
 # worth saying because wave 4's D4 found the binding half of this problem
 # (`_PhiloxWrapper._rng: PhiloxRandom[10]` behind an import alias) and it does
 # NOT apply to the one construct the sweep reaches.
+#
+# The ALIAS FAMILY is here for the same reason and is not a new fact: every name
+# below is `= Pointer[…]` or `= Optional[Pointer[…]]` in the language's own
+# `memory/pointer.mojo` (measured 2026-10-02 at lines 133-211), so each one is a
+# pointer by definition and the table's question — "does this name say a
+# pointer" — has the same answer for all of them. Leaving them out is what made
+# `std/os/env.mojo` REFUSE `external_call["getenv", OptionalPointer[UInt8,
+# ImmUntrackedOrigin]]` with "this path has no value of that kind to put in the
+# return register": a one-word nullable address, refused because the table had
+# never heard of the name, and `external_call_return_kind`'s own docstring says
+# a pointer "is an address, so `word`, and it needs no pointee" while the table
+# it consults said the name was not one. A name this path cannot read is the
+# safe direction, so the absence was not a wrong answer — but it was a refusal
+# of a construct the table's own rule already answers, on a file the sweep
+# reaches (`env.mojo`, and every `getpwuid`/`PyObject_Malloc` in `pwd/` and
+# `python/bindings.mojo` that spells its return type the same way).
+#
+# `pointee_args` reads the first argument that is not an attribute, and the
+# `mut: Bool, //` parameter ELISION in `OptionalPointer`'s own signature is what
+# keeps that right for it: `OptionalPointer[UInt8, ImmUntrackedOrigin]` spells
+# two positional arguments for three parameters, so the positional sequence is
+# `(T, origin)` exactly as it is for `Pointer` itself.
 POINTER_TYPE_CTORS = ("Pointer", "UnsafePointer", "_CPointer", "CPointer",
-                      "DTypePointer", "Reference")
+                      "DTypePointer", "Reference",
+                      "OptionalPointer", "MutPointer", "ImmPointer",
+                      "OpaquePointer", "MutOpaquePointer", "ImmOpaquePointer")
 
 # A pointee base name -> `(width in bytes, signed)`.  One table, read by both
 # backends through `dereference_lowering`, so the two architectures cannot
@@ -6631,9 +6655,97 @@ def _offset_scale(fn, expr, width, seen=()):
     return (True, None)
 
 
+# The spellings that are `Optional[Pointer[…]]` — a NULLABLE pointer — and the
+# reader that recognises one.  Both halves are here rather than at the call site
+# because `dereference_lowering` is not the only reader: `subscript_base_lowering`
+# asks the same question about `p[i]`, and a second place that spelled the
+# nullable-pointer test would be a second place for the two to disagree about
+# what `OptionalPointer` is.
+#
+# `_CPointer` is the stdlib's PREVIOUS name for the same type — measured
+# 2026-10-02, `new-modular`'s `std/` no longer spells it anywhere, so the name is
+# here because the corpus this path was measured on used it and because removing
+# it would change the answer for a spelling that is still in the table's own
+# docstrings, not because anything reads it today.
+NULLABLE_POINTER_ALIASES = ("OptionalPointer", "_CPointer")
+
+
+def nullable_pointer_unwrap(fn, expr, decls: dict, functions: dict = None):
+    """`(True, why)` when this receiver's DECLARED type is a nullable pointer.
+
+    **And the reason it is asked before any pointee question is the whole of
+    this function.**  A nullable pointer has BOTH a pointee and an unwrap, and
+    Mojo's two answers are different numbers:
+
+    * `Pointer[UInt8].value()` is the BYTE AT the address — a load;
+    * `OptionalPointer[UInt8, o].value()` — that is `Optional[Pointer[UInt8, o]]`
+      in the language's own definition (`memory/pointer.mojo:163-170`), so the
+      method resolved is `Optional.value()`, which is the UNWRAP: the pointer
+      itself, unchanged.
+
+    `dereference_lowering` sees only the SPELLING `value`, and the receiver's
+    declared type is the only thing in hand that tells the two apart, so a
+    nullable pointer read as a pointer produced the byte where the source says
+    the address.  Measured on this tree, `std/os/env.mojo`'s own `getenv` shape
+    with the previous spelling and no other change:
+
+        p = external_call["getenv", _CPointer[UInt8, UntrackedOrigin[mut=False]]](name)
+        String(unsafe_from_utf8_ptr=p.value())
+
+    BUILDS, RUNS, and dies of SIGSEGV (exit 139) — the image builds a `char *`
+    out of the first BYTE of the string ("hello" → 104 → address 104), and
+    address 104 is not mapped.  Nothing exits non-zero before that and no
+    diagnostic says anything: the wrong answer is a pointer to the low bytes of
+    a string.
+
+    **The identity is the correct VALUE, and it is correct for a reason that is
+    about the representation rather than about the source**: `Optional[T]`'s
+    payload here is one word (`bugs/FORMAL_stdlib_optional_needs_a_representation.md`
+    measures `Optional` at one field), so the pointer and its wrapper are the
+    same storage, and unwrapping is the identity on it — exactly the identity
+    `Pointer()` already is on this path (wave 4's D4) and the same one
+    `dereference_lowering`'s own struct branch derives and refuses for a
+    different reason.
+
+    **What the identity does NOT give is the RAISE.**  `Optional.value()` on
+    `None` raises in Mojo, and this backend has no raise: a nullable pointer
+    whose word is 0 unwraps to 0 here, and the source would have stopped.  That
+    is a control-flow difference and it is a real one, so it is stated rather
+    than claimed away — and it is the same gap the `Optional` doc records for
+    every other unwrap (`None` and `Some(0)` are the same word on this path).
+    It is not a reason to emit the byte instead: the load is wrong for a
+    POPULATED one too, which is the case the measurement above is.
+
+    The declared type is read with `_rhs_declared_text`, the same narrow reader
+    `dereference_lowering`'s SIMD branch uses, for the same reason: it recovers a
+    parameter annotation, a local's annotation, and an `external_call`'s declared
+    return type, which are the three shapes a nullable pointer arrives in, and
+    returns None for everything else rather than re-deriving the derivation.
+    """
+    text = _rhs_declared_text(fn, expr, decls, functions)
+    if not text:
+        return (False, None)
+    base = annotation_base_name(text)
+    if base in NULLABLE_POINTER_ALIASES:
+        return (True, f"{text} is `Optional[Pointer[...]]` — the stdlib's own "
+                      f"definition of {base} — so `value()` is "
+                      f"`Optional.value()`, the UNWRAP, and a nullable "
+                      f"pointer's payload is one word on this path: the "
+                      f"receiver is already the pointer")
+    if base == "Optional":
+        args = pointee_args(text)
+        if args and annotation_base_name(args[0]) in POINTER_TYPE_CTORS:
+            return (True, f"{text} is `Optional[Pointer[...]]`, so `value()` is "
+                          f"`Optional.value()`, the UNWRAP, and a nullable "
+                          f"pointer's payload is one word on this path: the "
+                          f"receiver is already the pointer")
+    return (False, None)
+
+
 def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
                          structs_by_name: dict = None, index_scaled: bool = False):
-    """`("load", width, signed)` | ("frame", struct) | None — with a refusal.
+    """`("load", width, signed)` | ("identity", 8, False) | ("frame", struct)
+    | None — with a refusal.
 
     `index_scaled=True` says the CALLER scales the index it supplies, so
     `_offset_scale` must judge the base address alone. It is the flag for a
@@ -6651,8 +6763,8 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
     in place of `DEREFERENCE_METHODS` for a receiver that is a pointer.  A
     string is `None`, and the `why` is the refusal to emit.
 
-    Two answers, and one of them is the one that makes this a value model rather
-    than a load:
+    Three answers, and the third is what makes this a value model rather than a
+    load:
 
       * `("load", width, signed)` — a scalar pointee whose width the table
         established.  `width` is 1, 2, 4 or 8 and is never anything else: a
@@ -6662,6 +6774,11 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         reasoning had only the 8-byte load available, which over-reads a
         `UInt8` pointee by seven bytes; with the pointee known the load is one
         byte, and one byte is the correct answer rather than an approximation.
+      * `("identity", 8, False)` — the receiver is a NULLABLE POINTER and the
+        `.value()` is the UNWRAP of it, not a load.  `nullable_pointer_unwrap`
+        is asked first, before any pointee question, because a nullable pointer
+        has a pointee AND an unwrap and the two answers are different numbers;
+        see that function for the whole of why the load was the wrong one.
       * `None` — no pointee, a pointee with no width, a FLOAT or a wide `SIMD`
         or a blob, or a STRUCT.  The struct case is the interesting one and its
         derivation is CORRECT (a struct's value is a frame address, so the
@@ -6672,7 +6789,18 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         and emitting the identity today returns 0 where the source says 22 on
         BOTH architectures.  The `why` spells that out, and the `why` is the
         same text on both architectures because it comes from here.
+
+    The three-tuple shape is kept for all three answers on purpose: every
+    existing reader unpacks `shape, width, signed`, and the two that ignore the
+    shape (`subscript_base_lowering` and both `_emit_dereference`) have to be
+    taught to look at it.  A second arity for the new answer would make every
+    reader a two-tuple branch, and the whole reason this function is shared is
+    that the two architectures cannot come to different answers about a load.
     """
+    unwrapped, unwrap_why = nullable_pointer_unwrap(fn, expr, decls,
+                                                    functions)
+    if unwrapped is True:
+        return (("identity", 8, False), unwrap_why)
     inner, why = pointer_pointee(fn, expr, decls, functions)
     if inner is None:
         return (None, why)
@@ -7046,6 +7174,16 @@ def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
                                     index_scaled=True)
     if how is not None:
         _shape, width, signed = how
+        if _shape == "identity":
+            return (None, None, None,
+                    f"the base is a NULLABLE POINTER, so `{spelled(obj)}[i]` is "
+                    f"the element AT the pointer and this path would have to "
+                    f"load it at the pointee's width from an address that is "
+                    f"either a live `char *` or 0 — there is no bounds check "
+                    f"against the pointee here and the source's own "
+                    f"`if not p:` is what establishes which. {_sentence(why)} "
+                    f"Read through `p.value()[i]` once the unwrap is written "
+                    f"out, which is the same program with the check spelled out")
         if _shape != "load":
             return (None, None, None,
                     f"the base is a pointer to a STRUCT, and a struct's value "

@@ -187,6 +187,61 @@ CASES = [
      "    return 0\n",
      0, "ptr_null=1"),
 
+    # ── 1b. `std/os/env.mojo` AS IT NOW READS ─────────────────────────────
+    #
+    # The stdlib renamed `_CPointer` to `OptionalPointer` (measured 2026-10-02:
+    # `new-modular`'s `std/` spells `_CPointer` nowhere), which is the same type
+    # under a name `POINTER_TYPE_CTORS` had never heard of — so the file that
+    # `env_round_trip` above transcribes was REFUSED again, with "this path has
+    # no value of that kind to put in the return register" about a one-word
+    # nullable address. Two facts about this case, and the second is why it is
+    # not the same case with a name swapped in:
+    #
+    #   1. the declared return type establishes the return REGISTER the same
+    #      way `_CPointer` did, so `if not ptr:` reads a null pointer and not an
+    #      integer — the null half is `env_getenv_null_is_a_null_pointer` again;
+    #   2. `ptr.value()` is `Optional.value()`, the UNWRAP, and NOT a load of
+    #      the first byte at that address. That is the half which was silently
+    #      WRONG before `model.nullable_pointer_unwrap` existed: measured, with
+    #      the previous spelling and nothing else changed,
+    #      `String(unsafe_from_utf8_ptr=ptr.value())` BUILDS, RUNS and dies of
+    #      SIGSEGV (exit 139) — the image builds a `char *` out of the byte 'h'
+    #      (104) and address 104 is not mapped. So a case that asserts only the
+    #      register shape would pass on the old lowering's first half and miss
+    #      the defect entirely; this one reads the string back, so it cannot.
+    #
+    # The expected value is `os.environ` in THIS process, the same reference
+    # `env_round_trip` uses — and the C library the image reads is the one that
+    # put it there.
+    ("env_round_trip_with_the_optional_pointer_spelling",
+     "def setenv(var name: String, var value: String,\n"
+     "           overwrite: Bool = True) -> Bool:\n"
+     "    var status = external_call[\"setenv\", Int32](\n"
+     "        name, value, Int32(1 if overwrite else 0))\n"
+     "    return status == 0\n"
+     "\n"
+     "def unsetenv(var name: String) -> Bool:\n"
+     "    return external_call[\"unsetenv\", c_int](name) == 0\n"
+     "\n"
+     "def getenv(var name: String, default: String = \"\") -> String:\n"
+     "    var ptr = external_call[\n"
+     "        \"getenv\", OptionalPointer[UInt8, ImmUntrackedOrigin]\n"
+     "    ](name)\n"
+     "    if not ptr:\n"
+     "        return default\n"
+     "    return String(unsafe_from_utf8_ptr=ptr.value())\n"
+     "\n"
+     "def main() -> Int32:\n"
+     f"    if not setenv(\"{VAR}\", \"hello\", True):\n"
+     "        return 1\n"
+     f"    printf(\"set=%s|\", getenv(\"{VAR}\"))\n"
+     f"    printf(\"absent=%s|\", getenv(\"{ABSENT}\", \"fallback\"))\n"
+     "    if not unsetenv(\"{}\"):\n".format(VAR) +
+     "        return 2\n"
+     f"    printf(\"after=%s|\", getenv(\"{VAR}\", \"gone\"))\n"
+     "    return 0\n",
+     0, "set=hello|absent=fallback|after=gone|"),
+
     # ── 3. the declared return type, per kind ─────────────────────────────
     # A 64-bit signed integer is the whole register, so nothing is emitted;
     # a signed 32-bit one is the low half, so the register is extended (see
@@ -439,6 +494,29 @@ def model_cases():
         got = spec(src)
         return None if got is None else got[2]
 
+    def deref_shape(src):
+        """`dereference_lowering`'s SHAPE for the `.value()` in `src`, or None.
+
+        The shape and not the width, because the two answers this needs to tell
+        apart are `load` and `identity` — a nullable pointer's `value()` is
+        `Optional.value()` (the unwrap, and the receiver IS the pointer) and a
+        plain pointer's is a load at the pointee's width. Both put a word in the
+        same register, so only the shape says which program was lowered.
+        """
+        stmts = B.parse_module(src, "<model_cases>")
+        for fn in B._extract_functions(stmts):
+            for node in M.iter_nodes(fn.body):
+                if isinstance(node, F.CallExpr) \
+                        and isinstance(node.func, F.MemberExpr) \
+                        and node.func.member in M.DEREFERENCE_TRY_NAMES:
+                    how, _why = M.dereference_lowering(fn, node.func.obj, {},
+                                                       {}, {})
+                    return None if how is None else how[0]
+        return None
+
+    def annotation_base_name_of(text):
+        return M.annotation_base_name(text)
+
     out = []
     # The corpus's own three shapes, with the return type each one declares.
     out.append(("spec_setenv_int32",
@@ -448,6 +526,22 @@ def model_cases():
     out.append(("spec_getenv_pointer",
                 spec('def f(s):\n    return external_call["getenv", '
                      '_CPointer[UInt8, UntrackedOrigin[mut=False]]](s)\n'),
+                ("getenv", M.EXTERN_RETURN_WORD, None)))
+    # The same type under the name `std/os/env.mojo` spells it NOW (measured
+    # 2026-10-02: `_CPointer` appears nowhere in `new-modular`'s `std/`), and
+    # the alias family around it. All of them are `= Pointer[…]` or
+    # `= Optional[Pointer[…]]` in `memory/pointer.mojo:133-211`, so the return
+    # register is the address in every case and the answer is one word.
+    for spelling in ("OptionalPointer[UInt8, ImmUntrackedOrigin]",
+                     "MutPointer[UInt8, MutUntrackedOrigin]",
+                     "ImmPointer[UInt8, ImmUntrackedOrigin]",
+                     "OpaquePointer[MutUntrackedOrigin]"):
+        out.append((f"return_kind_{annotation_base_name_of(spelling)}_is_a_word",
+                    M.external_call_return_kind(spelling),
+                    M.EXTERN_RETURN_WORD))
+    out.append(("spec_getenv_optional_pointer",
+                spec('def f(s):\n    return external_call["getenv", '
+                     'OptionalPointer[UInt8, ImmUntrackedOrigin]](s)\n'),
                 ("getenv", M.EXTERN_RETURN_WORD, None)))
     out.append(("spec_void",
                 spec('def f():\n    external_call["abort", NoneType]()\n'),
@@ -491,6 +585,23 @@ def model_cases():
                 M.EXTERN_RETURN_WORD))
     out.append(("return_kind_unknown_is_none",
                 M.external_call_return_kind("Some[Thing]"), None))
+    # The `value()` half, which is a DIFFERENT question from the return register
+    # and the one that was silently wrong: a nullable pointer's `.value()` is
+    # `Optional.value()` — the unwrap, so the receiver IS the pointer — while a
+    # plain pointer's is a load at the pointee's width. Same spelling, same
+    # register, two different programs.
+    out.append(("value_on_a_nullable_pointer_is_the_unwrap",
+                deref_shape('def f(s):\n'
+                            '    var p = external_call["getenv", '
+                            'OptionalPointer[UInt8, ImmUntrackedOrigin]](s)\n'
+                            '    return p.value()\n'),
+                "identity"))
+    out.append(("value_on_a_plain_pointer_is_a_load",
+                deref_shape('def f(s):\n'
+                            '    var p = external_call["getenv", '
+                            'Pointer[UInt8]](s)\n'
+                            '    return p.value()\n'),
+                "load"))
     return out
 
 

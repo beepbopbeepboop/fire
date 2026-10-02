@@ -4433,6 +4433,13 @@ dylib_exports: list = None, globals_base: int = None,
             ).format(dotted=_dotted(e.func)))
         _load, width, signed = how
         self._emit_expr(obj)                    # X0 = the address
+        if _load == "identity":
+            # A NULLABLE POINTER's `value()` is `Optional.value()`, the UNWRAP,
+            # and the receiver IS the pointer (`model.nullable_pointer_unwrap`).
+            # Nothing is emitted after the receiver: the answer is the word that
+            # is already in X0. The load below would read the FIRST BYTE of the
+            # pointee instead, which is what this used to do — measured, SIGSEGV.
+            return
         if width == 1:
             self.asm.emit(encode_ldrsb_xt_xn_imm(0, 0, 0) if signed
                           else encode_ldrb_wd_wn(0, 0, 0))
