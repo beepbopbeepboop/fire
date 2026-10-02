@@ -3308,6 +3308,32 @@ def gen_module_impl(self, stmts):
                 continue
             if _cname not in self.struct_field_types:
                 self.struct_field_types[_cname] = {}
+    # This module's OWN structs' constructor-param types, as proven by an
+    # IMPORTING module's literal call sites — the same table shape and the same
+    # key as `self._ctor_lit_param_types` above ("<struct>::<param>"), so the
+    # `pm` chain in the field pass below reads one key from one place and
+    # cannot tell (and does not need to) which module the evidence came from.
+    #
+    # Filtered to hints whose qualifier half is THIS module and which carry no
+    # conflict, mirroring the `_xmod_ctor_field_hints` merge further down: same
+    # `lstrip('.')` canonicalization, same "not unanimous → leave unresolved"
+    # rule. Built here, before the loop below replaces each `s.name` with its
+    # cname, and keyed by the same bare struct name the hint's own middle
+    # segment is (so a genuinely colliding pair — two modules both defining
+    # `Dialog` — resolves as neither does today, rather than as one of them
+    # twice).
+    _xf_own_ctor_params: dict = {}
+    if getattr(self, '_xmod_ctor_field_hints', None) and self.module_name:
+        _xfq = self.module_name.lstrip('.').replace('.', '_').replace('-', '_')
+        for _xfk in self._xmod_ctor_field_hints:
+            if self._xmod_ctor_field_conflict.get(_xfk):
+                continue
+            _xfhq, _xfhs, _xfhp = _xfk.split('::', 2)
+            if _xfhq != _xfq:
+                continue
+            _xfpct = self._xmod_ctor_field_hints[_xfk]
+            if _xfpct:
+                _xf_own_ctor_params[_xfhs + '::' + _xfhp] = _xfpct
     for s in all_struct_defs:
         s = _as_structdef_node(s)
         if isinstance(s, StructDef):
@@ -3698,6 +3724,39 @@ def gen_module_impl(self, stmts):
                         elif (_as_str(method.name) == '__init__'
                               and (_as_str(s.name) + '::' + pname) in self._ctor_lit_param_types):
                             pm[pname] = self._ctor_lit_param_types[_as_str(s.name) + '::' + pname]
+                        elif (_as_str(method.name) == '__init__'
+                              and (_as_str(s.name) + '::' + pname) in _xf_own_ctor_params):
+                            # The same evidence, one module away: a constructor
+                            # called from an IMPORTING module with a literal
+                            # argument of this type. It has to be consulted
+                            # HERE, on the PARAM, rather than only in the
+                            # `_xmod_ctor_field_hints` merge further down,
+                            # because that merge is keyed by param name and
+                            # applied to the FIELD of the same name — so
+                            #
+                            #     class Dialog:
+                            #         def __init__(self, s):   # unannotated
+                            #             self.s = s
+                            #             self.n = s
+                            #
+                            # imported and called as `mb.Dialog("hi")` typed
+                            # `self.s` and left `self.n` at the `int64_t`
+                            # default: `b.s` printed `hi`, `b.n` printed a heap
+                            # address. Same class, ONE module, was already
+                            # right — and the reason is this line: typing the
+                            # PARAM is what lets `_gmi_collect_self_assigns`
+                            # (three lines below) type EVERY field the
+                            # constructor assigns that param to. It also keeps
+                            # the store and the field declaration agreeing: the
+                            # merge alone typed a field `double` while the
+                            # param stayed `int64_t`, and `self.g = f` then
+                            # stored 2.5 as the int 2, which read back as 2.0.
+                            #
+                            # The one-module table above is consulted FIRST, so
+                            # a module's own literal evidence still wins over
+                            # another module's; and an explicit annotation beats
+                            # both (the `if ptype:` arm above).
+                            pm[pname] = _xf_own_ctor_params[_as_str(s.name) + '::' + pname]
                         else:
                             pm[pname] = 'int64_t'
                 new_fields = {}
