@@ -4491,13 +4491,15 @@ ASSIGNED_TYPE_REFUSALS = [
      "refuse:__init__ assigns it values this path cannot reduce to a type", None),
     # A TUPLE target: `self.a, self.b = A(), B()`, which is what
     # `tools/procrun.py` writes.  The field is recognised as assigned, so the
-    # message is about the STORE and not about the type — and the store is the
-    # real gap: a tuple store to a field is refused by name on x86-64 and
-    # ACCEPTED-AND-DROPPED on arm64.  This case is here so that reading a type
-    # out of a store the emitter does not perform cannot come back unnoticed;
-    # with it read as evidence the program built, ran, and answered 123 where
-    # the source says 128.
-    # bugs/FORMAL_tuple_store_to_a_field.md is the codegen bug.
+    # message is about the STORE and not about the type.  BOTH emitters perform
+    # the store now — x86-64 refused it by name until `_tuple_target_key` gave a
+    # `MemberExpr` element the same `_store_var` store a plain `self.x = v` uses,
+    # and arm64's arm is `_store_tup_slot`'s — so what this case now guards is
+    # the other half: that reading a TYPE out of a store is a separate question
+    # from performing it, and that the two must not be allowed to drift into
+    # agreeing.  With the store read as evidence the program built, ran, and
+    # answered 123 where the source says 128.
+    # `bugs/FORMAL_tuple_store_target_shapes.md` is the codegen history.
     ("byref_refuse_a_tuple_target_names_the_store",
      "struct Inner:\n"
      "    var a: Int\n"
@@ -4655,13 +4657,13 @@ INIT_FIELD_TYPE_CASES = [
      "    if o2.inner.total() != 489:\n"
      "        return 50 + o2.inner.total()\n"
      "    return 0\n", 0, None),
-    # THE TUPLE FORM is exercised by `init_assigned_scalar_fields_stay_plain`
-    # below rather than here, because it is a property of the STATEMENT
-    # lowering and x86-64 does not lower a `MemberExpr` tuple target at all
-    # (`formal/x86_64_codegen.py`'s `_emit_tuple_assign` takes plain names only,
-    # while arm64 lowers it) — a divergence in the two backends rather than in
-    # anything to do with the evidence source, filed as
-    # `bugs/FORMAL_x86_64_tuple_assignment_member_target.md`.
+    # THE TUPLE FORM is a PROPERTY OF THE STATEMENT LOWERING rather than of
+    # this evidence source, so the four shapes of it are checked against CPython
+    # on BOTH backends in `test_formal_value_model.py`'s `TUPLE_STORE_CASES`
+    # (which is where the x86-64 half of it was fixed).  These cases are written
+    # with separate assignments only so that they mean the same thing on both
+    # architectures as the model reads them, which is what the comment on
+    # `init_assigned_scalar_fields_stay_plain` records.
     ("init_assigned_scalar_fields_stay_plain",
      "class Tail:\n"
      "    __slots__ = ('limit', '_chunks', '_size')\n"

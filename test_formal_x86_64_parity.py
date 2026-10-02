@@ -216,6 +216,36 @@ REFUSALS = [
      "    printf(\"%d\\n\", len(a[0]))\n"
      "    return 0\n",
      "'+=' on two strings is refused"),
+    # THE SECOND HALF of the tuple-store divergence, and the reason the first
+    # half needed a positive case to be worth anything.  `h.x, h.y = p, q` is
+    # lowered by both now (`test_formal_value_model.py`'s
+    # `tuple_store_to_self_and_to_a_local` pins it against CPython on both), but
+    # the same SPELLING inside `__init__` reaches a different pass: the
+    # construction-with-arguments inline, which lowers the call by storing each
+    # of the constructor's `self.<field> = …` assignments into the fresh block
+    # and so needs the body to BE a straight line of those.  A tuple target is
+    # not, and it is refused — which is correct, and which is only correct while
+    # BOTH architectures say so.  x86-64 used to reach its own
+    # `_emit_tuple_assign` and refuse with
+    # "tuple assignment targets must be plain names on the formal x86-64 path",
+    # so the two backends answered one program with two different sentences.
+    #
+    # It is here rather than in the positive list because there is no output to
+    # compare: the assertion is that neither machine may answer it, and a case
+    # that pins an answer would be pinning the wrong one.
+    ("a_tuple_target_in_a_constructor_body_is_refused_identically",
+     "class Tail:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x, self.y = p, q\n"
+     "    def total(self):\n"
+     "        return self.x + self.y\n"
+     "def main(n):\n"
+     "    var t = Tail(3, 4)\n"
+     "    printf(\"t=%d\", t.total())\n"
+     "    return 0\n",
+     "whose body this path does not inline"),
 ]
 
 
