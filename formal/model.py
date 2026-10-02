@@ -2591,6 +2591,30 @@ def _build_cfg(body) -> tuple:
     # For a straight-line body it changes nothing at all — `run` returns the
     # block the entry already points at, so the `+=` was only ever a duplicate
     # edge there.
+    #
+    # WHEN IT FIRED, precisely, because "the last statement is a loop" is too
+    # coarse to be useful to the next reader and the coarse form was measured
+    # to be wrong on a program it very obviously looks like:
+    #
+    #     def main() -> int:
+    #         acc = 0
+    #         i = 0
+    #         while i < 5:
+    #             acc = acc + i
+    #             i = i + 1
+    #         if acc > 5:
+    #             return acc
+    #         return 0
+    #
+    # The `if` IS the last statement and it reads `acc` in both arms, and the
+    # old code refused nothing here — because `run` returns [] when every arm
+    # of the trailing statement TERMINATES (`return`/`raise`/`break` give no
+    # fall-through exit), so there was nothing to edge the entry to. The
+    # condition is therefore TWO things, not one: the body's last statement is a
+    # control-flow statement, AND at least one path falls OUT of it.
+    # `test_formal_read_before_store.py` pins both directions, because a rule
+    # stated in its coarse form and measured only in that form is how the next
+    # person re-derives it.
     entry = new([])
     run(body, [], [entry.index])
     for b in blocks:

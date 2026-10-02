@@ -83,15 +83,39 @@ into the tail of the body. The fixpoint pays for it, because the entry's OUT is
 only the parameter names: any region the trailing statement opened had its IN
 intersected with the parameters, so every local stored before it dropped out.
 
-The shape is therefore **not** "a loop reads a local" — it is **"a
-control-flow statement is the LAST statement of the body"**, which is why
-`_p_alt` (whose `while 1:` is its last statement) is the file that found it and
-why `fire.py`, which is 62 KB of ordinary code, was reporting it too.
+The shape is therefore **not** "a loop reads a local" — it is **two**
+conditions together: the body's LAST statement is a control-flow statement,
+**and at least one path falls out of it.** The second half is not a detail, and
+getting it wrong is how the coarse form of this rule gets re-derived: `run`
+returns `[]` when every arm of the trailing statement terminates (`return`,
+`raise`, `break` give no fall-through exit), so there is nothing to edge the
+entry to and the bug cannot fire. Measured, on a program the coarse form says
+must break:
 
-**Fixed** (commit `5d64069a`), with 10 new rows in
+```python
+def main() -> int:
+    acc = 0
+    i = 0
+    while i < 5:
+        acc = acc + i
+        i = i + 1
+    if acc > 5:            # the body's LAST statement, reads `acc` in both arms
+        return acc
+    return 0
+```
+
+— the old code refuses nothing here, and neither does the new one. Both
+directions are pinned in `test_formal_read_before_store.py` (`trailing_if_ok`
+and `trailing_if_whose_arms_all_return_is_the_other_shape`), because a rule
+stated in its coarse form and measured only in that form is how the next person
+re-derives it. `_p_alt` does fire because its `while 1:`'s body ends in an
+`if` with no `else`, and the false edge falls through.
+
+**Fixed** (commit `5d64069a`), with 11 new rows in
 `test_formal_read_before_store.py` — one per statement kind (`while`,
-`while 1:`, `for`, `if`, `if`/`else`, `try`, `match`, `with`) plus two that must
-still refuse. Eight of the ten go red on the pre-fix `model.py`.
+`while 1:`, `for`, `if`, `if`/`else`, `try`, `match`, `with`), two that must
+still refuse, and the one that pins the rule's other direction. Eight of the
+eleven go red on the pre-fix `model.py`.
 
 **Measured blast radius, over this repository's 2819 top-level functions:**
 

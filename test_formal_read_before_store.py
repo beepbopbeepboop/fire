@@ -338,11 +338,19 @@ CASES = [
     # `pend = entry` three lines above the read it was reported for. Taking `re`
     # out of the backend takes out every file that imports it.
     #
-    # The shape is not "a loop reads a local" — it is "a control-flow statement
-    # is the LAST statement of the body", which is why the group below is one
-    # row per statement kind. Adding a statement AFTER the loop is the smallest
-    # thing that hides it, which is exactly the accidental difference between
-    # this group and the ones above it.
+    # The shape is not "a loop reads a local" — it is TWO conditions together:
+    # the body's LAST statement is a control-flow statement, AND at least one
+    # path FALLS OUT of it. The second half is not a detail: `run` returns []
+    # when every arm of the trailing statement terminates (`return`, `raise`,
+    # `break` all give no fall-through exit), so there is nothing to edge the
+    # entry to and the bug cannot fire. A body whose trailing `if` returns from
+    # both arms builds today and built before the fix, which is measured and is
+    # pinned below — a rule stated only in its coarse form sends the next reader
+    # to a program it does not reproduce on.
+    #
+    # Adding a statement AFTER the loop is the smallest thing that hides it,
+    # which is exactly the accidental difference between this group and the
+    # ones above it.
     ("trailing_while_ok",
      "    p = 1\n    while n:\n        q = p\n        n = n - 1\n", "ok"),
     # `while 1:` is the shape the corpus uses most (a loop whose exit is a
@@ -370,6 +378,14 @@ CASES = [
      "    while n:\n        q = q\n        n = n - 1\n", "refuse"),
     ("trailing_control_flow_still_refuses_one_arm_store",
      "    if n:\n        p = 1\n    else:\n        q = p\n", "refuse"),
+    # The OTHER direction of the rule's second condition: a trailing control
+    # statement whose every arm TERMINATES produced no fall-through exit, so
+    # the entry had nothing spurious to point at and the old code refused
+    # nothing. Pinned so the rule is not restated in its coarse form.
+    ("trailing_if_whose_arms_all_return_is_the_other_shape",
+     "    p = 1\n    if n:\n        return p\n    return 0\n", "ok",
+     "every arm terminates, so `run` returns [] and there is no spurious entry "
+     "edge to remove — this is the case the coarse form of the rule gets wrong"),
 ]
 
 
