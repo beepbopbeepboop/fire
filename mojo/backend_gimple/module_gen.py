@@ -244,13 +244,18 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         # `'%s and %s' % (x, y)` formatted the boxed `char *` as a decimal
         # address: `4301506648 and 4301506656`, exit 0, no diagnostic.
         #
-        # Scoped to `cur is None` deliberately. A parameter the body DID type
-        # is decided on evidence this pass does not have — the container arm
-        # below already overrides one of those on purpose (an iterable-
-        # consuming builtin cannot tell `str` from `list`), and a parameter
-        # typed as something else entirely (`double` from a `+ 1`, a struct
-        # from a field match) must not be retyped by a literal.
-        if cur is None:
+        # Scoped to `cur is None` AND unannotated. A parameter the body DID
+        # type is decided on evidence this pass does not have — the
+        # container arm below already overrides one of those on purpose (an
+        # iterable-consuming builtin cannot tell `str` from `list`), and a
+        # parameter typed as something else entirely (`double` from a
+        # `+ 1`, a struct from a field match) must not be retyped by a
+        # literal. An ANNOTATED parameter is excluded because `_param_ctype`
+        # gives `_inferred_param_types` no say over an annotation, so an
+        # entry written here reaches the forward declaration and not the
+        # definition — see `_annotated_params`' own comment for the
+        # "conflicting types" that produces.
+        if cur is None and (fname, pname) not in getattr(gen, '_annotated_params', ()):
             ipt.setdefault(fname, {})[pname] = call_type
             continue
         if not ((cur in containers and call_type == 'char *')
@@ -5444,10 +5449,32 @@ def gen_module_impl(self, stmts):
     # "what did the callee infer for that parameter?". Looked up, never
     # computed, so there is no inference recursion.
     self._func_param_names: dict[str, list[str]] = {}
+    # Which (function, param) pairs carry an EXPLICIT annotation. Needed
+    # because "no use-derived evidence" and "annotated" look identical in
+    # `_inferred_param_types` — `_infer_param_types` records an entry only
+    # when the BODY says something — and `_param_ctype` consults that map
+    # only for an UNANNOTATED parameter. So writing an entry for an
+    # annotated one is not a no-op: it reaches the forward declaration
+    # (`_signature_ctypes`, which does not have the annotation guard) and
+    # not the definition, and the pair disagrees:
+    #
+    #     MojoList * make (MojoList *);      /* the declaration */
+    #     MojoList * make (int64_t buf)      /* the definition */
+    #
+    # "conflicting types", a hard error. Real:
+    # `fn make(buf: DynamicVector)` (test_gimple_runner.py's
+    # `gimple_struct_mixed_reads_survive_a_function_boundary`), where the
+    # annotation resolves to the generic box and the single call site
+    # passes a list literal.
+    self._annotated_params: set = set()
     for s in all_functions:
         if isinstance(s, FunctionDef):
-            self._func_param_names[_as_str(s.name)] = [
+            _sfn = _as_str(s.name)
+            self._func_param_names[_sfn] = [
                 _as_str(pn) for pn, _pt in (s.params or []) if not _as_str(pn).startswith('*')]
+            for _spn, _spt in (s.params or []):
+                if _spt is not None:
+                    self._annotated_params.add((_sfn, _as_str(_spn)))
     for s in all_functions:
         if isinstance(s, FunctionDef):
             self._inferred_param_types[s.name] = self._infer_param_types(s)
