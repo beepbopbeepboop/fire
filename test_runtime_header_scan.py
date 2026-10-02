@@ -242,17 +242,42 @@ def test_every_declaration_is_seen():
     # merge had. One name, and it is the whole delta -- which is exactly why the
     # number is read off the call and never added up: 531 + 1 is right here and
     # would have been wrong on any other pair of sides.
-    #
-    # `py_tokenize_named` is NOT an entry here, and this is the merge that
-    # settled it rather than adding one. One side of the `py_tokenize` conflict
-    # declared it in runtime/fire_runtime.h, which would have made this 533;
-    # it is deliberately not declared -- the function is not in
-    # `_NO_OVERLOAD_MANGLE`, so a generated call would reach it mangled and a
-    # bare-name declaration could never be that call's prototype, and nothing
-    # calls it from generated code at all. Leaving it out lands the count back
-    # on 532 exactly, which is independent evidence that this is the shape the
-    # other side had already built and gated. See the header's own comment.
-    for header, want in (('fire_runtime.h', 532),
+    # 532 -> 537 (2026-10-01, `bugs-container-compare`): the container ORDERING
+    # entry points, which are to `<` / `<=` / `>` / `>=` between containers what
+    # `mojo_*_eq` / `mojo_value_eq` were to `==` / `!=` --
+    # `mojo_list_cmp`, `mojo_set_cmp`, `mojo_value_cmp`, `mojo_cmp_fold`, and
+    # `mojo_bytes_cmp` (the three-way sibling of `mojo_bytes_eq`, needed for a
+    # bytes ELEMENT of an ordered container). Five, taken from the call.
+    # 537 -> 539 (2026-10-01, `bugs-container-compare` again, the tuple dict-key
+    # work): `mojo_dict_key_for` and `mojo_dict_key_free` — the CONTENT key a
+    # tuple used as a dict key is stored and looked up under, replacing the
+    # object's address. Two, taken from the call.
+    # 539 -> 541 (2026-10-01, the rest of the bug batch, merged over the two
+    # container-compare entries above): two names in and one net change out, so
+    # the total is NOT theirs plus these:
+    #   +1  `mojo_int_str_transient` (`bugs-segfaults`) — the decimal spelling
+    #       of an integer dict key above 2 GiB, which cannot be a borrowed
+    #       8-byte buffer and needs its own allocator's lifetime.
+    #   +1  `mojo_repr_list_slotkinds` (`bugs-silent-values-b`) — the repr of a
+    #       list whose per-slot kinds now travel with the value.
+    #   +2/-2, net zero (`bugs-silent-values-a`): `mojo_dict_set_bool` and
+    #       `mojo_dict_set_bytes_bool` REPLACE `mojo_is_bool_dict` and
+    #       `mojo_mark_dict_bool_values`. The pair that went away marked a dict
+    #       as bool-valued and read the flag off it; the pair that arrived sets
+    #       the value's kind at the store, which is what stops one bool value
+    #       from poisoning its neighbours' repr.
+    # Read off the call on the merged header: 541.
+
+    # `py_tokenize_named` is deliberately NOT an entry, and two separate merges
+    # have now settled that rather than adding one. It is not in
+    # `_NO_OVERLOAD_MANGLE` (only `py_tokenize` is), so a generated call would
+    # reach it under a mangled name and a bare-name declaration here could never
+    # be that call's prototype -- and nothing calls it from generated code at
+    # all, its callers being Python (formal/build.py, the lexing tests), which
+    # take the prototype from the definition. Declaring it would put a fact in
+    # this header that nothing checks and nothing could use: it would make the
+    # number 542, not 541. See the header's own comment.
+    for header, want in (('fire_runtime.h', 541),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

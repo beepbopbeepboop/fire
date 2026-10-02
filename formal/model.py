@@ -2573,8 +2573,28 @@ def _build_cfg(body) -> tuple:
     # predecessor, which is the edge that makes the seed reach anything: a body
     # emitted with an empty pending list opens its own unreachable first block,
     # and every block after it then inherits the universe.
+    #
+    # `run`'s return value is DISCARDED, and that is load-bearing. `run` already
+    # wired the entry to the first block of the body — it was the pending
+    # predecessor passed in below — so adding the returned EXITS to the entry's
+    # successor list added a second, fictitious edge from the entry straight to
+    # a block at the END of the body. The fixpoint intersects over a block's
+    # predecessors, so that edge poisons every join the body reaches: the
+    # entry's OUT set is the parameter seed and nothing else, so a block with
+    # any predecessor from the body proper plus the entry can hold nothing at
+    # all, and a name the body stored unconditionally reads as never stored.
+    #
+    # It was invisible for as long as every body ended in a `return`, because
+    # the `ReturnStmt` arm makes `run` return `[]` and there was nothing to
+    # add. The first body that ends in an ordinary expression statement is
+    # where it fires — a function whose last statement is `print(n)` or a
+    # call. It refused five `struct.pack` programs in
+    # `test_struct_formal.py`, all of them legal, all of them refusing
+    # `n = 0; ... ; print(n)` for a `n` the source stores three lines above the
+    # read. `test_formal_read_before_store.py`'s "a body whose LAST statement is
+    # an expression" section is the pin.
     entry = new([])
-    entry.succs += run(body, [], [entry.index])
+    run(body, [], [entry.index])
     for b in blocks:
         for d in b.succs:
             if d is not None and 0 <= d < len(blocks):

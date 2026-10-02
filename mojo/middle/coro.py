@@ -641,6 +641,38 @@ def _generator_value_kind(fn: N.FunctionDef,
     if has_tuple:
         return ('tuple', '') if _generator_tuple_slots(fn, env) is not None \
             else (None, 'tuple yield with inconsistent shape (v0)')
+    # A `None` here is a HOLE, not a kind: `_yield_kind` could not type that
+    # one yield expression. Beside a yield that DID get a kind, the question
+    # is whether picking that kind MISREADS the hole, and the answer is
+    # exactly "is the slot a type the hole would not get anyway".
+    #
+    # `int64_t` — whether it is the one positive kind or there is no positive
+    # kind at all — is a NO-OP here: an unresolvable expression is read as an
+    # `int64_t` everywhere else in this codegen (that is what
+    # `_KIND_TO_SLOT_CTYPE[None]` and the `return 'i', ''` default below both
+    # mean), so the slot a hole sits beside is already the slot the hole gets.
+    # Refusing there would disqualify ordinary untyped code: measured, it
+    # refused `def g(): yield 1; [x] = [42]; yield x` and
+    # `def g(): var ba = bytearray(); ...; yield len(ba)`, both of which are
+    # genuinely all-int and both of which compiled and printed right before
+    # this check existed. That is the same reasoning the mixed bool/int
+    # DECISION below records, for the same reason.
+    #
+    # `char *` and `double` ARE a refusal, because the hole would be read
+    # through a type it never got. Measured, not argued:
+    # `for i, x in enumerate(xs): yield i; yield "s"` printed `(null)` then
+    # `s` where CPython prints `0` then `s`, and
+    # `for k, v in d.items(): yield v; yield "s"` printed nothing at all --
+    # both exit 0. Every check below SKIPS `None` explicitly
+    # (`kinds - {'d', None}`), so a hole beside a positive kind sailed through
+    # all of them and landed on the `int64_t` default, which is the identical
+    # silent truncation the call-site half of this slot's contract was fixed
+    # for (see `_scan_callsite_param_kinds` and
+    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md).
+    if None in kinds and (kinds - {None, 'i'}):
+        return None, ('a `yield` whose value kind could not be resolved, '
+                      'beside one that requires a non-int64_t value slot '
+                      '(v0)')
     if 'd' in kinds and (kinds - {'d', None}):
         return None, f'mixed float / non-float yields (v0)'
     if 'd' in kinds:
@@ -1933,7 +1965,7 @@ def _async_for_ok(fn: N.FunctionDef) -> bool:
     _async_for_drive_stmts desugars."""
     for n in _walk(fn):
         if isinstance(n, N.ForStmt) and getattr(n, 'is_async', False):
-            if not isinstance(n.target, str) or ',' in n.target:
+            if not isinstance(n.target, str) or N.is_tuple_target(n.target):
                 return False
             if _await_target_name(n.iterable) is None:
                 return False
@@ -2221,10 +2253,14 @@ def _compute_no_wd_forward(stmts: list) -> None:
     # keeps one value word per entry, so its int and str views agree by
     # construction and every key spelling lands in the one domain. All four
     # tables are LOCAL for a reason of their own: a container handed across a
-    # call boundary reaches codegen as a boxed `int64_t`, and `x in <boxed
-    # dict>` goes through `mojo_in_dispatch_int`, which has no dict branch at
-    # all (bugs/CODEGEN_in_dispatch_int_has_no_dict_branch.md) -- so every
-    # membership test in this function is deliberately a typed-local one.
+    # call boundary reaches codegen as a boxed `int64_t` and the membership
+    # test then goes through a RUNTIME dispatcher
+    # (`mojo_in_dispatch_int` / `mojo_in_dispatch_str`) instead of the typed
+    # `mojo_dict_contains`, which costs a registry probe per test and — before
+    # the int view grew a dict branch — answered a flat "no". The dispatcher
+    # is answerable now (test_container_membership.py), so this is a cost and
+    # a clarity choice rather than a correctness requirement; keeping the
+    # tables local keeps the answer a compile-time predicate.
     preds: dict = {}
     seeds: list = []
     for name in fns:
@@ -2585,6 +2621,55 @@ def _mark_coro_body(body_fd):
     point of the marker is that it is a single shared contract.
     """
     body_fd._mojo_coro_body = True
+    return body_fd
+
+
+def _mark_coro_param_elem_kinds(body_fd, real_params, env):
+    """Attach the C element ctype of every LIST-typed parameter to a
+    synthesized coroutine body, as `body_fd._mojo_coro_param_elem_kinds`
+    ({param name: element C type}).
+
+    A generator's parameters cross the stack-switch ABI as untyped
+    `int64_t` slots (`__mojo_gen_arg`), so a `for <t> in <param>:` in the
+    body reaches the ORDINARY loop lowering as a boxed handle with no
+    container type — and with no element type either. The evidence is
+    available here and nowhere downstream: `env` (`_static_env`, seeded from
+    the unanimous cross-call-site contract) already holds `('list', k)` for
+    `rows([1.5, 2.5])`, and by the time the backend sees the body the
+    generator's own FunctionDef is GONE — the lowering replaced it with
+    `__mgco_<g>_body` — so no whole-module call-site scan downstream can
+    recover it. `kinds/ctypes` is `'i'/'b'/'p'/'d'`, mapped through the one
+    `_KIND_CTYPE` every other answer in this file goes through.
+
+    Without this, a generator that iterates a list parameter and yields its
+    elements declared the loop target `char *` (the dict arm of the runtime
+    dict-or-list dispatch wins the shared variable) and the yield slot `double`
+    could not be fed from it: a hard `gcc -fgimple` "pointer value used where
+    a floating-point was expected", i.e. an honest refusal. With it, the
+    element type reaches `_elem_types` through the ordinary cross-call
+    element-type contract (`module_gen`'s `_param_elem_types` ->
+    `emit_funcs.gen_func`), so the loop takes the list path directly.
+    See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md ("Item 8").
+
+    Only LIST params are recorded, and only a scalar element kind: a
+    container-of-container has no single C type either (it needs the nested
+    slot the ordinary lowering carries in `_nested_elem_types`), and an
+    `int64_t` element is the default the loop target assumes anyway.
+
+    Part of the same contract as `_mark_coro_body` and marked the same way
+    (an attribute, not a name-suffix guess) for the same reason: the backend
+    must be able to ask "is this a coroutine body, and what did its params
+    look like" without a parallel naming convention to keep in sync."""
+    kinds: dict = {}
+    for pname, _pann in real_params:
+        v = env.get(_cm_as_str(pname))
+        if isinstance(v, tuple) and len(v) == 2 and v[0] == 'list' \
+                and isinstance(v[1], str) and v[1] in _KIND_CTYPE:
+            ct = _KIND_CTYPE[v[1]]
+            if ct != 'int64_t':
+                kinds[_cm_as_str(pname)] = ct
+    if kinds:
+        body_fd._mojo_coro_param_elem_kinds = kinds
     return body_fd
 
 
@@ -4567,6 +4652,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     body_fd.is_generator = False
     body_fd.is_async = False
     body_fd = _mark_coro_body(body_fd)
+    _mark_coro_param_elem_kinds(body_fd, real_params, env)
 
     _lead = ([f'{struct_name} *'] if has_self else
              ['int64_t'] if is_classmethod else [])

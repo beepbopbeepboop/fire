@@ -411,6 +411,96 @@ BUILTIN_PROGRAMS = {
             print([i * 100 + j * 10 + k for i in range(2) for j in range(2) for k in range(2)])
             print([i * j for i in range(4) for j in range(4) if j > i])
     """),
+    # A comprehension whose ELEMENT is itself a list or a tuple. The result is
+    # a list of containers, which needs a SECOND type map (`_nested_elem_types`
+    # — what the inner containers hold) on top of `_elem_types` ("they are
+    # lists"); the single-clause path recorded only the first, so the repr
+    # helper that reads an inner slot as an int was never selected and the
+    # generic walker's None-sentinel heuristic rendered the first element's int
+    # 0 as `None`: `[[5, j] for j in range(3)]` printed `[(5, None), (5, 1),
+    # (5, 2)]`. Both the list and the tuple element, and both iterable kinds,
+    # because the two maps are recorded per ELEMENT and per RESULT, not per
+    # iterable — so the shape of the comprehension does not matter, only that
+    # its element is a container.
+    # A set/dict comprehension with MORE THAN ONE `for` clause. `set` and
+    # `dict` were left out of the multi-clause lowering that fixed `list`
+    # (the parked-remainder mechanism in `_gen_compr_append`), so every
+    # clause after the first was silently DROPPED — exit 0, and for a set
+    # that is invisible in the printed result because the outer clause alone
+    # is still a plausible-looking smaller set: `{i + j for i in range(3) for
+    # j in range(3)}` gave `{0, 1, 2}` where CPython gives `{0, 1, 2, 3, 4}`.
+    # Each kind needs its own merge — a list extend concatenates, a set must
+    # re-add per element so it deduplicates, a dict must re-insert per pair
+    # keeping each pair's key/value kinds — so the merge is `mojo_set_update`
+    # / `mojo_dict_update` respectively.
+    #
+    # The value-1 minimum in the element expressions is deliberate and NOT a
+    # dodge: a dict/slot holding the int 0 renders as `None` through the
+    # generic value reader, which is a SEPARATE pre-existing defect (a plain
+    # `{1: 0}` dict literal does it too, no comprehension involved). Using
+    # `i + j + 1` keeps this case measuring the clause count and the merge,
+    # which is what it is for.
+    "comprehension_multi_clause_set_and_dict": textwrap.dedent("""\
+        def main():
+            print({i + j for i in range(3) for j in range(3)})
+            print({i * j + 1 for i in range(3) for j in range(3)})
+            print(len({i + j for i in range(3) for j in range(3)}))
+            print(4 in {i + j for i in range(3) for j in range(3)})
+            print({str(i) + str(j): i + j + 1 for i in range(2) for j in range(2)})
+            print({str(i) + str(j): i + j + 1 for i in range(2) for j in range(2) if j > 0})
+            print(len({str(i) + str(j): i + j + 1 for i in range(3) for j in range(3)}))
+            print({str(i) + str(j): i + j + 1 for i in range(3) for j in range(3) if j > 1})
+    """),
+    # A heterogeneous list built in a CALLEE and read at a computed index in the
+    # caller. The elements' joined type is `char *` (TypeLattice.join resolves
+    # double-vs-char* to char*), so without the cross-function kinds marker the
+    # subscript lowered to `mojo_list_get_str` and handed a float slot's
+    # IEEE-754 bits to strlen — SIGSEGV. The callee already records the
+    # literal's per-slot kinds on the VALUE, so the read has to be lowered as a
+    # boxed one and the runtime has to be able to answer a str slot as well as a
+    # float one.
+    "list_returned_by_a_call_reads_heterogeneous_slots": textwrap.dedent("""\
+        def mixed(x: Float64, s: String) -> List:
+            return [x, 1, s]
+
+        def ints() -> List:
+            return [1, 2, 3]
+
+        def strs(s: String) -> List:
+            return [s, s]
+
+        def main():
+            var a = mixed(2.5, "yy")
+            var p = 0
+            print(a[p])
+            print(a[2])
+            print(a)
+            print(a[0] + 1)
+            print(str(a[2]))
+            for e in a:
+                print(e)
+            print(len(a))
+            var b = ints()
+            print(b[0])
+            print(b)
+            var c = strs("q")
+            print(c[0])
+            print(c)
+    """),
+    "comprehension_of_tuples_and_lists": textwrap.dedent("""\
+        def main():
+            print([[5, j] for j in range(3)])
+            print([(5, j) for j in range(3)])
+            ys = [7, 8, 9]
+            print([[5, y] for y in ys])
+            print([(5, y) for y in ys])
+            print([[i, j] for i in range(2) for j in range(2)])
+            print([(i, j) for i in range(2) for j in range(2)])
+            print([[0, 7], [1, 8]])
+            print([(0, 7), (1, 8)])
+            print(([0, 7], [1, 8]))
+            print(([0, 7],))
+    """),
     "global_var": textwrap.dedent("""\
         var counter: Int = 0
 

@@ -588,6 +588,61 @@ def gen():
     yield False
 """)
 
+    # ── A yield whose value kind could NOT BE RESOLVED ──────────────────
+    # The checks above are on the SET of kinds, and every one of them
+    # explicitly SKIPS an unresolved one (`kinds - {'d', None}`). So a yield
+    # the static scan could not type, sitting beside one it could, sailed
+    # through all of them and landed on the `int64_t` default — the identical
+    # silent truncation the CALL-SITE half of the same one-slot contract was
+    # fixed for (bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md).
+    # Both of these compiled, ran, exit 0, and printed wrong values:
+    #   `for i, x in enumerate(xs): yield i; yield "s"`  -> `(null)` then `s`
+    #   `for k, v in d.items(): yield v; yield "s"`      -> nothing at all
+    # The hole is a HOLE beside a slot that is NOT int64_t; see
+    # `_generator_value_kind`'s own note for why `int64_t` is excluded from
+    # the refusal (an unresolved expression is read as an `int64_t` anyway,
+    # so refusing there would disqualify ordinary untyped generators).
+    test_generator_refused("generator_unresolvable_yield_kind_beside_str", """\
+def gen(xs):
+    for i, x in enumerate(xs):
+        yield i
+        yield "s"
+""", "all values must agree on one scalar type")
+
+    test_generator_refused("generator_unresolvable_yield_kind_beside_double", """\
+def gen(pairs):
+    for a, b in pairs:
+        yield a
+        yield 2.5
+""", "all values must agree on one scalar type")
+
+    test_generator_refused("generator_unresolvable_yield_kind_beside_dict_value", """\
+def gen(d):
+    for k, v in d.items():
+        yield v
+        yield "s"
+""", "all values must agree on one scalar type")
+
+    # And the excluded half must keep compiling — an unresolvable yield
+    # beside an int one is NOT a refusal, because the slot the hole would get
+    # is the slot the int kind picks. Both of these are genuinely all-int
+    # and both compiled and printed correctly before the check existed; a
+    # blanket `None in kinds` refusal took them out of the compiled path.
+    test_generator_c_compiles("generator_unresolvable_yield_kind_beside_int", """\
+def gen():
+    yield 1
+    [x] = [42]
+    yield x
+""")
+
+    test_generator_c_compiles("generator_unresolvable_yield_kind_beside_int_len", """\
+def gen():
+    var ba = bytearray()
+    ba.append(5)
+    yield ba[0]
+    yield len(ba)
+""")
+
     # Mixed kinds reached through `yield from` are caught by the same check.
     # A `yield from` re-yields everything the sub-generator yields, so the
     # sub-generator's kind lands in the OUTER generator's single value slot
@@ -2522,6 +2577,28 @@ def main():
         print(v)
 """, "1\n2\n3\n4\n")
 
+    # A generator body that calls `next(it)` from INSIDE `for x in it:` over
+    # the same cursor. An A3 stack-switch body goes through the ordinary
+    # codegen's `_gen_for_list_iter_cursor`, whose cursor is the index of the
+    # next UNCONSUMED element (the advance is part of reading the element, not
+    # a post-body step) — so `next(it)` in the body reads the FOLLOWING
+    # element, as CPython's `list_iterator.__next__` does, and all four
+    # elements are seen exactly once. Before that invariant was restored the
+    # post-block advance made `next(it)` re-read the element the loop had just
+    # yielded: `1\n1\n3\n3`. Same shape as CPython's own
+    # `Tools/cases_generator/analyzer.py::check_escaping_calls`.
+    test_generator_stdout("generator_next_inside_for_over_same_it", """\
+def scan(xs):
+    it = iter(xs)
+    for x in it:
+        yield x
+        yield next(it)
+
+def main():
+    for v in scan([1, 2, 3, 4]):
+        print(v)
+""", "1\n2\n3\n4\n")
+
     # ── yield-kind inference for identifier / self.field / list-local refs ──
     # (bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md)
     # The Layer-1 pre-pass's _yield_kind() used to have no case for a bare
@@ -4255,6 +4332,83 @@ def outer() raises:
 def main() raises:
     outer()
 """, "cannot compile module")
+
+    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md "Item 8", the
+    # GENERATOR half: `for <t> in <list param>:` inside a generator. A
+    # generator's params cross the stack-switch ABI as untyped `int64_t`
+    # slots, so the loop reached the ordinary lowering as a boxed handle with
+    # no container type and no element type; the runtime dict-or-list
+    # dispatch's dict arm then won the shared `r` (dict keys are `char *`)
+    # and the `double` yield slot could not be fed from it. Before the fix
+    # this was an honest COMPILE ERROR ("pointer value used where a
+    # floating-point was expected"); it now prints what CPython prints.
+    #
+    # Both element kinds are covered, and both are CPython-verified on the
+    # identical program text.
+    test_generator_stdout("generator_for_over_list_param_from_float_literal", """\
+def rows(data):
+    for r in data:
+        yield r
+
+def main():
+    for v in rows([1.5, 2.5]):
+        print(v)
+""", "1.5\n2.5\n")
+
+    # A string element was ALREADY correct before this change -- `char *` is a
+    # pointer, so it satisfied the guard's old `_boxed_elem.endswith(' *')`
+    # condition and the list path was taken. Pinned anyway, because the guard
+    # is what this change widened and this is the half that used to depend on
+    # the narrow form of it.
+    test_generator_stdout("generator_for_over_list_param_from_str_literal", """\
+def rows(data):
+    for r in data:
+        yield r
+
+def main():
+    for v in rows(["a", "b"]):
+        print(v)
+""", "a\nb\n")
+
+    # Same shape through a list-typed LOCAL rather than a literal, so the
+    # contract is read off the caller's env: the loop target's type must not
+    # depend on how the caller spelled the list.
+    test_generator_stdout("generator_for_over_list_param_from_local", """\
+def rows(data):
+    for r in data:
+        yield r
+
+def main():
+    xs = [1.5, 2.5]
+    for v in rows(xs):
+        print(v)
+""", "1.5\n2.5\n")
+
+    # The dict arm must stay: a parameter with NO list evidence at all (here
+    # the argument is a dict local, which the callsite scan cannot type into a
+    # `('list', k)` answer) must keep the runtime dict-or-list dispatch, or
+    # every `for k in <dict>` through a generator would silently iterate
+    # nothing. This is the negative half of the guard above.
+    test_generator_stdout("generator_for_over_unknown_param_still_dispatches", """\
+def rows(data):
+    for r in data:
+        print(r)
+    yield 0
+
+def main():
+    var d = {"k": 7}
+    for v in rows(d):
+        print(v)
+""", "k\n0\n")
+
+    if _FAIL:
+        print(f"\n{_PASS} passed, {_FAIL} failed")
+        raise SystemExit(1)
+    print(f"\n{_PASS} passed, {_FAIL} failed")
+
+
+if __name__ == '__main__':
+    run_tests()
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

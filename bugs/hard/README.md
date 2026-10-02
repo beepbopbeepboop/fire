@@ -23,7 +23,6 @@ Last updated 2026-10-01.
 
 | doc | what remains |
 |---|---|
-| `CODEGEN_coro_yield_kind_unresolved_callsite.md` | one untypable call site silently re-poisoned the yield slot to `int64_t`. **FIXED 2026-09-26** for cases 1–7, and *correct* rather than refused — the evidence was always reachable, it just was not read. The doc's own docstring parenthetical is implemented, plus six sound widenings (any-annotation is not a hole; a bare identifier bound to a list answers `('list', k)`; `if caller_env:` was truthiness where membership was meant; ordinary `def`s are now scanned too). One shape has no reachable evidence and must stay refused. Case 8 reclassified: it is the ordinary loop lowering, not this subsystem. |
 | `CODEGEN_struct_kwargs_and_inline_unpack.md` | `struct.*` keyword arguments were silently dropped, and mixed int+float `unpack` returned raw IEEE-754 bits. **BOTH FIXED 2026-09-26**, and the residue under the second one **FIXED 2026-09-29**: the per-slot kinds now travel with the VALUE (a side table on the live `MojoList` address, `mojo_list_set_kinds`) instead of dying with one compile-time C name, so a copy, a slice, a concat, a returned value and a class attribute's `Struct` handle all read back correctly; and a read with no compile-time slot index — iteration, a computed subscript — is **boxed** (`mojo_list_get_boxed` + `mojo_repr_boxed`), which also fixes the heterogeneous `[1, 2.5]` literal that the doc named as the root cause underneath it. A uniform format records nothing and pays nothing. One thing the work uncovered is a DIFFERENT bug and is filed separately: a function returning a `MojoList *` it built in a local is typed `int64_t`, so the caller print()s the address and iterating it segfaults (pre-existing, not `struct`). |
 | `CODEGEN_method_call_on_struct_param_mistyped.md` | a method call on a struct passed as a free-function *parameter* was mistyped by method name alone — 6 crashes plus 2 silent wrong values. **FIXED 2026-09-26** for everything it owns: 8/8 names now correct, via a new cross-call contract in Pass 1.3d plus three supporting fixes. The doc's suggested refusal was not needed; the call site knows the type. One cross-module row remains and is *not* this bug in link mode — `module.Class(...)` construction is unresolved on every path, the larger gap named above. |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | **the kw-only-callable blocker is FIXED for the same-module case, 2026-09-29.** `walk_tree` and `iter_files_by_suffix` now compile and produce CPython's text; the stack-switch `kwonly params (v0)` gate is a representability question instead of a blanket refusal, and a callable-valued parameter's default is a real function address instead of a NULL pointer (which used to SIGSEGV on **every** path, ordinary `def`s included — that half was not in the doc). Residue: `_walk_tree`/`glob_tree` still refuse because their defaults name an **imported** module's function, undecidable at A3's eligibility time, and that same gap is a live SIGSEGV on the ordinary path (`bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md`); `iter_files`'s variadic lambda and `process_filenames`' `Exception(...)`-as-a-value are separate and outside this bug, so the file still does not build. |
@@ -80,7 +79,7 @@ new OPEN doc above rather than losing the residue:
 | `CODEGEN_struct_module.md` | `CODEGEN_struct_kwargs_and_inline_unpack.md` |
 | `CODEGEN_struct_format_shadowed_by_format_attribute.md` | `CODEGEN_return_type_of_module_constructor_result_erased.md` |
 | `CODEGEN_coro_nested_async_closure_capture.md` | `CODEGEN_coro_captured_param_capture_crashes.md` — itself closed and removed 2026-09-29 |
-| `CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md` | `CODEGEN_coro_yield_kind_unresolved_callsite.md` |
+| `CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md` | `CODEGEN_coro_yield_kind_unresolved_callsite.md` — itself **fixed and removed 2026-10-01** by `work/hard-coro-yield`; its residue is now in `../CODEGEN_generator_param_loop_target_kinds_still_unresolved.md` |
 | `CODEGEN_function_scoped_import_rettype_and_literal_cast_mismatches.md` | `CODEGEN_function_scoped_import_module_not_inlined.md` — itself since fixed and deleted; see the 2026-09-29 section below |
 | `CODEGEN_unannotated_init_param_field_type_defaults_int64.md` | `CODEGEN_ctor_arg_field_type_scalars_only.md` |
 | `CODEGEN_generator_consuming_generator_value_ctype.md` | `CODEGEN_generator_value_slot_loses_bool.md` |
@@ -163,6 +162,28 @@ named for is genuinely fixed and linear, but a fresh 2026-09-26 measurement
 found the remaining per-level rescan over generated C text is still
 superlinear (`_dedup_variadic_externs`, halved and cached in Phase 7 but
 still ~n^1.7), so the doc stays OPEN.
+
+### A ninth removal, and what it cost (2026-09-29)
+
+`CODEGEN_coro_yield_kind_unresolved_callsite.md` is the first doc in this
+directory removed under the rule above since the 2026-09-26 sweep, and it
+behaves the way that rule predicts: re-testing its own claims turned up **two
+load-bearing ones that were false**, and both changed what got fixed.
+
+- It said the `print(x)` half of its "test hole" was the cross-cutting
+  one-C-type-per-slot limitation, "an ordinary `def g(x): return x` does the
+  same". Re-measured, the ordinary case does **not** (it is correct), and the
+  real shape SEGFAULTS with a **single** call site — because
+  `'print': 'char *'` types the parameter from the one observation available.
+  Cause (c) again, in a new costume: the doc had been closed on a *different
+  subsystem's* limitation, so the shape it pointed at was never its own bug.
+  Now `../CODEGEN_print_unannotated_param_typed_char_star_segfaults.md`.
+- It said item 8 belonged to "a different subsystem ... Not attempted here".
+  The subsystem was reachable and the contract it named already existed; it
+  was fed from one observation source instead of two. Closed, both halves,
+  with three more regression docs: `../CODEGEN_generator_param_loop_target_
+  kinds_still_unresolved.md`, `../CODEGEN_nested_list_loop_target_loses_inner_
+  elem_type.md`, and the `print` one above.
 
 ### 2026-09-30: one removal, and the blocker turned out to be a different bug than the doc claimed
 
@@ -265,10 +286,27 @@ were silent:
 
 ## Notes for future sessions
 
+- **The three unrun test files are now registered** (corrected 2026-09-29;
+  the note this replaces was written 2026-09-26 and is kept because the *reason*
+  it matters has not changed). `test_gimple_runner.py` is `gimplerunner`,
+  `test_gimple_generator_runner.py` is `gimplegenerators` (both in `check`
+  and `gate`), and `test_coro_nested_async_capture.py` is
+  `coro-nested-capture` (in `gate`/`coroutine`, and its pre-rename
+  `mojo_*`-runtime source list is fixed). The history is still worth reading:
+  a correct fix sat **red** in `test_gimple_runner.py` for a full pass
+  because nothing ran it, which is what made the structural fix worth doing.
+  A fourth file remains in no bucket — `test_gimple_async_runner.py` is
+  registered as `gimple-async-runner` but carries `expect=` (36 failing), so
+  it runs and its result is not yet evidence of anything.
+
 - **Two of the OPEN entries were found by re-testing claims in an existing
   doc rather than by reading code.** The `.format` residual had been
   recorded as "returns a pointer-sized integer ... and a local is correct
   too"; on re-test both halves were wrong. Stale bug docs are not evidence.
+  The 2026-09-29 removal above is the same lesson a third time, and the sharpest
+  instance yet: the doc's own *test hole* named a shape it then declined to fix
+  on the grounds that it belonged to a limitation that turned out not to apply
+  to it at all. Re-measuring the claim would have found a **segfault**.
 - **That `.format` entry is now closed and its doc deleted** (2026-09-26). The
   fix closed the `struct.Struct` member-call branch for the whole closed type,
   not just the one name: `s.format(x)` and `s.size()` now raise the CPython

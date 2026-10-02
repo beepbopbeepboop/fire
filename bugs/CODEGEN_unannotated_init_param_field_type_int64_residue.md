@@ -71,5 +71,10 @@ result is applied to `self.n` or only to the param the call site names
 directly.
 
 Distinct from `CODEGEN_method_returning_self_str_field_segfaults.md`
-(filed the same day), which is a pointer-typed field returned out of a
-method and segfaults even when the param IS annotated.
+(filed the same day, removed 2026-10-01 as fixed). That one was a
+pointer-typed field returned out of a method, and it segfaulted even with
+the param annotated — the fault was upstream, at the CONSTRUCTOR's
+argument: an annotated `str` param given an integer was bit-reinterpreted
+into the `char *` slot and `strlen`ed. Its fix routes an untracked int64_t
+through the model's own discriminator instead of a cast. Re-measured here
+2026-10-01: still open, still `hi` / `4370470552`.

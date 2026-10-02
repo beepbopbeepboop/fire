@@ -22,11 +22,9 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `CODEGEN_bootstrap_resource_blowup.md` | the ~192 GB runaway, the 55 GB ceiling, attribution |
 | `CODEGEN_noshim_dumpfull_preexisting_divergence.md` | native-vs-reference `.ci` divergence |
 | *(deleted 2026-09-30)* | the nested-comprehension cluster is CLOSED on both the compiled and the formal backends: a 2+ clause comprehension no longer drops clauses (`_compr_pending_inner`), and the formal backends no longer exit 58/SIGSEGV at random — `_emit_range_list` gave every `range()` in a function one shared `_rabs` label, so the first range branched into the second's block and left through the second's `jmp div_label`. See the two commits on `work/codegen-old-divergences` and the cases in `test_x86_64_containers.py` |
-| `TEST_expect_marked_tests_in_no_bucket_never_run.md` | 11 of the 16 `expect`-marked tests have NO bucket, so no gate runs them and their anti-rot "marked expect= but it PASSES" check can never fire — ~69 failing cases, mostly the compiled-path async/await cluster |
-| `CODEGEN_set_dict_comprehension_multi_clause_dropped.md` | the list/generator half of the multi-clause comprehension fix is in; `set` and `dict` still drop every clause after the first (silent, exit 0) |
-| `CODEGEN_range_comprehension_tuple_slot_type_lost.md` | a comprehension over `range()` whose element is a tuple/list drops the per-slot element types, so a 0 in a non-first slot reads as NULL and prints `None` — silent, exit 0, and pre-existing (reproduces on a single clause) |
 | `FORMAL_sweep_work_map_2026-10-01_b3.md` | the b3 tree swept on BOTH architectures (630 files each, one tree): ranked causes, the first same-tree arm64-vs-x86-64 comparison (56 files, one ABI constant), the instrument's two splits of the `other refusal` bucket, and which cause is owned by which claim. **Read this before planning any formal work — it is the only map whose architecture comparison is real** |
 | `FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function.md` | the cross-module frame hand-off works for a METHOD receiver and not for a free function's struct parameter, so 4 assertions of the regression floor (`python3 test_formal_run.py`) are red on the b3 tree. In the `proofs` bucket, so not gate-red |
+| *(deleted 2026-10-01)* | the multi-clause comprehension cluster is CLOSED for all four kinds: `set`/`dict` no longer drop every clause after the first (each merges with the runtime call its semantics need — `mojo_set_update` per element, `mojo_dict_update` per pair — and both now walk the source in INSERTION order, which a merged result's iteration order and repr both report), and a comprehension whose element is a container now carries `_nested_elem_types` / `_tuple_slot_types` across, so a 0 in a non-first slot reads as an int instead of NULL printing `None`. A heterogeneous list RETURNED BY A CALL reads its slots boxed, so a float slot is no longer handed to `strlen` (SIGSEGV). Regressions in `test_runtime_diff.py`; the adjacent shapes still open are in `CODEGEN_nested_container_as_dict_key_or_tuple_slot.md` |
 | `FORMAL_x86_64_formal_backend_gaps.md` | the two backend gaps (both now fixed) |
 | `FORMAL_string_value_model.md` | what a string IS on the formal path, `len`/`==`/`+` on it, and the `String`-struct collision behind the 16 "a String receiver" refusals |
 | `FORMAL_arm64_instruction_coverage.md`, `FORMAL_arm64_known_proof_gaps.md`, `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | arm64 work — not duplicated here |
@@ -179,10 +177,12 @@ both worth knowing before the next bisect because they produce the same
   literal (a runtime length check rescans from byte 0 on every character):
   0.05 s under python3, 2.5 minutes self-hosted, for `myinterpreter.py`,
   before a single statement is compiled.
-- `CODEGEN_container_eq_is_pointer_identity.md` — `==` between two containers
-  is a pointer comparison, so any fixed-point loop written on one never
-  terminates; with C2's never-freed allocator each round's fresh set is also
-  permanent. Measured: a two-line program past 8 GB.
+- ~~`CODEGEN_container_eq_is_pointer_identity.md`~~ — **LANDED 2026-09-30.**
+  `==` / `!=` between containers is Python value equality on the compiled path
+  (runtime `mojo_set_eq` / `mojo_list_eq` / `mojo_dict_eq` / `mojo_value_eq`),
+  diffed against CPython case by case in `test_container_equality.py` (24
+  cases). Doc deleted. The ordering siblings (`<`, `<=`, `>`, `>=`) landed with
+  it on 2026-10-01 — `test_container_ordering.py`, 35 cases.
 
 ### C2. The self-hosted runtime's never-frees allocator — **high**
 

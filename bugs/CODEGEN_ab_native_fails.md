@@ -172,7 +172,7 @@ investigation. Read it with the threshold from CLAUDE.md: over ~4 GB (the
 | `nested-async-generic` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. |
 | `coro-detached-async` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. |
 | `async-runtime-scaffold` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. |
-| `formal-struct` | 0.08 GB | `tiny` 4 GB | `proofs` | 43 s alone, 201 s beside the other seven | **leave it as `expect=`.** 0.08 GB is two hundredths of the 4 GB line, so by the stated threshold this is the cheap side and the anti-rot is worth more than the saving. 2 of 148 cases; `bugs/FORMAL_struct_pack_over_eight_arguments.md` has the next step. |
+| `formal-struct` | 0.08 GB | `tiny` 4 GB | `proofs` | 43 s alone, 201 s beside the other seven | **leave it as `expect=`.** 0.08 GB is two hundredths of the 4 GB line, so by the stated threshold this is the cheap side and the anti-rot is worth more than the saving. 2 of 154 cases; `bugs/FORMAL_struct_pack_over_eight_arguments.md` has the next step. |
 | `formal-toplevel` | 0.04 GB | `tiny` 4 GB | `proofs` | not recorded (70 checks) | **leave it as `expect=`.** Same reasoning — and its doc records the *opposite* of the marker now (`bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md`: a case that builds where it asserted a refusal), so the burst of "marked expect=… but it PASSES" is exactly what should surface. |
 | `formal-module-attr` | 0.07 GB | `tiny` 4 GB | `proofs` | 10.3 s | **leave it as `expect=`.** Same reasoning; 1 of 11, and both halves of it are in `bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md`. |
 
@@ -185,21 +185,23 @@ afford, not for the red ones.
 
 Two things the table says that the markers do not:
 
-- **Eleven of the sixteen are in no bucket at all.** (Sixteen, not thirteen: the
-  three `formal-*` host-module suites below arrived on master after this table
-  was written, and each is `expect=` in `proofs` — see
-  `bugs/TEST_registered_tests_in_no_bucket_never_run.md` §"Why this is the same
-  bug as the estate one", which counted the 19 ungated registrations and named
-  this group.) The eleven are registered, they are red, they are declared — and
-  nothing runs them, which is a coverage hole rather than a cost problem: their
-  `expect=` markers are currently untested anti-rot. `coro` (the
-  `coroutine` bucket, in the gate) is the obvious home for the eight async ones
-  and `x86` for `x86-containers`. Note the flip side: the day they join a
-  bucket they are on the cheap side of the threshold, so `expect=` is the right
-  marker for all eleven, not `disabled=`. The owner of that decision is
-  recorded in `bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md`; the
-  costing half of it, and the part that says a marker on a test no gate runs
-  cannot rot out, is in CLAUDE.md, "Known-failing tests".
+- **The eleven of the sixteen that were in no bucket at all are in buckets
+  now** (2026-10-01). (Sixteen, not thirteen: the three `formal-*` host-module
+  suites below arrived on master after this table was written, and each is
+  `expect=` in `proofs`.) The eleven were registered, red and declared, and
+  nothing ran them — a coverage hole rather than a cost problem, because their
+  `expect=` markers were untested anti-rot. They are now the `coroutine`
+  bucket's ten (`gimple-async-runner`, `coro-detached-async`,
+  `async-with-lock-guard`, `mutable-async-capture`,
+  `transitive-closure-capture`, `async-void-return`, `nested-async-generic`,
+  `taskgroup`, `async-runtime-scaffold`, `coro-future-await`) and `x86`'s
+  `x86-containers`, each measured first: 0.0-0.2 GB and 1.2-11.6 s for the ten
+  (34.6 s total), ~4 minutes for `x86-containers`, which is why that one is in
+  `x86` only. They are all on the cheap side of the threshold, which confirms
+  `expect=` was the right marker for all eleven rather than `disabled=`. The
+  part that says a marker on a test no gate runs cannot rot out is in CLAUDE.md,
+  "Known-failing tests", and what stops the next one is
+  `test_suite.py`'s `the buckets:` checks.
 - **No duration is recorded for any of them.** `MEASURED_PEAK_GB` has rows only
   for jobs a gate ran while the peak table was being recorded, and the registry
   keeps no wall-time table; "wall time" above is from the registry comments and

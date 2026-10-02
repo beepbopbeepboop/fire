@@ -322,6 +322,35 @@ CASES = [
     ("nested_def_is_another_frame_ok",
      "    def inner():\n        m = 1\n        return m\n"
      "    return inner()\n", "ok"),
+
+    # ── a body whose LAST statement is an expression, not a `return` ─────
+    # Every case above ends in `return`, which is why this hole survived: the
+    # `ReturnStmt` arm makes `_build_cfg`'s `run` return `[]`, so the entry
+    # block's extra edge had nothing to attach to. A function whose last
+    # statement is `print(n)` or a bare call is ordinary, and the entry block
+    # was given a second, fictitious edge straight to that final block — so the
+    # fixpoint intersected the body's whole path with the entry's OUT set (the
+    # parameter seed, and nothing else) and any name the body stored
+    # unconditionally read as never stored. It refused five `struct.pack`
+    # programs in `test_struct_formal.py` for `n = 0` three lines above the
+    # `print(n)`.
+    ("tail_expression_statement_ok",
+     "    q = 1\n    sink(q)\n", "ok"),
+    # The shape that actually fired: a loop whose body may never run, and a
+    # store BEFORE it, then a read in the trailing expression statement.
+    ("tail_expression_after_loop_ok",
+     "    n = 0\n    i = 0\n    while i < 3:\n        n = n + i\n"
+     "        i = i + 1\n    sink(n)\n", "ok"),
+    # The same trailing statement with a store in only ONE arm is still a real
+    # defect, so the fix is not a blanket "the entry edge goes away" — this is
+    # the row that says the analysis still refuses here.
+    ("tail_expression_only_arm_store_refused",
+     "    if n:\n        p = 1\n    sink(p)\n", "refuse"),
+    ("tail_expression_after_a_returning_if_ok",
+     "    q = 1\n    if n:\n        return 0\n    sink(q)\n", "ok"),
+    ("tail_expression_after_try_finally_ok",
+     "    q = 1\n    try:\n        return 0\n    finally:\n        pass\n"
+     "    sink(q)\n", "ok"),
 ]
 
 

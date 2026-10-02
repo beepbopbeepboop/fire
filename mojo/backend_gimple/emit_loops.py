@@ -657,6 +657,43 @@ def _lower_int_dict_items(gen, recv) -> tuple:
     return 'MojoList *', t
 
 
+def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
+    """The `MojoList *` to iterate for a BOXED (int64_t) handle whose element
+    type is POSITIVELY known, or None when there is no such evidence.
+
+    This is the one definition of that rule, shared by every lowering that
+    otherwise has to emit the runtime dict-or-list dispatch: `_gen_for_iter`
+    (a bare `for <t> in <param>:`) and `_gen_for_enumerate`
+    (`enumerate(<param>)`). Both need it, they need it for the same reason,
+    and two copies of a rule about when a dispatch arm is provably dead is
+    how they drift.
+
+    The rule: `gen._elem_types` is only ever recorded for a LIST value — a
+    literal, a cross-call parameter contract, a struct field — and a dict's
+    keys are always strings, so an entry that is present and is not the
+    `int64_t` "nothing known" default is positive evidence that the handle
+    is a list AND the element type to read it with. The dict (and set) arm
+    is then provably dead, and skipping it is not an optimization: both arms
+    bind the SAME loop variable, `_declare_var` is first-decl-wins, so
+    emitting the dead arm declares one variable with two incompatible types
+    and `gcc -fgimple` rejects the whole function ("assignment to
+    'FunctionDef *' from incompatible pointer type 'char *'", or, for a
+    `double` element against a `char *` dict key, "pointer value used where a
+    floating-point was expected").
+
+    Returns None for the untyped case, and the caller falls back to emitting
+    the dispatch exactly as before.
+    """
+    if lst_type not in ('int', 'int64_t', 'void *'):
+        return None
+    elem = gen._elem_of(lst_val)
+    if not elem or elem == 'int64_t':
+        return None
+    lp = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(lst_type, lst_val))
+    gen._elem_types[lp] = elem
+    return lp
+
+
 def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # `for m in <compile-time-known-pattern>.finditer(text):` — see
     # regex_compile.py / BACKLOG-CODEGEN.md §4f. Checked structurally,
@@ -775,7 +812,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # treat `it` as a plain MojoList* and restart the scan from element 0.
     if (isinstance(it, gimple_ctypes.IdentExpr)
             and it.name in getattr(gen, '_list_iter_cursor', {})
-            and isinstance(var, str) and ',' not in var
+            and isinstance(var, str) and not gimple_ctypes._fc_is_tuple_target(var)
             and not getattr(node, 'else_body', None)):
         _gen_for_list_iter_cursor(gen, node, var)
         return
@@ -1009,22 +1046,23 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # pair-accessor gap (counter/interval/_unicode/string_slice
             # stdlib modules regress) — see A5-BUG.md. Keep this patch in
             # the tree as the starting point for resolving the frontier.
-            # POSITIVE EVIDENCE the boxed handle is a LIST: a tracked element
-            # type that is a real (non-boxed) pointer can only have been
-            # recorded for a list. Take the list path directly instead of
-            # emitting the runtime dict-or-list dispatch below, whose dict
-            # arm would bind this same loop variable to a `char *` KEY.
-            # `_declare_var` is first-decl-wins, so the two arms otherwise
-            # declare one variable with two incompatible types and GCC
-            # rejects the dead dict arm outright ("assignment to
-            # 'FunctionDef *' from incompatible pointer type 'char *'").
-            # The dict arm is provably dead for such a value anyway.
-            _boxed_elem = gen._elem_of(it_val)
-            if (it_type in ('int', 'int64_t', 'void *') and _boxed_elem
-                    and _boxed_elem != 'int64_t' and _boxed_elem.endswith(' *')):
-                _lp_known = gen._coerce_to_type(
-                    'int64_t', 'MojoList *', gen._to_int64(it_type, it_val))
-                gen._elem_types[_lp_known] = _boxed_elem
+            # POSITIVE EVIDENCE the boxed handle is a LIST, and the element
+            # type to read it with: skip the runtime dict-or-list dispatch
+            # entirely. `_boxed_list_ptr` owns that rule and its rationale;
+            # this is one of its two callers.
+            #
+            # This is what closes the GENERATOR's version of the shape: a
+            # generator's params cross as untyped `int64_t` slots, so
+            # `def rows(data): for r in data: yield r` called
+            # `rows([1.5, 2.5])` had no element type here at all, the dict arm
+            # won the shared `r`, and the `double` yield slot could not be fed
+            # from a `char *` (a hard `gcc -fgimple` "pointer value used where a
+            # floating-point was expected"). The element ctype reaches
+            # `_elem_types` via `_mojo_coro_param_elem_kinds` ->
+            # `_param_elem_types` -> `gen_func`. See
+            # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+            _lp_known = _boxed_list_ptr(gen, it_type, it_val)
+            if _lp_known is not None:
                 gen._gen_for_list(var, _lp_known, node.body)
             elif it_type in ('int', 'int64_t', 'void *'):
                 bb_dict = gen._new_bb(); bb_list = gen._new_bb()
@@ -1573,14 +1611,27 @@ def _gen_for_enumerate(gen, node):
         if lst_val in gen.var_types and gen.var_types[lst_val] == 'int64_t':
             list_ptr = gen._coerce_to_type('int64_t', 'MojoList *', lst_val)
     else:
-        # DESIGN.html R1/R5: dict/set materialization (`enumerate(d)`/
-        # `enumerate(s)` — real Python semantics: a dict's KEYS, a set's
-        # elements, not a reinterpret of the header) shares
-        # _materialize_as_list with all()/any()/str.join()/bytes.join()/
-        # shlex.join(); a genuinely-unknown boxed handle is now also
-        # runtime-guarded (mojo_is_registered_dict/_set) there instead of
-        # blindly assuming list.
-        list_ptr = gen._materialize_as_list(lst_type, lst_val)
+        # Same positive-list-evidence shortcut as `_gen_for_iter`, same
+        # helper, same reason (`_boxed_list_ptr`): without it
+        # `enumerate(<list param>)` materialized the param through the
+        # dict/set/list dispatch into a FRESH temp that carries no element
+        # type, so `for i, v in enumerate(xs)` read every value with
+        # `mojo_list_get_int` and printed a list of floats as their raw
+        # IEEE-754 bit patterns -- even though the identical program with a
+        # bare `for v in xs:` was correct. See
+        # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+        _lp_known = _boxed_list_ptr(gen, lst_type, lst_val)
+        if _lp_known is not None:
+            list_ptr = _lp_known
+        else:
+            # DESIGN.html R1/R5: dict/set materialization (`enumerate(d)`/
+            # `enumerate(s)` — real Python semantics: a dict's KEYS, a set's
+            # elements, not a reinterpret of the header) shares
+            # _materialize_as_list with all()/any()/str.join()/bytes.join()/
+            # shlex.join(); a genuinely-unknown boxed handle is now also
+            # runtime-guarded (mojo_is_registered_dict/_set) there instead of
+            # blindly assuming list.
+            list_ptr = gen._materialize_as_list(lst_type, lst_val)
 
     elem = gen._elem_of(list_ptr)
     gen._declare_var(idx_var, 'int64_t')
@@ -2776,16 +2827,25 @@ def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
     gen._emit(f"  if ({cond}) goto {bb_body}; else goto {bb_after};")
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    # The cursor invariant is Python's: `cur` is the index of the next
+    # UNCONSUMED element, and the advance happens as the element is read —
+    # not after the body. `next(it)` inside the body (the
+    # `Tools/cases_generator/analyzer.py::check_escaping_calls` shape) reads
+    # at `cur`, so a post-body advance would make it re-read the element the
+    # loop had just yielded: two elements consumed, each reported twice.
     ev = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
     gen._emit(f"  {gen._cname(var)} = {ev};")
+    nc = gen._inc_val(cur)
+    gen._emit(f"  {cur} = {nc};")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
+    # `bb_post` stays in the loop_stack above so a `continue` still lands
+    # somewhere correct; with the advance already done it is just the jump
+    # back to the condition.
     gen._emit_label(bb_post)
-    nc = gen._inc_val(cur)
-    gen._emit(f"  {cur} = {nc};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
 
@@ -2846,8 +2906,19 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
     """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__."""
     base = gimple_exprtypes._struct_name_of(struct_type)
 
-    # Determine iterator type (may be the same struct or a separate iter type)
-    iter_fn = f"{base}___iter__"
+    # Determine iterator type (may be the same struct or a separate iter type).
+    # Every symbol here goes through `gen._struct_method_csym`, the tree's ONE
+    # composer for a struct method's C name — NOT an f-string spelling
+    # `{Struct}___{method}__` written out again. The hand-written form omits
+    # the home-module qualifier, so a struct reached via `from mod import
+    # Struct` emitted a call to the BARE name: gcc's implicit-declaration
+    # fallback made it an `int` and the `for`/`next` lowering then read
+    # `It___iter__(It *)` as `int`, so `iter_var` was a garbage pointer —
+    # "implicit declaration of function 'It___iter__'; did you mean
+    # 'itmod_It___iter__'?" plus "assignment to 'It *' from 'int' makes
+    # pointer from integer without a cast", with no correct answer anywhere
+    # in the output.
+    iter_fn = gen._struct_method_csym(base, '__iter__', '')
     if iter_fn in gen.func_return_types:
         iter_type = gen.func_return_types[iter_fn]
         iter_var  = gen._new_temp(iter_type)
@@ -2858,8 +2929,8 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         iter_var  = obj_val
         iter_base = base
 
-    has_next_fn = f"{iter_base}___has_next__"
-    next_fn     = f"{iter_base}___next__"
+    has_next_fn = gen._struct_method_csym(iter_base, '__has_next__', '')
+    next_fn     = gen._struct_method_csym(iter_base, '__next__', '')
     elem_type   = gen.func_return_types.get(next_fn, 'int64_t')
     gen._declare_var(var, elem_type, force=(var == shadow_name))
 

@@ -358,91 +358,65 @@ def _seed_selfhost_return_elem_types(self):
             self._return_elem_types[_k] = _e
 
 
-def _returns_kinds_valued(gen, node, param_types: dict = None,
-                         kinds_callees: set = None) -> bool:
+def _returns_kinds_valued(gen, node) -> bool:
     """True when `node` is an expression that produces a value whose
     per-slot element kinds are recorded on the VALUE itself — a
     `struct.unpack` of a format that mixes kinds, a `Struct` handle's
-    `unpack`/`iter_unpack` on such a format, or a list LITERAL whose slots
-    are not all one kind. The kinds then survive a `return` even though
-    the compile-time NAME they were recorded against does not, which is
-    the whole reason this question needs answering at the callee (see
-    `_infer_return_maybe_kinds`).
+    `unpack`/`iter_unpack` on such a format, or a heterogeneous list/tuple
+    LITERAL. The kinds then survive a `return` even though the compile-time
+    NAME they were recorded against does not, which is the whole reason this
+    question needs answering at the callee (see `_infer_return_maybe_kinds`).
 
     Only literal formats answer, the same bar `_struct_ctor_format` sets:
     a computed format is not statically known, and guessing would be the
-    wrong-static-answer failure the whole table exists to avoid.
+    wrong-static-answer failure the whole table exists to avoid. The list
+    case is decided by the same rule `_lower_list_literal` records under —
+    a kind byte per element (`mojo_list_set_kinds`'s own alphabet, which
+    `_list_literal_slot_kind` maps), emitted only when they are not all the
+    same — so the two cannot disagree about which literals describe
+    themselves.
 
-    THE LIST-LITERAL CASE IS NOT OPTIONAL, and its absence is a live
-    segfault. `_lower_list_literal` (emit_exprs.py) records kinds on a
-    list literal whenever its per-slot kind bytes are not all the same —
-    `[x, 1, s]` with `x: Float64` and `s: String` is `dip`, not one kind —
-    so the runtime list IS marked. This function did not know that, so
-    such a function was never entered in `_return_maybe_kinds`, so the
-    CALLER's binding of its result was never put in `_maybe_kinds_vals`,
-    so a read with no compile-time slot index picked an accessor by
-    guesswork and read a float slot through `mojo_list_get_str`:
-
-        fn mixed(x: Float64, s: String) -> List:
-            return [x, 1, s]
-        fn main():
-            var b = mixed(9.5, "zz")
-            var i = 0
-            print(b[i])          # SIGSEGV
-
-    Measured on the tree that made `_maybe_kinds_vals` per-function
-    (commit c37d604b, and the per-function scoping is CORRECT — a temp
-    name cannot mean the same thing in two functions): this passed before
-    that commit only because the set leaked across function boundaries, so
-    the caller's temp happened to reuse a name the callee had marked. It
-    is in the tree's own `gimplerunner` step as
-    `gimple_kinds_survive_a_sibling_list_being_freed`, and it fails there
-    with a SIGSEGV.
-
-    The condition is the SAME one the emitter uses, not an approximation
-    of it: one byte per slot from `TypeLattice.slot_kind_byte` (with
-    `None` spelled `n`, matching `_list_literal_slot_kind`), and
-    heterogeneous iff more than one distinct byte. That also keeps the
-    stated bias intact — `_infer_return_maybe_kinds` says over-approximating
-    "would only cost a boxed read on a value the runtime then reports as
-    unboxed, while under-approximating costs a wrong answer" — because the
-    predicate here is exactly the emitter's, so a disagreement is not
-    possible."""
-    if node is None:
-        return False
-    if isinstance(node, gimple_ctypes.ListExpr) and node.elements:
-        # `param_types` is this body's OWN parameter ctypes, because
-        # `_quick_type` resolves a bare name through `gen.var_types` — which
-        # at Pass-2c time does not hold the callee's parameters, so without it
-        # every parameter reads `int64_t`, `[x, 1, s]` looks homogeneous
-        # (`iii`), and the whole question answers False. Callers pass it from
-        # the FunctionDef they already have; it is None only for a direct
-        # call with no FunctionDef in hand, where the conservative answer is
-        # the one this function already gave.
-        def _slot_ctype(el) -> str:
-            if (isinstance(el, gimple_ctypes.IdentExpr) and param_types
-                    and el.name in param_types):
-                return param_types[el.name]
-            return gen._quick_type(el)
-
-        _kinds = ''.join(
-            ('n' if isinstance(el, (gimple_ctypes.NoneLiteral,))
-             or (isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None')
-             else gimple_ctypes.TypeLattice.slot_kind_byte(_slot_ctype(el)))
-            for el in node.elements)
-        return bool(_kinds) and len(set(_kinds)) > 1
+    The heterogeneous-literal case is what makes `def mixed(x: Float64, s:
+    String) -> List: return [x, 1, s]` readable through a call. Its
+    elements' joined type is `char *` (`TypeLattice.join` resolves
+    double-vs-char* to char*), so the caller binds the result's element type
+    from `_return_elem_types` and `a[p]` lowers to `mojo_list_get_str` — a
+    float slot's IEEE-754 bits handed to `strlen`, which SIGSEGVs. The kinds
+    ARE recorded, by the callee's own literal lowering; marking the call
+    result makes the read a boxed one and lets the runtime answer per slot."""
+    if isinstance(node, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+        # `gen is None` is the predicate's own no-type-context mode, which
+        # test_gimple.py's struct-format case calls it in (that case is about
+        # the CallExpr arm below and needs no types). With no context an
+        # identifier element cannot be typed, so the literal half answers what
+        # it can — LITERAL elements only — rather than claiming to have seen
+        # the whole literal.
+        _kinds = set()
+        _saw_typed = False
+        for _el in (node.elements or []):
+            if isinstance(_el, (gimple_ctypes.NoneLiteral,)) or (
+                    isinstance(_el, gimple_ctypes.IdentExpr) and _el.name == 'None'):
+                _kinds.add('n')
+                _saw_typed = True
+            elif gen is None:
+                continue
+            else:
+                _kinds.add(gimple_ctypes.TypeLattice.slot_kind_byte(
+                    gen._quick_type(_el)))
+                _saw_typed = True
+        return _saw_typed and len(_kinds) > 1
     if not isinstance(node, gimple_ctypes.CallExpr):
         return False
     f = node.func
-    # `g(k)` where `g` is already known to hand back a kinds-carrying value
-    # (`kinds_callees`, the fixpoint this is asked in). The per-slot kinds
-    # ride on the returned VALUE, so they survive this call and this
-    # function's `return` exactly as they survive `struct.unpack`'s.
-    # Checked before the `struct.unpack` cases because it subsumes them: a
-    # wrapper `def unpack_all(buf): return struct.unpack('<if', buf)` is the
-    # shape, and without this hop it was invisible however deep the wrapper.
-    if (kinds_callees and isinstance(f, gimple_ctypes.IdentExpr)
-            and f.name in kinds_callees):
+    # A call to a function ALREADY KNOWN to hand back a kinds-carrying value
+    # (`fn drop_one() -> List: var kept = mixed(1.5, "aa"); return kept`).
+    # This is the transitive half and it is why the caller above runs a second
+    # pass: the callee has to be in `_return_maybe_kinds` before the function
+    # calling it can be answered, and either may come first in the module.
+    _callee = getattr(f, 'name', None)
+    if (_callee is not None
+            and _callee in getattr(gen, '_return_maybe_kinds', ())
+            and getattr(gen, 'func_return_types', {}).get(_callee) == 'MojoList *'):
         return True
     # `struct.unpack(fmt, buf)` / `struct.unpack_from(fmt, buf, off)` /
     # `struct.iter_unpack(fmt, buf)` — fmt is the first argument, read
@@ -462,8 +436,7 @@ def _returns_kinds_valued(gen, node, param_types: dict = None,
     return False
 
 
-def _infer_return_maybe_kinds(gen, body, param_types: dict = None,
-                              kinds_callees: set = None) -> bool:
+def _infer_return_maybe_kinds(gen, body, func_def) -> bool:
     """Does any `return` in this body hand back a kinds-carrying value?
 
     The cross-function half of the per-slot-kinds mechanism. A
@@ -483,31 +456,51 @@ def _infer_return_maybe_kinds(gen, body, param_types: dict = None,
     not — recorded rather than approximated, since over-approximating here
     would only cost a boxed read on a value the runtime then reports as
     unboxed, while under-approximating costs a wrong answer, and a missing
-    case is a missing case either way."""
+    case is a missing case either way.
+
+    `func_def` is the definition this body belongs to, and its ANNOTATED
+    params are seeded into `var_types` for the duration of the walk: the
+    heterogeneous-literal test reads each element's type, and a parameter is
+    the most ordinary element there is — `return [x, 1, s]` in
+    `def mixed(x: Float64, s: String) -> List` is three elements of which two
+    are params. With `var_types` unseeded `_quick_type` answers int64_t for
+    every identifier, so all three read as one kind and the literal looks
+    homogeneous. Seed and restore are the same save/overlay/restore
+    `_infer_return_elem_type` does for the same reason."""
+    _saved_vt = gen.var_types if gen is not None else None
+    if gen is not None:
+        gen.var_types = dict(_as_dict(_saved_vt))
+        if func_def is not None:
+            for _pname, _ptype in (func_def.params or []):
+                if _ptype:
+                    gen.var_types[_pname] = gimple_ctypes._mojo_type(_ptype)
     bound: set = set()
-    for _round in range(2):
-        found = False
-        for nd in _walk_ast(body):
-            if (isinstance(nd, gimple_ctypes.AssignStmt)
-                    and isinstance(nd.target, gimple_ctypes.IdentExpr)):
-                if _returns_kinds_valued(gen, nd.value, param_types, kinds_callees) or (
-                        isinstance(nd.value, gimple_ctypes.IdentExpr)
-                        and nd.value.name in bound):
-                    bound.add(nd.target.name)
-            elif (isinstance(nd, gimple_ctypes.VarDecl) and nd.name
-                    and _returns_kinds_valued(gen, getattr(nd, 'value', None),
-                                              param_types, kinds_callees)):
-                bound.add(nd.name)
-            elif isinstance(nd, gimple_ctypes.ReturnStmt):
-                v = getattr(nd, 'value', None)
-                if _returns_kinds_valued(gen, v, param_types, kinds_callees):
-                    found = True
-                elif (isinstance(v, gimple_ctypes.IdentExpr)
-                      and v.name in bound):
-                    found = True
-        if found:
-            return True
-    return False
+    try:
+        for _round in range(2):
+            found = False
+            for nd in _walk_ast(body):
+                if (isinstance(nd, gimple_ctypes.AssignStmt)
+                        and isinstance(nd.target, gimple_ctypes.IdentExpr)):
+                    if _returns_kinds_valued(gen, nd.value) or (
+                            isinstance(nd.value, gimple_ctypes.IdentExpr)
+                            and nd.value.name in bound):
+                        bound.add(nd.target.name)
+                elif (isinstance(nd, gimple_ctypes.VarDecl) and nd.name
+                        and _returns_kinds_valued(gen, getattr(nd, 'value', None))):
+                    bound.add(nd.name)
+                elif isinstance(nd, gimple_ctypes.ReturnStmt):
+                    v = getattr(nd, 'value', None)
+                    if _returns_kinds_valued(gen, v):
+                        found = True
+                    elif (isinstance(v, gimple_ctypes.IdentExpr)
+                          and v.name in bound):
+                        found = True
+            if found:
+                return True
+        return False
+    finally:
+        if gen is not None:
+            gen.var_types = _saved_vt
 
 
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
@@ -951,7 +944,6 @@ def _emit_reflection_dispatch(self, parts):
                "}\n"
                "static char * _mojo_repr_dict (MojoDict *d) {\n"
                "  if (!d) return \"{}\";\n"
-               "  int _is_booldict = mojo_is_bool_dict(d);\n"
                "  char *_buf = strdup(\"{\");\n"
                "  int64_t *_order = mojo_dict_order_indices(d);\n"
                "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
@@ -959,7 +951,13 @@ def _emit_reflection_dispatch(self, parts):
                "    if (_oi > 0) _buf = mojo_str_cat(_buf, \", \");\n"
                "    _buf = mojo_str_cat(_buf, mojo_repr_str(mojo_dict_slot_key(d, _i)));\n"
                "    _buf = mojo_str_cat(_buf, \": \");\n"
-                "    if (_is_booldict)\n"
+                "    if (d->slots[_i].kind == 3)\n"
+                "      /* A Python bool value (mojo_dict_set_bool): the same 0/1\n"
+                "       * int64_t a real int stores, so only this per-SLOT tag\n"
+                "       * separates them. The tag was once a whole-DICT flag,\n"
+                "       * which meant one bool value reformatted every OTHER\n"
+                "       * value too — `{'name': p.name, 'ok': p.ok}` printed\n"
+                "       * `{'name': True, 'ok': True}`. */\n"
                 "      _buf = mojo_str_cat(_buf, d->slots[_i].val ? \"True\" : \"False\");\n"
                 "    else if (d->slots[_i].kind == 2)\n"
                 "      /* A str value stored via mojo_dict_set_str carries its\n"
@@ -3751,6 +3749,15 @@ def gen_module_impl(self, stmts):
             already = set(self.struct_field_types[s.name].keys())
             for method in s.methods:
                 pm = {}
+                # Parameter names whose annotation says `bool`. Kept beside
+                # `pm` rather than folded into it because `_resolve_type`
+                # deliberately maps `'bool'` to `'int'` (see _TYPE_MAP), so
+                # the ctype dict cannot tell a bool parameter from an int one;
+                # `_gmi_collect_self_assigns` turns this set into
+                # `struct_bool_fields` entries, which is what makes
+                # `self.flag = flag` from a `flag: bool` parameter print as
+                # True/False instead of 1/0.
+                pbool = set()
                 _defaults = getattr(method, 'param_defaults', {}) or {}
                 for _mpj in (method.params or []):
                     # Indexed loop + `_as_str`, NOT `for pname, ptype in
@@ -3764,6 +3771,8 @@ def gen_module_impl(self, stmts):
                     ptype = _mpj[1]
                     if pname != 'self':
                         if ptype:
+                            if _as_str(ptype).strip() == 'bool':
+                                pbool.add(pname)
                             pm[pname] = self._resolve_type(ptype)
                         elif pname in _defaults:
                             _dv = _defaults[pname]
@@ -3779,7 +3788,7 @@ def gen_module_impl(self, stmts):
                         else:
                             pm[pname] = 'int64_t'
                 new_fields = {}
-                _gmi_collect_self_assigns(self, s.name, method.body, pm, new_fields)
+                _gmi_collect_self_assigns(self, s.name, method.body, pm, new_fields, pbool)
                 for _nf_k in new_fields:
                     fn = _as_str(_nf_k)
                     ft = _as_str(new_fields[_nf_k])
@@ -4664,52 +4673,43 @@ def gen_module_impl(self, stmts):
     # per nesting level. Memoised by body identity so a body is walked once
     # per compile even when the enclosing structure revisits it.
     _mk_cache: dict = {}
-    def _param_ctypes(fdef) -> dict:
-        # `{param name: C ctype}` for `_infer_return_maybe_kinds`, which has
-        # to type a list literal's ELEMENTS and can only read a parameter's
-        # type from the FunctionDef (see its own docstring). Unannotated
-        # parameters are left out, so they keep the `int64_t` default every
-        # other estimator gives an unknown name -- a missed case, not a wrong
-        # one, which is the bias this whole function documents.
-        _out: dict = {}
-        try:
-            for _pn, _pt in (getattr(fdef, 'params', None) or ()):
-                if _pt:
-                    _ct = self._resolve_type(_as_str(_pt))
-                    if _ct:
-                        _out[_as_str(_pn)] = _ct
-        except Exception:
-            return {}
-        return _out
-    # FIXPOINT, and the memo key carries `len(kinds_callees)` for the same
-    # reason: a body answered against an incomplete callee set is answered
-    # wrongly, so `len` is part of the identity. Without the fixpoint the
-    # chain shape — a helper that returns `struct.unpack(...)`, wrapped by
-    # one that returns the helper's result by name — resolves only its last
-    # link, and the wrapper's caller reads a float slot with the wrong
-    # accessor. Terminates because `_return_maybe_kinds` only ever grows and
-    # is bounded by the number of functions.
     def _mk(name, body, fdef=None):
-        _k = (id(body), len(self._return_maybe_kinds))
+        _k = id(body)
         _v = _mk_cache.get(_k)
         if _v is None:
-            _v = _mk_cache[_k] = _infer_return_maybe_kinds(
-                self, body, _param_ctypes(fdef) if fdef is not None else None,
-                self._return_maybe_kinds)
+            _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body, fdef)
         if _v:
             self._return_maybe_kinds.add(name)
-    for _mk_round in range(max(len(all_functions), 1)):
-        _before = len(self._return_maybe_kinds)
-        for s in all_functions:
-            if not _is_foreign_main(s) and isinstance(s, FunctionDef):
-                _mk(s.name, s.body, s)
-        for s in all_structs_for_methods:
-            if isinstance(s, StructDef):
-                _sk = _as_structdef_node(s)
-                for _m in _sk.methods:
-                    if _m.name != '__init__':
-                        _mk(f"{_sk.name}_{_m.name}", _m.body, _m)
-        if len(self._return_maybe_kinds) == _before:
+    # NO default parameter: the self-hosted backend lowers a cross-module call
+    # with a default by re-declaring the callee's signature, and a default
+    # reached through `None` is one more thing to get right there. Every call
+    # site — including test_gimple.py's, which passes None for both — passes
+    # all three explicitly.
+    _mk_targets = []
+    for s in all_functions:
+        if not _is_foreign_main(s) and isinstance(s, FunctionDef):
+            _mk_targets.append((s.name, s.body, s))
+    for s in all_structs_for_methods:
+        if isinstance(s, StructDef):
+            _sk = _as_structdef_node(s)
+            for _m in _sk.methods:
+                if _m.name != '__init__':
+                    _mk_targets.append((f"{_sk.name}_{_m.name}", _m.body, _m))
+    # To a FIXPOINT, not once. `_returns_kinds_valued`'s call arm answers from
+    # `_return_maybe_kinds`, so a function that RETURNS another such function's
+    # value needs that callee answered first — and either order is possible in
+    # the source or across the closure's modules. One extra round covers the
+    # one-hop chain (`def drop_one(): var kept = mixed(...); return kept`,
+    # measured); the loop stops as soon as a round adds nothing, which is what
+    # a program with no such chain does after the first. `_mk_cache` is
+    # per-round for the same reason: an answer computed before its callee was
+    # known is not reusable after.
+    for _mk_round in range(4):
+        _mk_before = len(self._return_maybe_kinds)
+        _mk_cache = {}
+        for _t in _mk_targets:
+            _mk(*_t)
+        if len(self._return_maybe_kinds) == _mk_before:
             break
     for _pass2c_iter in range(8):
         _c_changed = False
@@ -5573,6 +5573,22 @@ def gen_module_impl(self, stmts):
             if not _fp_pn.startswith('*'):
                 _fp_names.append(_fp_pn)
         _free_params[_as_str(_fp_s.name)] = _fp_names
+        # A synthesized coroutine BODY (`__mgco_<g>_body`) carries the C
+        # element ctype its generator's list parameters had, decided from the
+        # unanimous cross-call-site contract before the lowering REPLACED the
+        # generator's own FunctionDef — so this is the last point at which
+        # that evidence exists at all. Folded into the same table, under the
+        # body's own name, because `emit_funcs.gen_func` already seeds
+        # `_elem_types` from exactly this table for every function it
+        # lowers: one consumer, one table, no second seeding path. (Iterate
+        # the dict + index, not `.items()`: a tuple-unpacking `for` target
+        # is not lowered correctly when this file is self-compiled — see
+        # `gen_func`'s own note on `_pe`.)
+        _pe_body = getattr(_fp_s, '_mojo_coro_param_elem_kinds', None)
+        if _pe_body:
+            _pe_d = self._param_elem_types.setdefault(_as_str(_fp_s.name), {})
+            for _pe_k in _pe_body:
+                _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), None)
 
     def _record_param_elem(callee, pname, e, ne):
         # `_as_str` on both NAME params: a nested function's untyped params
@@ -5607,8 +5623,11 @@ def gen_module_impl(self, stmts):
         the SAME call with the list written in place — inherited nothing. The
         callee then read every element through `mojo_list_get_int` and
         `print(r)` emitted the floats' raw IEEE-754 bit patterns with exit 0.
-        See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md
-        ("Item 8")."""
+        That was "Item 8" of `CODEGEN_coro_yield_kind_unresolved_callsite`, a
+        bugs/hard doc since FIXED and DELETED with this contract; the cases
+        that pin it are `gimple_for_over_list_param_from_float_literal`,
+        `..._from_keyword_literal`, `..._from_str_literal` and
+        `..._nested_list_param_from_literal` in test_gimple_runner.py."""
         if not isinstance(a, ListExpr):
             return None
         els = a.elements
@@ -5739,6 +5758,7 @@ def gen_module_impl(self, stmts):
                 _fe, _fne = _static_arg_elems(a, elem, nested)
                 if _fe is not None:
                     _record_param_elem(callee, pnames[i], _fe, _fne)
+
                 st = _arg_scalar_type(caller_name, a)
                 if st:
                     # Split the chained `_scalar_obs.setdefault(callee, {})
@@ -5825,6 +5845,7 @@ def gen_module_impl(self, stmts):
                 _me, _mne = _static_arg_elems(_ma, _melem, _mnested)
                 if _me is not None:
                     _record_param_elem(_mcallee, _mpn[_mi], _me, _mne)
+
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
     # against struct types (`for s in stmts: if isinstance(s, FunctionDef)`)
@@ -10230,8 +10251,26 @@ def gen_module_impl(self, stmts):
             _sp_lines = [f'static char * {sname} = "{escaped}";'
                          for escaped, sname in self._str_pool.items()]
         else:
+            # Only the names this module's own emission put in the pool, and
+            # only those no earlier module in this TU has already declared.
+            # Both filters are needed and they are not the same filter: the
+            # pool is SHARED (`temp_gen._str_pool = gen._str_pool`), so an
+            # imported module sees every string interned before it — including
+            # its importers' and its own — and without `_str_pool_declared`
+            # each of them re-declared all of them. Legal C (a file-scope
+            # declaration without an initializer is a tentative definition, and
+            # any number of those precede the root's one real definition), so
+            # this was never a compile error — it was N copies of a line per
+            # name, quadratic in the imported-module count, in every .ci this
+            # backend writes. See bugs/CODEGEN_inline_import_string_pool_
+            # name_collision.md, whose reported `redefinition of '_slit_NNN'`
+            # was measured on this tree and does not occur: the pool is shared
+            # by construction and only the root emits definitions.
             _sp_lines = [f'static char * {sname};'
-                         for escaped, sname in self._str_pool.items()]
+                         for escaped, sname in self._str_pool.items()
+                         if sname not in self._str_pool_declared]
+            for _escaped, _sname in self._str_pool.items():
+                self._str_pool_declared.add(_sname)
         for _sp_line in sorted(_sp_lines):
             parts.append(_sp_line)
         parts.append('')
