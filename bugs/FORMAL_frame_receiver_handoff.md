@@ -604,6 +604,37 @@ must not outlive it."* The next step is named in §11.
 
 ## 9. Found, deliberately NOT fixed: module-level names are not module-level
 
+> **CLOSED 2026-10-01 — this is not a frame problem and the fix was never a
+> frame fix.** Module globals now have real `__DATA` storage:
+> `model.collect_global_slots` gives a name a slot when a function WRITES it or
+> when its value is a container literal, `module_slot_for` is the one scoping
+> decision both backends read, and the remaining names are still folded. So
+> `_load_var`'s module-global branch is a real load rather than the X19
+> fall-through this section describes, and `formal/build.py` keeps module globals
+> out of each function's register set so the two homes cannot coexist.
+>
+> Re-measured on this tree, the shape §11 gate 1 was named for — the one whose
+> measured answer was **10 on arm64 and 0 on x86-64** where the source says 7:
+>
+> ```
+> G = 5
+> struct R:  var a: Int
+> def stash(x: Int, y: Int):  global G;  G = y
+> def main(n: Int) -> Int:
+>     var r = R(); r.a = 7
+>     stash(1, r)
+>     return G
+> ```
+>
+> builds on both architectures and returns **7** — `__DATA` holding the address,
+> and the read reaching it. So the channel §8's argument leaned on is closed,
+> which is what made §11's next step landable.
+>
+> The text below is kept because its reasoning is the reason the fix is the right
+> one: a frame-lifetime analysis must NOT have keyed on "is this name a local",
+> because that would call `g = r` in `main` a global store and refuse correct
+> code. `module_slot_for`'s docstring carries that argument forward.
+
 `G = 5` at module level, read from a function, returns **10 on arm64 and 0 on
 x86-64** where the source says 5. Three shapes measured, all the same answer:
 a plain module-level `G = 5`; `f()` doing `G = 5` and `main` doing `return G`;
@@ -710,6 +741,39 @@ labelled as such in the file.
 
 ## 11. The next step, and the proof-side lemma E5 should specify rather than
 ## me land
+
+> **BOTH GATES CLOSED AND THE STEP TAKEN, 2026-10-01.** The next code step below
+> is no longer a next step.
+>
+> * **Gate 2 (`*args` / `**kwargs`) landed**: `model.ParamShape` records
+>   `vararg`, `kwarg`, `vararg_at` and the parser's own `kwonly`, and its
+>   `positional` property is the answer the callers wanted — the fixed
+>   parameters an ARGUMENT INDEX can land on, excluding everything written after
+>   a `*`. `params` is no longer a flat list of names.
+> * **Gate 1 (§9's module-level symbol table) landed**, as the note on §9 says.
+> * **The return refusal is lifted for a holder that arrived as a parameter**, and
+>   pinned by `ret_frame_through_a_nonfirst_parameter` in
+>   `test_formal_run.py`'s `RETURNED_FRAME_CASES`. Re-measured on this tree:
+>
+>   ```
+>   def take(x: Int, y: Int) -> Int:  return y          # returns the RECEIVED word
+>   def main(n: Int) -> Int:
+>       var r = R(); r.a = 7; r.b = 8
+>       return take(1, r).a
+>   ```
+>
+>   builds and returns **7** on arm64 and on x86-64, where §8 measured **10 and
+>   0** for the same source with only the position check lifted. The container
+>   channel it leaned on is still refused, by
+>   `byref_refuse_a_received_frame_address_stored` — "is stored in a container" —
+>   and that one is green.
+>
+> **What is NOT closed is the proof-side half**, which was never this document's
+> to land: the reachability lemma ("the creator is an ancestor of the callee").
+> The code now encodes the lifetime reasoning as refusals and as a returned-frame
+> convention, and `Frame`'s theorems are still about disjointness of two frames at
+> one instant and say nothing about which activations are live. Stated verbatim
+> in the next section, unchanged.
 
 **The next code step** is lifting the return refusal for a holder that arrived as
 a parameter, which §8 argues is sound. It is gated on two things and both are
