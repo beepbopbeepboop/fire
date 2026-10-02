@@ -9115,9 +9115,21 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `stmts` — the pass does not have them.
     from formal.imports import (imported_bound_names,
                                 star_imported_modules)
+    # `method_owners`, and NOT `owners`: the two maps are keyed differently and
+    # only one of them answers what the parameter asks. `owners` (from
+    # `_method_owners`) is `{method name: struct NAME}` and drops a name two
+    # structs declare; `M.method_owner_names` is `{<Struct>_<method> function
+    # name: StructDef}` and drops nothing. The parameter is documented and used
+    # as the latter throughout -- every consumer does `method_owners.get(fn.name)`
+    # and then reads `.name` off the result -- and passing the former put a bare
+    # string where a StructDef was expected, so building any module whose
+    # functions include a method crashed on `st.name` inside
+    # `_overridden_comptime_names` (measured: `formal/build.py` itself, via
+    # `test_dataclasses_formal.py`'s "classified, not crashed" case).
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
-                     star_imported_modules(stmts), owners)
+                     star_imported_modules(stmts),
+                     M.method_owner_names(structs))
     # The slot table is RETURNED as well as published, for the reason
     # `symbols` is: building an import compiles the imported module through this
     # same function, and that nested call publishes ITS globals over ours, so
