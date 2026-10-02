@@ -5229,6 +5229,120 @@ def main():
 main()
 """, "0 0\n")
 
+    # A container SHARED ACROSS FUNCTIONS — a module global, populated by a
+    # constructor and read by a different function. The mechanism is recorded
+    # in `_gmi_phase17_collect_appends`' own docstring
+    # (mojo/middle/module_shared.py); its bug doc is deleted. The list
+    # is correct at runtime the whole way through; what is lost is the
+    # compile-time knowledge of what is IN it, so `REGISTRY[0].numel()`'s
+    # receiver is an `int64_t`, finds no matching user method, and hits the
+    # generic no-op stub — the `T *`'s own bits as a decimal, exit 0.
+    # `print(len(REGISTRY), ...)` printed `4` and the garbage in the same
+    # breath, which is what makes the shape easy to miss.
+    #
+    # Two halves had to change for this, and each is a half on its own:
+    # `_gmi_phase17_collect_appends` walked FunctionDef/If/While/For/Try/
+    # With but NOT `StructDef`, so an append inside a constructor — the
+    # dominant registry shape — was invisible to the whole pass.
+    test_gimple_stdout("gimple_global_registry_element_type_survives_a_function_boundary", """\
+REGISTRY = []
+
+class T:
+    def __init__(self, n):
+        self.n = n
+        REGISTRY.append(self)
+    def numel(self):
+        return self.n * 2
+
+def build(k):
+    T(k)
+
+def main():
+    for i in range(4):
+        build(i + 1)
+    print(len(REGISTRY), REGISTRY[0].numel())
+
+main()
+""", "4 2\n")
+
+    # The same conclusion read back through a comprehension and through a
+    # method that is not `numel`, so the fix is a real element type on the
+    # global rather than one call site happening to work.
+    test_gimple_stdout("gimple_global_registry_element_type_reaches_every_reader", """\
+REG = []
+
+class T:
+    def __init__(self, n):
+        self.n = n
+        REG.append(self)
+    def numel(self):
+        return self.n * 2
+    def tag(self):
+        return 't'
+
+def report():
+    return [r.numel() for r in REG]
+
+def main():
+    for i in range(3):
+        T(i + 1)
+    print(len(REG), report(), REG[2].tag())
+
+main()
+""", "3 [2, 4, 6] t\n")
+
+    # The CLASS-ATTRIBUTE spelling, which is a different receiver shape at
+    # the append site: `T.registry.append(self)` reads as
+    # `MemberExpr(obj=IdentExpr('T'), member='registry')`, so the collector's
+    # bare-`IdentExpr` test rejected it and the conclusion was never reached
+    # at all. Its key has to be the `_classattr_T__registry` global the
+    # class-attribute registration synthesizes, which is what makes the
+    # recorded answer reachable by the reader.
+    test_gimple_stdout("gimple_class_attribute_registry_element_type", """\
+class T:
+    registry = []
+    def __init__(self, n):
+        self.n = n
+        T.registry.append(self)
+    def numel(self):
+        return self.n
+
+class U:
+    registry = []
+    def __init__(self, n):
+        self.n = n
+        U.registry.append(self)
+    def numel(self):
+        return self.n * 7
+
+def main():
+    T(3)
+    U(4)
+    print(len(T.registry), T.registry[0].numel())
+    print(len(U.registry), U.registry[0].numel())
+
+main()
+""", "1 3\n1 28\n")
+
+    # A local list has always worked (populate and read in the same
+    # function), and it must keep working: it is the control that shows the
+    # fix is about where the element type is RECORDED, not about the read.
+    test_gimple_stdout("gimple_local_registry_element_type_unchanged", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n * 2
+
+def main():
+    reg = []
+    for i in range(4):
+        reg.append(T(i + 1))
+    print(len(reg), reg[0].numel())
+
+main()
+""", "4 2\n")
+
     # The `var` spelling of a class-body field. To Python this is the SAME
     # declaration as the bare `NAME = ...` above — `var` only suppresses a
     # type inference the class body never did — but only the bare spelling

@@ -27,6 +27,42 @@ Last updated 2026-10-01.
 | `CODEGEN_method_call_on_struct_param_mistyped.md` | a method call on a struct passed as a free-function *parameter* was mistyped by method name alone — 6 crashes plus 2 silent wrong values. **FIXED 2026-09-26** for everything it owns: 8/8 names now correct, via a new cross-call contract in Pass 1.3d plus three supporting fixes. The doc's suggested refusal was not needed; the call site knows the type. One cross-module row remains and is *not* this bug in link mode — `module.Class(...)` construction is unresolved on every path, the larger gap named above. |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | **the kw-only-callable blocker is FIXED for the same-module case, 2026-09-29.** `walk_tree` and `iter_files_by_suffix` now compile and produce CPython's text; the stack-switch `kwonly params (v0)` gate is a representability question instead of a blanket refusal, and a callable-valued parameter's default is a real function address instead of a NULL pointer (which used to SIGSEGV on **every** path, ordinary `def`s included — that half was not in the doc). Residue: `_walk_tree`/`glob_tree` still refuse because their defaults name an **imported** module's function, undecidable at A3's eligibility time, and that same gap is a live SIGSEGV on the ordinary path (`bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md`); `iter_files`'s variadic lambda and `process_filenames`' `Exception(...)`-as-a-value are separate and outside this bug, so the file still does not build. |
 
+### 2026-10-02: two more rows closed, and the third one's *diagnosis* replaced with its two real causes
+
+`CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md` (OPEN, the
+2026-09-30 row) and `CODEGEN_cross_function_container_element_type.md` are
+**fixed and deleted**. Both were diagnosed as a scope or an identity problem
+and were neither; in both cases the real cause is a set of CALL SITES a pass
+never collected, which is a much smaller and much more checkable defect than
+either doc's "exact next step" section claimed to need.
+
+The module-scope one: the cross-module constructor field-type hint pre-pass
+collects its sites by walking `FunctionDef` bodies only, so a module-level
+`insp.Parameter('v', 7)` was in no collected set. Not the import seam (both
+spellings were equally wrong, and both were right inside a function) and not
+module scope alone (the same-file case is correct at module scope, because in
+one translation unit the struct's own field table is registered before the
+module's statements are emitted). One line: extend the site collector.
+
+The container-element one is two independent halves of the same pass, and
+naming them separately is the transferable part. `gen._elem_types` is a
+per-function map keyed by lowered C value, which is why a container shared
+across functions loses its element type — but the pass that is supposed to
+conclude otherwise (`_gmi_phase17_collect_appends`, keyed on a module GLOBAL's
+name and so function-independent by construction) had two gaps of its own: it
+walked `FunctionDef`/`If`/`While`/`For`/`Try`/`With` but **not `StructDef`**, so
+an append inside a constructor — the dominant registry shape — was invisible
+to the whole pass; and its receiver test required a bare `IdentExpr`, so the
+class-attribute spelling `T.registry.append(self)` was rejected as well. The
+doc's own fix sketch — a `_value_sources` provenance chain through
+`_coerce_to_type` — is not needed for either, because the pass that already
+exists for exactly this question was simply not being asked.
+
+Both fixes are worth reading together with the two rows above them: three of
+the five instances of cause (c) in this file were "one spelling of a working
+site collection was never wired up", and in every case the cheap check was to
+write both spellings of the same program down side by side and diff.
+
 ## Closed reports are deleted, not kept as monuments
 
 A doc for a bug that is fully fixed is **removed**, per CLAUDE.md's "Bug
