@@ -1,122 +1,129 @@
-# CODEGEN_test_struct_formal: the struct suite is FLAKY, and its own harness cannot say why
+# CODEGEN_test_struct_formal: the suite's TOTAL moved with its own verdicts, and one case reported a dead process as correct
 
-**Found 2026-09-30 while running the regression floor after five unrelated
-fixes. NOT MINE and NOT FIXED** — `struct` and its formal lowering are another
-worker's area, and this is a test-harness defect as much as anything else.
-Filed because `struct-formal` is a REGISTERED gate job, a red run of it is
-indistinguishable from a real regression, and a suite whose pass count changes
-from run to run on an unchanged tree is worse than no suite.
+Found 2026-09-30 and rewritten 2026-10-01, because the central claim in the
+original — that this suite is FLAKY — is **refuted by measurement**, and the
+thing underneath it turned out to be three separate defects in the harness, all
+now fixed and all now checked. **The residual, a genuine intermittent hang, is
+filed separately** as `bugs/FORMAL_a_calcsize_image_hangs_once_in_several.md`
+and is the formal tier's, not this file's.
 
-## What I ran, and what I saw
+## What the original claimed, and what the tree actually does
 
-Four consecutive runs of the same tree, nothing changed between them:
+Four runs of an unchanged tree, reporting 148, 147, 145 and 144 checks, with
+`calcsize` cases printing nothing. The reading was "the total itself moves, so
+some checks did not run — this is a harness defect as much as a flake".
 
-```console
-$ python3 test_struct_formal.py     # run 1
-148/148 checks passed
-$ python3 test_struct_formal.py     # run 2
-FAIL calcsize("<4sBBBBBBB5x") == 16 (every corpus format is implemented):
-     expected 1 numbers, program printed 0: []
-FAIL calcsize("<8I") == 32 (every corpus format is implemented): …
-FAIL calcsize("<HHHHHH") == 12 (every corpus format is implemented): …
-FAIL calcsize("<HHIQQQI") == 36 (every corpus format is implemented): …
-146/147 checks passed
-$ python3 test_struct_formal.py     # run 3
-142/145 checks passed
-$ python3 test_struct_formal.py     # run 4
-FAIL … (the same four, plus more)
-140/144 checks passed
-```
+Four runs of this tree, 2026-10-01, nothing changed between them:
 
-**The total itself moves — 144, 145, 147, 148 checks — on an unchanged tree.**
-That is the finding. A count that changes run to run means the number of checks
-REACHED changes, not just their verdicts, so the failure is not "the struct
-lowering computes a wrong size"; it is "some checks did not run, or ran twice".
+    146/148   run 1 — the two declared failures, nothing else
+    122/127   run 2 — plus a TimeoutExpired on calcsize("<HHIQQQI") after 60 s
+    146/148   run 3 — the two declared failures, nothing else
+    152/154   run 4 — after the three harness fixes below, which add the
+                       self-test's six checks: the two declared failures and
+                       nothing else, out of a total that is now a function of
+                       the cases
 
-Every failure is a `calcsize` case, and every one has the same shape: **the
-build SUCCEEDED and the image printed nothing.** `build_and_run` raises
-`AssertionError` on a non-zero build, and `expect_lines` catches that and reports
-`build failed: …`, so a build failure is distinguishable in the output. These
-are not build failures. They are images that ran and produced no stdout.
+So the suite is **not flaky about `calcsize`**, and the two failures that do
+happen are a REGISTERED, DOCUMENTED red: `formal-struct` carries
 
-## The harness defect, which is what makes this unattributable
+    expect='bugs/FORMAL_struct_pack_over_eight_arguments.md — a formal arm64
+           call is limited to 8 register arguments, so struct.pack cannot be
+           called for a format naming 8 values'
 
-`test_struct_formal.py`'s `build_and_run`:
+and that bug doc records the byte-identical transcript, `146/148 checks passed`
+with the same two `pack(...) is refused, not wrong: build failed: … 9 arguments
+exceeds the 8 …` lines. The original transcript was also internally
+inconsistent — four `FAIL` lines against a `146/147` tally, which is one
+failure — so it could not have been a verbatim capture.
+
+**But the report was right that something is wrong, and it was the HARNESS.**
+Three defects, all three real:
+
+### 1. `build_and_run` threw `run.returncode` away
 
 ```python
-run = subprocess.run([out], capture_output=True, text=True,
-                     timeout=RUN_TIMEOUT)
-return [ln for ln in run.stdout.split("\n") if ln.strip() != ""]
+    run = subprocess.run([out], capture_output=True, text=True,
+                         timeout=RUN_TIMEOUT)
+    return [ln for ln in run.stdout.split("\n") if ln.strip() != ""]
 ```
 
-**`run.returncode` is never read.** A program that builds, links, and then dies
-at the first instruction — SIGSEGV, SIGBUS, an illegal instruction, a `dyld`
-kill — returns an empty stdout, which is indistinguishable here from a program
-that legitimately printed nothing. So the one piece of evidence that would say
-*crashed* instead of *printed nothing* is thrown away, and the reported failure
-points at the struct tables when the real answer is a process that died.
+An image that builds, links, prints the right answer and then dies — SIGSEGV,
+SIGBUS, a `dyld` kill — has the stdout a correct program has, so it was
+compared and reported as a PASS. Measured, not argued, by re-running the
+pre-fix pair against a real three-line image that prints `36` and returns 3:
 
-That is a one-line fix and it is the first thing to do, because it converts an
-unattributable flake into an attributable one. Every other thing here is a
-hypothesis until that is in.
+    ok   a real image that exits 3 after printing 36   [length]
+    ok   a real image that exits 3 after printing 36   [values]
+    -> 2/2 checks PASSED for a process that exited 3
 
-## What is NOT the cause, measured
+Fixed: `build_and_run` returns `(lines, how_it_died)`, and a negative
+returncode is translated by `signal.Signals(-rc).name`, because `-11` in a
+report names neither the signal nor the process.
 
-* **Not the program.** `calcsize("<8I")` standalone, built and run 8 times, and
-  then all four failing formats 3 times each through the same `fire.py build
-  --formal` path (12 builds, 12 correct answers, 12 clean exits):
+### 2. `expect_lines` returned early, so the denominator depended on the verdicts
 
-  ```console
-  $ for i in 1..8; do .tmp/w/cs8i.bin; echo "exit=$?"; done
-  32 / exit=0     (×8, all printing 32)
-  ```
-* **Not a codegen change on this branch.** The suite was run on the same tree
-  before and after each of this branch's five commits; it was green
-  (148/148) on some runs of every one of them. The failures appear on runs with
-  no code change at all.
-* **Not the machine's memory budget.** Every one of these runs was inside
-  `tools/memslot.py --gb 8`, so memory admission is not the variable.
+A case that failed on length cost ONE check and a case that passed cost two. The
+original's 148/147/145/144 are exactly this: 0, 1, 3 and 4 failing `calcsize`
+cases. A denominator that is a function of the failures is not a denominator,
+and a suite whose total moves is a suite whose reader learns to re-run it — and
+a re-run that comes back green is not evidence.
 
-## The next step, in order
+Fixed: two checks in EVERY outcome, the second saying `not reached: …` when it
+could not be evaluated rather than being skipped, each with its own `what` so
+"which of the two failed" is answerable.
 
-1. **Check `run.returncode`.** One line in `build_and_run`. Re-run the suite in a
-   loop until it goes red and read what it says. Everything below is a guess
-   until this is done.
-2. **Reproduce under the conditions where it happens.** The machine had ~15
-   parallel workers running. `memslot` serializes the memory RESERVATION and
-   nothing else, so N builds can be in flight at once. Loop the suite with and
-   without concurrent load; if it only fails under load, it is a timing or
-   contention bug and not a language one.
-3. **The prime suspect is the shared content-addressed store.**
-   `~/.gmojo/cas` is one directory shared by every worktree on this machine, and
-   `formal/lean.py`'s `ensure_library` documents the exact hazard this project
-   has already been bitten by: three concurrent callers meant three
-   simultaneous writes to ONE output path, which "can interleave into a
-   truncated `.olean` that every later typecheck then reads". The fix there was
-   an exclusive `flock` plus a private temp and `os.replace`. If a build here
-   publishes its image through the same store, a reader can be handed a
-   truncated artifact — and a truncated Mach-O that still has a valid enough
-   header to load, and then dies, is exactly "builds, runs, prints nothing".
-   Worth checking whether `cas.publish` for a build artifact is atomic.
-4. **If it is not the store, bisect the suite itself.** The check COUNT moves, so
-   something is being reached a variable number of times. `CORPUS_FORMATS` is
-   computed once at import by `discover_corpus_formats()`, which globs
-   `formal/*.py` and `test_x86_64_decode.py` for format strings and keeps the
-   ones CPython accepts. If that walk's result varies — a partially written
-   `.py` in `formal/` from a concurrent editor, or a `__pycache__` entry — the
-   corpus and therefore the number of checks moves with it. Print
-   `len(CORPUS_FORMATS)` at the start of every run and see whether THAT moves;
-   it is a one-line diagnostic and it splits (4) from everything above in a
-   single run.
+### 3. A hung image abandoned the rest of the loop — the one that cost 21 checks
 
-## Why the owner should care more than "a flaky test"
+`subprocess.TimeoutExpired` is an `OSError`, not an `AssertionError`, so it
+sailed straight through `expect_lines`'s `except AssertionError` and out of the
+`for fmt in CORPUS_FORMATS` loop it was called from. **Every case after it was
+never reached and nothing said so**: 122/127 where 148 was the number, with 21
+checks silently missing from the tally.
 
-`struct-formal` is in the gate, and this suite is the only thing that
-differential-tests the `struct` module's formatting against CPython for every
-format the corpus uses — `test_every_corpus_format_is_implemented` is the check
-that would have caught `<II` being missing, and a format the table does not know
-returns 0, which is a plausible-looking answer rather than an error. A suite
-whose pass count moves on an unchanged tree trains its reader to re-run it, and
-a re-run that comes back green is not evidence. That is the same failure the
-project already records for the interpreter oracle in `test_interp_oracle.py`:
-a test that cannot fail reliably cannot be evidence when it passes.
+Fixed: a run that does not finish raises `AssertionError` with the image's path
+and what to do about it, which is what a build failure already was. The cases
+after it now run.
+
+## What was NOT the cause, measured
+
+* **Not the program.** `calcsize("<8I")` and `calcsize("<HHIQQQI")` built and
+  run 10/10 standalone in 0.00 s each, both printing the right answer, exit 0.
+* **Not a codegen change on this branch.** The tree was the same for all six
+  runs.
+* **Not a shared content-addressed store.** The original's prime suspect was a
+  racing `cas.publish` handing a reader a truncated artifact. It cannot:
+  `cas.publish` writes a private temp, `fsync`s it and `os.replace`s it
+  (cas.py:608), and the docstring says why — hash-named files are immutable, so
+  a racing identical write is harmless. A truncated Mach-O is not available.
+* **Not `discover_corpus_formats` moving.** `CORPUS_FORMATS` is computed once at
+  import, and `test_the_corpus_was_discovered_and_is_not_empty` already asserts
+  `len(CORPUS_FORMATS) >= 13` and names seven of them individually.
+
+## The check that holds all of it there
+
+`test_the_harness_records_a_case_even_when_it_cannot_pass`, in the file itself,
+six checks, contributing a fixed number to the total (which is why the count is
+154 and not 148, and why the two declared failures are still the only two). Four
+of the six fail against the pre-fix harness, verified by restoring the old
+`expect_lines` and the old `build_and_run` and re-running it:
+
+    pre-fix expect_lines (early return):            1/6 pass, 5 FAIL
+    …and the real-image probe reports a dead process as a PASS
+
+Each probe records through a `probe()` helper that silences the tally and the
+printing, because every case in the self-test is SUPPOSED to fail — a green run
+that printed eight red lines from its own self-test would be the same noise this
+doc is about, and five deliberately-red stub cases reaching the suite's total
+would turn a green run red.
+
+`RESULTS` also keeps the `detail` now, not just `(ok, what)`. A suite that
+reports `FAIL <what>` and discards the only sentence that says why has discarded
+the evidence, and `-v` prints it.
+
+## Related
+
+* `formal-struct`'s registration comment carries the same measurement and the
+  reason the job is in `proofs` rather than `check` (43 s alone, 201 s beside
+  the other seven, 154 checks most of them a build).
+* `bugs/CODEGEN_ab_native_fails.md` §4's cost table says "2 of 154 cases" for
+  the same reason, and `CLAUDE.md`'s `EXPECTED` table with it.

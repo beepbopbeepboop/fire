@@ -6325,24 +6325,58 @@ def main():
     # still compiles, and a yielded param with UNANIMOUS call sites still
     # resolves to the right type. Both are ordinary compiles, so assert on
     # the generated C rather than on stdout.
+    #
+    # (a) used to be `g(3)` and `g(5)` with the comment "call sites
+    # disagree" -- two ints, which AGREE, so the `len(kinds) > 1` branch never
+    # fired and the narrowness this test is named for was never exercised at
+    # all (found as "A test hole found on the way" in
+    # `CODEGEN_coro_yield_kind_unresolved_callsite`, a bugs/hard doc since
+    # FIXED and DELETED). The conflict now really exists: `x` is
+    # unannotated and its two call sites pass an int and a `char *`, while
+    # `y` -- the param actually yielded -- is unanimous `double`. `x` is
+    # never READ in the body, so this is decidable without a tagged ABI and
+    # has a correct answer to assert, which the old arithmetic-use version
+    # did not: reading a genuinely conflicting param is the cross-cutting
+    # one-C-type-per-slot limitation, and asserting a value for it would
+    # assert the wrong answer. That limitation is
+    # bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md, still
+    # OPEN; the `int64_t`-is-not-evidence rule in `_record_param_elem` is the
+    # part of it that is fixed, and this case is where that rule earns its
+    # keep.
     def test_conflicting_callsite_gate_is_narrow():
         global _PASS, _FAIL
         name = "conflicting_callsite_gate_is_narrow"
-        # (a) param used only arithmetically, call sites disagree: the
-        #     yielded value is unaffected, so this must still lower.
-        n2 = compile_to_gimple("""\
-def g(x):
-    var t = 0
-    for i in range(x):
-        t = t + i
-    yield t
+        # (a) a genuinely conflicting unannotated param that is NOT yielded:
+        #     the yielded value is unaffected, so this must still lower --
+        #     AND the yielded slot must still come out `double`, which is
+        #     what proves the conflict on `x` did not poison the generator.
+        #     Wrapped so an over-broad refusal is reported as this test's
+        #     failure with the compiler's own message, rather than aborting
+        #     the whole suite (the same shape as
+        #     `conflicting_callsite_yield_kind_refused_not_miscompiled`).
+        try:
+            n2 = compile_to_gimple("""\
+def g(x, y):
+    yield y
 
 def main():
-    for v in g(3):
+    for v in g(1, 3.5):
         print(v)
-    for v in g(5):
+    for v in g("s", 1.5):
         print(v)
 """)
+        except Exception as e:
+            print(f"FAIL  {name}: a conflict on a param that is NOT yielded "
+                  f"must not refuse, but this was refused: {e}")
+            _FAIL += 1
+            return
+        if '__mgco_g_value (MojoGenerator *)' not in n2 or \
+                'double __mgco_g_value' not in n2:
+            print(f"FAIL  {name}: a conflict on a param that is NOT yielded "
+                  f"must not refuse, and must not degrade the yielded param's "
+                  f"slot -- expected a double yield slot, got:\n{n2[-3000:]}")
+            _FAIL += 1
+            return
         # (b) yielded param, but every call site agrees: resolves normally.
         c = compile_to_gimple("""\
 def g(x):
@@ -7051,6 +7085,94 @@ main()
                       f"definition in the same file: {', '.join(missing)}")
                 _FAIL += 1
                 return
+        print(f"PASS  {name}  ({len(cases)} shapes)")
+        _PASS += 1
+
+    def test_ast_walk_reaches_every_name_in_a_lambda_body():
+        """`_ast_walk` must not lose a name, because `_lower_LambdaExpr`
+        derives a lambda's CAPTURE LIST from it.
+
+        It walked a hand-written list of 16 attribute names, and 17 of the AST
+        dataclasses had a child-bearing field missing from it —
+        `TernaryExpr.condition`, `IfStmt.condition`, `WhileStmt.condition`,
+        `SubscriptExpr.index`, `ForStmt.iterable`, `CallExpr.kwargs`,
+        `CompareChain.operands`, `Comprehension.element`/`generators`,
+        `DictExpr.pairs`, `MultiAssignStmt.targets`, `SliceExpr.start/stop/step`,
+        `MatchStmt.subject`/`cases`, `TryStmt.handlers`/`else_body`/
+        `finally_body`, `WithItem.expr`, `MatchCase.patterns`/`guard`,
+        `ExceptHandler.exc_type`, `DecoratorArgs.clauses`,
+        `Generator.conditions`. (`IfStmt`/`WhileStmt.condition`,
+        `TryStmt`'s handlers and `MatchStmt`'s cases are statement-level and a
+        lambda body is an EXPRESSION, so they cannot reach this walk from a
+        lambda; they are here only because the walk is also what a nested
+        `def`'s own body walk would use.) A captured local reachable ONLY
+        through one of
+        those was never put in the closure env, and the lambda body read it
+        through the `ct param or undeclared` fallback — a hard 0. Silent: exit
+        0 and a plausible wrong value (`sorted(d, key=lambda k: d[k] if p
+        else 0)` came out unsorted).
+
+        The expectation is `_used_idents_node`, not a written-down list of
+        field names: it is this codebase's other name-collecting walk and it
+        walks GENERICALLY over dataclass fields (rule 2 in its docstring, added
+        precisely because "a node type with no explicit branch" was an
+        under-approximation), so "the structural walk sees everything the
+        generic one does" is the invariant, and it fails by itself the next
+        time a field is added or renamed. One case per previously-missed
+        field, so a fix that patches only `condition` cannot pass.
+
+        The two walks differ deliberately in ONE respect and the cases respect
+        it: both stop at a nested `FunctionDef`/`LambdaExpr` boundary for
+        `_used_idents_node` but not for `_ast_walk`, so no case here contains
+        a nested closure."""
+        global _PASS, _FAIL
+        name = "ast_walk_reaches_every_name_in_a_lambda_body"
+        from mojo.backend_gimple.emit_calls import _ast_walk
+        from mojo.middle.types import _used_idents_node
+        # label -> a lambda body whose free names sit under a DIFFERENT field
+        cases = {
+            'ternary_condition': ('1 if cap else 0', {'cap'}),
+            'subscript_index': ('d[cap]', {'d', 'cap'}),
+            # `x` is the KEYWORD NAME (a str in the pair), not a reference,
+            # so it is correctly not an IdentExpr and is not expected.
+            'call_kwargs': ('f(x=cap)', {'f', 'cap'}),
+            'compare_chain_operand': ('cap < q', {'cap', 'q'}),
+            # `c` is the comprehension's OWN binding, not a free name, so it
+            # is not expected here — `_used_idents_node` subtracts generator
+            # targets and this case asserts against that answer too.
+            'comprehension_element': ('[cap for c in s]', {'cap', 's'}),
+            'comprehension_generators': ('[z for z in cap]', {'z', 'cap'}),
+            'dict_pairs': ('{cap: q}', {'cap', 'q'}),
+            'slice_start_stop_step': ('cap[1:2:3]', {'cap'}),
+            'unary_operand': ('-cap', {'cap'}),
+            'boolop_operands': ('cap and q', {'cap', 'q'}),
+            'member_chain': ('cap.real', {'cap'}),
+            'nested_call_arg': ('f(g(cap))', {'f', 'g', 'cap'}),
+        }
+        import fire_compiler as _F
+        missing = []
+        for label, (expr, want) in sorted(cases.items()):
+            # Parse the expression as a real lambda body so the node under test
+            # is the AST the capture walk actually sees.
+            src = f'zz = lambda: {expr}\n'
+            mod = _F.Parser(_F.py_tokenize(src)).parse_module()
+            lam = None
+            for st in mod:
+                if isinstance(st, _F.AssignStmt) and isinstance(st.value, _F.LambdaExpr):
+                    lam = st.value
+            if lam is None:
+                missing.append(f'{label}: no LambdaExpr parsed from {src!r}')
+                continue
+            seen = {n.name for n in _ast_walk(lam.body)
+                    if isinstance(n, _F.IdentExpr)}
+            generic = _used_idents_node(lam.body)
+            lost = (generic | want) - seen
+            if lost:
+                missing.append(f'{label}: {sorted(lost)} invisible to _ast_walk')
+        if missing:
+            print(f"FAIL  {name}: " + '; '.join(missing))
+            _FAIL += 1
+            return
         print(f"PASS  {name}  ({len(cases)} shapes)")
         _PASS += 1
 
@@ -7900,7 +8022,7 @@ def computed(fmt, buf):
         stmts = gimple_codegen.Parser(
             gimple_codegen.py_tokenize(src)).parse_module()
         answers = {getattr(st, 'name', None):
-                   mg._infer_return_maybe_kinds(None, st.body)
+                   mg._infer_return_maybe_kinds(None, st.body, None)
                    for st in stmts if getattr(st, 'name', None) in
                    ('literal', 'computed')}
         want = {'literal': True, 'computed': False}
@@ -8013,7 +8135,255 @@ outer([10, 20, 30])
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_paren_name_vs_one_tuple_for_target_differ():
+        """`for (a) in b:` binds the whole item; `for (a,) in b:` unpacks it.
+
+        Both reduced to the IDENTICAL target string `"(a)"`, and every
+        consumer decided "tuple" by looking for a comma — so the one shape
+        Python keeps distinct was decided wrongly, silently and in opposite
+        directions: the compiled path printed `1` for `for (a) in [(1,)]`
+        where CPython prints `(1,)`, and the interpreter printed `(1,)` for
+        `for (a,) in [(1,)]` where CPython prints `1`.
+
+        The parsers now unwrap a parenthesised single NAME to bare text and
+        keep the parens for a 1-element group that really had a comma, so
+        the surrounding parens are the disambiguation
+        (`fire_compiler.is_tuple_target`). Asserted against CPython on the
+        same text, on both pipelines: a shape whose right answer differs per
+        engine is exactly what a hand-written expectation would get wrong.
+
+        All four spellings are here for each of `for` and a comprehension,
+        because the comprehension generator target is a SEPARATE parser
+        (`_parse_generator_target`) with its own representation — a bare
+        comma list carries no parens there — and it had the same collision
+        plus its own version of the trailing comma (`[y for y, in z]`
+        produced the bare `"y"`). Nested `for (a, (b, c)) in ...` is here
+        because the per-slot split has to be bracket-aware.
+        """
+        global _PASS, _FAIL
+        name = "paren_name_vs_one_tuple_for_target_differ"
+        src = '''\
+def plain(items):
+    out = []
+    for (a) in items:
+        out.append(a)
+    return out
+
+def one_tuple(items):
+    out = []
+    for (a,) in items:
+        out.append(a)
+    return out
+
+def bare_comma(items):
+    out = []
+    for a, in items:
+        out.append(a)
+    return out
+
+def nested(items):
+    out = []
+    for (a, (b, c)) in items:
+        out.append(str(a) + str(b) + str(c))
+    return out
+
+print(plain([(1,), (2,)]))
+print(one_tuple([(1,), (2,)]))
+print(bare_comma([(1,), (2,)]))
+print(nested([(1, (2, 3)), (4, (5, 6))]))
+print([y for (y) in [(1,), (2,)]])
+print([y for (y,) in [(1,), (2,)]])
+print([y for y, in [(1,), (2,)]])
+print([y for y in [(1,), (2,)]])
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'paren_target.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            # The interpreter is the third engine: it had the OPPOSITE wrong
+            # answer (`for (a,) in` bound the whole item), so a compiled-only
+            # comparison could not have caught the bug.
+            it = subprocess.run([sys.executable, os.path.join(_PROJECT_DIR, 'fire.py'),
+                                 'run', entry], capture_output=True, text=True,
+                                cwd=td, timeout=120)
+            if it.returncode != 0 or it.stdout != want:
+                print(f"FAIL  {name} [interp]: exit {it.returncode}, printed "
+                      f"{it.stdout!r}, CPython printed {want!r} "
+                      f"({(it.stderr or '').strip()[-300:]})")
+                _FAIL += 1
+                return
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'paren_{mode}.c')
+                exe = os.path.join(td, f'paren_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_next_inside_for_over_same_iterator_advances_once():
+        """`next(it)` inside `for x in it:` must read the FOLLOWING element.
+
+        `it = iter(<list>)` lowers to a shared list plus an int64_t cursor.
+        Both consumers of that cursor have to agree on what it means: Python's
+        `list_iterator.__next__` advances BEFORE returning, so by the time the
+        loop body runs, the iterator is already one past the element the loop
+        yielded, and a `next(it)` in the body reads the one after that. The
+        GIMPLE `for` lowering used to advance in its post block — after the
+        body — so `next(it)` re-read the element the loop had just handed out:
+        half the list consumed, every element reported twice
+        (`walk([1,2,3,4])` -> `[1, 1, 3, 3]`).
+
+        This is exactly CPython's own shape, in
+        `Tools/cases_generator/analyzer.py::check_escaping_calls`:
+
+            tkn_iter = iter(stmt.contents)
+            for tkn in tkn_iter:
+                ...
+                    next(tkn_iter)
+
+        so the answer is compared against CPython on the SAME text rather
+        than a hand-written expectation. The `continue` and `break` arms are
+        here because the fix moves the advance out of the post block: they
+        must still land in a place where the advance has happened."""
+        global _PASS, _FAIL
+        name = "next_inside_for_over_same_iterator_advances_once"
+        src = '''\
+def walk(items):
+    it = iter(items)
+    out = []
+    for x in it:
+        out.append(x)
+        out.append(next(it))
+    return out
+
+def every_other(items):
+    it = iter(items)
+    out = []
+    for x in it:
+        if x % 2:
+            continue
+        out.append(x)
+    return out
+
+def bail_on_sentinel(items):
+    it = iter(items)
+    out = []
+    for x in it:
+        if x == 99:
+            break
+        out.append(x)
+    return out
+
+def resumes_after_next(items):
+    it = iter(items)
+    out = []
+    print(next(it))
+    for x in it:
+        out.append(x)
+    return out
+
+print(walk([1, 2, 3, 4]))
+print(every_other([1, 2, 3, 4, 5, 6]))
+print(bail_on_sentinel([1, 2, 99, 3]))
+print(resumes_after_next([7, 8, 9]))
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'cursor_once.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'once_{mode}.c')
+                exe = os.path.join(td, f'once_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_cursor_advance_has_no_cast_operand_in_gimple()
+    test_next_inside_for_over_same_iterator_advances_once()
+    test_paren_name_vs_one_tuple_for_target_differ()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()
@@ -8034,6 +8404,7 @@ outer([10, 20, 30])
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_handwritten_selfhost_signature_tables_match_the_source()
     test_every_funcptr_initializer_has_a_definition()
+    test_ast_walk_reaches_every_name_in_a_lambda_body()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

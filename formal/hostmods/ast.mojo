@@ -1673,11 +1673,13 @@ def tokenize_from(src: str, first: int, out, cap: int) -> int:
     and not recorded, and the answer is the stream's TOTAL length either way.
 
     This is how a caller walks a source with more tokens than one buffer holds.
-    A buffer on this target is a list literal, and a list literal is emitted
-    with a 12-bit store immediate, so at most 4095 words — 1365 tokens of three
-    words each — and a bigger one is a compiler crash rather than a refusal
-    (`bugs/CODEGEN_list_literal_over_4095_words_asserts.md`). A 30 KB Python
-    file is around 8000 tokens, so the loop is not optional:
+    A buffer on this target is a list literal, and the frame it is emitted into
+    holds at most 16383 words — 5461 tokens of three words each — past which
+    `compile_stdlib` refuses it with a message naming the count (the 4095-word
+    ceiling this comment used to state was one instruction's 12-bit store
+    immediate, not a limit, and it no longer applies: the offset goes in a
+    register). A 30 KB Python file is around 8000 tokens, so the loop is not
+    optional:
 
         first = 0
         while 1:

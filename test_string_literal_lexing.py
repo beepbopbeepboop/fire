@@ -273,10 +273,10 @@ PROGRAMS = {
 # character the source never wrote, silently, in every one of these shapes.
 #
 # Each row is (name, the statement, the value HERE, the value CPython gives it,
-# or None when CPython's answer is not the contract for this row — see the two
-# rows that say so). Where both are given they must be EQUAL, because that is
-# the whole claim for a non-raw continuation: this path can be CPython's oracle
-# for one, since a line continuation is not an escape.
+# or None when CPython's answer is not the contract for this row — see the rows
+# that say so). Where both are given they must be EQUAL, because that is the
+# whole claim for a continuation: a line continuation is not an escape, so
+# whether the pair is deleted or kept, CPython is the oracle for both.
 CONTINUATIONS = [
     ("plain",              'a = "ab\\\ncd"',            "abcd",  "abcd"),
     # The next line's INDENTATION is content inside a string — CPython deletes
@@ -300,24 +300,48 @@ CONTINUATIONS = [
     # between them. Both sides read this as two adjacent literals, so the
     # concatenation is the parser's and the value must be `xb`.
     ("quote_run_then_text", 'a = "x\\\n""b"',           "xb",    "xb"),
-    # ── the two rows where this path's answer is NOT CPython's ──
+    # ── raw: the pair is CONTENT, and this path now keeps it ──
     #
-    # A RAW literal keeps the pair (it is content: CPython's token text for it
-    # is 'r"a\\\nb"'), and this path cannot, because a value only reaches the
+    # A RAW literal keeps the pair — CPython's token text for it is
+    # 'r"a\\\nb"' — and it did not used to, because a value only reaches the
     # token stream with a newline in it through the placeholder
-    # `replace_multiline_strings` builds — and the join runs after it. The row
-    # is spelled out anyway, because a divergence that is pinned is a fact and
-    # one that is not is a surprise. Next step, in full:
-    # bugs/CODEGEN_backslash_continuation_in_a_raw_literal.md.
-    ("raw_keeps_the_pair_in_cpython_only", 'a = r"a\\\nb"',
-     "ab", None),
-    # The same rule on a TRIPLE-quoted span, which IS placeholdered and so does
-    # keep the pair — and CPython deletes it there, because a triple-quoted
-    # literal is not raw either. Pre-existing, unchanged by the join, and part
-    # of the same no-escape-processing contract as `"\n"` being four
-    # characters rather than one.
+    # `replace_multiline_strings` builds, and the join ran after it. The join
+    # now builds a placeholder for the line break itself, so the STRING token
+    # carries `a\` + a real newline + `b`, which is CPython's value byte for
+    # byte: a raw literal processes no escapes, so there is nothing left for
+    # the two to disagree about.
+    ("raw_keeps_the_pair", 'a = r"a\\\nb"',
+     "a\\\nb", "a\\\nb"),
+    ("raw_single_quoted", "a = r'a\\\nb'", "a\\\nb", "a\\\nb"),
+    # The same on a two-letter prefix. The `b` is dropped by this front end (it
+    # has no bytes type) so CPython's value is a `bytes` — a different question
+    # from what the pair is worth, so `ours` is compared to its own spelling
+    # and CPython only decides that the pair survives.
+    ("raw_bytes_prefix", 'a = rb"a\\\nb"', "a\\\nb", None),
+    # Indentation is content here for the same reason it is in a non-raw
+    # literal — the line is joined with nothing in front of it either way — and
+    # both sides keep all four spaces.
+    ("raw_indented_next_line", 'a = r"ab\\\n    cd"', "ab\\\n    cd",
+     "ab\\\n    cd"),
+    ("raw_closes_on_the_next_line", 'a = r"ab\\\n"', "ab\\\n", "ab\\\n"),
+    ("raw_two_continuations", 'a = r"a\\\nb\\\nc"', "a\\\nb\\\nc",
+     "a\\\nb\\\nc"),
+    # ── the one row where this path's answer is NOT CPython's ──
+    #
+    # The same rule on a TRIPLE-quoted span, which is placeholdered as a whole
+    # before the join runs and so does keep the pair — and CPython deletes it
+    # there, because a triple-quoted literal is not raw either. Pre-existing,
+    # unchanged by the join, and part of the same no-escape-processing contract
+    # as `"\n"` being four characters rather than one: fixing it means editing
+    # the VALUE a triple-quoted literal collapses to, which would change the
+    # text of every docstring in the compiler and the stdlib that holds such a
+    # pair — a different change, and one nothing here depends on.
     ("triple_keeps_the_pair_here_too", 'a = """ab\\\ncd"""',
      "ab\\\ncd", None),
+    # The control for the row above, and for `raw_keeps_the_pair`: the same
+    # source spelled raw, where both sides agree. A fix that taught the join to
+    # keep every pair would go red here.
+    ("raw_triple_agrees", 'a = r"""ab\\\ncd"""', "ab\\\ncd", "ab\\\ncd"),
 ]
 
 
@@ -583,21 +607,25 @@ def run_end_to_end(verbose):
                   '    print(len(a))\n'
                   '    print(len(b))\n'
                   '    return 0\n')
-    # The third oracle-able program: backslash-newline pairs INSIDE literals.
+    # The fourth oracle-able program: backslash-newline pairs INSIDE literals.
     # CPython's tokenizer decides a line continuation is worth nothing before
-    # the parser sees the token, and this path now does the same, so for a
-    # non-raw literal the two agree on the bytes even though they disagree about
-    # every other escape. The raw spelling is deliberately absent here: there
-    # CPython keeps the pair and this path cannot, which is pinned with the rest
-    # of that divergence in CONTINUATIONS rather than here.
+    # the parser sees the token, and this path does the same, so for a non-raw
+    # literal the two agree on the bytes even though they disagree about every
+    # other escape. The raw spelling is here too, and is oracle-able for a
+    # different reason: there CPython KEEPS the pair and so does this path, and
+    # a raw literal processes no escapes, so again there is nothing left to
+    # disagree about. Before the fix the raw value lost the backslash and the
+    # newline with it, so the image printed one fewer line than CPython did.
     continued = ('def main():\n'
                  '    a = "ab\\\ncd"\n'
                  '    b = "x\\\ny"\n'
                  '    c = "m"\n'
+                 '    d = r"p\\\nq"\n'
                  '    print(a)\n'
                  '    print(b)\n'
                  '    print(c)\n'
-                 '    print(len(a) + len(b) + len(c))\n'
+                 '    print(len(d))\n'
+                 '    print(len(a) + len(b) + len(c) + len(d))\n'
                  '    return 0\n')
     # The fourth oracle-able program: characters that `str.splitlines()` calls
     # line breaks and the language does not, inside literals. CPython's value is
@@ -631,9 +659,10 @@ def run_end_to_end(verbose):
     cases = [
         # (name, mojo text, python text or None, expected stdout, expected exit)
         ("agree", agree, agree + "main()\n", 'p"q\nx\ny\nsay "hi"\n14\n', 0),
-        ("byte_exact", byte_exact, byte_exact + "main()\n",
+("byte_exact", byte_exact, byte_exact + "main()\n",
          'a"b\np\\nq\n3\n4\n', 0),
-        ("continued", continued, continued + "main()\n", 'abcd\nxy\nm\n7\n', 0),
+        ("continued", continued, continued + "main()\n",
+         'abcd\nxy\nm\n4\n11\n', 0),
         ("not_line_breaks", not_breaks, not_breaks + "main()\n",
          '9\nx\vy\np\fy\nm\x1cy\n', 0),
         ("literal_tab", literal_tab, literal_tab + "main()\n",

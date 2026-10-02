@@ -30,6 +30,13 @@ from fire_compiler import (
     Parser, py_tokenize, _as_str, _as_set, _as_int, _pair_key, _ptr_slot_in_range,
     _as_ident_node, _as_member_node,
 )
+# Aliased: this module also has a LOCAL `is_tuple_target` (the
+# generator-driven comprehension loop's own flag, which additionally
+# requires known tuple slot types), so the shared predicate could not keep
+# the plain name here without shadowing confusion at both sites.
+from fire_compiler import (is_tuple_target as _for_target_is_tuple,
+                           for_target_slots as _for_target_slots,
+                           _split_top_level_commas as _fc_split_top_level_commas)
 import regex_compile
 import mlir
 import mojo.backend_gimple.device_glue as _gmi_glue
@@ -300,6 +307,12 @@ def _reset_func(gen, body: list = None, params: list = None,
     # temp-name string in it (2.7M strings on `--dump-full fire.py`).
     gen._cstr_key_src.clear()
     gen._kw_key_src.clear()
+    # Same reason as the two above: temp names repeat across functions, so a
+    # stale entry would mark some other function's `_t3` as a known integer.
+    # A miss here is harmless (the value falls back to the runtime's own
+    # discriminator, i.e. today's behaviour) which is what makes this table
+    # safe to seed only where the answer is provable.
+    gen._int_word_vals.clear()
     gen._fresh_vals.clear()   # per function: temp names repeat across functions
     # The four the ownership work added are ASSIGNED here rather than cleared,
     # and the difference is not a style choice: they are not in
@@ -1203,6 +1216,34 @@ _FRESH_STRING_RETURNS = frozenset([
 ])
 
 
+def carry_callable_ret_types(gen, src: str, dst: str) -> None:
+    """Copy the three "what does this callable really return" side tables
+    from the key `src` to the key `dst`.
+
+    Every one of these tables is keyed by the NAME a value is read under, and
+    the name changes twice on the way from a lambda to a call site: the value
+    is materialized into a temp (`_lower_LambdaExpr`), bound to a target by an
+    assignment or declaration, and — for a MODULE-level target — read back
+    through a fresh temp at every use. A table entry that does not survive
+    those hops is lost, and the consumer has no other source: the
+    `mojo_fnptr_call_N` / `mojo_bound_method_call_N` helpers are the
+    homogenized `int64_t` convention (correct for the box they hand back,
+    wrong for the value inside it), so with the type missing a `lambda: False`
+    prints `0`, a `lambda: "hi"` prints its own pointer decimal and
+    `m.truthy` bound to a global prints `1`.
+
+    ONE definition, used by every hop, because the four store sites (local
+    assignment, local `var`, and the two module-global store branches) and the
+    global-read site were five separate hand-written copies of the same three
+    lines — and the two global-store copies omitted all three, which is
+    exactly the case that was broken. A copy that is forgotten is silent: the
+    program keeps running and prints a plausible wrong value with exit 0."""
+    for _tbl in (gen._callable_ret_types, gen._dict_callable_ret,
+                 gen._bound_method_ret_types):
+        if src in _tbl:
+            _tbl[dst] = _tbl[src]
+
+
 def note_fresh_result(gen, t: str) -> None:
     """A container-display lowering (`[...]`, `{...}`, a comprehension) calls
     this with the temp it is about to return: the display always builds a new
@@ -1686,7 +1727,12 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 cv = aval if atype == 'char' else gen._new_val('char', f'(char){aval}')
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                 coerced_args.append(sv)
-            else:
+            elif actual_atype.endswith(' *'):
+                # A pointer the codegen POSITIVELY knows this value holds
+                # (`_actual_types` / `_global_var_types` recorded a pointer
+                # type), just spelled `int64_t` here. Round-trip the bits,
+                # exactly as before: the value really is a pointer, so the
+                # cast is the identity it has always been.
                 vp = gen._new_temp('void *')
                 cp = gen._new_temp('char *')
                 if atype in ('int',):
@@ -1696,6 +1742,67 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                     gen._emit(f'  {vp} = (void *){aval};')
                 gen._emit(f'  {cp} = (char *){vp};')
                 coerced_args.append(cp)
+            else:
+                # An UNTRACKED int64_t going into a `char *` parameter.
+                #
+                # `char *` IS this dialect's string slot: `_TYPE_MAP` maps
+                # only `str`/`String` to it (`*UInt8` and friends resolve to
+                # `uint8_t *`, `None` to `void *`), so a parameter spelled
+                # `char *` is a STRING parameter and the callee will hand
+                # the word to strlen/strcmp. The annotation is a static
+                # PROMISE codegen used to take literally by bit-reinterpreting
+                # whatever integer arrived: `Dialog(5)` on
+                # `def __init__(self, widgetName: str)` emitted
+                # `(char *)(void *)(int64_t)5`, and `mojo_print` then
+                # `strlen`ed address 5 -- SIGSEGV, exit -11, no output at
+                # all (bugs/CODEGEN_annotated_str_param_given_an_int_
+                # segfaults.md). In Python a parameter annotation is
+                # documentation, not a cast: `Dialog(5)` is legal and prints
+                # `5`.
+                #
+                # So this is not a place the codegen may decide: in this
+                # compiler's scalar body model an int64_t and a `char *` are
+                # the same 64 bits, and an untracked word is genuinely
+                # ambiguous -- it is a real string handle far more often
+                # than not (a lambda parameter, an erased dict value, a
+                # getattr result all arrive here with their pointer bits and
+                # nothing recorded, and that by-value handle pass-through is
+                # load-bearing for the self-host's own compilation).
+                # `mojo_cstr_or_int_str` is the model's OWN answer to exactly
+                # this question -- it is what `_char_to_cstr` already routes
+                # every other int64_t-used-where-a-string-is-needed through --
+                # and it is safe in BOTH directions rather than right in
+                # only one: a real boxed `char *` comes back as the very same
+                # address (the cast's own result), and a genuine integer
+                # comes back as its decimal, which is what CPython prints.
+                #
+                # Deliberately NOT registered with `_cstr_key_src`, so the
+                # `mojo_cstr_or_int_release` protocol does not reclaim it:
+                # the callee may STORE the pointer (`self.widgetName =
+                # widgetName`), and releasing a string the value kept is a
+                # use-after-free. The int case therefore keeps its one
+                # block, which is this runtime's documented no-free model for
+                # a kept string (`mojo_str_from_int`'s own comment) and only
+                # happens on the path that used to be a SIGSEGV.
+                iv = (aval if atype == 'int64_t'
+                      else gen._new_val('int64_t', f'(int64_t){aval}'))
+                if aval in getattr(gen, '_int_word_vals', ()):
+                    # ...unless the codegen PROVABLY knows this word is an
+                    # integer, in which case there is no question to ask and
+                    # `mojo_cstr_or_int_str`'s own range test must not be
+                    # consulted at all: `mojo_boxed_is_str` calls every
+                    # positive int64 in [2^31, 2^47) a pointer, so
+                    # `Dialog(3000000000)` would still `strlen` address
+                    # 3000000000. `mojo_str_from_int` is that function's own
+                    # unconditional integer half, and the KEPT variant rather
+                    # than the transient one because the callee owns this
+                    # string (see the release note above).
+                    sv = gen._call_expr('char *', 'mojo_str_from_int',
+                                        [('int64_t', iv)])
+                else:
+                    sv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                        [('int64_t', iv)])
+                coerced_args.append(sv)
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain
             # scalar-typed value. TWO unrelated situations reach this one
@@ -2180,6 +2287,35 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         # loop no longer leaks one string per access. A caller that stores
         # the pointer, or reuses it across several calls, must not pass it.
         if transient and word_ok:
+            if val in getattr(gen, '_int_word_vals', ()):
+                # This codegen PROVABLY knows the word is an integer (see
+                # `gen._int_word_vals`), so it supplies the answer instead of
+                # asking the runtime to work it out — which is the whole
+                # point: `mojo_boxed_is_str` is a range test, so it calls
+                # every positive int64 in [2^31, 2^47) a pointer and the `_kw`
+                # twin dereferenced it. `d[3000000000] = 1` was a SIGSEGV,
+                # at -O0, -O2 and under ASan alike.
+                #
+                # So render the decimal and use the ORDINARY dict entry
+                # point, exactly as this function already does for a
+                # non-transient key. That is not a demotion: the dict
+                # re-normalises the text through `_canon_int`, so `d[5]` and
+                # `d["5"]` stay the one integer slot they have always been
+                # and `d[3000000000] = 1` finds what it stored. It costs a
+                # format the `_kw` twin skips — that is the price of not
+                # guessing, paid only where guessing was wrong.
+                #
+                # Transient, same as every other key here: the block comes
+                # from the same pool and is released by
+                # `_release_transient_cstr_args` right after the one call
+                # that consumes it, so an Int-keyed dict in a hot loop still
+                # leaks nothing.
+                iv = (val if typ == 'int64_t'
+                      else gen._new_val('int64_t', f'(int64_t){val}'))
+                ikey = gen._call_expr('char *', 'mojo_int_str_transient',
+                                     [('int64_t', iv)])
+                gen._cstr_key_src[ikey] = val
+                return 'char *', ikey
             # A dict operation's key that is an untracked int64_t: hand the
             # consumer the raw machine WORD instead of a string. `_emit_call`
             # turns the dict call into its `_kw` twin, which decides string vs
@@ -2236,6 +2372,32 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         if transient:
             gen._cstr_key_src[key] = '0'
         return 'char *', key
+    if typ in ('MojoList *', 'MojoSet *', 'MojoDict *') and transient and word_ok:
+        # A CONTAINER used as a dict key. This used to fall through to the raw
+        # `(char *)value` below, which makes the key the container's ADDRESS —
+        # so `d[(p, mtime)]` never found the entry an equal tuple stored, every
+        # miss re-inserted, and with no GC the tuple leaked per miss (about 16
+        # of the 19 GB live on `mojoc --dump-full fire.py`; see
+        # bugs/PERF_selfhost_memory_leak_hunt.md).
+        #
+        # The fix is in the runtime (`mojo_dict_key_for` renders a tuple's
+        # CONTENT into a length-delimited key) and this is the half that routes
+        # to it: hand the raw WORD over, exactly as the untracked-int64_t arm
+        # above does, so `_apply_kw_keys` selects the `_kw` twin and the twin
+        # decides between the three kinds a key word can be. A new pair of
+        # `mojo_dict_*_container` entry points would have meant a second
+        # dispatch table to keep in step with this one.
+        #
+        # `word_ok` is the dict-key signal, so this arm is reached ONLY for a
+        # key: a container in any other position keeps the raw cast below,
+        # which is what it wants.
+        # `ipw`, not `val`: `_apply_kw_keys` emits the registered expression
+        # as the `int64_t` argument of the `_kw` twin verbatim, and this
+        # codegen rejects an implicit pointer-to-integer conversion.
+        ipw = gen._new_val('int64_t', f'(int64_t){val}')
+        marker = gen._new_val('char *', f'(char *){ipw}')
+        gen._kw_key_src[marker] = ipw
+        return 'char *', marker
     if typ != 'char *':
         return 'char *', gen._new_val('char *', f'(char *){val}')
     return typ, val
@@ -3062,6 +3224,17 @@ def _list_repr_fn(gen, rav: str) -> str:
     # different shape from the enumerate/zip pairs handled above.
     if gen._elem_types.get(rav) == 'MojoList *' and nested == 'int64_t':
         return 'mojo_repr_list_intlists'
+    # A list of inner lists/tuples whose slots are NOT all one kind —
+    # `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]` — goes before the
+    # branches below for the same reason `mojo_repr_list_kinds` does: the one
+    # container-wide ctype says nothing about what is inside, and the uniform
+    # helpers read every inner slot through a single accessor. So an int 0 in a
+    # non-first slot printed as `None` and a double printed its raw IEEE-754
+    # bits (or faulted in mojo_read_type_tag_safe when those bits looked like a
+    # heap address). `_tuple_slot_types` records the pattern per inner slot, so
+    # hand it to the one helper that reads each inner slot by its own kind.
+    if gen._elem_types.get(rav) == 'MojoList *' and _tuple_slot_kind_bytes(gen, rav):
+        return 'mojo_repr_list_slotkinds'
     # A `struct.unpack` result whose format MIXES kinds goes FIRST, before the
     # uniform branches below: its one container ctype is the degraded
     # 'int64_t' _struct_elem_ctype returns for any non-uniform format, so the
@@ -3094,12 +3267,49 @@ def _list_repr_fn(gen, rav: str) -> str:
 # The bytes are from a fixed alphabet, so the pooled string needs no C escaping.
 _STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's'}
 
+# The same alphabet for a list of inner lists/tuples that share one per-slot
+# pattern — `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]`. Keyed on the CTYPE
+# `_tuple_slot_types` records, so it accepts every spelling that map does
+# ('int64_t'/'int'/'char' all mean the int accessor) rather than only the three
+# a `struct` format string can produce.
+_TUPLE_SLOT_KIND_BYTE = {'int': 'i', 'int64_t': 'i', 'char': 'i', '_Bool': 'i',
+                         'double': 'd', 'char *': 'p', 'MojoStr *': 'p',
+                         'MojoBytes *': 's', 'MojoList *': 'l',
+                         'MojoDict *': 'l', 'MojoSet *': 'l'}
+
 
 def _struct_slot_kind_bytes(gen, rav: str) -> str | None:
     kinds = gen._struct_slot_kinds.get(rav)
     if not kinds or len(set(kinds)) == 1:
         return None
     return ''.join(_STRUCT_KIND_BYTE[k] for k in kinds)
+
+
+def _tuple_slot_kind_bytes(gen, rav: str) -> str | None:
+    """The per-slot kind string for a list of inner lists/tuples that all share
+    one pattern, or None when it has no recorded per-slot types or the pattern
+    is uniform (uniform is the `mojo_repr_list_intlists` / `mojo_repr_list_doubles`
+    / `mojo_repr_list_kinds` cases, which take one accessor for the whole list
+    and must not be shadowed by this one).
+
+    An unrecognised slot ctype returns None rather than guessing an 'i': the
+    generic walker it falls back to can still be wrong, but it fails by
+    printing a pointer decimal, whereas claiming 'i' would hand a struct pointer
+    to an int accessor and call it exact.
+    """
+    slots = gen._tuple_slot_types.get(rav)
+    if not slots:
+        return None
+    out = []
+    for ct in slots:
+        b = _TUPLE_SLOT_KIND_BYTE.get(_as_str(ct))
+        if b is None:
+            return None
+        out.append(b)
+    kinds = ''.join(out)
+    if len(set(kinds)) == 1:
+        return None
+    return kinds
 
 
 def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
@@ -3118,6 +3328,8 @@ def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
     args = [('MojoList *', lst if lst is not None else key)]
     if fn == 'mojo_repr_list_kinds':
         args.append(('const char *', gen._intern_string(_struct_slot_kind_bytes(gen, key))))
+    elif fn == 'mojo_repr_list_slotkinds':
+        args.append(('const char *', gen._intern_string(_tuple_slot_kind_bytes(gen, key))))
     return fn, args
 
 
@@ -3657,10 +3869,16 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     # every emitted reference. FRESH name, not `it_val = _as_str(it_val)`:
     # reassigning the param re-widens it via the same unification.
     _iv = _as_str(it_val)
-    # Detect tuple unpacking target: "_, av" or "(_, av)"
+    # Detect tuple unpacking target: "(_, av)" — a parenthesised group
+    # (fire_compiler.is_tuple_target), or the bare comma form "_, av" that
+    # `_parse_generator_target` produces for `for a, b in ...` inside a
+    # comprehension. A 1-tuple target is `(a)` — parenthesised but with no
+    # comma inside — so testing `',' in inner_str` alone missed it and
+    # `[y for (y,) in [(1,), (2,)]]` bound the whole item per iteration
+    # (printing `[0, 0]` / `[(1,), (2,)]` where CPython prints `[1, 2]`).
     target_str = gen0.target.strip()
     inner_str = target_str[1:-1].strip() if (target_str.startswith('(') and target_str.endswith(')')) else target_str
-    if ',' in inner_str:
+    if _for_target_is_tuple(target_str) or ',' in inner_str:
         # Tuple target: each element of the outer list is a sub-list
         # (tuple). Mirrors _gen_for_list's identical, already-fixed
         # per-slot logic (see its own comment for the history): pick
@@ -3703,11 +3921,13 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             # only its INNER names get declared, as boxed int64_t (the
             # assignment recursion below reads the slot as an opaque
             # boxed pair; mirrors _gen_for_list's identical convention).
-            if vn.startswith('(') and vn.endswith(')'):
-                for _nv in _split_top_level_comma(vn[1:-1].strip()):
-                    _declare_target_name(_nv, 'int64_t')
-            else:
-                gen._declare_var(vn, se)
+            # Declares only: it appends to nothing, because a nested closure
+            # that mutates a captured list is the shape that has broken this
+            # compiler's own self-host before (see `replace_multiline_strings`
+            # in fire_compiler.py for the instance and the reason). The caller
+            # below owns the shadow bookkeeping.
+            for _bn in _compr_target_leaf_names(vn):
+                gen._declare_var(_bn, se)
 
         # index walk + `_as_str` — NOT `for vn, se in zip(var_names,
         # slot_elems)`: the zip 2-tuple unpack boxes both slots on the
@@ -3715,10 +3935,17 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         # and `mojo_str_cat` in the decl builder ran `strlen()` on
         # garbage (a hard segfault on the single-TU `--dump
         # myinterpreter.py`, in a list comprehension with a tuple target).
+        saved_slots = []
         for _czi in range(len(var_names)):
             _cvn = _as_str(var_names[_czi])
             _cse = _as_str(slot_elems[_czi]) if _czi < len(slot_elems) else 'int64_t'
             _declare_target_name(_cvn, _cse)
+            # Own binding per bound name, exactly as the single-target branch
+            # below: `[(a, b) for a, b in pairs]` shadows BOTH names, and each
+            # one's token is kept so the enclosing function's `a`/`b` come
+            # back when the comprehension ends.
+            for _bn in _compr_target_leaf_names(_cvn):
+                saved_slots.append((_bn, _compr_bind_target(gen, _bn, _cse)))
         len64 = gen._new_val('int64_t', f'mojo_list_len ({_iv})')
         idx64 = gen._new_val('int64_t', '(int64_t)0')
         bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -3783,9 +4010,13 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         gen._emit(f"  {idx64} = {st};")
         gen._emit(f"  goto {bb_cond};")
         gen._emit_label(bb_after)
+        for _sn, _st in saved_slots:
+            _compr_restore_target(gen, _sn, _st)
         return
     elem = _as_str(gen._elem_of(_iv))
-    gen._declare_var(_as_str(gen0.target), elem)
+    # Own binding — see `_compr_bind_target`. Restored at the end of this
+    # function, below.
+    saved_target = _compr_bind_target(gen, _as_str(gen0.target), elem)
     # FRESH `char *` view of the loop-target C name: `gen0.target` (an AST
     # str field) erases to int64_t on the self-hosted path, so a bare
     # `f'  {gen0.target} = ...'` LVALUE emitted a raw ASLR pointer decimal
@@ -3837,6 +4068,9 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
+    # The comprehension is over: the enclosing function's own binding for this
+    # name is live again (see `_compr_restore_target`).
+    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
@@ -3880,9 +4114,14 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     _inner_str = (_target_str[1:-1].strip()
                   if (_target_str.startswith('(') and _target_str.endswith(')'))
                   else _target_str)
-    is_tuple_target = (',' in _inner_str and tuple_slot_ctypes is not None)
+    # `_for_target_is_tuple` rather than `',' in _inner_str`: a 1-tuple
+    # target `(a)` is parenthesised with NO comma inside, so the comma test
+    # alone called it a plain single-name bind and the whole item went to
+    # `a`.
+    is_tuple_target = ((_for_target_is_tuple(_target_str) or ',' in _inner_str)
+                       and tuple_slot_ctypes is not None)
     if is_tuple_target:
-        var_names = [v.strip() for v in _inner_str.split(',')]
+        var_names = _for_target_slots(_target_str)
     else:
         var_names = None
         gen._declare_var(gen0.target, vct,
@@ -3977,6 +4216,94 @@ def _compr_target_is_shadowed(gen, target) -> bool:
     return _as_str(target) in gen.var_types
 
 
+def _compr_target_leaf_names(target_str: str) -> list:
+    """The source names a comprehension target binds, in binding order.
+
+    A parenthesised slot is not itself a variable, so `(a, (b, c))` binds
+    `a`, `b`, `c` and not `(a, (b, c))`. One walk, so the declaration side and
+    the restore side cannot disagree about how many bindings there are or what
+    they are called — the same reason `_gen_for_list`'s per-slot machinery is
+    bracket-aware rather than a `split(',')`.
+    """
+    _t = _as_str(target_str).strip()
+    if _t.startswith('(') and _t.endswith(')'):
+        out = []
+        for _nv in _split_top_level_comma(_t[1:-1].strip()):
+            out.extend(_compr_target_leaf_names(_nv))
+        return out
+    return [_t]
+
+
+def _compr_bind_target(gen, name, ctype):
+    """Declare a comprehension's loop target as a binding of its OWN, and
+    return the token `_compr_restore_target` needs (None when the name was
+    free, so the common case allocates nothing).
+
+    A comprehension's `for` target is a new binding in the comprehension's own
+    scope in every language here, so it can never reuse the enclosing
+    function's C variable for that source name — and when it does, the damage
+    is not subtle. Measured, six lines of plain Python (a `class` lowers to a
+    struct, so the fixture is something CPython can be the oracle for; the
+    regression is `test_gimple_runner.py`'s
+    `comprehension_target_shadows_struct_local`): with a `struct Tok *` local
+    named `t` in scope, `[t for t in names]` re-declared nothing, so the
+    `char *` element was routed through an `(int64_t)` temp into the existing
+    `Tok *` variable and gcc refused the whole program — `assignment to
+    'Tok *' from 'int64_t' makes pointer from integer without a cast`. The same
+    input with `t` an `int64_t` built, ran, and was silently wrong instead.
+
+    So this is the `_declare_var(..., force=True)` the other comprehension
+    lowerings already pass (see `_compr_target_is_shadowed`'s own docstring),
+    applied where it was MISSING: every comprehension whose iterable lowers to
+    a `MojoList *` goes through `_compr_list_loop`, whatever its result kind, so
+    the list/set/dict comprehensions were all reaching the one loop helper that
+    did not shadow.
+    """
+    _n = _as_str(name)
+    if not _compr_target_is_shadowed(gen, _n):
+        gen._declare_var(_n, ctype)
+        return None
+    saved = (gen._c_names.get(_n), gen.var_types.get(_n),
+             _n in gen._elem_types, gen._elem_types.get(_n),
+             _n in gen._actual_types, gen._actual_types.get(_n))
+    gen._declare_var(_n, ctype, force=True)
+    return saved
+
+
+def _compr_restore_target(gen, name, saved):
+    """Undo `_compr_bind_target`'s shadow: put the enclosing function's binding
+    back under that source name.
+
+    Without this the shadow would last until the end of the function, and the
+    comprehension's LAST element would be what every later read of that name
+    sees — trading a loud compile error for a silent wrong answer on
+    `a = [t for t in names]` followed by `t.k`. The C declaration the shadow
+    made is left alone (`_declare_var`'s force branch never touches the old
+    one; it is still valid C, just no longer reachable under that name), and
+    the free-name case restores nothing because nothing was saved.
+    """
+    if saved is None:
+        return
+    _n = _as_str(name)
+    prev_cname, prev_type, had_elem, prev_elem, had_actual, prev_actual = saved
+    if prev_cname is None:
+        gen._c_names.pop(_n, None)
+    else:
+        gen._c_names[_n] = prev_cname
+    gen.var_types[_n] = prev_type
+    if had_elem:
+        gen._elem_types[_n] = prev_elem
+    else:
+        gen._elem_types.pop(_n, None)
+    # `_actual_types` too, because `_emit_slot_assign`'s string branch writes
+    # one for the TARGET name (`gen._actual_types[vn] = 'char *'`), and a later
+    # read of the enclosing binding asks that table what it holds.
+    if had_actual:
+        gen._actual_types[_n] = prev_actual
+    else:
+        gen._actual_types.pop(_n, None)
+
+
 def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop
     # A source set of strings (e.g. `frozenset({'a','b'})`) must round-trip
@@ -4028,6 +4355,41 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
         # type must not un-poison it, so the '' is sticky (`_cur and ...`
         # above never re-enters this branch once poisoned).
         gen._dict_callable_ret[dict_val] = ''
+
+
+def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
+                              val_ctype: str, val: str, val_node) -> None:
+    """The one dict store of an integer-ish VALUE, shared by the dict literal
+    (`_lower_dict_literal`), the dict comprehension (`_lower_dict_compr`),
+    the subscript store `d[k] = v` and the two `d[k] = v` shapes that reach a
+    dict through an opaque int-typed receiver — five copies of the same three
+    lines, which is how they came to disagree.
+
+    A Python bool and the integer 1/0 are the same int64_t slot here (see
+    `_lower_BoolLiteral`), so the store's TYPE cannot tell them apart; the
+    expression can, and `is_python_bool_expr` is the one predicate that says
+    so. When it does, the store goes through `mojo_dict_set_bool`, which tags
+    THAT slot `_DictSlot.kind == 3` — the dict's repr then prints True/False
+    for that value alone. This replaced a whole-dict registry
+    (`mojo_mark_dict_bool_values`, since deleted): one bool value made every
+    OTHER value in the same dict print as True/False too, so
+    `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
+
+    `note_dict_callable_ret` runs first for both branches — a stored callable
+    keeps its return type whatever its slot kind is.
+
+    The store goes through `_emit_call`, NOT a raw `gen._emit`, because that
+    is what resolves the placeholder key `_char_to_cstr` handed out: an
+    integer key arrives as a raw machine word and `_apply_kw_keys` rewrites the
+    call to the `_kw` twin (`mojo_dict_set_int_kw(d, 3, v)`). A raw emit skips
+    that and hands the runtime `(char *)3` as a key to hash, which segfaults."""
+    gen._note_dict_callable_ret(dict_val, val)
+    vv64 = gen._to_int64(val_ctype, val)
+    _suffix = 'bool' if gimple_exprtypes.is_python_bool_expr(gen, val_node) else 'int'
+    _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
+    gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _suffix,
+                   [('MojoDict *', dict_val), (key_ctype, key_val),
+                    ('int64_t', vv64)])
 
 
 def _gen_print(gen, args: list, kwargs: list = None):
@@ -4300,16 +4662,11 @@ def _eval_const_bool(gen, node) -> bool | None:
                                            _comptime_call_hook(gen))
 
 def _split_top_level_comma(s: str) -> list[str]:
-    """Split s by top-level commas only (bracket-aware)."""
-    parts, depth, start = [], 0, 0
-    for i, c in enumerate(s):
-        if c in '([': depth += 1
-        elif c in ')]': depth -= 1
-        elif c == ',' and depth == 0:
-            parts.append(s[start:i].strip())
-            start = i + 1
-    parts.append(s[start:].strip())
-    return parts
+    """Split `s` by top-level commas only (bracket-aware) — the tree's one
+    splitter, `fire_compiler._split_top_level_commas`, re-exported under the
+    name this module's call sites use. This used to be a second copy with
+    its own `([`-only depth tracking."""
+    return _fc_split_top_level_commas(s)
 
 # Per-part parse results for `_dedup_variadic_externs`, keyed by the part's
 # exact text: (concrete, variadic) function names, or None-absent.

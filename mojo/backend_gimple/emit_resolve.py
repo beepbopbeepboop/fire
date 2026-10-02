@@ -556,6 +556,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._emitted_structs = gen._emitted_structs
                 temp_gen._struct_allocs_needed = gen._struct_allocs_needed  # share: reflection dispatch scoping (see gen_module) needs every allocated struct visible, not just the root module's own
                 temp_gen._str_pool = gen._str_pool
+                temp_gen._str_pool_declared = gen._str_pool_declared  # share: one forward declaration per _slit_N in the TU, not one per module (see its own declaration)
                 temp_gen._regex_patterns = gen._regex_patterns  # share: finditer() lowering (see BACKLOG-CODEGEN.md §4f)
                 temp_gen._regex_progs = gen._regex_progs        # share: bubble compiled regex data up to root preamble
                 temp_gen._regex_progs_defined = gen._regex_progs_defined  # share: avoid duplicate emission across recursive paths
@@ -2985,6 +2986,53 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._tuple_slot_types[res] = gen._tuple_slot_types[_iv_raw]
         return
 
+    if _inner is not None and node.kind == 'set':
+        # Same nesting, and the merge is one call rather than a loop:
+        # `mojo_set_update` walks the source's slots and re-adds each element
+        # under its OWN tag (`mojo_set_add_int` / `mojo_set_add_str`), so the
+        # result is deduplicated per element exactly as the single-clause
+        # `mojo_set_add_*` arm is, not concatenated. `for i in A for j in B`
+        # is `update({elt for j in B} for each i in A)`.
+        gen._compr_pending_inner = None
+        _ir = gen.lower_expr(_inner)
+        _it = _as_str(_ir[0])
+        _iv_raw = _as_str(_ir[1])
+        _iv = _iv_raw
+        if _it != 'MojoSet *':
+            _iv = gen._new_val('MojoSet *', f'(MojoSet *){_iv_raw}')
+        gen._emit_call('void', '', 'mojo_set_update',
+                       [('MojoSet *', res), ('MojoSet *', _iv)])
+        # The element type, as the single-clause set arm records it: without it
+        # `sorted({s for s in strs for c in s})` cannot type its result and
+        # yields raw char* decimals (see that arm's comment).
+        if _iv_raw in gen._elem_types:
+            gen._elem_types[res] = gen._elem_types[_iv_raw]
+        return
+
+    if _inner is not None and node.kind == 'dict':
+        # `mojo_dict_update` is the dict sibling of `mojo_set_update`: it
+        # re-inserts each live pair under its own `keykind`/`kind`, so an
+        # integer-keyed pair stays integer-keyed and a string value stays a
+        # string rather than being re-read as an int64_t. The inner
+        # comprehension is a DICT comprehension (same `kind`), so its key/value
+        # expressions are lowered by the same `_char_to_cstr` + typed-set path
+        # the single-clause case uses -- `for i in A for j in B` is
+        # `update({k: v for j in B} for each i in A)`.
+        gen._compr_pending_inner = None
+        _ir = gen.lower_expr(_inner)
+        _it = _as_str(_ir[0])
+        _iv_raw = _as_str(_ir[1])
+        _iv = _iv_raw
+        if _it != 'MojoDict *':
+            _iv = gen._new_val('MojoDict *', f'(MojoDict *){_iv_raw}')
+        gen._emit_call('void', '', 'mojo_dict_update',
+                       [('MojoDict *', res), ('MojoDict *', _iv)])
+        # The dict's VALUE type, keyed as the single-clause dict arm's
+        # consumers key it (`d[k]` / `d.get(k)` read `_dict_val_types`).
+        if _iv_raw in gen._dict_val_types:
+            gen._dict_val_types[res] = gen._dict_val_types[_iv_raw]
+        return
+
     if node.kind == 'list' or node.kind == 'generator':
         # `_lower_comprehension` initializes a 'generator' comprehension
         # identically to 'list' ("convert to list for simplicity" — see
@@ -3017,6 +3065,18 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         gen._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
         # Track element type so downstream for-loops use the right accessor
         gen._elem_types[res] = et
+        # An element that is ITSELF a list/tuple (`[[5, j] for j in range(3)]`)
+        # carries a SECOND map, `_nested_elem_types`: what the inner containers
+        # hold. The single-clause path recorded only `_elem_types` here, so the
+        # result was describable as "a list of lists" and nothing more —
+        # `_list_repr_fn`'s `mojo_repr_list_intlists` branch needs the nested
+        # entry to pick the accessor that reads an inner slot as an int, and
+        # without it the generic walker read slot 0 of the first inner list
+        # through its None-sentinel heuristic, so the int 0 of `[5, 0]` printed
+        # as `None`. Mirrors _lower_list_literal's per-element carry (the same
+        # two lines, for the same reason, on the literal path).
+        if et == 'MojoList *' and ev in gen._elem_types:
+            gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
         # A comprehension of TUPLES (`[(n, f) for n, f in funcs]`) — carry
         # the heterogeneous tuple's per-slot types so a later
         # `for n, f in test_funcs:` reads each slot with the right accessor.
@@ -3072,13 +3132,10 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
                 vv = vv_tmp
             gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
         else:
-            # See the dict-literal case's identical comment: vt alone
-            # can't distinguish a real bool literal from a genuine int.
-            if gimple_exprtypes.is_python_bool_expr(gen, node.key):
-                gen._emit(f"  mojo_mark_dict_bool_values ({res});")
-            gen._note_dict_callable_ret(res, vv)
-            vv64 = gen._to_int64(vt, vv)
-            gen._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
+            # See the dict-literal case's identical comment: vt alone can't
+            # distinguish a real bool literal from a genuine int, so the
+            # shared store helper asks `is_python_bool_expr` instead.
+            gen._emit_dict_int_value_store(res, kt, kv, vt, vv, node.key)
 
 
 

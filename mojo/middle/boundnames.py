@@ -16,6 +16,9 @@ from fire_compiler import (
     NonlocalStmt,
     IdentExpr, IfStmt, ListExpr, MultiAssignStmt, TryStmt, TupleExpr,
     VarDecl, WhileStmt, WithStmt, _as_str,
+    _split_top_level_commas as _fc_split_top_level_commas,
+    is_tuple_target as _fc_is_tuple_target,
+    for_target_slots as _fc_for_target_slots,
 )
 
 
@@ -63,33 +66,21 @@ class _OrderedNames:
 
 
 def _lbn_split_commas(s: str) -> list:
-    """Split on top-level commas only (paren depth 0).
+    """Split on top-level commas only (paren depth 0), dropping empty parts.
 
     A naive `.split(',')` tore nested tuple-target slots into paren-
     carrying fragments (`'(_n, (_mod, _sem))'` → `'_n'`, `'(_mod'`,
     `'_sem)'`). Shared by `_lbn_target_names` and formal's for-target
-    emit."""
-    parts = []
-    depth = 0
-    cur = []
-    for ch in s:
-        if ch == "(":
-            depth += 1
-            cur.append(ch)
-        elif ch == ")":
-            depth -= 1
-            cur.append(ch)
-        elif ch == "," and depth == 0:
-            part = "".join(cur).strip()
-            if part:
-                parts.append(part)
-            cur = []
-        else:
-            cur.append(ch)
-    part = "".join(cur).strip()
-    if part:
-        parts.append(part)
-    return parts
+    emit.
+
+    A thin wrapper over the tree's ONE bracket-aware splitter
+    (`fire_compiler._split_top_level_commas`, re-exported here as
+    `_fc_split_top_level_commas`) — this used to be a fourth copy with its
+    own paren-only depth tracking, which meant it disagreed with the other
+    three about bracket characters they each handled differently. Only the
+    empty-part drop is local: a trailing comma is the only thing that can
+    produce one."""
+    return [p for p in _fc_split_top_level_commas(s) if p]
 
 
 def _lbn_target_names(t) -> list:
@@ -105,9 +96,9 @@ def _lbn_target_names(t) -> list:
     fallback). Returns LEAF names only (nested groups flattened)."""
     if isinstance(t, str):
         name = t.strip()
-        if name.startswith("(") and name.endswith(")"):
+        if _fc_is_tuple_target(name):
             names = []
-            for part in _lbn_split_commas(name[1:-1]):
+            for part in _fc_for_target_slots(name):
                 names.extend(_lbn_target_names(part))
             return names
         # Bare comma form: comprehension Generator.target is the parser's

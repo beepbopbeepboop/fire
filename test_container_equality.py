@@ -369,13 +369,13 @@ CASES = [
         "    return 0")),
 ]
 
-# Ordering comparisons between containers are NOT covered here and are a
-# separate open bug: they still lower to a pointer comparison, and the CPython
-# this diffs against (3.14) answers `a < b` for lists and sets, so a
-# `mojo_list_lt` is now ANSWERABLE rather than a refusal. See
-# bugs/CODEGEN_container_ordering_is_pointer_identity.md. No case here uses
-# `<`, `>`, `<=` or `>=` on a container, so a future change to those cannot be
-# mistaken for coverage this test provides.
+# Ordering comparisons between containers are NOT covered here: they are a
+# separate lowering with their own CPython diff, in
+# test_container_ordering.py (`mojo_list_cmp` / `mojo_set_cmp` /
+# `mojo_value_cmp`, folded by `mojo_cmp_fold`). No case here uses `<`, `>`,
+# `<=` or `>=` on a container, so a future change to those cannot be mistaken
+# for coverage this test provides -- and that file cannot be mistaken for
+# coverage of `==`, which it also does not duplicate.
 
 
 def _py_source(src: str) -> str:

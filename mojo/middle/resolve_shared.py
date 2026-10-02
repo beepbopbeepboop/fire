@@ -758,7 +758,25 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     if _joined == 'char *' and any(
             _t and _t.endswith(' *') and _t != 'char *' for _t in types):
         return 'int64_t'
-    return gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
+    # A literal of NOTHING BUT Python bools is a `_Bool` list, which
+    # `_list_repr_fn` routes to `mojo_repr_list_bools` (that helper exists for
+    # exactly `[True, False]`, whose elements `_quick_type` already types
+    # `_Bool`). The estimate has to be made HERE rather than by teaching
+    # `_quick_type` that a `bool`-annotated struct field is a `_Bool`: that
+    # estimator also writes the enclosing function's PROTOTYPE and every local
+    # declaration, so claiming `_Bool` for a field the lowering really loads as
+    # an `int` would write a `_Bool x = <int>` store into a `__GIMPLE` body —
+    # which gcc rejects outright. The literal's element type is this
+    # function's own decision (it already overrides the join for a literal that
+    # spells out a `None`, and `_lower_list_literal` checks that again), so the
+    # same kind of override is the right shape here. Only the ALL-bool literal
+    # answers `_Bool`: a mixed one joins exactly as before, because
+    # `TypeLattice.join` widens `_Bool` to `int` and a genuine 0/1 int must
+    # keep printing as one.
+    for _e in elements:
+        if not gimple_exprtypes.is_python_bool_expr(gen, _e):
+            return gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
+    return '_Bool'
 
 def _prepass_callee_key(gen, node) -> str | None:
     """Symbol key of a CallExpr's callee for the pre-pass's

@@ -461,28 +461,19 @@ def _gen_stmt_VarDecl(gen, node):
             gen._generator_var_api[node.name] = gen._generator_var_api[v]
         if actual_dst == 'MojoAsync *' and v in gen._async_var_api:
             gen._async_var_api[node.name] = gen._async_var_api[v]
-        # `var f = <closure value>` (see _lower_IdentExpr's closure-value
-        # materialization): carry the closure's real return type along
-        # with the variable so a later `f()` (_lower_bound_method_call)
-        # narrows the result correctly — mirrors the AssignStmt path's
-        # identical propagation (see _track_pointer_actual_type's caller
-        # a few lines below this method).
-        if actual_dst == 'MojoBoundMethod *' and v in gen._bound_method_ret_types:
-            gen._bound_method_ret_types[node.name] = gen._bound_method_ret_types[v]
-        # Any callable VALUE assigned to a variable (`f = lambda: False`):
-        # carry its real return type onto the variable too, for the same
-        # reason and by the same mechanism as the two propagations above —
-        # the call site keys on the VARIABLE's name, not the RHS temp the
-        # value was materialized into. Without this the type is lost at the
-        # assignment and `f()` prints `0` for a `lambda: False`.
-        if v in gen._callable_ret_types:
-            gen._callable_ret_types[node.name] = gen._callable_ret_types[v]
-        # Same for the dict's own record of what was stored in it: a dict
-        # LITERAL is materialized into a temp and only then bound to the
-        # variable, so `d = {"k": lambda: False}; print(d["k"]())` looked the
-        # temp up and found nothing.
-        if v in gen._dict_callable_ret:
-            gen._dict_callable_ret[node.name] = gen._dict_callable_ret[v]
+        # `var f = <closure value>` / `var f = lambda: False` (see
+        # _lower_IdentExpr's closure-value materialization and
+        # _lower_LambdaExpr): carry what the callable REALLY returns onto the
+        # variable, so a later `f()` (_lower_bound_method_call /
+        # _lower_fnptr_call_value) narrows the result correctly instead of
+        # assuming the homogenized `int64_t` — without it `print(f())` printed
+        # `0` for a `lambda: False`. One shared carry for all three callable
+        # tables (`var f = <bound method>`, `var f = <lambda>`, and the dict's
+        # own single agreed record), because the AssignStmt path below had the
+        # same three tables hand-copied and the two module-global store
+        # branches had none of them — a copy that is silently forgotten is a
+        # wrong value with exit 0, not a build error.
+        ginf.carry_callable_ret_types(gen, v, node.name)
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,
@@ -640,6 +631,17 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
     char/string dispatch. See bugs/CODEGEN_selfhost_actual_types_
     identifier_field_key.md for the still-open general form of this."""
     tname = _as_str(tname)
+    # The complement of everything below: carry the POSITIVE integer record
+    # across the assignment, so `k = 3000000000` then `d[k]` is still known
+    # to be an integer at the dict site rather than handed to the runtime's
+    # range-only discriminator (see `gen._int_word_vals`). `discard` on the
+    # other branch is what keeps this sound rather than optimistic — `k = "s"`
+    # later must NOT leave `k` marked, and every RHS this codegen cannot
+    # vouch for takes that branch.
+    if v in gen._int_word_vals:
+        gen._int_word_vals.add(tname)
+    else:
+        gen._int_word_vals.discard(tname)
     if dst != 'int64_t':
         if v in gen._struct_field_owners:
             gen._struct_field_owners[tname] = list(gen._struct_field_owners[v])
@@ -901,6 +903,13 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._elem_types[tname] = gen._elem_types[v]
                     if v in gen._nested_elem_types:
                         gen._nested_elem_types[tname] = gen._nested_elem_types[v]
+            # ...and the callable return-type tables, which are the one
+            # propagation neither global branch below ever had: this function
+            # RETURNS right here, so every store to a `global`-declared name
+            # returned with all three tables still keyed on the RHS temp. A
+            # module-level `f = lambda: False` reached through one of these
+            # two branches printed `0`. See ginf.carry_callable_ret_types.
+            ginf.carry_callable_ret_types(gen, v, tname)
             return
         # Genuine module-scope statement (we're generating THIS module's own
         # _toplevel()/_{module}_toplevel() body — see _in_toplevel_gen) whose
@@ -960,6 +969,12 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._actual_types[tname] = gen._actual_types[v]
             elif v in gen._actual_types:
                 gen._actual_types[tname] = gen._actual_types[v]
+            # The callable return-type tables, for the same reason as the
+            # `_func_declared_globals` branch above: this is the path an
+            # ordinary MODULE-LEVEL `f = lambda: False` takes, and it returns
+            # here — without this the type stayed keyed on the RHS temp and
+            # `print(f())` printed `0`. See ginf.carry_callable_ret_types.
+            ginf.carry_callable_ret_types(gen, v, tname)
             return
         # Regular local variable assignment
         if tname not in gen.var_types:
@@ -1124,28 +1139,23 @@ def _gen_stmt_AssignStmt(gen, node):
         # `f = self.b` (a bound-method value, see _lower_bound_method_value):
         # carry the method's real return type along with the variable so a
         # later `f()` (_lower_bound_method_call) narrows the result
-        # correctly instead of assuming int64_t.
-        if dst == 'MojoBoundMethod *' and v in gen._bound_method_ret_types:
-            gen._bound_method_ret_types[tname] = gen._bound_method_ret_types[v]
+        # correctly instead of assuming int64_t. The same carry for every
+        # OTHER callable kind is the shared one just below — one definition,
+        # because three hand-written copies of it is how the two module-global
+        # store branches came to omit all of it.
+        ginf.carry_callable_ret_types(gen, v, tname)
         # A `MojoBoundMethod *` value stored into a local whose declared C
         # type is NOT `MojoBoundMethod *` — the var-type-inference join
         # with another branch's plain fn-pointer / lambda value collapsed
         # the slot to `void *`/`int64_t` (`if c: f = lambda: 42 else: f =
         # self.tell; f()`). The call site can't tell statically which kind
         # of callable is live, so record the name for dynamic dispatch
-        # (mojo_maybe_bound_call_N) — see _lower_maybe_bound_call.
+        # (mojo_maybe_bound_call_N) — see _lower_maybe_bound_call. Its return
+        # type rides along on the shared carry immediately above, which covers
+        # the `_Bool` a `lambda: 42`-vs-`self.tell` join would otherwise
+        # narrow to `int64_t`.
         if vtype == 'MojoBoundMethod *' and dst != 'MojoBoundMethod *':
             gen._bm_tainted_locals.add(tname)
-            if v in gen._bound_method_ret_types:
-                gen._bound_method_ret_types[tname] = gen._bound_method_ret_types[v]
-        # Any callable VALUE assigned to a variable — the AssignStmt path's
-        # identical propagation a few hundred lines above, same reason:
-        # `f = lambda: False` materializes the value into a temp, and the
-        # call site keys on the variable's name.
-        if v in gen._callable_ret_types:
-            gen._callable_ret_types[tname] = gen._callable_ret_types[v]
-        if v in gen._dict_callable_ret:
-            gen._dict_callable_ret[tname] = gen._dict_callable_ret[v]
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,
@@ -1453,8 +1463,8 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._emit_call('void', '', 'mojo_dict_set_bytes_str',
                                     [('MojoDict *', obj_v), ('MojoBytes *', idx_v), ('char *', v)])
                 else:
-                    gen._emit_call('void', '', 'mojo_dict_set_bytes_int',
-                                    [('MojoDict *', obj_v), ('MojoBytes *', idx_v), (vtype, v)])
+                    gen._emit_dict_int_value_store(obj_v, 'MojoBytes *', idx_v,
+                                                  vtype, v, node.value)
                 key_tmp = None
             else:
                 _, key_tmp = gen._char_to_cstr(it, idx_v, True, True)
@@ -1464,20 +1474,15 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._emit_call('void', '', 'mojo_dict_set_str',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
             else:
-                # Mark so generic repr() prints True/False instead of 1/0
-                # for this dict's values — see mojo_mark_dict_bool_values's
-                # doc comment in runtime/fire_runtime.c. A literal RHS was
+                # A Python bool RHS goes through `mojo_dict_set_bool`, which
+                # tags THAT slot so the dict's repr says True/False for it and
+                # leaves every other value alone — see
+                # `emit_dict_int_value_store`'s docstring. A literal RHS was
                 # the only shape recognised, so `d['a'] = b` for a `b = True`
                 # and `d['a'] = 1 == 1` both printed `{'a': 1}` while
-                # `print(b)` and `repr(b)` were already right; the one shared
-                # predicate is `is_python_bool_expr`, which the dict LITERAL
-                # store and the print dispatch use too.
-                if gimple_exprtypes.is_python_bool_expr(gen, node.value):
-                    gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
-                gen._note_dict_callable_ret(obj_v, v)
-                # Pass actual vtype so _emit_call can coerce pointers to int64_t
-                gen._emit_call('void', '', 'mojo_dict_set_int',
-                                [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
+                # `print(b)` and `repr(b)` were already right.
+                gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
+                                              vtype, v, node.value)
         else:
             # Opaque int-typed container: check if it's a list or dict
             if ot in ('int', 'int64_t'):
@@ -1528,12 +1533,8 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
-                    if gimple_exprtypes.is_python_bool_expr(gen, node.value):
-                        gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
-                    gen._note_dict_callable_ret(dp, v)
-                    # Pass actual vtype so _emit_call can coerce pointers to int64_t
-                    gen._emit_call('void', '', 'mojo_dict_set_int',
-                                    [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
+                    gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
+                                                  vtype, v, node.value)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -2800,11 +2801,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             elif ot == 'MojoDict *':
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
-                if gimple_exprtypes.is_python_bool_expr(gen, node.value):
-                    gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
-                gen._note_dict_callable_ret(obj_v, v)
-                gen._emit_call('void', '', 'mojo_dict_set_int',
-                                [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
+                gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
+                                              vtype, v, node.value)
             elif ot in ('int', 'int64_t'):
                 actual_type = gen._get_actual_type(ot, obj_v)
                 # Same read/write-symmetry rule as the other two subscript
@@ -2829,11 +2827,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True, True)
-                    if gimple_exprtypes.is_python_bool_expr(gen, node.value):
-                        gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
-                    gen._note_dict_callable_ret(dp, v)
-                    gen._emit_call('void', '', 'mojo_dict_set_int',
-                                    [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
+                    gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
+                                                  vtype, v, node.value)
             elif ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) not in gen.struct_field_types:
                 # Raw C pointer: use _mojo_at_ helper (GIMPLE doesn't allow
                 # ptr arithmetic) — mirrors _gen_stmt_AugAssignStmt's
@@ -4244,16 +4239,43 @@ def _gen_stmt_WithStmt(gen, node):
             gen._emit(f"  /* with: __enter__ ({struct_name}) */")
             enter_v = ctx_v
             enter_ret_t = et
+        # Register the item for its TEARDOWN before deciding anything about
+        # the `as` target, which is what the generator arm just above does.
+        # These five appends used to sit INSIDE `if item.alias is not None:`,
+        # so `with ctx():` — no `as` — appended nothing at all: `has_exit`
+        # below stayed False, no `setjmp`-protected region was emitted, and
+        # `_with_emit_exits` walked an empty list. `__enter__` was called, the
+        # body ran, and the teardown was never emitted. Not a wrong `__exit__`
+        # argument and not a missing `mojo_exc_pop` — no teardown at all, with
+        # exit 0, on every `with` whose context manager has one.
+        #
+        # Real Python calls `__exit__` for `with C():` too, so this is a
+        # compiled-path-only divergence, and `test_runtime_diff.py`'s A/B engine
+        # comparison cannot see it either: the two engines differ on the
+        # OUTPUT, and here the output can be identical (the body worked) while
+        # the teardown never ran.
+        #
+        # It was found on a LOCK: `build_stdlib_dylib`'s publish lock, where
+        # `with _OutputLock(out):` silently never released it and wedged every
+        # other process wanting the same lock for the life of the tree —
+        # exactly the cross-process situation the lock exists for. Any
+        # resource with an `__exit__` (a temp file, a transaction, a
+        # subprocess) leaks per iteration.
+        #
+        # `has_exit` and `_with_emit_exits` need no change: they already
+        # consume exactly these lists, and index-parallelism is the
+        # convention the generator arm established (which is why it is three
+        # lists and not a list of tuples).
+        _ctx_ts.append(ctx_t)
+        _ctx_vs.append(ctx_v)
+        _ctx_sns.append(struct_name)
+        _gctx_bases.append(None)   # keep index-parallel
+        _gctx_vs.append(None)
         if item.alias is not None:
             alias = _with_item_alias_name(item.alias)
             if alias not in gen.var_types:
                 gen._declare_var(alias, enter_ret_t)
             gen._safe_coerce_emit(enter_ret_t, gen.var_types[alias], enter_v, alias)
-            _ctx_ts.append(ctx_t)
-            _ctx_vs.append(ctx_v)
-            _ctx_sns.append(struct_name)
-            _gctx_bases.append(None)   # keep index-parallel
-            _gctx_vs.append(None)
 
     has_exit = False
     for _hxi in range(len(_ctx_sns)):
@@ -4293,10 +4315,37 @@ def _gen_stmt_WithStmt(gen, node):
         gen._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 
         gen._emit_label(bb_try)
+        # Set when the interceptor below has ALREADY emitted this region's
+        # teardown on an early-exit path, so the tail block below does not emit
+        # it a second time as unreachable code. A one-element list rather than
+        # a `nonlocal`, for the self-hosted compiled path.
+        _teardown_done = [False]
         for s in node.body:
             # break/continue lower to a bare `goto <loop label>;` and jump
             # out of this with's protected region same as an early return
             # — same leak as in _gen_stmt_TryStmt if unaccounted for.
+            #
+            # Both of those paths popped the exception stack and emitted
+            # NOTHING else, so the teardown never ran on them either: a
+            # `return` out of a `with` body, or a `continue`/`break` out of
+            # one, left the context manager's `__exit__` uncalled. That is
+            # pre-existing and hit the `as` spelling too — but the tail block
+            # below emits its teardown AFTER the body, i.e. after the `return`,
+            # so the very lines meant to clean up were themselves dead. The
+            # teardown has to be emitted BEFORE the statement that leaves.
+            #
+            # The `return` is caught at the STATEMENT level rather than in the
+            # emitter interceptor, because `_with_emit_exits`'s own docstring
+            # records that a nested closure in this function emitted NOTHING
+            # once the self-hosted binary compiled the compiler (a real
+            # stage1-vs-stage2 divergence). Anything that must be reliable here
+            # belongs outside the closure. `type(x).__name__` is the
+            # established spelling in this file family (see `_lower_LambdaExpr`'s
+            # `_bound` scan).
+            if type(s).__name__ == 'ReturnStmt':
+                _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns,
+                                 _gctx_bases, _gctx_vs)
+                _teardown_done[0] = True
             original_emit = gen._emit
             def intercepted_emit(line, rv=None, rt=None):
                 stripped = line.strip()
@@ -4305,6 +4354,9 @@ def _gen_stmt_WithStmt(gen, node):
                     f"goto {gen._loop_break_bb()};",
                 ):
                     original_emit("  mojo_exc_pop ();")
+                    _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns,
+                                     _gctx_bases, _gctx_vs)
+                    _teardown_done[0] = True
                     original_emit(line)
                     return
                 original_emit(line)
@@ -4316,12 +4368,13 @@ def _gen_stmt_WithStmt(gen, node):
         # and must pop the exception stack (_mojo_exc_top) exactly like
         # the normal-exit path does (see the matching fix and comment in
         # _gen_stmt_TryStmt — this is the same leak, in the `with`
-        # codegen instead of `try`).
+        # codegen instead of `try`). It does NOT re-emit the teardown when the
+        # interceptor already did it above (`_teardown_done`).
         if not gen._last_was_terminal:
             gen._emit("  mojo_exc_pop ();")
             _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
             gen._emit(f"  goto {bb_after};")
-        else:
+        elif not _teardown_done[0]:
             gen._emit("  mojo_exc_pop ();")
             _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
 

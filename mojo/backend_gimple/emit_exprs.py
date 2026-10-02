@@ -38,6 +38,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
+import mojo.backend_gimple.emit_infra as ginf
 
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
@@ -123,9 +124,17 @@ def lower_expr(gen, node) -> tuple[str, str]:
 def _lower_IntLiteral(gen, node) -> tuple[str, str]:
     value = _signed_int64(_as_intlit_node(node).value)
     if -0x80000000 <= value <= 0x7FFFFFFF:
-        return 'int', str(value)
+        _iv = str(value)
+        # An integer literal is the ONE value whose type needs no inference:
+        # it cannot be a pointer, at any magnitude. Recorded so a consumer
+        # that would otherwise ask the runtime to guess can be told (see
+        # `gen._int_word_vals`), which is what makes `d[3000000000] = 1` a
+        # dict write instead of a `strcmp` of address 3000000000.
+        gen._int_word_vals.add(_iv)
+        return 'int', _iv
     t = gen._new_temp('int64_t')
     gen._emit(f"  {t} = {_signed_int64_c_literal(value)};")
+    gen._int_word_vals.add(t)
     return 'int64_t', t
 
 
@@ -631,6 +640,19 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             # [1, 8]]`. Mirrors the _dict_nested_val_types copy just above.
             if name in gen._nested_elem_types:
                 gen._nested_elem_types[t] = gen._nested_elem_types[name]
+        # The CALLABLE side tables, same hop and same reason as the three just
+        # above — see `ginf.carry_callable_ret_types`'s docstring for why a
+        # module-level callable lost what it returns. Reading a global mints a
+        # FRESH temp, and `_lower_fnptr_call_value` keys its lookup on the C
+        # expression it was handed, not on the Mojo name, so without this copy
+        # every module-level callable printed the homogenized `int64_t` box:
+        #     e = lambda: False;  print(e())  ->  0         (False)
+        #     d = {"k": lambda: True}; print(d["k"]())  ->  0  (True)
+        #     f = m.truthy;      print(f())  ->  1         (True)
+        # while the identical spelling inside a `def` was already right — a
+        # local read returns the variable's own C name, which is the whole
+        # difference between the two.
+        ginf.carry_callable_ret_types(gen, name, t)
         # Resolve the C decl type through the same own-overlay helper the
         # module-globals struct field freeze (gen_module_impl's
         # `_declared_globals` loop) and the assignment-site coercion
@@ -2826,37 +2848,155 @@ def _eq_call_args(gen, ctype: str, kind: str, lv: str, lt: str,
 
 def _lower_container_eq(gen, op: str, lkind: str | None, lnode, lt: str, lv: str,
                         rkind: str | None, rnode, rt: str, rv: str) -> tuple[str, str]:
-    """`a == b` / `a != b` where at least one operand is statically a
-    container.
+    """`a == b` / `a != b` / `a < b` / `a <= b` / `a > b` / `a >= b` where at
+    least one operand is statically a container.
 
-    Same kind on both sides (the statically-typed case, and the one the
-    documented 43 GB compile hit) calls that kind's own predicate with its own
-    pointer type and element code, so a list of strings compares by CONTENT.
-    Every other pairing -- one operand erased to int64_t, or two different
-    kinds -- goes through `mojo_value_eq`, whose operands are int64_t words
-    because one of them may be a handle whose kind only the registry knows.
-    That case is deliberately NOT folded at compile time to a constant False
-    when the two static kinds differ: `_actual_types` is an inference table
-    and a wrong guess there is a wrong ANSWER, whereas the registry is what
-    the rest of this runtime already treats as the truth."""
+    One function for all six, because they are one decision. `==`/`!=` and the
+    four ordering operators differ only in which runtime entry point answers
+    them and in how the answer is folded, and the part that decides anything --
+    which kind each operand is, and hence which predicate can be trusted -- is
+    identical. Splitting them is how `==` got fixed and `<` did not.
+
+    Same kind on both sides (the statically-typed case) calls that kind's own
+    predicate with its own pointer type and per-side element code, so a list
+    of strings compares by CONTENT. Every other pairing -- one operand erased to
+    int64_t, or two different kinds -- goes through `mojo_value_eq` /
+    `mojo_value_cmp`, whose operands are int64_t words because one of them may
+    be a handle whose kind only the registry knows. That case is deliberately
+    NOT folded at compile time to a constant False when the two static kinds
+    differ: `_actual_types` is an inference table and a wrong guess there is a
+    wrong ANSWER, whereas the registry is what the rest of this runtime
+    already treats as the truth.
+
+    A DICT operand is refused for the ordering operators, which is CPython's
+    own answer rather than a limitation of this backend: `{'a':1} < {'b':2}`
+    raises TypeError on 3.14 as well. Two DIFFERENT kinds, and a container
+    against a non-container, are refused for the same reason. A refusal is
+    emitted as the same `mojo_raise_type_error` + never-taken-result shape
+    `_struct_kwarg_rejection` uses, so the surrounding expression still
+    typechecks."""
+    _is_ord = op in _ORD_CMP_OPS
+    if _is_ord and _ord_pair_is_refused(lkind, rkind):
+        return _lower_container_ord_refusal(gen, op, lkind, rkind, lt, rt)
     if lkind is not None and lkind == rkind:
         _kind = lkind
         _ctype = 'MojoList *' if lkind == 'list' else (
             'MojoDict *' if lkind == 'dict' else 'MojoSet *')
-        _fn = 'mojo_list_eq' if lkind == 'list' else (
-            'mojo_dict_eq' if lkind == 'dict' else 'mojo_set_eq')
+        if _is_ord:
+            _fn = 'mojo_list_cmp' if lkind == 'list' else 'mojo_set_cmp'
+        else:
+            _fn = 'mojo_list_eq' if lkind == 'list' else (
+                'mojo_dict_eq' if lkind == 'dict' else 'mojo_set_eq')
         _two = True
     else:
         _kind = lkind if lkind is not None else rkind
         _ctype = 'int64_t'
-        _fn = 'mojo_value_eq'
+        _fn = 'mojo_value_cmp' if _is_ord else 'mojo_value_eq'
         _two = False
     _args = _eq_call_args(gen, _ctype, _kind, lv, lt, rv, rt, _two)
-    _r = _as_str(gen._call_expr('int', _fn, _args))
+    if not _is_ord:
+        _r = _as_str(gen._call_expr('int', _fn, _args))
+        _t = gen._new_temp('_Bool')
+        _cmp = '!= 0' if op == '==' else '== 0'
+        gen._emit(f"  {_t} = {_r} {_cmp};")
+        return '_Bool', _t
+    # The ordering predicates return a THREE-WAY answer and the operator is one
+    # fold of it — but the operator is ALSO an argument, because a refusal has
+    # to name the operator the source spelled and only this site knows it.
+    # Folding in the runtime rather than emitting four comparison arms at each
+    # of the five call sites is what keeps the four operators from drifting:
+    # `<=` must be `c <= 0`, not `c < 0 || c == 0` re-derived anywhere.
+    _opv = _as_str(gen._new_val('int64_t', str(int(_ORD_CMP_OPS[op]))))
+    _args.append(('int64_t', _opv))
+    _c = _as_str(gen._call_expr('int', _fn, _args))
+    _fc = _as_str(gen._new_temp('int'))
+    gen._emit(f"  {_fc} = mojo_cmp_fold ({_c}, {_opv});")
     _t = gen._new_temp('_Bool')
-    _cmp = '!= 0' if op == '==' else '== 0'
-    gen._emit(f"  {_t} = {_r} {_cmp};")
+    gen._emit(f"  {_t} = {_fc} != 0;")
     return '_Bool', _t
+
+
+# The four ORDERING comparisons, and the MOJO_CMP_OP_* code each folds with.
+# The codes are the runtime's (fire_runtime.h), not a second numbering here --
+# a second spelling of the same table is the mistake the `==` family already
+# made once with the MOJO_EQ_* codes, where passing 3 for a bytes element
+# strcmp'd two `MojoBytes *`.
+_ORD_CMP_OPS = {
+    '<': 0,          # MOJO_CMP_OP_LT
+    '<=': 1,         # MOJO_CMP_OP_LE
+    '>': 2,          # MOJO_CMP_OP_GT
+    '>=': 3,         # MOJO_CMP_OP_GE
+}
+
+# Every comparison operator that is answered by a container's VALUE rather than
+# by the C pointer comparison the generic tail emits. `is` / `is not` are NOT in
+# this set: pointer identity is exactly what they mean.
+_CONTAINER_CMP_OPS = ('==', '!=', '<', '<=', '>', '>=')
+
+# The Python type name CPython's TypeError names for each lowering kind, which
+# is not the C one: a tuple is a list at the C level, and its marker is the
+# only thing that tells them apart.
+_ORD_CMP_TYPENAME = {'list': 'list', 'dict': 'dict', 'set': 'set'}
+
+
+def _ord_pair_is_refused(lkind: str | None, rkind: str | None) -> bool:
+    """Does this pair of lowering kinds have NO ordering in CPython?
+
+    Two kinds that DIFFER (`list` against `set`, `dict` against anything), a
+    dict on either side, and a container against a NON-container (`None` for
+    that operand's kind, which is what `_eq_operand_kind` returns for a scalar)
+    are all TypeError in CPython — `{'a':1} < {'b':2}` on 3.14 as much as
+    `[1] < 1`. Answering any of them with a comparison would invent a verdict
+    where the language has none.
+
+    NOT refused: two same-kind operands (compared), and — the case worth
+    stating — a list against a tuple. Both lower to `MojoList *`, so this
+    function cannot see them apart; the tuple MARKER decides, in the runtime,
+    where `mojo_list_cmp` raises with the two real type names. Deciding it here
+    from the AST would mean a second source of truth for "is this a tuple",
+    and the marker is the one the rest of the runtime already trusts."""
+    if lkind is None or rkind is None:
+        return True
+    return lkind != rkind or 'dict' in (lkind, rkind)
+
+
+def _lower_container_ord_refusal(gen, op, lkind, rkind, lt, rt) -> tuple[str, str]:
+    """CPython's own answer for an ordering there is none of: a TypeError.
+
+    `mojo_raise_type_error` longjmps, so the assignment after it is never
+    reached and exists only so the expression still typechecks -- the same
+    convention `_struct_kwarg_rejection` documents (`_STRUCT_RAISE_STUB`).
+
+    The type NAMES are best-effort and the comment on `_scalar_typename` says
+    why: the codegen tracks C types, not Python ones, so a `char *` operand is
+    reported as `str` whether it is one. That is the same answer CPython gives
+    for the shapes that reach here (a string literal, a container local), and a
+    slightly wrong type name in an exception message is worth far less than no
+    exception at all."""
+    _lt = _ORD_CMP_TYPENAME.get(lkind) or _scalar_typename(gen, lt)
+    _rt = _ORD_CMP_TYPENAME.get(rkind) or _scalar_typename(gen, rt)
+    _msg = gen._intern_string(gimple_ctypes._c_escape(
+        "'%s' not supported between instances of '%s' and '%s'"
+        % (op, _lt, _rt)))
+    gen._emit_call('void', '', 'mojo_raise_type_error', [('char *', _msg)])
+    _t = gen._new_temp('_Bool')
+    gen._emit(f"  {_t} = 0;")
+    return '_Bool', _t
+
+
+def _scalar_typename(gen, ctype: str) -> str:
+    """The Python type name for a non-container operand's C type, for the
+    TypeError text. Best-effort by construction -- the codegen does not track
+    Python types, only C ones -- so this reports what it knows rather than
+    refusing to answer."""
+    _t = _as_str(ctype)
+    if _t in ('char *', 'MojoStr *'):
+        return 'str'
+    if _t == 'MojoBytes *':
+        return 'bytes'
+    if _t in ('double', 'float'):
+        return 'float'
+    return 'int'
 
 
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
@@ -3241,19 +3381,45 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         gen._emit(f"  {t} = {eq_t} {cmp};")
         return '_Bool', t
 
-    # Container `==` / `!=` → Python VALUE equality, not the C pointer
-    # comparison the generic tail would emit. Placed BEFORE the string
-    # equality block below because that block claims any comparison with a
-    # string literal on one side: `some_list == "abc"` reached it and strcmp'd
-    # the list's address (a garbage answer, never False), where the runtime's
-    # answer is the honest one. `is` / `is not` are NOT here — pointer identity
-    # is exactly what they mean.
-    if op in ('==', '!='):
+    # Container `==` / `!=` and the four ordering operators → Python's VALUE
+    # comparison, not the C pointer comparison the generic tail would emit.
+    # Placed BEFORE the string equality block below because that block claims
+    # any comparison with a string literal on one side: `some_list == "abc"`
+    # reached it and strcmp'd the list's address (a garbage answer, never
+    # False), where the runtime's answer is the honest one. `is` / `is not` are
+    # NOT here — pointer identity is exactly what they mean.
+    #
+    # The ordering operators are here for the same reason `==` is, and they
+    # were missing for the same reason: `a < b` fell through to the generic
+    # numeric tail, which emits `_t = a < b;` on two `MojoList *` — the same
+    # address comparison `==` used to do, so the answer was decided by heap
+    # addresses. For `==` that was a False where Python says True; for `<` it
+    # is a stable, plausible and wrong verdict, exit 0, no diagnostic.
+    if op in _CONTAINER_CMP_OPS:
         _lk = _eq_operand_kind(gen, left_node, lt, lv)
         _rk = _eq_operand_kind(gen, right_node, rt, rv)
         if _lk is not None or _rk is not None:
             return _lower_container_eq(gen, op, _lk, left_node, lt, lv,
                                        _rk, right_node, rt, rv)
+
+    # A container against a NON-container on an ordering operator is a TypeError
+    # in CPython (`[1] < 1`, `'a' < [1]`), and the generic tail below would
+    # answer it by comparing a pointer against an integer. Taken here, before
+    # the string block claims the string side, so `'a' < [1]` is the refusal
+    # rather than a strcmp against a list's address.
+    #
+    # `_eq_operand_kind` returns None for a scalar operand, so "exactly one side
+    # is a container" is the signature of this case and it is a refusal for all
+    # four ordering operators -- the same decision `_ord_pair_is_refused` makes
+    # when it is reached through the container block above. This second site
+    # exists only for the ordering operators, because for `==`/`!=` "one side is
+    # a container and the other is not" is a plain False that mojo_value_eq
+    # already answers.
+    if op in _ORD_CMP_OPS:
+        _lk2 = _eq_operand_kind(gen, left_node, lt, lv)
+        _rk2 = _eq_operand_kind(gen, right_node, rt, rv)
+        if (_lk2 is None) != (_rk2 is None):
+            return _lower_container_ord_refusal(gen, op, _lk2, _rk2, lt, rt)
 
 
     # `x == None` / `x != None` where `x` is a `char *` is a NULL-POINTER test,
@@ -4824,21 +4990,13 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
             vv = vv_tmp
         gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
     else:
-        # A bool stored as a dict value is indistinguishable from a genuine
-        # 0/1 int once it is a slot (vt is a plain `int` for a bool in this
-        # backend — `_lower_BoolLiteral` returns `int`, and any/all/isinstance
-        # return a C int on purpose), so the dict is MARKED and
-        # mojo_is_bool_dict picks the bool formatter for its whole repr. That
-        # mark used to require a literal RHS, which missed every other bool
-        # expression: `b = True; d = {'k': b}` and `d = {'k': 1 == 1}` both
-        # printed `{'k': 1}` while `print(b)` and `print(repr(b))` were
-        # already right. `is_python_bool_expr` is the one predicate, shared
-        # with the print dispatch.
-        if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
-            gen._emit(f"  mojo_mark_dict_bool_values ({t});")
-        gen._note_dict_callable_ret(t, vv)
-        vv64 = gen._to_int64(vt, vv)
-        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}int ({t}, {kv}, {vv64});")
+        # `gen._emit_dict_int_value_store` picks `mojo_dict_set_bool` over
+        # `mojo_dict_set_int` for a Python bool VALUE: the two are the same
+        # int64_t slot, so the store's type cannot tell them apart and the
+        # expression can — one shared decision for the dict literal, the dict
+        # comprehension and every `d[k] = v` spelling, which are five copies
+        # of it. See that function's docstring.
+        gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
@@ -4964,6 +5122,21 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
         gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+        # A tuple whose elements are themselves LISTS (`([0, 7], [1, 8])`)
+        # needs the same two maps `_lower_list_literal` records for
+        # `[[0, 7], [1, 8]]` — `_nested_elem_types` (what the inner lists
+        # hold) and `_tuple_slot_types` (each inner slot's own ctype) — and
+        # recorded neither, the result was describable only as "a tuple of
+        # lists". `_list_repr_fn` then had no nested entry to pick
+        # `mojo_repr_list_intlists` with, the generic walker recursed through
+        # its None-sentinel heuristic, and the tuple printed as
+        # `((0, 7), (1, 8))` — the inner LISTS in tuple brackets. Same
+        # carry, same reason, on the tuple path; the two lowerings differ
+        # only in the `mojo_mark_as_tuple` at the end.
+        if et == 'MojoList *' and ev in gen._elem_types:
+            gen._nested_elem_types.setdefault(t, gen._elem_types[ev])
+            if ev in gen._tuple_slot_types:
+                gen._tuple_slot_types[t] = gen._tuple_slot_types[ev]
     # Mark as a tuple AFTER the elements are in, not before. The mark is
     # what makes this value a tuple rather than a list (see
     # mojo_mark_as_tuple's doc comment in runtime/fire_runtime.c), and since
@@ -4972,6 +5145,27 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # construction. The mark is a statement about the FINISHED value, which
     # is exactly what placing it last says.
     gen._emit(f"  mojo_mark_as_tuple ({t});")
+    # Record the per-slot kinds on the VALUE (runtime's mojo_list_set_kinds)
+    # when they are not all the same, so every consumer that has to learn what
+    # a slot holds AT RUNTIME can: `_eq_elem_code` returns MOJO_EQ_UNKNOWN for
+    # such a value (the list-wide `_elem_types` entry is a lossy summary of a
+    # heterogeneous literal — for `('a', 1)` it says `char *`) and the
+    # comparison lowerings then ask the value itself.
+    #
+    # This was the missing half of the tuple-literal lowering and it cost a
+    # real answer: with no record, `('a', 1) < ('a', 2)` compared the INTEGER
+    # slot 1 against the string's ADDRESS, which is both a garbage verdict and
+    # a refusal that never fired (`_slot_cmp` saw two MOJO_EQ_STR codes and
+    # strcmp'd them). `_lower_list_literal` has recorded this since it was
+    # needed for the whole-result repr; a tuple is the same MojoList and
+    # needed it for the same reasons plus these.
+    _tkinds = ''.join(_list_literal_slot_kind(gen, el, et)
+                      for el, et, _ev in lowered)
+    if _tkinds and len(set(_tkinds)) > 1:
+        gen._emit_call('void', '', 'mojo_list_set_kinds',
+                       [('MojoList *', t),
+                        ('const char *', gen._intern_string(_tkinds))])
+        gen._maybe_kinds_vals.add(t)
     return 'MojoList *', t
 
 
@@ -5101,13 +5295,15 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
 
     # Park the remaining `for` clauses for `_gen_compr_append` to consume from
     # inside the clause-0 loop body. See its comment there for why the extra
-    # clauses used to vanish and why extending is the right lowering.
-    # Only list/generator: both are list-backed ('generator' is initialised
-    # "as a list for simplicity", per `_gen_compr_append`), so they share
-    # `mojo_list_extend`. A set/dict comprehension with 2+ clauses is still
-    # dropped -- those need per-kind insert/merge, not a list extend, and
-    # guessing at it is how this bug got in.
-    if len(node.generators) > 1 and node.kind in ('list', 'generator'):
+    # clauses used to vanish and why nesting is the right lowering.
+    # The parked remainder keeps THIS comprehension's own `kind`, so each kind
+    # merges into the outer one with its own runtime call: `mojo_list_extend`
+    # for list/generator (both list-backed -- 'generator' is initialised "as a
+    # list for simplicity", per `_gen_compr_append`), `mojo_set_update` for a
+    # set, `mojo_dict_update` for a dict. The latter two are per-element/per-pair
+    # merges, which is what the set and dict cases need and what a list extend
+    # cannot express -- they were dropped here rather than guessed at.
+    if len(node.generators) > 1:
         gen._compr_pending_inner = gimple_ctypes.Comprehension(
             kind=node.kind, element=node.element, key=node.key,
             generators=list(node.generators[1:]))

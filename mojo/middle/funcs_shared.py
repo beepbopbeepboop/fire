@@ -1549,14 +1549,15 @@ def _selfhost_begin_compile() -> None:
 # `py_tokenize` + `parse_module` + `ast_rewriter.rewrite` over the same ~60
 # files and keep its own copy. All of them now read this one cache.
 #
-# The cache key is a STRING, `path@mtime`. Both a tuple `(path, mtime)` and a
-# tuple-of-tuples file-list fingerprint compared with `==` look right and are
-# right under CPython, but a self-hosted tuple hashes/compares by the tuple
-# object's ADDRESS, so every lookup missed and every pass re-tokenized and
-# re-parsed the whole compiler on every call, per imported module, retaining
-# each copy: ~16 GB of tokenizer garbage in `mojoc --dump-full fire.py`
-# (bugs/PERF_selfhost_memory_leak_hunt.md; the general defect is
-# bugs/CODEGEN_tuple_dict_key_hashed_by_address.md).
+# The cache key is a STRING, `path@mtime`. A tuple `(path, mtime)` looks right
+# and is right under CPython, and it USED to be wrong here: a self-hosted tuple
+# used as a dict key hashed by the tuple object's ADDRESS, so every lookup
+# missed and every pass re-tokenized and re-parsed the whole compiler on every
+# call, per imported module, retaining each copy: ~16 GB of tokenizer garbage in
+# `mojoc --dump-full fire.py`. The general defect is FIXED — a tuple dict key is
+# now keyed by its CONTENT (runtime `mojo_dict_key_for`), see
+# test_dict_tuple_key.py — and this string key stays because it is what the
+# comment above the original said it was, not as a workaround.
 #
 # `{ path + '@' + str(mtime): stmts }`, plus the distinguished `_PARSE_FAILED`
 # entry recording a file that failed to parse (not re-attempted on every
