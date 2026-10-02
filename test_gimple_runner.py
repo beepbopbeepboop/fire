@@ -6376,6 +6376,57 @@ main()
 """, "[R<a>]\n(R<a>,)\n[R<a>, R<a>]\n[[R<a>]]\n[R<a>]\n[R<a>]\n"
        "[R<a>, R<a>]\n")
 
+    # A struct-typed FIELD inside another struct's generated field dump is
+    # rendered through that struct's own repr shim (`_mojo_repr_Q`), so
+    # `Holder(p=Q(x='b'))` reads as itself. It used to be formatted as an
+    # integer — `mojo_repr_int((int64_t)obj->p)`, i.e. the struct's ADDRESS,
+    # which ASLR moves every run, so nothing could compare it and no exit code
+    # could report it. The doc's fixture as written (a field holding a `P`
+    # from one place and a `Q` from another) is a DIFFERENT limitation and
+    # still is: one C type per slot, so `struct_field_types['Holder']['p']`
+    # is int64_t for two disagreeing call sites and the dump has nothing
+    # better to say. One field type per Holder is the shape this pins, with
+    # and without a `__repr__` on the field's own class (the dunder case
+    # takes the shim, the no-dunder case the field dump — both must not be a
+    # decimal).
+    #
+    # `DunderHolder(p=R(x='c'))` and not `DunderHolder(p=R<c>)`: a field dump
+    # is this runtime's own rendering (CPython has no field dump at all — it
+    # prints `<__main__.R object at 0x...>`), so the dunder is not consulted
+    # for it, while the CONTAINER case above does consult it. The point of
+    # this row is the same in both: not a decimal address.
+    test_gimple_stdout("gimple_struct_field_dump_is_not_an_address", """\
+class Q:
+    def __init__(self, x):
+        self.x = x
+
+class R:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+class PlainHolder:
+    def __init__(self, p):
+        self.p = p
+
+class DunderHolder:
+    def __init__(self, p):
+        self.p = p
+
+def main():
+    var h = PlainHolder(Q("b"))
+    var g = DunderHolder(R("c"))
+    print(repr([h]))
+    print(repr([[h]]))
+    print(repr(h))
+    print(repr([g]))
+    print(repr(g))
+main()
+""", "[PlainHolder(p=Q(x='b'))]\n[[PlainHolder(p=Q(x='b'))]]\n"
+       "PlainHolder(p=Q(x='b'))\n[DunderHolder(p=R(x='c'))]\n"
+       "DunderHolder(p=R(x='c'))\n")
+
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.
