@@ -2258,7 +2258,7 @@ class GimpleGen:
         # its own empty `_emitted_c_helpers` set, so none of the above held
         # for it and a second module emitted a second definition; correctness
         # came only from six independent per-call-site guards, none of them
-        # this contract. See bugs/CODEGEN_c_helper_sets_documented_shared_but_are_not.md.
+        # this contract.
         self._c_helpers_needed: dict[str, str] = {}
         # Which of those have already had their DEFINITION emitted into the
         # final .ci. Definitions are emitted inline, immediately before the

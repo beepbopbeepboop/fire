@@ -5899,8 +5899,7 @@ def main():
 
     test_cross_module_ctor_scalar_field_type()
 
-    # bugs/CODEGEN_c_helper_sets_documented_shared_but_are_not.md: the
-    # `sizeof`/`fnaddr` accessor helpers are file-scope `static`s, and every
+    # The `sizeof`/`fnaddr` accessor helpers are file-scope `static`s, and every
     # module's parts land in ONE translation unit, so the sets that decide
     # whether one has already been DEFINED must be shared into every
     # `_compile_imported_module` temp_gen. They were not: each temp_gen
@@ -6164,8 +6163,7 @@ d = {'a': 1}
 print(str(d))
 """, "[1, 2, 3]\n[1, 2, 3]\n{1, 2}\n{'a': 1}\n")
 
-    # bugs/CODEGEN_annotated_str_param_given_an_int_segfaults.md: a
-    # `str`-annotated parameter is a STATIC PROMISE the compiled path takes
+    # A `str`-annotated parameter is a STATIC PROMISE the compiled path takes
     # literally, so `Dialog(5)` reached the constructor as address 5 and the
     # first `print` strlen'd it — SIGSEGV, exit -11, no output, on a program
     # that built and started cleanly. The generated C was correct everywhere
