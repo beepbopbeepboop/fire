@@ -5152,6 +5152,26 @@ def _struct_elem_repr_shim(gen, elem_type: str) -> str:
         return ''
     if not gen.struct_field_types.get(sn):
         return ''
+    # `emit_struct_defs`, because that is the gate the shim's DEFINITION and
+    # forward declaration are behind (`_emit_reflection_dispatch`). An imported
+    # module compiles with it False -- only the main module emits struct
+    # typedefs and the reflection dispatch -- and its generated text is
+    # concatenated into the same translation unit, so a shim named there is a
+    # reference to a symbol nobody declares: "_mojo_elem_repr_IntLiteral
+    # undeclared here (not in a function)", once per list literal of a
+    # reflected struct in every imported module of the closure (measured on
+    # ast_rewriter.py, regex_compile.py, mojo/middle/solvers.py and others
+    # building mojoc).
+    #
+    # So this asks the same question the emitter asks rather than a related
+    # one. `struct_field_types` alone is not it: type information is SHARED
+    # across the closure, so an imported module knows an imported module's
+    # struct perfectly well while emitting none of that struct's shims.
+    # Nothing is lost by answering '' here -- the runtime's own per-slot
+    # reader takes over, which is the pre-existing behaviour for every
+    # element type this function declines.
+    if not getattr(gen, 'emit_struct_defs', False):
+        return ''
     return f'_mojo_elem_repr_{sn}'
 
 
@@ -5174,13 +5194,23 @@ def _elem_repr_operand(gen, shim: str) -> str:
     initializer instead; that initializer is what `_funcptr_builtins_needed`
     collects and module_gen emits.
 
+    Read into a TEMP rather than passed as the bare global, and that is not
+    tidiness: a file-scope variable is not a legal gimple operand either, so
+
+        mojo_list_set_elem_repr (_t1, _funcptr__mojo_elem_repr_P);
+
+    is "invalid argument to gimple call" even with the static defined. `_new_val`
+    is what every other function-pointer path already uses for exactly this --
+    it emits `_t = _funcptr_X;` and hands back the temp -- so the shim is named
+    and loaded the same way the lifted-closure, builtin-callable and vararg
+    paths are.
+
     ONE spelling for every function-pointer target, which is what makes this a
-    fix rather than a second way of naming the same thing: the lifted-closure,
-    the builtin-callable and the vararg paths all reach the shim through
-    `_funcptr_` already.
+    fix rather than a third way of naming the same thing: they all reach a
+    function pointer through `_funcptr_` already.
     """
     gen._funcptr_builtins_needed.add(shim)
-    return f'_funcptr_{shim}'
+    return gen._new_val('void *', f'_funcptr_{shim}')
 
 
 def _list_literal_slot_kind(gen, el, et) -> str:
