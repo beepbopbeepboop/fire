@@ -2436,6 +2436,46 @@ class X86_64Codegen:
             operands.append(a)
         return frags, operands
 
+    def _printf_arg_is_text(self, arg):
+        """True / False / None: does this `printf` vararg hold text.
+
+        The three-way answer `model.printf_text_conversion_refusal` is written
+        against.  arm64's copy of this method is the authority on why each arm
+        is what it is; what is shared is the EVIDENCE, which is
+        `ValueKinds.own_shape_kind` — the same predicate that answers "is this
+        name a container element", so one test carries two families and the two
+        architectures cannot disagree about which names it fires for.
+
+        `None` — the source does not say — is the permissive direction and
+        covers the unannotated parameter, which is a word this build cannot
+        classify; refusing it would refuse every function that takes a string
+        it was never told about, and those work today.
+        """
+        if isinstance(arg, F.StringLiteral):
+            return True
+        if M.string_operand_is_string(self._expr_str_kind(arg)):
+            return True
+        if (isinstance(arg, F.IdentExpr)
+                and self._vkinds.own_shape_kind(arg.name) == M.INT_KIND):
+            return False
+        return None
+
+    def _refuse_printf_text_conversion(self, name, e) -> None:
+        """Raise when `e` hands a `%s` conversion something that is not text.
+
+        Delegation, and nothing else: the callee set, the conversion scan, the
+        three-way narrowing and the message are all
+        `model.printf_text_conversion_refusal`, so this method cannot come to
+        disagree with arm64's about what a format string means.
+        """
+        args = list(e.args or [])
+        fmt = args[0] if args else None
+        reason = M.printf_text_conversion_refusal(
+            name, fmt.value if isinstance(fmt, F.StringLiteral) else None,
+            args[1:], self._printf_arg_is_text)
+        if reason is not None:
+            raise CodegenError(reason)
+
     def _print_kwargs(self, e):
         """`print`'s `sep=` / `end=` / `file=`, as (sep, end). Only literals.
 
@@ -5812,6 +5852,19 @@ class X86_64Codegen:
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
+        # `%s` OF SOMETHING THAT IS NOT TEXT.  Asked here for the same reason
+        # `print` is intercepted two lines above: the format string is the
+        # SOURCE's, and this is the last place both the format and the varargs
+        # are in hand together.  `print` builds its own format and so cannot get
+        # it wrong; `printf` takes one unchecked all the way to C, where `%s`
+        # walks bytes at the address it is handed looking for a NUL.  Measured
+        # with this refusal lifted, on both architectures: `a = 5;
+        # printf("[%s]", a)` builds, runs, prints nothing and dies of SIGSEGV,
+        # exit 139.  The decision and the message are
+        # `model.printf_text_conversion_refusal`, shared with arm64; it gates on
+        # the resolved CALLEE rather than on `is_extern_call`, so
+        # `external_call["printf", Int32](fmt, n)` is asked the same question.
+        self._refuse_printf_text_conversion(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return

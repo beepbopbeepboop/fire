@@ -3954,6 +3954,54 @@ dylib_exports: list = None, globals_base: int = None,
             operands.append(a)
         return frags, operands
 
+    def _printf_arg_is_text(self, arg):
+        """True / False / None: does this `printf` vararg hold text.
+
+        The three-way answer `model.printf_text_conversion_refusal` is written
+        against, and the distinction is the whole of the narrowing. A STRING
+        LITERAL is text without any question asked. A name `_expr_str_kind`
+        classifies `STR_KIND` is text for the reason that classification exists.
+        A bare name a statement of THIS function bound to an INTEGER on that
+        statement's own shape is NOT text — that is `ValueKinds.own_shape_kind`,
+        the same predicate the container-element refusal asks, so one evidence
+        test answers "is this an element address" and "is this a string" and the
+        two architectures cannot disagree about which names carry it.
+
+        Everything else is `None` — the source does not say. That includes an
+        UNANNOTATED PARAMETER, which is a word this build cannot classify, and
+        refusing it would refuse `def show(s): printf("[%s]", s)` for every
+        caller that passes a string: measured working, both architectures, exit
+        0 and `[abc]`. `None` is the permissive direction by design and
+        `printf_text_conversion_refusal`'s docstring says why at length.
+        """
+        if isinstance(arg, F.StringLiteral):
+            return True
+        if M.string_operand_is_string(self._expr_str_kind(arg)):
+            return True
+        if (isinstance(arg, F.IdentExpr)
+                and self._vkinds.own_shape_kind(arg.name) == M.INT_KIND):
+            return False
+        return None
+
+    def _refuse_printf_text_conversion(self, name, e: F.CallExpr) -> None:
+        """Raise when `e` hands a `%s` conversion something that is not text.
+
+        A no-op for every callee the model's set does not name, and for a call
+        whose format is not a LITERAL: the argument arithmetic needs the
+        conversions enumerated, and a format in a variable cannot be. Both are
+        the model's decision rather than this one's — it is asked with the
+        callee name and the arguments and answers for itself, so x86-64's copy
+        of this method is two lines of delegation and the two cannot come
+        apart.
+        """
+        args = list(e.args or [])
+        fmt = args[0] if args else None
+        reason = M.printf_text_conversion_refusal(
+            name, fmt.value if isinstance(fmt, F.StringLiteral) else None,
+            args[1:], self._printf_arg_is_text)
+        if reason is not None:
+            raise CodegenError(reason)
+
     def _print_kwargs(self, e: F.CallExpr):
         """`print`'s `sep=` / `end=` / `file=`, as (sep, end). Only literals.
 
@@ -5988,6 +6036,20 @@ dylib_exports: list = None, globals_base: int = None,
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
+        # `%s` OF SOMETHING THAT IS NOT TEXT, asked here for the same reason
+        # `print` is intercepted two lines above and not left to the extern
+        # path: the format string is the SOURCE's, and this is the last place
+        # both the format and the varargs are in hand together.  `print` builds
+        # its own format and so cannot get it wrong; `printf` takes one
+        # unchecked all the way to C, where `%s` walks bytes at the address it
+        # is handed looking for a NUL.  Measured with this refusal lifted, on
+        # both architectures: `a = 5; printf("[%s]", a)` builds, runs, prints
+        # nothing and dies of SIGSEGV, exit 139.  The decision and the message
+        # are `model.printf_text_conversion_refusal`, shared with x86-64; it
+        # gates on the resolved CALLEE rather than on `is_extern_call`, so
+        # `external_call["printf", Int32](fmt, n)` — which reaches this same
+        # line with `name == "printf"` — is asked the same question.
+        self._refuse_printf_text_conversion(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return

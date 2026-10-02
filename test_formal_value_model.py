@@ -601,6 +601,21 @@ REFUSALS = [
      "    printf(\"a=%d\", a)\n"
      "    return 0\n",
      "asks for a container element"),
+    # `%s` OF AN INTEGER, and the same argument for putting it here: the
+    # defect is SHARED by the two backends, so only a refusal that is required
+    # to read identically from each can see it.  `%s` is the one printf
+    # conversion that dereferences its argument — every other one renders the
+    # word — so `a = 5; printf("[%s]", a)` walked bytes at address 5 looking
+    # for a NUL.  Measured on both architectures from a GREEN build: nothing
+    # printed, SIGSEGV, exit 139.  The evidence is the same
+    # `ValueKinds.own_shape_kind` the container-element refusal above asks,
+    # which is why one predicate answers both.
+    ("a_percent_s_of_an_integer_is_refused",
+     "def main(n):\n"
+     "    var a = 5\n"
+     "    printf(\"[%s]\", a)\n"
+     "    return 0\n",
+     "conversion in printf's format string reads"),
 ]
 
 

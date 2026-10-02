@@ -3132,6 +3132,143 @@ def string_operand_is_string(kind) -> bool:
     """
     return kind == STR_KIND
 
+# ── `%s`, the one conversion that DEREFERENCES its argument ─────────────────
+#
+# Every other conversion reads the word it is handed and renders it: `%d`,
+# `%lld`, `%llu`, `%u`, `%c`, `%f`, and `%p` on Darwin, which prints the address
+# rather than the bytes at it.  `%s` is the exception, and it is the whole of
+# why a format string is a thing this model has to READ rather than pass
+# through: it walks bytes at the address until it finds a NUL, so handing it a
+# number is not a wrong rendering — it is a walk off the end of whatever the
+# number points into.
+#
+# The corpus spells the output call `printf` and nothing else, so the set is a
+# set and not a pattern; a second member would be added with the callee that
+# needs it.  The reason it is needed at all is that `print()` builds its OWN
+# format — `_print_call` chooses `%s` or `%lld` from the operand's kind and
+# refuses the case it cannot tell — while `printf` takes the format the SOURCE
+# wrote and hands it to C unchecked.
+PRINTF_TEXT_CONVERSIONS_CALLEES = frozenset({"printf"})
+
+# A printf conversion specification: `%`, the flags, an optional width and
+# precision (each of which may be `*`, which is itself an argument), an
+# optional length modifier, and the conversion character.  `%%` matches and is
+# NOT a conversion — `print_literal` doubles every literal `%` precisely so this
+# can tell the two apart, which is why the alternation holds both rather than
+# making `%%` a separate branch.
+_PRINTF_CONVERSION_RE = re.compile(
+    r"%(?:%|[-+ #0\']*(?:[0-9]+|\*)?(?:\.(?:[0-9]+|\*)?)?"
+    r"(?:hh|h|ll|l|L|z|j|t|q)?[a-zA-Z])")
+
+
+def printf_conversion_specifiers(fmt_text) -> list | None:
+    """The conversion characters of `fmt_text`, in order, or None if unparsed.
+
+    `%%` yields nothing, which is the only skipping rule.  A `*` width or
+    precision DOES consume an argument and is counted here as a conversion
+    whose character is `*` — deliberately, and it is what keeps the index
+    arithmetic right: the position of a `%s` in the output is the position of
+    its argument in the varargs list, and an off-by-one there would refuse the
+    wrong argument, which is worse than not looking.
+
+    None for text this does not parse, and that is the permissive direction: a
+    format whose conversions cannot be enumerated is one the callers below say
+    nothing about, so an unusual `%` in a corpus format string cannot become a
+    new refusal.
+    """
+    if not isinstance(fmt_text, str):
+        return None
+    out = []
+    pos = 0
+    while True:
+        at = fmt_text.find("%", pos)
+        if at < 0:
+            return out
+        m = _PRINTF_CONVERSION_RE.match(fmt_text, at)
+        if m is None:
+            return None
+        conv = m.group(0)[-1]
+        if conv != "%":
+            out.extend(["*"] * m.group(0).count("*"))
+            out.append(conv)
+        pos = m.end()
+
+
+def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
+                                   text_of) -> str | None:
+    """Why a `%s` conversion of an argument that is not text is refused.
+
+    `args` is the call's arguments with the format string ALREADY REMOVED, so
+    index 0 of `args` is the first vararg and the conversion at position `j` of
+    `printf_conversion_specifiers(fmt_text)` is `args[j]`.
+
+    `text_of(arg)` is the emitter's own question about one argument, and it is a
+    THREE-WAY answer, which is the whole of the narrowing:
+
+    | `text_of` | meaning | refused |
+    |---|---|---|
+    | `True` | this argument is text | no |
+    | `False` | this argument is NOT text, and the source says so | yes |
+    | `None` | the source does not say | no |
+
+    `None` is the permissive direction on purpose. An UNANNOTATED PARAMETER is
+    a word this build cannot classify, and `def show(s): printf("[%s]", s)`
+    called with `show("abc")` is a program that works — measured on both
+    architectures, exit 0 and `[abc]`. Reading "not known to be text" as "not
+    text" would refuse it, and with it every function in the corpus that takes
+    a string it was never told about. That is the gap the note above
+    `ValueKinds` records as the remaining one for `print`, it is a kind-table
+    gap rather than a conversion gap, and this function does not make it worse.
+
+    **`False` is positive evidence**, and the emitters produce it from
+    `ValueKinds.own_shape_kind`: a statement of THIS function bound the name to
+    an integer on that statement's own shape. `a = 5; printf("[%s]", a)` is the
+    reproducer — measured on both architectures from a GREEN build it printed
+    nothing and died of SIGSEGV, exit 139, because `%s` walked bytes at address
+    5 looking for a NUL. `printf("[%s]", a)` where `a = 2 + 4` faults the same
+    way and `own_shape_kind` covers it for the same reason, which is also why
+    the same predicate answers the container-element question
+    (`non_container_element_refusal`): one evidence test, two families, and two
+    architectures that cannot disagree about which names carry it.
+
+    A FRAME ADDRESS does not reach here: `_check_frame_escapes` has already
+    refused a frame receiver in a call position — `frame_receiver_escape_refusal`'s
+    `FRAME_C_VALUE_CALLS` branch, whose own measured consequence is a `%d` of a
+    frame printing its address and exiting 0. What is NOT refused there and is
+    NOT caught here is a struct of ONE field, whose receiver is that field
+    rather than an address, so `printf("[%s]", one_field_int_struct)` still
+    faults. `bugs/FORMAL_struct_receiver_as_a_printf_string.md` records why,
+    and the table that would close it is another worker's.
+    """
+    if callee not in PRINTF_TEXT_CONVERSIONS_CALLEES:
+        return None
+    convs = printf_conversion_specifiers(fmt_text)
+    if convs is None:
+        return None
+    for j, conv in enumerate(convs):
+        if conv != "s" or j >= len(args):
+            continue
+        if text_of(args[j]) is not False:
+            continue
+        return (
+            f"the `%s` conversion in {callee}'s format string reads "
+            f"`{spelled(args[j])}` as text, and `{spelled(args[j])}` is a value "
+            f"this function bound to an integer. A string on this path is a "
+            f"bare `char *` and an integer is a NUMBER, and `%s` is the one "
+            f"conversion that DEREFERENCES what it is handed — it walks bytes "
+            f"at the address until it finds a NUL. Measured on BOTH "
+            f"architectures, this builds, links, runs, and then dies of "
+            f"SIGSEGV, exit 139, with the build green, because there is no NUL "
+            f"to find at a small integer. Refused here rather than emitted, "
+            f"because a missing terminator is not a wrong rendering: it is a "
+            f"walk off the end of whatever the number points into. What the "
+            f"same source can do instead: bind the text and convert it "
+            f"(`s = String(a)`, or read the field that holds it), or use a "
+            f"conversion that does not dereference — `%lld` renders the number "
+            f"itself"
+        )
+    return None
+
 
 def _is_zero_literal(e) -> bool:
     """True for the integer literal `0` and for `0 - 0`, and nothing else.

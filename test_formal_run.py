@@ -6747,6 +6747,78 @@ SUBSCRIPT_CASES = [
 ]
 
 
+# ── `%s`, the one printf conversion that DEREFERENCES its argument ───────
+#
+# Every other conversion reads the word it is handed and renders it; `%s` walks
+# bytes at the address until it finds a NUL, so handing it a number is not a
+# wrong rendering — it is a walk off the end of whatever the number points into.
+#
+# `print()` cannot get this wrong: `_print_call` builds the format from each
+# operand's kind and refuses the case it cannot tell.  `printf` takes the format
+# the SOURCE wrote and hands it to C unchecked, which is what these pin.
+PRINTF_TEXT_CASES = [
+    # THE reproducer.  Measured on BOTH architectures before the refusal: the
+    # build is GREEN, the image runs, prints nothing and dies of SIGSEGV,
+    # exit 139, because `%s` walked bytes at address 5 looking for a NUL.  It
+    # builds and it runs, which is the shape of failure this backend exists to
+    # convert into a message.
+    ("printf_s_of_an_integer_is_refused",
+     "def main(n):\n"
+     "    var a = 5\n"
+     "    printf(\"[%s]\", a)\n"
+     "    return 0\n",
+     "refuse:conversion in printf's format string reads", None),
+    # The same thing where the integer is an ARITHMETIC result rather than a
+    # literal, because the evidence the refusal rests on is `own_shape_kind`
+    # — a statement of this function bound the name to an integer ON THAT
+    # STATEMENT'S OWN SHAPE — and `a = 2 + 4` is the shape a corpus program
+    # writes.  It faulted identically before.
+    ("printf_s_of_an_arithmetic_result_is_refused",
+     "def main(n):\n"
+     "    var a = 2 + 4\n"
+     "    printf(\"[%s]\", a)\n"
+     "    return 0\n",
+     "refuse:conversion in printf's format string reads", None),
+    # THE THREE THAT MUST NOT BE REFUSED, and the second of them is the one
+    # that decided the rule.  An UNANNOTATED PARAMETER is a word this build
+    # cannot classify, and `show("abc")` through it prints `[abc]` on both
+    # architectures — measured.  A rule that read "not known to be text" as
+    # "not text" would refuse it, and with it every function in the corpus
+    # that takes a string it was never told about, so `None` — the source does
+    # not say — is the permissive answer here on purpose.
+    ("printf_s_of_a_parameter_a_literal_and_a_bound_string_still_print",
+     "def show(s):\n"
+     "    printf(\"[%s]\", s)\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    var s = \"abc\"\n"
+     "    show(\"def\")\n"
+     "    show(s)\n"
+     "    printf(\"[%s]\", \"lit\")\n"
+     "    return 0\n", 0, "[def][abc][lit]"),
+    # THE VARARG ARITHMETIC, which is the part a scanner gets wrong and which
+    # the refusal depends on: the position of a `%s` in the OUTPUT is the
+    # position of its argument in the varargs list, and getting that off by one
+    # refuses the WRONG argument.  Two things are in this format on purpose and
+    # both consume an argument while reading as none:
+    #
+    #   * `%%` — a literal percent, which `print_literal` doubles so the scanner
+    #     can tell it from a conversion.  A scanner that counted it would shift
+    #     every later conversion by one;
+    #   * `%*d` — a `*` WIDTH, which consumes the `4`.  A scanner that dropped
+    #     it would read the SECOND `%s` as the `7`.
+    #
+    # Both `%s` conversions read a string literal, so a correct scanner finds
+    # nothing to refuse and the program prints; a scanner that miscounts lands a
+    # `%s` on the integer `7` and the build fails.  The expected bytes are
+    # `printf`'s own, checked against the C library on this host.
+    ("printf_star_width_and_literal_percent_keep_the_varargs_aligned",
+     "def main(n):\n"
+     "    printf(\"100%% [%*d] [%s] [%s] %s\", 4, 7, \"a\", \"b\", \"c\")\n"
+     "    return 0\n", 0, "100% [   7] [a] [b] c"),
+]
+
+
 # ── wave 6: `~`, the truthiness conversion, and a slice of a string ────────
 #
 # Three separate defects, all found by RUNNING programs and all in the same
@@ -10362,7 +10434,8 @@ def main():
     everything = (CASES + RECVKIND_CASES + FD_CASES + BYREF_CASES
                   + RETURNED_FRAME_CASES
                   + BYREF_REFUSALS + WIDE_OFF_CASES
-                  + SUBSCRIPT_CASES + DECLARED_TYPE_CASES
+                  + SUBSCRIPT_CASES + PRINTF_TEXT_CASES
+                  + DECLARED_TYPE_CASES
                   + DECLARED_TYPE_REFUSALS
                   + ASSIGNED_TYPE_CASES + ASSIGNED_TYPE_REFUSALS \
                   + INIT_FIELD_TYPE_CASES \
