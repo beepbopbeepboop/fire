@@ -179,6 +179,44 @@ def main(n):
     return 0
 """
 
+# `x: T = None` is the default for an optional field, and it is the single most
+# common class-level default in this repository's own dataclasses
+# (`std/type_system.py`'s `Type.bit_width: Optional[int] = None` and nine more
+# on the same class; `std/fault_tolerance.py`'s `SideResult.harness_error`).
+#
+# It used to be refused, and the refusal had a branch of its own in
+# `field_refusal` because it is the one a reader is most likely to believe is
+# free: on this parser `None` is a NAME (`IdentExpr('None')`) and not a
+# literal, so there was nothing for a class-level constant to be materialized
+# as. `model.NONE_WORD` closed it by making `None` the word 0, which is the
+# representation rather than an approximation — it is what an unwritten frame
+# slot already is.
+#
+# The branch is gone from `field_refusal` and this row is what keeps it gone:
+# a refusal nobody can see is a refusal nobody removes. Both halves matter —
+# the default is read at construction, and the word it reads as is 0 — and
+# `test_formal_run.py`'s `none_*` group pins the representation from the other
+# side (a class-level constant, a module-level one, and the three comparisons
+# the fold must NOT answer).
+#
+# Deliberately NOT compared against CPython: `printf("%d", None)` is a
+# TypeError there, so the oracle does not exist. What this asserts is the
+# REPRESENTATION, which is a 0.
+NONE_FIELD_DEFAULT = """
+from dataclasses import dataclass
+
+@dataclass
+class T:
+    bit_width: int = None
+    name: int = 7
+
+def main(n):
+    a = T()
+    b = T(3)
+    printf("%d %d %d %d", a.bit_width, a.name, b.bit_width, b.name)
+    return 0
+"""
+
 # THE case. A bare struct's `==` compares two words, and for a struct of more
 # than one field those words are frame addresses — so this program printed
 # `0 1 0 1` (every equality false) where CPython prints `1 0 0 1`. The image
@@ -685,6 +723,55 @@ def run_guard_case(tmpdir, only=None):
     check(rc == 1, name, f"expected the method's own return value, got {rc}")
 
 
+# A default with NO CPython oracle, checked against the REPRESENTATION on both
+# architectures. `run_exec_cases` diffs against CPython, which is the right
+# default for this suite and the wrong oracle here: `printf("%d", None)` is a
+# TypeError on CPython, so a program whose whole point is that a `None` default
+# reads as the word 0 cannot be run through the reference to find out what it
+# should print. What it should print is a property of the representation, and
+# the representation is decided in `formal/model.py` — so the expectation is
+# written down here, once, and BOTH backends are held to it.
+REPRESENTATION_CASES = [
+    ("a_none_field_default_reads_as_the_word_zero", NONE_FIELD_DEFAULT,
+     "0 7 3 7", 0),
+]
+
+
+def run_representation_cases(tmpdir, only=None):
+    for name, source, want_out, want_rc in REPRESENTATION_CASES:
+        if only and name not in only:
+            continue
+        answers = {}
+        for arch in ("arm64", "x86_64"):
+            try:
+                answers[arch] = formal_run(tmpdir, f"{name}_{arch}", source,
+                                           arch)
+            except BuildRefused as e:
+                check(False, name, f"{arch} refused: {str(e)[-400:]}")
+                answers = None
+                break
+            except subprocess.TimeoutExpired:
+                check(False, name, f"{arch} build timed out")
+                answers = None
+                break
+        if answers is None:
+            continue
+        (arm_out, arm_rc), (x86_out, x86_rc) = answers["arm64"], \
+            answers["x86_64"]
+        # The two architectures agreeing is the assertion that matters most
+        # here: the fold is in `formal/model.py`, which both read, so a
+        # disagreement would mean one of them stopped reading it — and the
+        # failure mode is a wrong number on one side with everything else
+        # green.
+        check(arm_out == x86_out,
+              f"{name}: arm64 and x86-64 disagree on stdout",
+              f"arm64 {arm_out!r} vs x86-64 {x86_out!r}")
+        check(arm_out == want_out and arm_rc == want_rc == x86_rc,
+              f"{name}: the image is not the representation",
+              f"want {want_out!r}/{want_rc}, arm64 {arm_out!r}/{arm_rc}, "
+              f"x86-64 {x86_out!r}/{x86_rc}")
+
+
 # ── 3. the corpus, DISCOVERED from the tree rather than listed ──────────────
 #
 # The five files this closes were measured, not guessed: a `@dataclass` in this
@@ -800,6 +887,7 @@ def main(argv):
         run_exec_cases(tmpdir, only)
         run_refuse_cases(tmpdir, only)
         run_guard_case(tmpdir, only)
+        run_representation_cases(tmpdir, only)
         run_corpus_case(tmpdir, only)
         run_arch_parity_case(tmpdir, only)
 

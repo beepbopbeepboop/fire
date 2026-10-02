@@ -347,9 +347,6 @@ CAUSE_SAMPLES = [
     ("method call on a value receiver is not one of the lowered methods",
      "value.write_repr_to() is a method call on a value, and this backend "
      "lowers only append, close, write"),
-    ("a class-level default is the NAME `None`",
-     "SideResult.harness_error: the default for field 'harness_error' is "
-     "`None`, and on this path `None` is a NAME rather than a literal"),
     ("multi-index subscript",
      "size_of[type, target] is a subscript whose index is a tuple. A value "
      "here is one 64-bit word and a list is a flat blob of words, so a tuple "

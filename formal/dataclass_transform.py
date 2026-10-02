@@ -512,21 +512,30 @@ def field_refusal(name: str, default, declared_type) -> str:
     sends the next reader looking for the wrong thing, which is the failure
     `bugs/FORMAL_known_limits.md` exists to prevent.
 
-    A `None` default is the common case and is worth naming, because it is the
-    one a reader is most likely to believe is free: on this path `None` is a
-    NAME (`IdentExpr('None')`), not a literal, so it is materialized as a call
-    and refused — the same thing a module-level `G = None` does."""
+    **`None` used to need a branch of its own here, and no longer does.** It
+    was the common case and the one a reader is most likely to believe is
+    free, so it was named rather than folded into the generic message: on this
+    path `None` is a NAME (`IdentExpr('None')`) and not a literal, so there was
+    nothing for a class-level constant to be materialized as. `model`'s
+    `NONE_WORD` fixed that by making `None` the word 0 — which is the
+    REPRESENTATION rather than an approximation, since it is what an unwritten
+    frame slot already is — and `fold_literal_expr` folds it, so `_folds` is
+    `True` and this function returns `""` before reaching any branch. The
+    branch is deleted rather than left as unreachable code with a docstring
+    claiming `None` is refused: a message that describes a construct this
+    backend now answers is worse than no message, and the comparison it used to
+    guard is refused by name in `formal/build.py`'s `refuse_none_comparisons`
+    because the model is one untagged word (`None` and the integer 0 are the
+    same expression after the fold, and CPython says `None == 0` is False).
+
+    The limit the fold does not remove, and the reason that refusal is a
+    refusal rather than an answer: `None` is not the integer 0 at every use.
+    It is falsy as `0` is, and `None == 0` is False in Python while `0 == 0` is
+    True, so the two must not be conflated — which is what
+    `refuse_none_comparisons` is for, and why this function can now say
+    nothing at all about `None` and still be correct."""
     if _folds(default):
         return ""
-    if isinstance(default, F.IdentExpr) and default.name == "None":
-        return (f"the default for field {name!r} is `None`, and on this path "
-                f"`None` is a NAME rather than a literal — it parses to a bare "
-                f"identifier, not to a value — so there is nothing for a "
-                f"class-level constant to be materialized as. A formal value "
-                f"is one 64-bit word, and the only thing a class-level name "
-                f"can be read as is the literal it is written with. Leave the "
-                f"field undeclared (`{name}: T`) so it reads as the zero an "
-                f"unwritten slot gives, or give it a literal")
     return (f"the default for field {name!r} is not a value this build can "
             f"materialize, and a class-level default on this path has to be "
             f"one: a formal value is a single 64-bit word, a class-level "
