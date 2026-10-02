@@ -611,9 +611,9 @@ def main():
     # A character costs NO allocation, on either spelling. `s[i]` and
     # `for c in s` used to reach `mojo_cstr_slice(s, i, i + 1)` — a correct
     # NUL-terminated 1-char string, allocated per character and owned by
-    # nobody, which is the whole of
-    # bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md's residual (1226
-    # bytes a pass over a 96-character line, measured). Both now reach
+    # nobody, which was the whole of the char-scan residual (1226 bytes a
+    # pass over a 96-character line, measured; 246.7 MB over the 4.8M
+    # characters this tripwire runs). Both now reach
     # `mojo_char_at_str`, which is `mojo_char_to_str` reached through the
     # string and the index — gimple refuses a `char` argument, which is why
     # the two-step spelling was never available — and lands in its immortal

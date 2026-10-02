@@ -3938,9 +3938,11 @@ char *mojo_char_to_str(char c) {
  *
  * Before this, a subscript reached `mojo_cstr_slice(s, i, i + 1)` — a correct
  * NUL-terminated 1-char string, allocated per character and owned by nobody.
- * `for c in s: ...` over a 96-character line leaked 1226 bytes a pass, which
- * is the residual bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md
- * measured, and 246.7 MB over the 4.8M characters that suite's tripwire runs.
+ * `for c in s: ...` over a 96-character line leaked 1226 bytes a pass, and
+ * 246.7 MB over the 4.8M characters that `gimplerunner`'s
+ * `gimple_char_scan_allocates_nothing_per_character` tripwire runs. (Both
+ * figures measured; the doc that carried them is deleted now that the residual
+ * is gone, which is why they live here.)
  *
  * The result is NOT the caller's to free, exactly as for `mojo_char_to_str`:
  * it is deliberately absent from the codegen's `_FRESH_STRING_RETURNS`, which

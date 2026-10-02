@@ -2176,8 +2176,8 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     # 'integer_cst'") because a char is promoted to int64_t and the conversion
     # is not trivial to it, so the two-step spelling is not available at all.
     # `mojo_cstr_slice(s, i, i+1)` was the workaround that did lower — and it
-    # allocated a 1-char string per character that nobody freed, which is the
-    # residual in bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md.
+    # allocated a 1-char string per character that nobody freed, which was the
+    # whole of the char-scan residual (1226 bytes a pass, measured).
     # The helper takes a pointer and an index instead, so it lowers cleanly AND
     # lands in the immortal table `mojo_char_to_str` already keeps. As above,
     # no `_mojo_at_char` is requested: the helper is not called from here.

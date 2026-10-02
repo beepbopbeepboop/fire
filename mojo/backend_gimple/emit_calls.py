@@ -6984,8 +6984,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # It shares mojo_char_to_str's immortal 256-entry table, so a
             # character costs no allocation; `mojo_cstr_slice(s, i, i + 1)`
             # was correct and leaked one malloc per character, owned by
-            # nobody (see runtime/fire_runtime.c's own comment and
-            # bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md).
+            # nobody (see runtime/fire_runtime.c's own comment: 1226 bytes a
+            # pass over a 96-character line, measured).
             # `_mojo_at_char` is not emitted here: it returns a pointer INTO
             # the string, which is not NUL-terminated and so is not a str.
             return 'char *', gen._new_val(

@@ -204,6 +204,12 @@ silently dropped. It does not compile: three errors, two shapes.
    `-> 'gctypes.ExprStmt | None'` (a STRING annotation) whose body returns
    both `None` and a `gctypes.ExprStmt(...)` struct construction.
 
-So the metal line's GPU work has been validated on the python-hosted path and
-on the Metal benchmarks, never through the self-host closure. Filed as
-bugs/CODEGEN_offload_module_never_compiled.md.
+So the metal line's GPU work had been validated on the python-hosted path and
+on the Metal benchmarks, never through the self-host closure, because
+`mojo/middle/offload.py` was being silently dropped from that closure: a local
+named `_lens` was a `set` in one function and a `dict` in another, and on the
+compiled path the name froze as the set, so the dict assignment raised and
+`_compile_imported_module`'s rollback discarded four GPU siblings the pass had
+already inlined. That was filed as its own bug, is now FIXED -- the name is
+distinct and `make mojoc` builds with `mojo/middle/offload.py` in fire.py's
+import closure -- and its doc is deleted, so this paragraph is the record.
