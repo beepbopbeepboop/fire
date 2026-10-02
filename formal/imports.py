@@ -1577,28 +1577,33 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # name that collides across architectures would reintroduce the same
     # overwrite one level up.
     #
-    # The SOURCE DIGEST is in the name as well, and that closes the last
-    # overwrite. `(arch, module name)` is not an identity: two builds of a
-    # module called `helper` — two checkouts, two temp trees, two concurrent
-    # jobs in one `-j18` bucket — took the same path, so whichever finished
-    # last replaced the other's library, and a program could be linked against
-    # a dylib built from different source. It showed up as an intermittent
-    # failure in test_formal_sweep.py's dyld-probe cases, which read a dylib
-    # back off this shared path while other jobs were writing it.
+    # The SOURCE DIGEST and the COMPILER DIGEST are in the name as well, and
+    # that closes the last overwrite; `module_dylib_path` owns the naming rule
+    # and the reason each part of it is there.
     #
-    # Hashing the source is what makes sharing safe rather than merely rare:
-    # two builds whose sources agree produce byte-identical libraries, so
+    # `(arch, module name)` is not an identity: two builds of a module called
+    # `helper` — two checkouts, two temp trees, two concurrent jobs in one
+    # `-j18` bucket — took the same path, so whichever finished last replaced
+    # the other's library, and a program could be linked against a dylib built
+    # from different source. It showed up as an intermittent failure in
+    # test_formal_sweep.py's dyld-probe cases, which read a dylib back off
+    # this shared path while other jobs were writing it.
+    #
+    # Hashing the inputs is what makes sharing safe rather than merely rare:
+    # two builds whose inputs agree produce byte-identical libraries, so
     # writing the same path is then harmless, and two that disagree get
     # different paths. Nothing has to take a lock, so a concurrent build
     # neither blocks nor blocks on it — the same bargain the CAS makes
-    # everywhere else. The digest is the module's own source, so editing it
-    # invalidates the path rather than leaving a stale library reachable
-    # under a name that looks current.
-# `prefix` and the digests come from `module_dylib_path`, which owns the
-    # naming rule and the reason each part of it is there.
+    # everywhere else. Each digest invalidates a name that looks current the
+    # moment the thing it names changes.
+    #
+    # `prefix` below is the EXPORT prefix, a different consumer of the same
+    # substitution: it is what the manifest keys every export by, and what
+    # `dylib_export_module` resolves through. `module_dylib_path` computes it
+    # too because it is part of the name, but a name and an export qualifier
+    # are two jobs, so both read the one rule rather than one of them being a
+    # copy of it.
     prefix = _model.abi_module_name(module_identity)
-    with open(source_path, "rb") as f:
-        src_digest = cas.hash_parts(f.read())[:12]
     out = module_dylib_path(out_dir, module_identity, source_path, arch)
     # Serialise the write to this exact path.
     #

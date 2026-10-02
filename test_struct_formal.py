@@ -75,9 +75,20 @@ RESULTS = []
 _NOT_COMPARED = object()
 
 
-def check(ok, what, detail=""):
-    RESULTS.append((bool(ok), what))
-    if not ok:
+def check(ok, what, detail="", tally=None, announce=True):
+    """Record one verdict, and print it when it is a failure.
+
+    `tally` redirects the record somewhere other than `RESULTS`, which is for a
+    caller measuring THIS harness rather than `struct`: the probes in
+    `test_the_check_count_is_fixed_whatever_the_verdicts` are supposed to fail,
+    and a failure that reached the suite's own tally would make it red for a
+    reason that has nothing to do with `struct`. It is the same code path
+    either way, so what the probe measures is real. `announce=False` suppresses
+    the FAIL line, which is the other half of that: a probe's expected failure
+    printed among the suite's real ones is noise.
+    """
+    (RESULTS if tally is None else tally).append((bool(ok), what))
+    if not ok and announce:
         print(f"FAIL  {what}" + (f": {detail}" if detail else ""), flush=True)
     return bool(ok)
 
@@ -149,7 +160,7 @@ def build_and_run(tmpdir, name, source):
                               timeout=RUN_TIMEOUT))
 
 
-def expect_lines(tmpdir, name, source, expected, what, into=None,
+def expect_lines(tmpdir, name, source, expected, what, tally=None,
                 announce=True):
     """The program's printed integers must equal `expected`, element-wise.
 
@@ -159,32 +170,17 @@ def expect_lines(tmpdir, name, source, expected, what, into=None,
     total was a symptom of the failures rather than a fixed denominator, and a
     reader could not tell a missing check from a failing one. Each case now
     contributes exactly two checks, whatever it does.
-
-    `into` redirects those two checks to another tally instead of `RESULTS`,
-    which is for a caller measuring THIS harness rather than `struct`: the
-    probes in `test_the_check_count_is_fixed_whatever_the_verdicts` are
-    supposed to fail, and a failure that reached the suite tally would make it
-    red for a reason that has nothing to do with `struct`. It is the same code
-    path either way, so what the probe measures is real. `announce=False`
-    suppresses the FAIL lines, which is the other half of that: a probe's
-    expected failure printed among the suite's real ones is noise.
     """
-    tally = RESULTS if into is None else into
-
-    def _say(ok, text, detail=""):
-        if not ok and announce:
-            print(f"FAIL  {text}" + (f": {detail}" if detail else ""),
-                  flush=True)
-
     try:
         ran = build_and_run(tmpdir, name, source)
     except AssertionError as e:
-        tally.append((False, what))
-        tally.append((False, f"{what} (value comparison)"))
-        _say(False, what, str(e))
+        check(False, what, str(e), tally=tally, announce=announce)
+        check(False, f"{what} (values)", "the build failed, so nothing ran",
+              tally=tally, announce=announce)
         return None
     got = ran.lines
     why = ran.why_empty()
+    count_detail = ""
     # `bad` holds (line, got, expected) triples, so the report below must
     # unpack THREE. It unpacked two, which raised ValueError on the first
     # wrong value — and `main()`'s catch-all turned that into a single
@@ -195,7 +191,6 @@ def expect_lines(tmpdir, name, source, expected, what, into=None,
     if len(got) == len(expected):
         bad = [(i, g, e) for i, (g, e) in enumerate(zip(got, expected))
                if int(g) != e]
-        count_detail = ""
         values_detail = (f"{len(bad)} of {len(expected)} differ, first: "
                          + ", ".join(f"line {i}: got {g}, CPython says {e}"
                                      for i, g, e in bad[:4])) if bad else ""
@@ -210,13 +205,12 @@ def expect_lines(tmpdir, name, source, expected, what, into=None,
         count_detail = (f"expected {len(expected)} numbers, program printed "
                         f"{len(got)}: {got}"
                         + (f"; the image {why}" if why else ""))
-        values_detail = (why or f"printed {got} instead of "
-                         f"{len(expected)} numbers") + \
-            " (values were never compared: the count was already wrong)"
-    tally.append((not count_detail, what))
-    _say(not count_detail, what, count_detail)
-    tally.append((not bad, f"{what} (values)"))
-    _say(not bad, f"{what} (values)", values_detail)
+        values_detail = (
+            (why or f"printed {got} instead of {len(expected)} numbers")
+            + " (values were never compared: the count was already wrong)")
+    check(not count_detail, what, count_detail, tally=tally, announce=announce)
+    check(not bad, f"{what} (values)", values_detail, tally=tally,
+          announce=announce)
     return got
 
 
@@ -734,7 +728,7 @@ def test_the_check_count_is_fixed_whatever_the_verdicts(tmpdir):
     prints the right number of wrong values, and one whose program prints
     nothing at all. The second is the shape the real flake took.
 
-    `into=reached`, because two of the three probes are SUPPOSED to fail — a
+    `tally=reached`, because two of the three probes are SUPPOSED to fail — a
     probe recorded in the suite's own tally would be indistinguishable from the
     bug it exists to detect. The count is read off a second tally the same
     `expect_lines` populates, so what is measured is the real code path.
@@ -760,7 +754,7 @@ def test_the_check_count_is_fixed_whatever_the_verdicts(tmpdir):
     for name, src, expected, shape, want_checks, want_failed in cases:
         reached = []
         expect_lines(tmpdir, name, src, expected, f"count probe: {shape}",
-                     into=reached, announce=False)
+                     tally=reached, announce=False)
         check(len(reached) == want_checks,
               f"a `{shape}` case reaches exactly {want_checks} checks; got "
               f"{len(reached)}")
