@@ -1055,6 +1055,105 @@ def test_an_expect_marker_points_at_a_doc_that_exists():
           f'is fixed, so the row outlives its own next step: {dangling}')
 
 
+def test_an_expect_marker_count_is_checked_against_the_run():
+    """A marker states how many cases fail; the run is asked whether it does.
+
+    The gap this closes is
+    `bugs/TEST_expect_marker_undercounts_the_failures_it_absorbs.md`. An
+    `expect=` marker forgives FAIL and ERROR wholesale, so a NEW failure
+    inside an already-marked test is absorbed silently and the tally still
+    says EXPECTED — the marker has become a category rather than a claim. It
+    was found on `formal-receiver-position`, whose marker said "2 of 12" and
+    whose file reported three, the third being a module-state refusal from a
+    different bug entirely.
+
+    So the count is now checkable, from two numbers that already exist: the one
+    the marker writes down and the one the harness prints. Both readings are
+    checked here against synthetic output first (a parser that matches nothing
+    reports green forever, which is the one thing a guard of this shape must
+    not be able to do), and then against the real registry, so a marker whose
+    prose shape stops matching its own rule is caught here rather than by a
+    gate that silently stops checking it.
+    """
+    check('expect count: the marker reader takes the leading count, past a '
+          'doc path',
+          suite.marker_failures('2 of 12: a thing') == 2
+          and suite.marker_failures(
+              'bugs/SOME.md — 36 failing: a thing') == 36,
+          'the two shapes the registry spells: "N of M:" and "N failing:"')
+    check('expect count: ...and reads a count out of the middle of prose only '
+          'when it leads',
+          suite.marker_failures(
+              'the marker said "2 of 12" until then') is None,
+          'an unanchored read picks up a number the marker is QUOTING rather '
+          'than claiming, which is how a stale count survives being quoted')
+
+    check('expect count: the run reader knows all three summary shapes',
+          suite.observed_failures('Results: 9 passed, 3 failed') == 3
+          and suite.observed_failures('[x86_64] PASS=59 FAIL=1 of 60') == 1
+          and suite.observed_failures('\n146/148 checks passed') == 2,
+          'Results:/PASS=FAIL=/checks-passed are the three families of harness '
+          'in this tree')
+    check('expect count: ...and reports no count as no count, not as zero',
+          suite.observed_failures('a fanout item with nothing to say') is None,
+          'a missing count read as 0 would make every marker agree')
+    check('expect count: an interim tally cannot make a test look better than '
+          'its final line',
+          suite.observed_failures('Results: 1 passed, 1 failed\n'
+                                  'Results: 3 passed, 2 failed') == 2,
+          'the largest count any summary line reports is the one used')
+
+    # The two verdicts, on synthetic specs whose output says what we say it
+    # says. The FAIL one is the point of the whole check; the EXPECTED one is
+    # the control that says it did not fire on a marker that is telling the
+    # truth, and the no-count one is the case that must stay silent.
+    def verdict(expect, output):
+        with Sandbox(m=dict(cmd=ok_cmd('pass'), expect=expect)):
+            spec = suite.REGISTRY['m']
+            state = {'m': suite.FAIL}
+            res = {'m': suite.Result(suite.FAIL, 0.0, output=output)}
+            suite._apply_expectations({'m': 1}, state, suite.Log(None), res)
+            return state['m']
+
+    check('expect count: a marker whose count matches the run is EXPECTED',
+          verdict('2 of 12: a thing', 'PASS=10 FAIL=2') == suite.EXPECTED,
+          'the control')
+    check('expect count: a NEW failure inside a marked test is a FAILURE, not '
+          'an absorbed EXPECTED',
+          verdict('2 of 12: a thing', 'PASS=9 FAIL=3') == suite.FAIL,
+          'this is the whole check: three failures against a marker that '
+          'claims two is a marker that no longer describes its test')
+    check('expect count: a marker with no count is left alone',
+          verdict('a whole-job condition, not a case count', 'nothing') ==
+          suite.EXPECTED,
+          'four markers in the registry describe a condition rather than a set '
+          'of cases, and inventing a number for them would be a fiction')
+
+    # …and the real registry, so the rule cannot rot into matching nothing.
+    counted = {n: suite.marker_failures(getattr(s, 'expect', '') or '')
+               for n, s in suite.REGISTRY.items()
+               if getattr(s, 'expect', '')}
+    stated = {n: c for n, c in counted.items() if c is not None}
+    check('expect count: most registered markers state a count',
+          len(stated) >= 12,
+          f'only {len(stated)} of {len(counted)} markers state one '
+          f'({sorted(stated)}); a rule with nothing to check reports green '
+          f'forever')
+    check('expect count: the counts the registry states are the ones the '
+          'reader sees',
+          stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
+                     'async-with-lock-guard': 2, 'coro-detached-async': 2,
+                     'coro-future-await': 17, 'formal-external-call': 2,
+                     'formal-module-attr': 1, 'formal-receiver-position': 3,
+                     'formal-toplevel': 2, 'gimple-async-runner': 36,
+                     'mutable-async-capture': 2, 'nested-async-generic': 2,
+                     'taskgroup': 3, 'transitive-closure-capture': 2,
+                     'x86-containers': 1},
+          f'the reader sees {stated}; a marker whose prose shape has drifted '
+          f'stops being checked, which is the failure this whole mechanism '
+          f'is for')
+
+
 # A Markdown table row that is unmistakably a status inventory: a pipe, a
 # backticked name, and a status word. Deliberately narrow, because the whole
 # value of this check is that it has no exemptions and no false positives —
@@ -3214,6 +3313,53 @@ def test_every_test_file_is_registered():
           f'reason, {len(undeclared)} undeclared')
 
 
+def test_every_registered_test_is_in_a_bucket_unless_it_is_a_dependency():
+    """A registration nobody runs is in the inventory and in no run.
+
+    `test_every_test_file_is_registered` above asks the other question — is
+    every `test_*.py` *named* by a spec — and the estate it builds cannot tell
+    a registration that is EXECUTED from one that is merely present. A spec in
+    no bucket is named, so the estate counted it as covered, while `make check`,
+    `make gate` and every other bucket walked straight past it.
+
+    That is not hypothetical: fourteen tests arrived that way, one or two per
+    merge over five months, each satisfying the check that was supposed to
+    notice. `--list` printed `[]` in the bucket column for each and nothing
+    else in the tree reads that column. `bugs/TEST_registered_tests_in_no_
+    bucket_never_run.md` is the census and `bugs/TEST_expect_marked_tests_in_
+    no_bucket_never_run.md` is the eleven `expect=`-marked ones, where it was
+    worse: an `expect=` marker is a claim about a test that no run can observe
+    going stale, so a stale one there is immortal.
+
+    The one legitimate exception is `prooflib`, which is a DEPENDENCY — the one
+    Lean `.olean` that sixteen proof-checking jobs `deps` on — and CLAUDE.md
+    says outright that it is in no bucket on purpose so `make check`/`make
+    gate` do not pay for it. That is a per-spec `dep=True` beside the
+    registration rather than a name in an exception list here, because a check
+    that needs an exception list is the excuse table this doc argues against,
+    and both directions are checked: every other registered test is in at least
+    one bucket, and a `dep=True` one is in none (so the opt-out cannot become a
+    place to hide a test).
+    """
+    in_bucket = {n for members in suite.BUCKETS.values() for n in members}
+    deps = {n for n, s in suite.REGISTRY.items() if getattr(s, 'dep', False)}
+    ungated = sorted(set(suite.REGISTRY) - in_bucket - deps)
+    check('buckets: every registered test is in at least one bucket',
+          not ungated,
+          f'registered and run by nothing: {ungated} — give one a bucket, or '
+          f'`dep=True` if it is a dependency rather than a test')
+    shadowed = sorted(deps & in_bucket)
+    check('buckets: ...and `dep=True` is only for something in no bucket',
+          not shadowed,
+          f'these claim to be dependencies but are in a bucket, so the marker '
+          f'is not saying what it is for: {shadowed}')
+    check('buckets: the dependency opt-out is not a blank cheque',
+          deps == {'prooflib'},
+          f'{sorted(deps)} carry `dep=True`; the one legitimate case in the '
+          f'tree is `prooflib` (the Lean .olean every proof job deps on), and a '
+          f'second one has to be argued for rather than copied')
+
+
 def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
     """The three ways this check can be present and still never run.
 
@@ -3512,6 +3658,7 @@ def main():
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
+               test_every_registered_test_is_in_a_bucket_unless_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
                test_no_test_preflights_on_an_unbuildable_artifact,
                # The memory-campaign tests. They were DEFINED and never CALLED
@@ -3537,6 +3684,7 @@ def main():
                test_over_provisioned_classes_are_reported_not_silently_kept,
                test_every_job_over_the_debt_line_says_why,
                test_an_expect_marker_points_at_a_doc_that_exists,
+               test_an_expect_marker_count_is_checked_against_the_run,
                test_a_doc_that_states_a_tests_status_agrees_with_the_registry,
                test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
         fn()

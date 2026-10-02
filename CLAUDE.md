@@ -334,29 +334,43 @@ mark it with a reason and a bug-doc link.
   compiled path ignored decorators too, so the diff was clean). A new
   interpreter-oracle bug belongs there, not in `test_runtime_diff.py`.
 
-Current `EXPECTED` entries, and the one `DISABLED` entry — the five that reach a
-bucket, plus eleven more `expect=` jobs registered in no bucket at all (so they
-run in nothing today; `bugs/CODEGEN_ab_native_fails.md` §4 has those eleven with
-a recommendation each). **`python3 tools/suite.py --list` is the census**, not
-this table: the bucket column reads `[]` for an ungated test, and nothing else in
-the tree reads it.
+Current `EXPECTED` entries, and the one `DISABLED` entry. **`python3
+tools/suite.py --list` is the census**, not this table — and since 2026-10-01 it
+is the only census that can be: every registered test is now in a bucket unless
+it declares `dep=True` (one does, `prooflib`), which `test_suite.py` checks in
+both directions. So the `[]` column the eleven ungated `expect=` jobs used to
+print cannot be produced again by accident, which is what
+`bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md` and
+`bugs/TEST_registered_tests_in_no_bucket_never_run.md` were about; both docs are
+deleted with their fixes.
+
+A marker that states a count is CHECKED against the run, for the same reason:
+`expect=` forgives `FAIL`/`ERROR` wholesale, so a new failure inside an
+already-marked test used to be absorbed silently and the tally still said
+EXPECTED. The count is read out of the marker's own leading prose ("3 of 14:",
+"36 failing:") and out of the harness's summary line, and a disagreement is a
+FAILURE — the same signal as a marker whose test starts passing, because both
+mean the marker no longer describes the test. Four markers state no count
+(`native-dumpfull`, `bootstrap-stage2-dumps`, `ptrreg-boxed-str`,
+`formal-struct`) because they describe a whole-job condition rather than a set
+of cases, and a marker that states a count but whose run prints none is reported
+as UNCHECKED rather than agreed with.
 
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
 | `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
 | `bootstrap-stage2-dumps` | `expect=` (`SELFHOST_STAGE2_STALL`) | the compiled binary dumping every source | 47 items x 0.5 GB, `tiny` (4 GB) each |
-| `formal-struct` | `expect=` (`bugs/FORMAL_struct_pack_over_eight_arguments.md`) | `struct.pack`/calcsize against CPython | 2 of 148 cases; `proofs` |
-| `formal-toplevel` | `expect=` (`bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md`) | a module body runs, diffed against CPython | 2 of 70 cases; `proofs` |
-| `formal-module-attr` | `expect=` (`bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md`) | `mod.NAME` on both backends | 1 of 11 cases; `proofs` |
+| `formal-struct` | `expect=` (`bugs/FORMAL_struct_pack_over_eight_arguments.md`) | `struct.pack`/calcsize against CPython | `proofs` |
+| `formal-toplevel` | `expect=` (`bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md`) | a module body runs, diffed against CPython | 2 of 79 checks; `proofs` |
+| `formal-module-attr` | `expect=` (`bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md`) | `mod.NAME` on both backends | 1 of 18 checks; `proofs` |
+| the eleven async/coroutine ones | `expect=`, count checked | compiled-path async/await, coroutine and closure capture | 1.4-15.4 s each, `tiny`; `coroutine` |
 
 **A declared red and an unrun red are different failures**, and the second is
 worse: a marker on a test no gate runs can never be observed going green, so it
-cannot rot out. That is why the eleven ungated ones above are a coverage hole
-(`bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md`) and not merely a
-cost question, and why "register it" is never the same act as "run it"
-(`bugs/TEST_registered_tests_in_no_bucket_never_run.md` for the ungated tests
-that are not marked at all).
+cannot rot out. That is why the eleven above went into `coroutine` rather than
+staying out of every bucket, and why "register it" is never the same act as
+"run it".
 
 The two heavyweight `expect=` entries are the old "the binary segfaults on any
 input" claim, which was **measured false on 2026-09-27 and corrected rather than
