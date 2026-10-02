@@ -8933,7 +8933,21 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         _refuse_unlowerable_module_body(body)
     functions = _extract_functions(stmts, synthetic=synthetic, symbols=symbols,
                                    body=body)
-    owners = _method_owners(stmts, extra_structs)
+    # NAMED for what it holds, because the two tables in this function have the
+    # same SUBJECTS and incompatible SHAPES and were interchanged once already
+    # (`bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`):
+    #
+    #   `dispatch_owners` — `{`size`: "Pair"}`  bare method name → struct NAME.
+    #                       What `recv.m(x)` dispatches on, so a name TWO
+    #                       structs declare is absent: that absence is what
+    #                       makes an ambiguous call decline to be rewritten.
+    #   `method_owners`  — `{`Pair_size`: <Pair StructDef>}`  LIFTED function
+    #                       name → the struct, every method present however many
+    #                       structs declare it.  What "which struct is this
+    #                       FUNCTION a method of" is answered from.
+    #
+    # Reading either as the other is a crash or a refusal, not a degradation.
+    dispatch_owners = _method_owners(stmts, extra_structs)
     # This file's own declarations win over an imported one of the same name:
     # a local definition shadows the import, and the local is what this file's
     # code means.
@@ -9024,7 +9038,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # required — a class name is not a value and has no register, so the call
     # bound a name with no home.  The call rewriting below skips the receiver
     # for exactly those, which is the language's rule and not a special case.
-    receiverless = _receiverless_methods(owners, structs_by_name)
+    receiverless = _receiverless_methods(dispatch_owners, structs_by_name)
     # The class values a function may read through its OWN receiver, per
     # function, and read here rather than at the substitution because both of
     # the consumers below need the same answer and neither has the other's
@@ -9080,7 +9094,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # `StridedSlice.write_to` is, because `Slice`, `StridedSlice` and
         # `ContiguousSlice` all declare it and dispatch here is by name.
         alias = _ReceiverAliases(bindings, structs_by_name)
-        _rewrite_method_calls(fn.body, owners, wide, receiverless, alias)
+        _rewrite_method_calls(fn.body, dispatch_owners, wide, receiverless,
+                              alias)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
         # gives. Everything else about it is `_rewrite_class_constants`.
@@ -9176,22 +9191,16 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `stmts` — the pass does not have them.
     from formal.imports import (imported_bound_names,
                                 star_imported_modules)
-    # `method_owners`, and NOT `owners`.  The two tables have the same SUBJECTS
-    # and incompatible SHAPES, and they were interchanged here:
-    #
-    #   `owners`         = `_method_owners(stmts, extra_structs)`
-    #                   → {`size`: "Pair"}    bare method name → struct NAME,
-    #                     and a name two structs declare is absent (that is what
-    #                     makes dispatch-by-name decline an ambiguous one);
-    #   `method_owners`  = `model.method_owner_names(structs)`
-    #                   → {`Pair_size`: <Pair StructDef>}
-    #                     LIFTED function name → the struct itself, and every
-    #                     method is present however many structs declare it.
+    # `method_owners`, and NOT `dispatch_owners` — the two tables the comment on
+    # that local above describes.  They were interchanged HERE, and
+    # `bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md` is the
+    # filed account of it; that doc's §"next step" is this call site.
     #
     # `_frame_receivers` asks `method_owners.get(fn.name)` — `fn.name` is the
     # lifted name — and hands the answer to `_rewrite_class_constants` as the
     # struct a function's receiver reads a class-level `comptime` through.  Given
-    # `owners`, that lookup almost always MISSES (the keys do not overlap), which
+    # the dispatch table, that lookup almost always MISSES (the keys do not
+    # overlap), which
     # is why this sat unnoticed: a miss means no owner, and no owner means the
     # receiver case is not offered.  It HITS in exactly one shape — a module-level
     # FUNCTION whose name is also a method name in this module, and which HOLDS a
