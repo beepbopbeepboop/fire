@@ -1483,6 +1483,10 @@ char *mojo_repr_list_intlists(MojoList *l);
 char *mojo_repr_list_pairs(MojoList *l);
 char *mojo_repr_list_pairs_s(MojoList *l);
 char *mojo_repr_list_pairs_d(MojoList *l);
+/* A list whose elements are inner lists/tuples sharing ONE per-slot kind
+   pattern — `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]`. `kinds` is that
+   pattern, one byte per INNER slot, same alphabet as `mojo_repr_list_kinds`. */
+char *mojo_repr_list_slotkinds(MojoList *l, const char *kinds);
 char *mojo_bool_to_str(int b);
 /* RESTORED, and it has a caller that `nm` on fire_runtime.o cannot see.
  *

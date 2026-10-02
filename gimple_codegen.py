@@ -2779,6 +2779,7 @@ class GimpleGen:
         'mojo_repr_list_bools':      ('char *',    ['MojoList *']),
         'mojo_repr_list_bytes':      ('char *',    ['MojoList *']),
         'mojo_repr_list_kinds':      ('char *',    ['MojoList *', 'const char *']),
+        'mojo_repr_list_slotkinds': ('char *',   ['MojoList *', 'const char *']),
         'mojo_repr_boxed':           ('char *',    ['int64_t']),
         'mojo_list_get_boxed':       ('int64_t',   ['MojoList *', 'int64_t']),
         'mojo_box_double':           ('double',    ['int64_t']),

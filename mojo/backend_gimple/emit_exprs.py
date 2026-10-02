@@ -5104,6 +5104,21 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
         gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+        # A tuple whose elements are themselves LISTS (`([0, 7], [1, 8])`)
+        # needs the same two maps `_lower_list_literal` records for
+        # `[[0, 7], [1, 8]]` — `_nested_elem_types` (what the inner lists
+        # hold) and `_tuple_slot_types` (each inner slot's own ctype) — and
+        # recorded neither, the result was describable only as "a tuple of
+        # lists". `_list_repr_fn` then had no nested entry to pick
+        # `mojo_repr_list_intlists` with, the generic walker recursed through
+        # its None-sentinel heuristic, and the tuple printed as
+        # `((0, 7), (1, 8))` — the inner LISTS in tuple brackets. Same
+        # carry, same reason, on the tuple path; the two lowerings differ
+        # only in the `mojo_mark_as_tuple` at the end.
+        if et == 'MojoList *' and ev in gen._elem_types:
+            gen._nested_elem_types.setdefault(t, gen._elem_types[ev])
+            if ev in gen._tuple_slot_types:
+                gen._tuple_slot_types[t] = gen._tuple_slot_types[ev]
     # Mark as a tuple AFTER the elements are in, not before. The mark is
     # what makes this value a tuple rather than a list (see
     # mojo_mark_as_tuple's doc comment in runtime/fire_runtime.c), and since
@@ -5262,13 +5277,15 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
 
     # Park the remaining `for` clauses for `_gen_compr_append` to consume from
     # inside the clause-0 loop body. See its comment there for why the extra
-    # clauses used to vanish and why extending is the right lowering.
-    # Only list/generator: both are list-backed ('generator' is initialised
-    # "as a list for simplicity", per `_gen_compr_append`), so they share
-    # `mojo_list_extend`. A set/dict comprehension with 2+ clauses is still
-    # dropped -- those need per-kind insert/merge, not a list extend, and
-    # guessing at it is how this bug got in.
-    if len(node.generators) > 1 and node.kind in ('list', 'generator'):
+    # clauses used to vanish and why nesting is the right lowering.
+    # The parked remainder keeps THIS comprehension's own `kind`, so each kind
+    # merges into the outer one with its own runtime call: `mojo_list_extend`
+    # for list/generator (both list-backed -- 'generator' is initialised "as a
+    # list for simplicity", per `_gen_compr_append`), `mojo_set_update` for a
+    # set, `mojo_dict_update` for a dict. The latter two are per-element/per-pair
+    # merges, which is what the set and dict cases need and what a list extend
+    # cannot express -- they were dropped here rather than guessed at.
+    if len(node.generators) > 1:
         gen._compr_pending_inner = gimple_ctypes.Comprehension(
             kind=node.kind, element=node.element, key=node.key,
             generators=list(node.generators[1:]))

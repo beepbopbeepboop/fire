@@ -855,6 +855,16 @@ static void _kinds_forget(uint64_t addr)
 typedef struct {
     uint64_t magic;
     int64_t  bits;
+    /* The slot's own kind byte (mojo_list_set_kinds' alphabet), copied from
+     * the list at BOX time. A box exists precisely because the raw word is
+     * not self-describing — a double has no int64_t spelling, and a str
+     * slot's word is a bare pointer with nothing to say it is one — so the
+     * consumer has to be able to ASK rather than guess. Without this the box
+     * only ever carried the float case and every other kind came back as the
+     * bare word: `mojo_repr_boxed` could only answer "box ⇒ float", so a
+     * STRING slot of the same heterogeneous list printed as its address
+     * decimal. */
+    char     kind;
 } MojoBox;
 
 static _PtrReg _reg_box;
@@ -868,8 +878,15 @@ int mojo_is_boxed(int64_t v)
 int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
 {
     if (!l || i < 0 || i >= l->len) return 0;
-    if (mojo_list_slot_kind(l, i) != 'd')
-        return l->data[i];          /* the raw word, exactly as before */
+    char _k = mojo_list_slot_kind(l, i);
+    /* An int slot is its own answer and stays the bare word: a box is a heap
+     * cell per (list, slot), and taxing every int in a mixed list to serve the
+     * uncommon kinds would be the wrong trade. Every OTHER kind is boxed —
+     * not just 'd' — because for each of them the raw word is ambiguous: a
+     * double has no int64_t spelling, and a `char *` slot's word is a bare
+     * pointer a consumer cannot tell from an int. */
+    if (_k == 'i')
+        return l->data[i];
     uint64_t addr = (uint64_t)(uintptr_t)l;
     int fresh = 0;
     _KindRow *r = _kinds_row_for_write(addr, &fresh);
@@ -889,6 +906,7 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
          * it is what mojo_list_get_double does. Storing the double TRUNCATED
          * to an int64_t instead would read back 2.5 as 2.0. */
         bx->bits = l->data[i];
+        bx->kind = _k;
         _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
         r->boxes[i] = bx;
     }
@@ -915,32 +933,66 @@ int64_t mojo_double_to_bits(double v) {
     return bits;
 }
 
-/* The box read as a double. A value that is NOT a box comes back as its own
- * numeric value, not 0: the codegen marks a whole READ SITE as possibly
- * boxed (the runtime decides per slot), so a call here must be correct for
- * the int slots of the same list too — and promoting an int to a double is
- * exactly what an operation with a float operand already does to it. */
+/* The box read as a double. A value that is NOT a box — or a box of a kind
+ * that is not a double's — comes back as its own numeric value, not 0: the
+ * codegen marks a whole READ SITE as possibly boxed (the runtime decides per
+ * slot), so a call here must be correct for the int slots of the same list
+ * too — and promoting an int to a double is exactly what an operation with a
+ * float operand already does to it. A non-double box unwraps to its raw word
+ * first, which is what that same slot returned before it was boxed at all. */
 double mojo_box_double(int64_t v)
 {
     if (!mojo_is_boxed(v)) return (double)v;
-    return mojo_double_from_bits(((MojoBox *)(intptr_t)v)->bits);
+    MojoBox *bx = (MojoBox *)(intptr_t)v;
+    if (bx->kind != 'd') return (double)bx->bits;
+    return mojo_double_from_bits(bx->bits);
 }
 
 /* The box read as an integer: Python's own conversion (truncation toward
- * zero), and the value itself when it is not a box. */
+ * zero) of a DOUBLE box, and the raw word for anything else — including a
+ * non-double box, whose slot is not a number at all and whose word is what
+ * the unboxed read returned. */
 int64_t mojo_box_int(int64_t v)
 {
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (!bx || !mojo_is_boxed(v)) return v;
+    if (bx->kind != 'd') return bx->bits;
     return (int64_t)mojo_box_double(v);
 }
 
-/* The repr of a possibly-boxed int64_t. Box -> the double it holds; not a
- * box -> the plain integer, which is what every other int64_t in this
- * runtime already is. One call so the consumer needs no branch. */
+/* The repr of a possibly-boxed int64_t. A box is described by its OWN kind
+ * byte (see MojoBox): 'd' the double it holds, 'p' a str, 's' bytes, 'l' a
+ * nested container, 'n' None, anything else the plain integer. Not a box ->
+ * the plain integer, which is what every other int64_t in this runtime
+ * already is. One call so the consumer needs no branch.
+
+ * The per-kind arms are `mojo_repr_list_kinds`' own, so a str slot and a str
+ * element of a heterogeneous list cannot print differently — and the str arm
+ * is why this cannot go on answering "box ⇒ float": a `char *` slot's word is
+ * a bare pointer, so without asking the box a str element printed as its own
+ * address decimal. */
 char *mojo_repr_boxed(int64_t v)
 {
-    if (mojo_is_boxed(v)) return mojo_repr_float(mojo_box_double(v));
+    if (mojo_is_boxed(v)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)v;
+        switch (bx->kind) {
+            case 'd': return mojo_repr_float(mojo_double_from_bits(bx->bits));
+            /* str() semantics, NOT repr(): every caller of this function is a
+             * str() spelling (`print`, an f-string, `%s`, the `str` builtin),
+             * where `str("yy")` is `yy` and only `repr` would quote it. The
+             * float case could not tell the two apart, which is why the
+             * name says "repr" and the behaviour was never checked; the str
+             * slot can. strdup'd because the string belongs to the list, and
+             * callers treat this result as their own (see
+             * mojo_cstr_or_int_str's ownership comment). */
+            case 'p': return strdup((char *)(intptr_t)bx->bits);
+            case 's': return mojo_bytes_repr((MojoBytes *)(intptr_t)bx->bits);
+            case 'l': return mojo_repr_list_kinds(
+                (MojoList *)(intptr_t)bx->bits, NULL);
+            case 'n': return strdup("None");
+            default:  return mojo_repr_int(bx->bits);
+        }
+    }
     return mojo_str_from_int(v);
 }
 
@@ -5683,14 +5735,26 @@ MojoSet *mojo_set_copy(MojoSet *s) {
     return out;
 }
 
+/* `dst |= src`, and the merge behind a multi-clause set comprehension
+   (`{i + j for i in range(3) for j in range(3)}`, lowered as one
+   `mojo_set_update` per outer element). Walks the SOURCE in INSERTION order
+   (mojo_set_order_indices), not raw hash-slot order: the destination's own
+   order is what a set's iteration and repr report, so a slot-order walk made
+   the merged result's order depend on where the heap put the source's
+   elements. `s |= other` is a merge in the source's order for the same
+   reason. */
 void mojo_set_update(MojoSet *dst, MojoSet *src) {
     if (!dst || !src) return;
-    for (int64_t i = 0; i < src->cap; i++) {
-        if (src->slots[i].tag == 0)
-            mojo_set_add_int(dst, src->slots[i].val_i);
-        else if (src->slots[i].tag == 1)
-            mojo_set_add_str(dst, src->slots[i].val_s);
+    int64_t *order = mojo_set_order_indices(src);
+    int64_t n = order ? src->used : 0;
+    for (int64_t oi = 0; oi < n; oi++) {
+        _SetSlot *s = &src->slots[order[oi]];
+        if (s->tag == 0)
+            mojo_set_add_int(dst, s->val_i);
+        else if (s->tag == 1)
+            mojo_set_add_str(dst, s->val_s);
     }
+    free(order);
 }
 
 /* ── MojoSetIter ─────────────────────────────────────────────────────────*/
@@ -6800,11 +6864,20 @@ static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
    the inner lists through the None-sentinel heuristic, so an inner 0 printed
    as `None` (`[[None, 7], [1, 8]]`). The codegen knows statically that the
    inner lists hold plain ints (that is exactly what routes this helper), so
-   read every inner slot as an int. */
-char *mojo_repr_list_intlists(MojoList *l) {
-    if (!l) return "[]";
+   read every inner slot as an int.
+
+   The outer value and every inner value each pick their own brackets from
+   `mojo_is_tuple`, the same way every other repr helper here does. That is not
+   cosmetic: `[(5, j) for j in range(3)]` and `[[5, j] for j in range(3)]`
+   are the same comprehension with a tuple or a list element, both route here
+   (both elements are int lists, so both carry the same nested element type),
+   and the tuple one printed as `[[5, 0], [5, 1], [5, 2]]`. Hardcoding `[`
+   here also misreported a tuple of int lists. */
+static char *_mojo_repr_intlists(MojoList *l) {
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
     int64_t _n = mojo_list_len(l);
-    char *_buf = strdup("[");
+    char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
         if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
         int64_t _p = mojo_list_get_int(l, _i);
@@ -6814,19 +6887,59 @@ char *mojo_repr_list_intlists(MojoList *l) {
         }
         MojoList *_in = (MojoList *)(intptr_t)_p;
         int64_t _m = mojo_list_len(_in);
-        _buf = mojo_str_cat(_buf, "[");
+        int _in_tup = mojo_is_tuple(_in);
+        _buf = mojo_str_cat(_buf, _in_tup ? "(" : "[");
         for (int64_t _j = 0; _j < _m; _j++) {
             if (_j > 0) _buf = mojo_str_cat(_buf, ", ");
             _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(_in, _j)));
         }
-        _buf = mojo_str_cat(_buf, "]");
+        if (_in_tup && _m == 1) _buf = mojo_str_cat(_buf, ",");
+        _buf = mojo_str_cat(_buf, _in_tup ? ")" : "]");
     }
-    return mojo_str_cat(_buf, "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
 }
+
+char *mojo_repr_list_intlists(MojoList *l) { return _mojo_repr_intlists(l); }
 
 char *mojo_repr_list_pairs(MojoList *l) { return _mojo_repr_pairlist(l, 0); }
 char *mojo_repr_list_pairs_s(MojoList *l) { return _mojo_repr_pairlist(l, 1); }
 char *mojo_repr_list_pairs_d(MojoList *l) { return _mojo_repr_pairlist(l, 2); }
+
+/* A list whose elements are inner lists/tuples that ALL share one per-slot
+   kind pattern — `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]`,
+   `[(cfg, model), (cfg, model)]`. `kinds` is that pattern, one byte per
+   INNER slot, in mojo_repr_list_kinds' own alphabet; the inner brackets, the
+   single-element trailing comma and the per-slot value reading are all that
+   function's, so this is the same reader applied one level up — which is why
+   it delegates rather than repeating the switch.
+
+   Without it the generic walker read each inner slot through the
+   None-sentinel heuristic, so every int 0 in a non-zero slot printed as
+   `None` (`[('a', 0, 1)]` → `[('a', None, 1)]`) and a double read as an int
+   printed its raw IEEE-754 bits — or, when those bits looked like a heap
+   address, faulted inside mojo_read_type_tag_safe (`[(1.5, 2)]` SIGSEGV'd).
+   The codegen has the pattern statically (`_tuple_slot_types`, recorded for
+   every tuple literal whose slots are not all one type), which is what routes
+   here. */
+char *mojo_repr_list_slotkinds(MojoList *l, const char *kinds) {
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        int64_t _p = mojo_list_get_int(l, _i);
+        if (!mojo_is_registered_list(_p)) {
+            _buf = mojo_str_cat(_buf, mojo_repr_obj(_p));
+            continue;
+        }
+        _buf = mojo_str_cat(_buf,
+            mojo_repr_list_kinds((MojoList *)(intptr_t)_p, kinds));
+    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+}
 
 char *mojo_repr_list_bytes(MojoList *l) {
     /* A list that brought its own per-slot kinds is described by them
@@ -8016,14 +8129,27 @@ MojoList *mojo_dict_items_int(MojoDict *d) {
 
 void mojo_dict_update(MojoDict *dst, MojoDict *src) {
     if (!dst || !src) return;
-    for (int64_t i = 0; i < src->cap; i++)
-        if (src->slots[i].key) {
-            if (src->slots[i].keykind == 2)
-                _dict_set_ik(dst, src->slots[i].ikey, src->slots[i].val, src->slots[i].kind);
-            else
-                _dict_set_raw_seq_kind_k(dst, src->slots[i].key, src->slots[i].val,
-                                         -1, src->slots[i].kind, src->slots[i].keykind);
-        }
+    /* Walks the SOURCE in INSERTION order (mojo_dict_order_indices), not raw
+     * hash-slot order. A dict's iteration order and repr are insertion order,
+     * and each re-inserted pair takes a FRESH sequence number in the
+     * destination (seq = -1 below), so the destination's order became the
+     * source's slot order: `{str(i) + str(j): i for i in range(2) for j in
+     * range(2)}` printed `{'01': 1, '00': 1}` where CPython prints
+     * `{'00': 1, '01': 1}`. `d.update(other)` merges in the source's order for
+     * the same reason. Each pair keeps its own `keykind`/`kind`, so an
+     * integer-keyed pair stays integer-keyed and a string value stays a
+     * string. */
+    int64_t *order = mojo_dict_order_indices(src);
+    int64_t n = order ? src->used : 0;
+    for (int64_t oi = 0; oi < n; oi++) {
+        _DictSlot *s = &src->slots[order[oi]];
+        if (!s->key) continue;
+        if (s->keykind == 2)
+            _dict_set_ik(dst, s->ikey, s->val, s->kind);
+        else
+            _dict_set_raw_seq_kind_k(dst, s->key, s->val, -1, s->kind, s->keykind);
+    }
+    free(order);
 }
 
 /* dict.setdefault(key, default): return the value for `key`, inserting
