@@ -7064,6 +7064,44 @@ def _module_published_names(module: str, link_line) -> set:
         M.dylib_export_module(forwarded, module))
 
 
+def _bracketed_export_gap(base_name: str, fn_name: str, link_line):
+    """The EXPORT refusal for `base_name[…](…)`, or None when the export rule
+    is not what stops it.
+
+    `f[x](y)` has two independent reasons to have no callee on this path, and
+    the bracketed scan can only ask one of them. It asked the BRACKETS
+    (`model.specialization_call_refusal`) for every bracketed callee this unit
+    does not compile, which is right for `plain[3](5)` — `plain` is exported
+    perfectly well; the brackets have nowhere to bind — and wrong for
+    `priv._helper[1](2)`, where the name is private and there is no symbol at
+    all. The second case used to be reported with a message about generics and
+    monomorphization, and the reader sent to look for a signature had none to
+    find: the fact is `doc/ABI.md`'s export rule, and it is checkable.
+
+    So the export rule is asked FIRST here, and the two facts are told apart by
+    the link line rather than by a guess: the base name is an imported one
+    (`model.module_symbol`, `site == "imported"`), and the library built for
+    the module it came from does not publish it. A base name the module DOES
+    publish returns None and keeps the brackets' own refusal, which is the
+    sentence that is true of it.
+
+    Both halves are refused rather than assumed. `link_line` empty (a caller
+    that has not resolved imports) or a module with no readable export table
+    yields an empty `published`, and an empty table is not evidence that
+    anything is missing from it — so it returns None and the old verdict stands.
+    """
+    sym = M.module_symbol(base_name)
+    if sym is None or getattr(sym, "site", None) != "imported":
+        return None
+    module = getattr(sym, "module", None)
+    if not module:
+        return None
+    published = _module_published_names(module, link_line)
+    if not published or base_name in published:
+        return None
+    return M.imported_callee_refusal(base_name, sym, fn_name)
+
+
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
@@ -7514,7 +7552,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         M.member_chain_text(sub.obj), sub.obj.member,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
                         if _ambiguous_method_owners(sub.obj, structs_by_name)
-                        else M.specialization_call_refusal(base_name))
+                        else (_bracketed_export_gap(
+                            base_name, fn.name, link_line)
+                            or M.specialization_call_refusal(base_name)))
                 elif M.debug_assert_callee(sub):
                     # The FOURTH bracketed callee this tree has a better answer
                     # for, and it is a different KIND of answer from the three
