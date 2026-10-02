@@ -5,6 +5,88 @@ Found 2026-09-27 while closing
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
+## Status (2026-10-02 — re-measured: the compiled half is STILL wrong, and the two candidate fixes are now MEASURED, one of them ruled out)
+
+Same verdict, from the doc's own minimal repro compiled through
+`compile_to_gimple` + `gcc -fgimple` and run (`deco(f) -> 99`, `@deco def
+step`, `print(step)` / `print(step(7))`). The doc's 2026-09-30 entry read the
+compiled address as `35260224` and this tree prints `7901000`; the value is an
+address and moves per build, which is itself the answer to whether it is a
+correct one:
+
+| | result |
+|---|---|
+| CPython 3.14.7 | `99`, then `TypeError: 'int' object is not callable` |
+| `fire.py run` | `99`, then the same `TypeError` — the interpreter half is fixed |
+| compiled + run | `7901000`, then `1` — the UNDECORATED result |
+
+**The generated C, because it splits this into three separable defects and two
+of them are prerequisites rather than the feature:**
+
+```c
+int64_t deco_9f63a2 (int64_t f) { ... return 99LL; }   /* (1) */
+static void * _funcptr_step_9f63a2 = (void *)step_9f63a2;
+  _t1 = _funcptr_step_9f63a2;
+  sprintf (_t2, "%d", _t1);                              /* (2) */
+  _t6 = step_9f63a2 (_t7);                               /* (3) */
+```
+
+1. **The decorator's own parameter is `int64_t`.** The decoration is the only
+   call site of `deco` and it is never emitted, so the call-site observation
+   that types an unannotated parameter has nothing to observe and the default
+   stands. This is the ordering hazard the 2026-10-01 entry below already names
+   (`CODEGEN_string_arg_type_lost_across_forwarding_hop.md`): the free-function
+   scalar-observation pass runs BEFORE any body's parameters are refined, so
+   whatever makes the decoration visible has to survive that.
+2. **`sprintf("%d", (void *)ptr)`.** `print(step)` reads the function value as
+   a `void *` and formats it with `%d`, which on a 64-bit target is undefined
+   behaviour and is where the decimal address comes from. CPython prints
+   `<function step at 0x…>`, so the *address* is not the wrong answer — the
+   `%d` is. This one is independent of the feature and fixable on its own.
+3. **The call site resolves the bare name to the C symbol**, so `step(7)` runs
+   the undecorated body. This is the bug.
+
+**The obvious cheap fix — refuse a decorated `def` at compile time — is
+RULED OUT by measurement, and this is the useful part of this entry.** The
+interpreter's compile-time-only decorator name set has ten names; the stdlib
+(249 `.mojo` modules under `build_stdlib_dylib.STDLIB_PATH`) decorates
+**426** definitions with names outside it — `doc_hidden`, `stable`,
+`deprecated`, `explicit_destroy`, `unavailable`, `implicit`,
+`__nonmaterializable`, `__allow_legacy_custom_self_type`,
+`__unsafe_nested_origins_read_only`, `lldb_formatter_wrapping_type`,
+`__annotation` — and 11 of those are on FREE functions. Refusing them would drop real
+stdlib modules, which is exactly the `stdlib-dylib` `skip` regression
+CLAUDE.md makes a judgement call about. So the fix has to be *application*, and
+it has to decide per NAME whether a decorator is a declaration annotation (which
+the stdlib shows is most of them, and which the Mojo front end strips) or a real
+callable — a bigger question than "apply the decorator".
+
+**So the first commit of the real fix is three things, in this order:**
+
+1. a module-level REBINDING data model: `@deco def step` becomes a module-scope
+   variable `step` holding the decoration's value, the same
+   `_lower_IdentExpr` closure-value branch (`emit_exprs.py:764`) that already
+   handles `return add` for a LOCAL, lifted to module scope;
+2. the decorator's parameter typed from that new call site (defect 1 above),
+   which is a chicken-and-egg with the observation pass and is the delicate
+   part;
+3. a compile-time refusal for the one case that cannot be represented —
+   `step` bound to a decoration whose inferred return type is a scalar, then
+   CALLED (`step(7)` where CPython raises `TypeError`). Cheap, and safe to land
+   on its own precisely because it is a case that is silently wrong today; it
+   is NOT the same as refusing decorated `def`s, which is what the 426 above
+   rules out.
+
+Defect 2 is independent of all three and can be landed whenever.
+
+Not attempted this session, and not attempted by any of the three commits above:
+the codegen half is feature-sized, `mojo/backend_gimple/*` is mid-merge under
+other claims, and a mistake in it is a silent wrong value in the compiler's own
+compiled path. The interpreter half remains fixed; the compiled half remains
+the work.
+
+Doc kept open.
+
 ## Status (2026-10-01 — re-measured, the compiled half is STILL exactly as the entry below describes; not attempted)
 
 Confirmed unchanged on this tree, from the doc's own minimal repro
