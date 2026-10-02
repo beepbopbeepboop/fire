@@ -113,6 +113,15 @@ AAPCS64 passes eight), and the fix is an ABI change plus a proof-model change
 that `FORMAL_x86_64_argument_registers` already measures. **Do not start it from
 this map.**
 
+**The same probe found one arm64-only WRONG ANSWER, which is the row to read
+this map for.** `base ** <computed exponent>` is **0 on arm64** and correct on
+x86-64: `2 ** 10` → 0 where the source says 1024, `3 ** y` → 0 where it says 27,
+while the literal exponent (`2 ** 4` → 16) is right on both. It is
+`bugs/FORMAL_variable_exponent_is_zero_on_arm64.md`, filed from this slice and
+unfixed, and it is the direction that matters because `test_formal_run.py` builds
+**the host's** architecture for a positive case — on this project's machines,
+the one that gets it wrong.
+
 **The census cannot see the defects that matter most, and the reason is
 structural.** Both fixes below were found by building ~60 small constructs on
 both backends and diffing the verdicts (`git show f89f9622`), because a sweep
