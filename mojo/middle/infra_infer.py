@@ -1474,6 +1474,72 @@ def _seed_addressed_locals(gen, body: list):
             if _as_str(_kp[0]) == 'to' and isinstance(_kp[1], IdentExpr):
                 gen._addressed_locals.add(_as_str(_as_ident_node(_kp[1]).name))
 
+def _generator_value_ctype_for_next(gen, arg):
+    """The value ctype `next(<arg>)` will produce, or None when `arg` does
+    not resolve to a registered generator api.
+
+    The four registries, in the order that can actually answer, and what each
+    one is keyed by -- they are not interchangeable, which is the reason this
+    is one function rather than four inline lookups:
+
+      * `_generator_var_api`  — the handle VALUE (`_tN`). Populated by
+        `_emit_generator_start_call` at EMISSION time, so it is the only one
+        that covers a generator assigned to a local first
+        (`g = mk(); next(g)`). Worth consulting first: it is keyed by the
+        very handle the lowering will drive, so it cannot disagree with it.
+      * `_generator_api`      — the generator FUNCTION name, including the
+        post-desugar wrapper spelling the A3 coroutine path renamed it to.
+      * `_generator_method_api` — `(StructName, method)` for a generator
+        METHOD (`next(b.render())`). Resolving the receiver needs the same
+        `var_types`-names-a-registered-struct gate `_quick_type`'s own method
+        row uses, so a user class can define a method named anything.
+      * `_imported_generator_bindings` / `_fn_returns_generator` — a
+        cross-module generator alias, and a generator whose identity is known
+        only from the enclosing function's `for x in gen(...)`.
+
+    None means "not a generator this pass knows", and the caller keeps today's
+    answer. That is the important direction: this function only ever adds
+    certainty."""
+    _gav = getattr(gen, '_generator_var_api', None) or {}
+    if isinstance(arg, gimple_ctypes.IdentExpr):
+        _an = _as_str(arg.name)
+        _by_val = _gav.get(gen._c_names.get(_an, _an))
+        if _by_val is not None:
+            return _by_val.get('value_ctype')
+        for _tbl in (getattr(gen, '_generator_api', None) or {},
+                     getattr(gen, '_imported_generator_bindings', None) or {}):
+            _e = _tbl.get(_an)
+            if isinstance(_e, dict) and _e.get('value_ctype'):
+                return _e['value_ctype']
+        _prov = (getattr(gen, '_fn_returns_generator', None) or {}).get(_an)
+        if _prov:
+            _pe = (getattr(gen, '_generator_api', None) or {}).get(_prov)
+            if isinstance(_pe, dict) and _pe.get('value_ctype'):
+                return _pe['value_ctype']
+        return None
+    if isinstance(arg, gimple_ctypes.CallExpr):
+        if isinstance(arg.func, gimple_ctypes.IdentExpr):
+            _fn = _as_str(arg.func.name)
+            for _tbl in (getattr(gen, '_generator_api', None) or {},
+                         getattr(gen, '_imported_generator_bindings', None) or {}):
+                _e = _tbl.get(_fn)
+                if isinstance(_e, dict) and _e.get('value_ctype'):
+                    return _e['value_ctype']
+            return None
+        if isinstance(arg.func, gimple_ctypes.MemberExpr) and isinstance(arg.func.obj, gimple_ctypes.IdentExpr):
+            _ot = _as_str(gen.var_types.get(_as_str(arg.func.obj.name), ''))
+            if not _ot.endswith(' *'):
+                return None
+            _sn = gimple_exprtypes._struct_name_of(_ot)
+            if _sn not in gen.struct_field_types:
+                return None
+            _me = (getattr(gen, '_generator_method_api', None) or {}).get(
+                (_sn, _as_str(arg.func.member)))
+            if isinstance(_me, dict) and _me.get('value_ctype'):
+                return _me['value_ctype']
+    return None
+
+
 def _closure_info_for_ident(gen, name: str):
     """Resolve a bare identifier reference to the ClosureInfo of the
     nested function it names, or None if `name` is not a closure in
@@ -1729,6 +1795,30 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                     _vt = gen._quick_type(_v)
                     if _vt.endswith(' *') and _vt[:-2].strip() in gen.struct_field_types:
                         cand = _vt
+                    # `next(<generator>)` is a POINTER result that is not a
+                    # struct -- `char *` for a string-yielding generator, and
+                    # the struct-pointer test above can never see it. So
+                    # `def h(): r = next(mk()); return r` inferred
+                    # `int64_t` and printed the yielded string's address,
+                    # while `def h(): return next(mk())` was already correct:
+                    # the same fact, asked one step later.
+                    #
+                    # Asked through `gen._generator_value_ctype_for_next`,
+                    # the SAME resolver `_quick_type`'s `next` row uses, so
+                    # the two cannot disagree about what a generator yields.
+                    # Narrow by construction: it answers only for a registered
+                    # generator api, and only when `next` is not shadowed, so
+                    # nothing about a scalar- or opaque-class-valued call
+                    # changes.
+                    elif (isinstance(_v.func, gimple_ctypes.IdentExpr)
+                          and _as_str(_v.func.name) == 'next'
+                          and not gen._locally_binds_name('next')):
+                        _nargs = _v.args or []
+                        _nv = None
+                        if len(_nargs) >= 1:
+                            _nv = gen._generator_value_ctype_for_next(_nargs[0])
+                        if _nv:
+                            cand = _nv
                 if cand is None:
                     # `q = p` -- a local bound from ANOTHER local this map
                     # already knows, which is the same value under a second

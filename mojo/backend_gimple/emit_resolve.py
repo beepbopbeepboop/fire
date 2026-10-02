@@ -3153,17 +3153,44 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # key, stringified via mojo_str_from_int, or one actually boxed as
         # int64_t — and loads global string literals into locals first).
         if kt != 'char *':
-            kt, kv = gen._char_to_cstr(kt, kv)
+            # `transient=True, word_ok=True` -- the DICT-KEY spelling, and
+            # every other dict-key site already uses it (subscript get/set,
+            # `in`, `d.get`, `emit_methods`' own key arm). This one did not,
+            # and that is the whole bug for a container key: without
+            # `word_ok` a `MojoList *` key falls past the container arm
+            # entirely and the raw `(char *)value` cast below reads the list
+            # HEADER's bytes as a C string -- `{MojoList *data; int64_t len,
+            # cap; ...}` -- so what lands in the key is a pointer and two
+            # small integers, printed as binary garbage, and a later
+            # `d[(1, 1)]` MISSES because the lookup key is built the same way
+            # from a different address.
+            #
+            # With the flags, `_char_to_cstr` hands over the raw WORD and
+            # `_apply_kw_keys` selects the `_kw` twin, which renders the
+            # container's CONTENT through the same `_container_key_str` the
+            # subscript path uses -- so the comprehension's key and the
+            # lookup's key are one stringification, and the repr is the
+            # content rather than an address.
+            kt, kv = gen._char_to_cstr(kt, kv, True, True)
         elif kv.startswith('_slit_'):
             kv_tmp = gen._new_val('char *', f"{kv}")
             kv = kv_tmp
+        # Through `_emit_call`, NOT a raw `_emit`, and that is load-bearing
+        # rather than tidiness: `_emit_call` is where `_apply_kw_keys` runs,
+        # and that is what resolves the placeholder key `_char_to_cstr(...,
+        # word_ok=True)` handed out into the `_kw` twin with the raw word.
+        # A raw `_emit` bypassed it, so the placeholder reached the store as
+        # the bare `(char *)` cast it was standing in for -- the list
+        # HEADER's bytes, read as a C string.
         if vt in gimple_ctypes._FLOAT_TYPES:
-            gen._emit(f"  mojo_dict_set_double ({res}, {kv}, {vv});")
+            gen._emit_call('void', '', 'mojo_dict_set_double',
+                           [('MojoDict *', res), ('char *', kv), (vt, vv)])
         elif vt == 'char *':
             if vv.startswith('_slit_'):
                 vv_tmp = gen._new_val('char *', f"{vv}")
                 vv = vv_tmp
-            gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
+            gen._emit_call('void', '', 'mojo_dict_set_str',
+                           [('MojoDict *', res), ('char *', kv), ('char *', vv)])
         else:
             # See the dict-literal case's identical comment: vt alone
             # can't distinguish a real bool literal from a genuine int.
@@ -3171,7 +3198,8 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
                 gen._emit(f"  mojo_mark_dict_bool_values ({res});")
             gen._note_dict_callable_ret(res, vv, vt)
             vv64 = gen._to_int64(vt, vv)
-            gen._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
+            gen._emit_call('void', '', 'mojo_dict_set_int',
+                           [('MojoDict *', res), ('char *', kv), ('int64_t', vv64)])
 
 
 
