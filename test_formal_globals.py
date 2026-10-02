@@ -467,6 +467,63 @@ CASES = [
                    "    h: Int = get_hits()\n"
                    "    print(h)\n"
                    "    return 0\n"}, "3\n"),
+
+    # ── module-level `comptime` constants ──
+    # A MODULE-level `comptime` binding has no `__DATA` slot and is not meant
+    # to: it is a compile-time constant, so the build substitutes its value at
+    # every read site in the unit (`build.py:_substitute_module_constants`) and
+    # the slot question never arises. `collect_module_symbols` decides which
+    # names are in that category by asking whether the initialiser FOLDS.
+    #
+    # It used to fold only a literal, so a constant written over another one was
+    # refused — and refused with a message telling the reader to do exactly
+    # that. `comptime_fold_refusal`'s text says: "Make the initializer a literal
+    # (or an expression of literals and other `comptime` names)". The second
+    # half did not work at module level; it does at function scope
+    # (`mojo/middle/comptime.py:eval_const` resolves operand names out of the
+    # bindings recorded so far for that function), so one half of the language's
+    # own promise was implemented and the other was not.
+    #
+    # The source is `std/utils/_serialize.mojo`'s, verbatim in shape and in
+    # spelling, because that is where the sweep found it:
+    #
+    #     comptime _kCompactMaxElemsToPrint = 7
+    #     comptime _kCompactElemPerSide = _kCompactMaxElemsToPrint // 2
+    #
+    # Two operators in one line, and they needed two separate repairs in two
+    # different folders: the reference to the earlier name is
+    # `collect_module_symbols` walking its own table in source order, and `//`
+    # is in neither folder's operator table. Before, the file was refused on
+    # arm64 and on x86-64 alike with "'_kCompactElemPerSide' is a `comptime`
+    # binding declared at module level, and it does not fold to a compile-time
+    # constant".
+    #
+    # The interpreter is a third engine here for free: `fire.py run` handles
+    # `comptime` at module level, so this row needs no keyword-stripped copy of
+    # itself to have a reference answer, and 3 is what CPython would print for
+    # `7 // 2` too.
+    ("module_comptime_constant_over_another_module_constant",
+     "comptime _kCompactMaxElemsToPrint = 7\n"
+     "comptime _kCompactElemPerSide = _kCompactMaxElemsToPrint // 2\n"
+     "\n"
+     "def main(n):\n"
+     "    per_side: Int = _kCompactElemPerSide\n"
+     "    print(per_side)\n"
+     "    return 0\n", "3\n"),
+
+    # The same shape with `+ - *` instead of `//`, so a reader can tell which
+    # half of the two repairs this file's row above needed. It also pins the
+    # value being the SUBSTITUTED one rather than the name: 7 + 7 + 7 = 21, and
+    # a read that came back as the address of a slot would not be 21.
+    ("module_comptime_constant_arithmetic_chain",
+     "comptime _A = 7\n"
+     "comptime _B = _A * 2\n"
+     "comptime _C = _B + _A\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = _C\n"
+     "    print(v)\n"
+     "    return 0\n", "21\n"),
 ]
 
 # Cases that must be REFUSED, and why each one is a refusal rather than a wrong
@@ -554,6 +611,34 @@ REFUSALS = [
      # answers; the old sentence named neither.
      "is read in bump() at `G + 1`, before anything in that function has "
      "assigned it"),
+
+    # THE HALF THAT KEEPS THE TWO ROWS ABOVE HONEST. Resolving a module-level
+    # initializer's operand names against the names bound SO FAR is what makes
+    # `comptime _B = _A // 2` fold, and the question a reader has to be able to
+    # answer is which names it resolves. Three of the four ways a name can fail
+    # to be resolvable are pinned by the rows below; the fourth (a name bound
+    # LATER) is this one, and it is the one that is easy to get wrong in the
+    # direction that fabricates.
+    #
+    # `comptime _B = _A + 1` appears BEFORE `comptime _A = 7`. The module-level
+    # sequence runs top to bottom, so at the point `_B` is initialised `_A` has
+    # no value yet — CPython raises `NameError: name '_A' is not defined`, and
+    # the interpreter agrees. A folder that consulted the WHOLE module instead
+    # of the part before this statement would fold `_B` to 8 and print a number
+    # for a program that has none.
+    #
+    # It is here rather than in the cases above because the answer is not a
+    # number: it is the refusal that says the build does not know, which is the
+    # only correct one.
+    ("module_comptime_constant_over_a_later_name_refused",
+     "comptime _B = _A + 1\n"
+     "comptime _A = 7\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = _B\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "does not fold to a compile-time constant"),
 ]
 
 

@@ -4675,6 +4675,42 @@ BOTH_ARCH_CASES = [
      "    x = 7\n"
      "    x //= 0\n"
      "    return x\n", 1, None),
+    # THE COMPTIME HALF OF THE OPERATOR, and the row above is the reason it is
+    # here. `//` is not an exotic operator on this path: `_emit_div_shift_pow`
+    # lowers it (arm64 UDIV/SDIV) and `_emit_div_mod` lowers it (x86-64 IDIV),
+    # the reference interpreter folds it (`myinterpreter.py`'s binary-op table),
+    # and the row above pins what the RUNTIME does when the divisor is zero.
+    # What was missing was the compile-time half, and it was missing in the
+    # only way a missing operator can be: silently.
+    #
+    # `mojo/middle/comptime.py:fold_arith` is the ONE folder every compiled
+    # path shares for `comptime NAME = ...` — arm64 and x86-64 both call
+    # `resolve_var`, and the gimple path's evaluator goes through the same
+    # `eval_const`. It had `+ - *` and `/` and no `//`, so
+    #
+    #     comptime c = 7 // 2
+    #
+    # printed `3` under `python3 fire.py run`, ran as `3` when the same `//`
+    # sat OUTSIDE the `comptime`, and was REFUSED by both compiled backends as
+    # "does not fold to a compile-time constant". One source, three answers,
+    # and the two compiled ones were the odd ones out.
+    #
+    # The value is 43 on both architectures and every step is stated so a reader
+    # can check it without running anything: `a` binds 100, `b` reads it and
+    # folds to `100 // 7 == 14`, `c` reads `b` and folds to `(14 // 2) * 6 + 1
+    # == 43`. The chain matters — a folder that resolved the names but not the
+    # operator would produce nothing at all (a refusal), and one that folded the
+    # operator but not the names likewise, so this row cannot pass with only half
+    # the repair. 43 is not 0 and not 1 for a second reason: 1 is what the
+    # row below makes the answer to a zero divisor, so a case whose right answer
+    # were 1 could not tell "folded correctly" from "divided by zero and
+    # trapped".
+    ("both_arch_comptime_floor_division_folds",
+     "def main(n: Int) -> Int:\n"
+     "    comptime a = 100\n"
+     "    comptime b = a // 7\n"
+     "    comptime c = (b // 2) * 6 + 1\n"
+     "    return c\n", 43, None),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -11335,6 +11371,42 @@ REFUSAL_CASES = [
      "    var ys = [i + 1 for i in xs]\n"
      "    printf(\"y=%d\", len(ys))\n    return 0\n",
      0, "y=3"),
+    # THE OTHER HALF OF `//`, and a CRASH rather than a wrong answer, which is
+    # the shape that makes it worth a row. `fold_arith` reaches Python's
+    # operators directly, so a literal-zero divisor raised out of it, out of
+    # `eval_const`, out of `resolve_var` and out of the backend — a
+    # `ZeroDivisionError` traceback where the reader gets no message at all and
+    # no indication of which statement in their file caused it:
+    #
+    #     $ python3 fire.py build --formal --no-prove -o t t.mojo
+    #     build: division by zero
+    #     ZeroDivisionError: division by zero
+    #
+    # Both spellings are here because the guard has to cover the one that was
+    # already broken as well as the one the new `//` arm would otherwise have
+    # added: `/` was in that table from the start and had the same exposure, so
+    # a fix that closed only `//` would have left the identical crash reachable.
+    #
+    # REFUSING is the right answer and not a trap. At compile time there is
+    # nothing running to trap: the value is wanted as a constant and the build
+    # does not have one, which is exactly what `comptime_fold_refusal` is for.
+    # The runtime's answer to the same question is pinned separately by
+    # `both_arch_augmented_division_by_zero_exits_one`, and it is a different
+    # question — `x //= 0` has an `x`, this has no program to run.
+    ("comptime_division_by_zero_is_refused_not_a_crash",
+     "def f(n):\n"
+     "    comptime c = 1 / 0\n"
+     "    return c\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return f(n)\n",
+     "refuse:does not fold to a compile-time constant", None),
+    ("comptime_floor_division_by_zero_is_refused_not_a_crash",
+     "def f(n):\n"
+     "    comptime c = 1 // 0\n"
+     "    return c\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return f(n)\n",
+     "refuse:does not fold to a compile-time constant", None),
 ]
 
 
