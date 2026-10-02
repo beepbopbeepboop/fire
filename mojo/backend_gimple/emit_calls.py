@@ -3193,6 +3193,116 @@ def _callable_return_elem_type(gen, fn_expr) -> str:
     return 'int64_t'
 
 
+def _bind_callable_element_param(gen, fn_expr, kelem_t: str) -> dict:
+    """Bind `fn_expr`'s own parameter NAMES to the element type `kelem_t`
+    for the duration of one synthesized call, and record that type ON THE
+    NODE so the lifted function it becomes can be given it too.
+
+    Two consumers, one binding:
+
+    * The live `var_types` binding. A lambda's FORWARD DECLARATION types
+      its params from `var_types[<param name>]` while the definition takes
+      the call site's argument type, so binding the element to the lambda's
+      own param name keeps the two in step — otherwise a container-typed
+      param declares `int64_t f(int64_t)` in one place and
+      `int64_t f(MojoList *)` in the other, which GCC rejects as
+      "conflicting types".
+    * The node stamp (`_call_site_param_types`). The element type is a
+      fact about THIS CALL, and the lifted function's own parameter
+      resolution is usage-based (`_gen_lifted_closure` seeds
+      `var_types[pname]` from `_infer_param_types`), so a lambda whose body
+      carries no evidence of its own — `key=lambda s: k3(s)`, where `s` is
+      only ever handed to a helper — came out `int64_t` however the call
+      site typed it, and the call site then passed a real string pointer
+      into an `int64_t` slot. `sorted(names, key=lambda s: k3(s))` over a
+      module-level list of strings printed the input order, because each
+      key was `mojo_str_from_int(<address>) + "!"` and every key therefore
+      compared as a different decimal of a different address. See
+      bugs/CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.md.
+
+    The stamp is a node attribute rather than a `gen` side table because the
+    value belongs to THIS reference of the lambda, not to the lambda: the
+    same lambda text is a fresh AST node at every reference site, and
+    `_lower_LambdaExpr` may lift each one separately. Same convention as
+    `node._callable_ret`.
+
+    Plain loops, NOT comprehensions: a comprehension whose target unpacks a
+    `list[tuple[str, str]]` boxes BOTH slots to int64_t on the self-hosted
+    compiled path (see `_lower_LambdaExpr`'s own `syn_params` loop for the
+    same reason).
+
+    Returns the saved `var_types` entries for
+    `_unbind_callable_element_param`, and `{}` for a non-lambda callee.
+    """
+    saved: dict = {}
+    if isinstance(fn_expr, gimple_ctypes.LambdaExpr):
+        _stamp: dict = {}
+        for _pn, _pd in fn_expr.params:
+            saved[_pn] = gen.var_types.get(_pn, None)
+            gen.var_types[_pn] = kelem_t
+            _stamp[_pn] = kelem_t
+        fn_expr._call_site_param_types = _stamp
+    return saved
+
+
+def _unbind_callable_element_param(gen, fn_expr, saved: dict) -> None:
+    """Undo `_bind_callable_element_param`'s `var_types` binding. The node
+    stamp is deliberately NOT undone: it describes the lambda this call site
+    lowered, and the lifted function it produced has already read it."""
+    for _pn, _old_t in saved.items():
+        if _old_t is None:
+            gen.var_types.pop(_pn, None)
+        else:
+            gen.var_types[_pn] = _old_t
+
+
+def _carry_elem_types(gen, src: str, dst: str) -> None:
+    """Carry a list's element typing across a coercion hop.
+
+    `_coerce_to_type` mints a fresh temp and, like every other bare cast in
+    this backend, records nothing about what the value holds — so the
+    `(MojoList *)x` a boxed container is recovered through arrives with no
+    element type, and every later consumer reads its slots with the int
+    accessor. The two tables are a property of the VALUE, so a pure re-typing
+    of it must carry them (the same carry `_note_global_store_types` does
+    for a store into the globals struct).
+    """
+    if src == dst:
+        return
+    if src in gen._elem_types:
+        gen._elem_types[dst] = gen._elem_types[src]
+    if src in gen._nested_elem_types:
+        gen._nested_elem_types[dst] = gen._nested_elem_types[src]
+
+
+def _resolve_container_kind(gen, at: str, av: str) -> tuple[str, str]:
+    """The container KIND of `av` for the callers that dispatch on it.
+
+    A module-level container is stored in the globals struct as a boxed
+    `int64_t`, so at the read its C type is `int64_t` while its real kind is
+    recorded in `_actual_types` (`_lower_IdentExpr`'s global-read arm). Every
+    such dispatch is a question about the KIND — MojoSet vs MojoDict vs a list
+    of strings vs a list of ints — and a bare `int64_t` answers none of them:
+    `sorted(names)` over a module-level list of strings took the generic
+    int64-slot sorter and ordered the strings by ADDRESS, non-deterministically
+    across runs. A statically known kind is a real fact and is worth reading;
+    a genuinely unknown one still goes through `_materialize_as_list`'s
+    runtime registry checks, which is the right answer for a dynamic value
+    (and the reason this resolves only the three CONTAINER kinds — a
+    boxed `char *` or a boxed struct has no such branch to reach).
+
+    Returns `(kind, value)`, where `value` is a fresh coercion temp when the
+    kind had to be recovered (with its element typing carried across it).
+    """
+    if at in ('int64_t', 'int', 'void *'):
+        _known = gen._actual_types.get(av) or ''
+        if _known in ('MojoList *', 'MojoSet *', 'MojoDict *'):
+            _cast = gen._coerce_to_type(at, _known, av)
+            _carry_elem_types(gen, av, _cast)
+            return _known, _cast
+    return at, av
+
+
 def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
                             only_truthy: bool = False,
                             var_prefix: str = '_fcall_elem'):
@@ -3242,27 +3352,13 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
         _read = gen._coerce_to_type('int64_t', _kelem_t, _read64)
     gen._declare_var(_kvar, _kelem_t)
     gen._emit(f"  {gen._cname(_kvar)} = {_read};")
-    # A lambda's FORWARD DECLARATION types its params from
-    # `var_types[<param name>]` while the definition takes the call site's
-    # argument type, so bind the element to the lambda's own param name for
-    # the duration of the call — otherwise a container-typed param declares
-    # `int64_t f(int64_t)` in one place and `int64_t f(MojoList *)` in the
-    # other, which GCC rejects as "conflicting types".
-    _saved_param_types = {}
-    if isinstance(fn_expr, gimple_ctypes.LambdaExpr):
-        for _pn, _pd in fn_expr.params:
-            _saved_param_types[_pn] = gen.var_types.get(_pn, None)
-            gen.var_types[_pn] = _kelem_t
+    _saved_param_types = _bind_callable_element_param(gen, fn_expr, _kelem_t)
     try:
         kret_t, kret_v = gen.lower_expr(gimple_ctypes.CallExpr(
             func=fn_expr, args=[gimple_ctypes.IdentExpr(_kvar)],
             line=getattr(fn_expr, 'line', 0), col=getattr(fn_expr, 'col', 0)))
     finally:
-        for _pn, _old_t in _saved_param_types.items():
-            if _old_t is None:
-                gen.var_types.pop(_pn, None)
-            else:
-                gen.var_types[_pn] = _old_t
+        _unbind_callable_element_param(gen, fn_expr, _saved_param_types)
     if only_truthy:
         # filter's predicate: append only when the call's result is truthy.
         bb_yes = gen._new_bb(); bb_no = gen._new_bb()
@@ -3403,19 +3499,7 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
         _read = gen._coerce_to_type('int64_t', _kelem_t, _read64)
     gen._declare_var(_kvar, _kelem_t)
     gen._emit(f"  {gen._cname(_kvar)} = {_read};")
-    # A lambda key's FORWARD DECLARATION types its params from
-    # `var_types[<param name>]`, while the definition picks up the type
-    # of the argument at this call site. Bind the element to the
-    # lambda's own param name for the duration of the call so a
-    # container-typed param (`key=lambda t: t[0]`) declares
-    # `int64_t f(MojoList *)` in both places — otherwise the definition
-    # said `MojoList *` and the declaration `int64_t`, which GCC rejects
-    # as "conflicting types".
-    _saved_param_types = {}
-    if isinstance(key_expr, gimple_ctypes.LambdaExpr):
-        for _pn, _pd in key_expr.params:
-            _saved_param_types[_pn] = gen.var_types.get(_pn, None)
-            gen.var_types[_pn] = _kelem_t
+    _saved_param_types = _bind_callable_element_param(gen, key_expr, _kelem_t)
     try:
         kret_t, kret_v = gen.lower_expr(gimple_ctypes.CallExpr(
             func=key_expr, args=[gimple_ctypes.IdentExpr(_kvar)],
@@ -3440,11 +3524,7 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
             kret_v = gen._coerce_to_type(kret_t, 'char *', kret_v)
             kret_t = 'char *'
     finally:
-        for _pn, _old_t in _saved_param_types.items():
-            if _old_t is None:
-                gen.var_types.pop(_pn, None)
-            else:
-                gen.var_types[_pn] = _old_t
+        _unbind_callable_element_param(gen, key_expr, _saved_param_types)
     # A `char *` key is a STRING to compare (strcmp), not an address to
     # compare as an int64_t slot — `sorted(words, key=lambda w: w)` with
     # the int path ordered by address. The key's own lowered return type
@@ -3485,6 +3565,7 @@ def _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse: bool):
         (`key=bylen` where `def bylen(s): return len(s)`).
     A lambda key and a builtin key both handle string elements correctly."""
     at, av = gen.lower_expr(arg0)
+    at, av = _resolve_container_kind(gen, at, av)
     if at != 'MojoList *':
         av = gen._materialize_as_list(at, av)
         at = 'MojoList *'
@@ -3569,6 +3650,10 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
 
     at, av = gen.lower_expr(arg0)
     for a in node.args[1:]: gen.lower_expr(a)
+    # A module-level container's C type is a box at the read (see
+    # `_resolve_container_kind`), and every dispatch below asks about the
+    # KIND.
+    at, av = _resolve_container_kind(gen, at, av)
     # Dispatch on the container type so `sorted(...)` matches Python's
     # semantics instead of running mojo_sorted's generic int64 payload
     # bubble-sort over the wrong layout (a MojoSet has a completely
@@ -4743,6 +4828,20 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         captures=_env_fields,
         inner_def=syn_def,
     )
+    # The CALL SITE's parameter types, when it had them: `map`/`filter`/
+    # `sorted(key=)` bind each element to the lambda's own param name
+    # before lowering the call (`_bind_callable_element_param`), and that
+    # binding is a real fact about the value — unlike a same-named variable
+    # that merely happens to be visible, it cannot be wrong about this
+    # lambda. The lifted body resolves its parameters usage-based
+    # (`_gen_lifted_closure` -> `_infer_param_types`), so without this a
+    # lambda whose body carries no evidence of its own came out `int64_t`
+    # whatever the call site knew. `sorted(names, key=lambda s: k3(s))` over
+    # a module-level list of strings is the measured case: each key came out
+    # `mojo_str_from_int(<address>) + "!"`, so every key was a distinct
+    # decimal of a distinct address and the sort returned the INPUT order.
+    # See bugs/CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.md.
+    ci.call_site_param_types = getattr(node, '_call_site_param_types', None) or {}
     # Register return type and param types now so call sites resolve correctly
     ret_type = gen._infer_return_type(syn_body)
     gen.func_return_types[lifted_name] = ret_type

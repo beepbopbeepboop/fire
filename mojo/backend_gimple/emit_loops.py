@@ -2486,11 +2486,22 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     # outer captured variable via shadowing, are unaffected -- those
     # still resolve their param type the normal way below.
     _lambda_capture_types = dict(ci.captures) if not ci.env_struct else {}
+    # The call site's own answer for this function's parameters (a lambda
+    # handed to `map`/`filter`/`sorted(key=)`, whose element type the call
+    # site resolved and bound to the lambda's param names). A FALLBACK, not
+    # an override: the body's usage evidence above is the primary answer and
+    # this only fills in for a parameter it says nothing about, which is the
+    # case that used to default to `int64_t` and turn a real string argument
+    # into a decimal address (`sorted(names, key=lambda s: k3(s))` — see
+    # `ci.call_site_param_types`'s own comment).
+    _call_site_types = dict(ci.call_site_param_types) if not ci.env_struct else {}
     for pname, ptype in node.params:
         if pname in _lambda_capture_types:
             gen.var_types[pname] = _lambda_capture_types[pname]
         elif ptype is None and pname in inferred_params:
             gen.var_types[pname] = inferred_params[pname]
+        elif ptype is None and pname in _call_site_types:
+            gen.var_types[pname] = _call_site_types[pname]
         else:
             gen.var_types[pname] = gen._resolve_type(ptype)
 
@@ -2557,6 +2568,12 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
             ctype = _lambda_capture_types[pname]
         elif ptype is None and pname in inferred_params:
             ctype = inferred_params[pname]
+        elif ptype is None and pname in _call_site_types:
+            # Same fallback as the var_types seeding above, and it must be
+            # the same answer: this loop is what DECLARES the parameter, so
+            # a disagreement with the body would be a definition whose own
+            # `var_types` seed contradicts its signature.
+            ctype = _call_site_types[pname]
         else:
             ctype = gen._param_ctype(pname, ptype, node)
         gen.var_types[pname] = ctype

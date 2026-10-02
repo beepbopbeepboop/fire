@@ -1552,6 +1552,31 @@ print(sorted(names, key=lambda s: k3(s)))
 print(sorted(names, key=lambda s: s + "!"))
 """, "['a', 'bb', 'ccc']\n['a', 'bb', 'ccc']\n")
 
+    # The MODULE-LEVEL spelling of the same list, which is where
+    # `gimple_sorted_string_key_runtime_built` above was red. A module-level
+    # container is stored in the globals struct as a BOXED `int64_t`, so at
+    # the read its C type is `int64_t` and its real kind lives in
+    # `_actual_types` — and every `sorted` dispatch asked the C type, so all
+    # three forms took the generic int64-slot path. A LOCAL list of the same
+    # contents works, which is what made this read as a bug about lambdas.
+    #
+    #   sorted(names)            ordered the strings by ADDRESS (non-
+    #                            deterministic across runs; here the input
+    #                            order, because the literals descend)
+    #   sorted(names, key=k3(s)) each key was `mojo_str_from_int(<address>)
+    #                            + "!"`, so the DECIMAL of each address
+    #                            decided the order and the answer was the
+    #                            input order — the symptom the bug doc filed
+    #   sorted(words, key=len)   SEGFAULTED (exit -11): the key loop read a
+    #                            list that was never materialized
+    #
+    # See bugs/CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.md.
+    test_gimple_stdout("gimple_sorted_module_level_string_list", """\
+words = ["pear", "fig", "apple"]
+print(sorted(words, key=len))
+print(sorted(words))
+""", "['fig', 'pear', 'apple']\n['apple', 'fig', 'pear']\n")
+
     # ── MojoSet rehash: the `tag == 2` (bytes) domain ────────────────────
     # `_set_grow`'s replay had a `tag == 0` branch and a `tag == 1` branch
     # and NO `tag == 2` branch, so every BYTES element in a set was
