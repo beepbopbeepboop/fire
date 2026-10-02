@@ -7064,6 +7064,33 @@ def _module_published_names(module: str, link_line) -> set:
         M.dylib_export_module(forwarded, module))
 
 
+def _link_line_publishes(link_line, name: str) -> bool:
+    """Does ANY library on this link line publish `name`, by definition or by
+    re-export?
+
+    The complement of "which names does the module that IMPORTED this one
+    publish", and asked of the SAME tables — `model.dylib_export_tables` over
+    `dylib_export_lists(link_line)` — for the reason
+    `_module_published_names` gives. A bare callee is bound through the flat
+    `by_name` table and nothing else (`dylib_extern_symbol`'s first arm), so
+    "will this call have a symbol" is exactly "is this name in `by_name`", and
+    answering it with a second reading of the manifests would be a second
+    answer to a question the emitter already asks.
+
+    Deliberately ANY rather than the importing module: a bare `from mod import
+    f` binds by bare name across every library on the line, first one winning
+    (`dylib_syms`' own `setdefault` in link order), so a name published by a
+    DIFFERENT library on the line does bind and refusing it would break a
+    working program. This predicate answers "does any library publish it",
+    which is the question that decides whether the emitted `BL` has a target.
+    """
+    if not link_line:
+        return False
+    by_name, _by_module, _forwarded = M.dylib_export_tables(
+        dylib_export_lists(link_line))
+    return name in (by_name or {})
+
+
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
@@ -7273,12 +7300,25 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         #      callee" is answerable here and nowhere else.
         callees = set()
         imported = imported_module_names or ()
+        # The BARE-NAMED callees, `f(x)`, kept apart from `callees` for the
+        # export refusal in the name-placement walk below — which is asked only
+        # of this set, because the other three spellings have answers of their
+        # own that must not be pre-empted by it. A MODULE root (`mod.f(x)`) is
+        # exempt because it is a library on the link line and `dylib_extern_symbol`
+        # resolves the chain from it; a BRACKETED callee (`f[x](x)`) already has
+        # `imported_callee_refusal` waiting in the `bracket_callees` arm; and an
+        # `external_call` template is not a name this mechanism is about at all.
+        # Asking about all four together refused working programs — measured, 6
+        # cases of `test_formal_module_attr.py` and 4 of `test_formal_imports.py`
+        # — so the set is what the question is asked of.
+        bare_callees: set = set()
         for c in M.iter_nodes(fn.body):
             if not isinstance(c, F.CallExpr):
                 continue
             func = c.func
             if isinstance(func, F.IdentExpr):
                 callees.add(id(func))
+                bare_callees.add(id(func))
             elif isinstance(func, F.MemberExpr):
                 # Case 2, through `model.dylib_module_reference` — the ONE
                 # recogniser of "this chain is rooted at an imported module".
@@ -7730,6 +7770,53 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             if id(node) in module_reads:
                 raise CodegenError(module_reads[id(node)])
             if id(node) in callees:
+                # A callee this unit does not compile is a LINK-TIME fact, not
+                # a missing local — that is why it is exempt at all. It is NOT
+                # however a licence to emit a `BL` against a name nothing
+                # defines, and for an IMPORTED callee the build knows the
+                # answer without asking the assembler, which is the half
+                # `_unaccounted_report` says is "asked nowhere in this backend".
+                #
+                # Asked HERE, before the exemption rather than in the
+                # `bracket_callees` arm below, because a bare `widen(5)` and a
+                # bracketed `widen[Int](5)` are the same call and must give the
+                # same answer. It was the bare spelling that reached the link
+                # audit — `bracket_callees` covers only the second, so the two
+                # spellings of one construct got two different diagnostics, and
+                # the one a reader is most likely to have written (`f(x)`) is
+                # the one that named the link line.
+                #
+                # Only `bare_callees`, not every name in `callees`: the other
+                # three spellings each have a better answer of their own (see
+                # where that set is built), and asking here without that
+                # restriction refused 10 working cases across two files.
+                #
+                # And not a CONSTRUCTOR: `Info()` on an imported struct is a
+                # bare callee too, but it is lowered from the struct
+                # DECLARATION the import carried (`_imported_structs` puts it
+                # in `structs_by_name`, which is what `compile(structs=…)`
+                # registers), so it binds no symbol and needs none. Asking
+                # without that exclusion refused a program with nothing wrong
+                # with it — measured, the two-file `Info()` reproducer in
+                # `bugs/FORMAL_imported_class_reached_as_a_value.md`.
+                #
+                # The remaining three conditions are all necessary and none is a
+                # guess: the build resolved this unit's imports (so an empty
+                # `link_line` is a caller that has not, and every existing
+                # verdict is kept), the name is a module symbol of site
+                # `imported` (so a libc call, a local and a name this unit
+                # compiles are all untouched), and no library on the line
+                # publishes it (which is the question that decides whether the
+                # emitted `BL` has a target at all).
+                cname = node.name
+                csym = M.module_symbol(cname)
+                if (id(node) in bare_callees and link_line
+                        and cname not in structs_by_name
+                        and csym is not None
+                        and getattr(csym, "site", None) == "imported"
+                        and not _link_line_publishes(link_line, cname)):
+                    raise CodegenError(M.imported_callee_refusal(
+                        cname, csym, fn.name))
                 continue
             name = node.name
             if name in placed or name in frame_slots \
