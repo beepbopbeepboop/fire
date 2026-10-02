@@ -1,5 +1,48 @@
 # COMPILE_FAIL: Lib/importlib/resources/readers.py
 
+## Status (2026-10-01 — this file contributes ZERO `error:` lines; all five of the 2026-09-30 errors below are gone, and a simpler refusal replaced them)
+
+```
+python3 tools/memslot.py --gb 8 --label readers -- \
+  python3 fire.py build -o .tmp/out/readers/readers \
+  /Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py
+→ exit 1, 0 `error:` lines
+```
+
+All five errors the 2026-09-30 entry below records for `readers.py`
+itself are gone — the `operator_attrgetter___init__` implicit declaration,
+the `_itertools_only_37bd8e` vs `_15e7c2` suffix mismatch, both
+`pathlib_Path___init__` arity errors, and `re_finditer`. What is left is a
+single module-level generator refusal, in a **closure member** rather
+than in this file:
+
+```
+cannot compile module: `next(...)` on next(IdentExpr) has no lowering in
+this codegen ...
+```
+
+at `Lib/importlib/resources/_common.py:105`'s
+`return next(callers).frame`, where `callers` comes from
+`itertools.filterfalse(...)`. That builtin has no lowering at all, so the
+operand's type is unmodelled and `next()` over it has no honest answer.
+Root-caused to six lines and filed as
+`CODEGEN_itertools_filterfalse_has_no_lowering.md`, which also records the
+two measurements that show the refusal's *diagnosis* is misleading — the
+builtin `filter` IS modelled and `next(it)` over its result already works,
+as does `next(iter(it))` — and the trap that makes "just support
+`next(<list>)`" the wrong fix (it would turn two CPython `TypeError`s into
+values, because a list and a set have no `__next__`).
+
+So this file's own compile unit is clean and the closure it needs has one
+remaining unmodelled builtin in a sibling module. Two open items in this
+closure are not this file's: the `_common.py` refusal above, and
+`shutil.py`, which no longer stops at the `'open'` ambiguity (fixed and
+removed — see `bugs/COMPILE_FAIL_zipfile___init__.md`'s 2026-10-01 entry)
+and now contributes its own errors.
+
+Doc kept open on the closure, with the blocker in a named sibling module
+rather than in this file.
+
 ## Status (2026-09-30, branch work/compile-fail-stdlib-misc — the crash that blocked the whole closure is FIXED; 7 modules in it now compile and report their own errors; readers.py's own 5 errors unchanged and all now precisely located)
 
 Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py`
