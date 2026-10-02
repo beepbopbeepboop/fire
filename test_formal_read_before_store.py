@@ -238,6 +238,25 @@ CASES = [
     ("try_else_clause_still_refuses_an_unstored_read",
      "    try:\n        if n:\n            p = 1\n    except ValueError:\n"
      "        pass\n    else:\n        sink(p)\n    return 0\n", "refuse"),
+    # ── a `finally` and "the body may have RAISED" ──────────────────────────
+    # The clause runs on every way out, including an exception, and that one
+    # path is not one of the arms — so it was modelled separately, as a fallback
+    # used when the body has no fall-through exit, and it pointed at the try's
+    # HEADER. The header is not a point that can raise: nothing in `try:`
+    # evaluates anything before the body, so the earliest point that can is the
+    # body's first block, and a store there dominates the clause. This is the
+    # "build it, and clean up whatever happened" shape
+    # (`tools/mem_slope.py:180` is the measured refusal: `exes = []` in the
+    # body, `for e in exes: unlink(e)` in the `finally`).
+    ("try_finally_clause_reads_what_the_body_stored_ok",
+     "    try:\n        exes = []\n        sink(n)\n        return 0\n"
+     "    finally:\n        sink(exes)\n", "ok"),
+    # …and the edge is still there for the store it exists to catch: a name
+    # bound LATER in the body is skipped by every path that raises before it, so
+    # the clause reads an unbound name when `n` is falsey and CPython raises.
+    ("try_finally_clause_still_refuses_a_later_store",
+     "    try:\n        p = 1\n        if n:\n            q = 2\n"
+     "    finally:\n        sink(q)\n    return 0\n", "refuse"),
     ("finally_store_dominates_ok",
      "    try:\n        return 1\n    finally:\n        p = 1\n", "ok"),
     ("finally_store_then_read_ok",

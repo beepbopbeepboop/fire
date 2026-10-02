@@ -2621,6 +2621,11 @@ def _build_cfg(body) -> tuple:
                 t = first([s], pending)
                 pending = [t.index]
                 cur = None
+                # The body's FIRST block, which is where the "the body raised"
+                # path starts: nothing in `try:` itself evaluates anything, so
+                # this is the earliest point that can raise. See the `finally`
+                # note below for what it is an edge from.
+                body_first = len(blocks)
                 body_exits = run(getattr(s, "body", None) or [], loops,
                                  [t.index])
                 arm_exits = list(body_exits)
@@ -2672,9 +2677,40 @@ def _build_cfg(body) -> tuple:
                 # `finally` falls out of the same branch correctly, because
                 # `run` on an empty run returns the exits that reach it, so
                 # the arms' exits and the finally's exits are the same list.
+                #
+                # "…and the body may have RAISED" is the one way out of the
+                # statement that the arms do not carry, and the OLD answer was
+                # `arm_exits or [t.index]` — a fallback used only when the body
+                # has no fall-through exit, which is a body that always
+                # `return`s or `raise`s. Two things are wrong with the header it
+                # pointed at, and both are fixed here:
+                #
+                #   * the header is not a point that can raise at all. Nothing
+                #     in `try:` evaluates anything before the body, so the
+                #     earliest point that can is the body's FIRST block, and a
+                #     store in it dominates the clause. `tools/mem_slope.py`
+                #     is the measured case: `try: exes = []; …; return 0 /
+                #     finally: unlink(e) for e in exes` is a legal program and
+                #     was refused for `exes`.
+                #   * it is a real path, so it cannot simply be dropped either:
+                #     a store LATER in the body is skipped by it, which is why
+                #     the edge stays for every other shape.
+                #
+                # The narrower form is also the only affordable one. Adding this
+                # edge UNCONDITIONALLY — the shape that would close the
+                # soundness hole below — was measured on this repository and
+                # cost 6 more refusals than it removed (7 files): `try: …
+                # total = … / finally: cleanup` then `print(total)` is the
+                # single most common reason to have a `finally` at all, and
+                # every one of those 7 is a program CPython runs. Whether an
+                # intervening statement can raise is the question that decides
+                # it, and no statement-level reader here answers it. So the hole
+                # stays, in
+                # `bugs/FORMAL_read_before_store_the_body_may_have_raised.md`.
                 fin = getattr(s, "finally_body", None)
                 if fin is not None:
-                    fin_exits = run(fin, loops, arm_exits or [t.index])
+                    fin_exits = run(fin, loops,
+                                    arm_exits or [body_first])
                     pending = fin_exits
                 else:
                     pending = arm_exits
