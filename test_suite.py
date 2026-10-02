@@ -1145,6 +1145,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      'async-with-lock-guard': 2, 'coro-detached-async': 2,
                      'coro-future-await': 17, 'formal-external-call': 2,
                      'formal-module-attr': 1, 'formal-receiver-position': 3,
+                     'formal-x86-machine-model': 1,
                      'gimple-async-runner': 36,
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
