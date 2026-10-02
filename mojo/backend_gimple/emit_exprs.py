@@ -5052,12 +5052,25 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # mojo_list_set_kinds) when they are not all the same, so every read of
     # this literal — the whole-result repr, a copy, a slice, iteration, a
     # computed subscript — describes each slot by what it actually holds
-    # instead of by one list-wide ctype. A homogeneous literal records
-    # nothing: its single accessor is already exact, and the side-table
-    # probe is the only cost a program that never builds a heterogeneous
-    # list ever pays.
+    # instead of by one list-wide ctype. A homogeneous literal normally
+    # records nothing: its single accessor is already exact, and the
+    # side-table probe is the only cost a program that never builds a
+    # heterogeneous list ever pays.
+    #
+    # `None` is the ONE exception, and it is an exception because of what the
+    # runtime's default is, not because this literal is heterogeneous. An
+    # undescribed slot reads as 'i' (mojo_list_slot_kind's fallback), so a
+    # homogeneous `[None]` recorded nothing and was indistinguishable from a
+    # homogeneous `[0]` — which is CPython's `False` for `==` and a TypeError
+    # for `<`. Measured on this tree: `[None] == [0]` answered True, and
+    # `[1] < [None]` answered False where CPython raises. The literal's own
+    # single accessor being "exact" is true of the C TYPE (both are int64_t)
+    # and useless for the value: nothing downstream of the store can recover
+    # which of the two it was. So a literal containing `None` records its
+    # kinds however homogeneous it is; every other homogeneous kind keeps the
+    # old no-side-table behaviour.
     _kinds = ''.join(_list_literal_slot_kind(gen, el, et) for el, et, _ev in lowered)
-    if _kinds and len(set(_kinds)) > 1:
+    if _kinds and (len(set(_kinds)) > 1 or 'n' in _kinds):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_kinds))])
@@ -5369,6 +5382,23 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         # Skip emitting comment to avoid GIMPLE global-passing issues
         gen._emit(f"  {t} = 0;")
         return 'int', t
+
+    # Normalize every `for` clause's target, not just the first's: a chained
+    # comprehension (`[x for a in xs for (b) in a.ys]`) has the same
+    # parenthesised-single-name shape in each of its own clauses.
+    #
+    # A PARENTHESISED SINGLE NAME — `[x for (x) in xs]` — is one binding,
+    # spelled `'(x)'` by the parser, while the 1-tuple `[x for (x,) in xs]` is
+    # `'(x,)'` and DOES unpack (fire_compiler.py's "Unpacking-target
+    # representation"). Peel the redundant parens here, ONCE, so the ~20
+    # `_compr_*_loop` sites below — each of which uses `gen0.target` as a C
+    # IDENTIFIER in a `_declare_var`, a `_cname` or an f-string — see a bare
+    # name for a one-target comprehension. Same reasoning, and the same single
+    # entry point, as `_gen_stmt_ForStmt`'s normalization. Idempotent, so a
+    # re-lowered comprehension lands the same way.
+    for _gen0 in node.generators:
+        if isinstance(_gen0.target, str) and not gimple_ctypes.for_target_is_tuple(_gen0.target):
+            _gen0.target = gimple_ctypes.for_target_single_name(_gen0.target)
 
     gen0 = node.generators[0]
 

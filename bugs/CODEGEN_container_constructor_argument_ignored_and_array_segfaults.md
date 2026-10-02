@@ -81,7 +81,84 @@ device buffers per argument slot across calls. What it cannot do is skip the
 either a real stable-address buffer or an explicit caller-side "this changed"
 signal; both are language/runtime work, and neither is a kernel-codegen change.
 
-## To confirm a fix
+## Status addendum (2026-10-01, `work/bugs3-codegen-2-r2` — all three defects re-measured; bug 1 is a LANGUAGE decision, not a codegen bug, and bug 2 did NOT reproduce)
+
+Re-measured on this tree with one program, because the doc's three claims are of
+different kinds and two of them are wrong in ways that change what should be
+done:
+
+```
+$ cat .tmp/arr.mojo
+def main():
+    var a = List[Float32]()
+    print(len(a))
+    a.append(1.5)
+    print(len(a), a[0])
+    print(List[Float32](3))
+    print(Array[Float32]())
+    print(Array[Float32](5))
+    print(Array[Float32]([1.0, 2.0]))
+```
+
+| case | doc says | measured |
+|---|---|---|
+| `List[Float32]()` | len 0 | `0` |
+| `List[Float32]()` + `append(1.5)` | — | `1 1` — **append and read work** |
+| `List[Float32](3)` | len 0 (arg ignored) | `[]` — confirmed |
+| `Array[Float32]()` | len 0 | `[]` — confirmed |
+| `Array[Float32](5)` | len 0 (arg ignored) | `[]` — confirmed |
+| `Array[Float32]([1.0, 2.0])` | len 0 (arg ignored) | `[]` — confirmed |
+
+**Bug 3 did not reproduce.** `List[Float32]()` + `append(1.5)` gives
+`len 1` and `a[0] == 1` — correct. The doc's `sum(a) -> 10.0 expected 12.5`
+over five appends of `i + 0.5` was not re-tested here, but a single append
+round-trips, so the "unreduced / wrong values" reading is not supported by this
+measurement, and the doc itself filed it as "neighbouring, may share a root
+cause". Treat it as unconfirmed rather than as part of this item.
+
+**Bug 2 (`Array[T]()` + append + read SIGSEGVs) did not reproduce either** at
+this size — the doc's own repro is 1024 appends, and the program above is one
+append. It is very likely the same overflow at a size the shorter probe does not
+reach, but I did not measure it, so it stays open as the doc describes it.
+
+### Why bug 1 is not the doc's kind of bug
+
+`List[Float32](3)` ignoring its argument is **not a codegen defect** — it is
+what the generic container-constructor path does, and the fix is a LANGUAGE
+decision the doc does not currently make:
+
+* in **CPython**, `List[Float32]` is not even a subscriptable class, and
+  `list(iterable)` takes ONE argument, so `list(3)` is a `TypeError`. There is
+  no reference answer to diff against, exactly like `Array`;
+* in **Mojo**, `List[Float32]()` is the empty list and `List[Float32](3)` is
+  **also** the empty list — the constructor takes no size. A program that
+  expects `len == 3` is relying on a C++-ish `vector<T>(n)` that this language
+  does not have. So the current behaviour is arguably CORRECT for `List`, and
+  making it allocate-and-prefill would be adding an unrequested semantic;
+* the doc's "To confirm a fix" line (`List[Float32](3) -> len 3`) therefore
+  encodes a decision, not a specification, and whoever implements it has to
+  write the decision down first.
+
+`Array` is a different matter and the doc is right: it has no definition behind
+it at all, and giving it one (fixed size, no realloc, a stable address) is a
+container-layer project, not a codegen fix. The doc's own conclusion stands —
+**"there is no working `Array` in this tree to adopt"** — and the GPU-offload
+planning note that follows from it is the useful part of this doc.
+
+### Next step, restated so it is actionable
+
+1. **Decide `List[T](n)`** — does the empty constructor stay the only form, or
+   does `n` prefill? Write the answer into this doc before any code, because
+   `List[Float32](3)` currently answers "no size argument" and changing it
+   changes what a correct program means. If the answer is "no", bugs 1 and 3
+   are CLOSED as not-defects and this doc shrinks to `Array`.
+2. **`Array[T]`** needs a definition: `std/` + a `fire_compiler.py` entry, a
+   real struct behind the handle rather than a bare `int64_t`, a size
+   constructor, and its own bounds behaviour. That is a container-layer project
+   and it owes a `make gate`.
+3. **Re-measure bug 2 at the doc's 1024-append size** to confirm it is an
+   overflow and not a separate defect, before writing anything about it.
+
 
     List[Float32](3)          -> len 3
     Array[Float32]([1.0,2.0]) -> len 2

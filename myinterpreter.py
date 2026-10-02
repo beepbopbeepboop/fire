@@ -5449,18 +5449,20 @@ class Interpreter:
         """A comprehension/generator `for` clause's target is a plain string
         (possibly comma-joined for tuple unpacking, e.g. "a, b" or "(a, b)"
         — see fire_compiler.py's _parse_generator_target), not an Expr node.
-        Mirrors execute_VarDecl's handling of the same comma-joined-string
+        Mirrors execute-VarDecl's handling of the same comma-joined-string
         representation for `var a, b = ...`.
 
-        The SURROUNDING PARENS are what say "this is a tuple target", not a
-        comma: `_parse_generator_target` / `_parse_unpack_target` unwrap a
-        parenthesised single name to bare text (`for (a) in b:` binds the
-        whole item) and keep the parens for a 1-element group that really
-        had a comma (`for (a,) in b:` unpacks the item's one element). So
-        `(a)` unpacks one element and `a` binds the whole item — they were
-        the identical string before that disambiguation, and this function
-        then bound `a` to the whole item for both, so `for (a,) in [(1,)]`
-        printed `(1,)` where CPython prints `1`.
+        Whether the pattern UNPACKS at all is `for_target_is_tuple`, the one
+        reader of the difference between `(a,)` and `(a)` — see
+        fire_compiler.py's "Unpacking-target representation" section. Reading
+        it here by hand is what made `for (a,) in [(1,), (2,)]` bind the whole
+        item to `a` and print `1` where CPython prints `(1,)`: the parser used
+        to spell both targets identically, so "is there a comma?" could not
+        tell them apart. Slot splitting is the shared bracket-aware
+        `target_slots` for the same reason a nested target must not be torn
+        into `(b` / `c)` — and for the same reason it drops the empty slot a
+        1-tuple's trailing comma leaves, which is what `for (a,) in [(1,)]`
+        binds `a` to `1` rather than to `(1,)`.
 
         One element of the comma-list may be starred (e.g. "a, *rest" or
         "*rest, a, b" — see fire_compiler.py's _parse_for_target), matching
@@ -5472,59 +5474,60 @@ class Interpreter:
         (e.g. "st.lineno", possibly chained "a.b.c" — see fire_compiler.py's
         _parse_for_target), which SETS an existing object's attribute each
         iteration instead of binding a fresh local; see _bind_single_target."""
-        name = target_str.strip()
-        if N.is_tuple_target(name):
-            names = N.for_target_slots(name)
-        elif ',' in name:
-            names = N.for_target_slots(name)
-        else:
-            self._bind_single_target(name, value)
+        if not N.for_target_is_tuple(target_str):
+            # `for (a) in ...` — a parenthesised single NAME. The parens are
+            # redundant grouping, so the name bound is what is inside them;
+            # binding the string `"(a)"` would define a variable literally
+            # called `(a)`.
+            self._bind_single_target(
+                N.for_target_single_name(target_str.strip()), value)
             return
-        values = (list(value) if hasattr(value, '__iter__')
-                  and not isinstance(value, (str, bytes)) else [value])
-        # A nested slot is ITSELF a target: `for a, (b, c) in ...` binds
-        # `b`/`c` from the item's second element, it does not define a local
-        # literally named "(b, c)". Recurse per slot rather than splitting
-        # this level only (see _bind_one_target).
-        values = list(values)
-        if len(values) < len(names):
-            raise ValueError(
-                f"Cannot unpack {len(values)} values into {len(names)} targets")
-        # Plain loop, not next()+genexpr: this file is itself compiled by
-        # this project's self-hosting gimple_codegen.py, which has no
-        # runtime `next()` builtin -- that emitted an undefined-symbol
-        # link error ("_next", referenced from Interpreter__bind_
-        # comprehension_target) rather than a compile-time diagnostic.
-        star_idx = None
-        for i, n in enumerate(names):
-            if n.startswith('*'):
-                star_idx = i
-                break
-        if star_idx is None:
-            for n, v in zip(names, values):
-                self._bind_one_target(n, v)
-        else:
-            before, after = names[:star_idx], names[star_idx + 1:]
-            star_name = names[star_idx][1:]
-            n_before, n_after = len(before), len(after)
-            if len(values) < n_before + n_after:
-                raise ValueError(
-                    f"Cannot unpack {len(values)} values into {len(names)} "
-                    f"targets (starred target needs at least {n_before + n_after})")
-            for n, v in zip(before, values[:n_before]):
-                self._bind_one_target(n, v)
-            self.scope.define(star_name, values[n_before:len(values) - n_after])
-            for n, v in zip(after, values[len(values) - n_after:]):
-                self._bind_one_target(n, v)
-
-    def _bind_one_target(self, name, value):
-        """Bind ONE slot of a (possibly nested) for-target string. A slot
-        that is itself a tuple target recurses; a bare one goes to
-        `_bind_single_target` as before."""
-        if N.is_tuple_target(name):
-            self._bind_comprehension_target(name, value)
-        else:
-            self._bind_single_target(name, value)
+        t = target_str.strip()
+        inner = N._target_group_inner(t)
+        if inner is not None:
+            t = inner
+        names = N.target_slots(t)
+        if names:
+            values = (list(value) if hasattr(value, '__iter__')
+                      and not isinstance(value, (str, bytes)) else [value])
+            # Plain loop, not next()+genexpr: this file is itself compiled by
+            # this project's self-hosting gimple_codegen.py, which has no
+            # runtime `next()` builtin -- that emitted an undefined-symbol
+            # link error ("_next", referenced from Interpreter__bind_
+            # comprehension_target) rather than a compile-time diagnostic.
+            star_idx = None
+            for i, n in enumerate(names):
+                if n.startswith('*'):
+                    star_idx = i
+                    break
+            if star_idx is None:
+                for n, v in zip(names, values):
+                    # A NESTED group slot — `for (i, (j,)) in pairs` — is
+                    # itself a pattern, not a variable name, so it recurses
+                    # with that slot's value. Binding it through
+                    # `_bind_single_target` defined a local literally called
+                    # `"(j,)"` and the body's `j` was then a NameError;
+                    # flattening instead (what the codegen's
+                    # `for_target_names` does) would bind `j` to the OUTER
+                    # element. Recursing is what CPython means and what both
+                    # engines now do.
+                    if N.for_target_is_tuple(n):
+                        self._bind_comprehension_target(n, v)
+                    else:
+                        self._bind_single_target(n, v)
+            else:
+                before, after = names[:star_idx], names[star_idx + 1:]
+                star_name = names[star_idx][1:]
+                n_before, n_after = len(before), len(after)
+                if len(values) < n_before + n_after:
+                    raise ValueError(
+                        f"Cannot unpack {len(values)} values into {len(names)} "
+                        f"targets (starred target needs at least {n_before + n_after})")
+                for n, v in zip(before, values[:n_before]):
+                    self._bind_single_target(n, v)
+                self.scope.define(star_name, values[n_before:len(values) - n_after])
+                for n, v in zip(after, values[len(values) - n_after:]):
+                    self._bind_single_target(n, v)
 
     def _bind_single_target(self, name, value):
         """Bind one non-starred element of a for-loop/comprehension target

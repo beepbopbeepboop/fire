@@ -3220,14 +3220,12 @@ class GimpleGen:
         'Scope_get':             ('int',        ['Scope *', 'char *']),
         'Scope_set':             ('void',       ['Scope *', 'char *', 'int']),
         'Scope___init__':        ('void',       ['Scope *', 'Scope *']),
-        # ONE parameter, matching `def py_tokenize(src: str)` and the pinned
-        # declaration in runtime/fire_runtime.h. The filename-carrying variant
-        # is `py_tokenize_named(src, filename)`, an ordinary function whose arity
-        # this codegen derives from its definition. This entry is read to coerce
-        # ARGUMENT types at a call site and to take a return type, never to emit
-        # a prototype, so a stale arity here is a coercion imprecision — but
-        # test_gimple.py checks it against the real signature anyway, because
-        # the header copy next to it IS a prototype and the two must agree.
+        # ONE parameter, matching fire_compiler.py's `py_tokenize(src)` and
+        # runtime/fire_runtime.h's hand-written declaration. It was two here
+        # and two in the header while the source took one (7ce61398 moved the
+        # filename to `py_tokenize_named` precisely to keep this pinned C ABI
+        # at one argument), so the generated closure emitted
+        # `py_tokenize(src, 0)` against a one-parameter definition.
         'py_tokenize':              ('MojoList *', ['char *']),
         'Parser_parse_module':   ('MojoList *', ['Parser *']),
         'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),

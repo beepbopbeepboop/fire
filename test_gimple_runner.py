@@ -4526,6 +4526,59 @@ fn main():
     print(n.get(b'a'), n.get('a'), n.pop(b'a'), len(n), n['a'])
 """, "7 0 -1\n7 0 0\n-1 2\n7 8 0\n3 3 1\n9 9 3 2\nv v 0\n1.5\n1 2 1 1 2\n")
 
+    # `x in <dict>` where the DICT arrived at the test with its static type
+    # erased -- a dict handed to an unannotated parameter, which is what any
+    # cross-module table looks like -- used to go to `mojo_in_dispatch_int`,
+    # and that dispatcher had branches for a list and a set and no dict at
+    # all, so it fell off the end and answered False. Compiled, exit 0, no
+    # diagnostic; only the ANSWER was wrong, which is why the helper below
+    # has to take the dict as a parameter for this to be the erased path.
+    #
+    # Both key domains are covered because the erased view cannot tell them
+    # apart: a str key is a boxed `char *` in the same int64_t the integers
+    # use, so the dispatcher's dict branch has to decide between them (the
+    # existing `mojo_dict_contains_kw`), and a dict mixing the two domains
+    # is the case where deciding wrong is visible.
+    test_gimple_stdout("gimple_in_erased_dict_answers_membership", """\
+def count_str(keys, d) -> Int:
+    var n = 0
+    for k in keys:
+        if k in d:
+            n = n + 1
+    return n
+
+def count_int(keys, d) -> Int:
+    var n = 0
+    for k in keys:
+        if k in d:
+            n = n + 1
+    return n
+
+fn main():
+    var names = ["f0", "f1"]
+    var byname = {}
+    byname["f0"] = 1
+    byname["f1"] = 1
+    print(count_str(names, byname))
+    var nums = [1, 2]
+    var bynum = {}
+    bynum[1] = 1
+    bynum[2] = 1
+    print(count_int(nums, bynum))
+    # an absent key is still absent, and the mixed-domain dict answers both
+    print(count_str(["f0", "f9"], byname))
+    print(count_int([1, 9], bynum))
+    # a numeric STRING key and the integer it spells are one entry in this
+    # runtime (see _dict_set_raw's keykind note), so an erased int needle
+    # finds the "1" entry too -- the established answer for d["1"], asserted
+    # here because the new dict branch now shares that decision with the
+    # dict-subscript path and the two must not drift apart.
+    var numeric = {}
+    numeric["1"] = 100
+    print(count_int([1, 2], numeric), 1 if numeric["1"] == 100 else 0)
+    return 0
+""", "2\n2\n1\n1\n1 1\n")
+
     # A set's loop TARGET is a fresh binding, not a read of an existing
     # name, so two loops over sets of different element domains in one
     # function must both work. They did not: `_declare_var` is

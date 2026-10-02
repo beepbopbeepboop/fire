@@ -238,10 +238,10 @@ def test_every_declaration_is_seen():
     # 526 -> 531 (2026-10-01, `memory-ownership`): the two frees for the two
     # things a bound method can be — `mojo_bound_method_free` and
     # `mojo_closure_free` — and their cleanup thunks. Taken from the call.
-    # 531 -> 532 (2026-10-01, merging batch 1 in): `mojo_str_from_double`, the
+# 531 -> 532 (2026-10-01, merging batch 1 in): `mojo_str_from_double`, the
     # 479 -> 480 entry above, which no branch that landed on THIS side of the
-    # merge had. One name, and it is the whole delta -- which is exactly why the
-    # number is read off the call and never added up: 531 + 1 is right here and
+    # merge had. One name, and it is the whole delta -- which is exactly why
+    # the number is read off the call and never added up: 531 + 1 is right here and
     # would have been wrong on any other pair of sides.
     # 532 -> 537 (2026-10-01, `bugs-container-compare`): the container ORDERING
     # entry points, which are to `<` / `<=` / `>` / `>=` between containers what
@@ -268,6 +268,15 @@ def test_every_declaration_is_seen():
     #       the value's kind at the store, which is what stops one bool value
     #       from poisoning its neighbours' repr.
     # Read off the call on the merged header: 541.
+    # A sibling branch's header grew by SEVEN instead, for the SAME fix in its
+    # own spelling: `MOJO_ORD_INCOMPARABLE`, `mojo_value_order`,
+    # `mojo_list_order`, `mojo_set_order`, `mojo_dict_order`,
+    # `mojo_value_order_op`, and an operator-less `mojo_list_cmp` /
+    # `mojo_set_cmp`. None of those names is in this header -- the ordering
+    # entry points here are the three-way `mojo_*_cmp` plus `mojo_cmp_fold`,
+    # with `op` threaded down -- so this is not 539 and not 541 + 7. One
+    # implementation of a fix is one set of names, and the runtime file records
+    # which spelling won and why.
     for header, want in (('fire_runtime.h', 541),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),

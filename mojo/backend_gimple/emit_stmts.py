@@ -2940,6 +2940,25 @@ def _gen_stmt_MultiAssignStmt(gen, node):
 
 
 def _gen_stmt_ForStmt(gen, node):
+    # A PARENTHESISED SINGLE NAME — `for (a) in b:` — is one binding, spelled
+    # `'(a)'` by the parser, while the 1-tuple `for (a,) in b:` is `'(a,)'` and
+    # DOES unpack (fire_compiler.py's "Unpacking-target representation"; see
+    # bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md). Peel the
+    # redundant parens HERE, once, so every `_gen_for_*` below — and every
+    # `_declare_var` they call — sees a bare C identifier for a one-name
+    # target.
+    #
+    # Normalizing at the entry rather than in each lowering is the point: each
+    # of them used to answer "is this target a group?" with its own
+    # `startswith('(')` test, and that test cannot see the trailing comma, so
+    # it read `for (a,) in ...` as a one-name target too. With the parens gone
+    # by the time they run, `for_target_is_tuple` is the only thing any of them
+    # has to know, and it is the one that knows about the comma.
+    #
+    # Idempotent, so a module compiled twice (as an import and again inline)
+    # lands on the same target both times.
+    if isinstance(node.target, str) and not gimple_ctypes.for_target_is_tuple(node.target):
+        node.target = gimple_ctypes.for_target_single_name(node.target)
     # `for i in reversed(range(...))` — rewrite to an equivalent descending
     # `range(...)` ForStmt and take the fast integer-loop path, instead of
     # `_lower_builtin_reversed` (which only materializes list/str/bytes and

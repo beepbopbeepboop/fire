@@ -3995,16 +3995,14 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     # every emitted reference. FRESH name, not `it_val = _as_str(it_val)`:
     # reassigning the param re-widens it via the same unification.
     _iv = _as_str(it_val)
-    # Detect tuple unpacking target: "(_, av)" — a parenthesised group
-    # (fire_compiler.is_tuple_target), or the bare comma form "_, av" that
-    # `_parse_generator_target` produces for `for a, b in ...` inside a
-    # comprehension. A 1-tuple target is `(a)` — parenthesised but with no
-    # comma inside — so testing `',' in inner_str` alone missed it and
-    # `[y for (y,) in [(1,), (2,)]]` bound the whole item per iteration
-    # (printing `[0, 0]` / `[(1,), (2,)]` where CPython prints `[1, 2]`).
+    # Detect tuple unpacking target: "_, av" or "(_, av)" — and the 1-tuple
+    # `(_,)` / `_,`, which unpacks too. `for_target_is_tuple` is the one reader
+    # of that difference; reading "is there a comma in the text?" here is what
+    # made `[x for (x,) in pairs_of_one]` bind the whole 1-tuple to `x` and
+    # print `(0,)` where CPython prints `0`.
     target_str = gen0.target.strip()
     inner_str = target_str[1:-1].strip() if (target_str.startswith('(') and target_str.endswith(')')) else target_str
-    if _for_target_is_tuple(target_str) or ',' in inner_str:
+    if gimple_ctypes.for_target_is_tuple(target_str):
         # Tuple target: each element of the outer list is a sub-list
         # (tuple). Mirrors _gen_for_list's identical, already-fixed
         # per-slot logic (see its own comment for the history): pick
@@ -4140,9 +4138,30 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             _compr_restore_target(gen, _sn, _st)
         return
     elem = _as_str(gen._elem_of(_iv))
-    # Own binding — see `_compr_bind_target`. Restored at the end of this
-    # function, below.
-    saved_target = _compr_bind_target(gen, _as_str(gen0.target), elem)
+    # `force=_compr_target_is_shadowed(...)`, the same argument the range, set
+    # and generator comprehension loops already pass, and this one site was
+    # the odd one out. It matters twice over, and the second time is the one
+    # that makes it a compile error rather than a silent aliasing bug:
+    #
+    #   1. A comprehension's target is a FRESH binding, so it must not share
+    #      the enclosing function's C variable. `_declare_var` is
+    #      first-decl-wins, so without `force` a target that shadows an
+    #      already-live name was written straight into that variable.
+    #   2. `target_type = gen._type_of(...)` below is read AFTER this call, so
+    #      a forced declaration also makes the element's OWN type the one the
+    #      assignment below coerces to. Without it, a `char *` element whose
+    #      target name happened to be a live `struct Token *` local took the
+    #      "cast to int64_t if target is opaque" branch and emitted
+    #      `t = (int64_t)mojo_list_get_str(...)` into a `struct Token *` —
+    #      gcc's "non-trivial conversion in 'var_decl'", which is how this was
+    #      found (fire_compiler.py's own `_parse_comptime`, whose multi-target
+    #      comprehension named `t` while a `Token *` local `t` was live;
+    #      bugs/CODEGEN_comprehension_target_shadows_struct_local.md).
+    #
+    # False in the common case — a target name that is not already live — so
+    # the single-comprehension program is byte-identical to before.
+    gen._declare_var(_as_str(gen0.target), elem,
+                     force=_compr_target_is_shadowed(gen, gen0.target))
     # FRESH `char *` view of the loop-target C name: `gen0.target` (an AST
     # str field) erases to int64_t on the self-hosted path, so a bare
     # `f'  {gen0.target} = ...'` LVALUE emitted a raw ASLR pointer decimal
@@ -4240,14 +4259,14 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     _inner_str = (_target_str[1:-1].strip()
                   if (_target_str.startswith('(') and _target_str.endswith(')'))
                   else _target_str)
-    # `_for_target_is_tuple` rather than `',' in _inner_str`: a 1-tuple
-    # target `(a)` is parenthesised with NO comma inside, so the comma test
-    # alone called it a plain single-name bind and the whole item went to
-    # `a`.
-    is_tuple_target = ((_for_target_is_tuple(_target_str) or ',' in _inner_str)
+    # `for_target_is_tuple`, not "does the text contain a comma": a 1-tuple
+    # target is spelled `'(a,)'` and the comma is the only thing that says so,
+    # so a comma test here has to be the one that knows about it (see
+    # fire_compiler.py's "Unpacking-target representation").
+    is_tuple_target = (gimple_ctypes.for_target_is_tuple(_target_str)
                        and tuple_slot_ctypes is not None)
     if is_tuple_target:
-        var_names = _for_target_slots(_target_str)
+        var_names = gimple_ctypes.target_slots(_inner_str)
     else:
         var_names = None
         gen._declare_var(gen0.target, vct,
@@ -4946,11 +4965,19 @@ def _eval_const_bool(gen, node) -> bool | None:
                                            _comptime_call_hook(gen))
 
 def _split_top_level_comma(s: str) -> list[str]:
-    """Split `s` by top-level commas only (bracket-aware) — the tree's one
-    splitter, `fire_compiler._split_top_level_commas`, re-exported under the
-    name this module's call sites use. This used to be a second copy with
-    its own `([`-only depth tracking."""
-    return _fc_split_top_level_commas(s)
+    """Split s by top-level commas only (bracket-aware), stripped.
+
+    `fire_compiler.target_slots` under the name this package's callers use
+    (including `GimpleGen._split_top_level_comma`, which forwards here), and an
+    alias rather than a second implementation. This copy tracked `(`/`[` but
+    not `{`, and kept the empty slot a trailing comma produces — so the 1-tuple
+    target `'(a,)'`, whose comma is the ONLY thing distinguishing it from a
+    parenthesised single name, reached every one of this package's ~14 readers
+    as a two-element list with a variable named `''` in it. fire_compiler.py
+    owns the target representation (see its "Unpacking-target
+    representation" section) and this is where the empty-slot rule is paid
+    for once."""
+    return gimple_ctypes.target_slots(s)
 
 # Per-part parse results for `_dedup_variadic_externs`, keyed by the part's
 # exact text: (concrete, variadic) function names, or None-absent.

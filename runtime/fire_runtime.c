@@ -5912,10 +5912,21 @@ int mojo_in_dispatch_str(int64_t container, char *needle)
 
 /* The int view asks the same question with BOTH operands erased to
  * int64_t, so the NEEDLE is as untyped as the container and needs the same
- * treatment: `mojo_boxed_is_str` -- the discriminator mojo_cstr_or_int_str
- * and every `_kw` dict entry point already use, so no new notion of "which
- * words are strings" enters the runtime here -- picks the predicate. Without
- * it this function asked the INT predicates about a boxed `char *`:
+ * treatment, and the dict branch is `mojo_dict_contains_kw` rather than
+ * `mojo_dict_contains` because of it: on the int view the needle is not known
+ * to be an integer at all. An erased key can be a boxed `char *` (a str
+ * subscripted dict read through an int64_t accessor), and `_kw` is the existing
+ * helper that decides between the two key domains from `mojo_boxed_is_str` --
+ * the same discriminator `mojo_cstr_or_int_str` and every `_kw` dict entry
+ * point already use, so no new notion of "which words are strings" enters the
+ * runtime here, and `d[k]` and `k in d` agree on the same erased key instead of
+ * one of them answering for a key the other cannot see. Casting the needle to
+ * `char *` unconditionally (what this used to be written as the moment a dict
+ * branch existed) makes an int-keyed dict compare its integer bits as if they
+ * were a string.
+ *
+ * Without that treatment this function asked the INT predicates about a boxed
+ * `char *`:
  *
  *   - a dict fell off the end entirely (there was no dict branch at all), so
  *     `x in d` answered False for every erased dict -- bugs/
@@ -5927,7 +5938,13 @@ int mojo_in_dispatch_str(int64_t container, char *needle)
  * Both were silent: exit 0, no diagnostic, and the "no" inverts whatever
  * branch of the program the membership test was guarding. A container that
  * is none of the three kinds really is not a container, so the trailing 0
- * is the honest answer and not a fallback. */
+ * is the honest answer and not a fallback.
+ *
+ * The list and set branches stay on their int view deliberately: there is no
+ * `_kw` twin for either, and inventing one means strcmp-ing slots that hold
+ * bare integers, which is the segfault the `contains` pair's own note in this
+ * file records having been tried. That is an element-type inference gap in the
+ * codegen, where the static type is known, not something to guess at here. */
 int mojo_in_dispatch_int(int64_t container, int64_t needle)
 {
     if (container == 0) return 0;
@@ -6014,6 +6031,17 @@ static const char *_eq_typename(int code)
 
 static int _slot_eq(int64_t x, int64_t y, int ea, int eb, char ka, char kb)
 {
+    /* `None` against a NUMBER, before the codes are resolved: `_kind_to_eq`
+     * below folds 'n' into MOJO_EQ_INT (they are the same int64_t at the C
+     * level, and a `None == 0` test is a real thing to answer), which is right
+     * for ordering's purposes and wrong for equality's. `[None] == [0]` is
+     * CPython's False and this answered True, because both slots are the word
+     * 0 and `x == y` below cannot tell them apart. The per-slot kind is the
+     * only evidence that can, which is why the codegen records it for a
+     * homogeneous `[None]` too (see `_lower_list_literal`). One 'n' against a
+     * number is unequal; TWO 'n's are the same value, and `x == y` still
+     * answers that. */
+    if ((ka == 'n') != (kb == 'n')) return 0;
     if (ea == MOJO_EQ_UNKNOWN) ea = _kind_to_eq(ka);
     if (eb == MOJO_EQ_UNKNOWN) eb = _kind_to_eq(kb);
     if ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE)) {
@@ -6187,6 +6215,35 @@ int mojo_value_eq(int64_t a, int64_t b, int elem)
                        elem, elem);
 }
 
+/* A SECOND implementation of this same fix was written independently on
+ * another branch: `MOJO_ORD_INCOMPARABLE`, `mojo_value_order`,
+ * `mojo_list_order` / `mojo_set_order` / `mojo_dict_order` /
+ * `mojo_value_order_op`, and a `mojo_list_cmp(a, b, ea, eb)` that took NO
+ * operator. It is not here, and the reason is worth writing down rather than
+ * leaving to the next reader who finds those names in a branch:
+ *
+ *   - ONE comparison, folded at the call site. The `*_order` family is a
+ *     per-operator entry point, which is the shape the `==` family already had
+ *     before it was consolidated into `mojo_*_eq`; re-introducing it for the
+ *     four ordering operators would put two spellings of the same three-way
+ *     comparison back in the file. `mojo_cmp_fold` is the fold.
+ *   - `op` is threaded down rather than handed to a per-operator wrapper,
+ *     because the TypeError text must name the operator the SOURCE wrote and a
+ *     nested container (`[[1]] < [['a']]`) must keep naming the OUTERMOST one.
+ *     With a per-operator wrapper that becomes the wrapper's problem at every
+ *     level of the recursion.
+ *   - `mojo_dict_order` (always raises) is redundant with the codegen's
+ *     compile-time `_ord_pair_is_refused`, and on the erased route -- the only
+ *     route it would still be reachable from -- the registry cannot say "dict"
+ *     at all, so `mojo_value_cmp` refuses on the same MOJO_CMP_UNORDERABLE.
+ *
+ * Its one thing this block did NOT have is folded in below: the explicit
+ * `ka == 'n' || kb == 'n'` refusal. `None` shares MOJO_EQ_INT with the integers
+ * here, so the per-slot kind is the only thing that can say "None is in no
+ * order with anything, itself included" -- `[None] < [None]` is a TypeError on
+ * CPython, and without this check the word 0 is compared against the word 0 and
+ * answers "equal", which for `<=` is False where CPython raises.
+ */
 /* ── `<` / `<=` / `>` / `>=` between containers: Python's ordering ────────
  *
  * The same lowering question `==` was, one level up: `a < b` between two
@@ -6282,6 +6339,13 @@ static int _slot_cmp(int64_t x, int64_t y, int ea, int eb, char ka, char kb,
 {
     if (ea == MOJO_EQ_UNKNOWN) ea = _kind_to_eq(ka);
     if (eb == MOJO_EQ_UNKNOWN) eb = _kind_to_eq(kb);
+    /* `None` is in NO order with anything, itself included: CPython raises for
+     * `[None] < [None]`. It shares MOJO_EQ_INT with the integers here (as it
+     * does in `_slot_eq`), so the per-slot KIND is the only thing that can say
+     * so, and that is what this test reads. Without it the two 0 words compare
+     * equal, which for `<=` answers False where CPython raises -- a refusal
+     * turned into a verdict, and the quietest possible version of it. */
+    if (ka == 'n' || kb == 'n') return MOJO_CMP_UNORDERABLE;
     /* Exactly one side DOUBLE: a genuine int/float pair compares NUMERICALLY
      * ([1] < [1.5] is True), so the integer word is CONVERTED rather than
      * reinterpreted -- `_eq_as_double`, the same helper `_slot_eq` uses, for

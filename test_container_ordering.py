@@ -434,6 +434,46 @@ REFUSALS = [
         "def main() -> Int:",
         "    print(['b'] < [1])",
         "    return 0")),
+    # `None` is in no order with anything, ITSELF included. It shares the int
+    # slot here (as it does for `==`), so the per-slot kind is the only thing
+    # that can refuse it: without that check `None < None` compares the word 0
+    # against the word 0 and answers "equal", which for `<=` is a False where
+    # CPython raises. The reflexive line is the one that catches it.
+    ("refuse-elem-none", _p(
+        "def main() -> Int:",
+        "    print([1] < [None])",
+        "    print([None] < [None])",
+        "    print([None] < [1])",
+        "    return 0")),
+    # A list against a STRING, which is not the same refusal as list-against-
+    # int: the string arm of the generic tail does not gate on the operator
+    # alone, so it would claim this one for a strcmp against a list's address.
+    ("refuse-list-str", _p(
+        "def main() -> Int:",
+        '    print([1] < "a")',
+        "    return 0")),
+    # A SET of floats stores IEEE bits in an int slot, and Python says
+    # `{1.0} <= {1}` -- the same cross-domain promotion the set's `==` does, and
+    # the case a bit-comparing set implementation gets backwards. Both strict
+    # and non-strict, in both directions.
+    ("set-float-elements", _p(
+        "def main() -> Int:",
+        "    print({1.0} < {1}, {1.0} <= {1}, {1} < {1.0}, {1} <= {1.0})",
+        "    print({1.0} > {1}, {1.0} >= {1}, {1} >= {1.0})",
+        "    return 0")),
+    # `<=` through an erased helper over a SET. `<=` is `==` OR the strict form,
+    # so an equal-but-separately-built pair is the case a pointer comparison got
+    # wrong; and a set is a subset question, so the erased route has to answer
+    # it from the registry rather than from a statically known kind.
+    ("erased-set-nonstrict", _p(
+        "def le(a, b) -> Int:",
+        "    if a <= b:",
+        "        return 1",
+        "    return 0",
+        "",
+        "def main() -> Int:",
+        "    print(le({1, 2}, {1, 2}), le({1, 2}, {1, 3}), le({1}, {1, 2}))",
+        "    return 0")),
 ]
 
 

@@ -500,6 +500,180 @@ def test_used_idents_covers_new_syntax():
           "the assignment target is a use, per AssignStmt's branch")
 
 
+# ── 11. A bracket that MIXES a keyword element with a later positional ──────
+def test_bracket_mixing_keyword_and_positional():
+    """`f[T=Int, "O_APPEND", linux=..., macos=...]` must PARSE, and keep both
+    elements.
+
+    This is the language's own bracket-call form, not a stdlib quirk: the
+    project's `def platform_map[T: DType, operation, *, linux=..., macos=...]`
+    (std/sys/info.mojo) puts a positional AFTER a keyword and BEFORE further
+    keywords, and `std/io/file.mojo` calls it that way four times. Two defects
+    made the shape unparseable, and `_skip_comptime_rhs`'s bare `except:` turned
+    the resulting ParseError into the `IdentExpr('_comptime_expr')` placeholder —
+    so the alias read as a placeholder at every use, and the file-open flags
+    built from it were a wrong answer rather than a refusal
+    (bugs/CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md,
+    part 2).
+
+    Both elements must SURVIVE, and in order: the old code parsed a bare
+    positional and then discarded it (the comment "else positional arg:
+    arg_expr already fully parsed" described no code), so a positional that did
+    parse was still lost.
+    """
+    def _comptime_value(src):
+        stmts = _parse(src)
+        return stmts[0].value
+
+    # The real stdlib call shape: keyword, then positional, then two keywords.
+    v = _comptime_value(
+        'comptime O_APPEND = platform_map[\n'
+        '    T=Int, "O_APPEND", linux=0x0400, macos=0x0008\n'
+        ']()')
+    check("mixed_bracket_is_not_the_comptime_placeholder",
+          not (isinstance(v, N.IdentExpr) and v.name == '_comptime_expr'),
+          repr(v))
+    check("mixed_bracket_keeps_its_own_value",
+          isinstance(v, N.CallExpr) and isinstance(v.func, N.SubscriptExpr),
+          repr(v))
+    attrs = list(v.func.attrs or [])
+    check("mixed_bracket_keeps_every_element_in_order",
+          [n for n, _ in attrs] == ['T', None, 'linux', 'macos'],
+          repr([n for n, _ in attrs]))
+    check("mixed_bracket_keeps_the_positional_value",
+          len(attrs) == 4 and isinstance(attrs[1][1], N.StringLiteral)
+          and attrs[1][1].value == 'O_APPEND',
+          repr(attrs[1] if len(attrs) > 1 else None))
+
+    # A bare literal directly after a keyword — the minimal form, and the one
+    # that used to leave the token unconsumed so `_expect("RBRACKET")` raised.
+    v2 = _comptime_value('comptime A = f[T=Int, 1]()')
+    check("keyword_then_bare_literal_parses",
+          isinstance(v2, N.CallExpr)
+          and [n for n, _ in (v2.func.attrs or [])] == ['T', None],
+          repr(v2))
+
+    # ... and a bare NAME after a keyword, which parsed BEFORE this fix and was
+    # silently dropped. It has to be kept, under its own name.
+    v3 = _comptime_value('comptime A = f[T=Int, op]()')
+    check("keyword_then_bare_name_is_kept",
+          isinstance(v3, N.CallExpr)
+          and [n for n, _ in (v3.func.attrs or [])] == ['T', 'op'],
+          repr(v3))
+
+    # POSITIONAL-FIRST order was always the working one (it takes a different
+    # branch) and must keep working: this is the negative half of the pair, so
+    # a parser that simply accepted more without modelling the mix would fail
+    # it by changing what `f[T, 1]` puts in `attrs` (it puts a TupleExpr in
+    # `index` and leaves `attrs` None).
+    v4 = _comptime_value('comptime A = f[T, 1]()')
+    check("positional_first_order_is_unchanged",
+          isinstance(v4, N.CallExpr) and v4.func.attrs is None
+          and isinstance(v4.func.index, N.TupleExpr),
+          repr(v4))
+
+    # The all-positional bracket must NOT start producing attrs: it has its own
+    # consumers reading `index`.
+    v5 = _comptime_value('comptime A = f[1, 2]()')
+    check("all_positional_bracket_keeps_its_index_form",
+          isinstance(v5, N.CallExpr) and v5.func.attrs is None
+          and isinstance(v5.func.index, N.TupleExpr),
+          repr(v5))
+
+    # A slice VALUE beside a positional: `x=(-50)::` is a SliceExpr, and the
+    # ellipsis arm is the one element that carries no value to keep.
+    v6 = _comptime_value('comptime A = f[x=(-50)::, 3]()')
+    check("keyword_slice_then_positional_parses",
+          isinstance(v6, N.CallExpr)
+          and [n for n, _ in (v6.func.attrs or [])] == ['x', None]
+          and isinstance(v6.func.attrs[0][1], N.SliceExpr),
+          repr(v6))
+    v7 = _comptime_value('comptime A = f[T=Int, ...]()')
+    check("ellipsis_after_a_keyword_still_parses",
+          isinstance(v7, N.CallExpr)
+          and [n for n, _ in (v7.func.attrs or [])] == ['T'],
+          repr(v7))
+
+    # `byte=:-1` is the keyword-slice SUBSCRIPT (not a call) and is lowered by
+    # `_lower_subscript` off `attrs`; the fix must not have moved it.
+    sub = _parse('comptime A = f[byte=:-1]')[0].value
+    check("keyword_slice_subscript_still_carries_its_attr",
+          isinstance(sub, N.SubscriptExpr) and sub.attrs
+          and sub.attrs[0][0] == 'byte'
+          and isinstance(sub.attrs[0][1], N.SliceExpr),
+          repr(sub))
+
+
+# ── 12. A MISPARSE is a refusal; a FUNCTION TYPE is still a placeholder ────
+def test_comptime_rhs_misparse_is_refused():
+    """The two fates of a `comptime` right-hand side must be DISTINGUISHABLE.
+
+    A function type (`comptime F = def[T](Int) -> None`) is deliberately not
+    modelled and becomes `IdentExpr('_comptime_expr')`. A bracket call that
+    failed to parse became the SAME placeholder, because `_skip_comptime_rhs`'s
+    bare `except:` turned the ParseError into a skip-to-newline — so
+    "not implemented" and "misparsed" were one value, every consumer read the
+    alias as a placeholder, and the stdlib's `O_CREAT`/`O_APPEND`/`O_CLOEXEC`
+    file-open flags were built from a placeholder rather than from
+    `0x200 | 0x400 | 0x1000`. A wrong answer, invisibly
+    (bugs/CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md,
+    parts 1 and 2).
+
+    So a misparse is now a `SyntaxError` naming the line, and the deliberate
+    skip stays a placeholder. Both halves are asserted, because asserting only
+    the refusal would pass for a parser that refuses everything.
+    """
+    def _value(src):
+        return _parse(src)[0].value
+
+    # The deliberate case, all three spellings. The parenthesized multi-line
+    # one is 6 of the 22 function-type aliases in the new-modular stdlib
+    # (std/_plugin/_trait.mojo's `_ReduceGeneratorPluginHookFnType`), so it is
+    # the case that decides whether a real stdlib module still parses.
+    for i, src in enumerate((
+            'comptime F = def[T](Int) -> None',
+            'comptime F = (\n    def[T](Int) -> None\n)',
+            'comptime F = def[T, U](SIMD[T, U], Int) -> SIMD[T, U]')):
+        v = _value(src)
+        check("function_type_alias_is_still_the_placeholder_%d" % i,
+              isinstance(v, N.IdentExpr) and v.name == '_comptime_expr',
+              repr(v))
+
+    # The misparse, which is now a refusal naming the offending text.
+    for i, src in enumerate((
+            'comptime A = f[+](1)',
+            'comptime A = f[T=Int, )]()',
+            'comptime A = [1, 2')):
+        try:
+            _parse(src)
+            check("misparsed_comptime_rhs_is_refused_%d" % i, False,
+                  "no exception")
+        except SyntaxError as e:
+            msg = str(e)
+            check("misparsed_comptime_rhs_is_refused_%d" % i,
+                  'comptime' in msg and 'function TYPE' in msg, msg[:160])
+
+    # The exception set is enumerated, not bare: a `TypeError` from a
+    # malformed AST node used to be read as "unparseable comptime rhs" and
+    # become a placeholder, which is how a real crash in this function could
+    # present as a stdlib constant silently reading 0. Only a PARSE failure
+    # is a refusal, and these are the shapes that must still parse.
+    for i, src in enumerate((
+            'comptime A = 0x10',
+            'comptime A = "s"',
+            'comptime A = [1, 2]',
+            'comptime A = {"k": 1}',
+            'comptime A = a.b.c',
+            'comptime A = f[1,]()',
+            'comptime A = f[T=Int]()')):
+        try:
+            _parse(src)
+            check("well_formed_comptime_rhs_still_parses_%d" % i, True)
+        except Exception as e:                          # noqa: BLE001
+            check("well_formed_comptime_rhs_still_parses_%d" % i, False,
+                  "%s: %s" % (type(e).__name__, e))
+
+
 def run_tests():
     print("=" * 70)
     print("PARSER: new-modular syntax")
@@ -508,7 +682,9 @@ def run_tests():
                test_imm_convention, test_struct_where,
                test_multi_target_comptime, test_fn_type_in_subscript,
                test_decorated_import, test_multi_statement_result,
-               test_used_idents_covers_new_syntax):
+               test_used_idents_covers_new_syntax,
+               test_bracket_mixing_keyword_and_positional,
+               test_comptime_rhs_misparse_is_refused):
         print(f"\n--- {fn.__name__}")
         fn()
     print()
