@@ -15,6 +15,139 @@ at `_dedup_variadic_externs` is the one per-level cost that is not a rescan (a
 other three items in "Remaining work" are untouched, but the headline "34% of
 the run, still superlinear" no longer describes this function.
 
+**State as of 2026-10-02 (Phase 9, below): one of those three is now measured
+on a fresh profile, and the answer is that only one of them is still worth
+anything.** Re-profiling the doc's own benchmark shape (a synthetic struct
+chain, `class` + class attrs + `__init__` self-assigns + a method + a libc
+call per module) at n=20/40/80/160 gives a per-doubling ratio of **2.95x then
+3.62x** — still superlinear, so the shape the doc exists to kill is still
+here. But the profile's rank-1 is `_walk_ast_into` itself, not any of the three
+named candidates, and the two of those three that still appear are cheap.
+Phase 9 removed the last of the per-visit `dataclasses` reflection from it
+(96.2% fewer calls, byte-identical output). What is left is honest, measured
+and named below; nothing in "Remaining work" was silently declared done.
+
+## Status (2026-10-02, Phase 9 — `_walk_ast_into` asks "is this class a dataclass" once per CLASS, not once per node visit)
+
+### What changed
+
+`_walk_ast_into` (`mojo/middle/exprtypes.py`) already cached
+`dataclasses.fields(node)` per class — that is Phase 5, and it is the reason
+the reflection cost is not what it was. What it did NOT cache is the question
+one line above: `dataclasses.is_dataclass(node)`, asked on **every node
+visit**, to decide which of the two arms to take. Both are pure functions of
+`type(node)` and both are static for the life of the process, so the answer
+now lives in a second per-class dict, `_WALK_DATACLASS_CACHE`, keyed on the
+same `type(node)` the field-name cache already used.
+
+### Measured
+
+160-module struct chain, `compile_to_gimple(do_imports=True)`. The metric is
+`dataclasses.is_dataclass` call COUNT, which is profiler-independent (this doc
+established that cProfile inflates per-call sites enormously and that wall
+clock is the honest end-to-end column — see Phase 7's own note):
+
+| metric | before | after |
+|---|---|---|
+| `is_dataclass` calls | 4,371,942 | **164,375 (−96.2%)** |
+| `_walk_ast` calls | 164,662 | 164,662 (unchanged) |
+| wall clock (n=160) | 7.32s | 7.45s (within noise) |
+| generated C, n=160 chain | 1,986,475 bytes | byte-identical (md5 `6a7d7caf1b928d2c4999c24b9837cde1` both sides) |
+
+**The wall clock did not move, and that is the honest headline.** 1.42s of a
+23.3s profiled run (6.1%) was attributed to those calls, and cProfile charges
+~0.34 µs of its own overhead per call — 4.2M calls is ~1.4s of the profiler's
+own cost, which is very nearly the whole attributed figure. The real saving is
+the difference between 4.2M `is_dataclass` calls (each an `isinstance` walk up
+`cls.__mro__` plus a `__dataclass_fields__` lookup) and 164K dict hits, which
+at ~0.2 µs each is ~0.8s of the *unprofiled* 7.3s… which the wall column does
+not show either, because the machine was contended and the run-to-run spread
+is larger than that. This is a small win, honestly measured and honestly
+reported as such; it is not a phase that changes the complexity class.
+
+### Equivalence evidence
+
+- **Byte-identical generated C** on the 160-module chain (1,986,475 bytes, same
+  md5 both sides) and on a real large succeeding case: `Lib/socket.py` from
+  the CPython 3.14.6 tree at `/Users/mrs/net/Python-3.14.6`, 1,149,048 bytes,
+  md5 `99b5c680b25453d0837606bbfe1344ef` both sides, 34.5s vs 36.2s wall.
+- **`test_gimple.py`'s `walk_ast_dataclass_cache_is_transparent`** asserts the
+  invariant that matters, which is NOT the call count: the node list the cached
+  walk produces must equal, node for node and in order, what a verbatim
+  pre-cache body produces. The failure mode a cache could have here is a walk
+  that silently STOPS descending — the dataclass test runs *before* the scalar
+  early-return precisely because on the self-hosted compiled path every AST
+  node is an int64_t-boxed pointer and so tests as an `int` (that ordering's
+  own comment) — and a stopped descent is a wrong artifact, not a slow one.
+  Verified the test bites: sabotaging the cache to answer "not a dataclass"
+  for everything turns it red (`probe StructDef: 44 nodes, got 1`) and takes
+  11 other tests with it.
+- Driven over a real parsed module (real AST node types, not stand-ins) and
+  over the arms the cache has to keep apart: a genuine dataclass, a plain
+  non-dataclass object, a `type` object — which returns before the dataclass
+  question is asked and so must never gain a cache entry, asserted explicitly —
+  and the scalars.
+
+### What is left, precisely — a fresh profile, and a re-ranking of "Remaining work"
+
+The three candidates "Remaining work" has listed since 2026-08-18 were each
+re-measured against this profile rather than trusted, and the result is worth
+recording because two of the three are no longer worth doing:
+
+| candidate | verdict on a fresh n=160 profile |
+|---|---|
+| `_class_attr_ctype`'s Pass 1.1 caller loop | **does not appear** in the top 18 by `tottime` or by `cumtime`. The 08-18 analysis ("entangled with time-dependent `struct_field_types` and adjacent inheritance-merge logic") is why it was never attempted, and on this benchmark it is not the cost it was assumed to be. Whether that generalises to a benchmark that exercises class attributes harder is NOT established here — this chain's class attrs are two scalars, not containers. |
+| The Pass 2c residual scan (`_infer_return_elem_type`) | **does not appear.** Phase 4 hoisted its seeding; what is left is ~0 in this profile. The doc's own "not recommended without new evidence" stands, and this is that absence of evidence, measured. |
+| `_collect_self_assigns` / `_collect_self_reads` | 26,080 calls, 1.75s cumtime of a 23.3s run (7.5%). **Still the largest of the three, and still untouchable for the reason Phase 3 gives** — it mutates struct ASTs directly (`s.fields.append(...)`), so memoizing it means caching raw syntactic shape and re-deriving the type from three live pieces of state on every call. |
+| `_dedup_variadic_externs` | **gone from the profile** (Phases 7 and 8). |
+
+So one of the three is a real 7.5% and structurally blocked, and the other two
+are not costs in this benchmark. That is the honest state of the list, and it
+is why this entry does not close the doc.
+
+### The site that IS the remaining cost
+
+Rank 1 by `tottime` is `_walk_ast_into` (4,742,278 calls, 3.59s tottime,
+**6.81s cumtime = 29% of the profiled run**) and rank 2 is `builtins.isinstance`
+(58,059,832 calls, 3.38s) which is mostly called *from* it — five `isinstance`
+tests per node visit, re-decided every time. `_walk_ast` itself is entered
+164,662 times, i.e. ~1,023 whole-subtree walks per module at n=160, and each
+one is a fresh recursive descent.
+
+This is the same per-level-rescans-cumulative-tree shape the doc exists to
+kill, one level up from Phase 8: the memoized per-statement caches
+(`_field_scan_var_cache`, `_calls_in_stmts_cache`, `_param_usage_scan_cache`)
+cover the *consumers* that Phase 2-4 enumerated, and `_walk_ast` — the shared
+utility every one of them calls — is not among them, so a consumer nobody
+memoized still walks the cumulative tree at every level.
+
+**Not attempted, and the reason is specific.** `_walk_ast` returns a fresh
+`list`, and its callers do everything with lists: `for n in _walk_ast(body)`,
+`result.extend(_walk_ast(child))`, and several that then sort or filter the
+result. A memo keyed on `id()` (the pattern Phase 2 established for
+`_scan_body_for_local_field_access`) would hand the SAME list object to every
+caller, and one caller mutating it corrupts every later reader — a silent wrong
+answer from a performance change, which is the trap this doc has already
+fallen into twice (Phase 5's write-invalidation analysis, Phase 7's superset
+analysis). Making it safe needs either a read-only sequence type threaded
+through every caller, or a per-caller-keyed cache, and neither is a narrow
+change to a shared utility. It is the right next phase and it needs its own
+proof, not a drive-by.
+
+### Not run, owed by the integrator
+
+Worker pass only: `make gate`, `compile_stdlib.py`, `build_stdlib_dylib.py`,
+`mojoc`, the bootstrap stages. The change adds 6 lines to a file INSIDE the
+compiled closure, so the checks that can only see the self-hosted binary's own
+lowering of it (`mojoc` builds, `stage2`/`stage3`,
+`stdlib-dylib`'s `skip <module>:` count vs baseline — must not increase — and
+`stdlib-syntax`'s unexpected-failure count vs baseline — must not increase) are
+exactly the ones still owed. `test_gimple.py` 349 passed / 1 failed,
+`test_gimple_runner.py` 266 passed / 2 failed,
+`test_module_cache.py` 83/0, `test_link_mode.py` 13/0,
+`test_silent_noop_iter.py` 16/16 — every failure byte-identical to the
+parent commit's run.
+
 ## Status (2026-09-30, Phase 8 — the output text's parse is DERIVED, so the parent stops rescanning the child's whole blob)
 
 Phase 7's own "What is left, precisely" said the only remaining way to make

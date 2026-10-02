@@ -14,6 +14,18 @@ from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_
 import dataclasses
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _signed_int64
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
+# Whether a node's CLASS is a dataclass, cached beside the field names for
+# the same reason and on the same key. `dataclasses.is_dataclass` is a pure
+# function of its argument's type, so the per-class answer is static for the
+# life of the process exactly as the field-name tuple is — but it was being
+# re-asked on EVERY node visit, which at the 160-module struct chain this
+# file's walk utility is profiled on meant 4,207,567 calls costing 1.42s of a
+# 23.3s profiled run (6.1%) to re-derive an answer the very next line's
+# `_WALK_FIELD_NAMES_CACHE.get(type(node))` had already been keyed on.
+# `None` means "not a dataclass"; a tuple means "a dataclass, and these are
+# its field names". A class that is not a dataclass has no entry to compute,
+# so it is stored as `None` and never re-tested.
+_WALK_DATACLASS_CACHE: dict[type, bool] = {}
 _WALK_AST_MAX_DEPTH = 900
 
 def _walk_ast_into(node, out, _depth=0):
@@ -57,15 +69,20 @@ def _walk_ast_into(node, out, _depth=0):
     # never pre-registered and emitted `(uint64_t *)0` (repro:
     # std/test/memory/uninit_check/test_uninit_check_float64_poison). A
     # genuine int/str/float is never a dataclass, so this ordering is safe.
-    if dataclasses.is_dataclass(node):
-        fnames = _WALK_FIELD_NAMES_CACHE.get(type(node))
+    _nc = type(node)
+    _is_dc = _WALK_DATACLASS_CACHE.get(_nc)
+    if _is_dc is None:
+        _is_dc = dataclasses.is_dataclass(node)
+        _WALK_DATACLASS_CACHE[_nc] = _is_dc
+    if _is_dc:
+        fnames = _WALK_FIELD_NAMES_CACHE.get(_nc)
         if fnames is None:
             _raw = dataclasses.fields(node)
             _names = []
             for _f in _raw:
                 _names.append(_f.name if hasattr(_f, 'type') else _f)
             fnames = tuple(_names)
-            _WALK_FIELD_NAMES_CACHE[type(node)] = fnames
+            _WALK_FIELD_NAMES_CACHE[_nc] = fnames
         for fname in fnames:
             _child = getattr(node, fname, None)
             if _child is node:
