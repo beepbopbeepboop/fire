@@ -43,19 +43,31 @@ directly above it already records the same fact, in the tier that is
 — its siblings' `open` bodies print, so the test asserts by their absence
 that the builtin ran.
 
+**A separate bare-`import` defect found while measuring this, filed not
+fixed:** a bare `import X` + `<X>.<free_fn>(...)` module-qualified call
+answers 0 on the link/build path where the same source is correct on the
+single-TU inline path and where `from X import fn` is correct everywhere.
+See `bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md`. It
+is the shape behind four of `Lib/ctypes/util.py`'s errors, not this
+file's.
+
 **This file's own 21 remaining errors** (it contributed ZERO before the
 ambiguity fix, because the refusal fired first — so every claim in the
 entries below that its compile unit was clean was true only of a build
 that never got to check it):
 
 - **9 × cross-module struct-method / free-function symbols not declared in
-  this TU** — `ArgumentParser___init__`, `_add_argument`, `_parse_args`
-  (from `argparse`). Root-caused to a bare-`import` module-qualified call
-  and filed as
-  `CODEGEN_bare_import_module_qualified_call_answers_zero.md`: a bare
-  `import X` records `imported_symbols['X']` for the module and nothing
-  for its members, so `_func_mangleable` answers False for `X.fn` and the
-  call lowers to a weak 0-returning stub.
+  this TU** — `ArgumentParser___init__`, `_add_argument`, `_parse_args`.
+  These are a DOWNSTREAM CONSEQUENCE, not a shape of their own, and the fix
+  is not in zipfile: `argparse` itself refuses to compile in this closure
+  (`cannot coerce MojoList * to MojoDict * (incompatible container kinds)
+  … value='_t229' dest='args'`), so its symbols are never defined and every
+  reference to them becomes an implicit declaration. The two errors at
+  `zipfile/__init__.py:2383-2397` disappear the moment `argparse`
+  compiles; a minimal two-file probe confirms the module-qualified struct
+  path itself is sound (a bare `import lib` + `lib.Thing(1).go(2)`
+  compiles, links and prints the right answer, at both module and
+  function-body import scope).
 - **12 × a `zipfile/_path`-internal genexp/annotation shape** at
   `__init__.py:741` and `:752` (`non-trivial conversion in 'component_ref'` /
   `'var_decl'`, and the `int64_t *` ↔ `int64_t` round-trip that follows):
