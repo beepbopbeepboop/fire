@@ -131,6 +131,7 @@ for the files this doc is about.
 - Found while registering the eight files in
   `bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md` (closed and
   deleted 2026-09-30), whose own arithmetic is where `62 + 33 != 93` showed up.
-- `bugs/TEST_registered_tests_in_no_bucket_never_run.md` is the same family of
-  hole one level down — a registration that satisfies the estate without being in
-  a run — and is why "the walk found it" is not the same claim as "it runs".
+- A registration that satisfies the estate without being in a run is the same
+  family of hole one level down, and nineteen of them were in that state until
+  2026-10-01: `test_suite.py`'s `the buckets:` checks are what now says "the
+  walk found it" is not the same claim as "it runs".

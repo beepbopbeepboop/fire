@@ -1058,9 +1058,11 @@ def test_an_expect_marker_points_at_a_doc_that_exists():
 # A Markdown table row that is unmistakably a status inventory: a pipe, a
 # backticked name, and a status word. Deliberately narrow, because the whole
 # value of this check is that it has no exemptions and no false positives —
-# a rule that needs an exception list is the excuse table
-# `bugs/TEST_registered_tests_in_no_bucket_never_run.md` argues against, and it
-# would rot the same way.
+# a rule that needs an exception list is an excuse table, and an excuse table
+# is how nineteen registrations came to sit in the estate's inventory and in no
+# run at all (see `test_every_registered_test_is_in_a_bucket_or_says_it_is_a
+# _dependency` below, which is the same argument with a `dep=True` field
+# instead of a list).
 _STATUS_ROW = re.compile(
     r'^\s*\|(?P<cells>.*)\|\s*$')
 _CELL_NAME = re.compile(r'^`(?P<name>[\w.-]+)`$')
@@ -3298,6 +3300,188 @@ def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
           f'empty patterns: {empty}')
 
 
+def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
+    """Being named is not being run, and only the bucket column knows which.
+
+    `test_every_test_file_is_registered` above asks "is every `test_*.py` in the
+    repo named by a registered spec?". It reads `cmd`, and it CANNOT tell a
+    registration that is EXECUTED from one that is merely present: a spec in no
+    bucket is named, so the estate counted it as covered, while `make check`,
+    `make gate` and every other bucket walked straight past it. Nineteen tests
+    were in that state — eleven of them `expect=`-marked, which is the worse
+    half, because a marker nobody can observe going stale is immortal. Both
+    groups were written up as bug docs and both docs are DELETED with this
+    commit, per CLAUDE.md's "Bug docs": a doc for a fully fixed bug is removed
+    rather than left with a Status history, because a fixed bug still listed is
+    indistinguishable from an open one. What is left in their place is this
+    check, the buckets, and the measured table at the registrations.
+
+    The opt-out is a per-spec `dep=True`, not a name list here, and the reason
+    is the same one the `--list` ratchets above give: a list inside the checker
+    is an excuse table, and an excuse table is how the nineteen got in.
+    `prooflib` is the one legitimate case — 27 MB, ~80 s, a `deps` of sixteen
+    proof-checking jobs, and deliberately in no bucket so `make check` does not
+    pay for it (CLAUDE.md, "Shared expensive dependencies").
+
+    And the opt-out is EARNED, which is the clause that stops `dep=True` from
+    being a way to be ungated: a registration that claims to be a dependency
+    and that nothing declares a `deps` on is refused. The marker can therefore
+    only ever be the statement "this is run, as a dependency, on purpose" — it
+    cannot be "this is not run". That is also why `dep` is not consulted for
+    the vacuity floor: with a synthetic sandbox spec in the checks below, the
+    rule is exercised on a registry that is deliberately not the real one.
+    """
+    in_a_bucket = set()
+    # `expand_bucket` is the runner's own answer to "what does this bucket
+    # reach", transitivity and de-duplication included, and it is reused rather
+    # than re-implemented: two implementations of that question is the
+    # disagreement this check exists to catch, in the other direction.
+    for bucket in suite.BUCKETS:
+        in_a_bucket.update(suite.expand_bucket(bucket))
+    in_a_bucket = {n for n in in_a_bucket if n in suite.REGISTRY}
+
+    declared_deps = set()
+    for spec in suite.REGISTRY.values():
+        declared_deps.update(getattr(spec, 'deps', ()) or ())
+
+    check('the buckets: the rule is not vacuous — most tests are in one',
+          len(in_a_bucket) >= 100,
+          f'only {len(in_a_bucket)} of {len(suite.REGISTRY)} registered tests '
+          f'are in any bucket, so a rule that reads buckets is reading almost '
+          f'nothing and would pass on a registry of one')
+    check('the buckets: every registered test is in one, or declares dep=True',
+          not [n for n, s in sorted(suite.REGISTRY.items())
+               if n not in in_a_bucket and not getattr(s, 'dep', False)],
+          'these are registered and in no bucket, so no run in this tree '
+          'executes them and --list prints `[]` in the only column that says '
+          'so: '
+          + ', '.join(n for n, s in sorted(suite.REGISTRY.items())
+                      if n not in in_a_bucket
+                      and not getattr(s, 'dep', False)))
+    check('the buckets: a dep=True is earned — something depends on it',
+          not [n for n, s in sorted(suite.REGISTRY.items())
+               if getattr(s, 'dep', False) and n not in declared_deps],
+          'dep=True claims "I am run as a dependency"; these are depended on '
+          'by nothing, so the claim is empty and the marker is a way to be '
+          'ungated: '
+          + ', '.join(n for n, s in sorted(suite.REGISTRY.items())
+                      if getattr(s, 'dep', False) and n not in declared_deps))
+
+    # The rule on a registry built for the purpose, because a check that can
+    # only be exercised by the real one is a check that goes red the first time
+    # somebody registers a test and cannot say why. `Sandbox` ADDS to the real
+    # registry rather than replacing it, so the assertion is scoped to the five
+    # synthetic names — otherwise it would be re-asserting the two checks above
+    # over the whole tree, which is how a check ends up passing for the wrong
+    # reason.
+    synthetic = ('gated', 'ungated', 'as_dep', 'claimed_dep', 'needs_it')
+    with Sandbox(gated=dict(cmd=ok_cmd('pass')),
+                 ungated=dict(cmd=ok_cmd('pass')),
+                 as_dep=dict(cmd=ok_cmd('pass'), dep=True),
+                 claimed_dep=dict(cmd=ok_cmd('pass'), dep=True),
+                 needs_it=dict(cmd=ok_cmd('pass'), deps=['as_dep'])):
+        saved = dict(suite.BUCKETS)
+        try:
+            suite.BUCKETS['probe'] = ['gated']
+            reached = {n for n in suite.expand_bucket('probe')
+                       if n in suite.REGISTRY}
+            check('the buckets: a bucket reaches a test and nothing else',
+                  reached == {'gated'}, f'got {sorted(reached)}')
+            ungated = sorted(n for n in synthetic
+                             if n not in reached
+                             and not getattr(suite.REGISTRY[n], 'dep', False))
+            check('the buckets: an ungated registration is named by the rule',
+                  ungated == ['needs_it', 'ungated'],
+                  f'got {ungated}: the rule must catch the ungated one, exempt '
+                  f'the two that declared dep=True, and — the case that is easy '
+                  f'to get wrong — still catch `needs_it`, which HAS a deps and '
+                  f'is nevertheless in no bucket. Depending on something is not '
+                  f'the same as being run.')
+            earned = sorted(n for n in synthetic
+                            if getattr(suite.REGISTRY[n], 'dep', False)
+                            and n not in {d for s in suite.REGISTRY.values()
+                                          for d in getattr(s, 'deps', ()) or ()})
+            check('the buckets: a dep=True nothing depends on is named too',
+                  earned == ['claimed_dep'],
+                  f'got {earned}: `claimed_dep` declares dep=True and nothing '
+                  f'depends on it, which is the loophole, and the rule has to '
+                  f'reach it')
+        finally:
+            suite.BUCKETS.clear()
+            suite.BUCKETS.update(saved)
+
+
+def test_a_deleted_bug_doc_is_not_still_cited():
+    """A reference to a `bugs/` path that is not there is a lie in a file that
+    exists to be believed — and the project's own rule manufactures them.
+
+    CLAUDE.md deletes a bug doc when the bug is fixed, rather than leaving it
+    behind with a Status history, and that is the right rule: a fixed bug still
+    listed is indistinguishable from an open one to whoever reads the queue
+    next. It has a cost nobody was measuring, though, and the first instance
+    found was a test file's module docstring sending a reader to a file that is
+    not there. `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md` is
+    the write-up, rewritten after the walk turned out to be a hundred times
+    bigger than the two places it named.
+
+    So the WALK is `tools/dangling_doc_refs.py`, and these four checks are about
+    the walk rather than about the corpus, which is the only shape that can
+    land: the census is 335 citations across 127 deleted names, two thirds of
+    them inside `fire_compiler.py`, `gimple_codegen.py`, `formal/` and
+    `mojo/` — files that belong to whoever owns that area. A `check()` over the
+    whole corpus goes red on every one of those branches for something it did
+    not do, and a red check is indistinguishable from a real regression. What
+    is checked here is that the tool finds the corpus, that it does not invent
+    it, and that the two citations this bug named are gone.
+
+    `test_suite.py` itself is skipped, and that is not an exception list: the
+    checks below for `expect=` and `disabled=` markers deliberately name
+    documents that do not exist (`NEVER_WRITTEN.md`,
+    `NO_SUCH_DOC_ANYWHERE.md`) to prove those checks can fail. This file is
+    where a walk for missing files is guaranteed to find one.
+    """
+    sys.path.insert(0, os.path.join(HERE, 'tools'))
+    try:
+        import dangling_doc_refs
+    except ImportError as e:
+        check('dangling refs: the walk is importable', False, repr(e))
+        return
+
+    have, by_doc, by_file = dangling_doc_refs.find(skip={'test_suite.py'})
+    check('dangling refs: the walk is not vacuous — there is a real corpus',
+          len(by_doc) > 50 and sum(len(v) for v in by_doc.values()) > 100,
+          f'found {len(by_doc)} names / '
+          f'{sum(len(v) for v in by_doc.values())} citations; a walk that '
+          f'matches nothing reports green forever, which is the one thing it '
+          f'must not be able to do')
+    check('dangling refs: it does not invent one — a cited doc that EXISTS is '
+          'not reported',
+          'bugs/FORMAL_arm64_right_shift_is_always_arithmetic.md' in have
+          and 'FORMAL_arm64_right_shift_is_always_arithmetic.md' not in by_doc
+          and 'CODEGEN_ab_native_fails.md' not in by_doc,
+          f'the walk found {len(have)} docs under bugs/; a walk that reports '
+          f'every citation would make the census meaningless, so the '
+          f'exists-branch is checked against names this tree really cites')
+    check('dangling refs: every name it reports really is absent',
+          not [n for n in by_doc if f'bugs/{n}' in have],
+          f'{[n for n in by_doc if f"bugs/{n}" in have]}')
+
+    # The two the bug doc named, by file and by name — the specific defect,
+    # asserted directly rather than read out of a total, because a census check
+    # cannot tell "fixed" from "the number went down".
+    gone = {('test_formal_hashlib.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_'
+             'every_amount_above_8.md'),
+            ('bugs/FORMAL_arm64_right_shift_is_always_arithmetic.md',
+             'FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md')}
+    still = [f'{f}: {d}' for f, d in sorted(gone)
+             if any(d == n for n, _ln in by_file.get(f, ()))]
+    check('dangling refs: the two this bug named are rewritten by symptom',
+          not still,
+          f'still cited: {still}. The fix is to name the BUG — the symptom, or '
+          f'the commit that fixed it — which is what '
+          f'test_arm64_encoders.py says at its shift sweep.')
+
+
 def _module_const_paths(src, tree):
     """`<NAME> = os.path.join(..., 'build', '<name>')` -> {NAME: that source text}.
 
@@ -3511,9 +3695,11 @@ def main():
                test_checked_run_key_covers_what_it_names,
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
-               test_every_test_file_is_registered,
-               test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
-               test_no_test_preflights_on_an_unbuildable_artifact,
+                test_every_test_file_is_registered,
+                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
+                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
+                test_a_deleted_bug_doc_is_not_still_cited,
+                test_no_test_preflights_on_an_unbuildable_artifact,
                # The memory-campaign tests. They were DEFINED and never CALLED
                # — three functions, 300-odd lines, nothing in this list — which
                # is the same defect as a test file in no bucket: the coverage

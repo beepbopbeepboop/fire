@@ -37,6 +37,7 @@ Run:  python3 test_struct_formal.py [-v]
 """
 import argparse
 import os
+import signal
 import struct
 import subprocess
 import sys
@@ -71,18 +72,68 @@ RESULTS = []
 
 
 def check(ok, what, detail=""):
-    RESULTS.append((bool(ok), what))
+    # The detail is KEPT, not just printed: a suite that reports "FAIL
+    # <what>" and throws away the only sentence that says why has thrown away
+    # the evidence, and `bugs/CODEGEN_test_struct_formal_is_flaky.md` is the
+    # write-up of a run whose output could not be attributed for exactly that
+    # reason. It is also what the harness self-test below asserts on.
+    RESULTS.append((bool(ok), what, detail))
     if not ok:
         print(f"FAIL  {what}" + (f": {detail}" if detail else ""), flush=True)
     return bool(ok)
 
 
+def _how_it_died(run):
+    """A description of a non-clean exit, or None when the image was fine.
+
+    A program that builds, links, and then dies — SIGSEGV, SIGBUS, an illegal
+    instruction, a `dyld` kill — has an EMPTY stdout, which is exactly what a
+    program that legitimately printed nothing also has. Without this the one
+    piece of evidence that distinguishes "crashed" from "answered wrongly" is
+    discarded at the point where it still exists, and the reported failure
+    points at the struct tables when the real answer is a dead process.
+
+    `run.returncode` is negative when the child was killed by a signal, and
+    that negative number is the ONLY record of which signal, so it is
+    translated by name here rather than printed as `-11`.
+    """
+    if run.returncode == 0:
+        return None
+    if run.returncode < 0:
+        try:
+            signame = signal.Signals(-run.returncode).name
+        except ValueError:
+            signame = f"signal {-run.returncode}"
+        how = f"the image was killed by {signame} (wait status {run.returncode})"
+    else:
+        how = f"the image exited {run.returncode}"
+    err = (run.stderr or "").strip()
+    return how + (f", stderr: {err[-300:]}" if err else ", with no stderr")
+
+
 def build_and_run(tmpdir, name, source):
     """Compile `source` through the formal arm64 backend and run it.
 
-    Returns the stdout lines, or raises AssertionError with the build output —
-    a build failure is a test failure here, never a skip: `struct.mojo` is in
-    this repository and a program that imports it must build.
+    Returns `(stdout_lines, how_it_died)`, or raises AssertionError with the
+    build output — a build failure is a test failure here, never a skip:
+    `struct.mojo` is in this repository and a program that imports it must
+    build.
+
+    The exit status is RETURNED rather than raised because one caller
+    (`test_unservable_formats_are_refused_not_wrong`) requires a nonzero exit
+    to be the passing outcome: reading `b[i]` for i past the end of an empty
+    list is supposed to stop the program. Turning that into an exception would
+    turn a correct observation into a failure.
+
+    A run that never finishes is raised, and that is a separate decision from
+    the exit status. `subprocess.TimeoutExpired` is an `OSError`, not an
+    `AssertionError`, so it used to sail straight through `expect_lines`'s
+    `except AssertionError` and out of the `for fmt in CORPUS_FORMATS` loop it
+    was called from — abandoning every case after it. Measured: one run in two
+    hit a 60 s timeout on `calcsize("<HHIQQQI")` and finished **122/127**
+    instead of 148, because 21 checks were never reached and the report could
+    not say so. A case that does not finish is a failed case, which is exactly
+    what a build failure already was, and the fix is to make it one.
     """
     path = os.path.join(tmpdir, f"{name}.py")
     with open(path, "w") as f:
@@ -95,25 +146,70 @@ def build_and_run(tmpdir, name, source):
     if result.returncode != 0:
         raise AssertionError(
             f"build failed: {(result.stderr or result.stdout).strip()[-600:]}")
-    run = subprocess.run([out], capture_output=True, text=True,
-                         timeout=RUN_TIMEOUT)
-    return [ln for ln in run.stdout.split("\n") if ln.strip() != ""]
+    try:
+        run = subprocess.run([out], capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            f"the image was built and then did not finish within "
+            f"{RUN_TIMEOUT}s — it is hung, not slow, and the cases after this "
+            f"one in the same loop would not be reached if this were allowed "
+            f"to propagate. `file {out}` and run it under "
+            f"`tools/gdbtool.py` to see where it is looping."
+        ) from None
+    return ([ln for ln in run.stdout.split("\n") if ln.strip() != ""],
+            _how_it_died(run))
 
 
 def expect_lines(tmpdir, name, source, expected, what):
-    """The program's printed integers must equal `expected`, element-wise."""
+    """The program's printed integers must equal `expected`, element-wise.
+
+    **TWO checks are recorded in every outcome, and that is the point.** This
+    used to `return` from a failed length check, so the suite's own DENOMINATOR
+    moved with its own verdicts — `bugs/CODEGEN_test_struct_formal_is_flaky.md`
+    recorded 144, 145, 147 and 148 checks on an unchanged tree, and read that
+    as "some checks did not run", which is a claim about the tree and not about
+    the tally. It is about the tally: a case that fails on length used to cost
+    one check and a case that passed cost two, so the total was a function of
+    the failures. A denominator that depends on the verdicts is not a
+    denominator, and a suite whose total moves is a suite whose reader learns
+    to re-run it — and a re-run that comes back green is not evidence.
+
+    So the second check is always recorded, and when it cannot be evaluated it
+    says so rather than being skipped. Each carries its own `what`, because
+    "which of the two failed" is only answerable if they are distinguishable.
+    """
+    values_what = f"{what} [each printed value]"
+
+    def unreached(why):
+        return check(False, values_what, f"not reached: {why}")
+
     try:
-        got = build_and_run(tmpdir, name, source)
+        got, died = build_and_run(tmpdir, name, source)
     except AssertionError as e:
         check(False, what, str(e))
+        unreached("the program did not build")
+        return None
+    if died is not None:
+        # A case in this file prints its whole answer and then falls off the
+        # end of `main`, so anything but a clean exit is a defect whether or
+        # not the printed numbers happened to be right. Reported on its own
+        # first: an image that died at its first instruction has printed
+        # nothing, and "expected 1 numbers, program printed 0: []" is a
+        # statement about the struct tables that the process, not the tables,
+        # is what makes false.
+        check(False, what, died)
+        unreached(died)
         return None
     if not check(len(got) == len(expected), what,
                  f"expected {len(expected)} numbers, program printed "
                  f"{len(got)}: {got}"):
+        unreached(f"the program printed {len(got)} of {len(expected)} "
+                  f"numbers, so there is nothing to compare: {got}")
         return None
     bad = [(i, g, e) for i, (g, e) in enumerate(zip(got, expected))
            if int(g) != e]
-    check(not bad, what,
+    check(not bad, values_what,
           f"{len(bad)} of {len(expected)} differ, first: "
           + ", ".join(f"line {i}: got {g}, CPython says {e}"
                       for i, g, e in bad[:4]))
@@ -600,7 +696,7 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
                "        i = i + 1\n"
                "    print(n)\n")
         try:
-            got = build_and_run(tmpdir, f"refuse_{fmt.strip('<>')}", src)
+            got, died = build_and_run(tmpdir, f"refuse_{fmt.strip('<>')}", src)
         except AssertionError as e:
             check(False, f'pack("{fmt}") is refused, not wrong', str(e))
             continue
@@ -608,15 +704,20 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
         # than printing, so a refusal shows up as a nonzero exit; a wrong
         # answer would print `size`. Accept either "printed 0" or "the read
         # of the empty list stopped the program".
-        run = subprocess.run(
-            [os.path.join(tmpdir, f"refuse_{fmt.strip('<>')}.bin")],
-            capture_output=True, text=True, timeout=RUN_TIMEOUT)
-        refused = (got == ["0"]) or (run.returncode != 0)
+        #
+        # The exit status comes from the run `build_and_run` already did. It
+        # used to be a SECOND `subprocess.run` of the same image, which cost a
+        # process spawn per format to learn something the first run had
+        # already observed — and, on a machine where the image is
+        # intermittently not runnable at all, gave the two runs a chance to
+        # disagree with each other and report a refusal that was an artefact
+        # of which of the two was unlucky.
+        refused = (got == ["0"]) or (died is not None)
         check(refused,
               f'pack("{fmt}") must produce nothing (it needs 8 values and '
               f"only 8 argument registers exist, one of which is the format); "
               f"the program instead read {size - len(got)} of {size} bytes "
-              f"and exited {run.returncode}")
+              f"and {died or 'exited 0 after printing them'}")
 
 
 # ── 5. the module is where the resolver looks, and the corpus imports it ─────
@@ -717,6 +818,122 @@ def test_the_seven_importers_no_longer_refuse_on_the_import(tmpdir):
               text.strip()[-300:])
 
 
+# ── 7. the harness itself, which is what made the flake unattributable ──────
+
+def test_the_harness_records_a_case_even_when_it_cannot_pass(tmpdir):
+    """Every case costs the same number of checks, whatever happened to it.
+
+    A suite whose TOTAL moves on an unchanged tree is a suite whose reader
+    learns to re-run it, and a re-run that comes back green is not evidence.
+    Three things moved this file's total, and each is a real defect rather
+    than a reporting quirk:
+
+      * `expect_lines` returned early from a failed length check, so a case
+        that failed cost ONE check and a case that passed cost two;
+      * a run that never finished raised `subprocess.TimeoutExpired`, which is
+        an `OSError` and so sailed straight through `except AssertionError` and
+        out of the `for fmt in CORPUS_FORMATS` loop — abandoning every case
+        after it. Measured: 122/127 instead of 148, with nothing in the output
+        saying that 21 checks had been skipped;
+      * `build_and_run` returned only stdout and threw `run.returncode` away,
+        so an image that built, linked, printed the right answer and then died
+        was reported as a PASS. That is not a denominator problem, it is a
+        correctness one, and no amount of counting finds it.
+
+    Each probe below records what it saw through `probe()`, which silences both
+    the tally and the printing: every case here is SUPPOSED to fail, so a green
+    run that printed eight red lines from its own self-test would be the same
+    noise this docstring is about. Each probe's verdicts are appended once, at
+    the end, so this function contributes a FIXED six checks whatever happens.
+
+    Against the pre-fix harness, four of the six fail — verified by restoring
+    the old `expect_lines` and the old `build_and_run` and re-running this.
+    """
+    global build_and_run
+    real_build_and_run, real_check = build_and_run, globals()['check']
+
+    def probe(fn):
+        """Run `fn` with the tally and the printing silenced; return its checks."""
+        keep, RESULTS[:] = RESULTS[:], []
+        globals()['check'] = lambda ok, what, detail='': RESULTS.append(
+            (bool(ok), what, detail))
+        try:
+            fn()
+            return RESULTS[:]
+        finally:
+            globals()['check'] = real_check
+            RESULTS[:] = keep
+
+    verdicts = []
+
+    # (label, what build_and_run returns, the two verdicts the case must have).
+    # Every one of the three is a FAILING case, which is the point: a
+    # denominator has to be a function of the cases and not of their verdicts,
+    # so the failing outcomes are the ones worth pinning.
+    for label, canned, want in (
+            ("the image exited nonzero after printing the right answer",
+             (["36"], "the image exited 3, with no stderr"), (False, False)),
+            ("the image printed the wrong NUMBER of answers",
+             (["36", "37"], None), (False, False)),
+            ("the image printed the right NUMBER and the wrong VALUE",
+             (["35"], None), (True, False))):
+        build_and_run = lambda *a, **k: canned
+        added = probe(lambda: expect_lines(tmpdir, "stub", "stub source",
+                                           [36], label))
+        got = tuple(o for o, _w, _d in added)
+        verdicts.append((
+            got == want and len(added) == 2,
+            f'harness: "{label}" is reported, and costs exactly two checks',
+            f'{len(added)} check(s), verdicts {got}, wanted {want}: '
+            f'{[w for _o, w, _d in added]}. One check means the case was '
+            f'abandoned half way, which is what makes the total a function of '
+            f'the verdicts.'))
+        if canned[1] is not None:
+            verdicts.append((
+                bool(added) and added[0][2] == canned[1],
+                f'harness: "{label}" says the image EXITED, not that it '
+                f'answered wrongly',
+                f'the recorded detail was '
+                f'{added[0][2] if added else None!r}, and a program that '
+                f'printed the right answer and then died has to say so'))
+    build_and_run = real_build_and_run
+
+    class _Ran:
+        def __init__(self, rc, err=''):
+            self.returncode, self.stderr = rc, err
+    notes = {rc: (_how_it_died(_Ran(rc)) or '') for rc in (0, 3, -11, -9)}
+    verdicts.append((
+        'SIGSEGV' in notes[-11] and 'SIGKILL' in notes[-9]
+        and notes[0] == '' and 'exited 3' in notes[3],
+        'harness: a signal is reported BY NAME, not as a negative wait status',
+        f'{notes}: a `-11` reaching a report names neither the signal nor the '
+        f'process, and a clean exit must produce no note at all'))
+
+    # ONE REAL BUILD, and it is the case no stub can reach. The three stubbed
+    # outcomes above all go through a `build_and_run` this test supplies, so
+    # they cannot see whether the REAL one reads `run.returncode` — and reading
+    # it is the defect. This builds a three-line formal program that prints the
+    # expected answer and then exits 3. Before the fix, `build_and_run`
+    # returned only stdout, so this compared `['36']` against `['36']` and
+    # reported a PASS for a process that had already failed; measured, not
+    # argued, by re-running this probe against the old function.
+    added = probe(lambda: expect_lines(
+        tmpdir, "harness_dies_after_printing",
+        'def main():\n    print("36")\n    return 3\n', [36],
+        "a real image that exits 3 after printing 36"))
+    verdicts.append((
+        len(added) == 2 and not added[0][0] and 'exited 3' in added[0][2],
+        'harness: a REAL image that exits nonzero after printing the right '
+        'answer is reported as dead, not as correct',
+        f'{len(added)} check(s): {added}. A pass here is the defect: stdout '
+        f'matched and the process had already exited nonzero.'))
+
+    for ok, what, detail in verdicts:
+        RESULTS.append((ok, what, detail))
+        if not ok:
+            print(f"FAIL  {what}: {detail}", flush=True)
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -726,6 +943,7 @@ def main():
 
     tests = [
         test_the_corpus_was_discovered_and_is_not_empty,
+        test_the_harness_records_a_case_even_when_it_cannot_pass,
         test_every_corpus_format_is_implemented,
         test_calcsize_each_format,
         test_pack_single_value_formats,
@@ -749,10 +967,12 @@ def main():
             except Exception as e:            # a raising test is a failed test
                 check(False, f"{t.__name__} raised", repr(e))
             if args.verbose:
-                for ok, what in RESULTS[before:]:
+                for ok, what, detail in RESULTS[before:]:
                     print(f"  {'ok  ' if ok else 'FAIL'}  {what}")
+                    if not ok and detail:
+                        print(f"          {detail}")
 
-    passed = sum(1 for ok, _ in RESULTS if ok)
+    passed = sum(1 for ok, _w, _d in RESULTS if ok)
     total = len(RESULTS)
     print(f"\n{passed}/{total} checks passed")
     return 0 if passed == total else 1

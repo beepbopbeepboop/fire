@@ -28,13 +28,30 @@ are chosen for the SHAPES rather than the values:
 
 That last point is load-bearing for this module in particular. Writing
 BLAKE2b meant working around FOUR separate defects in the backend, three of
-which produce plausible wrong answers rather than refusals (see
-`bugs/FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md`,
-`bugs/FORMAL_arm64_ninth_argument_is_silently_dropped.md`,
-`bugs/FORMAL_arm64_right_shift_is_always_arithmetic.md` and
-`bugs/FORMAL_shift_by_64_or_more_wraps_instead_of_saturating.md`). Each one
-was found by bisecting a digest that was wrong, and each is guarded here by
-the same assertion that found it: the digest must equal CPython's.
+which produce plausible wrong answers rather than refusals:
+
+  * the immediate `lsl` encoder carried a base opcode with stray bits in `immr`
+    (`0xd3780000` where its own docstring said `0xd3400000`), so a shift
+    AMOUNT was corrupted while `Rn`/`Rd` stayed right — `1 << 12` returned
+    `16`, and only amounts 1-8, whose intended `immr` already had those bits
+    set, came out correct. `test_arm64_encoders.py` now sweeps all three shift
+    encoders over the whole 0..63 range for exactly that reason, and its
+    comment there is where this now lives.
+  * a ninth argument was silently dropped rather than refused: a cross-module
+    call whose arity exceeded the eight the arm64 ABI passes in registers
+    produced a plausible answer from the wrong registers instead of a
+    diagnosis. `test_formal_run.py` asserts the refusal, and
+    `formal/build.py` emits it.
+  * `UInt64 >> Int` shifted ARITHMETICALLY, because the shift AMOUNT's type
+    was promoted into the decision that the VALUE's type should make. That
+    one's doc is still open — `bugs/FORMAL_arm64_right_shift_is_always_arithmetic.md`,
+    kept as a correction to a misdiagnosed repro rather than deleted.
+  * a shift of 64 or more WRAPPED (the amount was masked to the register width)
+    instead of saturating. The rule is `formal/model.py`'s
+    `shift_saturated_is_zero`, and both backends branch on it.
+
+Each was found by bisecting a digest that was wrong, and each is guarded here
+by the same assertion that found it: the digest must equal CPython's.
 
 Building and RUNNING, not building. `test_formal.py` typechecks the generated
 proof and never executes the image; every case here exits with a status this

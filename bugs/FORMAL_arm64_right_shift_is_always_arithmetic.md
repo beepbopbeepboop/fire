@@ -139,6 +139,26 @@ value, for the reason in (1).
 
 ## Checked and NOT the same bugs
 
-- Not `FORMAL_shift_by_64_or_more_wraps_instead_of_saturating.md` (fixed in the same session): that is how FAR a shift goes, this is what comes in. `x >> 64` saturating to 0 is unrelated to `x >> 4` on an unsigned value.
-- Not the immediate-`<<` encoder defect (`FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md`, also fixed, also in the same session): a different instruction and a different direction.
-- Not `FORMAL_negative_shift_amount_masks_instead_of_raising.md`, which is a new finding from the same session: an amount that is out of range in the other direction, affecting `<<` and `>>` alike.
+Three neighbouring shift defects were ruled out while diagnosing this one, and
+all three are named by SYMPTOM rather than by the doc they once had, because
+CLAUDE.md deletes a fixed bug's doc and the citation would then point at
+nothing. The facts live with the code that carries them.
+
+- Not **a shift of 64 or more wrapping instead of saturating** (fixed in the
+  same session, and its doc deleted with the fix). That is how FAR a shift
+  goes; this is what comes in. `x >> 64` saturating to 0 is unrelated to
+  `x >> 4` on an unsigned value. The rule is `formal/model.py`'s
+  `shift_saturated_is_zero`, and both backends branch on it rather than
+  re-deriving the test.
+- Not **the immediate-`<<` encoder's base opcode carrying stray bits in
+  `immr`** (also fixed, also in the same session, also with its doc deleted):
+  `encode_lsl_xd_xn_imm` carried `0xd3780000` where its own docstring said
+  `0xd3400000`, so `1 << 12` returned `16` and only amounts 1-8 were right. A
+  different instruction and a different direction — the amount field, not the
+  value's type. `test_arm64_encoders.py` sweeps all three shift encoders over
+  the whole 0..63 range and says so at the sweep.
+- Not **a negative shift amount masking instead of raising** (a finding from
+  the same session, also fixed, also with its doc deleted): an amount out of
+  range in the OTHER direction, affecting `<<` and `>>` alike. The range check
+  is `formal/model.py`'s, and the encoders raise on an out-of-range amount
+  rather than truncating it.

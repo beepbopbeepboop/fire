@@ -334,29 +334,37 @@ mark it with a reason and a bug-doc link.
   compiled path ignored decorators too, so the diff was clean). A new
   interpreter-oracle bug belongs there, not in `test_runtime_diff.py`.
 
-Current `EXPECTED` entries, and the one `DISABLED` entry — the five that reach a
-bucket, plus eleven more `expect=` jobs registered in no bucket at all (so they
-run in nothing today; `bugs/CODEGEN_ab_native_fails.md` §4 has those eleven with
-a recommendation each). **`python3 tools/suite.py --list` is the census**, not
-this table: the bucket column reads `[]` for an ungated test, and nothing else in
-the tree reads it.
+Current `EXPECTED` entries, and the one `DISABLED` entry. The table below is
+the five whose COST is worth a column of its own: two heavyweight steps and the
+three formal host-module suites. The remaining `expect=` jobs are the compiled-
+path async/await cluster, all cheap (0.0-0.2 GB, 1.2-11.6 s each) and all in
+`coroutine` and `x86` — registered in NO bucket at all until 2026-10-01, each
+measured one at a time before being named, with the measurement at its
+registration. `bugs/CODEGEN_ab_native_fails.md` §4 carries the full inventory
+and the reasoning for `expect=` rather than `disabled=` on each.
+
+**`python3 tools/suite.py --list` is the census**, not this table: the bucket
+column reads `[]` for an ungated test, and `test_suite.py`'s `the buckets:`
+checks fail the self-test on one unless it declares `dep=True` (`prooflib`, and
+nothing else).
 
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
 | `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
 | `bootstrap-stage2-dumps` | `expect=` (`SELFHOST_STAGE2_STALL`) | the compiled binary dumping every source | 47 items x 0.5 GB, `tiny` (4 GB) each |
-| `formal-struct` | `expect=` (`bugs/FORMAL_struct_pack_over_eight_arguments.md`) | `struct.pack`/calcsize against CPython | 2 of 148 cases; `proofs` |
+| `formal-struct` | `expect=` (`bugs/FORMAL_struct_pack_over_eight_arguments.md`) | `struct.pack`/calcsize against CPython | 2 of 154 cases; `proofs` |
 | `formal-toplevel` | `expect=` (`bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md`) | a module body runs, diffed against CPython | 2 of 70 cases; `proofs` |
 | `formal-module-attr` | `expect=` (`bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md`) | `mod.NAME` on both backends | 1 of 11 cases; `proofs` |
 
 **A declared red and an unrun red are different failures**, and the second is
 worse: a marker on a test no gate runs can never be observed going green, so it
-cannot rot out. That is why the eleven ungated ones above are a coverage hole
-(`bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md`) and not merely a
-cost question, and why "register it" is never the same act as "run it"
-(`bugs/TEST_registered_tests_in_no_bucket_never_run.md` for the ungated tests
-that are not marked at all).
+cannot rot out. That is why the ungated ones are a coverage hole and not
+merely a cost question, and why "register it" is never the same act as "run it".
+Every one of them is in a bucket (2026-10-01), measured one at a time before
+being named, and `test_suite.py`'s `the buckets:` checks are what keeps it that
+way — a registration that is in no bucket fails the self-test unless it declares
+`dep=True`, which is `prooflib` and nothing else.
 
 The two heavyweight `expect=` entries are the old "the binary segfaults on any
 input" claim, which was **measured false on 2026-09-27 and corrected rather than
@@ -368,11 +376,19 @@ left to rot**: `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 
 that no exit code reports. Divergences themselves:
 `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`.
 
-**The gate is otherwise clean**: `check` 11/11, `coro` 20/20, `stdlib` 2/2,
-`mojoc` builds, `bootstrap` green through `stage2-cc`. (Those counts are a claim
-about a *run*, so only a gate run establishes them; `check` has since gained
-members, so read the current tally off `build/suite.log` rather than this line —
-see `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md`.)
+**The gate is otherwise clean**: every `expect=` and `disabled=` registration in
+the registry is accounted for above, and there is no undeclared red. That is a
+statement about the REGISTRY, not about a run, and it is deliberately phrased
+that way: this line used to read "`check` 11/11, `coro`
+20/20, `stdlib` 2/2, `mojoc` builds, `bootstrap` green through `stage2-cc`",
+which is a claim about a *run* that no light change can establish and that
+every commit adding a test falsifies — it was already 37/13/2 by 2026-10-01, and
+the day it was written `check` held 21 names. The pass/fail tally is in
+`build/suite.log` after a run, and `python3 tools/suite.py --dry-run <bucket>`
+prints the size the runner would schedule; both are read off a run, neither is
+written down here. A sentence that states no number cannot go stale under a
+change made in none of the files it names, which is how this one went stale
+twice.
 
 ## Known failures: `expect=` or `disabled=`, decided by cost
 

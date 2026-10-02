@@ -103,9 +103,9 @@ the line, where a run-time trap can only say "something went wrong".
 
 ## Why the saturation fix left it alone
 
-`FORMAL_shift_by_64_or_more_wraps_instead_of_saturating.md` was fixed in the
-same session, and its fix puts a `CMP X1, #64` / `B.GE` in front of exactly
-this instruction. The obvious way to write that compare is UNSIGNED
+A shift of 64 or more wrapping instead of saturating was fixed in the same
+session (and that doc is deleted with its fix, hence named by symptom here).
+Its fix puts a `CMP X1, #64` / `B.GE` in front of exactly this instruction. The obvious way to write that compare is UNSIGNED
 (`B.HS`/`B.CC`), which would have made a negative amount take the saturating
 branch and answer 0 — a third wrong answer, arrived at by fixing the wrong
 thing.
