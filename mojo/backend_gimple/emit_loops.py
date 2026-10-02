@@ -2760,7 +2760,31 @@ def _emit_generator_pending_exc_check(gen, gen_val: str, base: str,
 def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
     """`for x in it:` over a resumable list-iterator local — see
     `_gen_for_iter`'s call site. Resumes from the shared cursor and leaves
-    it exhausted."""
+    it exhausted.
+
+    The cursor advance belongs at the TOP of the body, immediately after
+    the read, not in `bb_post` after it. That is the Python invariant:
+    by the time the loop body runs, the iterator is already one past the
+    element just yielded, so a `next(it)` inside the body reads the
+    FOLLOWING one. With the advance in `bb_post`, `cur` still pointed AT
+    the element the loop had just handed to `var` while the body ran, and
+    `next(it)` read exactly that one again — so `walk([1,2,3,4])` below
+    printed `[1, 1, 3, 3]` (two elements consumed, each reported twice,
+    and half the iterations lost) where CPython prints `[1, 2, 3, 4]`.
+
+    This is the same shape CPython's
+    `Tools/cases_generator/analyzer.py::check_escaping_calls` uses:
+
+        tkn_iter = iter(stmt.contents)
+        for tkn in tkn_iter:
+            ...
+                next(tkn_iter)
+
+    `bb_post` stays on `loop_stack` so `break`/`continue` still land
+    somewhere correct; it is now just the jump back to `bb_cond`. A
+    `continue` is still right, precisely because the advance has already
+    happened by the time the body is reached.
+    """
     li = gen._list_iter_cursor[node.iterable.name]
     lst, cur, elem = li['list'], li['cursor'], li['elem']
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
@@ -2778,14 +2802,14 @@ def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     ev = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
     gen._emit(f"  {gen._cname(var)} = {ev};")
+    nc = gen._inc_val(cur)
+    gen._emit(f"  {cur} = {nc};")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
-    nc = gen._inc_val(cur)
-    gen._emit(f"  {cur} = {nc};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
 

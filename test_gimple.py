@@ -7846,7 +7846,156 @@ outer([10, 20, 30])
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_next_inside_for_over_same_iterator_is_one_ahead():
+        """`next(it)` inside `for x in it:` must read the element AFTER the
+        one the loop just yielded.
+
+        `it = iter(<list>)` lowers to a shared list plus an int64_t cursor
+        (`_try_bind_list_iter`), and both the `for` lowering and the
+        `next()` lowering read `mojo_list_get(lst, cur)` and then advance
+        `cur`. Each is right alone; together they were an off-by-one,
+        because the `for` advance happened in its post block AFTER the
+        body, so while the body ran the cursor still pointed AT the
+        element the loop had just handed to its target — and `next(it)`
+        read exactly that one again. `walk([1, 2, 3, 4])` printed
+        `[1, 1, 3, 3]` (two elements consumed, each reported twice, and
+        half the iterations lost) where CPython prints `[1, 2, 3, 4]`.
+
+        It is silent and exit 0, and it is not a corner case: this is the
+        shape CPython's own
+        `Tools/cases_generator/analyzer.py::check_escaping_calls` uses.
+
+        Nested `def`s on purpose, for the same reason as the test above:
+        only a `__GIMPLE` body proves anything about the cast operand and
+        the literal-increment shapes these two lowerings share. Each helper
+        PRINTS from inside the closure rather than returning the list:
+        returning a `MojoList *` out of a nested def is a separate,
+        pre-existing defect (it prints a raw pointer decimal — reproduced
+        with no `next()` involved at all), and a regression test should not
+        depend on it.
+
+        The other four cases are in the same program because the fix moves
+        the advance from the loop's post block to the top of its body, and
+        each of those is a way that move could be wrong: `next(it, d)` on
+        exhaustion, a `continue` (whose target is the now-empty post block,
+        so it must not skip the advance), a `break`, and a string element
+        type rather than int64_t."""
+        global _PASS, _FAIL
+        name = "next_inside_for_over_same_iterator_is_one_ahead"
+        src = '''\
+def walk(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            out.append(next(it))
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def with_default(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            out.append(next(it, 0))
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def skipping(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            if x % 2 == 0:
+                continue
+            out.append(x)
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def stopping(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            if x == 3:
+                break
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def strings(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            out.append(next(it))
+        print('|'.join(out))
+    inner()
+
+walk([1, 2, 3, 4])
+with_default([9, 10])
+skipping([1, 2, 3, 4])
+stopping([1, 2, 3, 4])
+strings(['a', 'b'])
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'next_ahead.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **{'do_imports': True} if mode == 'single-TU'
+                        else {'link_mode': True})[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'na_{mode}.c')
+                exe = os.path.join(td, f'na_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_cursor_advance_has_no_cast_operand_in_gimple()
+    test_next_inside_for_over_same_iterator_is_one_ahead()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()
