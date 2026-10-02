@@ -1,14 +1,95 @@
 # CODEGEN: four compiled-path gaps measured on 2026-09-27, none of them refusals
 
-## Status (2026-09-30): TWO OF THE FOUR ARE CLOSED — #2 fixed here, #4 was
-## already fixed on 2026-09-27 — and #1 and #3 are still open
+## Status (2026-10-01): #1's `cls` half is CLOSED (and it was NOT feature-sized,
+## as this document argued), #2 and #4 were already closed, #3 is untouched
+
+The `cls` half of #1 was recorded here as needing "a class OBJECT to exist at
+runtime, or the placeholder to carry the receiver's class id" — feature-sized,
+on the reasoning that `cls` "is resolved purely by NAME against the defining
+`struct_name`". The second half of that sentence is what made it look
+impossible, and it is true of the DEFINING struct only: a lifted
+`Child_who(int64_t cls)` is emitted PER SUBCLASS, and it reads
+`_classattr_Child__tag`. So if the class attribute's INITIALISER is right, the
+name-resolved `cls.tag` is right for free — no class object, no runtime id.
+
+It was not right, and the reason is a merge-order bug that has nothing to do
+with either of this document's two causes:
+
+```python
+class Base:  tag = 7   other = 1
+class Child(Base): tag = 9
+class Grand(Child): tag = 11
+print(Base.tag, Child.tag, Grand.tag)   # CPython: 7 9 11
+```
+
+| | CPython | `fire.py run` | compiled before | compiled after |
+|---|---|---|---|---|
+| `Base.tag, Child.tag, Grand.tag` | `7 9 11` | `7 9 11` | `7 7 7` | `7 9 11` |
+| `Base.other, Child.other, Grand.other` (inherited, not overridden) | `1 1 1` | `1 1 1` | `1 1 1` | `1 1 1` |
+| `b.tag, c.tag` on instances | `7 9` | `7 9` | `7 7` | `7 9` |
+| `Child.who()` where `who` is a `@classmethod` reading `cls.tag` | `9` | `9` | `7` | `9` |
+| `Base.who()` | `7` | `7` | `7` | `7` |
+
+The emitted initialiser said which:
+
+```c
+static void _mojo_classattr_init (void) {
+  _classattr_Base__tag  = 7;
+  _classattr_Child__tag = 7;     /* Child's own declaration says 9 */
+  _classattr_Grand__tag = 7;     /* Grand's says 11 */
+}
+```
+
+`_merge_struct_inheritance` builds a subclass's `.fields` as BASE declarations
+FIRST and the class's own LAST — its own docstring says "own members override
+every base" — and the class-attribute emitter **broke on the first match**. So
+every override in a chain took the root's value, and every method of the
+subclass read it too. Fixed by `module_gen._own_class_field_index`, which is
+the one place that answers "which declaration is this class's OWN" (it has to
+be a helper and not an inline `reversed()`: the self-hosted backend has no
+lowering for the lazy reverse iterator, and an in-place `.reverse()` would
+reorder the StructDef's own field list — the struct layout, and every other
+consumer of it).
+
+Regressions: `gimple_subclass_overrides_a_class_constant` (with the inherited-
+not-overridden attribute as the control) and
+`gimple_inherited_classmethod_reads_its_own_cls` (with `Base.who()` as the
+control, because a fix that made the subclass read its own value by also making
+the base read the subclass's would pass the first line).
+
+### What is still open in #1, and why the remaining half was NOT landed
+
+**The generator half.** `Child.gen(4)` is still `mojo_unsupported_iter`, and
+that is deliberate. `gen._generator_method_api` is keyed
+`(struct_name, method_name)` and holds only `('Base', 'gen')` (measured), so
+the call site misses. The doc's prescription — "walk the base chain at the call
+site" — was **not** applied, and the reason is worth recording, because
+applying it alone would have made the program WORSE:
+
+* Only ONE C++ generator unit is emitted, and it is **Base's**. Its `cls.tag`
+  resolves by name to `_classattr_Base__tag`.
+* So after a base-chain walk, `Child.gen(4)` would iterate successfully and
+  yield `7, 4` where CPython yields `9, 4` — converting a LOUD
+  `mojo_unsupported_iter` into a SILENT wrong value.
+
+The unit has to be emitted per receiver class: register the subclass alias in
+`_generator_method_api` AND generate a second unit keyed `(Child, gen)` so its
+`cls.<attr>` names resolve against `Child`. That is the real shape of this half,
+and it is why the doc's "land the lookup fix and record the `cls` half as its
+own refusal" is not the right split either — the lookup fix and the per-class
+unit are ONE change, and half of it is worse than not doing it.
+
+**#3 (a heterogeneous `dict | dict`) is untouched** and still deliberately
+unhandled. Its "measure the blast radius first (`compile_stdlib.py`'s `U`
+count)" step is a whole-stdlib compile, so it stays open by construction rather
+than by decision.
 
 Re-measured against the current tree, with CPython alongside, on
 2026-09-30 (branch `work/codegen-old-divergences`):
 
 | # | gap | state |
 |---|---|---|
-| 1 | an inherited `@classmethod`/`@generator` binds the DEFINING class and does not dispatch | **OPEN** — analysis below re-measured and unchanged |
+| 1 | an inherited `@classmethod`/`@generator` binds the DEFINING class and does not dispatch | **PARTLY CLOSED 2026-10-01** — the `cls` / plain-`@classmethod` half is fixed (a class-attribute initialiser took the BASE's value for every override in a chain); the `@generator` half stays `mojo_unsupported_iter`, on purpose, see the Status above |
 | 2 | `x == None` on a `char *` is False, and `print` of one prints `(null)` | **FIXED** (two commits on this branch) |
 | 3 | a heterogeneous `dict \| dict` has no static value type | **OPEN** — deliberately unhandled; the refusal is still the recommended move and is still unmeasured |
 | 4 | `__itertools_only_<hash>` vs `_itertools_only_<hash>` | **FIXED on 2026-09-27**, not by this branch — see below |

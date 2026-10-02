@@ -28,7 +28,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
+    py_tokenize, Parser, _as_str, _as_dict, _as_list, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
     _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal,
 )
 from module_loader import load_module, get_symbol_type
@@ -1126,6 +1126,44 @@ def _class_field_decl(field):
     if isinstance(field, VarDecl) and field.name and field.value is not None:
         return field.name, field.value
     return None
+
+
+def _own_class_field_index(fields, name) -> int:
+    """Index of `name`'s OWN class-body declaration in `fields`, or -1.
+
+    `_merge_struct_inheritance` (gimple_codegen.py) builds a subclass's
+    `.fields` as BASE declarations FIRST and the class's own LAST — its own
+    docstring: "own members override every base". So after the merge a
+    subclass that OVERRIDES a base member has TWO declarations of that name
+    in `.fields`, and the subclass's own is the LAST one. Every
+    "first declaration of this name wins" scan over `.fields` therefore
+    resolves to the BASE's, which is the opposite of the rule the merge
+    documents.
+
+    Measured, silent wrong value at exit 0:
+
+        class Base:
+            tag = 7
+        class Child(Base):
+            tag = 9
+
+    emitted `_classattr_Child__tag = 7`, so `Child.tag` read 7, every
+    `cls.tag` inside `Child`'s own methods read 7, and
+    `class Grand(Child): tag = 11` read 7 too — the whole inheritance chain
+    took the ROOT's value.
+
+    The comparison is `_cfd[0] == name`, exactly as the scanning loops
+    already spell it, so the self-hosted answer for a boxed field read is
+    unchanged; `range(len(...))` rather than `reversed()` because the
+    self-hosted backend has no lowering for the lazy reverse iterator.
+    """
+    _pick = -1
+    _fl = _as_list(fields)
+    for _i in range(len(_fl)):
+        _cfd = _class_field_decl(_fl[_i])
+        if _cfd is not None and _cfd[0] == name:
+            _pick = _i
+    return _pick
 
 
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
@@ -3929,15 +3967,16 @@ def gen_module_impl(self, stmts):
             already = set(self.struct_field_types[s.name].keys())
             for method in s.methods:
                 pm = {}
-                # Parameter names whose annotation says `bool`. Kept beside
-                # `pm` rather than folded into it because `_resolve_type`
-                # deliberately maps `'bool'` to `'int'` (see _TYPE_MAP), so
-                # the ctype dict cannot tell a bool parameter from an int one;
-                # `_gmi_collect_self_assigns` turns this set into
-                # `struct_bool_fields` entries, which is what makes
-                # `self.flag = flag` from a `flag: bool` parameter print as
-                # True/False instead of 1/0.
-                pbool = set()
+                # Which of this method's parameters say `bool` in their
+                # annotation. `_gmi_collect_self_assigns` reads it through
+                # `self` (see `GimpleGen._gmi_bool_params`) because that walk
+                # is the only place that knows which FIELD a parameter feeds,
+                # and re-walking the body here to recover that is exactly the
+                # quadratic-rescan cost
+                # bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+                # rescan.md is about. Rebuilt per method, so one method's
+                # answer can never leak into the next one's fields.
+                self._gmi_bool_params = set()
                 _defaults = getattr(method, 'param_defaults', {}) or {}
                 for _mpj in (method.params or []):
                     # Indexed loop + `_as_str`, NOT `for pname, ptype in
@@ -3954,6 +3993,8 @@ def gen_module_impl(self, stmts):
                             if _as_str(ptype).strip() == 'bool':
                                 pbool.add(pname)
                             pm[pname] = self._resolve_type(ptype)
+                            if _as_str(ptype).strip() == 'bool':
+                                self._gmi_bool_params.add(pname)
                         elif pname in _defaults:
                             _dv = _defaults[pname]
                             if isinstance(_dv, StringLiteral):
@@ -3979,8 +4020,56 @@ def gen_module_impl(self, stmts):
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
                             already.add(fn)
+            # A method that returns a `bool`-annotated FIELD hands back an
+            # `int`, because that is what the field's ctype is, so
+            # `print(b.get())` printed `1` where CPython prints `True`. Its
+            # own body is the evidence: EVERY `return` in it reads a bool
+            # field, which is the only shape recorded here -- a method that
+            # merely READS a bool field and returns something else is left
+            # alone, because answering True for that would trade a wrong
+            # value for a differently wrong one.
+            #
+            # A SEPARATE loop over the methods, not a step inside the one
+            # above: `__init__` is what registers the field, and a class may
+            # spell its getter first, so recording inside that loop would
+            # make the answer depend on declaration order.
+            if self.struct_bool_fields.get(s.name):
+                for _bm in s.methods:
+                    _rets = [_rn for _rn in _walk_ast(_bm.body)
+                             if isinstance(_rn, ReturnStmt)]
+                    if not _rets:
+                        continue
+                    # Which bare receiver names in this method denote a
+                    # struct: `self`, and any parameter annotated with a
+                    # struct name. Both come from the declaration, so
+                    # `return other.flag` in `def echo(self, other: Box)`
+                    # is recognised the same as `return self.flag`. A
+                    # receiver this cannot name is simply not claimed, which
+                    # is why the field check below is against the RECEIVER's
+                    # own bool fields and not this struct's.
+                    _recv_sn = {'self': _as_str(s.name)}
+                    for _mpj2 in (_bm.params or []):
+                        _pt2 = _mpj2[1]
+                        if _pt2 and _as_str(_pt2).strip() in self.struct_field_types:
+                            _recv_sn[_as_str(_mpj2[0])] = _as_str(_pt2).strip()
+                    _all_bool_field = True
+                    for _rn2 in _rets:
+                        _rv = _rn2.value
+                        _rname = ''
+                        if isinstance(_rv, MemberExpr) and isinstance(_rv.obj, IdentExpr):
+                            _rname = _as_str(_rv.obj.name)
+                        _rsn2 = _recv_sn.get(_rname)
+                        if not (_rsn2 is not None
+                                and _as_str(_rv.member) in (
+                                    self.struct_bool_fields.get(_rsn2) or ())):
+                            _all_bool_field = False
+                            break
+                    if _all_bool_field:
+                        self.struct_bool_methods.setdefault(
+                            s.name, set()).add(_as_str(_bm.name))
             if s.name in self._selfhost_hardcoded_struct_names:
                 continue
+
             # Same __getattr__ rule as _scan_body_for_local_field_access
             # below: a read of a member this struct never ASSIGNS is a
             # dynamic-attribute read on a __getattr__ struct — it must
@@ -10086,7 +10175,15 @@ def gen_module_impl(self, stmts):
             for aname in _ca_map:
                 mangled = _as_str(_ca_map[aname])
                 aname = _as_str(aname)
-                for field in s.fields:
+                # Stop at the class's OWN declaration of `aname`, which is the
+                # LAST one in the merged `.fields` (see
+                # `_own_class_field_index`). Scanning to the first match took
+                # the BASE's value for every override. The range is that one
+                # index, not "up to it": a range ending at it still `break`s
+                # on the inherited declaration earlier in the list.
+                _own_idx = _own_class_field_index(s.fields, aname)
+                for _pick in range(_own_idx, _own_idx + 1):
+                    field = _as_list(s.fields)[_pick]
                     _cfd = _class_field_decl(field)
                     if _cfd is not None and _cfd[0] == aname:
                         v = _cfd[1]

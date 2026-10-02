@@ -1527,9 +1527,15 @@ def _gen_stmt_AssignStmt(gen, node):
                 # `emit_dict_int_value_store`'s docstring. A literal RHS was
                 # the only shape recognised, so `d['a'] = b` for a `b = True`
                 # and `d['a'] = 1 == 1` both printed `{'a': 1}` while
-                # `print(b)` and `repr(b)` were already right.
-                gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
-                                              vtype, v, node.value)
+                # `print(b)` and `repr(b)` were already right; the one shared
+                # predicate is `is_python_bool_expr`, which the dict LITERAL
+                # store and the print dispatch use too.
+                if gimple_exprtypes.is_python_bool_expr(gen, node.value):
+                    gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
+                gen._note_dict_callable_ret(obj_v, v, vtype)
+                # Pass actual vtype so _emit_call can coerce pointers to int64_t
+                gen._emit_call('void', '', 'mojo_dict_set_int',
+                                [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
         else:
             # Opaque int-typed container: check if it's a list or dict
             if ot in ('int', 'int64_t'):
@@ -1580,8 +1586,12 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
-                    gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
-                                                  vtype, v, node.value)
+                    if gimple_exprtypes.is_python_bool_expr(gen, node.value):
+                        gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
+                    gen._note_dict_callable_ret(dp, v, vtype)
+                    # Pass actual vtype so _emit_call can coerce pointers to int64_t
+                    gen._emit_call('void', '', 'mojo_dict_set_int',
+                                    [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -1592,7 +1602,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      ('char *', v)])
                 else:
-                    gen._note_dict_callable_ret(_dsw_dp, v)
+                    gen._note_dict_callable_ret(_dsw_dp, v, vtype)
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      (vtype, v)])
@@ -2887,8 +2897,11 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             elif ot == 'MojoDict *':
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
-                gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
-                                              vtype, v, node.value)
+                if gimple_exprtypes.is_python_bool_expr(gen, node.value):
+                    gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
+                gen._note_dict_callable_ret(obj_v, v, vtype)
+                gen._emit_call('void', '', 'mojo_dict_set_int',
+                                [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
             elif ot in ('int', 'int64_t'):
                 actual_type = gen._get_actual_type(ot, obj_v)
                 # Same read/write-symmetry rule as the other two subscript
@@ -2913,8 +2926,11 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True, True)
-                    gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
-                                                  vtype, v, node.value)
+                    if gimple_exprtypes.is_python_bool_expr(gen, node.value):
+                        gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
+                    gen._note_dict_callable_ret(dp, v, vtype)
+                    gen._emit_call('void', '', 'mojo_dict_set_int',
+                                    [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
             elif ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) not in gen.struct_field_types:
                 # Raw C pointer: use _mojo_at_ helper (GIMPLE doesn't allow
                 # ptr arithmetic) — mirrors _gen_stmt_AugAssignStmt's

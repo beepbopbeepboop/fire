@@ -1,13 +1,34 @@
 # CODEGEN: a `bool`-annotated struct field — the field is fixed, its METHOD RETURN and a `bool` PARAMETER are not
 
 **State: PARTIAL, 2026-10-01.** This is the doc that was
-`CODEGEN_bool_annotated_struct_field_prints_as_int.md`, rewritten to say what
-landed and what did not. The original doc's own diagnosis was right and its
-own recommendation (candidate B, "record the bool fields and consult the map")
-is what shipped — but it was right about more than it knew: the table it asked
-for (`gen.struct_bool_fields`) already existed, and one more thing was broken
+`CODEGEN_bool_annotated_struct_field_prints_as_int.md`, rewritten twice over —
+once by the branch that landed option B and once by the batch that rewrote it
+against what the tree actually does — to say what landed and what did not.
+
+The original doc's own diagnosis was right and its own recommendation
+(candidate B, "record the bool fields and consult the map") is what shipped —
+but it was right about more than it knew: the table it asked for
+(`gen.struct_bool_fields`) already existed, and one more thing was broken
 besides the print spellings (a whole-DICT bool mark that corrupted unrelated
 int values).
+
+**What option B covered, and what it did not**, is the whole of this document:
+every PRINTING spelling of a `bool`-annotated field now says `True`/`False`
+(`print`, `repr`, `str`, `f'{...}'`, `'%r' %`, a dict value, a list element,
+a field read through a bound method, and a method that RETURNS one), and a
+bool field still occupies an `int` slot — which is option A, `_TYPE_MAP['bool']
+= '_Bool'`, untouched and still needing the full gate. Two shapes the doc's
+own step-2 list names are also still wrong and are the reason it is not
+CLOSED: a `bool`-annotated PARAMETER (`def show(v: bool): print(v)` → `1`)
+and the remaining method-return shapes. Both want the same new thing, a
+per-function record of the bool facts captured where the annotations are still
+readable — written down in "What is STILL wrong, measured on this tree" below.
+
+Not a duplicate of `bugs/CODEGEN_repr_of_a_bool_prints_1.md` (fixed
+2026-09-30) — that one was a `_Bool` value whose C type was already `_Bool`
+and whose repr chokepoint had no arm for it. This is the same *class* one
+level out: for a struct field the bool-ness is gone before anything can look
+at it, so no chokepoint can recover it.
 
 ## What I ran and what I saw
 

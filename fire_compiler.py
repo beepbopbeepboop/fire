@@ -1715,6 +1715,10 @@ def _unterminated_quote_pos(line: str) -> int:
     triple-quoted spans with placeholder names before this is consulted, and a
     single-quoted literal cannot hold a raw newline, so a line can only end
     inside one by way of the backslash-newline pair this function exists for.
+
+    `_unterminated_string_at` is the scan; this is its boolean, kept because
+    `test_string_literal_lexing.py` and the join's own truthiness check read it
+    as one.
     """
     i = 0
     n = len(line)

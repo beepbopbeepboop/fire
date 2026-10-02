@@ -7864,6 +7864,62 @@ void mojo_raise_type_error(char *detail) {
     mojo_raise();
 }
 
+/* `mojo_require_str_arg(v, detail)` — the guard the codegen emits at a call
+ * site whose `char *` parameter is being handed an INTEGER-typed word.
+ *
+ * Why it exists: an annotation is a STATIC PROMISE this codegen takes
+ * literally, so `def __init__(self, widgetName: str)` called as
+ * `Dialog(5)` emits `(char *)(void *)(int64_t)5` and the callee then
+ * `strlen`s address 5 — a SIGSEGV, exit -11, no output, on a program that
+ * builds and runs cleanly. In Python a parameter annotation is
+ * documentation, not a cast, and `Dialog(5)` is legal, so the compiled path
+ * has one C type per slot and no runtime tag and cannot represent the
+ * callee's value faithfully. What it CAN do is refuse to hand the callee
+ * something it will dereference as a C string (bugs/
+ * CODEGEN_annotated_str_param_given_an_int_segfaults.md).
+ *
+ * Two exemptions, both required by real programs rather than by taste:
+ *
+ *   - 0. A NULL `char *` is a legitimate string-typed value here and has
+ *     been since the `x == None` fix: `d.get(k)` returns NULL for an absent
+ *     key, and passing one straight into a `str` parameter is how every
+ *     `f(d.get(k))` guard in the tree is written.
+ *   - anything `mojo_boxed_is_str` accepts, which is the runtime's OWN
+ *     "this boxed int64_t is plausibly a char *" discriminator. It is
+ *     deliberately a range test with a 2 GiB floor and a 2^47 ceiling, so
+ *     it admits every genuine string pointer (including a `.rodata`
+ *     literal) and every other pointer-shaped handle, and rejects exactly
+ *     the values that cannot be one: small ints, None, bools, the 31-bit
+ *     crc32 type tags a compiled `type(node)` yields, and boxed doubles
+ *     (excluded by the box registry, so `struct.unpack` results are
+ *     rejected rather than `strlen`ed).
+ *
+ * The residual gap is honest and is the same one `_mojo_ptr_shaped` cannot
+ * close: an integer whose VALUE happens to land in the canonical userspace
+ * range (2^30 <= n < 2^47) still passes, exactly as it still does for every
+ * other boxed-any consumer in the runtime. It is a large improvement over
+ * "every integer is a SIGSEGV" and it is not a claim of completeness.
+ *
+ * One deliberate DIVERGENCE from the other two engines, recorded here
+ * because a reader comparing them will find it: CPython (and
+ * `fire.py run`) accept `Dialog(5)` and print `5`, because a parameter
+ * annotation there is documentation rather than a cast. This codegen has
+ * one C type per parameter slot and no runtime tag, so it cannot carry the
+ * callee's value faithfully, and it chooses to refuse rather than to
+ * dereference an integer as a C string. Refusing is not the same answer as
+ * CPython's — it is a smaller failure than a SIGSEGV, and a catchable one.
+ * The alternative (stringifying the integer into the `char *` slot, i.e.
+ * `mojo_cstr_or_int_str`) would match `print` and disagree on `repr`, on
+ * `len` and on every arithmetic use, which is the silent-wrong-answer shape
+ * this exists to remove.
+ *
+ * `detail` is the tail CPython puts after "TypeError: ". */
+void mojo_require_str_arg(int64_t v, char *detail) {
+    if (v == 0) return;
+    if (mojo_boxed_is_str(v)) return;
+    mojo_raise_type_error(detail);
+}
+
 /* `ValueError: <detail>` — same sequence, same tag derivation, next to its
  * three siblings above. Needed because an operation that REJECTS ITS
  * ARGUMENT is not one of those three: mojo_bytes_partition on an empty

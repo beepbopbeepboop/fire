@@ -80,14 +80,21 @@ RUN_TIMEOUT = 60
 Q3 = '"' * 3          # a triple-quote run
 SQ3 = "'" * 3
 
-# (name, the literal's source text, expected value or None to mean "whatever
-# CPython computes", expected_ours_value)
+# (name, the literal's source text, OUR expected value, CPython's expected
+# value or None for "no cross-check")
 #
-# `ours` is the byte-exact content: source text between the delimiters, with no
-# escape processing. It is spelled out for every row rather than derived,
-# because "byte-exact" is a contract a reader has to be able to check by eye.
-# A row whose value is a real newline is written '\n' in the table below and
-# comes from a source line break.
+# `ours` (the THIRD column) is the byte-exact content: source text between the
+# delimiters, with no escape processing. It is spelled out for every row rather
+# than derived, because "byte-exact" is a contract a reader has to be able to
+# check by eye. A row whose value is a real newline is written '\n' in the
+# table below and comes from a source line break.
+#
+# The fourth column is the oracle: when it is given, `check_continuation`
+# requires BOTH sides to equal it, so a row carrying one is a row the two
+# engines agree on and a row leaving it `None` is a labelled divergence. The
+# two are not interchangeable and reading the table as (ours, theirs) is the
+# mistake that made the first version of the raw-literal rows below assert a
+# divergence that no longer existed.
 LITERALS = [
     # ── the plain shapes: one STRING token, content is what is between ──────
     ("triple_plain",        Q3 + "abc" + Q3,                "abc"),

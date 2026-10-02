@@ -2345,6 +2345,27 @@ class GimpleGen:
         # above are, because all modules' generated code is concatenated into
         # ONE translation unit for the self-hosted build and a duplicate
         # top-level `static` would be a redefinition.
+        #
+        # What the sharing makes true, and why no call site has to reason
+        # about it: `_c_helper_def` is called at the POINT OF USE, and every
+        # place it emits to is ordered ahead of that use. Two of the three
+        # destinations are inside the module's own `parts`/`func_parts`, so a
+        # definition precedes its caller by construction; the third,
+        # `_elaborated_externs`, is deliberately NOT shared (see
+        # emit_resolve's sharing block) and is flushed by gen_module_impl
+        # BEFORE `imported_code` is appended to `parts`, so the root module's
+        # externs-borne definitions still land above every imported module's
+        # code, and an imported module that is handed `''` is relying on a
+        # definition higher up the one translation unit rather than on
+        # something it skipped. Imported modules are emitted in
+        # `sorted(modules_to_compile)` order, so the module that needed the
+        # helper first is also the one whose definition comes first.
+        #
+        # Before the sharing, each temp_gen started with its own empty dict AND
+        # its own empty `_emitted_c_helpers` set, so none of the above held
+        # for it and a second module emitted a second definition; correctness
+        # came only from six independent per-call-site guards, none of them
+        # this contract.
         self._c_helpers_needed: dict[str, str] = {}
         # Which of those have already had their DEFINITION emitted into the
         # final .ci. Definitions are emitted inline, immediately before the
@@ -2427,6 +2448,24 @@ class GimpleGen:
         # a NULL set -- the SIGSEGV that ended every `mojoc --dump-full
         # fire.py` in `mojo_set_add_str`.
         self._bool_valued: set = set()
+        # Parameter names whose ANNOTATION says `bool`, for the struct method
+        # `_gmi_collect_self_assigns` is scanning RIGHT NOW (module_gen.py
+        # rebuilds it per method). That walk is the one place that knows both
+        # halves -- "this parameter is a bool" and "`self.<field> = <param>`
+        # makes it a field" -- and `struct_bool_fields` needs both, because a
+        # `bool`-annotated field's own ctype is a plain `int` (`_TYPE_MAP`
+        # maps `'bool'` to `'int'`) so nothing downstream can recover it from
+        # the type. Declared here for the same self-hosting reason as
+        # `_bool_valued` directly above: a field created lazily behind
+        # `hasattr` reads as existing-but-NULL self-hosted.
+        self._gmi_bool_params: set = set()
+        # Struct -> method names whose every `return` hands back a `bool`
+        # field of that struct (see module_gen.py's second method loop). The
+        # method's own C return type is `int` -- the field's ctype -- so this
+        # is what lets `print(b.get())` answer `True`; it is deliberately NOT
+        # a `_Bool` return type, which would make `b.get() + 1` a GIMPLE
+        # operand-type error.
+        self.struct_bool_methods: dict[str, set[str]] = {}
         # Pool of reusable scratch dicts for the hermetic type scans, handed out
         # in stack order: see resolve_shared._scan_scratch_dict.
         self._scan_scratch: list = []
@@ -4782,15 +4821,9 @@ class GimpleGen:
         return ginf._compr_set_loop(self, node, gen0, res, res_type, it_val)
     def _gen_print(self, args: list, kwargs: list=None):
         return ginf._gen_print(self, args, kwargs)
-    def _note_dict_callable_ret(self, dict_val: str, value_text: str) -> None:
-        return ginf.note_dict_callable_ret(self, dict_val, value_text)
-    def _emit_dict_int_value_store(self, dict_val: str, key_ctype: str,
-                                   key_val: str, val_ctype: str, val: str,
-                                   val_node) -> None:
-        return ginf.emit_dict_int_value_store(self, dict_val, key_ctype, key_val,
-                                              val_ctype, val, val_node)
-    def _note_global_callable_store(self, gname: str, value_text: str) -> None:
-        return ginf._note_global_callable_store(self, gname, value_text)
+    def _note_dict_callable_ret(self, dict_val: str, value_text: str,
+                                value_ctype: str = 'int64_t') -> None:
+        return ginf.note_dict_callable_ret(self, dict_val, value_text, value_ctype)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
     def _eval_const_bool(self, node) -> bool | None:

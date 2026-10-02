@@ -1586,8 +1586,41 @@ def _list_unpack_name(elem: str) -> str:
     return _gmi_glue._c_unpack_name(elem)
 
 
-def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
-               arg_nodes: list = None) -> None:
+def _guard_str_arg(gen, fname: str, argno: int, word: str) -> None:
+    """Emit the runtime check that `word` may be handed to a `char *`
+    parameter, before the cast that pretends it is one.
+
+    An annotation is a STATIC PROMISE with no runtime tag behind it, so
+    `def __init__(self, widgetName: str)` called as `Dialog(5)` used to
+    reach the callee as address 5 and `strlen` it — a SIGSEGV on a program
+    that builds, links and starts cleanly. This is the ONE place in
+    `_emit_call` that knows both halves of that fact (the argument's own
+    C type is an integer, the callee's declared parameter type is
+    `char *`), so the check belongs here and nowhere else.
+
+    `word` is the int64_t the cast is about to consume, so the check reads
+    the value the callee would have seen rather than a second lowering of
+    the argument expression.
+
+    The check is deliberately a RUNTIME call and not a compile-time
+    refusal: an unannotated parameter's slot is `int64_t` by design and
+    legitimately carries a string handle on some call sites and an integer
+    on others (see the sibling branch in `_emit_call`), so the compiler
+    cannot refuse, and a static refusal here is exactly the
+    type-resolution change CLAUDE.md warns can drop dozens of real stdlib
+    modules from compiling without any test noticing. `mojo_require_str_arg`
+    accepts every value `mojo_boxed_is_str` accepts — so every genuine
+    string, literal or heap, and NULL — and raises a catchable TypeError
+    for the rest.
+    """
+    detail = gen._intern_string(
+        gimple_ctypes._c_escape(
+            f"{fname}(): argument {argno}: expected str, got int"))
+    gen._emit_call('void', '', 'mojo_require_str_arg',
+                   [('int64_t', word), ('char *', detail)])
+
+
+def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
 
     arg_pairs: list of (ctype, varname) for each argument.
@@ -1772,116 +1805,32 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 cv = aval if atype == 'char' else gen._new_val('char', f'(char){aval}')
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                 coerced_args.append(sv)
-            elif actual_atype.endswith(' *'):
-                # A pointer the codegen POSITIVELY knows this value holds
-                # (`_actual_types` / `_global_var_types` recorded a pointer
-                # type), just spelled `int64_t` here. Round-trip the bits,
-                # exactly as before: the value really is a pointer, so the
-                # cast is the identity it has always been.
-                vp = gen._new_temp('void *')
-                cp = gen._new_temp('char *')
+            else:
+                # An INTEGER-typed word in a `char *` slot. This is where an
+                # annotated-`str` parameter given a non-string argument used
+                # to become a SIGSEGV: `Dialog(5)` emitted
+                # `(char *)(void *)(int64_t)5` and the callee strlen'd
+                # address 5 (bugs/CODEGEN_annotated_str_param_given_an_int_
+                # segfaults.md). Two situations reach here and neither is
+                # distinguishable statically — an unannotated/polymorphic
+                # int64_t slot legitimately holding a string HANDLE (the
+                # pass-through the sibling branch's own comment is written
+                # about, which is why the cast must stay) and a genuine
+                # integer. So the cast stays AND the word is checked: the
+                # runtime's own boxed-any discriminator decides, which is
+                # the one answer every other ambiguous-slot consumer in the
+                # runtime already uses (see mojo_require_str_arg).
                 if atype in ('int',):
                     ip = gen._new_val('int64_t', f'(int64_t){aval}')
-                    gen._emit(f'  {vp} = (void *){ip};')
                 else:
-                    gen._emit(f'  {vp} = (void *){aval};')
+                    ip = gen._ensure_local('int64_t', aval)
+                _guard_str_arg(gen, fname, i + 1, ip)
+                vp = gen._new_temp('void *')
+                cp = gen._new_temp('char *')
+                gen._emit(f'  {vp} = (void *){ip};')
                 gen._emit(f'  {cp} = (char *){vp};')
                 coerced_args.append(cp)
-            elif atype in ('int', 'int64_t'):
-                # An UNTRACKED int64_t going into a `char *` parameter.
-                #
-                # `char *` IS this dialect's string slot: `_TYPE_MAP` maps
-                # only `str`/`String` to it (`*UInt8` and friends resolve to
-                # `uint8_t *`, `None` to `void *`), so a parameter spelled
-                # `char *` is a STRING parameter and the callee will hand
-                # the word to strlen/strcmp. The annotation is a static
-                # PROMISE codegen used to take literally by bit-reinterpreting
-                # whatever integer arrived: `Dialog(5)` on
-                # `def __init__(self, widgetName: str)` emitted
-                # `(char *)(void *)(int64_t)5`, and `mojo_print` then
-                # `strlen`ed address 5 -- SIGSEGV, exit -11, no output at
-                # all (bugs/CODEGEN_annotated_str_param_given_an_int_
-                # segfaults.md). In Python a parameter annotation is
-                # documentation, not a cast: `Dialog(5)` is legal and prints
-                # `5`.
-                #
-                # So this is not a place the codegen may decide: in this
-                # compiler's scalar body model an int64_t and a `char *` are
-                # the same 64 bits, and an untracked word is genuinely
-                # ambiguous -- it is a real string handle far more often
-                # than not (a lambda parameter, an erased dict value, a
-                # getattr result all arrive here with their pointer bits and
-                # nothing recorded, and that by-value handle pass-through is
-                # load-bearing for the self-host's own compilation).
-                # `mojo_cstr_or_int_str` is the model's OWN answer to exactly
-                # this question -- it is what `_char_to_cstr` already routes
-                # every other int64_t-used-where-a-string-is-needed through --
-                # and it is safe in BOTH directions rather than right in
-                # only one: a real boxed `char *` comes back as the very same
-                # address (the cast's own result), and a genuine integer
-                # comes back as its decimal, which is what CPython prints.
-                #
-                # Deliberately NOT registered with `_cstr_key_src`, so the
-                # `mojo_cstr_or_int_release` protocol does not reclaim it:
-                # the callee may STORE the pointer (`self.widgetName =
-                # widgetName`), and releasing a string the value kept is a
-                # use-after-free. The int case therefore keeps its one
-                # block, which is this runtime's documented no-free model for
-                # a kept string (`mojo_str_from_int`'s own comment) and only
-                # happens on the path that used to be a SIGSEGV.
-                iv = (aval if atype == 'int64_t'
-                      else gen._new_val('int64_t', f'(int64_t){aval}'))
-                if aval in getattr(gen, '_int_word_vals', ()):
-                    # ...unless the codegen PROVABLY knows this word is an
-                    # integer, in which case there is no question to ask and
-                    # `mojo_cstr_or_int_str`'s own range test must not be
-                    # consulted at all: `mojo_boxed_is_str` calls every
-                    # positive int64 in [2^31, 2^47) a pointer, so
-                    # `Dialog(3000000000)` would still `strlen` address
-                    # 3000000000. `mojo_str_from_int` is that function's own
-                    # unconditional integer half, and the KEPT variant rather
-                    # than the transient one because the callee owns this
-                    # string (see the release note above).
-                    sv = gen._call_expr('char *', 'mojo_str_from_int',
-                                        [('int64_t', iv)])
-                else:
-                    sv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
-                                        [('int64_t', iv)])
-                coerced_args.append(sv)
-            else:
-                # The remaining `char *`-parameter shapes are REAL scalars of
-                # another kind — a `double`, a `_Bool` — and a struct pointer
-                # that `actual_atype` has not resolved. Python's answer is
-                # `str(value)`, and for a double that is also the only answer
-                # that is not a wild pointer: this branch used to reinterpret
-                # the value's BITS as an address, so
-                # `class D: __init__(self, w: str)` called as `D(2.5)` did not
-                # even compile ("cannot convert to a pointer type") and
-                # `D(5)` stored address 5 in a `char *` field and the first
-                # `mojo_print` of it walked to it and SIGSEGV'd. The arm
-                # above already made exactly this argument for an `int`; a
-                # `double` is the same case with a wider value.
-                #
-                # `_stringify_value` is the chokepoint for "stringify this
-                # typed value" and is what `str()`, f-strings and `%s` all go
-                # through, so this reuses it rather than adding a fourth
-                # spelling of the same answer. It is also what makes the
-                # untracked-int64 case safe on this path: an `int64_t` that
-                # really holds a `char *` is answered from its `_actual_types`
-                # entry as a cast, not as a decimal.
-                #
-                # The int/int64_t arm ABOVE is kept rather than folded in
-                # because it is the one that has to ask the runtime:
-                # `_stringify_value`'s int arm calls `mojo_str_from_int`
-                # unconditionally, which is right for a value the codegen
-                # knows is an integer and wrong for one that is an UNTRACKED
-                # word, and `_int_word_vals` is the evidence that separates
-                # them.
-                _anode = None
-                if arg_nodes is not None and i < len(arg_nodes):
-                    _anode = arg_nodes[i]
-                coerced_args.append(
-                    gen._stringify_value(actual_atype, aval, _anode))
+
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain
             # scalar-typed value. TWO unrelated situations reach this one
@@ -4482,13 +4431,51 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
 
 
-def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
+def note_dict_callable_ret(gen, dict_val: str, value_text: str,
+                           value_ctype: str = 'int64_t') -> None:
     """A callable stored into a dict keeps its return type for a later
     `d[k](...)` call, which is the one place a dict subscript can be a
     CALLEE. Called from every dict store of an int64 slot; a non-callable
-    value has no entry in `_callable_ret_types` and is a no-op, which is
-    what keeps this off the hot path."""
-    _rt = gen._callable_ret_types.get(value_text)
+    value matches none of the three sources below and is a no-op, which is
+    what keeps this off the hot path.
+
+    THREE sources, because a first-class callable has more than one
+    representation here and every one of them has to reach the same
+    consumer:
+
+      - `_callable_ret_types` — a non-capturing closure or a lifted free
+        function, i.e. a bare `void *` function pointer.
+      - `_bound_method_ret_types` — anything that needs a receiver
+        alongside the pointer: a struct method bound as a value (`C().m`)
+        and a CAPTURING closure (`lambda x: x + n`, whose env is the
+        receiver). Both are a `MojoBoundMethod *`.
+      - `value_ctype` itself, for a `MojoBoundMethod *` whose construction
+        temp is not in either table because the value is a call RESULT
+        (`e['c'] = mk(100)`): `_call_expr` materializes it into a fresh
+        temp and nothing records its return type, because `mk`'s caller is
+        not a static callable-materialization site. A `MojoBoundMethod *`
+        is a callable BY CONSTRUCTION — the only producer in the tree is
+        `mojo_bound_method_new` — so this is a positive test, not a guess,
+        and 'int64_t' is the honest return type: that is what
+        `mojo_fnptr_call_N` hands back, and the consumer uses the answer
+        only to choose the helper.
+
+    The first two alone left two silent-wrong-answer shapes, both exit 0
+    with a printed `0` while `f = d[k]; f(...)` printed CPython's answer:
+    `dd = {}; dd['m'] = C().m; print(dd['m'](4))` (the bound method is the
+    dict's FIRST callable store, so nothing had put the container in the
+    table — one lambda stored first and the bound method rides in on that
+    entry, which is how the original bug report's `d['k'] = lambda a, b:
+    a + b` repro looked already-fixed) and `e['c'] = mk(100)` (a call
+    result, which neither table can have). The value in the dict was a
+    perfectly good bound method in both cases — `mojo_fnptr_call_1`
+    dispatches it, which is exactly what the working named-local spelling
+    emits — so what was missing was an ENTRY, not a mechanism.
+    """
+    _rt = (gen._callable_ret_types.get(value_text)
+           or gen._bound_method_ret_types.get(value_text))
+    if not _rt and value_ctype == 'MojoBoundMethod *':
+        _rt = 'int64_t'
     if not _rt:
         return
     _cur = gen._dict_callable_ret.get(dict_val)

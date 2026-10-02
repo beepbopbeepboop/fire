@@ -4968,6 +4968,26 @@ def _lower_mlir_struct(gen, kind: str, index, arg_pairs: list):
 
 def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     elem = gen._infer_list_elem_type(node.elements)
+    # A literal whose every element is a Python bool VALUE is a list of
+    # bools, and the two answers differ in more than the digits: the generic
+    # path both formats a slot as "1"/"0" (mojo_repr_int, not mojo_repr_bool)
+    # AND treats a False (0) slot as the None sentinel, so `[b.flag, c.flag]`
+    # printed `[1, None]`. `[True, False]` was already right because
+    # `_infer_list_elem_type`'s `_quick_type` says `_Bool` for a BoolLiteral;
+    # a bool-annotated struct FIELD has no such type (see
+    # `is_python_bool_expr`), which is why this asks the shared PREDICATE
+    # rather than looking at the joined ctype.
+    #
+    # Only the repr route changes: `list_suffix('_Bool')` is 'int', so the
+    # append suffix, the slot layout and every per-slot reader are exactly
+    # what the integer answer gave. This is the list-side twin of
+    # `mojo_mark_dict_bool_values`, and it is deliberately NOT a change to
+    # `_quick_type`, which is shared with arithmetic: a `_Bool`-typed
+    # `self.count += self.flag` is a GIMPLE operand-type error.
+    if (elem in ('int', 'int64_t') and node.elements
+            and all(gimple_exprtypes.is_python_bool_expr(gen, _el)
+                    for _el in node.elements)):
+        elem = '_Bool'
     suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
     t    = gen._new_temp('MojoList *')
     # See _literal_elements_include_none's docstring: don't tag an
@@ -5197,13 +5217,21 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
             vv = vv_tmp
         gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
     else:
-        # `gen._emit_dict_int_value_store` picks `mojo_dict_set_bool` over
-        # `mojo_dict_set_int` for a Python bool VALUE: the two are the same
-        # int64_t slot, so the store's type cannot tell them apart and the
-        # expression can — one shared decision for the dict literal, the dict
-        # comprehension and every `d[k] = v` spelling, which are five copies
-        # of it. See that function's docstring.
-        gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
+        # A bool stored as a dict value is indistinguishable from a genuine
+        # 0/1 int once it is a slot (vt is a plain `int` for a bool in this
+        # backend — `_lower_BoolLiteral` returns `int`, and any/all/isinstance
+        # return a C int on purpose), so the dict is MARKED and
+        # mojo_is_bool_dict picks the bool formatter for its whole repr. That
+        # mark used to require a literal RHS, which missed every other bool
+        # expression: `b = True; d = {'k': b}` and `d = {'k': 1 == 1}` both
+        # printed `{'k': 1}` while `print(b)` and `print(repr(b))` were
+        # already right. `is_python_bool_expr` is the one predicate, shared
+        # with the print dispatch.
+        if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
+            gen._emit(f"  mojo_mark_dict_bool_values ({t});")
+        gen._note_dict_callable_ret(t, vv, vt)
+        vv64 = gen._to_int64(vt, vv)
+        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}int ({t}, {kv}, {vv64});")
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:

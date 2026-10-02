@@ -4453,32 +4453,36 @@ def _ast_walk(body):
     rather than the middle-tier walkers (whose results are self-hosted-boxed
     and would cost more than they explain here).
 
-    `_AST_CHILD_FIELDS` must name EVERY field that can hold a child node, and
-    it did not: 17 of the 53 AST dataclasses had a child-bearing field missing
-    from it, including `TernaryExpr.condition`, `IfStmt.condition`,
-    `WhileStmt.condition`, `SubscriptExpr.index`, `ForStmt.iterable`,
-    `CallExpr.kwargs`, `CompareChain.operands`, `Comprehension.element`,
-    `DictExpr.pairs`, `MultiAssignStmt.targets`, `SliceExpr.start/stop/step`,
-    `MatchStmt.subject/cases` and `TryStmt.handlers`. A name that appears ONLY
-    in one of those is invisible here, and this walk feeds the LAMBDA'S
-    CAPTURE LIST (`_lower_LambdaExpr`, below): the name is not put in the env,
-    the body reads it as the hard 0 the `ct param or undeclared` fallback
-    emits, and the program answers with a plausible wrong value and exit 0.
-    Real, measured (`sorted(d, key=lambda k: d[k] if p else 0)` came out
-    unsorted), and the whole class is one edit.
+    The attribute list below is the WHOLE set of child-node fields on the
+    parser's AST dataclasses, not the subset that happened to be needed
+    first. It has to be: an unlisted field is an UNDER-approximation of what
+    the lambda body reads, and this walk feeds the capture list directly, so
+    a name the body needs is a name the closure does not get — the env struct
+    comes out without it and the body reads a hard
+    `(int64_t)0; /* ct param or undeclared: p */` instead, which is a silent
+    wrong answer at exit 0. Measured, one omission at a time, every one of
+    these a name the body really does read:
 
-    The invariant is pinned by `test_gimple.py`'s
-    `ast_walk_reaches_every_name_in_a_lambda_body`, which asserts the walk sees
-    everything `_used_idents_node` — this codebase's other name-collecting
-    walk, generic over dataclass fields by construction — sees. Put THAT there
-    rather than a list of field names, so a field added or renamed later fails
-    there instead of as a silent wrong answer somewhere.
+      - `condition` (a TernaryExpr's test) — `lambda k: d[k] if p else 0`,
+        the shape bugs/CODEGEN_captured_string_local_reads_falsey.md reports
+        as "a captured string reads falsey". It read as 0 because it was
+        never captured at all; the truthiness coercion was never involved.
+      - `index` — `lambda k: d[p]`, a captured name used as a subscript key.
+      - `pairs` — `lambda: {'k': s}`. The list said `key`/`val`, which no
+        AST node has had for a while, so a dict literal's value half was
+        invisible; a lambda whose only capture was inside a dict literal got
+        NO env struct at all.
+      - `operands`, `start`, `stop`, `step`, `kwargs`, `generators`,
+        `iterable`, and the statement-shaped `handlers`/`finally_body`
+        (the list said `handler`/`finalbody`, singular).
 
-    Scalar fields (`line`, `col`, `name`, `op`, `raw`, ...) are deliberately
-    NOT listed: they are str/int and `_ast_child_nodes` drops them anyway, so
-    naming them would only make the list harder to check.
-    `fire_compiler.py`'s AST node definitions are the authority for which
-    fields exist."""
+    `mojo/middle/types.py`'s `_used_idents_node` is the same question with
+    the same answer for a nested `def` — it is complete, which is why
+    `discover_closures` never saw any of this — and it is NOT used here
+    because it cannot also report which names the body BINDS, which is the
+    other half of this walk. `str`/`bytes`/`int`/`float` leaves are skipped
+    by the isinstance tests below, so a name that is also a scalar is free.
+    """
     # A lambda's `body` is a single EXPRESSION, not a statement list, so
     # normalize before walking.
     if body is None:
@@ -4486,33 +4490,44 @@ def _ast_walk(body):
     stack = list(body) if isinstance(body, list) else [body]
     while stack:
         n = stack.pop()
+        if isinstance(n, (list, tuple)):
+            # Normalise on POP, not on extend. `DictExpr.pairs` is a list of
+            # (key, value) 2-tuples, so extending pushes the tuple itself and
+            # both halves are then invisible: a captured name used as a dict
+            # VALUE (`lambda: {'k': s}`) stayed uncaptured even with `pairs`
+            # on the field list. Flattening where the item is popped is also
+            # what `_used_idents_node` does with a list-or-tuple node, and it
+            # nests for free.
+            stack.extend(x for x in n
+                         if hasattr(x, '__class__')
+                         and not isinstance(x, (str, bytes, int, float)))
+            continue
         yield n
         for _attr in _AST_CHILD_FIELDS:
-            _kids = []
-            _ast_child_nodes(getattr(n, _attr, None), _kids)
-            stack.extend(_kids)
+            _v = getattr(n, _attr, None)
+            if _v is None:
+                continue
+            if isinstance(_v, (list, tuple)):
+                stack.extend(x for x in _v if hasattr(x, '__class__') and not isinstance(x, (str, bytes, int, float)))
+            elif hasattr(_v, '__class__') and not isinstance(_v, (str, bytes, int, float)):
+                stack.append(_v)
 
-
-
-# Every field of every AST dataclass in fire_compiler.py that can hold a child
-# NODE (a dataclass instance, or a list/tuple/dict of them). `test_gimple.py`'s
-# ast_walk_covers_every_child_field recomputes this from the dataclass
-# definitions and fails if a field is added, renamed or missed here — the list
-# is derived, not remembered.
+# Every child-node field on the parser's AST dataclasses (`fire_compiler.py`),
+# as one table. `_ast_walk`'s attribute list was hand-grown and had drifted
+# from this: `key`/`val` are not fields any more (DictExpr carries `pairs`),
+# `handler`/`finalbody` are `handlers`/`finally_body`, and six fields that DO
+# exist were never in it. One named table, checked against the dataclasses,
+# is what keeps the next new node field from having to be remembered here.
 _AST_CHILD_FIELDS = (
-    # expressions
-    'value', 'left', 'right', 'operand', 'func', 'args', 'kwargs', 'obj',
-    'index', 'attrs', 'start', 'stop', 'step', 'condition', 'then_val',
-    'else_val', 'operands', 'elements', 'key', 'val', 'pairs', 'captures',
-    'param_convs',
-    # statements
-    'body', 'target', 'targets', 'name', 'then_body', 'else_body', 'elifs',
-    'iterable', 'handlers', 'handler', 'finalbody', 'finally_body', 'items',
-    'cases', 'subject', 'msg', 'generators', 'element', 'names',
-    'name_alias_strs', 'module', 'alias', 'extra', 'decorators', 'params',
-    'methods', 'fields', 'bases', 'comptime_aliases', 'comptime_params',
-    'param_defaults', 'expr', 'clauses', 'exc_type', 'conditions',
-    'patterns', 'guard',
+    'args', 'body', 'cases', 'captures', 'clauses', 'comptime_params',
+    'condition', 'conditions', 'decorators', 'element', 'elements', 'elifs',
+    'else_body', 'else_val', 'exc_type', 'expr', 'extra', 'fields', 'finally_body',
+    'func', 'generators', 'guard', 'handlers', 'index', 'items', 'iterable',
+    'key', 'kwargs', 'kwonly', 'left', 'methods', 'names', 'obj', 'operand',
+    'operands', 'pairs', 'params', 'param_convs', 'param_defaults',
+    'param_types', 'patterns', 'return_type', 'right', 'start', 'step', 'stop',
+    'subject', 'target', 'targets', 'then_body', 'then_val', 'types',
+    'value',
 )
 
 

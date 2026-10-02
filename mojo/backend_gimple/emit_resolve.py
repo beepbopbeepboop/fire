@@ -581,6 +581,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._c_kw_struct_renames = gen._c_kw_struct_renames  # share: C-keyword struct-name renames (auto/enum.auto) must agree across modules
                 temp_gen.struct_boxed_fields = gen.struct_boxed_fields
                 temp_gen.struct_bool_fields = gen.struct_bool_fields
+                temp_gen.struct_bool_methods = gen.struct_bool_methods
                 temp_gen._struct_name_owner = gen._struct_name_owner  # share: cross-module same-name collision guard
                 # The module-qualified struct IDENTITY that guard feeds: which
                 # C name each colliding StructDef is emitted under, and which
@@ -630,6 +631,17 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._global_inline_defs = gen._global_inline_defs
                 temp_gen._emitted_allocs = gen._emitted_allocs
                 temp_gen._emitted_singletons = gen._emitted_singletons
+                # share by reference: a `sizeof`/`fnaddr` accessor is a
+                # file-scope `static` and every module's parts land in ONE
+                # translation unit, so a second module needing the same one is
+                # a gcc "redefinition of". Without this each temp_gen started
+                # with an empty dict AND an empty set, so `_c_helper_def`
+                # returned a second definition of a helper the root gen had
+                # already emitted. `_c_helpers_needed`'s own docstring says
+                # why handing back `''` still leaves the definition ahead of
+                # the caller.
+                temp_gen._c_helpers_needed = gen._c_helpers_needed
+                temp_gen._emitted_c_helpers = gen._emitted_c_helpers
                 temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
                 # share: incrementally-maintained flat mirror of
                 # _module_stmts' union (see PERF_nested_module_compile_
@@ -3153,10 +3165,13 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
                 vv = vv_tmp
             gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
         else:
-            # See the dict-literal case's identical comment: vt alone can't
-            # distinguish a real bool literal from a genuine int, so the
-            # shared store helper asks `is_python_bool_expr` instead.
-            gen._emit_dict_int_value_store(res, kt, kv, vt, vv, node.key)
+            # See the dict-literal case's identical comment: vt alone
+            # can't distinguish a real bool literal from a genuine int.
+            if gimple_exprtypes.is_python_bool_expr(gen, node.key):
+                gen._emit(f"  mojo_mark_dict_bool_values ({res});")
+            gen._note_dict_callable_ret(res, vv, vt)
+            vv64 = gen._to_int64(vt, vv)
+            gen._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
 
 
 
