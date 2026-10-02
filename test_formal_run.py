@@ -6300,18 +6300,106 @@ CONSTRUCTION_REFUSALS = [
      "    r = Resolver2(n, n, n)\n"
      "    return r.resolve(\"a\")\n",
      "refuse:does not match its fields (no fields at all)", None),
-    # ── A KEYWORD construction, which the language does not have ──
-    # `P3(x=1, y=2)` is not a shape a struct construction has. The tempting
-    # wrong answer is to read the keywords as positionals in dict order, which
-    # makes a program's meaning depend on an iteration order nobody wrote.
-    ("constr_refuse_keyword_arguments",
+    # ── A KEYWORD construction ──
+    # This used to be a REFUSAL, with the case named
+    # `constr_refuse_keyword_arguments` and the comment "which the language does
+    # not have" — which was never true.  It IS a shape, it is the idiomatic
+    # spelling for a struct with many fields, and the stdlib's own
+    # `StringSlice(unsafe_from_ptr=p)` is one.  What the old refusal gave as
+    # its reason was right about the wrong reading: reading the keywords as
+    # POSITIONALS in dict order would make a program's meaning depend on an
+    # iteration order nobody wrote.  Matching each keyword against the FIELD
+    # LIST by name is the reading that cannot depend on any order, so that is
+    # what `model.keyword_construction_stores` does.
+    #
+    # Four cases and a refusal, because the construct has five answers and a
+    # rule that got four of them right would be the same defect again: every
+    # field named; a field left at its default; positionals filling the fields a
+    # keyword does not name; a keyword naming no field; a field named twice.
+    ("constr_keyword_construction",
      "struct P3:\n"
      "    var x: Int\n"
      "    var y: Int\n\n"
      "def main(n: Int) -> Int:\n"
      "    var p = P3(x=1, y=2)\n"
-     "    return p.x\n",
-     "refuse:keyword argument(s) 'x', 'y' is not a shape this path lowers",
+     "    printf(\"x=%d y=%d\", p.x, p.y)\n"
+     "    return p.x + p.y\n", 3, "x=1 y=2"),
+    # A FIELD NO KEYWORD NAMES keeps its class-level default, which is the
+    # language's rule (the object is default-initialized before anything is
+    # assigned to it).  This is the row that separates the keyword shape from
+    # the positional one: `S(a, b)` covers every field, so it has no defaults
+    # left to keep, and a rule that read a keyword construction as a permuted
+    # positional list would have had to invent a value for `x`.
+    ("constr_keyword_leaves_unnamed_fields_at_their_default",
+     "struct P3:\n"
+     "    var x: Int = 4\n"
+     "    var y: Int = 5\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P3(y=9)\n"
+     "    printf(\"x=%d y=%d\", p.x, p.y)\n"
+     "    return p.x + p.y\n", 13, "x=4 y=9"),
+    # THE MIXED FORM: the positionals take the fields in declaration order and
+    # the keyword names its own.  This row is here because a rule that filled
+    # the fields from the keywords alone would answer 0 for `x` and be right
+    # about everything else in this comment.
+    ("constr_keyword_mixed_with_positional",
+     "struct P3:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P3(1, y=2)\n"
+     "    printf(\"x=%d y=%d\", p.x, p.y)\n"
+     "    return p.x + p.y\n", 3, "x=1 y=2"),
+    # A ONE-FIELD struct, where the receiver IS the field: the keyword names
+    # it, the value is the result, and there is nothing to store.  This branch
+    # used to refuse every keyword before the plan was consulted, which is how
+    # the shape stayed a refusal here while the framed case was being fixed.
+    ("constr_keyword_on_a_one_field_struct",
+     "struct W3:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var w = W3(v=42)\n"
+     "    printf(\"v=%d\", w.v)\n"
+     "    return w.v\n", 42, "v=42"),
+    # A keyword naming no field.  The FIELD LIST is in the message, because
+    # "unknown keyword argument" without the names sends the reader to grep a
+    # declaration that is right there.
+    ("constr_refuse_keyword_naming_no_field",
+     "struct P3:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P3(b=3)\n"
+     "    return 0\n",
+     "refuse:is not a field of P3 (x, y)", None),
+    # A field given twice — `S(1, x=2)`, which is CPython's `got multiple
+    # values for argument x`.  The naive reading (append the keywords to the
+    # positionals and let the arity rule notice) would have STORED both, and the
+    # second store would be the program's answer with nothing to say so.
+    ("constr_refuse_a_field_given_twice",
+     "struct P3:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P3(1, x=2)\n"
+     "    return 0\n",
+     "refuse:gives field 'x' more than one value", None),
+    # A keyword against a struct that DECLARES an `__init__`, and this is the
+    # one the resolution cannot fix rather than a rule it is leaving out:
+    # `CONSTRUCTION_INIT` selects the overload by ARGUMENT COUNT, so a keyword
+    # call has nothing to select on.  Picking the widest, or the first, would
+    # be running a constructor the program did not choose.
+    ("constr_refuse_keyword_against_a_declared_init",
+     "struct S3:\n"
+     "    var start: Int\n"
+     "    var end: Int\n"
+     "    def __init__(out self, start: Int, end: Int):\n"
+     "        self.start = start\n"
+     "        self.end = end\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S3(end=7)\n"
+     "    return 0\n",
+     "refuse:is a call to a user-defined `__init__` (S3 declares 1 of them)",
      None),
     # ── a COPY of the wrong thing ──
     # A copy of a DIFFERENT struct. A copy here is a slot-for-slot copy, so it

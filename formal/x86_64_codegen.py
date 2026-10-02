@@ -6315,10 +6315,14 @@ class X86_64Codegen:
                 f"image built and then failed to load). The by-reference "
                 f"receiver that gives one is switched off "
                 f"({M.WIDE_RECEIVER_ENV}=0)")
-        if e.kwargs:
-            raise CodegenError(M.construction_keyword_refusal(
-                name, [k for k, _v in e.kwargs]))
-        if e.args:
+        # A KEYWORD construction is decided by the SAME plan as the
+        # positional one — `model.struct_construction_plan` reads each keyword
+        # against the field list and refuses the three ways that can fail — so
+        # there is no guard here of its own.  This branch used to refuse every
+        # keyword before the plan was consulted, which is how `S(a=1)` on a
+        # ONE-field struct stayed a refusal when the receiver IS the field and
+        # the value was the argument all along.
+        if e.args or e.kwargs:
             # A ONE-FIELD struct with an argument: the receiver IS the field, so
             # the argument is not stored, it is the result.  What is refused is
             # what the shared DECISION refuses, by name — see
@@ -6337,7 +6341,9 @@ class X86_64Codegen:
                 self._return_types)
             if refusal is not None:
                 raise CodegenError(refusal)
-            if plan[0] == M.CONSTRUCTION_INIT:
+            if plan[0] in (M.CONSTRUCTION_INIT, M.CONSTRUCTION_KEYWORD):
+                # One word, so nothing is stored anywhere: the receiver IS the
+                # field and the LAST value is the whole result.
                 if plan[1]:
                     self._emit_expr(plan[1][-1][2])
                     return
@@ -6435,8 +6441,9 @@ class X86_64Codegen:
         # …and then the constructor's own stores, for the one shape that has
         # them.  Empty for `S()`, which is why this is the same code as the
         # default constructor's rather than a fourth copy of it.
-        for _field, slot, value in (plan[1] if shape == M.CONSTRUCTION_INIT
-                                    else ()):
+        for _field, slot, value in (plan[1] if shape in
+                                    (M.CONSTRUCTION_INIT,
+                                     M.CONSTRUCTION_KEYWORD) else ()):
             self._emit_block_store(base, slot, value)
         # Each nested field's slot then gets the ADDRESS of the frame just
         # brought up.  Same order as the loop above, so the address stored and

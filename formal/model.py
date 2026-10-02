@@ -13351,6 +13351,19 @@ CONSTRUCTION_COPY = "copy"
 # CALLED to be RUN: a body this path can express becomes the same stores, at the
 # same construction site, in the same block.  See `init_body_stores`.
 CONSTRUCTION_INIT = "init"
+# `S(a=1, b=2)` — the KEYWORD form, and it is a shape of its own rather than
+# the positional one with the arguments permuted, because a keyword need not
+# cover every field: `StringSlice(unsafe_from_ptr=p)` (the corpus's own
+# spelling, `std/collections/string/string_slice.mojo`) names one field and
+# leaves the rest at their class-level defaults.  So its payload is the same
+# `(field, slot, value)` list `CONSTRUCTION_INIT` carries and its lowering is
+# the DEFAULT construction followed by those stores — which is why the two
+# emitters handle the two kinds with one branch each rather than two emitters.
+#
+# It was a blanket refusal until `keyword_construction_stores` resolved each
+# keyword against the field list; `construction_keyword_refusal` is now only
+# the three ways that resolution can fail, each with its own sentence.
+CONSTRUCTION_KEYWORD = "keyword"
 
 
 def _construction_arg_spelling(arg) -> str:
@@ -13935,36 +13948,132 @@ def construction_arity_refusal(name: str, got: int, summary: str) -> str:
             f"representation")
 
 
-def construction_keyword_refusal(name: str, keys) -> str:
-    """`S(a=1)` — a keyword form of a construction, refused rather than
-    misread.
+def construction_keyword_refusal(name: str, keys, why: str,
+                                 fields=(), field: str = None,
+                                 overloads: int = 0) -> str:
+    """`S(a=1)` — a keyword construction that `keyword_construction_stores`
+    could not resolve. One message per `why`, because the three failures are
+    three different facts about the program.
 
-    Refused rather than read as positional, because reading it as positional
-    would depend on the order the keywords happen to appear in a dict, and a
-    program's meaning must not depend on that.
+    `why` is one of:
 
-    It is a REAL limit and not an oversight, and it has a shape worth stating
-    because the stdlib leans on it — `StringSlice(unsafe_from_ptr=p)` is the
-    idiomatic spelling and 1 stdlib file reaches it as its first thing wrong.
-    What would close it is decidable and is named here so the next reader does
-    not have to work it out: match each keyword against
-    `struct_frame_slots`, let the positionals take the remaining slots in
-    declaration order, and require the two together to cover every field
-    EXACTLY once — a keyword naming no field, a field named twice, and a field
-    left uncovered are each a refusal with its own reason.  That is a small
-    extension of what is here and it was left out of a change whose subject is
-    the three positional shapes, not because it is hard.
+    * `"unknown"` — a keyword names no field of `name`. `fields` is the field
+      list and it is printed, because "unknown keyword argument" without the
+      names is the shape of message that sends the reader to grep the source
+      for a field that is right there in the declaration.
+    * `"twice"` — a field is given a value twice: named by a keyword AND
+      covered by a positional (`S(1, a=2)` for fields `a, b`), or named by two
+      keywords if the parser ever lets that through. CPython calls this
+      `got multiple values for argument`; `field` names it.
+    * `"init"` — `name` declares a user-defined `__init__`, and
+      `CONSTRUCTION_INIT` selects the overload by ARGUMENT COUNT alone, so a
+      keyword call cannot say which overload it means. This is the one case the
+      resolution itself cannot fix, and it stays a refusal rather than becoming
+      "pick the overload with the most parameters", which would be running a
+      constructor the program did not choose.
+
+    It used to be ONE blanket refusal for every keyword construction, and the
+    reason it gave — "reading a keyword as positional would make the program's
+    meaning depend on the order the keywords appear in" — was true of the
+    naive reading and irrelevant to the real one: `keyword_construction_stores`
+    matches each keyword against `struct_frame_slots` by NAME, which is the one
+    reading that cannot depend on any order. `StringSlice(unsafe_from_ptr=p)`
+    is the corpus's own spelling of the shape.
     """
-    return (f"constructing {name} with keyword argument(s) "
-            f"{', '.join(repr(k) for k in keys)} is not a shape this path "
-            f"lowers: {name}'s fields are filled in DECLARATION ORDER from "
-            f"positional arguments, and reading a keyword as positional would "
-            f"make the program's meaning depend on the order the keywords "
-            f"appear in. Match the keyword against the field list instead — "
-            f"each keyword naming a field, the positionals taking the rest in "
-            f"declaration order, and the two together covering every field "
-            f"exactly once — or pass the values positionally, or use `{name}()` "
-            f"and assign the fields")
+    keys = ", ".join(repr(k) for k in keys)
+    fields = ", ".join(fields) if fields else "none"
+    if why == "unknown":
+        return (f"constructing {name} with {keys} — {keys.split(',')[0]} is "
+                f"not a field of {name} ({fields}), and a keyword "
+                f"construction matches each keyword against the FIELD LIST by "
+                f"name, so a keyword that names no field has nowhere to put its "
+                f"value")
+    if why == "twice":
+        return (f"constructing {name} with {keys} gives field {field!r} more "
+                f"than one value: a keyword names its field, the positionals "
+                f"take the remaining fields in DECLARATION ORDER, and the two "
+                f"together must cover each field exactly once. This is the same "
+                f"`TypeError` CPython raises — got multiple values for argument "
+                f"{field}")
+    return (f"constructing {name} with {keys} is a call to a user-defined "
+            f"`__init__` ({name} declares {overloads} of them), and this path "
+            f"selects the overload by ARGUMENT COUNT — nothing here resolves "
+            f"by type or by parameter name, so a keyword call cannot say which "
+            f"one it means. Passing the values positionally selects the "
+            f"overload the same way every other call on this path does, or use "
+            f"`{name}()` and assign the fields")
+
+
+def keyword_construction_stores(struct_def, call, decls: dict, rets=None):
+    """`(stores, refusal)` — `S(a=1, b=2)` resolved against the field list.
+
+    The rule, and it is the language's: the POSITIONAL arguments take the
+    first fields in declaration order, each KEYWORD names its own field, and
+    the two together must not name a field twice. A field neither reaches keeps
+    its class-level default, which is why this is not the positional shape — the
+    positional shape covers every field, and a keyword construction need not, so
+    `S(y=3)` on a two-field struct leaves `x` at its own default and
+    `S(1, y=3)` fills `x` from the positional and `y` from the keyword. Both
+    are the same program as `S()` followed by the assignments, which is exactly
+    the pair of operations the emitters perform.
+
+    `stores` is `[(field, slot, value)]` in DECLARATION ORDER, the same payload
+    `CONSTRUCTION_INIT` carries and for the same reason: the emitter brings
+    every field up at its default first and then applies these, and there is no
+    slot left whose value this does not decide.
+
+    Three refusals, all in `construction_keyword_refusal` and all decidable
+    here: a keyword naming no field, a field named twice, and a struct with a
+    declared `__init__` — where `CONSTRUCTION_INIT`'s arity-based overload
+    selection has nothing to work with and picking one would run a constructor
+    the program did not choose.
+
+    The two per-argument checks the positional path applies — an argument onto
+    a slot a nested frame was PLACED in, and a container returned by a CALLEE —
+    are applied here too, by the same predicates, because a keyword names a
+    field exactly where a positional does and the hazards are the field's, not
+    the syntax's.
+    """
+    name = struct_def.name
+    slots = struct_frame_slots(struct_def)
+    kwargs = list(getattr(call, "kwargs", None) or [])
+    args = list(getattr(call, "args", None) or [])
+    keys = [k for k, _v in kwargs]
+    if not kwargs:
+        return ([], construction_keyword_refusal(
+            name, keys or ["<none>"], "unknown", struct_field_names(struct_def)))
+    by_field = {field: i for i, field in enumerate(slots)}
+    named = {}
+    for key, value in kwargs:
+        if key not in by_field:
+            return (None, construction_keyword_refusal(
+                name, keys, "unknown", struct_field_names(struct_def)))
+        named[by_field[key]] = value
+    # Positionals fill the first fields in declaration order, so a keyword on
+    # one of those is the same collision CPython calls `got multiple values`.
+    values = {}
+    for i in range(min(len(args), len(slots))):
+        if i in named:
+            return (None, construction_keyword_refusal(
+                name, keys, "twice", struct_field_names(struct_def),
+                field=slots[i][0]))
+        values[i] = args[i]
+    values.update(named)
+    placed = {field: child.name
+              for field, _slot, child in struct_nested_frame_fields(
+                  struct_def, decls or {})}
+    stores = []
+    for i, field in enumerate(slots):
+        value = values.get(i)
+        if value is None:
+            continue
+        if field in placed:
+            return (None, construction_nested_slot_refusal(
+                name, field, value, placed[field]))
+        if _construction_arg_is_dead_blob(value, rets):
+            return (None, construction_dead_blob_refusal(name, field, value))
+        stores.append((field, struct_frame_slot(struct_def, field), value))
+    return (stores, None)
 
 
 def construction_nested_slot_refusal(name: str, field: str, arg,
@@ -14088,9 +14197,34 @@ def struct_construction_plan(struct_def, call, decls: dict,
     args = list(getattr(call, "args", None) or [])
     kwargs = list(getattr(call, "kwargs", None) or [])
     slots = struct_frame_slots(struct_def)
+    shapes = struct_init_shapes(struct_def)
     if kwargs:
-        return (None, construction_keyword_refusal(
-            name, [k for k, _v in kwargs]))
+        # A KEYWORD construction, decided before anything else because a
+        # keyword names its field, so the shape of the call is not the count of
+        # its arguments.  Two orderings matter and both are stated where the
+        # decision is made.
+        #
+        # The `__init__` case is refused HERE rather than resolved, and it is
+        # the one the resolution cannot fix: `CONSTRUCTION_INIT` selects the
+        # overload by argument COUNT, so `S(a=1)` against two overloads has
+        # nothing to select on.  Picking the widest, or the first, would be
+        # running a constructor the program did not choose.
+        if shapes:
+            return (None, construction_keyword_refusal(
+                name, [k for k, _v in kwargs], "init",
+                overloads=len(struct_init_overloads(struct_def))))
+        stores, refusal = keyword_construction_stores(
+            struct_def, call, decls, rets)
+        if refusal is not None:
+            return (None, refusal)
+        # A field no keyword names keeps its class-level default, which is the
+        # language's rule (the object is default-initialized before anything is
+        # assigned to it) and is what the emitters do: `CONSTRUCTION_INIT`'s
+        # path brings every slot up first and then applies these stores.  That
+        # is why this is its own kind rather than `CONSTRUCTION_POSITIONAL` —
+        # the positional shape covers every field, so it has no defaults left
+        # to keep.
+        return ((CONSTRUCTION_KEYWORD, stores), None)
     # A DECLARED `__init__` outranks everything below, and it has to: with one,
     # `S(a, b)` is a call to it, so every message underneath — the arity one
     # included — is describing a construct the source does not contain.
@@ -14124,7 +14258,6 @@ def struct_construction_plan(struct_def, call, decls: dict,
     # REQUIRES a parameter is the other half and is now what the language
     # says: `Bag4()` against `def __init__(out self, n, m)` is a `TypeError`,
     # and it is refused as one, naming the declared overloads.
-    shapes = struct_init_shapes(struct_def)
     if not args and not shapes:
         # The existing shape, for a struct that declares no constructor at all:
         # every field at its own default, and every placed nested frame brought
