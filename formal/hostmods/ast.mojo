@@ -91,8 +91,8 @@ ERRORTOKEN 67). Nothing has to be translated to compare a stream with
 THE TWO PLACES THIS STREAM IS NOT IDENTICAL TO `tokenize`'S
 ----------------------------------------------------------
 Both are stated here, in `test_ast_formal.py` (which compares against CPython
-with exactly these two normalisations applied, and nothing else), and in
-`bugs/FORMAL_ast_module_subset.md`:
+with exactly these two normalisations applied, and nothing else), and — for the
+f-string one — under "DIVERGENCES THAT ARE NOT ABOUT THE VERDICT" below:
 
   1. **An f-string or t-string is ONE token, not three or more.**
      `tokenize` splits `f"a{b}c"` into FSTRING_START, FSTRING_MIDDLE, OP `{`,
@@ -128,7 +128,7 @@ statement may not end with `)`) while `x = 1 +* 2` is not. Raising is not
 available here either — a `raise` lowers to a call to a symbol nothing
 defines — so CPython's `SyntaxError` is a RETURN VALUE, the same degradation
 `struct.mojo` documents in its ERRORS section. The full list of what is and is
-not checked is in `bugs/FORMAL_ast_module_subset.md`; the short version is
+not checked is under "WHAT parse(src) DOES NOT MEAN" below; the short version is
 that this is a LEXICAL and BLOCK-STRUCTURE validator, and a file it accepts is
 one whose bytes and block structure are sound.
 
@@ -1838,12 +1838,13 @@ def parse(src: str) -> int:
       * a comma does not directly follow an opening bracket or another comma
         (`f(,a)`).
 
-    What it does NOT check, and what `bugs/FORMAL_ast_module_subset.md` lists in
-    full: the EXPRESSION grammar, so `x = 1 +* 2` passes here and fails in
+    What it does NOT check, and what the module docstring lists in full under
+    "WHAT parse(src) DOES NOT MEAN": the EXPRESSION grammar, so `x = 1 +* 2`
+    passes here and fails in
     CPython; a keyword used as a name (`def = 5`); `return`/`yield` outside a
     function; `await` outside `async def`; duplicate parameters; a `return` with
     a value in a generator. Each of those is a real gap and none of them is
-    hidden: this is a LEXICAL validator, and the bug doc a reader is sent to
+    hidden: this is a LEXICAL validator, and the section a reader is sent to
     says which half of the grammar is implemented.
 
     CPython raises `SyntaxError` for all of it. Raising is not available here —
