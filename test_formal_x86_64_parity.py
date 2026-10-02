@@ -253,6 +253,51 @@ CASES = [
      "    sys.stdout.write(\"%d %d %d %d %d\" % (3 ** 3, 3 ** 4, 3 ** 5,\n"
      "                                            2 ** 8, 3 ** 8))\n"
      "    return 0\n"),
+    # THE SAME DELEGATION THROUGH A FRAME SLOT, which is a different route and
+    # not a variation: a plain name loads and stores a local, while `self.x`
+    # goes through `_member_slot_key` into the frame's slot array, and
+    # `_emit_div_mod`/`_emit_pow` reach the target through `_emit_expr` /
+    # `_store_var` rather than through the local path.  A delegation that named
+    # the target correctly but stored it as a local would compute 101 and keep
+    # it in a register, and the case above — which reads a name — would still
+    # pass.
+    #
+    # TWO fields on purpose.  A one-field struct's receiver IS its field rather
+    # than a frame address (`bugs/FORMAL_method_param_field_access.md`), and on
+    # this backend a field stored by a zero-argument `__init__` of a one-field
+    # struct reads back as 0
+    # (`bugs/FORMAL_one_field_struct_field_stored_in_a_zero_arg_init_reads_as_zero.md`),
+    # so a one-field spelling of this case would be measuring that bug and not
+    # this construct.
+    ("aug_division_through_a_frame_slot",
+     "class Pair:\n"
+     "    def __init__(self):\n"
+     "        self.n = 20\n"
+     "        self.m = 3\n"
+     "\n"
+     "    def shrink(self):\n"
+     "        self.n //= 2\n"
+     "        self.m %= 2\n"
+     "        return self.n * 10 + self.m\n"
+     "\n"
+     "def main():\n"
+     "    var p = Pair()\n"
+     "    printf(\"%d\", p.shrink())\n"
+     "    return 0\n",
+     "import sys\n\nclass Pair:\n"
+     "    def __init__(self):\n"
+     "        self.n = 20\n"
+     "        self.m = 3\n"
+     "\n"
+     "    def shrink(self):\n"
+     "        self.n //= 2\n"
+     "        self.m %= 2\n"
+     "        return self.n * 10 + self.m\n"
+     "\n"
+     "def main():\n"
+     "    p = Pair()\n"
+     "    sys.stdout.write(\"%d\" % p.shrink())\n"
+     "    return 0\n"),
 ]
 
 

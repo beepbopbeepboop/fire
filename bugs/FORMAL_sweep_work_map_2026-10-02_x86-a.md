@@ -36,6 +36,25 @@ a summary, so it was restarted again; the CAS is why the restarts were cheap).
 The numbers below are the final complete run, extracted from the log as
 `.tmp/sweep-x86-final.txt`.
 
+**One observation from this run's own concurrency, recorded because it cost this
+session an hour and would cost the next one the same.** Other workers were
+running same-architecture sweeps throughout (`ps` showed 20+ `formal_sweep`
+processes machine-wide), which is what `--allow-concurrent` permits and what
+both backends' `~/.gmojo/cas/formal-imports/<arch>/` directory is not safe for.
+Between roughly 03:50 and 04:20, eight hand-written probe programs built
+successfully and answered **0** where the source says 101, 103, 213, 73, 21, 7,
+203 and 7 — and the SAME programs, rebuilt afterwards, answer all eight
+correctly. No refusal, no stderr, exit 0: a **silent wrong answer**, where the
+documented failure mode for that race is a loud `json.decoder.JSONDecodeError`
+in the `tool` class (`bugs/FORMAL_sweep_tool_json_decode_error.md`, superseded
+by `FORMAL_dylib_manifest_written_in_place.md`, which is on another branch and
+not in this tree). **Not reproducible on demand** — it did not recur once this
+worker stopped sharing the directory — so it is filed here as an observation
+rather than as a bug doc, and it is the reason every number in §5 below was
+re-measured serially with the sweeps stopped. A probe-based comparison of two
+backends should assume it can produce wrong answers while another same-arch
+sweep runs, and should re-run anything surprising before believing it.
+
 **One caveat a reader must have before comparing this map with an older one:**
 the `_criteria_id()` in every cache key is a hash of `tools/formal_sweep.py`
 itself, and the interpreter guard changed that file. This run's verdicts were
@@ -150,8 +169,11 @@ this session found where x86-64 answered a different NUMBER rather than a
 different verdict, which is why it was worth more than the sweep's top row.**
 
 Both are pinned by `test_formal_x86_64_parity.py` (CPython as the oracle, both
-architectures: 8/8) and, for the divide-by-zero trap that no CPython oracle can
-express, by one `BOTH_ARCH_CASES` row in `test_formal_run.py`.
+architectures: 9/9 — the third case routes the same delegation through a FRAME
+SLOT, `self.n //= 2`, which is a different load/store path than a name and the
+one a "store it as a local" mistake would survive) and, for the divide-by-zero
+trap that no CPython oracle can express, by one `BOTH_ARCH_CASES` row in
+`test_formal_run.py`.
 
 ## 6. Filed, not fixed
 
