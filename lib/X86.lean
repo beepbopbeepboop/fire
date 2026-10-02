@@ -1339,19 +1339,21 @@ theorem x86_step_xor_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
     almost everything else here is general -- the corpus emits `48 99` and
     nothing else, and there is nothing to generalise over.
 
-    `x86_sign_extend32` is the 32-bit extension, which is correct here: `cqo`
-    sign-extends bit 31 of RAX, not bit 7 or bit 15, so the two-byte and
-    one-byte helpers above are the wrong ones and this is the one that applies. -/
+    `x86_cqo` is the WHOLE-WORD extension, which is the one that applies here:
+    `cqo` sign-extends bit 63 of RAX, not bit 31 and not bit 7 or bit 15, so
+    `x86_sign_extend32` (which extends bit 31) and the one-byte helpers are
+    all the wrong ones -- see `x86_cqo`'s own docstring for what the 32-bit one
+    costs on the `idiv` that always follows. -/
 theorem x86_step_cqo (s : X86State) (code : Nat → UInt8) (m : Nat) (rex : UInt8)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x99)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true) :
-    x86_step s code = some { s with rdx := x86_sign_extend32 s.rax, rip := m + 2 } := by
+    x86_step s code = some { s with rdx := x86_cqo s.rax, rip := m + 2 } := by
   -- `x86_rex_w` is NOT in the simp set and `x86_is_rex` is not either, for the
   -- reason `x86_step_movsx_r64_r8` gives: unfolding either breaks the rewrite
   -- that has to happen first.  `h_rex` is what routes `x86_step` to the REX
   -- decoder at all, and there is no symbolic register index here for the two
   -- to interfere with.
-  simp [x86_step, x86_step_rex, x86_sign_extend32,
+  simp [x86_step, x86_step_rex, x86_cqo,
         h_rip, h_b0, h_b1, h_rex, h_w]
 
 /-! `shl` / `shr` / `sar` by an immediate byte (REX.W C1 /digit, mod=3).
