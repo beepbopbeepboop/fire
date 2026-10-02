@@ -3046,16 +3046,22 @@ def non_container_element_refusal(op: str, spelled: str,
     `frame_container_operand_refusal` was written for.
 
     **What is refused, and what is deliberately not.** A base that a statement
-    of THIS function bound to something whose kind is an integer. A parameter
-    is not this case, and the reason is the shape of what is known rather than
-    a politeness toward the corpus: `ValueKinds` seeds an unannotated parameter
-    to `INT_KIND` because a word arriving from a caller is a word, so
-    `def at(xs, i): return xs[i]` — which builds, answers, and is what every
-    container-taking function in the corpus looks like — has a base whose kind
-    says "integer" and is not one. `ValueKinds.is_bound_in_the_body` is what
-    separates the two, and both backends ask it at their choke points so a
-    read, a store and an augmented assignment all get this answer and the two
-    architectures cannot disagree about which bases qualify.
+    of THIS function bound to something whose kind is an integer **on that
+    statement's own evidence**. That qualifier is load-bearing and it is
+    `ValueKinds.own_shape_kind`, which is what separates `a = 5` from three
+    shapes that carry the same `INT_KIND` while being containers: an
+    unannotated parameter (a word arriving from a caller is a word, so every
+    container-taking function in the corpus has one), a CALL result whose callee
+    declares no return type, and a loop variable over a name. The first is
+    `def at(xs, i): return xs[i]`; the second is a `get(self) -> List[Int]`
+    method's result; the third is `for row in rows: printf("%d", row[0])`. All
+    three built and answered correctly before this refusal existed, so a
+    classification that read the default as a claim would have refused correct
+    programs — the failure mode a wrong answer causes everywhere else in this
+    backend, and the one this backend exists to prevent. Both backends ask
+    `own_shape_kind` at their choke points, so a read, a store and an augmented
+    assignment all get this answer and the two architectures cannot disagree
+    about which bases qualify.
 
     `op` is the only thing that varies between those call sites — `a subscript`,
     `a slice` — and it is a parameter rather than a constant so the message says
@@ -8383,6 +8389,13 @@ class ValueKinds:
         self.locals: dict = {}
         self._conflicts: set = set()
         self._returns: set = set()
+        # Per name, the kinds the statements of this function bound it to BY
+        # THE EXPRESSION'S OWN SHAPE — `kind_of` and nothing else, so no
+        # "unclassified means a word, and a word is an integer" default ever
+        # enters it.  `own_shape_kind` reads this, and the difference is the
+        # whole of what separates "the source SAYS this name holds an
+        # integer" from "we could not classify it"; see that method.
+        self._own_shape: dict = {}
         # The names this function's SIGNATURE binds, kept apart from the ones
         # its body binds, and the reason is the `declared_kind` hook: an
         # unannotated parameter is seeded INT_KIND above, and for a METHOD
@@ -8414,22 +8427,55 @@ class ValueKinds:
 
     # ── scanning ───────────────────────────────────────────────────────
 
-    def _bind(self, name, kind) -> None:
+    def _bind(self, name, kind, own=None) -> None:
         if name in self._conflicts:
             return
+        if own is not None:
+            self._own_shape.setdefault(name, set()).add(own)
         if name in self.locals:
             if self.locals[name] != kind:
                 # Bound two ways in one function: refuse rather than answer
                 # with whichever use site asked first.
                 self.locals[name] = None
                 self._conflicts.add(name)
+                # …and no own-shape claim either, for the same reason: two
+                # statements that disagree about what a name holds are exactly
+                # the case where "the source says integer" is not available.
+                self._own_shape.pop(name, None)
             return
         self.locals[name] = kind
 
     def _bind_value(self, name, value) -> None:
         """Bind `name` to what `value` holds, defaulting an unclassified
         non-container value to a word (see the note on kinds)."""
-        self._bind(name, self._value_kind(value))
+        self._bind(name, self._value_kind(value), own=self._own_shape_of(value))
+
+    def _own_shape_of(self, value):
+        """`kind_of(value)`, or None when that answer is a fallback.
+
+        The one place `own_shape_kind`'s evidence is filtered, and the filter is
+        a CALL. What a call produces is a fact about the CALLEE, and this model
+        has two answers for it with no way to tell them apart here: a declared
+        return type, or — when the callee declares nothing, or its returns
+        could not be classified, or it is not a function of this unit at all —
+        the same "a word, therefore an integer" default everywhere else. The
+        `func_kind` hook is a black box by construction (it exists because
+        `ValueKinds` cannot see the unit's function table), so `kind_of` cannot
+        say which of the two produced `INT_KIND`, and a claim of "the source
+        says this name holds an integer" may not rest on it.
+
+        Measured, both architectures, before this filter: a `get(self) ->
+        List[Int]` method's result bound to a local and then subscripted built
+        and answered 2, and this filter is what keeps it that way.
+
+        The residual is real and it is stated rather than papered over: `a = f()`
+        followed by `a[0] = 1` is not refused here, and still faults at run
+        time the way it did before any of this. Narrowing an over-refusal is
+        what was bought; a class that was never caught is not made worse.
+        """
+        if isinstance(value, F.CallExpr):
+            return None
+        return self.kind_of(value)
 
     def _value_kind(self, value):
         """`kind_of(value)`, or INT_KIND when it is unclassified and is not a
@@ -8441,21 +8487,22 @@ class ValueKinds:
             return INT_KIND
         return kind
 
-    def _bind_target(self, target, kind) -> None:
+    def _bind_target(self, target, kind, own=None) -> None:
         """Bind whatever names an assignment target introduces."""
         if isinstance(target, F.IdentExpr):
-            self._bind(target.name, kind)
+            self._bind(target.name, kind, own=own)
         elif isinstance(target, (F.TupleExpr, F.ListExpr)):
             for el in target.elements:
-                self._bind_target(el, kind)
+                self._bind_target(el, kind, own=own)
         elif isinstance(target, str):
             for nm in _target_names(target):
-                self._bind(nm, kind)
+                self._bind(nm, kind, own=own)
 
     def _scan(self, stmts) -> None:
         for s in stmts or []:
             if isinstance(s, F.AssignStmt):
-                self._bind_target(s.target, self._value_kind(s.value))
+                self._bind_target(s.target, self._value_kind(s.value),
+                                  own=self._own_shape_of(s.value))
             elif isinstance(s, F.VarDecl):
                 self._bind_value(s.name, s.value)
             elif isinstance(s, F.AugAssignStmt):
@@ -8464,8 +8511,9 @@ class ValueKinds:
                 self._bind_target(s.target, self.locals.get(
                     s.target.name if isinstance(s.target, F.IdentExpr) else ""))
             elif isinstance(s, F.MultiAssignStmt):
+                vkind = self._own_shape_of(s.value)
                 for t in s.targets:
-                    self._bind_target(t, self.kind_of(s.value))
+                    self._bind_target(t, self.kind_of(s.value), own=vkind)
             elif isinstance(s, F.ReturnStmt):
                 self._returns.add(self.kind_of(s.value))
             elif isinstance(s, F.IfStmt):
@@ -8475,6 +8523,19 @@ class ValueKinds:
                 self._scan(s.else_body)
             elif isinstance(s, F.WhileStmt):
                 self._scan(s.body)
+                self._scan(s.else_body)
+            elif isinstance(s, F.ForStmt):
+                self._bind_target(s.target, self._iterable_kind(s.iterable),
+                                  own=self._iterable_own_shape(s.iterable))
+                self._scan(s.body)
+                self._scan(s.else_body)
+            elif isinstance(s, F.WithStmt):
+                for it in (s.items or []):
+                    if getattr(it, "alias", None) is not None:
+                        self._bind(str(it.alias), self.kind_of(it.expr),
+                                   own=self._own_shape_of(it.expr))
+                self._scan(s.body)
+
                 self._scan(s.else_body)
             elif isinstance(s, F.ForStmt):
                 self._bind_target(s.target, self._iterable_kind(s.iterable))
@@ -8502,13 +8563,26 @@ class ValueKinds:
         A container literal knows its own element kind; `range` yields
         integers; anything else is a blob whose elements this path treats as
         words (types.function_var_types says the same about loop variables)."""
+        return self._iterable_own_shape(iterable) or INT_KIND
+
+    def _iterable_own_shape(self, iterable):
+        """`_iterable_kind` without its final fallback, or None.
+
+        The same three shapes `_iterable_kind` decides on its own evidence and
+        then `or INT_KIND`, kept apart because the fallback is not a claim.  A
+        loop variable over a name — `for row in rows: row[0]`, where `rows` is a
+        parameter — is the ordinary way to walk a list of lists, and
+        `_iterable_kind` answers INT_KIND for it because there is nothing else
+        to answer.  That answer is a word, not an integer, so anything reading
+        it as evidence that the source says "integer" refuses a correct
+        program; see `own_shape_kind`, which is what reads this."""
         if isinstance(iterable, (F.ListExpr, F.TupleExpr, F.SetExpr)):
             return list_kind(_kind_of_elements(iterable.elements))
         if isinstance(iterable, F.Comprehension):
             return list_kind(_kind_of_simple(iterable.element))
         if isinstance(iterable, F.CallExpr) and _flat_callee(iterable) == "range":
             return INT_KIND
-        return INT_KIND
+        return None
 
     def _return_kind(self, fn) -> str | None:
         ann = getattr(fn, "return_type", None)
@@ -8520,29 +8594,64 @@ class ValueKinds:
 
     # ── querying ───────────────────────────────────────────────────────
 
-    def is_bound_in_the_body(self, name: str) -> bool:
-        """True when a statement of this function bound `name` itself.
+    def own_shape_kind(self, name: str):
+        """What a statement of THIS function bound `name` to, on the EVIDENCE
+        of that statement alone — or None when no such statement says.
 
-        The question a kind cannot answer, and the reason the container
-        operations cannot treat `INT_KIND` as "not a container" on its own: an
-        unannotated parameter is SEEDED to `INT_KIND` above, because a word
-        arriving from a caller is a word — so `def at(xs): return xs[0]`, which
-        builds and answers, has a base whose kind says "integer" and which is
-        not one. What separates it from `a = 5` is where the binding came from:
-        a parameter's value is whatever the caller passed, which nothing in this
-        image can see, while `a = 5` is a statement in this function and the 5
-        is the whole of what is known about `a`.
+        **The question `name_kind` cannot answer, and the reason the container
+        operations cannot treat `INT_KIND` as "not a container".** `INT_KIND` is
+        this model's DEFAULT for a word, not a reading of the source: an
+        unannotated parameter is seeded to it because a word arriving from a
+        caller is a word, and `_value_kind` returns it for any expression it
+        could not classify. So `name_kind("xs") == INT_KIND` holds for three
+        quite different things, and only the first is an integer:
 
-        A module global is deliberately neither bound nor absent: `name_kind`
-        may classify it from its initializer, and a global's element access is
-        an ordinary program, so it is not in this set.
+        | the source | `name_kind` | `own_shape_kind` |
+        |---|---|---|
+        | `a = 5` | `int` | `int` — the source SAYS so |
+        | `ys = h.get()` | `int` (unclassified) | `None` — nothing said |
+        | `for row in rows:` | `int` (unclassified) | `None` — nothing said |
 
-        Exposed because both backends' subscript paths ask it at their single
-        choke point, and asking the question in two places is how the two
-        architectures would come to disagree about which bases are containers.
+        The second and third are the two shapes that make the default useless
+        as evidence, and the third is the ordinary way to walk a list of lists:
+
+            def walk(n, rows):            def first(rows):
+                for row in rows:               var head = rows[0]
+                    printf("%d", row[0])       return head[0]
+
+        Measured, both architectures, before this question existed: all three
+        built and answered correctly, so a refusal that reads the default as a
+        claim refuses correct programs — and a wrong answer is worse than a
+        refusal everywhere else in this backend.
+
+        What counts as evidence is `_own_shape_of`, which is `kind_of` — the
+        same classification the rest of the model uses, and the same
+        fall-through chain: a literal, an arithmetic operation over classified
+        operands, a comparison, a container literal, a `range` loop target.
+        What does NOT count is any fallback: not `_value_kind`'s default, not
+        `_iterable_kind`'s, not a call's (see `_own_shape_of` for why a call is
+        the one expression whose kind carries no evidence at all), and not the
+        nested-`def` binding. A name two statements of this function bind two
+        ways is a conflict and claims nothing, for the same reason `name_kind`
+        answers None for it.
+
+        A MODULE GLOBAL is deliberately outside this, as it is outside
+        `locals`: its binding is a statement of the MODULE, not of this
+        function, and `name_kind` may classify it from its slot's initializer
+        through `global_slot_kind`. That is the right question for it and this
+        is not.
+
+        Asked from both backends' single subscript/slice/membership/for-in
+        choke point, so the two architectures cannot come to disagree about
+        which bases are containers — which is the half of this that is a
+        language question rather than a wording one.
         """
-        return (name in self.locals and name not in self._param_names
-                and name not in self._conflicts)
+        if name in self._conflicts:
+            return None
+        kinds = self._own_shape.get(name)
+        if not kinds or len(kinds) != 1:
+            return None
+        return next(iter(kinds))
 
     def name_kind(self, name: str):
         """What the local `name` holds, or None if this does not say."""

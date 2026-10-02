@@ -586,6 +586,21 @@ REFUSALS = [
     # what it computes rather than for a refusal that stopped being the right
     # answer when `formal-module-globals` gave the name a real `__DATA` slot.
     # That comment, and the measurement behind the move, are on the case.
+    # AN ELEMENT OF AN INTEGER.  Every container lowering reads the blob's count
+    # from offset 0 of its base and then reads or writes at `base + 8 + 8k`, so
+    # for `a = 5` the element address is 13 and the image faults: measured on
+    # both architectures from a GREEN build, SIGSEGV, exit 139.  This is here
+    # and not only in `test_formal_run.py` because `run_refusal` builds BOTH
+    # architectures and requires the identical message from each, and for this
+    # refusal "identical on both" is the whole assertion — the defect is SHARED
+    # by the two backends, so a two-architecture comparison cannot see it.
+    ("an_element_of_an_integer_is_refused",
+     "def main(n):\n"
+     "    var a = 5\n"
+     "    a[0] = 1\n"
+     "    printf(\"a=%d\", a)\n"
+     "    return 0\n",
+     "asks for a container element"),
 ]
 
 

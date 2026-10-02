@@ -3523,25 +3523,25 @@ dylib_exports: list = None, globals_base: int = None,
         blob walk read a count out of the integer and computed an element
         address of `5 + 8`. Measured on BOTH architectures, `a[0] = 1` builds,
         links and dies of SIGSEGV at run time with the build green. See
-        `model.non_container_subscript_refusal` for the whole of it.
+        `model.non_container_element_refusal` for the whole of it.
 
         BARE NAME ONLY, for the same reason `_refuse_frame_container_operand`
         is: `h.xs[i]` on a field declared `List[Int]` is what that declaration
         is FOR, and the frame-holder table is about addresses rather than
         fields.
 
-        A PARAMETER is deliberately not this case, and `is_bound_in_the_body`
-        is the question that says so rather than the kind: an unannotated
-        parameter is seeded to INT_KIND because a word from a caller is a word,
-        so every container-taking function in the corpus has a base whose kind
-        says "integer". Binding site is what separates that from `a = 5`.
+        The kind is read from `own_shape_kind` and NOT from `_expr_str_kind`,
+        and that is the whole of the narrowing: `INT_KIND` is this model's
+        DEFAULT for a word, so a parameter (`def at(xs): return xs[0]`), a call
+        result (`ys = h.get()`) and a loop variable (`for row in rows:`) all
+        carry it while being containers, and reading it as a claim refuses
+        three correct programs — `own_shape_kind`'s docstring has the measured
+        table. What it answers is "did a statement of THIS function say so",
+        which is the difference between `a = 5` and every one of them.
         """
         if not isinstance(obj, F.IdentExpr):
             return
-        name = obj.name
-        if not self._vkinds.is_bound_in_the_body(name):
-            return
-        if self._expr_str_kind(obj) != M.INT_KIND:
+        if self._vkinds.own_shape_kind(obj.name) != M.INT_KIND:
             return
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
@@ -6839,8 +6839,6 @@ dylib_exports: list = None, globals_base: int = None,
         self._emit_slice_parts(expr.obj, expr.start, expr.stop, expr.step)
 
     def _emit_slice_parts(self, obj, start_e, stop_e, step_e) -> None:
-        self._refuse_frame_container_operand("a slice", obj)
-        self._refuse_non_container_operand("a slice", obj)
         """`obj[start:stop:step]` → new list blob in X0.
 
         Defaults: start=0, stop=count, step=1 (None nodes). Negative bounds
@@ -6858,6 +6856,8 @@ dylib_exports: list = None, globals_base: int = None,
         both backends, `s = "abcde"; printf("[%s]", s[1:])` died with SIGSEGV
         (exit 139). `model.string_slice_refusal` holds the message and the
         argument for lowering the suffix case later."""
+        self._refuse_frame_container_operand("a slice", obj)
+        self._refuse_non_container_operand("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))
         if sreason is not None:

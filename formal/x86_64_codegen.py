@@ -3390,17 +3390,15 @@ class X86_64Codegen:
         rather than a wording one.
 
         BARE NAME ONLY, for the reason `_refuse_frame_container_operand` above
-        gives, and a PARAMETER is deliberately not this case: `is_bound_in_the
-        _body` asks where the binding came from, because an unannotated
-        parameter is seeded to INT_KIND and every container-taking function in
-        the corpus has one.
+        gives, and the kind is read from `own_shape_kind` rather than from
+        `_expr_str_kind`: `INT_KIND` is the model's DEFAULT for a word, so a
+        parameter, a call result and a loop variable all carry it while being
+        containers, and reading it as a claim refuses `for row in rows: row[0]`.
+        arm64's copy of this docstring has the measured table.
         """
         if not isinstance(obj, F.IdentExpr):
             return
-        name = obj.name
-        if not self._vkinds.is_bound_in_the_body(name):
-            return
-        if self._expr_str_kind(obj) != M.INT_KIND:
+        if self._vkinds.own_shape_kind(obj.name) != M.INT_KIND:
             return
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
