@@ -5940,8 +5940,8 @@ def _refuse_holder_use(fn, node, holders, by_name, why, reason=None) -> None:
         f"what is still open about it")
 
 
-def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
-    """{local name: its field name} for locals holding a one-word struct.
+def _one_word_bindings(fn, structs_by_name: dict, owner=None) -> dict:
+    """{name: (field name, the struct that declares it)} for one-word holders.
 
     Found from the binding, not inferred: a local initialised from a one-word
     struct's constructor holds that struct's only field, and nothing else on
@@ -5955,6 +5955,14 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
     is the struct the caller's own `self` rewrite below already handles — so
     the two never both fire for one name and cannot disagree about which field
     a name means.
+
+    **The struct is carried, not just the field name**, and that is the whole
+    of what this table is now FOR. `x` holding `S`'s only field `f` is one fact;
+    what the WORD `x` holds is a second one, and only the second decides which
+    struct a method call on `x` dispatches to (`_one_word_receiver_types`).
+    Returning only the field name, as this did until the receiver alias needed
+    it, threw away the one piece of type evidence on a path whose dispatch is by
+    name alone.
     """
     mapping = {}
     for node in M.iter_nodes(fn.body):
@@ -5970,13 +5978,101 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
             continue
         st = structs_by_name.get(value.func.name)
         if st is not None and M.struct_is_one_field(st):
-            mapping[target] = _sole_field_name(st)
+            mapping[target] = (_sole_field_name(st), st)
     for pname, pst in M.parameter_declared_structs(
             fn, structs_by_name, owner).items():
         if pname in mapping or not M.struct_is_one_field(pst):
             continue
-        mapping[pname] = _sole_field_name(pst)
+        mapping[pname] = (_sole_field_name(pst), pst)
     return mapping
+
+
+def _one_word_receiver_types(bindings: dict, structs_by_name: dict) -> dict:
+    """{name: the struct whose value the receiver WORD `name` holds}.
+
+    `bindings[x] == (f, S)` says `x` holds the value of `S`'s only field `f`;
+    that field's type says what the value is.  So `x.f.m(...)` has a type for
+    its receiver, and the struct that type names is the one `m` dispatches to —
+    which is the evidence name-only dispatch (`_method_owners`) does not have
+    and cannot get any other way.
+
+    The reasoning is two steps and both are declarations, not inference: `x` was
+    bound from `S()` or declared as an `S`, `S` has exactly one field `f`, and
+    `f`'s type is `T`.  So the word in `x` is a `T`, and a `T` that declares
+    `m` is the only method the source can mean.  The type is read through
+    `model.struct_field_type`, which is where the two evidence sources — a
+    class-body declaration and the store `__init__` performs — are combined and
+    ranked, so this does not get to prefer one; a field neither source can
+    answer leaves the name out, and a name left out leaves dispatch exactly as
+    name-only left it.  `decls` is the module's own struct table, which is the
+    gate the second source needs and which is why an imported type stays
+    untyped rather than becoming a lookup into another module.
+    """
+    out = {}
+    for name, (field, st) in (bindings or {}).items():
+        base, _spelling, evidence, _why = M.struct_field_type(
+            st, field, structs_by_name)
+        target = (structs_by_name or {}).get(base) if evidence else None
+        if target is not None:
+            out[name] = target
+    return out
+
+
+class _ReceiverAliases:
+    """The three tables a receiver alias is made of, kept together.
+
+    `fields[name]` is the field a one-word holder's word IS, `holders[name]` is
+    the struct that word is a value OF, and `types[name]` is the struct whose
+    value the word holds (`fields[name]`'s type).  All three come from one walk
+    of the function's bindings (`_one_word_bindings`), so they cannot disagree
+    about which name is an alias.
+
+    **`holders` and `types` are different structs, and reading them as one is a
+    wrong answer rather than a refusal.** For
+
+    ```
+    struct Leaf:  var v: Int;  def size(self) -> Int: return self.v * 2
+    struct Box:   var _leaf: Leaf;  def size(self) -> Int: return self._leaf.size() + 1
+    ```
+
+    `var b = Box(Leaf(5))` gives `holders['b'] == Box` and `types['b'] == Leaf`,
+    and the source says `b.size()` is **`Box`.size** — Python's own answer,
+    because `b` is a `Box`.  Only the ALIASED spelling `self._leaf.size()` has
+    the field as its receiver, and only that one dispatches on `types`.  Getting
+    this backwards binds `b.size()` to `Leaf.size`, which is a program that
+    builds, runs, and prints the wrong digits.
+    """
+
+    __slots__ = ("fields", "holders", "types")
+
+    def __init__(self, bindings: dict, structs_by_name: dict):
+        self.fields = {n: f for n, (f, _st) in (bindings or {}).items()}
+        self.holders = {n: st for n, (_f, st) in (bindings or {}).items()}
+        self.types = _one_word_receiver_types(bindings, structs_by_name)
+
+    def source_struct(self, base):
+        """The struct the SOURCE means for a receiver base, or None.
+
+        `None` for a base that is not an alias at all, which is what leaves
+        dispatch by name alone exactly as it was.
+        """
+        if isinstance(base, F.IdentExpr):
+            return self.holders.get(base.name)
+        if (isinstance(base, F.MemberExpr) and isinstance(base.obj, F.IdentExpr)
+                and self.fields.get(base.obj.name) == base.member):
+            return self.types.get(base.obj.name)
+        return None
+
+    def aliased_to(self, base):
+        """`x` when `base` is `x.<the field x holds>`, else None."""
+        if isinstance(base, F.IdentExpr):
+            return base
+        if (isinstance(base, F.MemberExpr) and isinstance(base.obj, F.IdentExpr)
+                and self.fields.get(base.obj.name) == base.member):
+            # The EXISTING IdentExpr, not a fresh one: it carries the line and
+            # column every downstream diagnostic quotes.
+            return base.obj
+        return None
 
 
 def _sole_field_name(st) -> str:
@@ -8959,21 +9055,39 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     for fn in functions:
         if fn.name in writebacks:
             _return_the_receiver(fn, writebacks[fn.name])
-        _rewrite_method_calls(fn.body, owners, wide, receiverless)
+        # A method's `self` IS the field; a local initialised from a one-word
+        # constructor holds that struct's only field directly.  Computed BEFORE
+        # `_rewrite_method_calls` and not after, and the order is the fix rather
+        # than an accident: the call rewrite is what has to recognise
+        # `self.<sole field>.m(...)` as a method call on the word `self`, and
+        # `_rewrite_self_fields` below collapses that same spelling to `self`
+        # everywhere — after the collapse the two spellings are indistinguishable
+        # and a call the source wrote on the FIELD is refused as a call on the
+        # method `self.<field>` names.  Measured on
+        # `std/builtin/builtin_slice.mojo`'s `StridedSlice`.  The tables
+        # themselves do not depend on the order: they are read off the
+        # DECLARATIONS (the constructor calls and the parameter annotations),
+        # and `_rewrite_method_calls` only ever rewrites a MemberExpr CALLEE,
+        # which is never the `S()` shape they are built from.
+        bindings = _one_word_bindings(fn, structs_by_name,
+                                      method_owners.get(fn.name))
+        st = method_owners.get(fn.name)
+        if st is not None and M.struct_is_one_field(st):
+            bindings["self"] = (_sole_field_name(st), st)
+        # `alias` carries the receiver's TYPE as well as the field it is, which
+        # is what lets that same call be DISPATCHED when the method name is
+        # declared by two structs in this image — which is what
+        # `StridedSlice.write_to` is, because `Slice`, `StridedSlice` and
+        # `ContiguousSlice` all declare it and dispatch here is by name.
+        alias = _ReceiverAliases(bindings, structs_by_name)
+        _rewrite_method_calls(fn.body, owners, wide, receiverless, alias)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
         # gives. Everything else about it is `_rewrite_class_constants`.
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name),
                                  _method_receiver_bases(fn))
-        # A method's `self` IS the field; a local initialised from a one-word
-        # constructor holds that struct's only field directly.
-        mapping = _one_word_field_map(fn, structs_by_name,
-                                      method_owners.get(fn.name))
-        st = method_owners.get(fn.name)
-        if st is not None and M.struct_is_one_field(st):
-            mapping["self"] = _sole_field_name(st)
-        _rewrite_self_fields(fn.body, mapping)
+        _rewrite_self_fields(fn.body, alias.fields)
         # A class-level CONSTANT is not part of any value, so it is not
         # lowered as a field: it is materialized where it is read. Without
         # this a struct of nothing but constants — which the width rule now
@@ -9145,7 +9259,43 @@ def _receiverless_methods(owners: dict, structs_by_name: dict) -> set:
     return out
 
 
-def _method_call_target(call, owners: dict):
+def _call_receiver(base, alias):
+    """The word a method call's receiver base denotes, or None if it is not one.
+
+    A base that is already a NAME is its own word.  A base that is `x.f` where
+    `x` holds a ONE-FIELD struct whose only field is `f` is also `x`, because on
+    this path the receiver of a one-field struct IS its field.  Anything else — a
+    frame slot, a call result, a deeper chain — is None, because nothing here
+    knows what a word is.
+
+    The second arm is the load-bearing one and it has to be HERE, in the
+    recogniser, rather than left to `_rewrite_self_fields` afterwards.  That
+    pass collapses `self.<sole field>` to `self` everywhere, including where it
+    is the base of a LONGER chain — which is right for the value it computes
+    (`self._in.m()`'s receiver really is the word `self`) and wrong as a way to
+    reach a CALL, because it leaves `self.m(...)`: a spelling whose `m` is now
+    indistinguishable from a method of the receiver's OWN struct, so the two
+    diagnostics that read it refuse the program.  Measured on
+    `std/builtin/builtin_slice.mojo`'s `StridedSlice` (one field `_inner: Slice`),
+    whose `self._inner.write_to(writer)` was reported as
+    "`self.write_to` is not a field of StridedSlice — `write_to` is one of its
+    METHODS" when the receiver struct declared `write_to` too, and as "`self.m()`
+    is a method call on a value … the receiver is a name on this path" when it
+    did not.  Both are refusals of a program CPython runs, and both are decided
+    by a name the rewrite invented.
+
+    So the alias is resolved BEFORE the collapse: the call is lifted to
+    `Inner_write_to(self, writer)`, the receiver is the word it always was, and
+    `_rewrite_self_fields` then finds nothing left to collapse in that call.  The
+    value positions it does collapse are unaffected — `self._in.x` for a field
+    `x` of `Inner` is still the load at `self + 8·slot`, because `self` holds
+    the frame address `self._in` names.
+    """
+    return alias.aliased_to(base) if alias is not None else (
+        base if isinstance(base, F.IdentExpr) else None)
+
+
+def _method_call_target(call, owners: dict, alias=None):
     """`recv.m` or `recv.m[T]` on a CallExpr: (owner, member, receiver), or None.
 
     The one recogniser for "this call's callee is a method of a struct this
@@ -9160,16 +9310,41 @@ def _method_call_target(call, owners: dict):
     `None` for every other callee, which is the answer `owners` itself gives for
     a name two structs declare — dispatch here is by NAME, so an ambiguous one
     has no owner to lift to.
+
+    **…unless the receiver's own TYPE says which one.**  `owners` declines a
+    name two structs declare because `recv.m(x)` carries no type.  For a
+    receiver that is an alias (`self.<sole field>`, `_one_word_receiver_types`)
+    it does carry one, and that is not a guess: the word is a value of the
+    struct the field's declared type names, so a method that struct declares is
+    the only one the source can mean.  This is consulted ONLY when `owners`
+    declined, so it can turn a refusal into a lift and can never redirect a call
+    the name-only path already resolved — and it cannot redirect it, because a
+    struct declaring `m` is what put `m` in `owners` at all.
+
+    Measured: `std/builtin/builtin_slice.mojo` declares `write_to` on all three
+    of `Slice`, `StridedSlice` and `ContiguousSlice`, so every
+    `self._inner.write_to(writer)` in it was refused as a method call on a
+    value.  The receiver word's declared type is `Slice`, and that is the
+    method the source calls.  16 such ambiguous call sites across 5 stdlib files;
+    the 45 unambiguous ones are `_call_receiver`'s half of the same fix.
     """
     func = call.func
     if isinstance(func, F.SubscriptExpr):
         func = func.obj
-    if not (isinstance(func, F.MemberExpr) and isinstance(func.obj, F.IdentExpr)):
+    if not isinstance(func, F.MemberExpr):
+        return None
+    receiver = _call_receiver(func.obj, alias)
+    if receiver is None:
         return None
     owner = owners.get(func.member)
+    if owner is None and alias is not None:
+        st = alias.source_struct(func.obj)
+        if st is not None and any(m.name == func.member
+                                  for m in M.struct_methods(st)):
+            owner = st.name
     if owner is None:
         return None
-    return owner, func.member, func.obj
+    return owner, func.member, receiver
 
 
 def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
@@ -9194,7 +9369,7 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
 
 
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,
-                          receiverless: set = None) -> None:
+                          receiverless: set = None, alias=None) -> None:
     """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
 
     Rewriting the CALL rather than special-casing a method call in the
@@ -9203,11 +9378,11 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     becomes its first argument and every existing rule about arguments,
     registers and tail calls applies unchanged.
 
-    Which is also why the by-reference receiver needed NO change here. The
+    Which is also why the by-reference receiver needed NO change here.  The
     receiver this already passes is the word the local holds, and for a
     multi-field struct that word is the address of its frame — so the receiver
     arrives as the address it already was, and the one parameter `MojoFunc`
-    has is still enough. The whole ABI question
+    has is still enough.  The whole ABI question
     `bugs/FORMAL_wide_receiver_by_reference.md` asks is answered by that
     accident of the design, and this function is where it shows up: the
     receiver-width refusal below fires only for a struct that fits NEITHER
@@ -9219,13 +9394,22 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     puts a generic's comptime parameters first and arm64's `_emit_call` passes
     the bracket expressions first, so `Struct_m[T](recv, a)` and
     `Struct_m(recv, a)` reach the callee's parameters identically.  See
-    `_specialized_method_call`."""
+    `_specialized_method_call`.
+
+    `alias` is the receiver-alias table (`_ReceiverAliases`, built from the
+    one-word holders plus the method's own `self` entry), and it is what lets
+    `self.<sole field>.m(a)` be recognised AND dispatched here, rather than
+    after `_rewrite_self_fields` has turned it into `self.m(a)` — a spelling
+    whose `m` names a method of the receiver's OWN struct and is refused by
+    name.  `_call_receiver` is the first half and `_method_call_target`'s
+    `alias.source_struct` arm is the second.
+    """
     if isinstance(node, list):
         for x in node:
-            _rewrite_method_calls(x, owners, wide, receiverless)
+            _rewrite_method_calls(x, owners, wide, receiverless, alias)
         return
     if isinstance(node, F.CallExpr):
-        target = _method_call_target(node, owners)
+        target = _method_call_target(node, owners, alias)
         if target is not None:
             owner, member, receiver = target
             if (wide or {}).get(owner) is not None:
@@ -9253,7 +9437,8 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
             node.func = lifted
             return
     for name in getattr(node, "__dataclass_fields__", {}):
-        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless)
+        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless,
+                              alias)
 
 
 def dylib_manifest_path(dylib_path: str) -> str:

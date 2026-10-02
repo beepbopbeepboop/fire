@@ -164,6 +164,272 @@ DIFF_CASES = [
      "    sys.stdout.write(\"%d\" % D.twelve())\n"
      "main()\n"),
 
+    # ── the receiver ALIAS: `self.<sole field>` IS the receiver ──────────────
+    #
+    # A one-field struct's receiver is its field (`_one_word_field_map`), so
+    # `self._inner.total()` is a method call on the word `self`.  It has to be
+    # LIFTED as one, and it used to be refused — twice over, in two different
+    # words, because `_rewrite_self_fields` collapsed `self._inner` to `self`
+    # AFTER the call rewrite had already declined it (the receiver was a
+    # MemberExpr, not a name) and left `self.total(...)`, a spelling whose
+    # `total` names a method of the OUTER struct:
+    #
+    #   * `Outer` does not declare `total`  ->  "`self.total()` is a method call
+    #     on a value … the receiver is a name on this path"  (this case);
+    #   * `Outer` DOES declare `total`       ->  "`self.total` is not a field of
+    #     Outer — `total` is one of its METHODS"  (the case below).
+    #
+    # Both are refusals of a program CPython runs, decided by a name the
+    # compiler's own rewrite invented.  Measured on
+    # `std/builtin/builtin_slice.mojo`'s `StridedSlice` (one field
+    # `_inner: Slice`), whose `self._inner.write_to(writer)` produced the second
+    # message; the census behind the fix is 45 such call sites across 12 stdlib
+    # files, 6 of them in `std/pathlib/path.mojo`, 7 in `std/random/_rng.mojo`
+    # and 1 in `std/io/file_descriptor.mojo`.
+    #
+    # The answer has to be RIGHT, not merely emitted: `Inner.total()` reads two
+    # fields of a frame the receiver word addresses, so a lift that passed
+    # anything else would print a number no source wrote.  `7` is 3 + 4.
+    ("one_field_receiver_calls_a_method_on_its_sole_field",
+     "class Inner:\n"
+     "    def __init__(self):\n"
+     "        self.a = 3\n"
+     "        self.b = 4\n"
+     "\n"
+     "    def total(self) -> Int:\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "class Outer:\n"
+     "    def __init__(self, inner: Inner):\n"
+     "        self._inner = inner\n"
+     "\n"
+     "    def go(self) -> Int:\n"
+     "        return self._inner.total()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer(Inner())\n"
+     "    printf(\"%d\", o.go())\n"
+     "    return 0\n",
+     "class Inner:\n"
+     "    def __init__(self):\n"
+     "        self.a = 3\n"
+     "        self.b = 4\n"
+     "\n"
+     "    def total(self):\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "class Outer:\n"
+     "    def __init__(self, inner):\n"
+     "        self._inner = inner\n"
+     "\n"
+     "    def go(self):\n"
+     "        return self._inner.total()\n"
+     "\n"
+     "import sys\n"
+     "def main():\n"
+     "    o = Outer(Inner())\n"
+     "    sys.stdout.write(\"%d\" % o.go())\n"
+     "main()\n"),
+
+    # THE SAME NAME on both classes — which is what makes the case above hard.
+    # `write_to` is declared by all three of `Slice`, `StridedSlice` and
+    # `ContiguousSlice` in `std/builtin/builtin_slice.mojo`, and dispatch here is
+    # by NAME, so `owners` declines it and `self._leaf.size()` had no owner to
+    # lift to: `_rewrite_self_fields` collapsed it to `self.size()`, which names
+    # a method of `Box`, and the refusal named THAT.
+    #
+    # What resolves it is the receiver's own type: `Box` declares `_leaf: Leaf`,
+    # so the word `self` holds is a `Leaf`, and `Leaf` is the only struct here
+    # whose `size` the source can mean.  Read through
+    # `model.struct_field_type`, so a field neither a class-body declaration nor
+    # the store `__init__` performs can type leaves the name-only dispatch
+    # exactly as it was — this is extra evidence, not a weaker rule.
+    # `11` is `Leaf.size()`'s 10 plus the 1.
+    ("one_field_receiver_resolved_by_its_declared_type",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def __init__(out self, v: Int):\n"
+     "        self.v = v\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return self.v * 2\n"
+     "\n"
+     "struct Box:\n"
+     "    var _leaf: Leaf\n"
+     "\n"
+     "    def __init__(out self, leaf: Leaf):\n"
+     "        self._leaf = leaf\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return self._leaf.size() + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box(Leaf(5))\n"
+     "    printf(\"%d\", b.size())\n"
+     "    return 0\n",
+     "class Leaf:\n"
+     "    def __init__(self, v):\n"
+     "        self.v = v\n"
+     "\n"
+     "    def size(self):\n"
+     "        return self.v * 2\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self, leaf):\n"
+     "        self._leaf = leaf\n"
+     "\n"
+     "    def size(self):\n"
+     "        return self._leaf.size() + 1\n"
+     "\n"
+     "import sys\n"
+     "def main():\n"
+     "    b = Box(Leaf(5))\n"
+     "    sys.stdout.write(\"%d\" % b.size())\n"
+     "main()\n"),
+
+    # A one-field struct whose sole field is a one-word struct: the alias is
+    # transitive, so `self._inner.get()` is a call on the word `self` reached
+    # through two levels, and it has to be lifted the same way.  `9` is
+    # `Leaf.get()`'s 9.
+    ("one_word_field_through_one_field_receiver",
+     "struct Leaf:\n"
+     "    var _k: Int\n"
+     "\n"
+     "    def __init__(out self, k: Int):\n"
+     "        self._k = k\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self._k\n"
+     "\n"
+     "struct Mid:\n"
+     "    var _inner: Leaf\n"
+     "\n"
+     "    def __init__(out self, inner: Leaf):\n"
+     "        self._inner = inner\n"
+     "\n"
+     "    def go(self) -> Int:\n"
+     "        return self._inner.get()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Mid(Leaf(9))\n"
+     "    printf(\"%d\", m.go())\n"
+     "    return 0\n",
+     "class Leaf:\n"
+     "    def __init__(self, k):\n"
+     "        self._k = k\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self._k\n"
+     "\n"
+     "class Mid:\n"
+     "    def __init__(self, inner):\n"
+     "        self._inner = inner\n"
+     "\n"
+     "    def go(self):\n"
+     "        return self._inner.get()\n"
+     "\n"
+     "import sys\n"
+     "def main():\n"
+     "    m = Mid(Leaf(9))\n"
+     "    sys.stdout.write(\"%d\" % m.go())\n"
+     "main()\n"),
+
+    # The lift has to survive a LOOP BODY, because that is where the two
+    # rewrites are furthest apart: `_rewrite_self_fields` runs over the whole
+    # body including every block the CFG splits it into, so a call lifted only
+    # on the straight-line path would still arrive as `self.get(...)` inside the
+    # loop.  `8` is `6+0`, then `6+1`, then `6+2` — the last one written, which
+    # is what a loop that failed to lift would get wrong in a way a single
+    # iteration cannot show.
+    ("aliased_receiver_call_inside_a_loop",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def __init__(out self, v: Int):\n"
+     "        self.v = v\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.v\n"
+     "\n"
+     "struct Box:\n"
+     "    var _leaf: Leaf\n"
+     "\n"
+     "    def __init__(out self, leaf: Leaf):\n"
+     "        self._leaf = leaf\n"
+     "\n"
+     "    def report(self) -> Int:\n"
+     "        var through = 0\n"
+     "        var i = 0\n"
+     "        while i < 3:\n"
+     "            through = self._leaf.get() + i\n"
+     "            i = i + 1\n"
+     "        return through\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box(Leaf(6))\n"
+     "    printf(\"%d\", b.report())\n"
+     "    return 0\n",
+     "class Leaf:\n"
+     "    def __init__(self, v):\n"
+     "        self.v = v\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.v\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self, leaf):\n"
+     "        self._leaf = leaf\n"
+     "\n"
+     "    def report(self):\n"
+     "        through = 0\n"
+     "        i = 0\n"
+     "        while i < 3:\n"
+     "            through = self._leaf.get() + i\n"
+     "            i = i + 1\n"
+     "        return through\n"
+     "\n"
+     "import sys\n"
+     "def main():\n"
+     "    b = Box(Leaf(6))\n"
+     "    sys.stdout.write(\"%d\" % b.report())\n"
+     "main()\n"),
+
+    # THE CONTROL, and the reason the alias had to be taught to the CALL rewrite
+    # rather than left to `_rewrite_self_fields`: a LOCAL holding a one-word
+    # struct is the same alias with a name the call rewrite already read, and it
+    # has to keep working.  `8` is `5 + 1 + 2`.
+    ("local_holding_a_one_word_struct_still_dispatches",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def __init__(out self, v: Int):\n"
+     "        self.v = v\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Leaf(5)\n"
+     "    var b = 1\n"
+     "    var c = 2\n"
+     "    printf(\"%d\", a.get() + b + c)\n"
+     "    return 0\n",
+     "class Leaf:\n"
+     "    def __init__(self, v):\n"
+     "        self.v = v\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.v\n"
+     "\n"
+     "import sys\n"
+     "def main():\n"
+     "    a = Leaf(5)\n"
+     "    b = 1\n"
+     "    c = 2\n"
+     "    sys.stdout.write(\"%d\" % (a.get() + b + c))\n"
+     "main()\n"),
+
     # A `@classmethod`'s receiver is `cls`, and the rule has to thread it as one
     # — but there is NO case for it here, and that is a fact about this path
     # rather than about the rule: reaching a `@classmethod` means naming the
