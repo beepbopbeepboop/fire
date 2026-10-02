@@ -4218,16 +4218,36 @@ def _gen_stmt_WithStmt(gen, node):
             gen._emit(f"  /* with: __enter__ ({struct_name}) */")
             enter_v = ctx_v
             enter_ret_t = et
+        # The item is registered UNCONDITIONALLY, before the `as` binding: the
+        # five lists below are what `_with_emit_exits` walks to emit the
+        # teardown, and what the `has_exit` pre-scan reads to decide whether the
+        # block needs a setjmp-protected region at all. They used to be appended
+        # from inside `if item.alias is not None:`, so `with C():` — no `as` —
+        # appended nothing: `__enter__` was called, the body ran, and NO
+        # `__exit__` was emitted at all. Not a wrong argument, not a missing
+        # `mojo_exc_pop`; no teardown, so every resource with an `__exit__` (a
+        # lock, a temp file, a transaction, a subprocess) leaked per iteration
+        # and `with lock():` wedged every other process that wanted the same
+        # lock. Found on a self-hosted build's publish lock
+        # (bugs/CODEGEN_with_no_as_target_drops_exit.md, deleted with that fix).
+        #
+        # The generator arm above already registered itself before its alias
+        # check, which is why a `@contextmanager` generator used as
+        # `with g(x):` did get its final resume()+destroy(); these five appends
+        # move to the same place so both spellings register, and the pre-scan
+        # and `_with_emit_exits` need no change — they consume exactly these
+        # lists, and index-parallelism is already the convention the generator
+        # arm established.
+        _ctx_ts.append(ctx_t)
+        _ctx_vs.append(ctx_v)
+        _ctx_sns.append(struct_name)
+        _gctx_bases.append(None)   # keep index-parallel
+        _gctx_vs.append(None)
         if item.alias is not None:
             alias = _with_item_alias_name(item.alias)
             if alias not in gen.var_types:
                 gen._declare_var(alias, enter_ret_t)
             gen._safe_coerce_emit(enter_ret_t, gen.var_types[alias], enter_v, alias)
-            _ctx_ts.append(ctx_t)
-            _ctx_vs.append(ctx_v)
-            _ctx_sns.append(struct_name)
-            _gctx_bases.append(None)   # keep index-parallel
-            _gctx_vs.append(None)
 
     has_exit = False
     for _hxi in range(len(_ctx_sns)):

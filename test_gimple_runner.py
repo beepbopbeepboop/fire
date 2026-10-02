@@ -2677,6 +2677,57 @@ def main():
 main()
 """, "4\n299999\n", 40)
 
+    # ── `with C():` with no `as` target still runs `__exit__`
+    # (bugs/CODEGEN_with_no_as_target_drops_exit.md, deleted with that fix).
+    # The five index-parallel lists `_gen_stmt_WithStmt` accumulates per with
+    # item were appended from inside `if item.alias is not None:`, so the
+    # no-`as` spelling registered nothing: `__enter__` was called, the body ran,
+    # and NO teardown was emitted at all — not a wrong `__exit__` argument, no
+    # teardown. On a lock that wedges every other process for the life of the
+    # tree.
+    #
+    # It has to RUN to be a test: the generated C is well-formed either way and
+    # the body's own output is identical, which is why `test_runtime_diff.py`'s
+    # A/B engine comparison cannot see it. `__exit__` prints, so its absence is
+    # in stdout. Both spellings are in one program because the fix is exactly
+    # "the no-`as` spelling registers like the other one", and the loop is here
+    # because a per-iteration teardown leak is what the bug was FOR.
+    test_gimple_stdout("gimple_with_no_as_target_still_calls_exit", """\
+class Lock:
+    def __init__(self, name):
+        self.name = name
+        self.held = 0
+    def __enter__(self):
+        self.held = self.held + 1
+        print("enter", self.name, self.held)
+        return self.held
+    def __exit__(self, t, v, tb):
+        self.held = self.held - 1
+        print("exit", self.name, self.held)
+
+def work():
+    l = Lock("A")
+    with l:
+        print("body no as")
+    with l as n:
+        print("body as", n)
+    print("held after both", l.held)
+
+def loop():
+    for i in range(3):
+        with Lock("B"):
+            print("loop body", i)
+
+def main():
+    work()
+    loop()
+main()
+""", "enter A 1\nbody no as\nexit A 0\nenter A 1\nbody as 1\nexit A 0\n"
+       "held after both 0\n"
+       "enter B 1\nloop body 0\nexit B 0\n"
+       "enter B 1\nloop body 1\nexit B 0\n"
+       "enter B 1\nloop body 2\nexit B 0\n")
+
     # ── An unannotated integer local is 64-bit (bugs/CODEGEN_unannotated_int_local_is_32_bit.md).
     # `var a = 0` used to be a 32-bit `int`, so the accumulator wrapped at 2^31 while
     # `var b: Int = 0` and CPython both reached 6000000000.
@@ -5800,6 +5851,68 @@ def main():
             _FAIL += 1
 
     test_qualified_module_struct_construction()
+
+    # bugs/CODEGEN_unannotated_init_param_field_type_int64_residue.md (deleted
+    # with that fix): the cross-module constructor evidence above types a PARAM,
+    # but the `_xmod_ctor_field_hints` merge applied it to the FIELD whose name
+    # MATCHES the param. So a constructor that stores one param in two fields —
+    # `self.s = s` and `self.n = s` — typed only `self.s`, and `b.n` read back
+    # as a heap address: the same `char *` stored into an `int64_t` slot,
+    # silently wrong, exit 0, and ASLR-varying so no value comparison could ever
+    # pass. The identical class in ONE module was already right, which is what
+    # says the rule (type the param, then every field assigned from it) rather
+    # than "cross-module is hard".
+    #
+    # Both spellings are in one program because the fix is exactly "the second
+    # field types like the first", and CPython is run on the same source so the
+    # expected text is anchored rather than recorded.
+    def _test_cross_module_ctor_param_types_every_field():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "cross_module_ctor_param_types_every_field"
+        defn = ("class Dialog:\n"
+                "    def __init__(self, s):\n"
+                "        self.s = s\n"
+                "        self.n = s\n"
+                "\n"
+                "class Pair:\n"
+                "    def __init__(self, tag):\n"
+                "        self.first = tag\n"
+                "        self.second = tag\n"
+                "        self.of = [tag]\n")
+        use = ("import xmodctor3_defn\n"
+               "\n"
+               "def main():\n"
+               "    b = xmodctor3_defn.Dialog(\"hi\")\n"
+               "    print(b.s)\n"
+               "    print(b.n)\n"
+               "    p = xmodctor3_defn.Pair(\"t\")\n"
+               "    print(p.first)\n"
+               "    print(p.second)\n"
+               "    print(len(p.of))\n"
+               "\n"
+               "main()\n")
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmodctor3_defn.py', defn, 'xmodctor3_use.py', use)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        # `self.of = [tag]` is a list OF the param, not the param: it must stay
+        # a list, which is why this asserts its length rather than its contents.
+        want = "hi\nhi\nt\nt\n1\n"
+        if out == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected {want!r}, got {out!r}")
+            _FAIL += 1
+
+    _test_cross_module_ctor_param_types_every_field()
 
     # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md:
     # two REAL classes sharing a bare name across two modules. The single
