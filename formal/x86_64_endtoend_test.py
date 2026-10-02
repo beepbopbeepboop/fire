@@ -38,10 +38,18 @@ using anything else is reported as uncovered, with the form named, rather than
 skipped silently -- the point is to know what is and is not proved.
 
   Measured 2026-10-01 over all 45 examples: **terminates proved with no sorry
-  15, proved with a sorry 25, no finite tree 5 (4 loops and one uncovered
-  form), failing 0**; value 3 proved and 12 open.  It was 10 / 14 / 19 / 0 and
-  value 3 / 0 when the twenty-odd forms below were wired, so the list of
-  blockers has gone from fourteen names to one.
+  31, proved with a sorry 2, no finite tree 12 (10 loops and two that leave the
+  function), failing 0**; value 3 proved and 12 open.  It was 10 / 14 / 19 / 0
+  and value 3 / 0 when the twenty-odd forms below were wired.
+
+  The `sorry` count fell from 25 to 2 for a reason that is worth stating on its
+  own, because it is a sentence in `X86.lean` that was wrong: the memory
+  separation's inequality was always closedable, and the emitted proof applied
+  the peel `rw` ONCE against an N-deep `mem_write_bytes` chain.  `repeat` in
+  front of it peels every layer, and each layer's side condition is closed over
+  literals.  `simp only [key]` does not work — a conditional rewrite whose
+  side condition `simp` must discharge made no progress at all — while
+  `repeat rw [key _ _ _ _ (by decide)]` peels all of them.
 
   The twenty that came off this list, and the count of examples each was
   blocking, is the useful record of what a lemma is worth -- but note that it
@@ -964,6 +972,27 @@ def _tree(code, info, shapes):
             node = _Node(insn, form, raw, addr, "jmp", state, addr + off)
             node.kids = [build(addr + off, None, depth + 1)]
             return None if node.kids[0] is None else node
+        if form == "call_rel32":
+            # A CALL IS A JUMP, and the tree has to follow the TARGET.  It used
+            # to fall through to `addr + length`, which is the instruction after
+            # the call -- and the model's successor says `rip := (Int.ofNat m + 5
+            # + off).toNat`, so the instruction at `m + 5` is not executed at
+            # all after a call.  The chain went on to step it anyway, and the
+            # step's `rip` side condition is `s.rip = <m + 5>`, which is FALSE;
+            # `simp` turned that into `False`, the guard admitted it, and the
+            # proof carried a `sorry` from the instruction after the call
+            # onwards -- eight examples, silently, with `failing` at 0.
+            #
+            # That is B22's lesson (a form with a lemma conceals the state of
+            # everything after it) with the concealment on the other side: the
+            # lemma was right, the TREE was wrong, and only the sorry count said
+            # so.  `count`, `fact`, `fib`, `pow2`, `sqsum` and `sum` are the
+            # six that recurse, so their target is a back edge and the honest
+            # answer is `loops`; the non-recursive callers get a real proof.
+            off = int.from_bytes(raw[1:5], "little", signed=True)
+            node = _Node(insn, form, raw, addr, "jmp", state, addr + 5 + off)
+            node.kids = [build(addr + 5 + off, None, depth + 1)]
+            return None if node.kids[0] is None else node
         if form == "ret":
             return _Node(insn, form, raw, addr, "ret", state, None)
         node = _Node(insn, form, raw, addr, "seq", state, addr + insn.length)
@@ -1149,7 +1178,7 @@ def emit(path, expected):
     a("    simp [%s, i0, X86State.init, x86_flags_sub, x86_flags_add," % hs)
     a("      x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r, x86_flags_logic,")
     a("      x86_mem_addr, x86_trunc32] <;>")
-    a("    try (rw [key _ _ _ _ (by first | decide | omega)]) <;>")
+    a("    try (repeat rw [key _ _ _ _ (by first | decide | omega)]) <;>")
     a("    try (simp only [mem_read_bytes, ite_true]) <;>")
     a("    first | decide | omega")
     a("    all_goals sorry")
@@ -1296,7 +1325,7 @@ def emit_terminates(path):
                  % hs)
             emit("    x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r%s] <;>"
                  % case_simp)
-            emit("  try (rw [key _ _ _ _ (by first | decide | omega)]) <;>")
+            emit("  try (repeat rw [key _ _ _ _ (by first | decide | omega)]) <;>")
             emit("  try (simp only [mem_read_bytes, ite_true]) <;>")
             emit("  first | decide | omega")
             emit("  all_goals sorry")
@@ -1355,6 +1384,13 @@ def _has_loop(path):
     is out of its reach -- and that is a limit of the method rather than a
     proof that stopped working, so it is reported as uncovered rather than as a
     failure.  A back edge is any branch whose target is at or before itself.
+
+    `call rel32` counts, and it used not to.  That omission is why the six
+    recursive examples read `no tree: body loops, or branches out of the
+    function` -- the tree's own message, which names two very different reasons
+    -- instead of `loops`.  A recursive call's target is a back edge in exactly
+    the sense of the sentence above, so `count`, `fact`, `fib`, `pow2`, `sqsum`
+    and `sum` are loops and say so.
     """
     r = B.compile_formal(path, prove=False, check=False, arch="x86_64")
     code, info = r["code"], r["info"]
@@ -1363,7 +1399,7 @@ def _has_loop(path):
         return False
     for i in insns:
         raw = code[i.offset:i.next_offset]
-        if i.form == "jmp_rel32":
+        if i.form in ("jmp_rel32", "call_rel32"):
             if 5 + int.from_bytes(raw[1:5], "little", signed=True) <= 0:
                 return True
         elif i.form == "jcc_rel32":

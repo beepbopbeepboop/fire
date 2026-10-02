@@ -21,28 +21,29 @@ Bug numbers (`B1`…`B23`) are this doc's own, for cross-reference.
 |---|---|---|
 | `formal/x86_64_model_test.py` — model vs hardware | 43/43 agree | 43/43 agree (untouched) |
 | `formal/x86_64_model_coverage_test.py` | 151 samples over 57 forms, all steppable | 151/57, plus **step-lemma APPLICABILITY** at 17 lemmas x 38 real encodings, 354 hypotheses |
-| `formal/x86_64_endtoend_test.py` — terminates, no sorry | **10** | **15** |
-| `formal/x86_64_endtoend_test.py` — terminates, a sorry | 14 | 25 |
-| no finite path tree | 19 (4 loop, 15 uncovered form) | **5** (4 loop, **1** uncovered form) |
+| `formal/x86_64_endtoend_test.py` — terminates, no sorry | **10** | **31** |
+| `formal/x86_64_endtoend_test.py` — terminates, a sorry | 14 | **2** |
+| no finite path tree | 19 (4 loop, 15 uncovered form) | **12** (10 loop, 2 not) |
 | value theorem — every input, `rax` a fixed constant | 3 proved | 3 proved, 12 open (reported by reason) |
 | failing | 0 | **0** |
 
-The shape of the change is that **coverage stopped being the bottleneck and the
-proofs started being it.** Fifteen forms were wired and each one bought a path
-tree; the eleven examples that gained one carry the same memory-separation
-`sorry` every other spilling function already did, which is why the `sorry`
-count went up while the no-`sorry` count went up by more.
+The shape of the change is **two bottlenecks, in the order they appeared.**
+Fifteen forms were wired, which is most of the coverage work, and that exposed
+the second one: B18's memory separation was NOT a research problem. One word —
+`repeat` in front of the `rw` that peels a write out of a read's chain — took
+`terminates proved with no sorry` from 15 to 31 and the `sorry` count from 25 to
+2. See the entry below; the doc's own claim that the inequality "is not closed"
+was wrong, and wrong in the same way as most claims in this file that were never
+run.
 
-The 4 loops and the 25 sorries are unchanged and are the real work left, along
-with the one uncovered form (`group3:idiv`, whose obstacle is the model's
-step being PARTIAL rather than anything about wiring). See **Open, in the order
-I would take them** below for all three with the measurements behind them.
+What is left is 10 loops, 2 examples whose tree leaves the function, and 2
+sorries. See **Open, in the order I would take them** below for all of them.
 
 Two theorems of very different strength, and the gap between them is the whole
 story of B21. The value theorem is the stronger statement but can only be
 *formulated* for the examples whose result does not depend on their input, so it
 proves for 3. The termination theorem makes no claim about the value and covers
-40 — and `identity` is the example that shows why it is the one to chase: it
+33 — and `identity` is the example that shows why it is the one to chase: it
 returns its argument, so the value theorem can never say anything about it, and
 here it is proved.
 
@@ -518,14 +519,76 @@ from the SOURCE (`udivmod` compares `r11` against zero immediately before the
 Until that exists, `udivmod` has one uncovered form and the other 44 examples
 are covered.
 
-**The 25 sorries** (B18): the symbolic `mem_write_bytes` separation inequalities.
-The count went UP because eleven examples that had no tree at all now have one
-and carry the same sorry every other spilling function does. Nothing here made
-the separation harder; there are just eleven more functions to be hard about.
+**B18 WAS WRONG, and the fix is one word.** The entry above says the
+memory-separation inequalities "are not closed", that `decide` reports `Expected
+type must not contain free variables` "which names the tactic rather than the
+inequality that would have closed it", and that this is "the sole reason 14
+termination proofs carry a sorry". The inequality was always closedable and the
+tactic was always the right one; the emitted proof applied it **once**:
 
-**The 4 loop examples** — `countdown`, `sum_range`, `wdiff`, `wge`. No finite
-path tree, because the chain walks one straight line; these need induction over
-the back edge. A limit of the method as built, not a proof failure.
+```lean
+try (rw [key _ _ _ _ (by first | decide | omega)]) <;>
+```
+
+`rw` rewrites ONE occurrence. The goal is a `mem_write_bytes` chain N deep, and
+peeling the outermost write exposes the next one — so `rw` fired once, the rest
+of the chain survived, and `all_goals sorry` admitted the remainder. That is the
+whole bug, and it was invisible for the reason B21 describes: the report said
+"proved, 1 sorry", which is a gap, and the gap looked like a limitation.
+
+```lean
+try (repeat rw [key _ _ _ _ (by first | decide | omega)]) <;>
+```
+
+Every peel's side condition is `a + 8 <= b` over CLOSED literals — the frame is
+allocated at a literal offset and the closing read is at the exit sentinel — so
+`decide` closes each one and `repeat` runs until there is no write left. **The
+depth of the chain does not matter and never did.** Measured, same 45 examples,
+same chain, same lemmas: **15 -> 31 proved with no sorry, 25 -> 2 with a sorry.**
+
+The lesson is the file's own, arriving from a new direction: **`simp only
+[key]` does not work and `repeat rw [key]` does.** A conditional rewrite whose
+side condition `simp` has to discharge by `Decidable` made *no progress at all*
+on these goals, while `rw` with an explicit `by decide` peels every layer. The
+two look equivalent and are not.
+
+**The 2 remaining sorries, and they are different problems.**
+
+* `wide_recv` — the residual goal contains a `mem_read_bytes` whose ADDRESS is
+  itself a `mem_read_bytes`: `mem_read_bytes (… .toNat) 8`, where the inner read
+  loaded a pointer out of the frame. So `b` is not a literal, `a + 8 <= b` has no
+  `decide` to give it, and no amount of repeating helps. This is the real form of
+  B18, and closing it needs the separation lemma parameterised over a symbolic
+  address with the inner read's own separation supplied — a two-level statement,
+  not a repeat count.
+* `augassign` — a single admitted SIDE CONDITION on a `mov rax, [rsp]` step (the
+  SIB form), not a `hrip`. `simp [read_i32_le, read_i8, hb]` reports `False`, so
+  one of that instruction's byte facts is not in `all_bytes`. Worth ten minutes:
+  it is the only remaining case where the report cannot say which of the two
+  kinds of sorry this is.
+
+**The 10 loop examples** — `countdown`, `sum_range`, `wdiff`, `wge`, and the six
+RECURSIVE ones (`count`, `fact`, `fib`, `pow2`, `sqsum`, `sum`). The chain walks
+one straight line, so a back edge has no finite unfolding; these need induction
+over it. A limit of the method as built, not a proof failure.
+
+The six recursive ones are in this list because of a second bug, and the way it
+presented is worth recording. The path tree treated `call rel32` as a
+**fall-through** rather than a jump, so after a call it stepped the instruction
+at `m + 5` — which the model's own successor says is never executed, because the
+call's `rip` is `m + 5 + off`. That step's `rip` side condition was therefore
+false, `simp` turned it into `False`, the guard admitted it, and **six examples
+reported `terminates: proved, 1 sorry` while proving a chain that walks code the
+machine does not run.** `failing` was 0 throughout. Following the target fixes
+the tree and moves all six to `loops`, where they belong; `_has_loop` had to
+learn that a recursive call is a back edge too, or they read `no tree: body
+loops, or branches out of the function`, which names two different reasons.
+
+This is B22 again — one wrong thing conceals the state of everything after it —
+and it is worth contrasting with B22's own case, because here the concealment ran
+the other way. B22: a MISSING lemma hides a side condition. This: a CORRECT lemma
+hides a wrong tree. A green file with a `sorry` in it is the signature of both,
+and neither one shows up as a failure.
 
 **The value theorem's 12 open**, and why it went UP from 0: eleven of them are
 examples whose result **is** input-independent and whose proof could not be
