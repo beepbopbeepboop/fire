@@ -300,6 +300,12 @@ def _reset_func(gen, body: list = None, params: list = None,
     # temp-name string in it (2.7M strings on `--dump-full fire.py`).
     gen._cstr_key_src.clear()
     gen._kw_key_src.clear()
+    # Same reason as the two above: temp names repeat across functions, so a
+    # stale entry would mark some other function's `_t3` as a known integer.
+    # A miss here is harmless (the value falls back to the runtime's own
+    # discriminator, i.e. today's behaviour) which is what makes this table
+    # safe to seed only where the answer is provable.
+    gen._int_word_vals.clear()
     gen._fresh_vals.clear()   # per function: temp names repeat across functions
     # The four the ownership work added are ASSIGNED here rather than cleared,
     # and the difference is not a style choice: they are not in
@@ -1678,7 +1684,12 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 cv = aval if atype == 'char' else gen._new_val('char', f'(char){aval}')
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                 coerced_args.append(sv)
-            else:
+            elif actual_atype.endswith(' *'):
+                # A pointer the codegen POSITIVELY knows this value holds
+                # (`_actual_types` / `_global_var_types` recorded a pointer
+                # type), just spelled `int64_t` here. Round-trip the bits,
+                # exactly as before: the value really is a pointer, so the
+                # cast is the identity it has always been.
                 vp = gen._new_temp('void *')
                 cp = gen._new_temp('char *')
                 if atype in ('int',):
@@ -1688,6 +1699,67 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                     gen._emit(f'  {vp} = (void *){aval};')
                 gen._emit(f'  {cp} = (char *){vp};')
                 coerced_args.append(cp)
+            else:
+                # An UNTRACKED int64_t going into a `char *` parameter.
+                #
+                # `char *` IS this dialect's string slot: `_TYPE_MAP` maps
+                # only `str`/`String` to it (`*UInt8` and friends resolve to
+                # `uint8_t *`, `None` to `void *`), so a parameter spelled
+                # `char *` is a STRING parameter and the callee will hand
+                # the word to strlen/strcmp. The annotation is a static
+                # PROMISE codegen used to take literally by bit-reinterpreting
+                # whatever integer arrived: `Dialog(5)` on
+                # `def __init__(self, widgetName: str)` emitted
+                # `(char *)(void *)(int64_t)5`, and `mojo_print` then
+                # `strlen`ed address 5 -- SIGSEGV, exit -11, no output at
+                # all (bugs/CODEGEN_annotated_str_param_given_an_int_
+                # segfaults.md). In Python a parameter annotation is
+                # documentation, not a cast: `Dialog(5)` is legal and prints
+                # `5`.
+                #
+                # So this is not a place the codegen may decide: in this
+                # compiler's scalar body model an int64_t and a `char *` are
+                # the same 64 bits, and an untracked word is genuinely
+                # ambiguous -- it is a real string handle far more often
+                # than not (a lambda parameter, an erased dict value, a
+                # getattr result all arrive here with their pointer bits and
+                # nothing recorded, and that by-value handle pass-through is
+                # load-bearing for the self-host's own compilation).
+                # `mojo_cstr_or_int_str` is the model's OWN answer to exactly
+                # this question -- it is what `_char_to_cstr` already routes
+                # every other int64_t-used-where-a-string-is-needed through --
+                # and it is safe in BOTH directions rather than right in
+                # only one: a real boxed `char *` comes back as the very same
+                # address (the cast's own result), and a genuine integer
+                # comes back as its decimal, which is what CPython prints.
+                #
+                # Deliberately NOT registered with `_cstr_key_src`, so the
+                # `mojo_cstr_or_int_release` protocol does not reclaim it:
+                # the callee may STORE the pointer (`self.widgetName =
+                # widgetName`), and releasing a string the value kept is a
+                # use-after-free. The int case therefore keeps its one
+                # block, which is this runtime's documented no-free model for
+                # a kept string (`mojo_str_from_int`'s own comment) and only
+                # happens on the path that used to be a SIGSEGV.
+                iv = (aval if atype == 'int64_t'
+                      else gen._new_val('int64_t', f'(int64_t){aval}'))
+                if aval in getattr(gen, '_int_word_vals', ()):
+                    # ...unless the codegen PROVABLY knows this word is an
+                    # integer, in which case there is no question to ask and
+                    # `mojo_cstr_or_int_str`'s own range test must not be
+                    # consulted at all: `mojo_boxed_is_str` calls every
+                    # positive int64 in [2^31, 2^47) a pointer, so
+                    # `Dialog(3000000000)` would still `strlen` address
+                    # 3000000000. `mojo_str_from_int` is that function's own
+                    # unconditional integer half, and the KEPT variant rather
+                    # than the transient one because the callee owns this
+                    # string (see the release note above).
+                    sv = gen._call_expr('char *', 'mojo_str_from_int',
+                                        [('int64_t', iv)])
+                else:
+                    sv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                        [('int64_t', iv)])
+                coerced_args.append(sv)
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain
             # scalar-typed value. TWO unrelated situations reach this one
@@ -2172,6 +2244,35 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         # loop no longer leaks one string per access. A caller that stores
         # the pointer, or reuses it across several calls, must not pass it.
         if transient and word_ok:
+            if val in getattr(gen, '_int_word_vals', ()):
+                # This codegen PROVABLY knows the word is an integer (see
+                # `gen._int_word_vals`), so it supplies the answer instead of
+                # asking the runtime to work it out — which is the whole
+                # point: `mojo_boxed_is_str` is a range test, so it calls
+                # every positive int64 in [2^31, 2^47) a pointer and the `_kw`
+                # twin dereferenced it. `d[3000000000] = 1` was a SIGSEGV,
+                # at -O0, -O2 and under ASan alike.
+                #
+                # So render the decimal and use the ORDINARY dict entry
+                # point, exactly as this function already does for a
+                # non-transient key. That is not a demotion: the dict
+                # re-normalises the text through `_canon_int`, so `d[5]` and
+                # `d["5"]` stay the one integer slot they have always been
+                # and `d[3000000000] = 1` finds what it stored. It costs a
+                # format the `_kw` twin skips — that is the price of not
+                # guessing, paid only where guessing was wrong.
+                #
+                # Transient, same as every other key here: the block comes
+                # from the same pool and is released by
+                # `_release_transient_cstr_args` right after the one call
+                # that consumes it, so an Int-keyed dict in a hot loop still
+                # leaks nothing.
+                iv = (val if typ == 'int64_t'
+                      else gen._new_val('int64_t', f'(int64_t){val}'))
+                ikey = gen._call_expr('char *', 'mojo_int_str_transient',
+                                     [('int64_t', iv)])
+                gen._cstr_key_src[ikey] = val
+                return 'char *', ikey
             # A dict operation's key that is an untracked int64_t: hand the
             # consumer the raw machine WORD instead of a string. `_emit_call`
             # turns the dict call into its `_kw` twin, which decides string vs

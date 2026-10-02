@@ -123,9 +123,17 @@ def lower_expr(gen, node) -> tuple[str, str]:
 def _lower_IntLiteral(gen, node) -> tuple[str, str]:
     value = _signed_int64(_as_intlit_node(node).value)
     if -0x80000000 <= value <= 0x7FFFFFFF:
-        return 'int', str(value)
+        _iv = str(value)
+        # An integer literal is the ONE value whose type needs no inference:
+        # it cannot be a pointer, at any magnitude. Recorded so a consumer
+        # that would otherwise ask the runtime to guess can be told (see
+        # `gen._int_word_vals`), which is what makes `d[3000000000] = 1` a
+        # dict write instead of a `strcmp` of address 3000000000.
+        gen._int_word_vals.add(_iv)
+        return 'int', _iv
     t = gen._new_temp('int64_t')
     gen._emit(f"  {t} = {_signed_int64_c_literal(value)};")
+    gen._int_word_vals.add(t)
     return 'int64_t', t
 
 

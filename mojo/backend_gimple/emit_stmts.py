@@ -640,6 +640,17 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
     char/string dispatch. See bugs/CODEGEN_selfhost_actual_types_
     identifier_field_key.md for the still-open general form of this."""
     tname = _as_str(tname)
+    # The complement of everything below: carry the POSITIVE integer record
+    # across the assignment, so `k = 3000000000` then `d[k]` is still known
+    # to be an integer at the dict site rather than handed to the runtime's
+    # range-only discriminator (see `gen._int_word_vals`). `discard` on the
+    # other branch is what keeps this sound rather than optimistic — `k = "s"`
+    # later must NOT leave `k` marked, and every RHS this codegen cannot
+    # vouch for takes that branch.
+    if v in gen._int_word_vals:
+        gen._int_word_vals.add(tname)
+    else:
+        gen._int_word_vals.discard(tname)
     if dst != 'int64_t':
         if v in gen._struct_field_owners:
             gen._struct_field_owners[tname] = list(gen._struct_field_owners[v])
