@@ -426,12 +426,31 @@ _SUCCS = {
         "{ $s with rip := if x86_cond $cc $s = true then $tgt else $fall }",
     "jmp_rel32":
         "{ $s with rip := $tgt }",
-    # Transcribed from `x86_step_call_rel32`'s conclusion (lib/X86.lean:720),
-    # with `$tgt`/`$ret` supplied as literals by the decode branch above.
+    # Transcribed from `x86_step_call_rel32`'s conclusion (lib/X86.lean:757),
+    # and quoting the MODEL'S expressions for its two addresses rather than
+    # pre-computing them as literals the way the `jmp`/`jcc` rows above do.
+    #
+    # That difference is the whole reason this row needed changing, and it is
+    # not a style preference.  The lemma's conclusion carries
+    # `(Int.ofNat m + 5 + off).toNat` and `UInt64.ofNat (m + 5)`; a successor
+    # carrying the literals `4294967826` and `4294967984` is the SAME record up
+    # to those two fields, so closing the step is an `isDefEq` that has to
+    # evaluate the arithmetic -- and inside a 22-field structure whose `mem` is
+    # a `Nat -> UInt8` function, the congruence check gives up and reports
+    #
+    #     Type mismatch
+    #
+    # with both sides printed in full and neither of them naming the field that
+    # differs.  Quoting the model's expressions makes the two records
+    # syntactically identical, so the step closes by `rfl` with no arithmetic
+    # to do at all.  The literal would then be recovered where it is actually
+    # needed, by the NEXT step's `rip` side condition, and `simp` does fold
+    # `(Int.ofNat 4294967979 + 5 + (-158)).toNat` to `4294967826` -- checked,
+    # not assumed.
     "call_rel32":
-        "{ $s with rip := $tgt, rsp := $s.rsp - 8, mem := "
-        "mem_write_bytes $s.mem ($s.rsp - 8).toNat "
-        "(UInt64.ofNat $ret) 8 }",
+        "{ $s with rip := (Int.ofNat $m + 5 + $off).toNat, rsp := $s.rsp - 8, "
+        "mem := mem_write_bytes $s.mem ($s.rsp - 8).toNat "
+        "(UInt64.ofNat ($m + 5)) 8 }",
     "setcc":
         "{ x86_set_reg $s $rmv (if x86_cond $cc $s then 1 else 0) with"
         " rip := $next }",
@@ -667,7 +686,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     elif form == "jcc_rel32":
         op2 = raw[1]
         off = int.from_bytes(raw[2:6], "little", signed=True)
-        extra_args = " %d %d %d" % (op2, op2 - 0x80, off)
+        extra_args = " %d %d (%d)" % (op2, op2 - 0x80, off)
         # The two successors as LITERAL addresses.  The model's own form is
         # `(Int.ofNat m + 6 + off).toNat`, and `simp` does not reduce that
         # `Int` arithmetic, so the taken address never becomes a numeral and
@@ -676,16 +695,18 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
                       "$tgt": str(addr + 6 + off), "$fall": str(addr + 6)}
     elif form == "jmp_rel32":
         off = int.from_bytes(raw[1:5], "little", signed=True)
-        extra_args = " %d" % off
+        extra_args = " (%d)" % off
         extra_succ = {"$off": str(off), "$tgt": str(addr + 5 + off)}
     elif form == "call_rel32":
         # Same reason as jmp_rel32 above, plus one more: a call has TWO
         # addresses -- the target it branches to, and the return address it
         # PUSHES. The pushed value is `UInt64.ofNat (m + 5)`, i.e. `$ret`.
         off = int.from_bytes(raw[1:5], "little", signed=True)
-        extra_args = " %d" % off
-        extra_succ = {"$off": str(off), "$tgt": str(addr + 5 + off),
-                      "$ret": str(addr + 5)}
+        extra_args = " (%d)" % off
+        # `$off` parenthesised, and the address literals dropped: the successor
+        # quotes the model's own expression (see `_SUCCS`), and `$tgt`/`$ret`
+        # would only be substituting pre-computed arithmetic for it.
+        extra_succ = {"$off": "(%d)" % off}
     elif form == "setcc":
         op2, modrm = raw[1], raw[2]
         extra_args = " %d %d %d %d" % (op2, modrm, op2 - 0x90, modrm & 7)
@@ -732,7 +753,13 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         extra_succ.update(disp_succ)
     call = "%s %s rc %d%s" % (lemma, prev, addr, extra_args)
     if takes_imm:
-        call += " %d" % imm
+        # Parenthesised, always, not only when negative.  Lean's application is
+        # left-associative, so an unparenthesised negative literal swallows the
+        # first hypothesis that follows it: `x86_step_call_rel32 s rc m -158 (by
+        # …)` is `x86_step_call_rel32 s rc m - (158 (by …))`, and the error is
+        # "Function expected at 158" -- which names neither the form, nor the
+        # instruction, nor the argument, in a file with one instruction per step.
+        call += " (%d)" % imm
     call += " " + " ".join(sc)
     # Every placeholder is substituted in ONE pass, from a single table.  It
     # used to be positional -- `$s` and `$m` first, then the `extra_succ`
