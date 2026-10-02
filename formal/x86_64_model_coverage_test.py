@@ -265,6 +265,29 @@ def _rex_0f_mod3_hyps(addr, rex, modrm, reg, rm, dst, op2):
     ]
 
 
+def _alu_rr_hyps(addr, rex, modrm, opcode):
+    """Hypotheses for `REX.W <opcode> /r` mod=3, concretised.
+
+    The `01 /r` family, which is where `add`, `sub`, `cmp`, `test` and the three
+    logic forms all live.  There is no destination argument here — the
+    destination is the rm field extended by REX.B, and `x86_set_reg` on that
+    index appears identically on both sides of these lemmas, so nothing has to
+    be resolved to a literal for them (unlike the 0x-escape forms above).
+    """
+    b = "(%d : UInt8).toNat" % modrm
+    return [
+        "s.rip = %d" % addr,
+        "code %d = %d" % (addr, rex),
+        "code %d = %d" % (addr + 1, opcode),
+        "code %d = %d" % (addr + 2, modrm),
+        "x86_is_rex %d = true" % rex,
+        "x86_rex_w %d = true" % rex,
+        "%s >>> 6 = 3" % b,
+        "(%s >>> 3) &&& 7 = %d" % (b, (modrm >> 3) & 7),
+        "%s &&& 7 = %d" % (b, modrm & 7),
+    ]
+
+
 def step_lemmas():
     """Every step lemma this test holds to the applicability check above."""
     R = X.Reg
@@ -284,6 +307,21 @@ def step_lemmas():
             enc,
             _rex_0f_mod3_hyps(BASE + 16 * len(out), rex, modrm, reg, rm, d,
                               0xbe)))
+    # The three logic ALU forms, at register pairs that exercise BOTH REX
+    # extension bits and neither.  The corpus only ever emits `4c 2?/0?/3? d8`
+    # -- `and rax, rbx` and nothing else -- so a check written from the corpus
+    # would pass a lemma that is wrong for R12/R15, which is the trap B7 is
+    # about and the reason these are stated generally in the first place.
+    for name, enc_fn, opcode in (("and", X.encode_and_r64_r64, 0x21),
+                                 ("or", X.encode_or_r64_r64, 0x09),
+                                 ("xor", X.encode_xor_r64_r64, 0x31)):
+        for dst, src in _reg_pairs():
+            enc = enc_fn(dst, src)
+            out.append(Lemma(
+                "x86_step_%s_rr" % name,
+                "%s %s, %s" % (name, dst.name, src.name),
+                enc,
+                _alu_rr_hyps(BASE + 16 * len(out), enc[0], enc[2], opcode)))
     return out
 
 

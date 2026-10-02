@@ -1231,10 +1231,93 @@ theorem x86_step_sub_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
         x86_flags_sub,
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
 
+/-! The three LOGIC ALU forms -- `and` (0x21), `or` (0x09), `xor` (0x31) -- as
+    three theorems rather than one.
+
+    One theorem is the obvious thing to reach for and it does not work, which
+    is worth stating because the model's own arm IS one arm for all three:
+    `res` there is `if op = 0x09 then a ||| b else if op = 0x21 then a &&& b
+    else if op = 0x31 then a ^^^ b else a &&& b`, and a single theorem about
+    that chain has to either state the chain (so every caller inherits an `if`
+    it cannot reduce, and has to prove which arm it is in all over again) or
+    take the result as an argument and a hypothesis that it is the right arm
+    (so the caller supplies a fact that is false for two of the three opcodes).
+    Three theorems over a literal opcode byte is the shape `add_rr`/`sub_rr`
+    above already use, and it keeps each successor a plain term.
+
+    What the three have in common is the FLAGS, and that is the reason they are
+    siblings rather than six unrelated lemmas: `and`, `or` and `xor` all compute
+    ZF and SF from the result and clear CF and OF, so the successor is the same
+    four expressions with a different operator on the value.  In the model that
+    is literally `x86_flags_logic`, computed once on the pre-write state and
+    then re-asserted over the written-back one -- `add` above is the same shape
+    and `x86_step_add_rr`'s note says so. -/
+
+/-- `and r64, r64` (REX.W 21 /r, mod=3), general over both registers.
+
+    The DESTINATION is the rm field (+REX.B) and the SOURCE is the reg field
+    (+REX.R), which is the opposite sense to `mov` and the reason the parameter
+    names here are the encoding's. -/
+theorem x86_step_and_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x21)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) &&& (x86_get_reg s (reg + x86_rex_r rex))) with
+        rip := m + 3,
+        zf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& (x86_get_reg s (reg + x86_rex_r rex)))).zf,
+        sf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& (x86_get_reg s (reg + x86_rex_r rex)))).sf,
+        cf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& (x86_get_reg s (reg + x86_rex_r rex)))).cf,
+        of_ := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& (x86_get_reg s (reg + x86_rex_r rex)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+/-- `or r64, r64` (REX.W 09 /r, mod=3). -/
+theorem x86_step_or_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x09)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) ||| (x86_get_reg s (reg + x86_rex_r rex))) with
+        rip := m + 3,
+        zf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ||| (x86_get_reg s (reg + x86_rex_r rex)))).zf,
+        sf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ||| (x86_get_reg s (reg + x86_rex_r rex)))).sf,
+        cf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ||| (x86_get_reg s (reg + x86_rex_r rex)))).cf,
+        of_ := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ||| (x86_get_reg s (reg + x86_rex_r rex)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+/-- `xor r64, r64` (REX.W 31 /r, mod=3). -/
+theorem x86_step_xor_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x31)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) ^^^ (x86_get_reg s (reg + x86_rex_r rex))) with
+        rip := m + 3,
+        zf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ^^^ (x86_get_reg s (reg + x86_rex_r rex)))).zf,
+        sf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ^^^ (x86_get_reg s (reg + x86_rex_r rex)))).sf,
+        cf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ^^^ (x86_get_reg s (reg + x86_rex_r rex)))).cf,
+        of_ := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ^^^ (x86_get_reg s (reg + x86_rex_r rex)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
 /-! `mov r64, r/m64` in its two shapes.  These two cover every instance the
-backend emits -- 170 across the examples, and `mov_r64_rm64` was the single
-form blocking the most end-to-end proofs, so it is worth having the general
-version rather than the one-register-pair instances above. -/
+    backend emits -- 170 across the examples, and `mov_r64_rm64` was the single
+    form blocking the most end-to-end proofs, so it is worth having the general
+    version rather than the one-register-pair instances above. -/
 
 /-- `mov r64, r64` register to register (REX.W 8B /r, mod=3), general over both
     registers and over the REX bits that extend either of them.

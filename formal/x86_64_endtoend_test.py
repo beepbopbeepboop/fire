@@ -167,6 +167,17 @@ _FORMS = {
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:sub": ("x86_step_sub_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    # Three theorems rather than one, for the reason `lib/X86.lean` gives: the
+    # model has ONE arm for all three and its result is an `if` chain on the
+    # opcode, so one theorem would hand every caller that chain back.  The
+    # flags are identical across the three (`x86_flags_logic`), which is why
+    # they are siblings rather than three unrelated forms.
+    "alu_rr:and": ("x86_step_and_rr", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    "alu_rr:or": ("x86_step_or_rr", False,
+                  ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    "alu_rr:xor": ("x86_step_xor_rr", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "jcc_rel32": ("x86_step_jcc_rel32", False,
                   ["rip", "b0", "b1", "cc", "off", "lo", "hi", "nsetcc_lo",
                    "nzx", "notrex"]),
@@ -271,6 +282,14 @@ _SUCCS = {
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fa).zf, sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
     "alu_rr:sub":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fs).zf, sf := ($fs).sf, cf := ($fs).cf, of_ := ($fs).of_ }",
+    # `and`/`or`/`xor` share the shape above and differ only in the operator,
+    # which `$res` supplies; the flags are `x86_flags_logic` on the same value.
+    "alu_rr:and":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
+    "alu_rr:or":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
+    "alu_rr:xor":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
     # `= true` explicitly.  The model's `if` is over a `Bool`, and the
     # `by_cases` hypothesis is an equation about a `Prop`; writing the condition
     # the same way on both sides is what lets the hypothesis rewrite it.  It is
@@ -428,7 +447,8 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         extra_succ = {"$rex": str(rex), "$reg": str(reg), "$rm": str(rm),
                       "$dst": str(dst)}
     elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg", "alu_rr:add",
-                "alu_rr:sub", "alu_rr:cmp", "alu_rr:test"):
+                "alu_rr:sub", "alu_rr:cmp", "alu_rr:test", "alu_rr:and",
+                "alu_rr:or", "alu_rr:xor"):
         rex, modrm = raw[0], raw[2]
         extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7, modrm & 7)
         oa = "(x86_get_reg $s (%d + x86_rex_b $rex))" % (modrm & 7)
@@ -442,6 +462,14 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             extra_succ["$fa" if op == "+" else "$fs"] = (
                 "x86_flags_%s $s %s %s %s"
                 % ("add" if op == "+" else "sub", oa, ob, res))
+        elif form in ("alu_rr:and", "alu_rr:or", "alu_rr:xor"):
+            # `&&&`, `|||` and `^^^` in Lean, not the Python spellings the
+            # encoder uses (`&`, `|`, `^`).  The three share `x86_flags_logic`
+            # on the same value, which is why `$fl` is one name for all of them.
+            sym = {"and": "&&&", "or": "|||", "xor": "^^^"}[form.split(":")[1]]
+            res = "(%s %s %s)" % (oa, sym, ob)
+            extra_succ["$res"] = res
+            extra_succ["$fl"] = "x86_flags_logic $s %s" % res
         elif form == "alu_rr:cmp":
             extra_succ["$fc"] = "x86_flags_sub $s %s %s (%s - %s)" % (
                 oa, ob, oa, ob)
@@ -633,6 +661,11 @@ def _tree(code, info, shapes):
     return root
 
 
+def _nodes(node):
+    """How many instructions the tree holds, both arms of every fork included."""
+    return 1 + sum(_nodes(k) for k in node.kids)
+
+
 def _paths(node, acc=None):
     """Every root-to-`ret` path in the tree, as lists of nodes."""
     acc = [] if acc is None else acc
@@ -653,16 +686,32 @@ def _byte_list(insns, code, base):
     return out
 
 
-def _header(code, insns, base):
-    """The import, the code function, and every byte as a fact."""
+def _header(code, insns, base, steps):
+    """The import, the code function, and every byte as a fact.
+
+    `steps` is how many step equations the file below will introduce, and it
+    buys the second option below.
+    """
     # A heartbeat budget.  The `hrip` step at the end of each path is one `simp`
     # over every successor equation on that path, and on the longer ones that is
     # a real amount of work: the default budget reports "deterministic timeout"
     # and the theorem is fine.  A timeout is NOT catchable by `try`, so the
     # `try`-guarded block below does not help here and the budget is the only
     # lever -- hence raising it rather than guarding.
+    #
+    # `maxRecDepth` is the other half of the same step, and it is a LIMIT rather
+    # than an allocation, so raising it costs nothing when it is not needed.  The
+    # default is 1000, and it is the closing `simp` that runs out rather than any
+    # single step: its term nests one successor equation per instruction, so the
+    # depth it needs grows with the length of the function and a constant would
+    # be a constant that is wrong again at the next example.  Measured on
+    # `bitops`, 44 steps, the first two words that go through are 1200 and 2000
+    # and 1000 fails -- about 27 per step, so 40 is the factor used here, with
+    # the default as the floor for the short ones that never needed it.
+    depth = max(1000, 40 * max(steps, 1))
     out = ["import X86\n",
            "set_option maxHeartbeats 4000000\n",
+           "set_option maxRecDepth %d\n" % depth,
            "def rc (addr : Nat) : UInt8 :=",
            "  if addr < %d then 0 else" % base,
            "  ([%s].getD (addr - %d) 0)\n"
@@ -715,7 +764,7 @@ def emit(path, expected):
     """
     code, info, insns, shapes = _plan(path)
     base, entry = info["base_addr"], info["func_offset"]
-    L = _header(code, insns, base)
+    L = _header(code, insns, base, len(shapes))
     a = L.append
     a("/-- For EVERY input: the model runs this image to the exit pc and leaves")
     a("    `%d` in `rax`.  Proved, not asserted. -/" % expected)
@@ -790,7 +839,11 @@ def emit_terminates(path):
     root = _tree(code, info, shapes)
     if root is None:
         raise ValueError("body loops, or branches out of the function")
-    out = _header(code, insns, base)
+    # Every node in the tree, which is an upper bound on the length of any one
+    # path and so on the depth the closing `simp` at each `ret` will need.  Both
+    # arms of a fork are counted, which over-counts; the option is a limit, so
+    # over-counting only ever costs headroom nobody uses.
+    out = _header(code, insns, base, _nodes(root))
     out.append("/-- For EVERY input, the model runs this image to the exit pc.\n"
                "    No `sorry`: the path tree is walked once per branch outcome. -/")
     out.append("theorem terminates (n : UInt64) :")
