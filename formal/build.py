@@ -11312,7 +11312,11 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
     # module's source with its own `_frame_receivers` pass, has no table saying
     # which of this library's functions take the extra word, and passes
     # arguments the way the source spells them — so an exported one copies its
-    # caller's block into whatever the seventh argument register held.
+    # caller's block into whatever the argument register the caller passed it in
+    # held.  (The word, not the index: the hidden word travels by the REGISTER
+    # path on both backends — `model.RETURNED_FRAME_MAX_ARGS` — while source
+    # arguments past the register file travel in the caller's frame, so "the
+    # seventh argument register" names x86-64's first STACK slot.)
     frame_returns = [fn.name for fn in ordered
                      if getattr(fn, "_frame_return_status", None) == _RETURN_FRAME]
     offered = [n for n in frame_returns

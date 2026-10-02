@@ -17138,12 +17138,29 @@ def returned_frame_container_writes(fn, holder) -> list:
 
 
 
-# How many source arguments a frame-returning callee may take. Six, because
-# that is what the SMALLER of the two ABIs on this path passes in registers
-# (see `returned_frame_convention_refusal`), and the hidden word is one of
-# them. Named rather than written at each use because the two backends have to
-# apply the same number: a build that answers "8 is fine" on arm64 and
-# "8 is not fine" on x86-64 is a two-backend disagreement about one program.
+# How many source arguments a frame-returning callee may take. Six, and the
+# reason is the HIDDEN WORD rather than the arity: it is one more argument, and
+# both backends read it out of an argument REGISTER
+# (`formal/arm64_codegen.py` and `formal/x86_64_codegen.py` move it home by the
+# register path, with no stack convention for it), so the budget is the smaller
+# of the two REGISTER FILES — six on x86-64, eight on arm64.
+#
+# **It is not the limit on how many arguments a function may take.**  Both ABIs
+# put the arguments past their register file in the caller's frame and both
+# backends implement that now (`_MAX_INCOMING_ARGS`, 24, in each), so a
+# frame-returning callee could be handed its hidden word in that area and this
+# number would become twenty-three on both machines.  It has not moved, and the
+# reason it did not is worth stating rather than leaving to be inferred from the
+# digit: the hidden word travels by a DIFFERENT path from every source argument,
+# and widening the source path is not the same change as widening this one.  A
+# callee's block address also has to survive being read out of the frame rather
+# than a register, which is a second question from whether the offset is right.
+# `bugs/FORMAL_x86_64_argument_registers.md` step 3 asked for this number to be
+# decided before the register ceiling was lifted, and this is the decision.
+#
+# Named rather than written at each use because the two backends have to apply
+# the same number: a build that answers "8 is fine" on arm64 and "8 is not fine"
+# on x86-64 is a two-backend disagreement about one program.
 RETURNED_FRAME_MAX_ARGS = 6
 
 
@@ -17186,23 +17203,39 @@ def returned_frame_convention_refusal(callee, n_source_args: int,
        than an ABI one.
 
        The cost is a limit this has to refuse rather than approximate: the
-       The cost is a limit this has to refuse rather than approximate: the
-       hidden word is an argument register, and this path has a fixed number of
-       them — eight on arm64, six on x86-64, which is why `arg_regs` is a
-       parameter and the message quotes the number it was given. A callee that
-       already takes that many arguments cannot be given the word, and a
-       program that does that is refused HERE, by name, instead of being handed
-       a dropped argument and a frame written into scratch nobody reserved.
+       hidden word is an argument REGISTER — both backends move it home by
+       the register path and neither has a stack convention for it — and this
+       path has a fixed number of those, eight on arm64 and six on x86-64,
+       which is why `arg_regs` is a parameter and the message quotes the number
+       it was given. A callee that already takes that many arguments cannot be
+       given the word, and a program that does that is refused HERE, by name,
+       instead of being handed a dropped argument and a frame written into
+       scratch nobody reserved.
 
-       **THE DEFAULT IS THE SMALLER OF THE TWO, and that is a decision rather
-       than an oversight.** The build pass raises this refusal from a DECLARED
-       parameter list (`_check_returned_frame_budget`), before any backend has
-       been chosen, so it cannot quote a per-architecture budget. A build that
-       answered "8 is fine" there and then refused at emission on x86-64 would
-       be a two-backend disagreement about one source file, which is the one
-       thing this pair is not allowed to do — so the shared default is
-       `RETURNED_FRAME_MAX_ARGS` (six), each backend passes its own `arg_regs`
+       **THE DEFAULT IS THE SMALLER REGISTER FILE, and that is a decision
+       rather than an oversight.** The build pass raises this refusal from a
+       DECLARED parameter list (`_check_returned_frame_budget`), before any
+       backend has been chosen, so it cannot quote a per-architecture budget. A
+       build that answered "8 is fine" there and then refused at emission on
+       x86-64 would be a two-backend disagreement about one source file, which
+       is the one thing this pair is not allowed to do — so the shared default
+       is `RETURNED_FRAME_MAX_ARGS` (six), each backend passes its own `arg_regs`
        when it is the one asking, and the message says which budget it quoted.
+
+       **Six is NOT the limit on a function's arity, and that is the half of
+       this that is easy to misread now that both ABIs have a stack area.**
+       Arguments past the register file travel in the caller's frame on both
+       backends (`_MAX_INCOMING_ARGS`, 24, in each), so a frame-returning callee
+       could be handed its hidden word there and this budget would become
+       twenty-three on both machines at once. It has not moved, because the
+       hidden word takes a DIFFERENT path from every source argument and
+       widening the source path is not the same change: the callee would be
+       reading the CALLER's block address out of memory rather than out of a
+       register, which is a question about that address's lifetime and not about
+       the offset arithmetic both ends would otherwise share. `RETURNED_FRAME_MAX_
+       ARGS`'s own comment carries the decision in full; it was asked for by
+       step 3 of the filing that is now fixed, and answering it is half of what
+       that filing needed.
 
        **The block is COPIED into the caller's, not built in place**, and the
        copy is what a frame that arrived as a PARAMETER needs: `def fwd(r):

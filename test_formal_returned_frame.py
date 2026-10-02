@@ -352,6 +352,17 @@ CASES = [
     # word — the caller's block — has no register. Refused by name on both
     # machines rather than dropped, because a dropped word is a copy into
     # whatever the register held.
+    # SIX source arguments is the whole budget, and the reason is the hidden
+    # word rather than the arity: both ABIs put arguments past the register file
+    # in the caller's frame (`_MAX_INCOMING_ARGS` in both backends, 2026-10-02),
+    # so `mk` could take twenty-three and still be given its block — by a
+    # different path, which does not exist.  The hidden word is moved home by
+    # each backend's REGISTER path and nothing else, so what runs out is the
+    # registers and not the frame.  This row is the anti-rot for that decision
+    # (`model.RETURNED_FRAME_MAX_ARGS` and `test_returned_frame_layout.py` carry
+    # the reasoning); it is stated first because it is the one a reader meets
+    # first, and the eight-argument row below is now its sibling rather than the
+    # other half of a machine-dependent budget.
     ("refuse_a_callee_with_no_argument_register_left",
      "struct R:\n"
      "    var a: Int\n"
@@ -444,14 +455,15 @@ CASES = [
      "refuse",
      "is stored through 'xs[1]' in main()"),
 
-    # The EIGHT-argument half of the budget, and the SIBLING of
-    # `refuse_a_callee_with_no_argument_register_left` above rather than a second
-    # copy of it: that one declares SIX and is the whole budget on x86-64, this
-    # one declares EIGHT and is arm64's. The hidden word is an argument, so a
-    # machine that passes six cannot also pass the block. `main` deliberately
-    # does not CALL `make` here: the budget is counted from the DECLARED
-    # parameter list, so this refuses on both architectures without depending on
-    # which of them is over budget for some other reason.
+    # EIGHT arguments, which is arm64's register count and used to be the
+    # machine-dependent half of this budget.  It is not a second budget now: both
+    # backends pass source arguments in the caller's frame past the register
+    # file, so EIGHT and SIX are refused for the ONE reason above, and this row
+    # exists to say that a change which gave the hidden word a stack slot would
+    # have to move both. `main` deliberately does not CALL `make` here: the
+    # budget is counted from the DECLARED parameter list, so this refuses on both
+    # architectures without depending on which of them is over budget for some
+    # other reason.
     ("refuse_a_callee_declaring_eight_arguments",
      "struct Point:\n"
      "    var x: Int\n"
