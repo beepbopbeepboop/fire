@@ -1368,6 +1368,115 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     return out
 
 
+def own_module_identity(source_path: str, project_root: str = None) -> str:
+    """The dotted name `source_path` is ADDRESSED by, independent of who reached it.
+
+    `_module_identity` qualifies a name against the module that spelled it, and
+    so it needs to be HANDED the importer's identity — which `build_module_dylib`
+    takes as `_parent` and which nothing computed. A relative import at the root
+    therefore resolved differently depending on the spelling that reached it:
+    `formal/hostmods/os/path/__init__.mojo` builds its `.._syscalls` import as
+    the library `___syscalls.<digest>.arm64.dylib` with exports
+    `___syscalls_fs_chdir_9f63a2` when compiled on its own (`_parent` is None,
+    so the name passes through with its dots), and as `__syscalls.<digest>…`
+    with exports `__syscalls_fs_chdir_9f63a2` when the same process reached the
+    same file as `.path` from `formal/hostmods/os/__init__.mojo`. Two spellings,
+    two libraries, one source file. Nothing FAILED — `_BUILT` is keyed by
+    resolved path, and every consumer reads the manifest written beside the
+    library the build actually produced — but `build_module_dylib`'s own comment
+    says the source digest in the filename "is what makes sharing safe rather
+    than merely rare", and for this module the artifact depended on the
+    spelling rather than on the source. That is a content-addressing hole, and
+    the fix is to make the identity a function of the FILE.
+
+    THE PACKAGE CHAIN, and that is the rule rather than "the longest search
+    root": a directory is part of a module's name exactly when it is a PACKAGE,
+    which on this path means it holds an `__init__.mojo`. So the name is built
+    by walking up from the file's own directory for as long as each directory
+    is a package, prefixing the file's own basename at each step. For
+    `formal/hostmods/os/path/__init__.mojo` that is `os` then `path` — the
+    `__init__` itself contributes nothing, because it is the package rather
+    than a module inside it — and for `formal/hostmods/os/_syscalls.mojo` it is
+    `os` plus `_syscalls`. Which is what an importer actually spells, so
+    `.._syscalls` from `os/path` resolves to `os._syscalls` whether the file was
+    reached from `os` or built on its own.
+
+    "The longest search root" was tried first and is wrong for a reason worth
+    recording: `_search_roots` deliberately contains the importing file's OWN
+    directory and, as a catch-all for an absolute name, the repository root.
+    Both are strict ancestors of almost every file here, so the longest one is
+    usually the repository — which would name `formal.hostmods.os.path`. The
+    root that matters is the one whose modules are addressed WITHOUT a package
+    prefix, and that is a different question from the one a search root
+    answers.
+
+    A file in no package at all falls back to the roots: the longest one that is
+    a strict ancestor, relative to it with `__init__` and `.mojo` dropped. For
+    `formal/hostmods/sys.mojo` under `_HOSTMODS_ROOT` that is `sys`, which is
+    how `import sys` spells it.
+
+    None when neither answers — a file outside every search root, whose
+    identity nothing in this build can name. The caller then behaves exactly as
+    it did before: this makes the common case right rather than making every
+    case answerable, and a wrong answer here would be a wrong LIBRARY NAME,
+    which is worse than the naming instability it removes.
+    """
+    if not source_path:
+        return None
+    target = os.path.abspath(source_path)
+    if not target.endswith(".mojo"):
+        return None
+    stem = os.path.basename(target)
+    stem = stem[: -len(".mojo")]
+    is_package_init = stem == "__init__"
+
+    # The package chain: each directory that holds an `__init__.mojo` is one
+    # component of the name, nearest first. `os/path/__init__.mojo` is the
+    # package `os.path` and contributes `path` only because its own directory
+    # is the package; `os/__init__.mojo` is the package `os` and contributes
+    # nothing itself.
+    parts = [] if is_package_init else [stem]
+    directory = os.path.dirname(target)
+    while directory and os.path.exists(os.path.join(directory, "__init__.mojo")):
+        parts.append(os.path.basename(directory))
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    if len(parts) > (0 if is_package_init else 1):
+        return ".".join(reversed(parts))
+
+    # No package chain: fall back to the roots, so a top-level module under a
+    # fixed root is still named by it.
+    best = None
+    for root in _search_roots(target, project_root):
+        if not root:
+            continue
+        root = os.path.abspath(root)
+        # A STRICT ancestor: the root must be above the file, never the file's
+        # own directory, or every module in one directory would answer with a
+        # single-component name and two of them would collide.
+        if not target.startswith(root + os.sep):
+            continue
+        if best is None or len(root) > len(best):
+            best = root
+    if best is None:
+        return None
+    rel = os.path.relpath(target, best)
+    out = []
+    for part in rel.split(os.sep):
+        if part.endswith(".mojo"):
+            part = part[: -len(".mojo")]
+        if part == "__init__":
+            continue
+        if not part:
+            continue
+        out.append(part)
+    if not out:
+        return None
+    return ".".join(out)
+
+
 def _module_identity(module_name: str, parent: str = None) -> str:
     """`module_name` resolved against the module that spelled it.
 

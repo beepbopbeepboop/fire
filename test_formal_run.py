@@ -1076,17 +1076,20 @@ CASES = [
     # to stop at the terminator walks off the end of the buffer. An all-space
     # string strips to the empty string, and so does the empty one.
     #
-    # The second operand is the unescaping boundary, and it is here because it
-    # is surprising: `"\t"` in a Mojo literal on this path is a BACKSLASH and a
-    # `t`, two characters, not a tab — string literals are stored unescaped
-    # (see the module docstring of fire_compiler) — and a backslash is not
-    # whitespace, so `lstrip` leaves it alone. Python would return "". Asserting
-    # the unstripped result is what stops a later "fix" that unescapes literals
-    # in the string methods from quietly changing what the program computes.
+    # The second operand is a REAL TAB and it strips to nothing, which it did
+    # not used to. It was a BACKSLASH and a `t` — two characters, with the
+    # backslash left alone because a backslash is not whitespace — and this
+    # case asserted that, in a comment that gave the representation as the
+    # reason. Both `fire.py run` and `fire.py build` decode a literal's escapes,
+    # so the formal backends were the odd one out;
+    # bugs/FORMAL_string_literal_escape_is_not_decoded.md measured it and the
+    # decode now happens in `_intern_string`. CPython returns "" here too, so
+    # this is the third engine agreeing with the other two rather than a new
+    # answer: `lstrip` on a tab is "" on every engine in this repository now.
     ("str_lstrip_all_whitespace",
      "def main(n):\n"
      "    printf(\"[%s][%s]\\n\", \"   \".lstrip(), \"\\t\".lstrip())\n"
-     "    return 0\n", 0, "[][\\t]"),
+     "    return 0\n", 0, "[][]"),
     # A local receiver as well as a literal: the two lower differently (a
     # literal is ADRP+ADD, a local is a load), and only exercising the literal
     # would leave the local path untested.

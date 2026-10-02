@@ -1117,12 +1117,23 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
     symbol does not exist.
     """
     from formal.imports import (build_module_dylib, dylib_chain,
-                                imported_modules, resolve_module_path,
+                                imported_modules, own_module_identity,
+                                resolve_module_path,
                                 unresolvable_import_error)
     mods = imported_modules(stmts)
     if not mods:
         return []
     if fmt_wants_macho(arch):
+        # The name THIS file is addressed by, which is what a relative import
+        # inside it resolves against. Without it a relative import at the root
+        # resolved differently depending on which module reached this file
+        # first: the same source produced `___syscalls.<digest>.arm64.dylib`
+        # built on its own and `__syscalls.<digest>.arm64.dylib` reached as
+        # `.path`, with the exports mangled to match — two libraries and two
+        # export spellings for one file, so the digest in the filename stopped
+        # being sufficient to identify the artifact. See
+        # bugs/FORMAL_relative_import_at_the_root_has_no_qualified_identity.md.
+        parent = own_module_identity(source_path, source_path)
         # Per-architecture, and that is load-bearing rather than tidiness.
         # This directory holds BUILT module dylibs, and a dylib is a
         # target-specific image: an arm64 library and an x86-64 library for
@@ -1150,7 +1161,8 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                     unresolvable_import_error(source_path, mod))
             try:
                 dylib = build_module_dylib(mod, path, out_dir, arch,
-                                           project_root=source_path)
+                                           project_root=source_path,
+                                           _parent=parent)
             except ImportBuildError as e:
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
