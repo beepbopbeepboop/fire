@@ -4360,6 +4360,20 @@ def spelled(expr) -> str:
         if isinstance(expr.index, F.SliceExpr):
             return f"{spelled(expr.obj)}[...]"
         return f"{spelled(expr.obj)}[{spelled(expr.index)}]"
+    if isinstance(expr, (F.TupleExpr, F.ListExpr)):
+        # `(a, b)` / `[a, b]`, element by element.  Same reason as the two arms
+        # above and the same defect it fixes: a message about a tuple target
+        # that quotes `TupleExpr` names the parser's node type and not the line
+        # the reader is looking at, and a target list is the one thing a refusal
+        # about a tuple store most needs to show.
+        open_c, close_c = ("(", ")") if isinstance(expr, F.TupleExpr) else ("[", "]")
+        return (f"{open_c}{', '.join(spelled(e) for e in (getattr(expr, 'elements', None) or []))}"
+                f"{close_c}")
+    if isinstance(expr, F.UnaryOp):
+        # `*rest`, not `UnaryOp`.  A starred element of an assignment target is
+        # a shape `__init__`'s inline refuses by name, so the refusal quotes it,
+        # and `UnaryOp` tells the reader nothing they can act on.
+        return f"{expr.op}{spelled(getattr(expr, 'operand', None))}"
     return type(expr).__name__
 
 
@@ -11876,24 +11890,30 @@ def struct_field_assigned_type(struct_def, name, decls: dict) -> tuple:
     (`annotation_base_name` and every kind table downstream read it unchanged),
     so nothing after this function has to know there are two sources.
 
-    TWO assignment shapes are RECOGNISED, and only one of them is EVIDENCE.
-    `self.x = T()` and `self.x, self.y = T(), U()` are both read, because
-    `tools/procrun.py` writes the second and skipping it says "its __init__ does
-    not assign it" about a field the `__init__` plainly assigns — the reader is
-    sent to look for an assignment that is two lines above the one they are
-    looking at.  The second is not usable as EVIDENCE, and the reason is
-    measured rather than stylistic: a tuple store to a FIELD is refused by name
-    on x86-64 and ACCEPTED-AND-DROPPED on arm64, where
-    `self.p, self.q, self.r = 3, 4, 7` in a `__init__` builds, runs, and
-    computes 0.  So a type read out of a store the emitter does not perform
-    would be a type of a slot nothing was ever written to.  It is named in the
-    refusal instead, which is the fact a reader needs.
+    TWO assignment shapes are RECOGNISED, and both are EVIDENCE, because both
+    are stores this path PERFORMS.  `self.x = T()` and
+    `self.x, self.y = T(), U()` are read through `_init_statement_field_stores`
+    — one table, which the `__init__` inline itself emits from, so a type can
+    only be read out of a store that is actually going to happen.
+    `tools/procrun.py` writes the second
+    (`self.limit, self._chunks, self._size = limit, [], 0`) and skipping it
+    said "its __init__ does not assign it" about a field the `__init__` plainly
+    assigns — the reader sent to look for an assignment two lines above the one
+    they were looking at.
+
+    It USED to be the case that the tuple form was recognised and then
+    REFUSED as evidence, on the measured ground that a tuple store to a field
+    was refused by name on x86-64 and accepted-and-dropped on arm64, where
+    `self.p, self.q, self.r = 3, 4, 7` in an `__init__` built, ran, and
+    computed 0.  Both of those are fixed (see
+    `bugs/FORMAL_tuple_store_to_a_field.md`'s successor), so the band-aid's
+    reason is gone and it was deleted rather than left to rot: with the store
+    performed, a type read out of it is a type of a slot something WAS written
+    to.  The shape facts that remain are about an AUGMENTED assignment, which
+    is a read and a write and so still settles nothing.
     """
     # The SHAPE facts first, and they come first because they are about the
-    # STORE while the inference below is about the VALUE: a store this path does
-    # not perform leaves nothing to infer from, and `tools/procrun.py` writes
-    # the tuple form, so skipping it says "its __init__ does not assign it"
-    # about a field the __init__ plainly assigns.
+    # STORE while the inference below is about the VALUE.
     shape = _init_store_shape_refusal(struct_def, name)
     if shape is not None:
         return (None, None, shape)
@@ -11912,18 +11932,27 @@ def struct_field_assigned_type(struct_def, name, decls: dict) -> tuple:
 def _init_store_shape_refusal(struct_def, name) -> str | None:
     """Why the SHAPE of `__init__`'s store to `self.<name>` settles nothing.
 
-    Two of the four shapes `_assigned_value_for` reports, and they are kept
-    apart from the type inference because they are about the store rather than
-    the value: an AUGMENTED assignment is a read and a write and so says nothing
-    about the type, and a TUPLE store to a field is a store this path does not
-    perform — x86-64 refuses it by name and arm64 accepts it and leaves the slot
-    as it was, measured, so a type read out of it would be a type of a slot
-    nothing was ever written to.
+    ONE shape remains, and it is kept apart from the type inference because it
+    is about the store rather than the value: an AUGMENTED assignment is a read
+    and a write, so what the slot holds afterwards depends on what was in it
+    before, and the object under construction is at its CLASS-LEVEL default
+    where the constructor's stores run rather than at whatever an earlier
+    statement stored.
+
+    The TUPLE store used to be the second shape here, refused as
+    non-evidence on the measured ground that the emitters did not perform it
+    (x86-64 by name, arm64 by dropping the store).  Both emitters lower it now
+    and `init_body_stores` inlines it, so the reason is gone: this asks
+    `_init_statement_field_stores` — the same table the inline emits from — and
+    so a field's type can only be read out of a store that is going to happen.
+    A statement that table DECLINES (a starred target, a nested group, a mixed
+    target) contributes nothing here either, which is the absent answer and the
+    safe direction: no type, so no nested frame placed and no frame diagnostic
+    suppressed.
 
     `None` means the shape is fine and the question is the value's, which is
-    `struct_init_field_types`'s to answer. The tuple case is named in the
-    refusal rather than skipped, because the fact a reader needs is that the
-    store does not happen, not that the type is unknown."""
+    `struct_init_field_types`'s to answer.
+    """
     init = next((m for m in struct_methods(struct_def)
                  if m.name == "__init__"), None)
     if init is None:
@@ -11934,39 +11963,38 @@ def _init_store_shape_refusal(struct_def, name) -> str | None:
     for node in iter_nodes(getattr(init, "body", None)):
         if not isinstance(node, (F.AssignStmt, F.AugAssignStmt)):
             continue
-        how, value = _assigned_value_for(node, name, receivers)
-        if how == "elsewhere":
-            continue
-        if how == "augmented":
+        how, _value = _assigned_value_for(node, name, receivers)
+        if how == _STORE_AUGMENTED:
             untyped = (f"__init__ also does an augmented assignment to "
                        f"self.{name}, which is a read and a write and so says "
                        f"nothing about the type")
-        elif how == "tuple":
-            untyped = (f"__init__ assigns `self.{name} = {expr_spelling(value)}` "
-                       f"as one element of a tuple target, and a tuple store to "
-                       f"a FIELD is not a store this path performs — x86-64 "
-                       f"refuses it by name and arm64 accepts it and leaves the "
-                       f"slot as it was — so what the slot holds is not settled "
-                       f"by that line")
     return untyped
 
 
-# The four shapes `_assigned_value_for` reports, and why the tuple one is not
-# evidence is on `struct_field_assigned_type`'s own docstring.
+# The three shapes `_assigned_value_for` reports.  `_STORE_TUPLE` is gone: a
+# tuple store to a field is a store this path performs, so it is a `_STORE_PLAIN`
+# and the shape question is `_init_statement_field_stores`'s.
 _STORE_ELSEWHERE = "elsewhere"
 _STORE_PLAIN = "plain"
 _STORE_AUGMENTED = "augmented"
-_STORE_TUPLE = "tuple"
 
 
 def _assigned_value_for(node, name, receivers):
     """`(how, value)` for what `node` stores into `self.<name>`.
 
-    `how` is one of the four `_STORE_*` names; `value` is the right-hand side
-    for the two shapes that have one.  A starred target (`self.a, *rest = …`)
-    has no positional answer and a target that pairs a member with something
-    else is not a per-field store, so both come back `_STORE_ELSEWHERE` and the
-    field stays untyped — the absent answer, in the same direction.
+    `how` is one of the three `_STORE_*` names; `value` is the right-hand side
+    for the one that has it.  A starred target (`self.a, *rest = …`) has no
+    positional answer and a target that pairs a member with something else is
+    not a per-field store, so both come back `_STORE_ELSEWHERE` and the field
+    stays untyped — the absent answer, in the same direction.
+
+    The tuple case asks `_init_statement_field_stores`, the table the emitter
+    inlines from, so this cannot report a store the build will refuse.  That is
+    what replaced `_STORE_TUPLE`: it existed because the two emitters used to
+    DISAGREE about the tuple target — x86-64 refused it by name, arm64 lowered
+    it and dropped the store — so a type read out of it would have been a type
+    of a slot nothing wrote to.  Both lower it and `init_body_stores` inlines
+    it now, so the disagreement is gone and so is the arm.
     """
     target = getattr(node, "target", None)
     if isinstance(target, F.MemberExpr):
@@ -11976,17 +12004,9 @@ def _assigned_value_for(node, name, receivers):
         return ((_STORE_AUGMENTED, None) if isinstance(node, F.AugAssignStmt)
                 else (_STORE_PLAIN, getattr(node, "value", None)))
     if isinstance(target, (F.TupleExpr, F.ListExpr)):
-        value = getattr(node, "value", None)
-        if (isinstance(node, F.AugAssignStmt)
-                or not isinstance(value, (F.TupleExpr, F.ListExpr))):
-            return (_STORE_ELSEWHERE, None)
-        targets, values = list(target.elements or []), list(value.elements or [])
-        if len(targets) != len(values):
-            return (_STORE_ELSEWHERE, None)
-        for i, elt in enumerate(targets):
-            if (isinstance(elt, F.MemberExpr) and isinstance(elt.obj, F.IdentExpr)
-                    and elt.obj.name in receivers and elt.member == name):
-                return (_STORE_TUPLE, values[i])
+        for t, value in _init_statement_field_stores(node, receivers) or ():
+            if t.member == name:
+                return (_STORE_PLAIN, value)
     return (_STORE_ELSEWHERE, None)
 
 
@@ -12284,10 +12304,13 @@ def _init_field_assignments(struct_def) -> dict:
     target of a plain `AssignStmt`: `self.a, self.b = limit, [], 0` parses as an
     `AssignStmt` whose TARGET is a `TupleExpr` of `MemberExpr`, so a scan
     looking for `target: MemberExpr` reads a class as assigning nothing at all.
-    `MultiAssignStmt` (`a = b = v`) and a chained `self.a = self.b = v` come out
-    of the same `iter_nodes` walk for the same reason: a chained assignment is a
-    chain of `AssignStmt` nodes in this AST, so reading only the outermost one
-    would miss every target past the first.
+    The tuple form is read through `_init_statement_field_stores` — the same
+    table `init_body_stores` inlines from — so a type can never be read out of a
+    store the emitter is going to refuse.
+
+    `MultiAssignStmt` (`a = b = v`) is the other shape, and the parser gives
+    the chain ONE node with a `targets` list rather than a chain of nodes, so
+    `iter_nodes` alone would miss every target on it.
 
     An `AugAssignStmt` contributes the FIELD and no value: `self.n += 1` in
     `__init__` says the slot is a counter and says nothing about its type.
@@ -12301,42 +12324,24 @@ def _init_field_assignments(struct_def) -> dict:
         def record(name, value):
             out.setdefault(name, []).append(value)
 
-        def target_names(target):
-            """The field names one assignment target binds, or [] if none does.
-
-            A target is a field access only when its base is a receiver NAME, so
-            `self.x`, `(self.x, self.y)` and `self.x, = v` are fields and
-            `p[i]`, `a.b` and a bare local are not — the last of which is what
-            keeps `self.x = y` from claiming a field named `y`.
-            """
-            if isinstance(target, F.MemberExpr):
-                return ([target.member]
-                        if isinstance(target.obj, F.IdentExpr)
-                        and target.obj.name in receivers else [])
-            if isinstance(target, (F.TupleExpr, F.ListExpr)):
-                return [n for el in getattr(target, "elements", None) or []
-                        for n in target_names(el)]
-            return []
-
         for node in iter_nodes(getattr(m, "body", None)):
-            if isinstance(node, (F.AssignStmt, F.MultiAssignStmt)):
-                targets = [node.target] if isinstance(
-                    node, F.AssignStmt) else list(node.targets or [])
-                for t in targets:
-                    names = target_names(t)
-                    if isinstance(t, (F.TupleExpr, F.ListExpr)):
-                        values = list(getattr(node.value, "elements", None) or [])
-                        if isinstance(node.value, (F.TupleExpr, F.ListExpr)) \
-                                and len(values) == len(names):
-                            # The tuple form pairs them positionally, which is
-                            # what the language guarantees; an arity that does
-                            # not match is a parse this does not understand, so
-                            # it contributes nothing rather than a guess.
-                            for n, v in zip(names, values):
-                                record(n, v)
-                        continue
-                    for n in names:
-                        record(n, node.value)
+            if isinstance(node, F.AssignStmt):
+                for target, value in _init_statement_field_stores(node,
+                                                                   receivers) \
+                        or ():
+                    record(target.member, value)
+                continue
+            if isinstance(node, F.MultiAssignStmt):
+                # `a = b = v` is a chain of `AssignStmt` in this AST, and the
+                # parser gives the chain ONE node with a `targets` list, so this
+                # is the shape `iter_nodes` alone would miss.  Every target here
+                # is a plain name or a member — the grammar does not admit a
+                # chain of tuple targets — so one value serves them all.
+                for t in (getattr(node, "targets", None) or []):
+                    if isinstance(t, F.MemberExpr) and isinstance(t.obj,
+                                                                 F.IdentExpr) \
+                            and t.obj.name in receivers:
+                        record(t.member, node.value)
     return out
 
 
@@ -12951,37 +12956,162 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
             # effect in the language, so skipping it is the semantics rather
             # than a convenience.
             continue
-        target = getattr(stmt, "target", None)
-        if not isinstance(target, F.MemberExpr) \
-                or not isinstance(target.obj, F.IdentExpr) \
-                or target.obj.name not in receivers:
+        if not isinstance(stmt, F.AssignStmt):
+            # Everything this walk inlines is a plain `self.<field> = <expr>`
+            # store, so every other statement shape is a refusal — and the
+            # AUGMENTED assignment is the one whose spelling has to be named,
+            # because it is a receiver-field store that merely looks like this
+            # one: it is a read AND a write, so its value depends on what is
+            # already in the slot, and the slot holds the CLASS-LEVEL default
+            # where the constructor's stores run rather than whatever an earlier
+            # statement stored.  `_init_statement_spelling` says "an augmented
+            # assignment to `self.b`" for that statement and "a local assignment"
+            # for the others, which is the whole reason it exists.
             return (None, construction_init_body_refusal(
                 struct_def.name, _init_statement_spelling(stmt)))
-        field = target.member
-        slot = struct_frame_slot(struct_def, field)
-        if slot is None:
+        pairs = _init_statement_field_stores(stmt, receivers)
+        if pairs is None:
+            target = getattr(stmt, "target", None)
+            tuple_why = _init_tuple_target_refusal(stmt, target,
+                                                   getattr(stmt, "value", None),
+                                                   receivers)
             return (None, construction_init_body_refusal(
                 struct_def.name,
-                f"`{spelled(target)}`, which assigns a field "
-                f"({struct_field_summary(struct_def)}) this struct does not "
-                f"have"))
-        if not isinstance(stmt, F.AssignStmt):
-            # An AUGMENTED assignment reaching here: the target is a field of the
-            # receiver, so the statement spelling above is the wrong one and
-            # this is the only remaining kind.  It is a read AND a write, so its
-            # value depends on what is already in the slot — the object under
-            # construction, which the inline does bring up, but only at the
-            # CLASS-LEVEL default rather than at whatever the constructor has
-            # stored so far, so the two are the same program only for the first
-            # such statement and refusing is the honest answer.
-            return (None, construction_init_body_refusal(
-                struct_def.name, _init_statement_spelling(stmt)))
-        value, refusal = _init_store_value(struct_def, stmt.value, params, got,
-                                          args, rets, framed_names)
-        if refusal is not None:
-            return (None, refusal)
-        stores.append((field, slot, value))
+                tuple_why if tuple_why is not None
+                else _init_statement_spelling(stmt)))
+        for target, raw in pairs:
+            field = target.member
+            slot = struct_frame_slot(struct_def, field)
+            if slot is None:
+                return (None, construction_init_body_refusal(
+                    struct_def.name,
+                    f"`{spelled(target)}`, which assigns a field "
+                    f"({struct_field_summary(struct_def)}) this struct does "
+                    f"not have"))
+            value, refusal = _init_store_value(struct_def, raw, params, got,
+                                              args, rets, framed_names)
+            if refusal is not None:
+                return (None, refusal)
+            stores.append((field, slot, value))
     return (stores, None)
+
+
+def _init_statement_field_stores(stmt, receivers) -> list | None:
+    """`[(target, value_node)]` — the receiver-field stores one statement IS.
+
+    The shape question `init_body_stores` asks per statement, split out because
+    three callers need the same answer and a disagreement between them is a
+    silent wrong answer rather than a refusal: the emitter inlines what this
+    returns, `struct_init_field_type`'s second evidence source reads a TYPE out
+    of it, and `_init_store_shape_refusal` decides whether the store settles
+    anything.  Before this existed the third of those had to REFUSE a tuple
+    target the first two were about to perform, which is the band-aid
+    `bugs/FORMAL_tuple_store_to_a_field.md` describes.
+
+    TWO shapes, and they are the same program: `self.<f> = <v>` and
+    `self.<a>, self.<b> = <v>, <w>`.  The second is not a special case to be
+    tolerated, it is ordinary Python that this repository writes —
+    `tools/procrun.py` opens with
+    `self.limit, self._chunks, self._size = limit, [], 0` — and it parses as one
+    `AssignStmt` whose TARGET is a `TupleExpr` of `MemberExpr`, so a reader that
+    knows only `target: MemberExpr` sees a class that assigns three fields as
+    one that assigns none.  Pairing is POSITIONAL, which is what the language
+    guarantees and what both backends already emit (`arm64_codegen.py`'s
+    `_tup_slot` and `x86_64_codegen.py`'s `_tuple_target_key` answer the same
+    three target shapes with the same three answers).
+
+    `None` means the statement is not a straight line of receiver-field stores,
+    and every way of failing that is refused rather than partly performed:
+
+      * a target element that is not a field of a receiver — `self.a, b.c = X(), Y()`
+        is a field store AND a register store, and only the first has a slot
+        here;
+      * a starred element (`self.a, *rest = …`), which has no positional
+        partner at all;
+      * a nested group (`(self.a, self.b), self.c = (x, y), z`), whose inner
+        pair is an unpack this walk does not perform;
+      * a right-hand side that is not a tuple/list display of the SAME arity —
+        `self.a, self.b = f()` is an unpack of a runtime blob whose arity the
+        walk cannot know, and `self.a, self.b, self.c = 1, 2` is a parse whose
+        pairing this path does not understand.
+
+    All four are the ABSENT answer, which is the safe direction twice over: a
+    statement that is not one of these stores contributes no field type, and a
+    field with no type can neither place a frame nor suppress a frame
+    diagnostic.
+    """
+    target = getattr(stmt, "target", None)
+    value = getattr(stmt, "value", None)
+    if isinstance(target, F.MemberExpr):
+        if isinstance(target.obj, F.IdentExpr) and target.obj.name in receivers:
+            return [(target, value)]
+        return None
+    if not isinstance(target, (F.TupleExpr, F.ListExpr)):
+        return None
+    targets = list(getattr(target, "elements", None) or [])
+    if not isinstance(value, (F.TupleExpr, F.ListExpr)):
+        return None
+    values = list(getattr(value, "elements", None) or [])
+    if len(values) != len(targets):
+        return None
+    for t in targets:
+        if not (isinstance(t, F.MemberExpr) and isinstance(t.obj, F.IdentExpr)
+                and t.obj.name in receivers):
+            return None
+    return list(zip(targets, values))
+
+
+def _init_tuple_target_refusal(stmt, target, value, receivers) -> str | None:
+    """Why a TUPLE target in an `__init__` is not a straight line of stores.
+
+    Four shapes reach here that `_init_statement_field_stores` declines, and
+    they are declined for four different reasons, so "a local assignment" —
+    which is what the statement's own shape says and what a reader cannot act
+    on — is the one answer none of them can use.  Each is named by the thing
+    that makes it not a per-field store, which is also the thing a fix has to
+    supply:
+
+      * a target that is not a field of the receiver (`self.a, b.c = X(), Y()`):
+        the second element is a store into something this walk has no slot for;
+      * a STARRED element (`self.a, *rest = …`): it absorbs a variable number
+        of values, so no element has a positional partner;
+      * a NESTED GROUP (`(self.a, self.b), self.c = (x, y), z`): the inner pair
+        is itself an unpack, so its two values come out of one blob rather than
+        two stores;
+      * a right-hand side that is not a display of the SAME arity
+        (`self.a, self.b = f()`): an unpack of a runtime blob whose count the
+        walk cannot know, or a pairing this parse does not state.
+
+    `None` when the target is not a tuple at all, so the caller falls back to
+    the statement's own spelling — this is the tuple half of that question and
+    not a second answer to all of it.
+    """
+    if not isinstance(target, (F.TupleExpr, F.ListExpr)):
+        return None
+    targets = list(getattr(target, "elements", None) or [])
+    for t in targets:
+        if isinstance(t, (F.TupleExpr, F.ListExpr)):
+            return (f"a tuple target whose group `({', '.join(spelled(e) for e in targets)})` "
+                    f"holds a nested pair, and an inner unpack is not a store "
+                    f"into one field: give each field its own assignment")
+        if isinstance(t, F.UnaryOp):
+            return (f"a starred target (`{spelled(t)}`), which absorbs a "
+                    f"variable number of values and so has no positional "
+                    f"partner for one of them")
+        if not (isinstance(t, F.MemberExpr) and isinstance(t.obj, F.IdentExpr)
+                and t.obj.name in receivers):
+            return (f"a tuple target that mixes a field of the receiver with "
+                    f"`{spelled(t)}`, which is not one: only the first has a "
+                    f"slot in the block this stores into")
+    if not isinstance(value, (F.TupleExpr, F.ListExpr)):
+        return (f"a tuple target of {len(targets)} fields assigned from "
+                f"`{spelled(value)}`, which is not a display of "
+                f"{len(targets)} values: unpacking a runtime container needs a "
+                f"count this path does not read at a construction site")
+    values = list(getattr(value, "elements", None) or [])
+    return (f"a tuple target of {len(targets)} fields assigned "
+            f"{len(values)} value(s), so there is no positional pairing to "
+            f"store")
 
 
 def _init_statement_spelling(stmt) -> str:
