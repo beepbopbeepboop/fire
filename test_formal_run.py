@@ -11312,6 +11312,25 @@ REFUSAL_CASES = [
      "        p = 2\n"
      "    printf(\"p=%d\", p)\n    return 0\n",
      0, "p=1"),
+    # A `try`'s `else` clause, which is the shape the whole clause exists for:
+    # do the work where it can fail, and use the result only on the path where
+    # it did not. It was REFUSED on both architectures — "'p' is read at line 7
+    # before anything in this function stores it, and CPython raises
+    # UnboundLocalError for that program", which is false about both halves: the
+    # clause runs only when the body completed, so `p` is always stored there,
+    # and CPython runs the program. The graph reached the clause from the try's
+    # header, i.e. from the one path the language skips it on. Same program
+    # shape as `test_struct_formal.py:603`, which is where it was measured.
+    ("try_else_clause_runs_only_when_the_body_completed",
+     "def f(n):\n"
+     "    try:\n"
+     "        p = n + 1\n"
+     "    except Exception:\n"
+     "        return 1\n"
+     "    else:\n"
+     "        printf(\"p=%d\", p)\n"
+     "    return 0\n",
+     0, "p=11"),
     # A `for` target STAYS bound after its loop, because the target is a
     # definition in the loop's HEADER and the join is reached from the header's
     # exit edge — so `range(0, 100)` with an immediate break is legal and

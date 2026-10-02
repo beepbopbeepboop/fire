@@ -215,6 +215,48 @@ CASES = [
     ("try_else_and_handler_ok",
      "    try:\n        p = 1\n    except ValueError:\n        p = 2\n"
      "    else:\n        p = 3\n    return p\n", "ok"),
+    # ── a `try`'s `else` runs ONLY when the body completed ─────────────────
+    # The two rows below are the fix that `try_else_and_handler_ok` could not
+    # see, because there every arm stores and the answer is "ok" whichever way
+    # the clause is reached. `else` is entered from the HEADER (so it is one more
+    # arm of the try, hanging off `t.index`) and the header reaches it on
+    # exactly the path the language SKIPS it — the one where the body raised. So
+    # every name the body stores lost its dominance inside `else`, and a program
+    # CPython runs was refused with a sentence claiming CPython raises
+    # `UnboundLocalError` for it.
+    #
+    # Measured on `test_struct_formal.py:603`, where `out = build_module_dylib(…)`
+    # is in the `try` and `os.path.isfile(out)` is in the `else` — the ordinary
+    # "build it, and check it only on the path that succeeded" shape, which is
+    # what `try/except/else` is FOR.
+    ("try_else_clause_runs_only_when_the_body_completed_ok",
+     "    try:\n        p = 1\n    except ValueError:\n        pass\n"
+     "    else:\n        sink(p)\n    return 0\n", "ok"),
+    # …and the store still has to dominate INSIDE the clause: a store in only
+    # one arm of the body is not a dominating store, and `else` reads it. This
+    # is the row that says the fix removed an edge rather than the check.
+    ("try_else_clause_still_refuses_an_unstored_read",
+     "    try:\n        if n:\n            p = 1\n    except ValueError:\n"
+     "        pass\n    else:\n        sink(p)\n    return 0\n", "refuse"),
+    # ── a `finally` and "the body may have RAISED" ──────────────────────────
+    # The clause runs on every way out, including an exception, and that one
+    # path is not one of the arms — so it was modelled separately, as a fallback
+    # used when the body has no fall-through exit, and it pointed at the try's
+    # HEADER. The header is not a point that can raise: nothing in `try:`
+    # evaluates anything before the body, so the earliest point that can is the
+    # body's first block, and a store there dominates the clause. This is the
+    # "build it, and clean up whatever happened" shape
+    # (`tools/mem_slope.py:180` is the measured refusal: `exes = []` in the
+    # body, `for e in exes: unlink(e)` in the `finally`).
+    ("try_finally_clause_reads_what_the_body_stored_ok",
+     "    try:\n        exes = []\n        sink(n)\n        return 0\n"
+     "    finally:\n        sink(exes)\n", "ok"),
+    # …and the edge is still there for the store it exists to catch: a name
+    # bound LATER in the body is skipped by every path that raises before it, so
+    # the clause reads an unbound name when `n` is falsey and CPython raises.
+    ("try_finally_clause_still_refuses_a_later_store",
+     "    try:\n        p = 1\n        if n:\n            q = 2\n"
+     "    finally:\n        sink(q)\n    return 0\n", "refuse"),
     ("finally_store_dominates_ok",
      "    try:\n        return 1\n    finally:\n        p = 1\n", "ok"),
     ("finally_store_then_read_ok",
@@ -584,6 +626,56 @@ ENTRY_SHAPES = [
      "    pass\n", [1]),
 ]
 
+# (name, body, the block that holds the `sink` inside the `else`)
+#
+# The same argument as ENTRY_SHAPES, for the OTHER fictitious edge this
+# analysis had: `else` hung off the try's HEADER, and the header reaches it on
+# the path where the body raised — which is the one path on which the language
+# does not run `else` at all. So `else` is entered from the BODY's fall-through
+# exits and from nothing else, and the block holding its first statement says
+# which: its `preds` must not contain the try's header.
+#
+# The index is the block that holds `sink(p)`, which is what makes this a
+# statement about the graph rather than about a verdict: a rule that got the
+# right answer by leaving `else` unreachable would pass every row in CASES.
+TRY_ELSE_SHAPES = [
+    # 0 entry, 1 the try (header), 2 the body's store, 3 the handler,
+    # 4 the `else`'s `sink(p)`.
+    ("try_else_is_entered_from_the_body_not_the_header",
+     "    try:\n        p = 1\n    except ValueError:\n        pass\n"
+     "    else:\n        sink(p)\n", 4),
+    # 0 entry, 1 `q = 1`, 2 the try (header), 3 the body's `if`, 4 `p = 1`,
+    # 5 the handler, 6 the `else`'s `sink(p)`: the clause is entered from the
+    # body's own exits — the branch's false edge and its storing arm — and from
+    # neither the header nor anything outside the body.
+    ("try_else_is_entered_from_every_body_exit",
+     "    q = 1\n    try:\n        if n:\n            p = 1\n"
+     "    except ValueError:\n        pass\n    else:\n        sink(p)\n",
+     6),
+]
+
+
+def check_try_else_shape() -> list:
+    """Every failure in TRY_ELSE_SHAPES, as strings."""
+    bad = []
+    for name, body, want in TRY_ELSE_SHAPES:
+        fn = the_function(parse_module("def probe(n):\n" + body,
+                                       filename=f"{name}.mojo"))
+        blocks, _entry = M._build_cfg(fn.body)
+        head = next(b.index for b in blocks
+                    if b.stmts and type(b.stmts[0]).__name__ == "TryStmt")
+        block = blocks[want]
+        if head in block.preds:
+            bad.append(f"{name}: the `else` block {want} has the try's header "
+                       f"{head} as a predecessor, so the clause is reachable "
+                       f"on the path where the body raised — the one path the "
+                       f"language skips it on")
+        if not block.preds:
+            bad.append(f"{name}: the `else` block {want} has no predecessor at "
+                       f"all, so the fixpoint reads it as unreachable and the "
+                       f"clause is never checked")
+    return bad
+
 
 def check_entry_shape() -> list:
     """Every failure in ENTRY_SHAPES, as strings."""
@@ -596,6 +688,91 @@ def check_entry_shape() -> list:
         if got != want:
             bad.append(f"{name}: the entry block's successors are {got}, "
                        f"not {want}")
+    return bad
+
+
+# ── WHICH NAMES THE CHECK MAY ASK ABOUT ──────────────────────────────────
+#
+# Everything above asks `model.read_before_store` about a function in
+# isolation, and that is the whole analysis: given a set of names this function
+# could have stored, which does it read first? The BUILD asks a narrower
+# question before it gets there — `formal/build.py::_unstored_read` intersects
+# the caller's `placed` set with the names the function ITSELF binds, and
+# `placed` is a union of several kinds of home (a parameter, a local, a comptime
+# binding, a struct TYPE, every function this image defines, a specialization's
+# base, an imported module). Taking all of it as "a local this function stores
+# somewhere" made the check refuse a read of a name no statement of the body
+# has anything to do with.
+#
+# It needs its own rows because the failure is INVISIBLE to the ones above: each
+# of them passes `placed=None`, so they would all still pass with the old
+# intersection. These call the build's own function, with the build's own
+# recipe for `placed`, on a MODULE — the defect needs a second definition in
+# the unit for `_callee_defs` to have anything to add.
+OWN_NAMES = [
+    # (name, source, the name reported, or None)
+    # A module-level FUNCTION handed to a call as a value: `ex.submit(run_one,
+    # mode, f)` in `test_stdlib.py:55` is the real one. `run_one` is in `placed`
+    # because `_callee_defs` puts every function this image defines there (so
+    # that CALLING one needs no local), and the read-before-store check read
+    # that as "the body assigns it somewhere" and reported it. The message
+    # claimed CPython raises `UnboundLocalError` for a program it runs.
+    ("a_module_function_read_as_a_value_is_not_an_unstored_local",
+     "def helper() -> Int:\n    return 1\n\ndef probe():\n    f = helper\n"
+     "    return f\n", None),
+    # The same reasoning for a TYPE: `struct_names` is in `placed` because
+    # `S.x` and `S()` are not reads of a value, and a type has no register at
+    # all — so "the register allocator gave it a home" was never true of it.
+    ("a_type_read_as_a_value_is_not_an_unstored_local",
+     "struct S:\n    x: Int\n\ndef probe():\n    return S\n", None),
+    # A `*args` / `**kwargs` parameter is stored by the CALLER, exactly like a
+    # positional one, and `incoming_args` spells it the way the signature does —
+    # `*args`, stars included — so subtracting the parameters left the bare name
+    # in the candidate set. Latent rather than visible: the build refuses a
+    # variadic read by name first (`_refuse_variadic_reads`), which is why this
+    # row is a unit row and not a build row.
+    ("a_variadic_parameter_is_not_an_unstored_local",
+     "def probe(*args, **kw):\n    return sink(args)\n", None),
+    # …and the ordinary parameter, which the same subtraction handles, so the
+    # rows above cannot be a blanket "never ask about a parameter".
+    ("a_runtime_parameter_is_not_an_unstored_local",
+     "def probe(q):\n    return q\n", None),
+    # THE DEFECT IS STILL FOUND. A name the function binds and reads before
+    # storing is the whole subject, and it is in `own` for the same reason every
+    # other case above is.
+    ("a_self_reference_is_still_an_unstored_read",
+     "def probe():\n    p = p + 1\n    return p\n", "p"),
+    ("an_augmented_read_is_still_an_unstored_read",
+     "def probe(n):\n    total += n\n    return total\n", "total"),
+]
+
+
+def check_own_names() -> list:
+    """Every failure in OWN_NAMES, as strings."""
+    import formal.build as B
+    bad = []
+    for name, src, want in OWN_NAMES:
+        stmts = parse_module(src, filename=f"{name}.mojo")
+        functions, structs, _syms, _slots = B._prepare_functions(stmts)
+        by_name = {s.name for s in structs}
+        callees = set(B._callee_defs(functions))
+        for fn in functions:
+            if fn.name != "probe":
+                continue
+            shape = M.function_param_shape(fn)
+            placed = {n for n, _t in shape.fixed}
+            placed |= {shape.vararg, shape.kwarg}
+            placed.discard(None)
+            placed |= B._names_bound_in(fn)
+            placed |= B._comptime_bound_names(fn)
+            placed |= by_name
+            placed |= callees
+            frame_slots = dict(getattr(fn, "_frame_slots", None) or {})
+            hit = B._unstored_read(fn, placed, frame_slots)
+            got = None if hit is None else hit[0]
+            if got != want:
+                bad.append(f"{name}: the build's `_unstored_read` reported "
+                           f"{got!r} for probe, not {want!r}")
     return bad
 
 
@@ -657,8 +834,16 @@ def main():
     for problem in check_entry_shape():
         failed += 1
         print(f"  FAIL  entry-shape: {problem}")
+    for problem in check_try_else_shape():
+        failed += 1
+        print(f"  FAIL  try-else-shape: {problem}")
+    for problem in check_own_names():
+        failed += 1
+        print(f"  FAIL  own-names: {problem}")
     print(f"read-before-store: PASS={passed} FAIL={failed} "
-          f"({len(ENTRY_SHAPES)} graph shapes)")
+          f"({len(ENTRY_SHAPES)} graph shapes, "
+          f"{len(TRY_ELSE_SHAPES)} try/else graph shapes, "
+          f"{len(OWN_NAMES)} which-names rows)")
     return 1 if failed else 0
 
 

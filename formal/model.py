@@ -2621,8 +2621,14 @@ def _build_cfg(body) -> tuple:
                 t = first([s], pending)
                 pending = [t.index]
                 cur = None
-                arm_exits = run(getattr(s, "body", None) or [], loops,
-                                [t.index])
+                # The body's FIRST block, which is where the "the body raised"
+                # path starts: nothing in `try:` itself evaluates anything, so
+                # this is the earliest point that can raise. See the `finally`
+                # note below for what it is an edge from.
+                body_first = len(blocks)
+                body_exits = run(getattr(s, "body", None) or [], loops,
+                                 [t.index])
+                arm_exits = list(body_exits)
                 for h in (getattr(s, "handlers", None) or []):
                     arm_exits += run(getattr(h, "body", None) or [], loops,
                                      [t.index])
@@ -2631,8 +2637,31 @@ def _build_cfg(body) -> tuple:
                 # rather than a chain. That is what makes a `return` inside
                 # `finally` a terminating path rather than a fallthrough, and
                 # a store in only one handler not a dominating store.
+                #
+                # …and `else` hangs off the BODY's exits, never off the
+                # header. The header reaches `else` only when the body raised,
+                # which is precisely the path on which `else` does NOT run, so
+                # an edge from there is not a conservative extra edge — it is a
+                # claim that control reaches a clause the language skips, and
+                # it refused a program CPython runs:
+                #
+                #     try:
+                #         out = build(...)
+                #     except Exception:
+                #         pass
+                #     else:
+                #         use(out)        # 'out' is always stored here
+                #
+                # measured on `test_struct_formal.py:603` (`out = build_module_
+                # dylib(…)` in the `try`, `os.path.isfile(out)` in the `else`)
+                # and in `test_formal_read_before_store.py` as
+                # `try_else_clause_runs_only_when_the_body_completed`. The
+                # body's exits are the only predecessors `else` really has, so
+                # an `else` after a body that always returns or raises gets an
+                # unreachable block — whose IN set the fixpoint initializes
+                # from the top, which is the direction that cannot refuse.
                 if getattr(s, "else_body", None) is not None:
-                    arm_exits += run(s.else_body, loops, [t.index])
+                    arm_exits += run(s.else_body, loops, body_exits)
                 # The `finally` clause runs on every way OUT of the try, so it
                 # is entered from the ARMS and the statement after the whole
                 # statement is reached only through it. Modelling that
@@ -2648,9 +2677,40 @@ def _build_cfg(body) -> tuple:
                 # `finally` falls out of the same branch correctly, because
                 # `run` on an empty run returns the exits that reach it, so
                 # the arms' exits and the finally's exits are the same list.
+                #
+                # "…and the body may have RAISED" is the one way out of the
+                # statement that the arms do not carry, and the OLD answer was
+                # `arm_exits or [t.index]` — a fallback used only when the body
+                # has no fall-through exit, which is a body that always
+                # `return`s or `raise`s. Two things are wrong with the header it
+                # pointed at, and both are fixed here:
+                #
+                #   * the header is not a point that can raise at all. Nothing
+                #     in `try:` evaluates anything before the body, so the
+                #     earliest point that can is the body's FIRST block, and a
+                #     store in it dominates the clause. `tools/mem_slope.py`
+                #     is the measured case: `try: exes = []; …; return 0 /
+                #     finally: unlink(e) for e in exes` is a legal program and
+                #     was refused for `exes`.
+                #   * it is a real path, so it cannot simply be dropped either:
+                #     a store LATER in the body is skipped by it, which is why
+                #     the edge stays for every other shape.
+                #
+                # The narrower form is also the only affordable one. Adding this
+                # edge UNCONDITIONALLY — the shape that would close the
+                # soundness hole below — was measured on this repository and
+                # cost 6 more refusals than it removed (7 files): `try: …
+                # total = … / finally: cleanup` then `print(total)` is the
+                # single most common reason to have a `finally` at all, and
+                # every one of those 7 is a program CPython runs. Whether an
+                # intervening statement can raise is the question that decides
+                # it, and no statement-level reader here answers it. So the hole
+                # stays, in
+                # `bugs/FORMAL_read_before_store_the_body_may_have_raised.md`.
                 fin = getattr(s, "finally_body", None)
                 if fin is not None:
-                    fin_exits = run(fin, loops, arm_exits or [t.index])
+                    fin_exits = run(fin, loops,
+                                    arm_exits or [body_first])
                     pending = fin_exits
                 else:
                     pending = arm_exits

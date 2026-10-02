@@ -9036,6 +9036,34 @@ def _unstored_read(fn, placed: set, frame_slots: dict):
     there: a frame slot is placed by a CONSTRUCTOR, and whether the
     constructor has run is not a question a name walk can answer.
 
+    **`placed` is a union of SEVERAL kinds of home, and only one of them is
+    this function's own storage.** The walk above builds it as params ∪
+    `_names_bound_in` ∪ comptime bindings ∪ struct names ∪ every function this
+    image defines ∪ the call-site exemptions (a specialization's base, an
+    imported module, `external_call`), and "has a home" is the right question
+    for THAT walk. It is the wrong question here: the remaining kinds are
+    placed by the MODULE, not by any statement of this body, so a read of one
+    is not a read of an unstored local. Measured, on both architectures, for
+
+        def helper() -> Int:
+            return 1
+        def main():
+            f = helper
+            printf("f=%d", f())
+
+    — a program CPython runs (it prints 1; `main` is not even its entry
+    point) — refused with
+
+        main: 'helper' is read at line 5 before anything in this function
+        stores it, and CPython raises UnboundLocalError for that program
+
+    which is false in both halves: `helper` is a module-level binding the
+    body never stores and never has to, and no CPython error exists for this
+    text. The same line refused `test_stdlib.py:55` (`ex.submit(run_one, …)`,
+    a function handed to a call as a VALUE) and 96 further reads across the
+    repository, so this was a false positive on 62 files rather than a
+    diagnostic.
+
     Returns rather than raises, because of where it is called from — see the
     ordering note at the call site.
     """
@@ -9050,10 +9078,29 @@ def _unstored_read(fn, placed: set, frame_slots: dict):
     # and did not. One reader of "the names a call site binds", and it is the
     # one the ABI itself is written against.
     params = {name for name, _ptype in M.incoming_args(fn)}
+    # `incoming_args` spells a variadic parameter the way the SIGNATURE does,
+    # stars included (`*args`, `**kw`), so a body that reads one matched no
+    # entry and `read_before_store` counted a value the CALLER stored as a
+    # local nothing stored. `function_param_shape` is the reader that strips
+    # them, and it is already the one `placed` is built from above, so this is
+    # one reader of the parameter list rather than two that disagree. The
+    # build refuses such a read by name before it gets here
+    # (`_refuse_variadic_reads`, with the reason), which is why this was
+    # latent rather than visible: the analysis has to be right on its own for
+    # the direct call in `test_formal_read_before_store.py` to mean anything.
+    shape = M.function_param_shape(fn)
+    params |= {shape.vararg, shape.kwarg}
+    params.discard(None)
     # Only names this function ITSELF binds can be unstored: a parameter is
-    # stored by the caller, and everything else in `placed` is stored by
-    # something this walk does not see.
-    own = placed - params - set(frame_slots)
+    # stored by the caller, and `placed` also carries the names placed for the
+    # other reasons the docstring lists — a struct TYPE (which has no register
+    # at all, so "the allocator gave it a home" was never true of it), a
+    # function this image defines, an imported module name, a specialization's
+    # base. `_names_bound_in` is the module's one reader of "what this function
+    # writes", and intersecting with it is what makes `own` the set the
+    # refusal's sentence is about.
+    own = (placed & (_names_bound_in(fn) | _comptime_bound_names(fn))
+           ) - params - set(frame_slots)
     if not own:
         return None
     hit = M.read_before_store(fn, params, own)
