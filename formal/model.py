@@ -2621,8 +2621,9 @@ def _build_cfg(body) -> tuple:
                 t = first([s], pending)
                 pending = [t.index]
                 cur = None
-                arm_exits = run(getattr(s, "body", None) or [], loops,
-                                [t.index])
+                body_exits = run(getattr(s, "body", None) or [], loops,
+                                 [t.index])
+                arm_exits = list(body_exits)
                 for h in (getattr(s, "handlers", None) or []):
                     arm_exits += run(getattr(h, "body", None) or [], loops,
                                      [t.index])
@@ -2631,8 +2632,31 @@ def _build_cfg(body) -> tuple:
                 # rather than a chain. That is what makes a `return` inside
                 # `finally` a terminating path rather than a fallthrough, and
                 # a store in only one handler not a dominating store.
+                #
+                # …and `else` hangs off the BODY's exits, never off the
+                # header. The header reaches `else` only when the body raised,
+                # which is precisely the path on which `else` does NOT run, so
+                # an edge from there is not a conservative extra edge — it is a
+                # claim that control reaches a clause the language skips, and
+                # it refused a program CPython runs:
+                #
+                #     try:
+                #         out = build(...)
+                #     except Exception:
+                #         pass
+                #     else:
+                #         use(out)        # 'out' is always stored here
+                #
+                # measured on `test_struct_formal.py:603` (`out = build_module_
+                # dylib(…)` in the `try`, `os.path.isfile(out)` in the `else`)
+                # and in `test_formal_read_before_store.py` as
+                # `try_else_clause_runs_only_when_the_body_completed`. The
+                # body's exits are the only predecessors `else` really has, so
+                # an `else` after a body that always returns or raises gets an
+                # unreachable block — whose IN set the fixpoint initializes
+                # from the top, which is the direction that cannot refuse.
                 if getattr(s, "else_body", None) is not None:
-                    arm_exits += run(s.else_body, loops, [t.index])
+                    arm_exits += run(s.else_body, loops, body_exits)
                 # The `finally` clause runs on every way OUT of the try, so it
                 # is entered from the ARMS and the statement after the whole
                 # statement is reached only through it. Modelling that
