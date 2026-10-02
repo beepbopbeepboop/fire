@@ -8827,11 +8827,13 @@ def dylib_export_tables(dylib_exports: list):
     was built), so the call binds the definition rather than the forwarding —
     which is the same symbol the BARE spelling binds, so `from pkg import f`
     and `pkg.f` cannot disagree about where `f` lives. Its declared signature
-    is borrowed from `by_name` when the symbols agree, which is what keeps a
-    `char *` result classified as a string for a re-exported function exactly
-    as it is for a defined one. A name with no match in `by_name` keeps an
-    empty signature, which is the honest "the build does not know" — never a
-    guess at one that would change how a result is printed."""
+    and its call contract are borrowed from `by_name` when the symbols agree,
+    which is what keeps a `char *` result classified as a string for a
+    re-exported function exactly as it is for a defined one, and what keeps an
+    argument count checked against the same parameter list either spelling
+    names. A name with no match in `by_name` keeps an empty signature and no
+    contract, which is the honest "the build does not know" — never a guess at
+    either that would change how a result is printed or how a call is bound."""
     by_name: dict = {}
     by_module: dict = {}
     forwarded: dict = {}
@@ -8860,6 +8862,9 @@ def dylib_export_tables(dylib_exports: list):
                      if known and known.get("symbol") == fwd.get("symbol")
                      else "",
                      "arity": known.get("arity") if known else None,
+                     "call": known.get("call")
+                     if known and known.get("symbol") == fwd.get("symbol")
+                     else None,
                      "forwarded_by": module}
             if module:
                 forwarded.setdefault(module, {}).setdefault(name, entry)
@@ -8891,6 +8896,187 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str,
             return entry
         return dylib_export_module(forwarded, module).get(leaf)
     return by_name.get(callee)
+
+
+def dylib_callee_export(by_name: dict, by_module: dict, forwarded: dict,
+                        aliases: dict, callee: str):
+    """The manifest export entry the call to `callee` binds, or None.
+
+    THE ONE resolution of "which export is this callee", and the reason the
+    symbol a call is emitted against, the return kind it is classified by and
+    the DECLARATION its arguments are bound against cannot disagree about which
+    library answered. All three questions have to be asked about the same entry:
+    binding `pkg.f`'s call to `f`'s declaration would check the argument count
+    against one module's contract and call another's function.
+
+    Two steps, in this order, and the order is `dylib_extern_symbol`'s rather
+    than this function's own convenience: the IMPORT ALIAS first, then the
+    plain export lookup (a bare name through the flat table, a dotted name
+    through its module's own table and then through what that module FORWARDS).
+    The alias is a statement about where THIS FILE got the name, so it is the
+    more specific of the two and it is what the emitted `BL` binds — asking the
+    flat table first would let a library that happens to export the local
+    spelling answer for a call that calls somebody else's function.
+
+    **The `forwarded` table is not optional here**, which is the whole reason
+    this is a function rather than a call each reader made for itself: a
+    package `__init__` that is nothing but `from .sub import f` publishes `f`
+    with an EMPTY export table of its own (`build._namespace_library`), so
+    `pkg.f` is answered out of `forwarded`. A reader that passed only
+    `by_name`/`by_module` — as both backends' `_extern_decl_for` did — found no
+    entry, and a call with no declaration is a call whose arguments are passed
+    unexamined: `pkg.f(1)` read the second parameter out of whatever the caller
+    last left in that register (measured, 80905394 where the callee says 12) and
+    `pkg.f(1, 2, 3)` dropped the third and returned the answer to `pkg.f(1, 2)`.
+    Both are the failure `bugs/FORMAL_cross_module_call_arity_is_never_checked.md`
+    records for the BARE spelling, which `bind_call_arguments` had already
+    closed — so the two spellings of one export disagreed about the same
+    contract, and only one of them was checked.
+
+    `None` means nothing on this link line publishes the name, which is the
+    caller's cue to keep whatever answer it has for a callee it cannot resolve
+    (`dylib_extern_symbol` is the one that turns it into a refusal)."""
+    entry = dylib_aliased_export(by_name, by_module, callee, aliases)
+    if entry is not None:
+        return entry
+    return dylib_export_lookup(by_name, by_module, callee, forwarded)
+
+
+def export_call_contract(fn) -> dict:
+    """The argument-COUNT contract a library publishes for one of its exports.
+
+    A caller that can read the callee's DECLARATION asks
+    `bind_call_arguments`, which is the language's own rule and needs nothing
+    published. A caller that cannot — a library shipped without its sources, or
+    one whose manifest was written before the declaration could be read back —
+    has only what the manifest carries, and `arity` alone is not enough to
+    decide anything: `def f(a)` and `def f(a, b=7)` have the same arity and
+    opposite contracts for a one-argument call, and `def f(a, *rest)` has a
+    bigger one again while accepting any count.
+
+    So the contract is the three facts a count test needs, and they are the
+    three `function_param_shape` already knows:
+
+      * `positional` — the parameters an argument INDEX can land on, in order,
+        with the names, so a refusal can name them the way the local one does.
+        A keyword-only parameter is not in it, because a positional argument
+        reaching one is a `TypeError` rather than a count.
+      * `required` — the prefix of those with no default. A count below it has
+        an argument nothing can supply, and the callee would read it out of
+        whatever the caller left in that register.
+      * `variadic` — whether the callee has a `*`/`**` tail, which is what
+        makes an over-full count legal (the tail is dropped by design,
+        `bind_call_arguments`) rather than an arity error.
+
+    A generic is not exported at all (`doc/ABI.md`'s rule, `FORMAL_known_limits.md`
+    §1.1), so a comptime parameter is never in one of these lists — which is why
+    this can be read straight off `function_param_shape` rather than through a
+    second opinion about which parameters a caller supplies."""
+    shape = function_param_shape(fn)
+    positional = shape.positional
+    return {
+        "positional": positional,
+        "required": [p for p in positional if not shape.has_default.get(p)],
+        "variadic": bool(shape.variadic),
+    }
+
+
+def extern_call_count_refusal(callee: str, got: int, entry) -> str:
+    """Why an argument count contradicts a cross-module callee, or "".
+
+    The count check for a call whose callee this image cannot read a
+    DECLARATION for, which is the only arity question left once
+    `bind_call_arguments` has had its turn. Every wording here is the local
+    check's, deliberately: `bind_call_arguments` says "too many positional
+    arguments (3 for 2 parameter(s); the parameters are ['a', 'b'])" and a
+    reader who has seen one must be able to recognise the other, because the
+    difference between the two calls is invisible from the source.
+
+    `""` — not an exception — for every case this cannot decide, and there are
+    three of them and they are all common:
+
+      * no entry, or an entry with no `call` contract: the runtime dylib's
+        exports come from a C header and carry none, and a manifest written
+        before the contract existed carries none. A name whose manifest says
+        nothing about its shape keeps the behaviour it has always had, because
+        a check that fires on an unknown fires on every library and every
+        `*args` call;
+      * a variadic callee, where the arguments past the fixed ones are `*name`'s
+        and are dropped by design. That is `bind_call_arguments`' rule for a
+        callee whose declaration IS readable, so a caller that cannot read it
+        has to reach the same verdict rather than a stricter one;
+      * a count the contract admits, which includes every count that leaves no
+        parameter unfilled.
+
+    **A gap the caller cannot fill is a refusal even when the count is legal**,
+    and that is the second thing this closes. `with_default(1)` against
+    `def with_default(a, b=7, c=9)` names the right number of arguments, and the
+    manifest can say that `b` and `c` have defaults — but a default is an
+    EXPRESSION in the callee's declaration, and only the declaration has it. So
+    a caller that cannot read the declaration cannot materialize it, and the
+    callee reads whatever this image last left in those registers: measured,
+    `with_default(1)` returning 357586946 where the callee says 179. The
+    alternative is to keep passing them.
+
+    The message adds two things the local one has no way to say, because a
+    cross-module call has no parameter list in the image being built: the
+    MODULE the callee came from, and the manifest's own `signature` string,
+    which is the declaration the library was built from and is the one thing a
+    reader can check the count against without the source."""
+    contract = (entry or {}).get("call")
+    if not isinstance(contract, dict):
+        return ""
+    positional = contract.get("positional")
+    if not isinstance(positional, list):
+        return ""
+    if contract.get("variadic"):
+        return ""
+    module = entry.get("module") or "another module"
+    signature = entry.get("signature") or ""
+    where = (f", which {module} published it as `{signature}`"
+             if signature else f", which {module} published")
+    repair = (f"Rebuild the library where this build can read the module's "
+              f"source, or link the module by IMPORT "
+              f"(`from {module} import {callee}`), which brings the "
+              f"declaration with it")
+    if got > len(positional):
+        shown = (f"the parameters are {positional}" if positional else
+                 "it declares none")
+        return (f"call {callee}(): too many positional arguments ({got} for "
+                f"{len(positional)} parameter(s); {shown}{where}). The "
+                f"callee is compiled into another module, so its parameter "
+                f"list is not this image's to read — the count is checked "
+                f"against the manifest entry the call binds")
+    if got >= len(positional):
+        return ""
+    required = contract.get("required")
+    required = set(required) if isinstance(required, list) else set(positional)
+    gap = positional[got:]
+    # `required` is the set of parameters with NO default, so membership is
+    # the "nothing can fill this" test and its absence is the "a default could,
+    # if this image could read the expression" one.
+    unfilled = [p for p in gap if p in required]
+    defaulted = [p for p in gap if p not in required]
+    if defaulted and not unfilled:
+        names = ", ".join(repr(p) for p in defaulted)
+        verb = "has" if len(defaulted) == 1 else "have"
+        return (f"call {callee}(): {got} argument(s) for {len(positional)} "
+                f"parameter(s){where}, and {names} {verb} a default that only "
+                f"the callee's DECLARATION carries. Nothing writes into the "
+                f"registers those parameters would occupy, so the callee "
+                f"reads whatever this image last left there — measured, "
+                f"`with_default(1)` returning 357586946 where the callee's own "
+                f"default says 179. Pass the argument explicitly. {repair}")
+    if unfilled:
+        names = ", ".join(repr(p) for p in unfilled)
+        return (f"call {callee}(): missing required argument(s) {names} — a "
+                f"call with {got} argument(s) for {len(positional)} "
+                f"parameter(s){where}, and none of {names} has a default to "
+                f"fill it. Nothing is written into the register that would "
+                f"hold one, so the callee would read whatever this image last "
+                f"put there, and the two architectures do not agree about "
+                f"what that is. Pass the argument. {repair}")
+    return ""
 
 
 def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,

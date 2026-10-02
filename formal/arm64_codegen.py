@@ -3052,10 +3052,10 @@ dylib_exports: list = None, globals_base: int = None,
             # an integer — the pointer's own value, so the program printed
             # 4335747904 where it meant to print `darwin`.
             return M.dylib_export_return_kind(
-                M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name,
-                                      self._dylib_forwarded)
-                or self._aliased_export(name))
+                M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name))
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:
@@ -5326,18 +5326,28 @@ dylib_exports: list = None, globals_base: int = None,
     def _extern_decl_for(self, name: str):
         """The declaration of an IMPORTED callee `name`, or None.
 
-        Keyed by the SYMBOL the call binds, and the entry is found by the same
-        two steps in the same order as `_extern_symbol` — the plain export
-        lookup, then the import alias — so the declaration handed to
-        `bind_call_arguments` is always the one whose parameter list the call
-        is actually being checked against. Asking by bare name instead would be
-        a way to hand a call the signature of a same-named function in a
-        different library.
+        Keyed by the SYMBOL the call binds, and the entry is found by
+        `model.dylib_callee_export` — the one resolution, in the same order as
+        `_extern_symbol` — so the declaration handed to `bind_call_arguments` is
+        always the one whose parameter list the call is actually being checked
+        against. Asking by bare name instead would be a way to hand a call the
+        signature of a same-named function in a different library.
+
+        The `forwarded` table reaches this through that shared resolution, and
+        that is load-bearing rather than tidiness: a re-exported callee
+        (`pkg.f`, where `pkg/__init__` is nothing but `from .sub import f`) is
+        published by the PACKAGE's manifest and nowhere else, so a lookup that
+        left it out found no declaration, and a call with no declaration is a
+        call whose arguments are passed unexamined — `pkg.f(1, 2, 3)` dropped
+        the third and `pkg.f(1)` read the second out of an uninitialized
+        register, printing two different numbers on the two architectures. It
+        is the same defect `test_formal_cross_module.py` pins for the bare
+        spelling, reached by the dotted one.
         """
-        entry = M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name)
-        if entry is None:
-            entry = self._aliased_export(name)
+        entry = M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name)
         if entry is None:
             return None
         return self._extern_decls.get(entry.get("symbol"))
@@ -6039,6 +6049,23 @@ dylib_exports: list = None, globals_base: int = None,
             # flush=True) and pass positional args only — same ABI the
             # extern path already uses for zero-kwarg calls.
             args = list(e.args)
+            # …and the count is checked against what the MANIFEST publishes,
+            # because "no declaration to read" must not mean "no contract to
+            # obey". `extern_call_count_refusal` is the shared rule and returns
+            # "" for every case it cannot decide, which is most of them (the
+            # runtime dylib publishes no contract at all). Before it, a call
+            # whose library shipped without its sources dropped its extra
+            # arguments and read its missing ones out of an uninitialized
+            # register — measured, `two(1, 2, 3)` printing 12 and `two(1)`
+            # printing 1798665114 where CPython refuses both.
+            refusal = M.extern_call_count_refusal(
+                name, len(args),
+                M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name))
+            if refusal:
+                raise CodegenError(refusal)
         else:
             # An extern callee whose DECLARATION is known goes through the same
             # binder as a local one. That is the whole fix for a default
