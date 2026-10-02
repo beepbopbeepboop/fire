@@ -255,7 +255,8 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         # entry written here reaches the forward declaration and not the
         # definition — see `_annotated_params`' own comment for the
         # "conflicting types" that produces.
-        if cur is None and (fname, pname) not in getattr(gen, '_annotated_params', ()):
+        _ann_for = (getattr(gen, '_annotated_params', {}) or {}).get(fname)
+        if cur is None and not (_ann_for and _ann_for.get(pname)):
             ipt.setdefault(fname, {})[pname] = call_type
             continue
         if not ((cur in containers and call_type == 'char *')
@@ -5466,15 +5467,24 @@ def gen_module_impl(self, stmts):
     # `gimple_struct_mixed_reads_survive_a_function_boundary`), where the
     # annotation resolves to the generic box and the single call site
     # passes a list literal.
-    self._annotated_params: set = set()
+    # Nested dicts, NOT a set of `(fn, param)` tuples: a tuple key is hashed,
+    # and on the self-hosted compiled path a str slot read out of an AST field
+    # can arrive boxed, which is the whole reason `_as_str` guards every name
+    # read in this file. Two dict lookups on an `_as_str`'d name each are the
+    # pattern that does not depend on hashing (see `_inferred_param_types`).
+    self._annotated_params: dict = {}
     for s in all_functions:
         if isinstance(s, FunctionDef):
             _sfn = _as_str(s.name)
             self._func_param_names[_sfn] = [
                 _as_str(pn) for pn, _pt in (s.params or []) if not _as_str(pn).startswith('*')]
+            _ann_for = self._annotated_params.get(_sfn)
             for _spn, _spt in (s.params or []):
                 if _spt is not None:
-                    self._annotated_params.add((_sfn, _as_str(_spn)))
+                    if _ann_for is None:
+                        _ann_for = {}
+                        self._annotated_params[_sfn] = _ann_for
+                    _ann_for[_as_str(_spn)] = True
     for s in all_functions:
         if isinstance(s, FunctionDef):
             self._inferred_param_types[s.name] = self._infer_param_types(s)
