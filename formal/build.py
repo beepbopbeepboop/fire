@@ -3394,9 +3394,24 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # the same reason `hstruct` is a set rather than one struct — a set of
         # one is the ordinary case and a set of two is a disagreement the
         # consumer is entitled to see.
+        # `_fn_key(fn)` and NOT `fn.name`, for the reason the table's own
+        # docstring gives: `params_of`, `holders`, `hstruct` and
+        # `declared_holders` are all filed under `id(fn)` because each answers
+        # "what does THIS body do with its own names", and Mojo overloads make
+        # one name several bodies. Reading them by name was the same defect at
+        # the one call site `_fn_key` was introduced to close, and it was worse
+        # than a style disagreement: a name is not a key in any of the four, so
+        # all four `.get`s returned None, `_parameter_frame_contract` iterated
+        # an empty parameter list, and every module dylib published
+        # `frame_params: []`. `[]` is `_export_frame_contract`'s "this
+        # compilation could not classify it", so every cross-module frame
+        # hand-off was refused as `not-exported` — a refusal naming a missing
+        # EXPORT about a function the manifest lists with an arity.
         fn._frame_param_contract = _parameter_frame_contract(
-            fn, params_of.get(fn.name) or (), holders.get(fn.name) or (),
-            (hstruct.get(fn.name) or {}), declared_holders.get(fn.name) or {})
+            fn, params_of.get(_fn_key(fn)) or (),
+            holders.get(_fn_key(fn)) or (),
+            hstruct.get(_fn_key(fn)) or {},
+            declared_holders.get(_fn_key(fn)) or {})
         # `by_name` itself, published, and the reason is a CONSTRUCTION rather
         # than a field read: a copy construction `S(x)` needs to know what `x`
         # IS, and the holder analysis is the only thing in the compiler that

@@ -474,9 +474,9 @@ def import_closure_digest(source_path: str, _seen=None) -> str:
     Measured on `tools/formal_sweep.py`: a fix to `formal/hostmods/re.mojo`
     left the next run reporting `cas: 4 hit` and "verdict history: unchanged: 4"
     for four files that now build
-    (`bugs/FORMAL_cas_verdict_key_ignores_the_hostmod_sources_it_compiles.md`,
-    and the import-closure half of
-    `bugs/FORMAL_sweep_cache_ignores_imports.md`).
+    (`cas.formal_build_key`'s `imports` clause is where this digest is folded
+    in, and `test_formal_sweep_cache_key.py` is what pins that it moves the
+    key).
 
     It walks with the SAME two functions the build walks with —
     `imported_modules` for what a statement list imports and
