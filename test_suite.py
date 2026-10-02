@@ -3053,6 +3053,25 @@ UNREGISTERED = {
         'entry beside `gimple`/`gimplerunner` (a `cmd` step, memclass small: '
         '24 programs, ~25 s, peak 0.1 GB) and `extra` naming this file so '
         'checked_run.py\'s content-addressed cache invalidates when it changes.',
+    # The three that came with the same branch's other two fixes. Same reason
+    # and the same registration each wants, so they are one paragraph: three
+    # `cmd` steps, `tiny` memclass, each `extra` naming its own file. Measured
+    # here, alone, through memslot: membership 17 programs / 31 s / 0.1 GB,
+    # ordering 35 / 65 s / 0.1 GB, tuple-key 17 / 36 s / 0.1 GB.
+    'test_container_membership.py': '`x in <container>` on the compiled path, '
+        'including the dict arm that had no branch at all and the needle-typed '
+        'dispatch the int view needed (17 programs). Unregistered for the '
+        'reason `test_container_equality.py` above gives.',
+    'test_container_ordering.py': '`<` / `<=` / `>` / `>=` between containers as '
+        'PYTHON orders them rather than by heap address, and `None` against a '
+        'number refused rather than compared (35 programs, the largest of the '
+        'three). Unregistered for the reason `test_container_equality.py` '
+        'above gives.',
+    'test_dict_tuple_key.py': 'A tuple used as a dict key is keyed by its '
+        'CONTENT and not by the object\'s address, which is the one that '
+        'silently lost every entry the moment the tuple stopped living (17 '
+        'programs). Unregistered for the reason `test_container_equality.py` '
+        'above gives.',
     'test_imports.py': 'That import statements generate extern declarations. '
         'A missing extern is a link failure attributed to something else.',
     'test_kwargs_stmt.py': 'kwargs in statement-level calls, a shape the '
