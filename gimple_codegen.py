@@ -3097,7 +3097,13 @@ class GimpleGen:
         'Scope_get':             ('int',        ['Scope *', 'char *']),
         'Scope_set':             ('void',       ['Scope *', 'char *', 'int']),
         'Scope___init__':        ('void',       ['Scope *', 'Scope *']),
-        'py_tokenize':              ('MojoList *', ['char *', 'char *']),
+        # ONE parameter, matching fire_compiler.py's `py_tokenize(src)` and
+        # runtime/fire_runtime.h's hand-written declaration. It was two here
+        # and two in the header while the source took one (7ce61398 moved the
+        # filename to `py_tokenize_named` precisely to keep this pinned C ABI
+        # at one argument), so the generated closure emitted
+        # `py_tokenize(src, 0)` against a one-parameter definition.
+        'py_tokenize':              ('MojoList *', ['char *']),
         'Parser_parse_module':   ('MojoList *', ['Parser *']),
         'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),
         'interpret_and_execute': ('void',        ['char *', 'int']),
