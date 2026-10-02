@@ -498,6 +498,10 @@ MEASURED_PEAK_GB = {
     # that measures it.
     'formal-read-before-store': (0.08, 'measured'),  # 8.5 s, 61 cases, no builds
     'formal-receiver-spelling': (0.08, 'measured'),  # 2.8 s, 3 differential cases
+    # …and the third the estate check caught, on the merge of the formal5 batch
+    # (2026-10-02): `test_formal_core_hostmods.py`, measured one at a time
+    # under `tools/memslot.py --gb 8` before being named, like the two above.
+    'formal-core-hostmods':  (0.1,  'measured'),   # 25 s, 6 groups
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -2112,8 +2116,8 @@ test('formal-hashlib', [PY, 'test_formal_hashlib.py'], mem='tiny',
 # exactly the five values the module has slots for, on the measured ground that
 # the module answers the FORMAT it was given (`_nvalues(fmt)`) rather than the
 # number of arguments that arrived, so "five supplied, more wanted" is exactly
-# the state under test. The ABI wall itself is untouched and still documented
-# in bugs/FORMAL_struct_pack_over_eight_arguments.md §"What is left".
+# the state under test. Both ABIs have since grown their stack-argument
+# convention, so the wall that doc pointed at is gone and the doc with it.
 #
 # `proofs` and not `check` for a reason the solo number hides: 43 s alone, and
 # 201 s measured in a `-j4` run beside the other seven (it is 154 checks, most
@@ -2337,6 +2341,23 @@ test('formal-value-model', [PY, 'test_formal_value_model.py'], mem='tiny',
      extra=['test_formal_value_model.py', 'formal/build.py',
             'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='the value model\'s shapes, against CPython on both backends')
+# `enum` and `contextlib`, the two host modules whose whole content is one or two
+# names whose answers are CPython's to give. Registered because
+# `test_suite.py`'s estate check said so on the merge that brought the file:
+# `test_formal_core_hostmods.py` arrived with `work/formal5-hostmods-core` and
+# was named by nothing, which is the hole that check exists to close — a suite no
+# gate runs cannot rot out either. Beside `formal-json` and `formal-pathlib`
+# because it is the same shape (a hostmod differential, every answer computed
+# twice, no `prooflib`), and `formal-link-accounting`'s `test_host_tiers` is what
+# ties the two together: it requires every written `formal/hostmods/*.mojo` to
+# name the test that keeps it honest, and these two were the entries it caught
+# unregistered. Measured: 6 groups, 25 s, peak 0.1 GB.
+test('formal-core-hostmods', [PY, 'test_formal_core_hostmods.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_core_hostmods.py', 'formal/hostmods/enum.mojo',
+            'formal/hostmods/contextlib.mojo', 'formal/build.py',
+            'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='enum and contextlib: S.NAME.value/.name and nullcontext, against CPython')
 # An x86-64 MODULE dylib that calls out: it must build, sign, load and RUN.
 # Module dylibs are how every cross-module call reaches its definition on this
 # backend, so a defect here is a whole class of link failures.
@@ -2599,7 +2620,15 @@ BUCKETS = {
                 # …and the two the estate check named on 2026-10-02, for the
                 # same reason and with the same cost measurement: cheap enough
                 # that `check` runs them and `proofs` is only naming them.
-                'formal-read-before-store', 'formal-receiver-spelling'],
+'formal-read-before-store', 'formal-receiver-spelling',
+                # …and the one the estate check named on the merge of the
+                # formal5 batch: `test_formal_core_hostmods.py` came with
+                # `work/formal5-hostmods-core` and was named by no bucket.
+                # `proofs` rather than `check` because it builds and EXECUTES a
+                # formal image per group and its subject is a host module's
+                # answers rather than a static shape; 25 s and 0.1 GB measured,
+                # which is the cost class of `formal-json` above.
+                'formal-core-hostmods'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,

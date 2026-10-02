@@ -2548,7 +2548,15 @@ FD_CASES = [
  # proving a field holds a descriptor is cross-field flow and this path cannot
  # see it — a correct-looking `self._fd.write(s)` must not be lowered on the
  # strength of a name the model does not have.
- ("fd_write_on_frame_slot_refused",
+ #
+ # The needle says "classified as 'int'" where it used to say nothing about a
+ # kind, and the wording moved because `Box.__init__` literally stores `3`:
+ # `model.struct_ctor_field_value` reads the field's value off the construction
+ # that filled the slot, so the receiver now HAS a kind and the message can name
+ # it.  That is the same refusal on the same program — a word that is not a
+ # descriptor — with more said about it, and `3` is a true claim about `b.fd`
+ # rather than a convenient one.
+("fd_write_on_frame_slot_refused",
   "struct Box:\n"
   "    fd: Int\n"
   "    n: Int\n"
@@ -2560,7 +2568,7 @@ FD_CASES = [
   "    b = Box()\n"
   "    b.fd.write(\"x\")\n"
   "    return 0\n",
-  "refuse:and it is a frame slot", None),
+  "refuse:frame slot classified as 'int'", None),
 ]
 
 # ── a multi-field receiver, BY REFERENCE ───────────────────────────────────
@@ -4675,6 +4683,162 @@ BOTH_ARCH_CASES = [
      "    x = 7\n"
      "    x //= 0\n"
      "    return x\n", 1, None),
+    # ── THE ARITY LADDER, which used to be REFUSALS in `REFUSAL_CASES` and is
+    # here because it is the one construct the two backends put arguments in
+    # DIFFERENT PLACES for ──────────────────────────────────────────────────────
+    #
+    # AAPCS passes arguments 0..7 in registers and the rest in the caller's
+    # frame; SysV AMD64 passes 0..5 and the rest in the caller's frame.  Both
+    # conventions are implemented now (`_MAX_INCOMING_ARGS` on both backends),
+    # which means a SEVEN-argument call is a program that travels in a register
+    # on one architecture and in memory on the other — and a defect in either
+    # half of that convention is invisible on the machine that does not use the
+    # frame.  A `run_case` row builds the HOST's architecture, so these rows
+    # could not live there even once they were answerable.
+    #
+    # They were refusals until 2026-10-02 (arm64) and were refused on BOTH
+    # backends for the nine-argument rows until the x86-64 stack area landed the
+    # same day; the history and the measurement are in
+    # `bugs/FORMAL_x86_64_argument_registers.md` (deleted — it asked for exactly
+    # this) and `bugs/FORMAL_struct_pack_over_eight_arguments.md`.
+    #
+    # `seven` is the row the whole subject is: `a6` is the FIRST stack argument
+    # on x86-64 and the LAST register argument on arm64, and the answer is built
+    # from it twice over (`a6 * 1000000 + a0`) so a slot holding the right
+    # CONSTANT but the wrong argument still fails.
+    ("both_arch_seven_arguments_arrive",
+     "def seven(a0: int, a1: int, a2: int, a3: int,\n"
+     "          a4: int, a5: int, a6: int) -> int:\n"
+     "    return a6 * 1000000 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"seven=%d\", seven(1, 2, 3, 4, 5, 6, 7))\n"
+     "    return 0\n", 0, "seven=7000001"),
+    # The ninth argument, which is arm64's first stack slot and x86-64's third.
+    # Nine rather than seven so a fix that implemented only the first stack
+    # argument of each convention is caught by the count as well as the value.
+    ("both_arch_nine_arguments_arrive",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n"
+     "    return 0\n", 0, "nine=90001"),
+    # SIXTEEN arguments, which is the SHAPE of the outgoing area rather than the
+    # count: SysV spaces arguments 8 bytes and AAPCS 8 bytes, so an ODD number
+    # leaves the area short of the 16-byte alignment the `call` requires and the
+    # padding has to go at the HIGH end so the first stack argument is still at
+    # offset 0.  `a15 + a8 * 10 + a0` reads the last stack slot of each, which is
+    # where a padding byte at the wrong end lands.
+    ("both_arch_sixteen_arguments_arrive",
+     "def wide(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int, a8: int, a9: int,\n"
+     "          a10: int, a11: int, a12: int, a13: int, a14: int,\n"
+     "          a15: int) -> int:\n"
+     "    return a15 + a8 * 10 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"wide=%d\", wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))\n"
+     "    return 0\n", 0, "wide=107"),
+    # The stack argument arriving from a CALLER'S PARAMETER rather than from a
+    # literal, which is the direction a compiler can get wrong by FOLDING, and a
+    # NESTED CALL in the ninth position, which is the direction it can get wrong
+    # by ORDER: an argument expression that itself calls pushes and pops around
+    # RSP, so the outgoing slots must be reserved BEFORE it is evaluated and the
+    # store must survive the call.  With the register arguments spilled first,
+    # the seventh argument reads as ZERO — indistinguishable from a caller who
+    # passed zero, which is the answer the original refusal existed to prevent.
+    ("both_arch_a_stack_argument_from_a_parameter_and_a_nested_call",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def one() -> int:\n"
+     "    return 7\n\n"
+     "def call_it(w: int) -> int:\n"
+     "    return nine(1, 2, 3, 4, 5, 6, 7, 8, w)\n\n"
+     "def main() -> int:\n"
+     "    printf(\"param=%d\", call_it(9))\n"
+     "    printf(\" nested=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n"
+     "    return 0\n", 0, "param=90001 nested=70001"),
+    # RECURSION, which is the one caller whose outgoing area is the SAME
+    # function's own incoming arguments: `f`'s ninth argument lives in its
+    # caller's frame at `[rbp + 16 + 16]`, and the recursive call inside `f`
+    # reserves its own outgoing area BELOW `f`'s own RSP \u2014 so the two cannot
+    # overlap, which is exactly what a convention that put the outgoing area
+    # above RSP would get wrong.  37 is 2 + 5*7: the base case doubles `a0` and
+    # every level adds `a6`, so a stack argument read as zero rather than 7
+    # answers 2 and one read as a neighbour answers something in between.
+    ("both_arch_stack_arguments_survive_recursion",
+     "def dbl(v: int) -> int:\n"
+     "    return v * 2\n\n"
+     "def f(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "      a5: int, a6: int, a7: int, n: int) -> int:\n"
+     "    if n <= 0:\n"
+     "        return dbl(a0)\n"
+     "    return f(a0, a1, a2, a3, a4, a5, a6, a7, n - 1) + a6\n\n"
+     "def main() -> int:\n"
+     "    printf(\"rec=%d\", f(1, 2, 3, 4, 5, 6, 7, 8, 5))\n"
+     "    return 0\n", 0, "rec=37"),
+    # A DEFAULTED parameter past the sixth, which is the direction the convention
+    # is most likely to be got wrong by FOLDING rather than by dropping: the
+    # value in the outgoing slot is the DEFAULT the callee's own declaration
+    # names, filled in by `bind_call_args` rather than by any call site, and the
+    # two printfs differ only in whether the caller supplies those two at all.
+    # Both answers are stated: `def=87` is 8*10+7, the defaults, and `870` is the
+    # explicit 80 and 70 \u2014 so a convention that made the defaulted call read
+    # the caller\u0027s register leftovers fails the first and not the second.
+    ("both_arch_a_defaulted_stack_argument",
+     "def f(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
+     "      a6: int = 7, a7: int = 8) -> int:\n"
+     "    return a7 * 10 + a6\n\n"
+     "def main() -> int:\n"
+     "    printf(\"def=%d\", f(1, 2, 3, 4, 5, 6))\n"
+     "    printf(\" %d\", f(1, 2, 3, 4, 5, 6, 70, 80))\n"
+     "    return 0\n", 0, "def=87 870"),
+    # SIX arguments still work, and it is here as the boundary from the other
+    # side: the fix is a stack argument PAST the register file, not a smaller
+    # register file.  Without this row a change that cut either convention to the
+    # other's limit would pass every row above on one architecture.
+    ("both_arch_six_arguments_still_work",
+     "def six(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int) -> int:\n"
+     "    return a5 * 10 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"six=%d\", six(1, 2, 3, 4, 5, 6))\n"
+     "    return 0\n", 0, "six=61"),
+    # THE COMPTIME HALF OF THE OPERATOR, and the row above is the reason it is
+    # here. `//` is not an exotic operator on this path: `_emit_div_shift_pow`
+    # lowers it (arm64 UDIV/SDIV) and `_emit_div_mod` lowers it (x86-64 IDIV),
+    # the reference interpreter folds it (`myinterpreter.py`'s binary-op table),
+    # and the row above pins what the RUNTIME does when the divisor is zero.
+    # What was missing was the compile-time half, and it was missing in the
+    # only way a missing operator can be: silently.
+    #
+    # `mojo/middle/comptime.py:fold_arith` is the ONE folder every compiled
+    # path shares for `comptime NAME = ...` — arm64 and x86-64 both call
+    # `resolve_var`, and the gimple path's evaluator goes through the same
+    # `eval_const`. It had `+ - *` and `/` and no `//`, so
+    #
+    #     comptime c = 7 // 2
+    #
+    # printed `3` under `python3 fire.py run`, ran as `3` when the same `//`
+    # sat OUTSIDE the `comptime`, and was REFUSED by both compiled backends as
+    # "does not fold to a compile-time constant". One source, three answers,
+    # and the two compiled ones were the odd ones out.
+    #
+    # The value is 43 on both architectures and every step is stated so a reader
+    # can check it without running anything: `a` binds 100, `b` reads it and
+    # folds to `100 // 7 == 14`, `c` reads `b` and folds to `(14 // 2) * 6 + 1
+    # == 43`. The chain matters — a folder that resolved the names but not the
+    # operator would produce nothing at all (a refusal), and one that folded the
+    # operator but not the names likewise, so this row cannot pass with only half
+    # the repair. 43 is not 0 and not 1 for a second reason: 1 is what the
+    # row below makes the answer to a zero divisor, so a case whose right answer
+    # were 1 could not tell "folded correctly" from "divided by zero and
+    # trapped".
+    ("both_arch_comptime_floor_division_folds",
+     "def main(n: Int) -> Int:\n"
+     "    comptime a = 100\n"
+     "    comptime b = a // 7\n"
+     "    comptime c = (b // 2) * 6 + 1\n"
+     "    return c\n", 43, None),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -6091,6 +6255,211 @@ ONE_WORD_NESTED_CASES = [
      "    var x = Box()\n"
      "    x.p = mk()\n"
      "    return x.p.a * 10 + x.p.b\n", 34, None),
+    # ── the identity READ AS A CALL'S RECEIVER, which is a different program ──
+    #
+    # Every case above reads a one-word chain, and the rewrite is right for a
+    # read: `b.inner` and `b` are one word and reading either gives the field.
+    # Reading it as a CALL'S RECEIVER is not the same thing, because the rewrite
+    # keeps the METHOD NAME and drops the STRUCT the name belongs to.
+    # `std/builtin/builtin_slice.mojo` is the source of the shape and the
+    # measurement: `StridedSlice.write_to`'s whole body is
+    # `self._inner.write_to(writer)`, where `write_to` is declared by `Slice`,
+    # so after the identity the callee reads `self.write_to(writer)` — a call of
+    # `StridedSlice.write_to` on `self`, which is that same function, forever.
+    # Three refusals come out of it depending on which pass notices, and the one
+    # the file itself hit was a FALSE one ("`self.write_to` is not a field of
+    # StridedSlice … in Python this expression is the bound method", about an
+    # expression that is a CALL and was Slice's).
+    #
+    # So these assert the LIFT: `self._inner.add(v)` is `Slice.add(self, v)`,
+    # because `_inner`'s DECLARED type names the struct and that is the only
+    # thing in hand that can. 10 is `3 + 7`, and it is the number a wrong
+    # dispatch could not produce — the infinite recursion has no exit status.
+    ("one_word_field_method_call_reaches_the_fields_own_method",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "\n"
+     "    def add(self, v: Int) -> Int:\n"
+     "        return self.start + v\n"
+     "\n"
+     "struct StridedSlice:\n"
+     "    var _inner: Slice\n"
+     "\n"
+     "    def emit(self, v: Int) -> Int:\n"
+     "        return self._inner.add(v)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var inner = Slice()\n"
+     "    inner.start = 3\n"
+     "    var ss = StridedSlice()\n"
+     "    ss._inner = inner\n"
+     "    return ss.emit(7)\n", 10, None),
+    # The chain is a chain, so the receiver can be TWO fields deep: `Root.x` is
+    # `Mid`, `Mid.w` is `Leaf`, and `self.x.w.leaf()` is `Leaf.leaf(self)` by the
+    # same argument one level up. A lift that matched one level would leave
+    # `self.x.leaf()` for the identity to collapse into `self.leaf()`, which is
+    # `Root.leaf` — a symbol this image does not define.
+    ("one_word_field_method_call_through_a_two_level_chain",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def scaled(self, k: Int) -> Int:\n"
+     "        return self.v * k\n"
+     "\n"
+     "struct Mid:\n"
+     "    var w: Leaf\n"
+     "\n"
+     "struct Root:\n"
+     "    var x: Mid\n"
+     "\n"
+     "    def get(self, k: Int) -> Int:\n"
+     "        return self.x.w.scaled(k)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    a.x.w.v = 6\n"
+     "    return a.get(5)\n", 30, None),
+    # The same lift with a LOCAL as the root rather than a method's `self`,
+    # because `_one_word_field_map` records both and the lift has to ask the
+    # same question of both. `b` is one word from `Box()`, so `b.inner.add(7)`
+    # becomes `Slice.add(b, 7)` and `self.start` inside it reads `b`.
+    ("one_word_field_method_call_through_a_local_root",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "\n"
+     "    def add(self, v: Int) -> Int:\n"
+     "        return self.start + v\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Slice\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box()\n"
+     "    b.inner.start = 40\n"
+     "    return b.inner.add(2)\n", 42, None),
+]
+
+# The BOUNDARY of the lift above: a field whose declared type is NOT a struct of
+# this image has no method table, so the call cannot be lifted and must still be
+# refused — by the value-receiver sentence, which is true of it. Without this
+# case the lift could widen to any `recv.f.m(x)` and every case above would
+# still pass.
+ONE_WORD_FIELD_METHOD_REFUSALS = [
+    ("one_word_field_method_call_on_a_scalar_field_is_still_refused",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "    def go(self) -> Int:\n"
+     "        return self.n.add(2)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box()\n"
+     "    b.n = 3\n"
+     "    return b.go()\n",
+     "refuse:is a method call on a value", None),
+]
+
+# ── a CONDITIONAL ARM: `elif` and `comptime if`, and a walk that stops at them ──
+#
+# Both of these are ONE defect seen twice, and it is a defect in the WALKS rather
+# than in either construct. `IfStmt.elifs` is a list of TUPLES — the only
+# container in the tree that is not a list — so a walk that recurses on
+# `isinstance(node, list)` descends every `if` body and every `else` and stops
+# dead at the first `elif`, while `model.iter_nodes` (which every LATE check
+# uses) walks all of them. And a `comptime if` is a distinct NODE
+# (`fire_compiler.ComptimeIfStmt`), so a walk that knows `IfStmt` does not know
+# it at all.
+#
+# The consequence is the same both times and it is a REFUSAL THAT MISDESCRIBES
+# ITS OWN PROGRAM, because the reader is a check and the rewriter is a rewrite:
+#
+#   * the `elif` case — `formal/build.py`'s `_rewrite_method_calls` misses the
+#     arm, so a method call inside it is never lifted, so it reaches
+#     `check_value_position_method_reads` as `self._next` and the program is
+#     refused with "self._next is not a field of Rng … Call it
+#     (`self._next(...)`), which is a receiver and a call and lowers" — about a
+#     call that HAS its parentheses. Measured: `std/testing/prop/random.mojo`'s
+#     `Rng.rand_scalar`, arm64 and x86-64 identically.
+#   * the `comptime if` case — `mojo/middle/boundnames.py`'s `_lbn_walk` misses
+#     the node, so a name bound in the branch is not a local, so it gets no
+#     register and the program is refused with "'a' has no home: the register
+#     allocator collected no home for it, so the emitter and the allocation walk
+#     disagree" — which blames a disagreement between two passes instead of
+#     naming the one walk both of them should have shared.
+#
+# Both cases here are the two shapes with and without the offending arm, because
+# a case that only has the arm cannot tell a fix from a rewrite that stopped
+# emitting the branch: `a` alone and `a` + `b` are different numbers, and the
+# `comptime` pair differs by which arm the specialization takes.
+CONDITIONAL_ARM_CASES = [
+    # 9 = the `elif` arm's answer (diff 6 + lo 3). The `if` twin is 0, so a
+    # rewrite that dropped the arm entirely would be caught by the exit status
+    # rather than passing quietly.
+    ("method_call_in_an_elif_arm_is_lifted",
+     "struct Rng:\n"
+     "    def _next(self, max: Int) -> Int:\n"
+     "        return max\n"
+     "\n"
+     "    def rand_scalar[T: Int](self, lo: Int, hi: Int) -> Int:\n"
+     "        if lo > hi:\n"
+     "            return 0\n"
+     "        elif T == 2:\n"
+     "            var diff = hi - lo if hi > lo else lo - hi\n"
+     "            var uint64 = self._next(diff)\n"
+     "            return uint64 + lo\n"
+     "        else:\n"
+     "            return hi\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = Rng()\n"
+     "    return r.rand_scalar[2](3, 9)\n", 9, None),
+    ("method_call_in_an_if_body_is_lifted",
+     "struct Rng:\n"
+     "    def _next(self, max: Int) -> Int:\n"
+     "        return max\n"
+     "\n"
+     "    def rand_scalar[T: Int](self, lo: Int, hi: Int) -> Int:\n"
+     "        if T == 2:\n"
+     "            var diff = hi - lo if hi > lo else lo - hi\n"
+     "            var uint64 = self._next(diff)\n"
+     "            return uint64 + lo\n"
+     "        return hi\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = Rng()\n"
+     "    return r.rand_scalar[2](3, 9)\n", 9, None),
+    # 5 is the `else` arm (`k + 2` with k = 3), so this case is the one that
+    # proves the arm was CHOSEN and not merely compiled: the `then` arm's answer
+    # is 4.
+    ("a_local_in_a_comptime_if_body_has_a_home",
+     "def pick[T: Int](k: Int) -> Int:\n"
+     "    comptime if T == 1:\n"
+     "        var a = k + 1\n"
+     "        return a\n"
+     "    else:\n"
+     "        var b = k + 2\n"
+     "        return b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return pick[2](3)\n", 5, None),
+    # The same with an `elif` between the two arms, which is the shape
+    # `random.mojo`'s `rand_scalar` actually has (`comptime if … elif
+    # dtype.is_integral():`). 45 = the elif arm (15 + 25 + 5); the `then` arm
+    # answers 16 and the `else` 15, so all three arms are distinguishable and a
+    # rewrite that dropped the elif would not pass as the then arm.
+    ("a_local_in_a_comptime_elif_arm_has_a_home",
+     "def pick[T: Int](k: Int, lo: Int, hi: Int) -> Int:\n"
+     "    comptime if T == 1:\n"
+     "        var a = k + 1\n"
+     "        return a\n"
+     "    elif T == 2:\n"
+     "        var diff = hi - lo\n"
+     "        var uint64 = k\n"
+     "        return uint64 + diff + lo\n"
+     "    else:\n"
+     "        return k\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return pick[2](15, 5, 30)\n", 45, None),
 ]
 
 # ── a DECLARED frame parameter handed a frame-RETURNING call ────────────────
@@ -10420,11 +10789,27 @@ EQ_DISPATCH_CASES = [
      "    return bump()\n",
      "refuse:G is read in bump() at `G + 1`", None),
     # The sibling the filing did not mention: the same name WRITTEN through a
-    # `global` declaration, which the language allows and the value model has
-    # nowhere for.  There is no storage a write could outlive a frame in, so both
-    # emitters treat the declaration as a no-op — CPython answers 6 and 6 where
-    # this path answered 10601485 and 5 on arm64 and 11 and 5 on x86-64.
-    ("a_mutated_module_global_is_refused",
+    # `global` declaration.  It USED to expect a refusal here — "there is no
+    # storage a write could outlive a frame in", which was true and which both
+    # emitters enforced by treating the declaration as a no-op, so CPython
+    # answered 6 and 6 where this path answered 10601485 and 5 on arm64 and 11
+    # and 5 on x86-64.  That sentence stopped being true when
+    # `formal-module-globals` gave a written module-level name a `__DATA` slot,
+    # and the row was left asserting a refusal the backend no longer owes —
+    # red on `master` as well as on the branch that found it.  That was recorded
+    # in a `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
+    # doc, now deleted with the row it was about; the decision and its
+    # measurement are in `bugs/FORMAL_module_state_no_storage.md`'s "Re-measured
+    # 2026-10-02" section, which named this doc's owner as the decider.  Option 1
+    # of that doc's two, and the one the tree's behaviour already implements:
+    # the program is RIGHT, so the row asserts the number.
+    #
+    # 12 is CPython's: `G` goes 5 -> 6 and both reads see 6.  Measured on both
+    # backends on this tree, and the same number from `python3`.  The exit
+    # status is the assertion and the empty stdout is the other half of it —
+    # `main` RETURNS the sum rather than printing it, so an image that printed
+    # something and exited 0 would not pass.
+    ("a_mutated_module_global_is_read_back_from_its_slot",
      "G = 5\n"
      "def bump():\n"
      "    global G\n"
@@ -10434,7 +10819,7 @@ EQ_DISPATCH_CASES = [
      "    return G\n"
      "def main(n):\n"
      "    return bump() + rd()\n",
-     "refuse:G is declared `global` in bump() and assigned there", None),
+     12, ""),
 ]
 
 
@@ -11048,79 +11433,26 @@ TYPE_ARGUMENT_LIST_ABSENT_CASES = [
 # they no longer say what this paragraph says about them; they are here
 # because the diagnosis they record is a diagnosis about a refusal.
 REFUSAL_CASES = [
-    # THE ARITY LADDER, and it used to be two REFUSALS above the boundary.
-    #
-    # A function of NINE parameters read its ninth as ZERO: the callee's
-    # prologue `break`ed out of the argument loop at i == 8 and `_emit_call`
-    # dropped the extra arguments after evaluating them for side effects.
-    # `nine(1,...,9)` returned 1 where the source says 90001.  Zero is the
-    # worst possible wrong answer here, and the reason is structural: a callee
-    # cannot tell a dropped argument from a caller who passed zero, so the
-    # value was not merely wrong but INDISTINGUISHABLE from a legitimate one.
+    # The ARITY LADDER rows below were REFUSALS here and are ANSWERED ones in
+    # `BOTH_ARCH_CASES` now, so they no longer say what the paragraph this group
+    # used to open with says about them.  What is left of that history is worth
+    # one paragraph, because it is the reason the answered rows are where they
+    # are: a function of NINE parameters read its ninth as ZERO — the callee's
+    # prologue stopped moving arguments at the register count and `_emit_call`
+    # dropped the rest after evaluating them for side effects, so
+    # `nine(1,...,9)` returned 1 where the source says 90001.  Zero is the worst
+    # possible wrong answer here and the reason is structural: a callee cannot
+    # tell a dropped argument from a caller who passed zero, so the value was
+    # not merely wrong but INDISTINGUISHABLE from a legitimate one.
     #
     # The refusal that replaced it was RIGHT about the register count and wrong
-    # about the consequence.  AAPCS passes arguments 0..7 in X0..X7 and the rest
-    # in the caller's frame at ascending offsets from the SP the callee enters
-    # with; the convention was not implemented, so argument 8 was refused
-    # instead of being loaded from `[X29 + 16]`.  That refusal is what made
+    # about the consequence: both ABIs put arguments past the register file in
+    # the CALLER's frame, and neither convention was implemented, so argument 8
+    # (arm64) and argument 6 (x86-64) were refused instead of loaded from it.
     # `formal/hostmods/struct.mojo`'s own "a format I cannot serve returns an
-    # empty list" contract unreachable — `pack(fmt, v0..v7)` is nine arguments —
-    # and it kept `test_struct_formal.py`'s registered `formal-struct` job red
-    # on 2 of its 148 checks (`bugs/FORMAL_struct_pack_over_eight_arguments.md`,
-    # which has the whole measurement).
-    #
-    # Four rows because the convention has four corners and a fix that got one
-    # of them wrong would be the same defect again: the ninth argument itself,
-    # that argument arriving from a CALLER'S PARAMETER rather than a literal,
-    # SIXTEEN arguments so the outgoing area is more than one slot, and a nested
-    # call in an argument expression — the last one because a nested call pushes
-    # and pops around SP, and the outgoing slots have to survive that.
-    #
-    # These rows build with no `--backend`, so they are arm64 by construction,
-    # which is the platform whose convention landed. x86-64's SysV stack area
-    # is still unimplemented and its ninth-argument refusal is pinned as a
-    # STATED limit in `test_formal_x86_64_parity.py`'s `X86_ONLY_REFUSALS`.
-    ("nine_arguments_arrive",
-     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
-     "    return a8 * 10000 + a0\n\n"
-     "def main() -> int:\n"
-     "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n    return 0\n",
-     0, "nine=90001"),
-    # The stack argument arriving as a CALLER'S PARAMETER rather than as a
-    # literal, which is the direction a compiler could have got wrong by
-    # folding: `bind_call_arguments` fills a defaulted parameter from the
-    # callee's own table, and the value the ninth slot ends up holding is
-    # whatever the caller had at run time. A row that passed only literals
-    # would not notice a stack slot that read the right CONSTANT.
-    ("a_stack_argument_arrives_from_a_caller_parameter",
-     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
-     "    return a8 * 10000 + a0\n\n"
-     "def call_it(w: int):\n"
-     "    return nine(1, 2, 3, 4, 5, 6, 7, 8, w)\n\n"
-     "def main() -> int:\n"
-     "    printf(\"nine=%d\", call_it(9))\n    return 0\n",
-     0, "nine=90001"),
-    ("sixteen_arguments_arrive",
-     "def wide(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "          a5: int, a6: int, a7: int, a8: int, a9: int,\n"
-     "          a10: int, a11: int, a12: int, a13: int, a14: int,\n"
-     "          a15: int) -> int:\n"
-     "    return a15 + a8 * 10 + a0\n\n"
-     "def main() -> int:\n"
-     "    printf(\"wide=%d\", wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))\n"
-     "    return 0\n",
-     0, "wide=107"),
-    ("a_nested_call_in_a_stack_argument_arrives",
-     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
-     "    return a0 + a8\n\n"
-     "def one() -> int:\n"
-     "    return 7\n\n"
-     "def main() -> int:\n"
-     "    printf(\"nested=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n    return 0\n",
-     0, "nested=8"),
+    # empty list" contract was unreachable because of it — `pack(fmt, v0..v7)` is
+    # nine arguments — and so was `formal/hostmods/fnmatch.mojo`'s
+    # `match_core(7)`, which took `pathlib` and four files in `tools/` with it.
     # ── THE IMPORT DIAGNOSIS OUTRANKS A FRAME REFUSAL ──────────────────────────
     #
     # `_prepare_functions` runs BEFORE `_resolve_imports`, and every frame
@@ -11167,16 +11499,12 @@ REFUSAL_CASES = [
      "    p.b = 4\n"
      "    return p.zz + n\n",
      "refuse:P has no field 'zz'", None),
-    # EIGHT arguments is the boundary and it must still WORK: the fix is a
-    # stack argument past the limit, not a smaller limit. Without this row a
-    # fix that cut the ABI to 6 to match x86-64 would pass the two above.
-    ("eight_arguments_still_work",
-     "def eight(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "          a5: int, a6: int, a7: int) -> int:\n"
-     "    return a7 * 1000 + a6 * 100 + a5 * 10 + a0\n\n"
-     "def main() -> int:\n"
-     "    printf(\"eight=%d\", eight(1, 2, 3, 4, 5, 6, 7, 8))\n    return 0\n",
-     0, "8761"),
+    # EIGHT arguments used to be this row's subject — the boundary arm64
+    # answered and x86-64 refused, so it ran on one architecture and could not
+    # see the divergence.  Both conventions have a stack area now, and the whole
+    # ladder (7, 9, 16 arguments, a stack argument from a caller's parameter, a
+    # nested call in argument position, and 6 as the boundary from the other
+    # side) is in `BOTH_ARCH_CASES`, where every row builds and runs on both.
     # A name read before anything in the function stores it. CPython raises
     # UnboundLocalError; this path cannot, because the emitted image has no
     # way to mean "unbound" — the allocator gave the name a register (the
@@ -11312,6 +11640,25 @@ REFUSAL_CASES = [
      "        p = 2\n"
      "    printf(\"p=%d\", p)\n    return 0\n",
      0, "p=1"),
+    # A `try`'s `else` clause, which is the shape the whole clause exists for:
+    # do the work where it can fail, and use the result only on the path where
+    # it did not. It was REFUSED on both architectures — "'p' is read at line 7
+    # before anything in this function stores it, and CPython raises
+    # UnboundLocalError for that program", which is false about both halves: the
+    # clause runs only when the body completed, so `p` is always stored there,
+    # and CPython runs the program. The graph reached the clause from the try's
+    # header, i.e. from the one path the language skips it on. Same program
+    # shape as `test_struct_formal.py:603`, which is where it was measured.
+    ("try_else_clause_runs_only_when_the_body_completed",
+     "def f(n):\n"
+     "    try:\n"
+     "        p = n + 1\n"
+     "    except Exception:\n"
+     "        return 1\n"
+     "    else:\n"
+     "        printf(\"p=%d\", p)\n"
+     "    return 0\n",
+     0, "p=11"),
     # A `for` target STAYS bound after its loop, because the target is a
     # definition in the loop's HEADER and the join is reached from the header's
     # exit edge — so `range(0, 100)` with an immediate break is legal and
@@ -11335,6 +11682,42 @@ REFUSAL_CASES = [
      "    var ys = [i + 1 for i in xs]\n"
      "    printf(\"y=%d\", len(ys))\n    return 0\n",
      0, "y=3"),
+    # THE OTHER HALF OF `//`, and a CRASH rather than a wrong answer, which is
+    # the shape that makes it worth a row. `fold_arith` reaches Python's
+    # operators directly, so a literal-zero divisor raised out of it, out of
+    # `eval_const`, out of `resolve_var` and out of the backend — a
+    # `ZeroDivisionError` traceback where the reader gets no message at all and
+    # no indication of which statement in their file caused it:
+    #
+    #     $ python3 fire.py build --formal --no-prove -o t t.mojo
+    #     build: division by zero
+    #     ZeroDivisionError: division by zero
+    #
+    # Both spellings are here because the guard has to cover the one that was
+    # already broken as well as the one the new `//` arm would otherwise have
+    # added: `/` was in that table from the start and had the same exposure, so
+    # a fix that closed only `//` would have left the identical crash reachable.
+    #
+    # REFUSING is the right answer and not a trap. At compile time there is
+    # nothing running to trap: the value is wanted as a constant and the build
+    # does not have one, which is exactly what `comptime_fold_refusal` is for.
+    # The runtime's answer to the same question is pinned separately by
+    # `both_arch_augmented_division_by_zero_exits_one`, and it is a different
+    # question — `x //= 0` has an `x`, this has no program to run.
+    ("comptime_division_by_zero_is_refused_not_a_crash",
+     "def f(n):\n"
+     "    comptime c = 1 / 0\n"
+     "    return c\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return f(n)\n",
+     "refuse:does not fold to a compile-time constant", None),
+    ("comptime_floor_division_by_zero_is_refused_not_a_crash",
+     "def f(n):\n"
+     "    comptime c = 1 // 0\n"
+     "    return c\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return f(n)\n",
+     "refuse:does not fold to a compile-time constant", None),
 ]
 
 
@@ -12633,6 +13016,8 @@ def main():
                   + INIT_FIELD_TYPE_CASES \
                   + INIT_FIELD_TYPE_REFUSALS \
                   + ONE_WORD_NESTED_CASES \
+                  + ONE_WORD_FIELD_METHOD_REFUSALS \
+                  + CONDITIONAL_ARM_CASES \
                   + DECLARED_FRAME_RETURN_CASES
                   + OVERLOAD_LAYOUT_CASES + OVERLOAD_REFUSALS
                   + OVERLOAD_DISPATCH_REFUSALS

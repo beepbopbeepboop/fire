@@ -97,7 +97,7 @@ count unchanged.
 | files blocked | in-file | cause | owner / next step |
 |---|---|---|---|
 | **32** | 5 | a local read before its first assignment | `FORMAL_a_local_read_before_its_first_assignment` (claim `formal3-1-r2`). 26 of the 32 are the single name `pend` in `formal/hostmods/re.mojo:1401`, and the tool measures that 21 of the 25 files behind it name nothing `re.mojo` declares — so the row's value is `re.mojo` itself plus `formal/arm64.py`'s `sym_name` (3), not the 25 |
-| 6 | 1 | too many parameters for the register ABI (8 arm64 / 6 x86-64) | `FORMAL_x86_64_argument_registers` (claim `formal3-9-r2-r2`). The single in-file row is `formal/hostmods/fnmatch.mojo` — **the only x86-64-only finding in this slice** (§4) |
+| 6 | 1 | too many parameters for the register ABI (8 arm64 / 6 x86-64) | `FORMAL_x86_64_argument_registers` (claim `formal3-9-r2-r2`) — **deleted 2026-10-02, the cause is FIXED**: both ABIs now pass arguments past their register file in the caller's frame, and `fnmatch.mojo`/`pathlib.mojo` build on x86-64. The row as measured was real and the single in-file row was `formal/hostmods/fnmatch.mojo` — **the only x86-64-only finding in this slice** (§4) |
 | 3 | 3 | a module-global name has no storage | `FORMAL_module_state_no_storage` (claim `formal3-5`). `ELF_MAGIC` in `formal/elf.py`, `_MSL_FLOAT_TYPES` in `mojo/middle/metal_ops.py`, `REPO` in `tools/bootstrap_verify.py` |
 | 3 | 3 | a module's ATTRIBUTE read as a value (`sys.argv`) | `FORMAL_module_state_no_storage`, "What is left" (claim `formal3-5`) — `t_argv.mojo`, `tools/ci_line.py`, `tools/detach.py` |
 | 2 | 2 | `print()` cannot classify the argument's type | **unowned and NOT x86-specific** — arm64 refuses the same two files with the same words except "arm64" for "x86-64". The arm64 repository sweep (`sweep:repo-a/b/c`) is the natural owner; a lowering decision, not a wrong answer |
@@ -129,8 +129,12 @@ in the repository scope** — `re.mojo` and `hashlib.mojo`, the two that doc nam
 are behind host-import chains here. It is the largest x86-64/arm64 difference
 that exists, it is not a bug (SysV passes six integer arguments in registers,
 AAPCS64 passes eight), and the fix is an ABI change plus a proof-model change
-that `FORMAL_x86_64_argument_registers` already measures. **Do not start it from
-this map.**
+that `FORMAL_x86_64_argument_registers` already measured. **Do not start it from
+this map.** *(That filing was deleted on 2026-10-02: the ABI half landed on both
+backends and this cause no longer fires below twenty-five arguments. The
+proof-model half it also measured is `bugs/FORMAL_ast_bridge_binds_only_the_
+first_parameter.md`, which is still open and still says a two-parameter function
+has no proof — let alone a seven-argument one.)*
 
 **The same probe found one arm64-only WRONG ANSWER, which is the row to read
 this map for.** `base ** <computed exponent>` is **0 on arm64** and correct on
@@ -208,11 +212,16 @@ that the next reader does not re-derive the attribution.
    what the tool measured here: **21 of the 25 files behind `re.mojo` name
    nothing it declares**, so even a complete fix moves the row by a handful of
    files and lands most of them on the next refusal in their chain.
-2. **`fnmatch.mojo`'s `match_core(7)`** — `FORMAL_x86_64_argument_registers`
-   (claim `formal3-9-r2-r2`). Marginal effect **on this scope: 1 file**. The
-   doc's own next step (a stack-argument convention in both emitters, plus
-   `lib/ProofLib.lean`'s one-parameter `MojoFunc`) is unchanged and is still the
-   biggest single x86-64 item in the tree.
+2. ~~**`fnmatch.mojo`'s `match_core(7)`**~~ — **DONE 2026-10-02, both halves
+   that were reachable.** A stack-argument convention landed in BOTH emitters
+   (`_MAX_INCOMING_ARGS` = 24 each; `formal/x86_64_codegen.py`'s
+   `_load_home_from_stack` is the x86-64 half), so `fnmatch.mojo` and
+   `pathlib.mojo` build on x86-64 and the two `KNOWN_X86_64_ONLY` rows in
+   `test_formal_hostmods_census.py` are deleted. The marginal effect really was
+   1 file in this scope, as measured above. What is left of it is
+   `lib/ProofLib.lean`'s one-parameter `MojoFunc`
+   (`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`), which is not an
+   x86-64 item at all: it is one limit on both machines.
 3. **module-global storage and `sys.argv`** (6 files in-file) —
    `FORMAL_module_state_no_storage` (claim `formal3-5`), which states that the
    storage half landed and what is left is the three things a `__DATA` slot
