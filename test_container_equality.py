@@ -369,13 +369,186 @@ CASES = [
         "    return 0")),
 ]
 
-# Ordering comparisons between containers are NOT covered here and are a
-# separate open bug: they still lower to a pointer comparison, and the CPython
-# this diffs against (3.14) answers `a < b` for lists and sets, so a
-# `mojo_list_lt` is now ANSWERABLE rather than a refusal. See
-# bugs/CODEGEN_container_ordering_is_pointer_identity.md. No case here uses
-# `<`, `>`, `<=` or `>=` on a container, so a future change to those cannot be
-# mistaken for coverage this test provides.
+# ── ORDERING ───────────────────────────────────────────────────────────────
+#
+# Separate from the `==`/`!=` group above, and run through the same harness,
+# because these four operators are a DIFFERENT question with a different set of
+# rules and used to have a different wrong answer: `<` / `>` / `<=` / `>=`
+# between containers lowered to the raw C comparison of two pointers, so the
+# answer was decided by where malloc put the two allocations. That was silent
+# (exit 0, no diagnostic) and wrong for four of the five cases in
+# bugs/CODEGEN_container_ordering_is_pointer_identity.md.
+#
+# The rules being pinned are NOT one rule:
+#   * LIST (and tuple) is lexicographic with a SHORTER PREFIX ORDERING FIRST —
+#     `[1] < [1, 2]`, `[1, 2] > [1]` — and recurses through a nested container.
+#   * SET is the PROPER-SUBSET relation, in BOTH directions for `>`, which is
+#     not the list rule and not a difference-emptiness test: `{1, 2}` vs
+#     `{1, 3}` is neither `<` nor `>`, and the pointer comparison got
+#     `s1 > s2` backwards for exactly that pair.
+#   * DICT has no ordering on CPython either, so every dict case here is a
+#     TypeError and the test passes only if the compiled program raises one too
+#     (same stdout, same exit status as CPython).
+#
+# Every operator appears in every list and set case. A case that used only `<`
+# would pass with `<=` and `>=` inverted, since `<=` and `>=` are `==` OR the
+# strict form rather than the strict form alone — the shape
+# bugs/CODEGEN_container_ordering_is_pointer_identity.md §"Exact next step"
+# called out, and the reason this group exists rather than four more `==` rows.
+ORDER_CASES = [
+    ("order-list-lexicographic", _p(
+        "def main() -> Int:",
+        # all four operators, each against a list that differs from the other
+        # at one position and by length
+        "    print([1, 2] < [1, 3], [1, 2] > [1, 3], [1, 2] <= [1, 2], [1, 2] >= [1, 3])",
+        # a SHORTER PREFIX orders FIRST: the rule lists use and sets do not
+        "    print([1] < [1, 2], [1, 2] > [1])",
+        "    print([] < [], [] <= [], [] < [1], [] > [1])",
+        "    print([1, 2] < [1, 2, 3], [1, 2, 3] > [1, 2])",
+        # neither a prefix nor equal: decided on the first differing element
+        "    print([2] < [1, 3], [1, 3] > [2])",
+        "    return 0")),
+    ("order-list-elements", _p(
+        "def main() -> Int:",
+        # int vs float promotes rather than reinterpreting: `[1.0] < [1]` is
+        # False (they are equal) and `[1.0] < [2]` is True
+        "    print([1.0] < [1], [1.0] < [2], [1] < [1.0], [2] <= [1.0])",
+        # str elements order lexicographically, not by address
+        '    print(["a"] < ["b"], ["b"] < ["a"], ["a"] < ["ab"])',
+        # a nested container element recurses through the same three-way
+        "    print([[1]] < [[2]], [[2]] > [[1]])",
+        "    print([(1, 2)] < [(1, 3)], [(1, 3)] > [(1, 2)])",
+        "    print([[[1]]] <= [[[1]]])",
+        "    return 0")),
+    ("order-list-tuple-is-refused", _p(
+        # CPython 3.14: tuple and list are both MojoList at the C level, and
+        # the tuple marker is the only thing that tells them apart — which is
+        # what has to answer here, because the two order the same way and must
+        # NOT be interchangeable
+        "def main() -> Int:",
+        "    print([(1,)] < [(2,)])",
+        "    print([1] < [(1,)])",
+        "    return 0")),
+    ("order-set-proper-subset", _p(
+        "def main() -> Int:",
+        # a PROPER subset orders first, in both directions
+        "    print({1} < {1, 2}, {1, 2} > {1})",
+        "    print({1, 2} < {1, 2, 3}, {1, 2, 3} > {1, 2})",
+        # equal sets: neither strict, both non-strict
+        "    print({1, 2} < {1, 2}, {1, 2} > {1, 2})",
+        "    print({1, 2} <= {1, 2}, {1, 2} >= {1, 2}, {1} <= {1, 2})",
+        # SAME SIZE, different contents: not a subset either way. This is the
+        # pair the pointer comparison answered `s1 > s2` True for.
+        "    print({1, 2} < {1, 3}, {1, 2} > {1, 3})",
+        "    print({1, 2} <= {1, 3}, {1, 2} >= {1, 3})",
+        # order-independent, and str elements order by content
+        '    print({"a", "b"} < {"a", "b", "c"}, {"a"} > {"a", "c"})',
+        '    print({"a"} <= {"a", "b"}, {"b"} > {"a", "b"})',
+        "    return 0")),
+    ("order-set-float-elements", _p(
+        # a set of floats stores IEEE bits in an int slot, and Python says
+        # `{1.0} <= {1}` — the same cross-domain promotion mojo_set_eq does
+        "def main() -> Int:",
+        "    print({1.0} < {1}, {1.0} <= {1}, {1} < {1.0}, {1} <= {1.0})",
+        "    print({1.0} > {1}, {1.0} >= {1}, {1} >= {1.0})",
+        "    return 0")),
+    # Every dict case is a TypeError, on CPython and here. The harness compares
+    # stdout AND exit status, so a case that COMPILED and printed a wrong
+    # comparison instead of raising fails it exactly as it should — which is
+    # the property that made the doc's "a dict is the one container kind with
+    # no correct answer to give" implementable rather than a note.
+    ("order-dict-is-refused", _p(
+        "def main() -> Int:",
+        '    print({"a": 1} < {"b": 2})',
+        "    return 0")),
+    ("order-dict-vs-list-is-refused", _p(
+        "def main() -> Int:",
+        '    print([1] < {"a": 1})',
+        "    return 0")),
+    ("order-none-element-is-refused", _p(
+        # None is in no order with anything, itself included
+        "def main() -> Int:",
+        "    print([1] < [None])",
+        "    return 0")),
+    ("order-list-vs-str-is-refused", _p(
+        "def main() -> Int:",
+        '    print([1] < "a")',
+        "    return 0")),
+    # ── erased operands ────────────────────────────────────────────────────
+    # The erased route (`mojo_value_order_op`) is a DIFFERENT entry point with
+    # its own kind discovery, so the typed cases above say nothing about it. A
+    # helper per family, for the same reason the `==` cases use one: the
+    # call-site evidence must be UNANIMOUS about the container kind.
+    ("order-erased-list", _p(
+        "def lt(a, b) -> Int:",
+        "    if a < b:",
+        "        return 1",
+        "    return 0",
+        "",
+        "def main() -> Int:",
+        "    print(lt([1, 2], [1, 3]), lt([1, 3], [1, 2]), lt([1, 2], [1]))",
+        "    return 0")),
+    ("order-erased-set", _p(
+        "def gt(a, b) -> Int:",
+        "    if a > b:",
+        "        return 1",
+        "    return 0",
+        "",
+        "def main() -> Int:",
+        "    print(gt({1, 2, 3}, {1, 2}), gt({1, 2}, {1, 3}))",
+        "    return 0")),
+    ("order-erased-nonstrict", _p(
+        "def le(a, b) -> Int:",
+        "    if a <= b:",
+        "        return 1",
+        "    return 0",
+        "",
+        "def main() -> Int:",
+        # `<=` is `==` OR the strict form: an equal-but-separately-built pair
+        # is the case a pointer comparison got wrong
+        "    print(le([1, 2], [1, 2]), le({1, 2}, {1, 2}), le({1}, {1, 2}))",
+        "    return 0")),
+    ("order-erased-vs-literal", _p(
+        "def lt_list(a, b) -> Int:",
+        "    if a < b:",
+        "        return 1",
+        "    return 0",
+        "",
+        "def le_set(a, b) -> Int:",
+        "    if a <= b:",
+        "        return 1",
+        "    return 0",
+        "",
+        "def main() -> Int:",
+        # one operand erased, the other a literal: the erased side has no
+        # static element type at all, which is a third discovery question
+        "    print(lt_list([1, 2], [1, 3]), lt_list([1, 3], [1, 2]))",
+        '    print(le_set({"a"}, {"a", "b"}), le_set({"a"}, {"b"}))',
+        "    return 0")),
+    # ── what must NOT change ──────────────────────────────────────────────
+    # `is` / `is not` are pointer identity and stay that way. A change that
+    # routed them through the ordering predicates would make `a is b` True for
+    # two separately-built containers, which is the same bug in the other
+    # direction.
+    ("order-is-is-still-identity", _p(
+        "def main() -> Int:",
+        "    a = [1, 2]",
+        "    b = [1, 2]",
+        "    c = a",
+        "    print(a is b, a is c, a < b, a > b)",
+        "    s1 = {1}",
+        "    s2 = {1}",
+        "    print(s1 is s2, s1 < s2, s1 > s2)",
+        "    return 0")),
+    # Scalar and string comparison is untouched: a wrong answer there would be
+    # a much wider blast radius than the one being fixed.
+    ("order-scalars-unchanged", _p(
+        "def main() -> Int:",
+        "    print(1 < 2, 2 < 1, 1 <= 1, 1 >= 2, 2 > 1)",
+        "    print(1.5 < 2, 2.0 <= 1.5, 1.0 < 1.5)",
+        '    print("a" < "b", "b" < "a", "a" <= "a", "ab" < "b")',
+        "    return 0")),
+]
 
 
 def _py_source(src: str) -> str:
@@ -422,7 +595,22 @@ def run_compiled(src: str, tmp: str, name: str):
         raise RuntimeError("generated C rejected by gcc -fgimple:\n"
                            + r.stderr[-3000:])
     p = subprocess.run([exe], capture_output=True, text=True, timeout=60)
-    return p.stdout, p.returncode
+    return p.stdout, p.returncode, p.stderr
+
+
+def _is_type_error_refusal(rc: int, err: str) -> bool:
+    """Is CPython's verdict for this program "raises TypeError"?
+
+    Only TypeError counts, and only on the LAST line: a case whose reference
+    program fails for any other reason (a NameError from a typo in the case, a
+    SyntaxError from the `var`-stripping) is a broken TEST, and admitting it as
+    a refusal would let a case whose reference never ran pass by having the
+    compiled side also fail to run. A dict compared with `<` is the only thing
+    in ORDER_CASES that CPython refuses, so this is a narrow test on purpose.
+    """
+    if rc == 0 or not err.strip():
+        return False
+    return err.strip().splitlines()[-1].startswith("TypeError:")
 
 
 def _diff(want: str, got: str) -> str:
@@ -448,9 +636,40 @@ def main() -> int:
     tmp = tempfile.mkdtemp(prefix="eqtest-", dir=HERE)
     passed = failed = 0
     try:
-        for name, src in CASES:
+        for name, src in CASES + ORDER_CASES:
             py_out, py_rc, py_err = run_cpython(src, tmp)
-            if py_rc != 0 or py_err.strip():
+            want_refusal = _is_type_error_refusal(py_rc, py_err)
+            if want_refusal:
+                # A REFUSAL case, and the verdict is still CPython's: the
+                # compiled program must fail the same way. Its stderr is
+                # "Unhandled exception: " plus the same message, so the
+                # comparison is on the message line and the exit status, not
+                # on a byte-for-byte stderr match that no runtime would make.
+                # A compiled program that PRINTS a comparison instead is a
+                # wrong answer, not a differently-worded refusal, and fails
+                # here — which is the whole point of the dict cases.
+                try:
+                    c_out, c_rc, c_err = run_compiled(src, tmp, name)
+                except Exception as e:                       # noqa: BLE001
+                    status, note = "FAIL", str(e)
+                    failed += 1
+                else:
+                    want_msg = py_err.strip().splitlines()[-1]
+                    got_msg = (c_err.strip().splitlines() or [""])[-1]
+                    if c_rc == py_rc and c_out == py_out \
+                            and got_msg.endswith(want_msg):
+                        status = "PASS"
+                        note = "both refuse: %s" % want_msg
+                        passed += 1
+                    else:
+                        status = "FAIL"
+                        note = "compiled did not refuse the way CPython does\n" \
+                            "      cpython: rc=%d out=%r msg=%r" % (
+                                py_rc, py_out, want_msg) \
+                            + "\n      compiled: rc=%d out=%r msg=%r" % (
+                                c_rc, c_out, got_msg)
+                        failed += 1
+            elif py_rc != 0 or py_err.strip():
                 # A reference program that cannot run makes the case
                 # meaningless; say so instead of reporting a phantom failure.
                 status = "BROKEN"
@@ -459,7 +678,7 @@ def main() -> int:
                 failed += 1
             else:
                 try:
-                    c_out, c_rc = run_compiled(src, tmp, name)
+                    c_out, c_rc, _c_err = run_compiled(src, tmp, name)
                 except Exception as e:                       # noqa: BLE001
                     status, note = "FAIL", str(e)
                     failed += 1
@@ -476,7 +695,7 @@ def main() -> int:
                         note += "\n" + _diff(py_out, c_out)
                         failed += 1
             if status != "PASS" or args.verbose:
-                print("%-6s %-24s %s" % (status, name, note))
+                print("%-6s %-28s %s" % (status, name, note))
         if args.keep:
             print("kept: %s" % tmp)
             tmp = None
@@ -486,7 +705,8 @@ def main() -> int:
                 os.unlink(os.path.join(tmp, f))
             os.rmdir(tmp)
 
-    print("PASS=%d FAIL=%d of %d" % (passed, failed, len(CASES)))
+    print("PASS=%d FAIL=%d of %d" % (passed, failed,
+                                     len(CASES) + len(ORDER_CASES)))
     return 1 if failed else 0
 
 

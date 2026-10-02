@@ -237,12 +237,18 @@ def test_every_declaration_is_seen():
     # 526 -> 531 (2026-10-01, `memory-ownership`): the two frees for the two
     # things a bound method can be — `mojo_bound_method_free` and
     # `mojo_closure_free` — and their cleanup thunks. Taken from the call.
-    # 531 -> 532 (2026-10-01, merging batch 1 in): `mojo_str_from_double`, the
+# 531 -> 532 (2026-10-01, merging batch 1 in): `mojo_str_from_double`, the
     # 479 -> 480 entry above, which no branch that landed on THIS side of the
-    # merge had. One name, and it is the whole delta -- which is exactly why the
-    # number is read off the call and never added up: 531 + 1 is right here and
+    # merge had. One name, and it is the whole delta -- which is exactly why
+    # the number is read off the call and never added up: 531 + 1 is right here and
     # would have been wrong on any other pair of sides.
-    for header, want in (('fire_runtime.h', 532),
+    # 532 -> 539 (2026-10-01, container ordering): `MOJO_ORD_INCOMPARABLE`
+    # plus the six `mojo_*_order` / `mojo_*_cmp` entry points that answer
+    # `<` / `>` / `<=` / `>=` between containers, which used to lower to a C
+    # pointer comparison. Seven names, and again taken from the call: the two
+    # `*_cmp` three-way answers are only reachable from the `*_order` family,
+    # and `mojo_dict_order` exists to be the refusal.
+    for header, want in (('fire_runtime.h', 539),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

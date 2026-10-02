@@ -1394,6 +1394,42 @@ int mojo_set_eq(MojoSet *a, MojoSet *b, int ea, int eb);
  * `elem` describes the side the codegen knew and is applied to both. */
 int mojo_value_eq(int64_t a, int64_t b, int elem);
 
+/* ── `<` / `>` / `<=` / `>=` between containers ───────────────────────────
+ * Ordering is NOT equality with a different operator, and the reason is worth
+ * stating where a caller can read it: a set's order is the PROPER-SUBSET
+ * relation (`{1} < {1, 2}`, and `{1, 2} < {1, 3}` is neither `<` nor `>`),
+ * while a list's is lexicographic with a shorter prefix ordering first. So the
+ * three-way answers below are two different questions, and a caller that
+ * folded them as one got one of them wrong — which is what the pointer
+ * comparison these replace did to all of them.
+ *
+ * The `*_cmp` functions return the three-way (-1/0/1) or
+ * MOJO_ORD_INCOMPARABLE, which is NOT a value: CPython raises TypeError for
+ * an unordered pair, and there is no honest number to return instead. The
+ * `*_order` functions are what a call site names — they fold the three-way
+ * into the `_Bool` the operator wants, with `<=`/`>=` as `==` OR the strict
+ * form, and they raise the TypeError where the three-way said incomparable.
+ * `op` is a C string literal ("<", ">", "<=", ">=") because the refusal's
+ * message names the operator that was written.
+ *
+ * Declared here beside the `mojo_*_eq` family because they need the same
+ * MOJO_EQ_* element codes, and for the same reason those need all three
+ * container types: a nested container element has to be ordered through the
+ * erased dispatcher. */
+#define MOJO_ORD_INCOMPARABLE 2
+int mojo_list_cmp(MojoList *a, MojoList *b, int ea, int eb);
+int mojo_set_cmp(MojoSet *a, MojoSet *b, int ea, int eb);
+/* `a < b` for two words whose static types the codegen could not both
+ * resolve; MOJO_ORD_INCOMPARABLE for a pair with no order (including a dict,
+ * which has none on CPython either). `elem` is the known side's element code,
+ * applied to both, exactly as mojo_value_eq does. */
+int mojo_value_order(int64_t a, int64_t b, int elem);
+int mojo_list_order(MojoList *a, MojoList *b, int ea, int eb, char *op);
+int mojo_set_order(MojoSet *a, MojoSet *b, int ea, int eb, char *op);
+/* Always raises: a dict is not orderable, on this runtime or on CPython. */
+int mojo_dict_order(MojoDict *a, MojoDict *b, int va, int vb, char *op);
+int mojo_value_order_op(int64_t a, int64_t b, int elem, char *op);
+
 /* ── Python integration ─────────────────────────────────────────────────*/
 void mojo_print(char *str);
 void mojo_print_stderr(char *str);

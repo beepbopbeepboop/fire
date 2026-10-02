@@ -2841,6 +2841,51 @@ def _lower_container_eq(gen, op: str, lkind: str | None, lnode, lt: str, lv: str
     return '_Bool', _t
 
 
+def _lower_container_order(gen, op: str, lkind: str | None, lt: str, lv: str,
+                           rkind: str | None, rt: str, rv: str) -> tuple[str, str]:
+    """`<` / `>` / `<=` / `>=` where at least one operand is statically a
+    container. The ordering twin of `_lower_container_eq`, and it used to fall
+    through to the generic tail, where two `MojoList *` are compared as C
+    POINTERS: `[1,2] < [1,3]` answered by heap address, so four of the five
+    cases in bugs/CODEGEN_container_ordering_is_pointer_identity.md differed
+    from CPython, all with exit 0 and no diagnostic.
+
+    Routing matches `_lower_container_eq` exactly — same kinds to the same
+    per-kind predicate, everything else to the erased-word dispatcher — because
+    the two answer the same question about the same operands and a program must
+    not be able to say `a == b` and `a < b` about different values.
+
+    The operator travels as a C string because the refusal's message names it:
+    a dict has no ordering on CPython either, so `{'a': 1} < {'b': 2}` is a
+    TypeError and the honest answer is that TypeError rather than a number
+    this backend cannot compute.
+    """
+    # A dict on either side is the refusal. It is a RUNTIME function rather
+    # than a codegen-time bail because whether the dict is VISIBLE here is an
+    # inference-table question, and on the erased route only the registry can
+    # answer it at all — `mojo_value_order_op` is the entry that raises, and
+    # it does so for every pair with no order, dict included. Both routes
+    # therefore end in the same raise rather than in a number.
+    if lkind is not None and lkind == rkind:
+        _kind = lkind
+        _ctype = 'MojoList *' if lkind == 'list' else (
+            'MojoDict *' if lkind == 'dict' else 'MojoSet *')
+        _fn = 'mojo_list_order' if lkind == 'list' else (
+            'mojo_dict_order' if lkind == 'dict' else 'mojo_set_order')
+        _two = True
+    else:
+        _kind = lkind if lkind is not None else rkind
+        _ctype = 'int64_t'
+        _fn = 'mojo_value_order_op'
+        _two = False
+    _args = _eq_call_args(gen, _ctype, _kind, lv, lt, rv, rt, _two)
+    _args.append(('char *', gen._intern_string(op)))
+    _r = _as_str(gen._call_expr('int', _fn, _args))
+    t = gen._new_temp('_Bool')
+    gen._emit(f"  {t} = ({_r} != 0);")
+    return '_Bool', t
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -3236,6 +3281,19 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         if _lk is not None or _rk is not None:
             return _lower_container_eq(gen, op, _lk, left_node, lt, lv,
                                        _rk, right_node, rt, rv)
+
+    # ...and the same question with the four ORDERING operators, which used to
+    # reach the generic tail below and be answered by heap address. Placed
+    # HERE, right after `==`, and not further down, for one reason: the
+    # MojoList/MojoStr/MojoBytes blocks above all gate on `op in ('==', '!=')`,
+    # so none of them can claim an ordering operator, and putting this below
+    # them would put it below the string-equality block — which does NOT gate
+    # on the operator alone and would claim `[1] < "a"` for a strcmp.
+    if op in ('<', '>', '<=', '>='):
+        _lok = _eq_operand_kind(gen, left_node, lt, lv)
+        _rok = _eq_operand_kind(gen, right_node, rt, rv)
+        if _lok is not None or _rok is not None:
+            return _lower_container_order(gen, op, _lok, lt, lv, _rok, rt, rv)
 
 
     # `x == None` / `x != None` where `x` is a `char *` is a NULL-POINTER test,
@@ -4696,12 +4754,25 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # mojo_list_set_kinds) when they are not all the same, so every read of
     # this literal — the whole-result repr, a copy, a slice, iteration, a
     # computed subscript — describes each slot by what it actually holds
-    # instead of by one list-wide ctype. A homogeneous literal records
-    # nothing: its single accessor is already exact, and the side-table
-    # probe is the only cost a program that never builds a heterogeneous
-    # list ever pays.
+    # instead of by one list-wide ctype. A homogeneous literal normally
+    # records nothing: its single accessor is already exact, and the
+    # side-table probe is the only cost a program that never builds a
+    # heterogeneous list ever pays.
+    #
+    # `None` is the ONE exception, and it is an exception because of what the
+    # runtime's default is, not because this literal is heterogeneous. An
+    # undescribed slot reads as 'i' (mojo_list_slot_kind's fallback), so a
+    # homogeneous `[None]` recorded nothing and was indistinguishable from a
+    # homogeneous `[0]` — which is CPython's `False` for `==` and a TypeError
+    # for `<`. Measured on this tree: `[None] == [0]` answered True, and
+    # `[1] < [None]` answered False where CPython raises. The literal's own
+    # single accessor being "exact" is true of the C TYPE (both are int64_t)
+    # and useless for the value: nothing downstream of the store can recover
+    # which of the two it was. So a literal containing `None` records its
+    # kinds however homogeneous it is; every other homogeneous kind keeps the
+    # old no-side-table behaviour.
     _kinds = ''.join(_list_literal_slot_kind(gen, el, et) for el, et, _ev in lowered)
-    if _kinds and len(set(_kinds)) > 1:
+    if _kinds and (len(set(_kinds)) > 1 or 'n' in _kinds):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_kinds))])

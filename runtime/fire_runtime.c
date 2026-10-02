@@ -5869,6 +5869,17 @@ static int _kind_to_eq(char k)
 
 static int _slot_eq(int64_t x, int64_t y, int ea, int eb, char ka, char kb)
 {
+    /* `None` against a NUMBER, before the codes are resolved: `_kind_to_eq`
+     * below folds 'n' into MOJO_EQ_INT (they are the same int64_t at the C
+     * level, and a `None == 0` test is a real thing to answer), which is right
+     * for ordering's purposes and wrong for equality's. `[None] == [0]` is
+     * CPython's False and this answered True, because both slots are the word
+     * 0 and `x == y` below cannot tell them apart. The per-slot kind is the
+     * only evidence that can, which is why the codegen records it for a
+     * homogeneous `[None]` too (see `_lower_list_literal`). One 'n' against a
+     * number is unequal; TWO 'n's are the same value, and `x == y` still
+     * answers that. */
+    if ((ka == 'n') != (kb == 'n')) return 0;
     if (ea == MOJO_EQ_UNKNOWN) ea = _kind_to_eq(ka);
     if (eb == MOJO_EQ_UNKNOWN) eb = _kind_to_eq(kb);
     if ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE)) {
@@ -6032,6 +6043,365 @@ int mojo_value_eq(int64_t a, int64_t b, int elem)
                                                elem, elem);
     return mojo_set_eq((MojoSet *)(intptr_t)a, (MojoSet *)(intptr_t)b,
                        elem, elem);
+}
+
+/* ── `<` / `>` / `<=` / `>=` between containers: not pointer order ─────────
+ *
+ * These four operators used to lower to the raw C comparison of two
+ * `MojoList *` / `MojoSet *`, which is heap address: `a < b` was decided by
+ * where malloc happened to put the two allocations. Four of the five cases in
+ * bugs/CODEGEN_container_ordering_is_pointer_identity.md differed from CPython,
+ * all with exit 0 and no diagnostic — including `s1 > s2` inverting. Unlike
+ * the `==` case that is not an unanswerable question: CPython 3.14 orders both
+ * lists and sets, so there is a right answer and this is where it is computed.
+ *
+ * Three rules, and they are NOT one rule:
+ *
+ *   LIST (and tuple, which is the same struct — see _lower_tuple_literal):
+ *       lexicographic, element by element, and a SHORTER PREFIX ORDERS
+ *       FIRST: `[1] < [1, 2]`. An element that is itself a container recurses
+ *       through the same three-way answer.
+ *   SET: proper subset, BOTH directions for `>`. Not the lexicographic rule
+ *       lists use, and not `mojo_set_difference(a, b)` emptiness alone —
+ *       `s1 > s2` must also check that b is not contained in a, which is
+ *       exactly the case the pointer comparison got wrong.
+ *   DICT: no ordering exists, on CPython or here. `{'a': 1} < {'b': 2}` is a
+ *       TypeError even on 3.14, so the honest answer is the refusal, raised
+ *       below rather than returned as a comparison.
+ *
+ * `<=` and `>=` are `==` OR the strict form, reusing the predicates above
+ * rather than re-deriving equality, so a value that is equal-but-a-different-
+ * allocation orders as equal (which is what `[1, 2] <= [1, 2]` says).
+ */
+
+/* A dict has no ordering, on any Python. CPython's message is
+ * "'<' not supported between instances of 'dict' and 'dict'"; the operator is
+ * passed in because the same refusal answers all four and each one's text
+ * names the operator that was written. `mojo_raise_type_error` does not
+ * return, but the callers below still need a value, so the stub is the same
+ * never-taken `_Bool` the codegen's own stub results use. */
+static void _raise_unorderable_dict(char *op)
+{
+    char msg[128];
+    snprintf(msg, sizeof msg, "'%s' not supported between instances of 'dict' and 'dict'", op);
+    mojo_raise_type_error(msg);
+}
+
+/* One element's three-way answer. Deliberately the SAME element codes
+ * `mojo_*_eq` above take, and the same per-slot-kind fallback, so the two
+ * families cannot disagree about what a list's elements are — a list that
+ * compares equal but orders differently would be a new class of silent wrong
+ * answer, and both questions are asked about the same slots.
+ *
+ * The int/double case promotes rather than reinterpreting, for the reason
+ * `_slot_eq` gives: one side's 64 one-bits are not the other's zero. The
+ * result is the sign, so promotion is all a three-way needs of it.
+ *
+ * Returns -1, 0 or 1. A pair with NO order (int against str, a nested
+ * container against a scalar, `None` against anything) returns
+ * MOJO_ORD_INCOMPARABLE, which the list walk turns into the TypeError Python
+ * raises — never into a value, because there is no honest one. */
+/* `MOJO_ORD_INCOMPARABLE` and `mojo_value_order`'s declaration come from
+ * fire_runtime.h above, with the rest of the ordering family. `_slot_cmp`
+ * needs `mojo_value_order` for a nested-container element and the definitions
+ * are in dependency order rather than call order, which the header's
+ * declaration is what resolves. */
+static int _slot_cmp(int64_t x, int64_t y, int ea, int eb, char ka, char kb)
+{
+    if (ea == MOJO_EQ_UNKNOWN) ea = _kind_to_eq(ka);
+    if (eb == MOJO_EQ_UNKNOWN) eb = _kind_to_eq(kb);
+    /* `None` is in no order with anything, itself included: CPython raises for
+     * `[None] < [None]`. It shares MOJO_EQ_INT with the integers here (as it
+     * does in _slot_eq), so the per-slot kind is the only thing that can say
+     * so, and that is what this test reads. */
+    if (ka == 'n' || kb == 'n') return MOJO_ORD_INCOMPARABLE;
+    if ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE)) {
+        double dx = (ea == MOJO_EQ_DOUBLE) ? _eq_as_double(x) : (double)x;
+        double dy = (eb == MOJO_EQ_DOUBLE) ? _eq_as_double(y) : (double)y;
+        return dx < dy ? -1 : (dx > dy ? 1 : 0);
+    }
+    if (ea != eb) return MOJO_ORD_INCOMPARABLE;
+    switch (ea) {
+    case MOJO_EQ_INT:
+        if (x == y) return 0;
+        /* An int64_t slot can still hold a nested container, which has its own
+         * ordering — `[[1]] < [[2]]` is True and the elements are not words.
+         * Same registry probe `_slot_eq` makes, and the same reason: an
+         * element the codegen could not TYPE may still be a container. */
+        if (mojo_is_registered_list(x) && mojo_is_registered_list(y))
+            return mojo_value_order(x, y, MOJO_EQ_UNKNOWN);
+        if (mojo_is_registered_set(x) && mojo_is_registered_set(y))
+            return mojo_value_order(x, y, MOJO_EQ_UNKNOWN);
+        return x < y ? -1 : 1;
+    case MOJO_EQ_DOUBLE:  return _eq_as_double(x) < _eq_as_double(y) ? -1
+                             : (_eq_as_double(x) > _eq_as_double(y) ? 1 : 0);
+    case MOJO_EQ_STR:
+        /* Range-check before strcmp, exactly as _slot_eq does: the erased view
+         * can guess STR for a container whose elements are not strings, and a
+         * strcmp through a small integer is a segfault rather than a wrong
+         * answer. An unorderable guess is the refusal, not a comparison. */
+        if (!(_mojo_ptr_shaped(x) && _mojo_ptr_shaped(y)))
+            return MOJO_ORD_INCOMPARABLE;
+        { int c = strcmp((char *)(intptr_t)x, (char *)(intptr_t)y);
+          return c < 0 ? -1 : (c > 0 ? 1 : 0); }
+    case MOJO_EQ_BYTES:
+        if (!(_mojo_ptr_shaped(x) && _mojo_ptr_shaped(y)))
+            return MOJO_ORD_INCOMPARABLE;
+        { MojoBytes *bx = (MojoBytes *)(intptr_t)x, *by = (MojoBytes *)(intptr_t)y;
+          if (!bx || !by) return MOJO_ORD_INCOMPARABLE;
+          int64_t n = bx->len < by->len ? bx->len : by->len;
+          int c = n ? memcmp(bx->data, by->data, (size_t)n) : 0;
+          if (c) return c < 0 ? -1 : 1;
+          return bx->len < by->len ? -1 : (bx->len > by->len ? 1 : 0); }
+    default:               /* MOJO_EQ_GENERIC: a nested container */
+        return mojo_value_order(x, y, MOJO_EQ_UNKNOWN);
+    }
+}
+
+/* Lexicographic over the common prefix, then the shorter one first. */
+int mojo_list_cmp(MojoList *a, MojoList *b, int ea, int eb)
+{
+    if (!a || !b) return 0;
+    if (mojo_is_tuple(a) != mojo_is_tuple(b))
+        return MOJO_ORD_INCOMPARABLE;   /* CPython: tuple vs list */
+    int64_t n = a->len < b->len ? a->len : b->len;
+    for (int64_t i = 0; i < n; i++) {
+        int c = _slot_cmp(a->data[i], b->data[i], ea, eb,
+                          mojo_list_slot_kind(a, i), mojo_list_slot_kind(b, i));
+        if (c == MOJO_ORD_INCOMPARABLE) return c;
+        if (c) return c;
+    }
+    if (a->len == b->len) return 0;
+    return a->len < b->len ? -1 : 1;
+}
+
+/* One element's type NAME, for the incomparable-pair refusal. Same per-slot
+ * alphabet `mojo_list_slot_kind` reads, and where the alphabet is NOT enough
+ * the registries are asked — which is the point. A nested container element
+ * occupies an int64_t slot just as an integer does, and the alphabet only
+ * records 'l' for the ones the CODEGEN recognised; a tuple literal lowers to
+ * the same MojoList as a list, so `[1] < [(1,)]` is int64_t against int64_t
+ * and the alphabet says 'i' on both sides. CPython names that pair 'int' and
+ * 'tuple', and this is the only place that can.
+ *
+ * So the registry probe is NOT limited to the 'l' case — it runs for any word
+ * the alphabet would call an integer, which is exactly the set of words that
+ * can turn out to be a container. `_slot_cmp`'s INT arm does the same probe
+ * for the same reason, so the refusal names what the comparison decided on.
+ *
+ * `_kind_typename` below answers the same question for an erased WHOLE
+ * container and delegates here, so the two spellings of "what is this word"
+ * cannot name the same value differently. */
+static const char *_elem_typename(int64_t w, char k)
+{
+    if (k == 'n') return "NoneType";
+    if (k == 'p') return "str";
+    if (k == 's') return "bytes";
+    if (k == 'd') return "float";
+    if (mojo_is_registered_dict(w)) return "dict";
+    if (mojo_is_registered_set(w))  return "set";
+    if (mojo_is_registered_list(w))
+        return mojo_is_tuple((MojoList *)(intptr_t)w) ? "tuple" : "list";
+    return "int";                     /* 'i', 'l' with no registry, undescribed */
+}
+
+/* Does `sub`'s every entry occur in `sup`? Proper-subset needs this on its own
+ * because `<` also has to establish the two are not equal, and deriving that
+ * from a difference the other way round gets `s1 > s2` backwards for two
+ * equal-size proper subsets of each other.
+ *
+ * The float case is `_set_has_double` again for the same reason it is in
+ * `mojo_set_eq`: a set of floats stores IEEE bits in an int slot, and Python
+ * says `{1.0} <= {1}`. Cross-domain in BOTH directions, so each side's code is
+ * passed separately and a disagreement about float-ness switches the probe. */
+static int _set_is_subset(MojoSet *sub, MojoSet *sup, int esub, int esup)
+{
+    if (!sub) return 1;
+    if (!sup) return sub->used == 0;
+    if (sub->used > sup->used) return 0;
+    int mixed = ((esub == MOJO_EQ_DOUBLE) != (esup == MOJO_EQ_DOUBLE));
+    for (int64_t i = 0; i < sub->cap; i++) {
+        int tag = sub->slots[i].tag;
+        if (tag < 0) continue;
+        int hit;
+        if (tag == 1)
+            hit = mojo_set_contains_str(sup, sub->slots[i].val_s);
+        else if (tag == 2)
+            hit = mojo_set_contains_bytes(sup,
+                        (MojoBytes *)(intptr_t)sub->slots[i].val_s);
+        else if (mixed)
+            hit = _set_has_double(sup, _eq_as_double(sub->slots[i].val_i));
+        else
+            hit = mojo_set_contains_int(sup, sub->slots[i].val_i);
+        if (!hit) return 0;
+    }
+    return 1;
+}
+
+/* Set ordering: -1 when a is a PROPER subset of b, +1 when b is a proper
+ * subset of a, and 0 for equal sets AND for the two incomparable cases
+ * CPython reports as neither (`{1, 2}` vs `{1, 3}`). The caller folds that 0
+ * with the `<=`/`>=` case's equality check, which is why 0 here is not
+ * ambiguous. */
+int mojo_set_cmp(MojoSet *a, MojoSet *b, int ea, int eb)
+{
+    if (!a || !b) return 0;
+    if (a == b) return 0;
+    if (mojo_set_eq(a, b, ea, eb)) return 0;
+    if (a->used < b->used && _set_is_subset(a, b, ea, eb)) return -1;
+    if (b->used < a->used && _set_is_subset(b, a, eb, ea)) return 1;
+    return 0;
+}
+
+/* The erased-operand entry point, the ordering twin of `mojo_value_eq`. Both
+ * operands are bare words here, so the kind comes from the registries — which
+ * is also what makes the refusal reachable: a dict erased to int64_t has no
+ * ordering and this is where that is discovered, rather than by the codegen
+ * folding it to a comparison it cannot compute. */
+int mojo_value_order(int64_t a, int64_t b, int elem)
+{
+    int ka = _value_kind(a), kb = _value_kind(b);
+    if (ka == MOJO_VK_DICT || kb == MOJO_VK_DICT)
+        return MOJO_ORD_INCOMPARABLE;
+    if (ka != kb || ka == MOJO_VK_NONE) return MOJO_ORD_INCOMPARABLE;
+    if (ka == MOJO_VK_LIST)
+        return mojo_list_cmp((MojoList *)(intptr_t)a, (MojoList *)(intptr_t)b,
+                             elem, elem);
+    return mojo_set_cmp((MojoSet *)(intptr_t)a, (MojoSet *)(intptr_t)b,
+                        elem, elem);
+}
+
+/* The four operators, folded. One entry point per operator rather than a
+ * three-way the call site compares, because `<=` and `>=` are `==` OR the
+ * strict form and expressing THAT as a three-way needs the equality answer
+ * anyway — and because this way the set case's "0 means equal or
+ * incomparable" cannot be misread as a comparison by a caller that only knows
+ * the list rule.
+ *
+ * `strict` is the `mojo_*_cmp` three-way, `eq` is the `mojo_*_eq` predicate,
+ * and `kind` says which family both came from, because only the set reading
+ * needs the equality term. */
+static int _order_fold(int strict, int eq, char *op)
+{
+    if (strcmp(op, "<") == 0)  return strict < 0;
+    if (strcmp(op, ">") == 0)  return strict > 0;
+    if (strcmp(op, "<=") == 0) return strict < 0 || eq;
+    return strict > 0 || eq;                  /* ">=" */
+}
+
+/* The refusal for an element pair with no order, naming the two ELEMENT
+ * types the way CPython names them — `[1] < ['a']` says "'int' and 'str'",
+ * not "'list' and 'list'". The element types are what the per-slot kinds and
+ * the known side's element code describe, which are the same two pieces of
+ * evidence `_slot_eq` reads, so this cannot disagree with the comparison
+ * about what a list holds.
+ *
+ * Which pair is at fault is found by asking `_slot_cmp` again, which is free
+ * beside the walk that already paid for it and — unlike re-deriving the codes
+ * here — is guaranteed to be looking at the same decision. */
+static void _raise_unorderable_elems(char *op, MojoList *a, MojoList *b,
+                                     int ea, int eb)
+{
+    char msg[128];
+    int64_t n = (a && b) ? (a->len < b->len ? a->len : b->len) : 0;
+    for (int64_t i = 0; i < n; i++) {
+        char ka = a ? mojo_list_slot_kind(a, i) : 'i';
+        char kb = b ? mojo_list_slot_kind(b, i) : 'i';
+        int64_t x = a ? a->data[i] : 0, y = b ? b->data[i] : 0;
+        /* The SAME ea/eb the walk that got here was given — the incomparability
+         * was decided with these, and re-deciding with different ones is how a
+         * refusal ends up naming a pair that was never the problem. */
+        if (_slot_cmp(x, y, ea, eb, ka, kb) != MOJO_ORD_INCOMPARABLE)
+            continue;               /* this pair ordered; look further */
+        snprintf(msg, sizeof msg,
+                 "'%s' not supported between instances of '%s' and '%s'", op,
+                 _elem_typename(x, ka), _elem_typename(y, kb));
+        mojo_raise_type_error(msg);
+        return;
+    }
+    /* Reached only when no single ELEMENT pair was at fault — which means the
+     * incomparability was the CONTAINERS (a tuple against a list, the one
+     * case `mojo_list_cmp` refuses and no element explains). */
+    snprintf(msg, sizeof msg,
+             "'%s' not supported between instances of '%s' and '%s'", op,
+             a && mojo_is_tuple(a) ? "tuple" : "list",
+             b && mojo_is_tuple(b) ? "tuple" : "list");
+    mojo_raise_type_error(msg);
+}
+
+int mojo_list_order(MojoList *a, MojoList *b, int ea, int eb, char *op)
+{
+    int strict = mojo_list_cmp(a, b, ea, eb);
+    if (strict == MOJO_ORD_INCOMPARABLE) _raise_unorderable_elems(op, a, b, ea, eb);
+    return _order_fold(strict, mojo_list_eq(a, b, ea, eb), op);
+}
+
+int mojo_set_order(MojoSet *a, MojoSet *b, int ea, int eb, char *op)
+{
+    if (!a || !b) return 0;
+    int eq = mojo_set_eq(a, b, ea, eb);
+    int strict = mojo_set_cmp(a, b, ea, eb);
+    if (strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0) return eq || strict;
+    /* `mojo_set_cmp`'s 0 covers equal AND incomparable, so `<`/`>` must not
+     * read it as "not less" — they check the subset direction themselves. */
+    if (strcmp(op, "<") == 0) return _set_is_subset(a, b, ea, eb) && !eq;
+    return _set_is_subset(b, a, eb, ea) && !eq;    /* ">" */
+}
+
+int mojo_dict_order(MojoDict *a, MojoDict *b, int va, int vb, char *op)
+{
+    (void)a; (void)b; (void)va; (void)vb;
+    _raise_unorderable_dict(op);
+    return 0;
+}
+
+/* The type name CPython's refusal message spells for one erased operand. A
+ * registry kind is the only evidence there is for a bare word, and a list
+ * carrying the tuple marker answers "tuple" rather than "list" — the marker
+ * exists for exactly this kind of question (see mojo_mark_as_tuple).
+ *
+ * A word that is NOT a registered container is still nameable: a bare `char *`
+ * in this model is a string, and `[1] < "a"` has to say "'list' and 'str'",
+ * not "'list' and 'int'". `mojo_boxed_is_str` is the discriminator the rest of
+ * this runtime already uses for exactly that question (a boxed char * whose
+ * value is not a live container or a box), so the message names what the rest
+ * of the runtime would treat the word as. Anything else — a small integer, a
+ * bool, None, a genuinely unknown word — names itself, which is honest: this
+ * is a refusal and its text is diagnostic, not an answer. */
+static const char *_kind_typename(int kind, int64_t v)
+{
+    if (kind == MOJO_VK_LIST)
+        return mojo_is_tuple((MojoList *)(intptr_t)v) ? "tuple" : "list";
+    if (kind == MOJO_VK_DICT) return "dict";
+    if (kind == MOJO_VK_SET)  return "set";
+    if (mojo_boxed_is_str(v))  return "str";
+    /* `_elem_typename` covers the rest and, for a bare word with no registry
+     * entry, the cases a container-slot 'n' and a literal NULL share. */
+    return _elem_typename(v, v == 0 ? 'n' : (mojo_boxed_is_str(v) ? 'p' : 'i'));
+}
+
+int mojo_value_order_op(int64_t a, int64_t b, int elem, char *op)
+{
+    int ka = _value_kind(a), kb = _value_kind(b);
+    int strict = mojo_value_order(a, b, elem);
+    if (strict == MOJO_ORD_INCOMPARABLE) {
+        /* Same shape as the dict refusal: a pair with no order between them is
+         * a TypeError, and inventing a result for it is the pointer comparison
+         * this replaced. The names come from the registries, so a dict-vs-list
+         * that only the runtime could see is named correctly too — CPython says
+         * "'<' not supported between instances of 'dict' and 'list'", and the
+         * operands here are both bare words. */
+        char msg[128];
+        snprintf(msg, sizeof msg,
+                 "'%s' not supported between instances of '%s' and '%s'",
+                 op, _kind_typename(ka, a), _kind_typename(kb, b));
+        mojo_raise_type_error(msg);
+    }
+    /* `_order_fold` is right for BOTH families here: a list's three-way is a
+     * true three-way, and a set's is -1/+1 exactly when one side is a proper
+     * subset of the other with 0 for equal AND incomparable, which is what
+     * `<=`/`>=` need the `eq` term for. */
+    return _order_fold(strict, mojo_value_eq(a, b, elem), op);
 }
 
 int mojo_isinstance(int64_t obj, int type_id) {
