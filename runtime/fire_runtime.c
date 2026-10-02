@@ -6347,13 +6347,39 @@ int mojo_value_eq(int64_t a, int64_t b, int elem)
  * message says `'<= not supported…'` for `<=` rather than always saying `'<'`:
  * CPython names the operator the user wrote, and a diagnostic that misreports
  * which one failed is worse than none. */
-static void _raise_unorderable_ea(int ea, int eb, const char *op)
+/* The kind byte, when it is more specific than the MOJO_EQ_* code, wins the
+ * type name — and `None` is the case that makes this necessary rather than
+ * tidy. `_kind_to_eq` folds `'n'` into MOJO_EQ_INT because a `None` slot IS
+ * the word 0 at the C level, which is the right answer for deciding the
+ * comparison. It is the wrong answer for NAMING it: `[1] < [None]` raised
+ * "'<' not supported between instances of 'int' and 'int'", while CPython
+ * names `'NoneType'`, so the message blamed the wrong operand for a refusal
+ * that was correct. `_slot_cmp`'s `ka == 'n' || kb == 'n'` arm is what
+ * decided to refuse, so the kind is the same evidence that did the deciding
+ * and the two must not disagree about what was refused.
+ *
+ * Only `'n'` overrides. Every other kind is faithfully represented by its
+ * code, and a `'?'` / unknown kind means there was no per-slot evidence at
+ * all, which is what MOJO_EQ_UNKNOWN already says. */
+static const char *_cmp_side_typename(int code, char kind)
+{
+    if (kind == 'n') return "NoneType";
+    return _eq_typename(code);
+}
+
+static void _raise_unorderable_ea_kinds(int ea, int eb, char ka, char kb,
+                                        const char *op)
 {
     char detail[128];
     snprintf(detail, sizeof detail,
              "'%s' not supported between instances of '%s' and '%s'",
-             op, _eq_typename(ea), _eq_typename(eb));
+             op, _cmp_side_typename(ea, ka), _cmp_side_typename(eb, kb));
     mojo_raise_type_error(detail);
+}
+
+static void _raise_unorderable_ea(int ea, int eb, const char *op)
+{
+    _raise_unorderable_ea_kinds(ea, eb, 0, 0, op);
 }
 
 /* The list/tuple half: a tuple and a list are the same C type with a marker to
@@ -6485,9 +6511,10 @@ int mojo_list_cmp(MojoList *a, MojoList *b, int ea, int eb, int op)
                           op);
         if (c == MOJO_CMP_UNORDERABLE) {
             int ca = ea, cb = eb;
-            if (ca == MOJO_EQ_UNKNOWN) ca = _kind_to_eq(mojo_list_slot_kind(a, i));
-            if (cb == MOJO_EQ_UNKNOWN) cb = _kind_to_eq(mojo_list_slot_kind(b, i));
-            _raise_unorderable_ea(ca, cb, _cmp_op_name(op));
+            char ska = mojo_list_slot_kind(a, i), skb = mojo_list_slot_kind(b, i);
+            if (ca == MOJO_EQ_UNKNOWN) ca = _kind_to_eq(ska);
+            if (cb == MOJO_EQ_UNKNOWN) cb = _kind_to_eq(skb);
+            _raise_unorderable_ea_kinds(ca, cb, ska, skb, _cmp_op_name(op));
             return MOJO_CMP_UNORDERABLE;
         }
         if (c != 0) return c;
