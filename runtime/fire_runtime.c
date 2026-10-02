@@ -6388,7 +6388,7 @@ char *mojo_repr_float(double v) {
    (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). `a` must be a buffer the
    caller owns -- every use below is one this file just built -- and `b` is
    untouched, so passing a shared static (`mojo_repr_obj`'s buffer) is safe. */
-static char *_cat_free(char *a, const char *b) {
+static char *_cat_free(char *a, char *b) {
     char *r = mojo_str_cat(a, b);
     free(a);
     return r;
