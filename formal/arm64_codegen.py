@@ -2976,10 +2976,18 @@ dylib_exports: list = None, globals_base: int = None,
                                           self._structs))
 
     def _aliased_export(self, name: str):
-        """The manifest export a bare callee reaches THROUGH an import alias."""
+        """The manifest export a bare callee reaches THROUGH an import alias.
+
+        The forwarded table is passed because a package `__init__` is a NAMESPACE
+        library with an empty export table, so the names it publishes are all in
+        `forwarded` — which is what makes `from pkg import base as aliased`
+        resolvable, and why this is asked of the same three tables in the same
+        order as the DOTTED spelling (`model.dylib_aliased_export`).
+        """
         return M.dylib_aliased_export(self._dylib_by_name,
                                       self._dylib_by_module, name,
-                                      self._import_aliases)
+                                      self._import_aliases,
+                                      self._dylib_forwarded)
 
     def _extern_symbol(self, name: str) -> str:
         """The boundary symbol an unbound callee `name` is emitted against.

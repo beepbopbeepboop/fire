@@ -1157,6 +1157,182 @@ def test_reexport_of_an_unexported_name_is_refused(tmpdir, _shared):
           f"{text.strip()[-300:]}")
 
 
+# The three files of the aliased re-export, written out rather than built from
+# the REEXPORT_* constants above because the ALIAS is the whole subject: reusing
+# those would put a `from .sub import bump as …` line in a tree whose other
+# tests assert on `bump` by name, and the difference between the two is exactly
+# what has to be visible here.
+ALIAS_LEAF = """\
+def base(x):
+  return x * 2
+"""
+
+ALIAS_PKG = """\
+from leaf import base as aliased
+"""
+
+ALIAS_PROG = """\
+from pkg import aliased
+def main():
+  return aliased(21)
+"""
+
+
+def test_aliased_reexport_binds_under_both_spellings(tmpdir, _shared):
+    """`from leaf import base as aliased`, re-exported, binds as `aliased`.
+
+    The bug this is the regression test for was one of NAME, not of kind: the
+    package's manifest published the name the DEFINING module gave the symbol
+    (`base`) and not the name every consumer of the package actually writes
+    (`aliased`), so the program's call reached the bind audit as a symbol
+    nothing provides and the build refused an image that was correct Mojo. The
+    refusal was right; the manifest was wrong.
+
+    BOTH spellings are in the program on purpose, which is what makes this a
+    test of ADDITIVENESS rather than of a substitution. The original name is
+    still published — an export is matched against a library's export set by the
+    defining name, and a package that stopped publishing `base` would break
+    every consumer that asks for it. So the two calls must agree, and the guard
+    is that a change that quietly became SUBTRACTIVE fails here rather than in
+    some importer nobody was looking at.
+    """
+    prog = ("from pkg import aliased\n"
+            "from leaf import base\n\n"
+            "def main():\n"
+            "  printf(\"a=%d b=%d|\", aliased(21), base(21))\n"
+            "  return aliased(21)\n")
+    root = os.path.join(tmpdir, "alias")
+    os.makedirs(root)
+    write_tree(root, {"leaf/__init__.mojo": ALIAS_LEAF,
+                      "pkg/__init__.mojo": ALIAS_PKG,
+                      "prog.mojo": prog})
+    fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 42, f"the aliased re-export returned {code}, expected 42; "
+                      f"stderr: {err}")
+    check("a=42 b=42|" in err,
+          f"the two spellings of one re-export disagree: {err.strip()!r}")
+
+    # The manifest, which is where the defect was. Both keys, both pointing at
+    # the DEFINITION's symbol, and `defines` naming the name it was found under
+    # so a reader can tell an alias from a definition.
+    m = manifest(module_dylib("pkg"))
+    fwd = m.get("reexports") or {}
+    check(set(fwd) == {"base", "aliased"},
+          f"the package publishes {sorted(fwd)}; an aliased re-export has to "
+          f"publish the name consumers write AND the name the definition has, "
+          f"or one of the two spellings cannot resolve: {fwd!r}")
+    leaf_sym = [e["symbol"] for e in manifest(module_dylib("leaf"))["exports"]
+                if e["name"] == "base"]
+    check(leaf_sym, f"the leaf library exports no `base`: "
+                    f"{manifest(module_dylib('leaf'))['exports']!r}")
+    for spelling in ("base", "aliased"):
+        check(fwd[spelling].get("symbol") == leaf_sym[0],
+              f"`{spelling}` forwards {fwd[spelling].get('symbol')!r} but the "
+              f"definition is {leaf_sym[0]!r}; a re-export must bind the "
+              f"DEFINITION, or two spellings of one function are two "
+              f"addresses")
+    check(fwd["aliased"].get("defines") == "base",
+          f"the alias does not record the name it stands for: "
+          f"{fwd['aliased']!r}")
+    check(fwd["base"].get("defines") == "base",
+          f"a plain re-export records something other than its own name: "
+          f"{fwd['base']!r}")
+
+
+def test_aliased_reexport_runs_on_both_architectures(tmpdir, _shared):
+    """The same aliased tree builds and RUNS on arm64 and on x86-64.
+
+    The resolution table (`model.dylib_aliased_export`) is one shared function,
+    but the emitters that consult it are two files with two copies of the
+    question, so one architecture passing is not evidence about the other — and
+    the failure mode when the second is wrong is a link error, not a wrong
+    answer, so nothing else in this file would report it.
+    """
+    for arch in ("arm64", "x86_64"):
+        root = os.path.join(tmpdir, f"alias_{arch}")
+        os.makedirs(root)
+        write_tree(root, {"leaf/__init__.mojo": ALIAS_LEAF,
+                          "pkg/__init__.mojo": ALIAS_PKG,
+                          "prog.mojo": ALIAS_PROG})
+        fresh_cas()
+        _result, out = build(root, "prog.aout", arch=arch)
+        code, err = run(out)
+        check(code == 42, f"[{arch}] the aliased re-export returned {code}, "
+                          f"expected 42; stderr: {err}")
+
+
+def test_a_private_name_aliased_public_stays_unpublished(tmpdir, _shared):
+    """`from x import _priv as pub` publishes NOTHING, exactly as before.
+
+    The guard for the alias filter. A private definition cannot cross the
+    boundary at all — `doc/ABI.md` keeps a leading `_` out of the export set —
+    so a package that re-exports one under a public name has no symbol to
+    forward, and the honest answers are the two this test pins: the manifest
+    does not claim to publish it, and a caller is still refused BY NAME rather
+    than bound to something. Publishing `pub` here would be worse than the
+    original bug: it would make the name resolve and call a symbol that is not
+    in the image.
+    """
+    root = os.path.join(tmpdir, "alias_private")
+    os.makedirs(root)
+    write_tree(root, {
+        "leaf/__init__.mojo": "def _hidden(x):\n  return x\n",
+        "pkg/__init__.mojo": "from leaf import _hidden as pub\n",
+        "prog.mojo": "from pkg import pub\ndef main():\n  return pub(1)\n",
+    })
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    check(result.returncode != 0,
+          "a package re-exporting a private definition under a public alias "
+          "built successfully, so a caller of `pub` has nothing to bind")
+    text = result.stderr or result.stdout
+    check("pub" in text,
+          f"the refusal does not name the published spelling: "
+          f"{text.strip()[-300:]}")
+
+
+def test_a_name_the_module_defines_wins_over_its_own_import(tmpdir, _shared):
+    """`from leaf import base as g` beside a local `def g` calls the LOCAL one.
+
+    The precedence `imported_bound_names` and `import_bindings` both state, and
+    the one case where recording an alias could have changed it: a name this
+    module DEFINES is its definition, so a consumer binding `g` must get that
+    body and not `base`'s. The two are given different answers on purpose
+    (`x + 1` and `x * 2`), because a test that only checked the program built
+    would pass with either body and say nothing about which one was called.
+
+    `x * 2` would also be the WRONG ANSWER rather than a link failure, which is
+    the shape this whole area has: the two are the same function under two
+    names, and picking the wrong one is invisible to every check that is not a
+    comparison of the two.
+    """
+    prog = ("from pkg import g\n\n"
+            "def main():\n"
+            "  printf(\"g=%d base=%d|\", g(3), base(3))\n"
+            "  return g(3)\n")
+    root = os.path.join(tmpdir, "alias_shadowed")
+    os.makedirs(root)
+    write_tree(root, {
+        "leaf/__init__.mojo": ALIAS_LEAF,
+        "pkg/__init__.mojo": ("from leaf import base as g\n"
+                              "\n"
+                              "def g(x):\n"
+                              "  return x + 1\n"),
+        "prog.mojo": prog,
+    })
+    fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 4, f"`g(3)` returned {code}: the module's own definition of "
+                     f"`g` is `x + 1` and the import's is `x * 2`, so the "
+                     f"import shadowed a name this module defines; stderr: "
+                     f"{err}")
+    check("g=4 base=6|" in err,
+          f"the two definitions of one name disagree: {err.strip()!r}")
+
+
 def test_module_dylib_matches_the_programs_arch(tmpdir, _shared):
     """An x86-64 program's module dylibs are x86-64, and it RUNS.
 
@@ -1777,6 +1953,14 @@ TESTS = [
      test_namespace_library_exports_nothing),
     ("a re-export nothing provides is refused by name",
      test_reexport_of_an_unexported_name_is_refused),
+    ("an ALIASED re-export binds under both spellings",
+     test_aliased_reexport_binds_under_both_spellings),
+    ("an aliased re-export runs on both architectures",
+     test_aliased_reexport_runs_on_both_architectures),
+    ("a private name aliased public stays unpublished",
+     test_a_private_name_aliased_public_stays_unpublished),
+    ("a name the module defines wins over its own import",
+     test_a_name_the_module_defines_wins_over_its_own_import),
     ("a module dylib matches the program's arch, both arches",
      test_module_dylib_matches_the_programs_arch),
     ("both architectures' libraries coexist",

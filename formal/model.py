@@ -8853,7 +8853,13 @@ def dylib_export_tables(dylib_exports: list):
                 # `StructDef` (`imported_struct_defs`), so there is nothing
                 # here for a CALL to bind and nothing to put in this table.
                 continue
-            known = by_name.get(name)
+            # The declared signature is borrowed from the DEFINING name's own
+            # entry (`defines`, which equals the key for every re-export that is
+            # not an alias), because that is where the definition is: a package
+            # that publishes `g` for `f`'s symbol must classify `g`'s result
+            # exactly as it classifies `f`'s, or a re-exported `char *` prints
+            # as an integer under one spelling and as a string under the other.
+            known = by_name.get(fwd.get("defines") or name)
             entry = {"name": name, "symbol": fwd.get("symbol"),
                      "module": fwd.get("module") or module,
                      "signature": (known.get("signature") or "")
@@ -8936,7 +8942,8 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
     — which is what makes `os.path.join(...)`, the spelling 532 measured call
     sites in this tree are written with, resolve at all."""
     if "." not in name:
-        entry = dylib_aliased_export(by_name, by_module, name, aliases)
+        entry = dylib_aliased_export(by_name, by_module, name, aliases,
+                                     forwarded)
         if entry is not None:
             return entry.get("symbol") or name
         if is_import_alias(name, aliases):
@@ -9137,33 +9144,44 @@ def is_import_alias(callee: str, aliases: dict) -> bool:
 
 
 def dylib_aliased_export(by_name: dict, by_module: dict, callee: str,
-                         aliases: dict):
+                         aliases: dict, forwarded: dict = None):
     """The export a bare callee reaches THROUGH an import alias, or None.
 
     `aliases` is `formal/imports.py`'s `import_bindings` table: `{local name:
     (module as spelled, defining name)}`, so `from os.path import exists as
     pe` is `{"pe": ("os.path", "exists")}`.
 
-    Two questions, and they are asked in this order because the second is the
-    weaker one:
+    Three questions, and they are asked in this order because each is weaker
+    than the one before it — the last one cannot say WHICH module answered:
 
-      1. **Does the module the name was imported FROM export it?** That module's
-         export table, not the flat one: the flat table cannot say which module
-         owns a name, so a local alias that happened to collide with another
-         library's export would bind that other library's function. The alias is
-         a statement about where `pe` came from, so it is resolved against that
-         module and nowhere else.
+      1. **Does the module the name was imported FROM define it?** That module's
+         own export table, not the flat one: the flat table cannot say which
+         module owns a name, so a local alias that happened to collide with
+         another library's export would bind that other library's function. The
+         alias is a statement about where `pe` came from, so it is resolved
+         against that module and nowhere else.
 
-      2. **Does ANY library on the line export the DEFINING name?** This is the
-         re-export case, and it is the same name-based dispatch `from m import
-         f` — with no alias at all — already uses: a package `__init__` is a
-         namespace library with an EMPTY export table (`_namespace_library`),
-         so `from pkg import bump` has to be answered by the submodule's
-         library under `bump`. Asking it by the DEFINING name and not by the
-         local one is what keeps it from being a hole: `bump` is a real export
-         somewhere on the line, where `b` is a name only this file ever used.
+      2. **Does that module FORWARD it?** Same module, and the same reason for
+         the same answer, read off `forwarded` rather than `by_module` — which is
+         what `dylib_export_lookup` does for the DOTTED spelling of this very
+         call, and the omission was the whole of the aliased-re-export bug: a
+         package `__init__` is a namespace library with an EMPTY export table
+         (`_namespace_library`), so its published names are all in `forwarded`,
+         and question 1 above finds nothing for any of them. An `as` on top of
+         that made it unreachable, because the name the consumer writes is the
+         alias and the flat map is keyed by the DEFINING name. Both spellings of
+         one re-export now resolve through the same table.
 
-    `None` means neither can bind it, which is the caller's cue to raise
+      3. **Does ANY library on the line export the DEFINING name?** This is the
+         name-based dispatch `from m import f` — with no alias at all — already
+         uses, and it is the weakest question because it names no module: a
+         package `__init__` with an empty export table means `from pkg import
+         bump` has to be answered by the submodule's library under `bump`.
+         Asking it by the DEFINING name and not by the local one is what keeps
+         it from being a hole: `bump` is a real export somewhere on the line,
+         where `b` is a name only this file ever used.
+
+    `None` means none can bind it, which is the caller's cue to raise
     `dylib_aliased_export_refusal`. Falling back to the LOCAL spelling — what
     the code did before any of this — is what produced a BL against a symbol
     nothing defines.
@@ -9175,6 +9193,10 @@ def dylib_aliased_export(by_name: dict, by_module: dict, callee: str,
     entry = dylib_export_module(by_module, module).get(defined)
     if entry is not None:
         return entry
+    if forwarded:
+        entry = dylib_export_module(forwarded, module).get(defined)
+        if entry is not None:
+            return entry
     if "." in defined:
         return dylib_export_lookup(by_name, by_module, defined)
     return by_name.get(defined)
