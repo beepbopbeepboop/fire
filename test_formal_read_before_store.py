@@ -110,6 +110,42 @@ CASES = [
      "    if n:\n        p = 1\n    else:\n        p = 0\n"
      "    if n:\n        p = 2\n    return p\n", "ok"),
 
+    # ── the body's LAST block: the exit has no predecessor but the body's ──
+    # Every case above ends in `return`, so the top-level `run` returns `[]` and
+    # no exit edge is ever built. A body that FALLS OFF THE END is the other
+    # half of the shape, and it is where the graph used to carry an edge from
+    # the function's FIRST block to its last one — the top-level `run`'s return
+    # value wired to the entry as a successor, which is a path that runs nothing
+    # in between. `read_before_store` then intersected the exit's IN with the
+    # entry's OUT (the parameters) and reported the first read after the last
+    # control-flow statement as a read before any store. It refused correct
+    # stdlib Mojo on that invented edge: `std/collections/binary_heap.mojo`'s
+    # `_heapify_up` declares `var element`, then loops, then reads `element` in
+    # its trailing `unsafe_write`, and the whole `collections` closure with it.
+    # The store DOES dominate there — every path out of the loop runs the
+    # declaration first — so these are legal programs that were being refused.
+    ("store_before_loop_read_after_falling_off_the_end_ok",
+     "    var element = n\n    while n > 0:\n        n = n - 1\n"
+     "    print(element)\n", "ok"),
+    ("store_before_if_read_after_falling_off_the_end_ok",
+     "    var q = n\n    if n:\n        var w = 1\n"
+     "    print(q)\n", "ok"),
+    ("store_before_loop_break_read_after_falling_off_the_end_ok",
+     "    var q = n\n    for i in range(3):\n        if i > n:\n"
+     "            break\n    print(q)\n", "ok"),
+    # The control for the three rows above, and the reason removing the edge is
+    # safe rather than merely convenient: a name NO path stores is still
+    # refused at a fall-off-the-end tail, because the real predecessors are
+    # what the intersection runs over. CPython raises at probe(0) — `print(p)`
+    # is a builtin, so the NameError this would otherwise raise never happens.
+    ("falling_off_the_end_still_refuses",
+     "    if n:\n        p = 1\n    print(p)\n", "refuse"),
+    # …and a name stored only in a LOOP BODY is not promoted by the tail: the
+    # loop may run zero times, which is the same answer with or without the
+    # removed edge, and is why these two rows cannot be collapsed into one.
+    ("loop_body_store_read_after_falling_off_the_end_refused",
+     "    for i in range(n):\n        t = i\n    print(t)\n", "refuse"),
+
     # ── loops: the target is a definition in the HEADER, not the body ─────
     ("for_target_stays_bound",
      "    for i in range(3):\n        if i > 1:\n            break\n"
