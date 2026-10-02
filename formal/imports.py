@@ -182,7 +182,25 @@ HOST_MODELLED = frozenset((
     #     answer is written at the top of the file: `platform()` itself is one
     #     call away and blocked on `architecture()`, which needs `file(1)`, and
     #     `processor()`/`libc_ver()` are subprocesses and a readable file.
-    "errno", "stat", "select",
+    #   `stat`  — `formal/hostmods/stat.mojo`, the MODE VOCABULARY and nothing
+    #     else: every `S_I*` / `S_IF*` / `ST_*` constant, `S_IFMT`, `S_IMODE`,
+    #     the seven `S_IS*` predicates this platform compiles, and `filemode`,
+    #     each checked name by name against CPython's own `stat` by
+    #     `test_formal_stat.py` over an EXHAUSTIVE mode corpus — every one of
+    #     the 4096 permission combinations and every type CPython's `filemode`
+    #     table has a row for. It is the only host module with no dependency on
+    #     the C library and none on `os`, because CPython's `stat` is the
+    #     VOCABULARY for reading `os.stat`'s answer and holds no syscall of its
+    #     own; the syscall and its byte-wise field reader are
+    #     `formal/hostmods/os/_syscalls.mojo`'s (`fs_stat_field64`,
+    #     `fs_stat_mode`) and are deliberately NOT re-exported here, so there is
+    #     one reader of `struct stat` in this tree. What it cannot answer is at
+    #     the top of that file: `S_ISDOOR` / `S_ISPORT` / `S_ISWHT` are
+    #     compiled out of CPython on this platform and answering "no" would be a
+    #     plausible wrong answer about a whiteout, and Darwin's
+    #     `ST_BIRTHTIME` / `ST_BLOCKS` / `ST_BLKSIZE` have no CPython name to
+    #     be checked against.
+    "errno", "select",
     #   `pathlib`  — `formal/hostmods/pathlib.mojo`, in the pure half only,
     #     checked read for read against CPython's own `PurePosixPath` by
     #     `test_formal_pathlib.py`: `as_posix`, `name`, `stem`, `suffix`,
