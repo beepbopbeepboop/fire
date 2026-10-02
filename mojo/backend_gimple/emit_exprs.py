@@ -5118,7 +5118,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     if _elem_repr:
         gen._emit_call('void', '', 'mojo_list_set_elem_repr',
                        [('MojoList *', t),
-                        ('void *', gen._new_val('void *', _elem_repr))])
+                        ('void *', _elem_repr_operand(gen, _elem_repr))])
     gen._note_fresh_result(t)
     return 'MojoList *', t
 
@@ -5153,6 +5153,34 @@ def _struct_elem_repr_shim(gen, elem_type: str) -> str:
     if not gen.struct_field_types.get(sn):
         return ''
     return f'_mojo_elem_repr_{sn}'
+
+
+def _elem_repr_operand(gen, shim: str) -> str:
+    """The `void *` OPERAND naming the element-repr shim, for the runtime call.
+
+    The file-scope `static void *_funcptr_<shim> = (void *)<shim>;` this codegen
+    already emits for every function-pointer target, rather than the shim's
+    bare name. A function designator is not a legal gimple OPERAND, so passing
+    it inline produced
+
+        _t42 = _mojo_elem_repr_DType;
+
+    and gcc -fgimple refused the whole closure with "non-trivial conversion in
+    'function_decl'" -- one error per list literal in every module of the
+    stdlib, so `make mojoc` did not link at all (measured on the stdlib
+    `builtin/dtype.mojo`, three per function, plus the same shape in
+    `parsing_floats.mojo`). `(void *)name` is the same problem inside a cast,
+    which is equally not an operand, so the cast has to live in a real static
+    initializer instead; that initializer is what `_funcptr_builtins_needed`
+    collects and module_gen emits.
+
+    ONE spelling for every function-pointer target, which is what makes this a
+    fix rather than a second way of naming the same thing: the lifted-closure,
+    the builtin-callable and the vararg paths all reach the shim through
+    `_funcptr_` already.
+    """
+    gen._funcptr_builtins_needed.add(shim)
+    return f'_funcptr_{shim}'
 
 
 def _list_literal_slot_kind(gen, el, et) -> str:
@@ -5441,7 +5469,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     if _tshim:
         gen._emit_call('void', '', 'mojo_list_set_elem_repr',
                        [('MojoList *', t),
-                        ('void *', gen._new_val('void *', _tshim))])
+                        ('void *', _elem_repr_operand(gen, _tshim))])
     # Mark as a tuple AFTER the elements are in, not before. The mark is
     # what makes this value a tuple rather than a list (see
     # mojo_mark_as_tuple's doc comment in runtime/fire_runtime.c), and since
