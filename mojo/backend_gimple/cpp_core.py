@@ -3686,8 +3686,13 @@ def _cpp_expr(gen, e) -> str:
         # Python `s[i]` on a string → a 1-char string (not a C++ char).
         # Subscripting a char* expression (a local, another subscript's
         # result, or a string literal) is the common generator-body
-        # shape; emit mojo_cstr_slice(s, i, i+1) so it round-trips as a
-        # char* like every other string value in this scalar model.
+        # shape; emit mojo_char_at(s, i) so it round-trips as a
+        # char* like every other string value in this scalar model, and so it
+        # answers from the shared immortal character table instead of a fresh
+        # two-byte malloc per character — the same value the GIMPLE path's own
+        # string subscript now gets
+        # (bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md). Its bounds
+        # are `mojo_cstr_slice(s, i, i+1)`'s, which is what this emitted.
         # Only applies when the SUBJECT is string-ish: a plain identifier,
         # a string literal, or a slice/subscript chain (whose result this
         # emitter always types as char*). A MojoList/MojoDict subscript
@@ -3756,7 +3761,7 @@ def _cpp_expr(gen, e) -> str:
                     "generator/coroutine body (subscript base resolves "
                     "to a function/special-form value, not a string or "
                     "container)")
-            return f"mojo_cstr_slice((char *)({obj}), {idx}, ({idx}) + 1)"
+            return f"mojo_char_at((char *)({obj}), {idx})"
         # Subscripting a CALL RESULT whose declared return type is a
         # container pointer: `detect_encoding(readline)[0]` where
         # detect_encoding returns MojoList * (tokenize.py's exact shape —

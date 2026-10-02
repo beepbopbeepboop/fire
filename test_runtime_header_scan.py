@@ -299,7 +299,7 @@ def test_every_declaration_is_seen():
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula — a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    # 543 -> 545 (2026-10-02, `bugs4-9`), TWO names:
+    # 543 -> 546 (2026-10-02, `bugs4-9`), THREE names:
     #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr
     #       walker is a chain of. It was a file-local `_cat_free` in
     #       fire_runtime.c and is now PUBLIC because the repr walkers the
@@ -312,8 +312,16 @@ def test_every_declaration_is_seen():
     #       `mojo_dict_get_double` takes a KEY, so a `kind == 1` slot had no
     #       reader and went to the generic element repr, which dereferences a
     #       word above 65536 — a double's IEEE-754 bits. `print({"c": 3.5})`
-    #       was a SIGSEGV. Taken from the call.
-    for header, want in (('fire_runtime.h', 545),
+    #       was a SIGSEGV.
+    #   +1  `mojo_char_at`, `s[i]` on a `char *` str answered from the shared
+    #       immortal character table instead of a fresh two-byte malloc, with
+    #       `mojo_cstr_slice`'s bounds. It takes an int64_t INDEX because
+    #       gimple refuses a `char`-typed argument, which is the only reason
+    #       the allocating slice was there; 16.06 B per character of every
+    #       string scan was the result. NOT the caller's to free, so it is
+    #       deliberately absent from the codegen's `_FRESH_STRING_RETURNS`.
+    # Three, taken from the call.
+    for header, want in (('fire_runtime.h', 546),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

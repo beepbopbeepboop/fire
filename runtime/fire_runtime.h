@@ -749,6 +749,11 @@ int         mojo_str_eq(MojoStr *a, MojoStr *b);
 char        mojo_str_char_at(MojoStr *s, int64_t i);
 void        mojo_str_print(MojoStr *s);
 char       *mojo_char_to_str(char c);
+/* `s[i]` on a plain `char *` str, answered from the shared immortal table
+ * instead of a fresh two-byte malloc, with the same bounds semantics as
+ * `mojo_cstr_slice(s, i, i + 1)`. NOT the caller's to free — see
+ * mojo_char_at's own comment in fire_runtime.c. */
+char       *mojo_char_at(char *s, int64_t i);
 int64_t     mojo_ord(char *s);
 char       *mojo_chr(int64_t code);
 

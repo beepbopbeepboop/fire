@@ -7197,22 +7197,28 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             addr = gen._new_val('char *', f"_mojo_at_char ({cp}, {idx64})")
             # `s[i]` on a str is a 1-char STRING, not a character code —
             # the same rule as _gen_for_cstr / _compr_cstr_loop (see those
-            # for what returning a bare `char` broke). `mojo_char_to_str`
-            # is the existing helper; `rest[0]` comparing against a quote
-            # literal is the canonical use.
-            # `mojo_cstr_slice` rather than a `char`-taking helper:
-            # gimple rejects a `char` argument ("invalid argument to
-            # gimple call" — a char is promoted to int64_t non-trivially).
-# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
-            # operand. `_t = _i + (int64_t)1` is rejected at gimplification
-            # with "expected expression before '(' token" -- a HARD error
-            # under `gcc -fgimple`, so it takes out the whole self-host
-            # closure, not just this subscript. The `LL` suffix is the
-            # tree's existing idiom for a width-correct int64_t literal
-            # (`0LL` appears throughout the generated C) and needs no cast.
-            _one_cs = gen._new_val('int64_t', f"{idx64} + 1LL")
+            # for what returning a bare `char` broke).
+            #
+            # `mojo_char_at`, NOT `mojo_cstr_slice(ptr, i, i + 1)` and not
+            # `mojo_char_to_str`: gimple rejects a `char`-typed argument
+            # ("invalid argument to gimple call" — a char is promoted to
+            # int64_t non-trivially), which is the whole reason the slice was
+            # used, and the slice allocates a two-byte buffer per character
+            # that nothing owns — 16.06 B per character measured against 16.1 B
+            # for a bare malloc(2), i.e. the entire residual of a per-character
+            # scan (bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md).
+            # `mojo_char_at` is the int64-indexed route to the SAME shared
+            # immortal string `c == "x"` in this very loop body already goes
+            # through, so the two spellings of the same character are now one
+            # pointer. Its bounds are the slice's: a negative index resolves
+            # against the length and a past-the-end index is "".
+            #
+            # It must stay OUT of the codegen's `_FRESH_STRING_RETURNS` (it is
+            # deliberately absent, with `mojo_char_to_str`, for the same
+            # reason): a generated path that believed it owned this value would
+            # emit a `free()` of a static.
             return 'char *', gen._new_val(
-                'char *', f"mojo_cstr_slice ({cp}, {idx64}, {_one_cs})")
+                'char *', f"mojo_char_at ({cp}, {idx64})")
         # A STRING index proves the container is a dict even when its own
         # type is opaque: no list is indexable by a string. `pat.fields`
         # in ast_rewriter.py is exactly this — the A5 boxed-member read
@@ -7394,23 +7400,20 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # and the generic branch below would hand back the character CODE. But
     # `s[i]` on a Python str is a 1-char STRING — the same rule as
     # _gen_for_cstr / _compr_cstr_loop / the boxed-string subscript branch
-    # above, all of which now return `char *` via `mojo_char_to_str`.
+    # above, all of which now return `char *` via `mojo_char_at`.
     # Without it every string index disagreed with every string iteration:
     # `s[0]` was 97 while `for c in s` bound 'a'.
+    #
+    # `mojo_char_at` rather than `mojo_cstr_slice(ov, i, i + 1)`, and the
+    # reason is the boxed branch's own comment in full: gimple refuses a
+    # `char` argument so the slice was the only allocating route to the same
+    # answer, and it leaked a two-byte buffer per character of every scan
+    # (bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md). The result is
+    # a shared immortal string, deliberately absent from `_FRESH_STRING_RETURNS`
+    # so no generated path can `free()` it.
     if et == 'char':
-        # `mojo_cstr_slice` rather than a `char`-taking helper: gimple
-        # rejects a `char` argument ("invalid argument to gimple call"),
-        # since a char is promoted to int64_t non-trivially.
-# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
-        # operand. `_t = _i + (int64_t)1` is rejected at gimplification
-        # with "expected expression before '(' token" -- a HARD error
-        # under `gcc -fgimple`, so it takes out the whole self-host
-        # closure, not just this subscript. The `LL` suffix is the
-        # tree's existing idiom for a width-correct int64_t literal
-        # (`0LL` appears throughout the generated C) and needs no cast.
-        _one_gs = gen._new_val('int64_t', f"{idx64} + 1LL")
         return 'char *', gen._new_val(
-            'char *', f"mojo_cstr_slice ({ov}, {idx64}, {_one_gs})")
+            'char *', f"mojo_char_at ({ov}, {idx64})")
     t = gen._new_val(et, f"*{addr}")
     return et, t
 

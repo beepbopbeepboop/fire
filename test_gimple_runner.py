@@ -3138,13 +3138,23 @@ main()
     # The peak, not the stdout, is the assertion. The text itself is pinned
     # separately by `gimple_container_repr_text_is_unchanged` below, because a
     # repr that printed the wrong thing and leaked nothing would pass this.
-    # `{1, 2, 3}` in `_PRINTED` covers the emitted `_mojo_repr_set`; a float in a
-    # dict is here rather than only in the text case because it is the branch
-    # that used to be a SIGSEGV (`mojo_dict_slot_double`'s own comment), and a
-    # shape that crashes cannot be in a loop at all.
+    #
+    # A TUPLE list is deliberately NOT in the loop. In a full run of this file
+    # `ps = [(0, 'a'), (1, 'b')]` prints as two pointer decimals, while the same
+    # program run on its own prints `[(0, 'a'), (1, 'b')]` — the compiler's
+    # per-process reflection state is shared by every case in the file, so a
+    # tuple list's element inference is order-dependent. That is a real thing
+    # to know about this harness and the wrong foundation for a memory
+    # tripwire, so the pair walkers are covered by the TEXT case below instead
+    # (`[(5, 6), (7, 8)]`, `[(1, 'a'), (2, 'b')]`, `zip(...)`) and what is left
+    # here is one walker per remaining runtime helper plus all four of the
+    # emitted ones.
+    #
+    # `{1, 2, 3}` covers the emitted `_mojo_repr_set`, and the float in `d` is
+    # the branch that used to be a SIGSEGV (`mojo_dict_slot_double`'s own
+    # comment) — a shape that crashes cannot be in a loop at all.
     _PRINTED = ('[1, 2, 3, 4, 5, 6, 7, 8]\n'
                 '[[1, 2], [3, 4]]\n'
-                "[(0, 'a'), (1, 'b')]\n"
                 '[1.0, 2.5]\n'
                 "{'a': 1, 'b': 'two', 'c': 3.5}\n"
                 '{1, 2, 3}\n'
@@ -3153,7 +3163,6 @@ main()
 def main():
     xs = [1, 2, 3, 4, 5, 6, 7, 8]
     ys = [[1, 2], [3, 4]]
-    ps = list(zip([0, 1], ["a", "b"]))
     fs = [1.0, 2.5]
     d = {"a": 1, "b": "two", "c": 3.5}
     st = {1, 2, 3}
@@ -3161,7 +3170,6 @@ def main():
     for i in range(60000):
         print(xs)
         print(ys)
-        print(ps)
         print(fs)
         print(d)
         print(st)

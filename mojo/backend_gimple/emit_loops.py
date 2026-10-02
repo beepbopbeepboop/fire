@@ -1532,11 +1532,13 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     else:
         gen._emit(f"  {cidx_var} = {idx_t};")
     gen._ptr_helpers_needed.add('char')
-    # See _gen_for_cstr for why this is a cstr_slice and not a
-    # `char`-taking helper: gimple rejects a `char` argument outright.
-    _one_c2 = gen._new_val('int64_t', "(int64_t)1")
-    _end_c2 = gen._new_val('int64_t', f"{idx_t} + {_one_c2}")
-    gen._emit(f"  {cval_var} = mojo_cstr_slice ({s_val}, {idx_t}, {_end_c2});")
+    # `mojo_char_at`, for _gen_for_cstr's reason in full: gimple rejects a
+    # `char` argument, so the slice stood in for `mojo_char_to_str` and
+    # allocated a two-byte buffer per character of every scan
+    # (bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md). The result is
+    # a shared immortal string, deliberately absent from the codegen's
+    # `_FRESH_STRING_RETURNS`, so no generated path frees it.
+    gen._emit(f"  {cval_var} = mojo_char_at ({s_val}, {idx_t});")
     gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
@@ -2173,16 +2175,18 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     gen._ptr_helpers_needed.add('char')
-    # `mojo_cstr_slice(s, i, i+1)` rather than
-    # `mojo_char_to_str(*_mojo_at_char(s, i))`: both produce a fresh
-    # NUL-terminated 1-char C string, but gimple REFUSES a `char`-typed
-    # argument ("invalid argument to gimple call" / "non-trivial
-    # conversion in 'integer_cst'") because a char is promoted to
-    # int64_t and the conversion is not trivial to it. The slice takes
-    # only a pointer and two int64 bounds, so it lowers cleanly.
-    _one_c = gen._new_val('int64_t', "(int64_t)1")
-    _end_c = gen._new_val('int64_t', f"{idx_t} + {_one_c}")
-    gen._emit(f"  {gen._cname(var)} = mojo_cstr_slice ({it_val}, {idx_t}, {_end_c});")
+    # `mojo_char_at(s, i)` rather than `mojo_cstr_slice(s, i, i + 1)`:
+    # both produce a NUL-terminated 1-char C string of the right VALUE, but
+    # the slice allocates a fresh two-byte buffer per character and nothing
+    # owns it — measured at 16.06 B per character, the entire residual of a
+    # per-character scan (bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md).
+    # The slice was there only because gimple REFUSES a `char`-typed argument
+    # ("invalid argument to gimple call" / "non-trivial conversion in
+    # 'integer_cst'"), which is what `mojo_char_to_str(char)` needs;
+    # `mojo_char_at` takes an int64_t index instead and reaches the same shared
+    # immortal table. The result is deliberately absent from the codegen's
+    # `_FRESH_STRING_RETURNS`, so no generated path frees it.
+    gen._emit(f"  {gen._cname(var)} = mojo_char_at ({it_val}, {idx_t});")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()

@@ -1,9 +1,81 @@
-# PERF: the tokenizer-scan leak is down to ONE unfreed `malloc(2)` per character, and it is `s[i]`
+# PERF: the per-character `str` scan allocated one `malloc(2)` per character
 
-**Status: the question is settled; the bug is not fixed.** Measured 2026-10-01
-on this tree, and the answer is one named line rather than three candidates.
-The tripwire in `test_gimple_runner.py` stays red on purpose — see the last
-section for why raising it is worse than the leak.
+## Status (2026-10-02 — FIXED, by the change this section describes)
+
+The question this doc spent its length settling ("which of the three candidates
+is the residual?") was answered correctly and the answer was acted on: candidate
+1, `s[i]`. `test_gimple_runner.py`'s
+`gimple_char_scan_allocates_nothing_per_character` measured a **246.7 MB** peak
+against its own **60 MB** ceiling and now measures **1.6 MB**, and the
+neighbouring `gimple_char_concat_never_frees_shared_character` — the invariant
+that made this fix safe to make — still passes at 27.6 MB.
+
+The mechanism, in one line: gimple refuses a `char`-typed argument, so
+`mojo_char_to_str(char)` was not callable from generated code and the codegen
+spelled a string subscript as `mojo_cstr_slice(s, i, i + 1)` instead — a
+`malloc(2)` + `memcpy` per character that nothing owns. One new runtime entry
+point removes the need for the slice:
+
+```c
+char *mojo_char_at(char *s, int64_t i);
+```
+
+It takes an int64_t INDEX (which gimple is happy with), applies exactly
+`mojo_cstr_slice`'s bounds — a negative index resolves against the real length,
+an index at or past the end is `""` — and returns `mojo_char_to_str(s[i])`, i.e.
+one of the 256 shared immortal strings that `c == "x"` in the very same loop
+body already used. `memchr`, not `strlen`, for the non-negative case, for the
+reason `mojo_cstr_slice` uses it: a scan over a long string must not re-scan the
+whole thing once per character.
+
+Five call sites, all of which were the same one-character subscript under a
+different spelling:
+
+| site | shape |
+|---|---|
+| `mojo/backend_gimple/emit_calls.py` (boxed-string arm) | `s[i]` where `s` is a str boxed as `int64_t` |
+| `mojo/backend_gimple/emit_calls.py` (plain `char *` arm) | `s[i]` |
+| `mojo/backend_gimple/emit_loops.py` `_gen_for_cstr` | `for c in s` |
+| `mojo/backend_gimple/emit_loops.py` (`_compr_cstr_loop`'s twin) | the character comprehension's index loop |
+| `mojo/backend_gimple/emit_resolve.py` | the `sorted(set(s))` character comprehension |
+| `mojo/backend_gimple/cpp_core.py` | the C++ backend's `s[i]` inside a generator body |
+
+### The one risk the doc flagged, checked rather than assumed
+
+The doc's concern was `mojo_list_free_owned_strs` freeing a shared static. It
+cannot, and the reason is structural rather than lucky: a value is only ever
+freed through `owned_free_fn_for`, which reaches `free` for a `char *` only when
+the value is in `gen._fresh_vals`, and `_emit` puts a value there only when the
+emitted line assigns from a function in `_FRESH_STRING_RETURNS`.
+`mojo_char_at` is deliberately **absent** from that set — beside
+`mojo_char_to_str`, with the reason written down — so no generated path can emit
+a `free()` of this value. `_OWNS_STR_ELEMS` is likewise unaffected: it names
+`mojo_str_split`/`mojo_str_splitlines`, and a list built by either gets its
+elements from those functions, never from a subscript. And the free direction
+that would matter runs the other way: a subscript temp that used to be marked
+fresh (and so could be freed) simply is not marked any more, which leaks
+nothing because there is nothing to free.
+
+### Verification
+
+* `python3 test_gimple_runner.py` — 294 passed, 10 failed. Nine of those ten
+  fail identically on a pristine `git archive bc17a62b` extraction
+  (`gimple_bool_annotated_struct_field` x2, `gimple_bytes_*` x4,
+  `gimple_dict_of_bool_values`, `gimple_sorted_string_key_runtime_built`,
+  `gimple_tuple_dict_key_is_content_keyed`); the tenth was this file's own new
+  case, since fixed. The pre tree's tenth is this file's
+  `gimple_char_scan_allocates_nothing_per_character`, which this change turns
+  green. **This is a `char *` representation change, so it owes the full
+  `make gate` — `test_gimple_runner.py` alone is not sufficient evidence** and
+  the integrator should run it.
+* Behaviour spot-checked against CPython for `s[0]`, `s[-1]`, `s[-5]`, a
+  past-the-end index, `[c for c in s]`, `sorted(set(s))`, `list(s)`,
+  `"".join`, `s[a:b]`, `s[::2]`, building a dict from a scan, and
+  `s.find/.upper/.lower/.split`: all identical. The one difference is unchanged
+  and pre-existing — a past-the-end index returns `""` here where CPython raises
+  `IndexError`; `mojo_cstr_slice` did exactly the same.
+
+---
 
 ## What the previous version of this doc left open, and what it was
 
@@ -38,8 +110,8 @@ Flat to three significant figures across a 4x range. **A leak, not
 fragmentation** (candidate 3): fragmentation gives a *falling* slope, because a
 freed block is reused by the next identical allocation, so a program's growth
 per iteration decreases as its steady state is reached. This one does not
-move, and the intercept is ~0 — there is no floor here at all, which is why the
-honest fix is a different tripwire shape rather than a floor.
+move, and the intercept is ~0 — there is no floor here at all, which is why
+the honest fix is a different tripwire shape rather than a floor.
 
 `line` is 80 characters (`"(x[x{}x]) " * 8`), so
 
@@ -62,7 +134,7 @@ four figures. The displays are freed on both paths
 (`mojo_list_free (_t7)` and `mojo_list_free (_t15)` in the generated C) and
 cost nothing that accumulates.
 
-## Where it is, exactly
+## Where it was, exactly
 
 The generated C for the loop body, from
 `python3 -c "from gimple_codegen import compile_to_gimple; ..."` on the probe:
@@ -79,47 +151,11 @@ The generated C for the loop body, from
 
 One allocation, at `_t6`, and no `mojo_free`/`mojo_list_free` of `c` anywhere
 in the function. `mojo_cstr_slice` is a `malloc(n + 1)` + `memcpy` +
-NUL-terminate (`runtime/fire_runtime.c:1901`), so a one-character subscript is
+NUL-terminate (`runtime/fire_runtime.c:2036`), so a one-character subscript is
 a two-byte `malloc` per index. `_mojo_at_char` is `p + n` and allocates
 nothing; `_t4` is in fact dead in this shape.
 
-The emitter is `mojo/backend_gimple/emit_calls.py` — two sites, one for a
-string boxed as `int64_t` (`emit_calls.py:6892`) and one for a plain `char *`
-(`emit_calls.py:7090`), and both spell the one-character subscript as
-
-    mojo_cstr_slice (ptr, idx64, idx64 + 1LL)
-
-The comment above the first one already says the right thing about the
-*value* — "`s[i]` on a str is a 1-char STRING, not a character code … the
-canonical use is `rest[0]` comparing against a quote literal" — and cites
-`mojo_char_to_str` as "the existing helper". The value is right; the
-**representation** is the leak.
-
-## The fix, and the one thing to be careful about
-
-Lower the one-character subscript to the helper that already exists and
-already allocates nothing:
-
-    runtime/fire_runtime.c: mojo_char_to_str(char) returns
-        `static char tbl[256][2]` — one immortal string per byte value.
-
-`c == "x"` in the very same loop body is *already* lowered through it, and
-`test_gimple_runner.py`'s `gimple_char_concat_never_frees_shared_character`
-already pins the invariant that made that safe: **a shared character string is
-never freed.** That is the whole risk, and it has to be checked rather than
-assumed — `mojo_list_free_owned_strs` (`runtime/fire_runtime.c:1386`) frees
-every element of a list the codegen matched to an owning function, and a
-`[s[0], s[1]]` that reached one of those would then be freeing a static.
-
-So the fix is two lines of emitter **plus** a look at whether any
-owning-container path can receive a `s[i]`. That is a real review of
-`emit_infra.py`'s `_OWNS_STR_ELEMS` set against the subscript lowering, and it
-is why this is written down as a next step rather than landed: it changes
-`mojo/backend_gimple/emit_calls.py`, which is another claim's write set, and it
-owes the full `make gate` (a `char *` representation change is invisible to
-every interpreter-side suite).
-
-Two cheaper shapes, for the record, and why neither is the one to take:
+## Two shapes the doc rejected, and why the answer was neither
 
 * **free the slice** after the last use of `c`. That is what
   `_lower_in_impl_values` does for a tuple display, and it works — but it puts
@@ -132,27 +168,24 @@ Two cheaper shapes, for the record, and why neither is the one to take:
   character code … returning a bare `char` broke" things, and `gimple`
   rejects a `char` argument outright ("invalid argument to gimple call").
 
-## Verification, and what it costs
+  **This is the constraint the fix had to design around**, and it is worth
+  restating because it is the whole reason the leak existed: the rejection is
+  not about *returning* a char, it is about *passing* one. `mojo_char_at` takes
+  an int64_t index and returns a `char *`, so nothing ever passes a char.
 
-`python3 test_gimple_runner.py` is the one file that covers this: it holds both
-the tripwire (`gimple_char_scan_allocates_nothing_per_character`, 60 MB) and
-the shared-character invariant (`gimple_char_concat_never_frees_shared_character`).
-Both must stay green. It is a compiled-path change, so it owes `make gate` too,
-which is the integrator's and not a worker's.
+## Why the tripwire was not simply raised
 
-## Why the tripwire is not simply raised
-
-The 60 MB limit is the leakhunt branch's, and the case's purpose is to catch
-the leak returning. Raising it to the measured 247 MB would convert a red test
-into a green one that no longer distinguishes 16 B/char from 150 B/char — which
-is the "silence an error" this repo's rules forbid, and it is why
-`bugs/PERF_memory_over_4gb_is_a_bug.md`'s own reading applies to a test
+The 60 MB limit was the leakhunt branch's, and the case's purpose is to catch
+the leak returning. Raising it to the measured 247 MB would have converted a
+red test into a green one that no longer distinguishes 16 B/char from
+150 B/char — which is the "silence an error" this repo's rules forbid, and it
+is why `bugs/PERF_memory_over_4gb_is_a_bug.md`'s own reading applies to a test
 tripwire as much as to a class: a ceiling that has to be raised after every
 merge is a ceiling that measures the merges, not the program.
 
-The tripwire's own number is also *correct* for the workload it guards. The
+The tripwire's own number was also *correct* for the workload it guards. The
 docstring says the loop is sized so "the leak, if back, is gigabytes"; the
-residual that is there now is 16 B per character, and 16 B/char is
-indistinguishable from zero at a size that would catch 150 B/char. Once the
-subscript stops allocating, the case passes at 60 MB with room to spare, and
-that is the moment the number is revisited.
+residual that was there is 16 B per character, and 16 B/char is
+indistinguishable from zero at a size that would catch 150 B/char. Now that the
+subscript stops allocating, the case passes at 60 MB with room to spare (1.6
+MB), and that is the moment the number is revisited.

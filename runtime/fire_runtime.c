@@ -4043,6 +4043,45 @@ char *mojo_chr(int64_t code) {
     return mojo_char_to_str((char)code);
 }
 
+/* `s[i]` on a `char *` str: a ONE-CHARACTER STRING, taken from the shared
+ * immortal table above instead of a fresh two-byte malloc.
+ *
+ * This is the same value `mojo_cstr_slice(s, i, i + 1)` produced — the codegen
+ * spelled a string subscript that way purely because gimple REFUSES a
+ * `char`-typed argument, so `mojo_char_to_str(char)` was not callable from
+ * generated code and the slice was the only allocating route to the same
+ * answer. Every character of every string scan therefore cost one `malloc(2)`
+ * that nothing owns: measured at 16.06 B per character against 16.1 B for a
+ * bare `malloc(2)` on the same machine, i.e. exactly one allocation per
+ * character and nothing else (bugs/PERF_char_scan_leak_residual_21_bytes_per_
+ * char.md). A `--dump` that prints, a log line, or this compiler's own
+ * tokenizer over its own source all pay it per character.
+ *
+ * The BOUNDS are `mojo_cstr_slice`'s, deliberately: a negative index resolves
+ * against the real length, and an index at or past the end is `""` rather than
+ * a read out of bounds. `memchr` for the non-negative case, not `strlen`, for
+ * the same reason `mojo_cstr_slice` uses it: a scan over a long string must not
+ * re-scan the whole thing once per character.
+ *
+ * NOT the caller's to free — it is `mojo_char_to_str`'s table entry, and the
+ * codegen's `_FRESH_STRING_RETURNS` deliberately does not name it (see the note
+ * beside that set in mojo/backend_gimple/emit_infra.py), so no generated path
+ * emits a `free()` of this value. */
+char *mojo_char_at(char *s, int64_t i) {
+    if (!s) return mojo_char_to_str(0);
+    if (i < 0) {
+        i += (int64_t)strlen(s);
+        if (i < 0) return mojo_char_to_str(0);
+    } else if (memchr(s, 0, (size_t)i + 1) != NULL) {
+        /* A NUL at or BEFORE i means the string ended at or before it, so
+           `s[i]` is past the end: "", which is what the slice returned. A NUL
+           exactly AT i is that same case (`mojo_cstr_slice(s, i, i+1)` stops at
+           the first NUL within `s[0..i]`, inclusive of `i`). */
+        return mojo_char_to_str(0);
+    }
+    return mojo_char_to_str(s[i]);
+}
+
 int mojo_str_startswith(char *s, char *prefix) {
     if (!s || !prefix) return 0;
     while (*prefix) {
