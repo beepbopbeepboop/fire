@@ -7524,7 +7524,7 @@ main()
         here, and both are named in the docstring's neighbour bug docs:
         CPython raises TypeError where the compiled path answers `[]` for the
         first (a SIGSEGV until this same change's fail-closed arm —
-        `bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md`), and a
+        the `list(<an int>)` arm), and a
         boxed dict's keys come back as their own addresses for the second
         (`bugs/CODEGEN_materialized_container_has_no_element_type.md`).
 
@@ -9374,7 +9374,7 @@ def bare(xs, f):
         truncated AT THE CALL: `B(2.5)` passed the integer 2, `self.f = f`
         stored it into a `double` field, and `b.f` printed `2.0` where CPython
         prints `2.5` — a wrong value with exit 0
-        (bugs/CODEGEN_literal_evidence_param_field_typed_but_signature_not.md).
+        (the float half of the unannotated-`__init__`-param evidence family).
 
         The other four rows are the "do not break these" half, and each is a
         path that reaches a ctype by a DIFFERENT rule, so the new arm cannot

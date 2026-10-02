@@ -3185,7 +3185,7 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
         # answered `True` without looking at the value at all. So this arm is
         # strictly more correct on both counts, and `_materialize_as_list`'s
         # not-a-container arm is what raises (see
-        # bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md).
+        # so a program's loop body is silently skipped, exit 0).
         #
         # A `char *` was excluded from this arm only because the
         # materialization could not answer it — a string IS iterable, so the

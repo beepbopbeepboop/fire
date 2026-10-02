@@ -1376,7 +1376,7 @@ looping()
     # inner context manager's teardown may depend on the outer one's state
     # still being live. `_with_emit_exits` walked its index-parallel item
     # lists FORWARD, so every multi-item `with` released the outer manager
-    # first (bugs/CODEGEN_multi_item_with_unwinds_in_forward_order.md),
+    # first (a multi-item `with` unwound forward, so the outer one was released first),
     # silently, exit 0.
     #
     # Every exit route is in the one program because there are five emission
@@ -1431,7 +1431,7 @@ nested()
     # `list(12345678)` died with SIGSEGV; the fail-closed arm that fixed the
     # crash answered an EMPTY list instead, which is a silent wrong answer —
     # a program's loop body never runs and nothing says so, exit 0
-    # (bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md). CPython
+    # (the shared materialize-as-list chokepoint's not-a-container arm). CPython
     # raises TypeError, so that is what this asserts, one row per consumer
     # because each is a separate emission site over one chokepoint:
     # list/all/any/enumerate/str.join/bytes.join.

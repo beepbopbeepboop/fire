@@ -3142,8 +3142,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # is iterable in Python and becomes its characters, everything else
         # raises `TypeError` the way this runtime already reports every other
         # bad receiver. Both halves and the reason CPython's type name is
-        # absent are in `mojo_iter_boxed_list`'s definition; see
-        # bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md.
+        # absent are in `mojo_iter_boxed_list`'s definition.
         _ne = gen._call_expr('MojoList *', 'mojo_iter_boxed_list',
                              [('int64_t', it64)])
         gen._emit(f"  {result} = {_ne};")

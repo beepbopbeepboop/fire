@@ -614,7 +614,7 @@ def test_bracket_param_default_is_captured():
     omits the parameter: `f[T=Int]()` has exactly one source of truth for
     `y` — the declaration — and with it dropped the interpreter had nothing
     to bind and answered None where the source says 0
-    (bugs/CODEGEN_interpreter_evaluates_a_keyword_bracket_call_as_a_subscript.md).
+    (the interpreter's keyword-bracket call binding, which reads this table).
 
     Kept in its own field rather than folded into `param_defaults`, because
     that table's LENGTH is the trailing-default offset arithmetic's input

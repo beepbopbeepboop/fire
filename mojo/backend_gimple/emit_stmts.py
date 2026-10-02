@@ -4226,7 +4226,7 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
     one's state still being live. This emitted forward, so a multi-item
     `with` released the outer manager first (exit 6 / exit 7 where CPython
     prints exit 7 / exit 6; see
-    bugs/CODEGEN_multi_item_with_unwinds_in_forward_order.md). One walk,
+    so the OUTER one was released first). One walk,
     five call sites — the normal tail, the `return`/loop-exit interceptor,
     and the exception arm — so every exit route unwinds in the same order.
 

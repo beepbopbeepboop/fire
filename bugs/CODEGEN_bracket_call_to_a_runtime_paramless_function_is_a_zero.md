@@ -1,7 +1,7 @@
 # A bracket-parametrised call (`f[T=7]`) compiles to a literal `0` unless link mode specialises it AND the callee has a runtime parameter
 
 **Found 2026-10-02 on `work/bugs4-3`** while fixing
-`bugs/CODEGEN_interpreter_evaluates_a_keyword_bracket_call_as_a_subscript.md`
+`d733c457`
 (deleted with that fix). That doc treated the compiled path as the
 reference for what a bracketed call means; it is not one. The interpreter
 answers `7`; the compiled path answers `0`, silently, exit 0, on every
