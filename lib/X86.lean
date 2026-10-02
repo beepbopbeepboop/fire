@@ -830,6 +830,51 @@ theorem x86_step_movzx_rax_al (s : X86State) (code : Nat → UInt8) (m : Nat)
     x86_step s code = some { s with rax := s.rax &&& 0xFF, rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb, h_rip, h_b0, h_b1, h_b2, h_b3]
 
+/-! `movsx r64, r8` (REX.W 0F BE /r, mod=3), the SIGNED twin of the lemma
+    above, and general over both registers where `movzx_rax_al` is concrete.
+
+    Two things make it general rather than one more concrete pair.
+
+    The first is that the corpus emits two shapes and they are not the same
+    instruction: `48 0f be c0` (`movsx rax, al`) and `48 0f be db`
+    (`movsx rbx, bl`), three of the second to one of the first.  A
+    register-pair-parameterised version of `movzx_rax_al` would therefore have
+    callers, and the doc's own rule -- generalise a form when the backend
+    actually emits more than one shape of it -- points that way.
+
+    The second is `dst`, and it is not optional.  The destination is
+    `x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) ...`, and
+    `x86_set_reg` is a `match` on its index, which `simp` will not reduce on a
+    non-literal -- the same wall `x86_step_mov_rm64_mem_disp8_rbp` documents, and
+    the reason that lemma takes a concrete destination with
+    `reg + x86_rex_r rex = dst` beside it.  So the caller reads the destination
+    out of the encoding and supplies it as a literal, and `h_dst_lt` is what lets
+    the `match` reduce.
+
+    `x86_sign_extend8` is on bit 7, not bit 31.  The model's 0F BE arm is right
+    about that and used not to be, which is worth recording because the two
+    errors cancelled from outside: the arm applied the 32-bit extension, and the
+    only examples that emit a byte `movsx` (n8, sgt8, sle8) had no step lemma
+    wired for the form, so nothing ever asked the model what it computed.  A
+    gap in the proof chain hid a defect in the thing the chain was proving
+    things about -- see the arm's own comment. -/
+theorem x86_step_movsx_r64_r8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm dst : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x0f)
+    (h_b2 : code (m + 2) = 0xbe) (h_b3 : code (m + 3) = modrm)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some { x86_set_reg s dst
+        (x86_sign_extend8 (x86_get_reg s (rm + x86_rex_b rex) &&& 0xFF)) with
+        rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_sign_extend8, x86_rex_b, x86_rex_r,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_reg, h_rm, h_dst,
+        h_dst_lt]
+
 
 /-- `jz rel32` (0F 84 id): taken lands past the displacement. -/
 theorem x86_step_jz_rel32 (s : X86State) (code : Nat → UInt8) (m : Nat) (off : Int)
