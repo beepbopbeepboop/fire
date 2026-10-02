@@ -9570,17 +9570,93 @@ REFUSAL_CASES = [
      "        s = s + v\n"
      "    printf(\"s=%d\", s)\n    return 0\n",
      0, "s=6"),
-    # A name assigned only inside an `if` is NOT this case: whether the
-    # register holds a value depends on which arm ran, which is the
-    # reachability question this check does not attempt. Pinning that it
-    # still BUILDS records the deliberate limit rather than leaving it to be
-    # discovered as a new bug (bugs/FORMAL_read_before_store_dominating_store.md).
-    ("branch_local_still_builds",
+    # A name stored in only SOME arm of a branch. This row used to assert the
+    # OPPOSITE — that this program still BUILDS — because the check was an
+    # ordered walk and could not see it; the pin recorded a deliberate limit
+    # rather than leaving it to be rediscovered as a new bug. The limit is gone:
+    # the check is a "definitely stored" FIXPOINT over the function's CFG, so a
+    # store dominates the read only when every path to the read passes one.
+    # CPython raises UnboundLocalError whenever `n` is falsey, and the emitted
+    # image has no way to say that: the read returns whatever the CALLER left
+    # in the register, which is why this used to print `p=1` by luck.
+    ("branch_local_refused",
      "def f(n):\n"
      "    if n:\n"
      "        p = 1\n"
      "    printf(\"p=%d\", p)\n    return 0\n",
+     "refuse:is read at line 4 before anything in this function stores it",
+     None),
+    # The doc's own reproducer, which is the shape the walk could NOT see at
+    # all: the store is inside a LOOP, so it is not merely on one arm of an
+    # `if` — the loop may run zero times, and `printf` sits after it. Before
+    # the fix this built on both backends and printed `t=1`, which is the right
+    # answer only by luck.
+    ("loop_local_refused",
+     "def f(n):\n"
+     "    for i in range(3):\n"
+     "        if i:\n"
+     "            t = 1\n"
+     "    printf(\"t=%d\", t)\n    return 0\n",
+     "refuse:is read at line 5 before anything in this function stores it",
+     None),
+    # ── AND THE CONTROLS THAT KEEP THE FIXPOINT FROM OVER-REFUSING ──
+    #
+    # A refusal that fires on a program CPython accepts breaks working code,
+    # so the rows below are as load-bearing as the two above. Each is a name
+    # stored on EVERY path to the read, in the shape where a "count the arms"
+    # heuristic would also get it right — and each is here because the fixpoint
+    # gets it for a different reason than the old walk did.
+    #
+    # Stored in every arm of an `if`/`else`: the join INTERSECTS the arms'
+    # OUT sets, so both storing `p` puts it in the join. The entry function is
+    # called with the startup stub's `10` (formal's `-n`), so `n > 100` takes
+    # the `else` arm — the row is here to show the FALSE edge stores too, and
+    # a case that only ever took the `then` arm would not.
+    ("if_else_chain_store_is_dominating",
+     "def f(n):\n"
+     "    if n > 100:\n"
+     "        p = 1\n"
+     "    else:\n"
+     "        p = 2\n"
+     "    printf(\"p=%d\", p)\n    return 0\n",
+     0, "p=2"),
+    # The same through an `elif` chain, where the missing `else` is the thing
+    # that would make it a defect: the false edge falls through from the LAST
+    # arm, which is the arm that stores it.
+    ("elif_chain_store_is_dominating",
+     "def f(n):\n"
+     "    if n > 3:\n"
+     "        p = 1\n"
+     "    elif n > 1:\n"
+     "        p = 5\n"
+     "    else:\n"
+     "        p = 9\n"
+     "    printf(\"p=%d\", p)\n    return 0\n",
      0, "p=1"),
+    # Stored in every HANDLER of a `try`, which is a set of arms rather than a
+    # chain — the shape `bugs/FORMAL_read_before_store_dominating_store.md`
+    # names as one a partial rule gets wrong.
+    ("every_handler_stores_is_dominating",
+     "def f(n):\n"
+     "    try:\n"
+     "        p = 1\n"
+     "    except Exception:\n"
+     "        p = 2\n"
+     "    printf(\"p=%d\", p)\n    return 0\n",
+     0, "p=1"),
+    # A `for` target STAYS bound after its loop, because the target is a
+    # definition in the loop's HEADER and the join is reached from the header's
+    # exit edge — so `range(0, 100)` with an immediate break is legal and
+    # returns 4. `for_range_break` in the corpus above is the same program; it
+    # is named here too because a fixpoint that treated the target as stored by
+    # the BODY would refuse the single most ordinary loop in the language.
+    ("for_target_survives_its_loop",
+     "def f(n):\n"
+     "    for i in range(0, 100):\n"
+     "        if i > 3:\n"
+     "            break\n"
+     "    printf(\"i=%d\", i)\n    return 0\n",
+     0, "i=4"),
     # A comprehension's generator target is bound inside its own scope, so
     # `[i + 1 for i in xs]` is not a read of an unstored `i`. This is the row
     # that a flat node walk gets wrong, and it was wrong here: the first
@@ -9775,6 +9851,250 @@ COMPTIME_ATTRIBUTE_CASES = [
      "    rank = 9\n"
      "def main():\n"
      "    sys.stdout.write(\"%d %d\" % (Base.rank, Child.rank))"),
+]
+
+
+# ── a ONE-FIELD struct's MUTATING method (the receiver write-back) ──────────
+#
+# A multi-field struct's receiver is the ADDRESS of a frame of 8-byte slots, so
+# `self.f = x` in the callee writes into storage the caller still owns. A
+# ONE-field struct's receiver IS its field: `formal/build.py`'s
+# `_rewrite_self_fields` turns `self._value` into `self` and `c._value` into `c`,
+# so the caller's local and the callee's parameter are one word in two registers
+# and a store to the callee's copy is a store the caller never reads back.
+# Measured before the fix, on BOTH architectures and on the PLAIN spelling
+# (`c.bump()`, no brackets anywhere): the program built, ran, and printed the
+# value the caller had — the new one was computed and dropped.
+#
+# The fix is the other half of that sentence: the method RETURNS the receiver on
+# every path and the call site stores it back over the expression it was read
+# from (`formal/model.py`'s `receiver_writeback_name`). These are the CPython-pair
+# group because that is the only group here that builds and runs BOTH
+# architectures and compares the OUTPUT with CPython's — which is the assertion
+# this fix needs, since the defect was two machines agreeing on the wrong number.
+# The two refusals the write-back needs, in the `refuse:` form so BOTH
+# backends are asked and the words are required to be IDENTICAL — the same
+# property the answered rows above need for their output, asserted the other way
+# round. They are the boundary of the mechanism rather than a defect in it: a
+# mutator that also returns a value, and a mutator call in a value position, are
+# the two shapes where a 64-bit word cannot carry both the receiver and the
+# answer, and each is named rather than silently resolved one way.
+MUTATING_RECEIVER_REFUSALS = [
+    # A declared return value AND a receiver change: one word, two answers. This
+    # is a real shape (a mutator that also reports what it did), and the two
+    # ways out are in the message.
+    ("one_field_mutator_with_a_return_value_is_refused",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def bump(out self, k: Int) -> Int:\n"
+     "        self._value = self._value + k\n"
+     "        return self._value\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    c.bump(4)\n"
+     "    return 0\n",
+     "refuse:both changes its receiver and returns a value", None),
+    # The same without a declared type, which is the spelling a hand-written
+    # method has. A `return <value>` is a value just as much as an annotation
+    # is, and a rule that only read the annotation would let this one through and
+    # store the literal over the object.
+    ("one_field_mutator_returning_a_literal_is_refused",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def bump(out self, k: Int):\n"
+     "        if k > 100:\n"
+     "            return 1\n"
+     "        self._value = self._value + k\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    c.bump(4)\n"
+     "    return 0\n",
+     "refuse:both changes its receiver and returns a value", None),
+    # A mutator call in a VALUE position: there is no statement to put the
+    # write-back in, and reading the call\'s result instead would hand the
+    # caller the object\'s new CONTENTS.
+    ("one_field_mutator_in_a_value_position_is_refused",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def bump(out self, k: Int):\n"
+     "        self._value = self._value + k\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    var x = c.bump(4)\n"
+     "    printf(\"%d\", x)\n"
+     "    return 0\n",
+     "refuse:called here as a VALUE rather than as a statement", None),
+]
+
+ONE_FIELD_MUTATOR_CASES = [
+    ("one_field_mutator_no_args",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def bump(out self):\n"
+     "        self._value = self._value + 4\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    c.bump()\n"
+     "    printf(\"%d\", c._value)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self._value = 0\n"
+     "    def bump(self):\n"
+     "        self._value = self._value + 4\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     "    c._value = 5\n"
+     "    c.bump()\n"
+     "    sys.stdout.write(\"%d\" % c._value)"),
+    # WITH a runtime argument, so the answer cannot be confused with a stale
+    # register that happens to hold the right number — the second of the two
+    # cases the bug doc asks for, and the one that catches a write-back which
+    # recomputes rather than propagates.
+    # The `k` is what makes this row different from the one above: the callee
+    # ADDS something the caller chose at run time, so a write-back that dropped
+    # the callee's word and re-emitted the old one, or that propagated the
+    # argument instead of the receiver, gives a different number. 5 + 4 is 9,
+    # which is neither the value before (5) nor the argument (4).
+    ("one_field_mutator_with_an_argument",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def bump(out self, k: Int):\n"
+     "        self._value = self._value + k\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    c.bump(4)\n"
+     "    printf(\"%d\", c._value)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self._value = 0\n"
+     "    def bump(self, k):\n"
+     "        self._value = self._value + k\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     "    c._value = 5\n"
+     "    c.bump(4)\n"
+     "    sys.stdout.write(\"%d\" % c._value)"),
+    # An EARLY RETURN is the case that separates \"every path hands the receiver
+    # back\" from \"the last statement returns it\": a method that returns
+    # nothing on one path would hand the caller whatever the return register
+    # held, and the caller would store that over the object\'s value.
+    ("one_field_mutator_early_return_still_hands_the_receiver_back",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def bump(out self, k: Int):\n"
+     "        if k > 100:\n"
+     "            return\n"
+     "        self._value = self._value + k\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    c.bump(4)\n"
+     "    printf(\"%d\", c._value)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self._value = 0\n"
+     "    def bump(self, k):\n"
+     "        if k > 100:\n"
+     "            return\n"
+     "        self._value = self._value + k\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     "    c._value = 5\n"
+     "    c.bump(4)\n"
+     "    sys.stdout.write(\"%d\" % c._value)"),
+    # THE GUARD, and it is the row that makes the three above mean something: a
+    # one-field struct\'s method that only READS its receiver is not a mutator
+    # and must not acquire a write-back. If the rule were \"every method of a
+    # one-field struct returns its receiver\", this would store the receiver
+    # over the caller\'s local on a call that changed nothing — still right by
+    # accident here, and wrong the moment the caller\'s local had been rebound
+    # in between.
+    # A reader in a VALUE position, which is the shape that makes the guard
+    # discriminating rather than decorative: the write-back refuses a mutator
+    # call used as a value (see `one_field_mutator_in_a_value_position_is_refused`),
+    # so a rule written as "every method of a one-field struct hands its
+    # receiver back" would REFUSE this program. It has to build, and the `* 10`
+    # means a write-back that fired anyway would also store the wrong number.
+    ("one_field_reader_is_not_a_mutator",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def scaled(self) -> Int:\n"
+     "        return self._value * 10\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    printf(\"%d %d\", c.scaled(), c._value)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self._value = 0\n"
+     "    def scaled(self):\n"
+     "        return self._value * 10\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     "    c._value = 5\n"
+     "    sys.stdout.write(\"%d %d\" % (c.scaled(), c._value))"),
+    # …and the OTHER representation, unchanged: a two-field struct\'s receiver is
+    # a frame address, so its mutating method already reached the caller and must
+    # keep doing so through the ordinary store. If the write-back were applied by
+    # \"a method that assigns to self\" rather than by \"a one-field receiver\",
+    # this row would double-store and the value would be the same — so it is here
+    # to say the framed path was not touched, and its value is checked against
+    # CPython like every other pair row.
+    ("two_field_mutator_is_unchanged",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def bump(out self, k: Int):\n"
+     "        self.a = self.a + k\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var p = Pair()\n"
+     "    p.a = 5\n"
+     "    p.b = 1\n"
+     "    p.bump(4)\n"
+     "    printf(\"%d\", p.a)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Pair:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "    def bump(self, k):\n"
+     "        self.a = self.a + k\n"
+     "def main():\n"
+     "    p = Pair()\n"
+     "    p.a = 5\n"
+     "    p.b = 1\n"
+     "    p.bump(4)\n"
+     "    sys.stdout.write(\"%d\" % p.a)"),
 ]
 
 
@@ -10504,6 +10824,7 @@ def main():
                   + EQ_DISPATCH_CASES
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
+                  + MUTATING_RECEIVER_REFUSALS
                   + [X86_ONLY_1SLOT_BUG_CASE])
     # The CPython-pair group is a DIFFERENT SHAPE (three columns: name, Mojo
     # text, CPython text), so it is selected and dispatched separately rather
@@ -10514,11 +10835,13 @@ def main():
     pair_names = ({c[0] for c in TYPE_APPLICATION_CASES}
                   | {c[0] for c in COMPTIME_ALIAS_PAIR_CASES}
                   | {c[0] for c in COMPTIME_ATTRIBUTE_CASES}
-                  | {c[0] for c in OVERLOAD_LAYOUT_CASES})
+                  | {c[0] for c in OVERLOAD_LAYOUT_CASES}
+                  | {c[0] for c in ONE_FIELD_MUTATOR_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + COMPTIME_ALIAS_PAIR_CASES
                      + OVERLOAD_LAYOUT_CASES
                      + COMPTIME_ATTRIBUTE_CASES
+                     + ONE_FIELD_MUTATOR_CASES
                      if not args.cases or c[0] in args.cases])
     # `selected` is the four-column groups, so the pair cases have to be OUT of
     # it: they are dispatched separately below, and a name in both would be

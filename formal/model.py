@@ -2178,6 +2178,149 @@ def _case_is_wildcard(case) -> bool:
     return True
 
 
+def _cfg_int_literal(e) -> object:
+    """The `int` an `IntLiteral` node holds, or None for anything else.
+
+    Named apart from the module's other `_int_literal_value` (line ~17500,
+    which handles a boxed handle rather than a node) because two functions with
+    one name and two meanings is how a call site ends up reading the wrong
+    one."""
+    return e.value if isinstance(e, F.IntLiteral) else None
+
+
+def _range_is_nonempty(args) -> bool:
+    """Whether a `range(...)` call with LITERAL arguments yields an item.
+
+    Exactly CPython's own emptiness rule, including the step's sign — `range(5,
+    0)` and `range(0, 5, -1)` are both empty and getting either wrong would
+    drop an edge the program really has. Returns None ("cannot tell") for
+    anything that is not a `range` of 1-3 integer literals, so the caller
+    keeps the zero-iteration path.
+    """
+    if len(args) > 3:
+        return None
+    vals = []
+    for a in args:
+        v = _cfg_int_literal(a)
+        if v is None:
+            return None
+        vals.append(int(v))
+    if len(vals) == 1:
+        start, stop, step = 0, vals[0], 1
+    elif len(vals) == 2:
+        start, stop, step = vals[0], vals[1], 1
+    else:
+        start, stop, step = vals
+    if step == 0:
+        return None                       # a ValueError at run time
+    return len(range(start, stop, step)) > 0
+
+
+_CMP_OPS = {
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+}
+
+
+def _literal_truth(e) -> object:
+    """True/False when `e`'s value is decidable here, None when it is not.
+
+    Only INTEGER LITERALS, and that restriction is the point: an answer
+    computed from a literal is a fact about the program, while an answer
+    computed from a name would be an assumption about what the name holds,
+    and the whole analysis is careful to make no such assumption. Anything
+    unrecognised — a name, a call, a chained comparison with a name in it, a
+    float — is None, and None is the answer that keeps the edge.
+
+    A single `a < b` is a `BinaryOp` in this AST and only a CHAIN of two or
+    more comparisons is a `CompareChain`, so both are here: reading only the
+    chain is how `while 1 < 2:` — the shape a generated bound is written in —
+    came out undecidable.
+    """
+    if isinstance(e, F.BoolLiteral):
+        return bool(e.value)
+    if isinstance(e, F.UnaryOp) and getattr(e, "op", None) == "not":
+        inner = _literal_truth(getattr(e, "operand", None) or
+                               getattr(e, "expr", None))
+        return None if inner is None else (not inner)
+    if isinstance(e, F.BinaryOp) and getattr(e, "op", None) in _CMP_OPS:
+        left = _cfg_int_literal(getattr(e, "left", None))
+        right = _cfg_int_literal(getattr(e, "right", None))
+        if left is None or right is None:
+            return None
+        return bool(_CMP_OPS[e.op](int(left), int(right)))
+    if isinstance(e, F.CompareChain) and (getattr(e, "ops", None) or []):
+        vals = [_cfg_int_literal(o) for o in (getattr(e, "operands", None) or [])]
+        if any(v is None for v in vals):
+            return None
+        for op, a, b in zip(e.ops, vals, vals[1:]):
+            fn = _CMP_OPS.get(op)
+            if fn is None or not fn(int(a), int(b)):
+                return False
+        return True
+    return None
+
+
+def _loop_body_always_runs(s) -> bool:
+    """Whether this loop's body is guaranteed to execute at least once.
+
+    **The one question a CFG cannot answer, and the two cases where it can.**
+    "Is the join reachable without the body having run?" is a property of the
+    ITERABLE (or, for a `while`, of the condition on entry), and the graph
+    built from the statement tree has no such information: both the empty
+    `for` and the never-true `while` look like the same edge. So this asks the
+    narrow question that IS decidable — a literal-true condition, a non-empty
+    literal sequence, a `range` of literals that is not empty — and answers
+    False for everything else, which keeps the zero-iteration path.
+
+    The asymmetry is the whole design: dropping that edge can only ever REMOVE
+    a refusal, and only when the body provably ran, so this cannot introduce a
+    wrong answer. Keeping it when the answer is merely unknown refuses a
+    program that works — `while i < 3: t = 1; i = i + 1` then `print(t)` is
+    such a program, and the cost of answering that one exactly is a constant
+    propagation the model does not do. It is the one limit this analysis has
+    that can break working code, it is recorded in
+    `test_formal_read_before_store.py`, and it is the reason the rule is here
+    at all: without it, every `while True:` in the corpus would have its body's
+    stores treated as non-dominating, which is a false refusal of a shape the
+    language writes constantly.
+    """
+    kind = type(s).__name__
+    if kind == "WhileStmt":
+        return _literal_truth(getattr(s, "condition", None)) is True
+    if kind in ("ForStmt", "ComptimeForStmt"):
+        it = getattr(s, "iterable", None)
+        if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            return bool(getattr(it, "elements", None))
+        if isinstance(it, F.StringLiteral):
+            return bool(it.value)
+        if isinstance(it, F.CallExpr):
+            func = getattr(it, "func", None)
+            if (isinstance(func, F.IdentExpr) and func.name == "range"
+                    and not (getattr(it, "kwargs", None) or [])):
+                return bool(_range_is_nonempty(list(it.args or [])))
+        return False
+    return False
+
+    if kind in ("ForStmt", "ComptimeForStmt"):
+        it = getattr(s, "iterable", None)
+        if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            return bool(getattr(it, "elements", None))
+        if isinstance(it, F.StringLiteral):
+            return bool(it.value)
+        if isinstance(it, F.CallExpr):
+            func = getattr(it, "func", None)
+            if (isinstance(func, F.IdentExpr) and func.name == "range"
+                    and not (getattr(it, "kwargs", None) or [])):
+                return bool(_range_is_nonempty(list(it.args or [])))
+        return False
+    return False
+
+
 def _build_cfg(body) -> tuple:
     """`(blocks, entry index)` for a function body.
 
@@ -2275,29 +2418,58 @@ def _build_cfg(body) -> tuple:
                 head = open_block([s], pending)
                 pending = [head.index]
                 cur = None
-                loops.append({"head": head.index, "exits": [],
-                              "continues": []})
-                body_exits = run(getattr(s, "body", None) or [], loops,
-                                 [head.index])
-                # The body flows back to the header, which is what makes the
-                # header reachable from itself and the fixpoint a fixpoint
-                # rather than a single pass.
-                for be in body_exits:
-                    blocks[be].succs.append(head.index)
-                frame = loops[-1]
+                loop_body = getattr(s, "body", None) or []
+                # `first` is the block the body opens with, which is the node
+                # the back edge returns to: the condition is re-read at the
+                # TOP of the body, not in the preheader, so routing the back
+                # edge through `head` would put the body's definitions into the
+                # preheader's OUT set — the one path that must not have them.
+                # `len(blocks)` is that index because `run` creates a block for
+                # the first statement of any non-empty body, whatever shape it
+                # is.
+                frame = {"head": head.index, "exits": [], "continues": [],
+                         "first": len(blocks) if loop_body else None}
+                loops.append(frame)
+                body_exits = run(loop_body, loops, [head.index])
                 loops.pop()
-                # `else` runs when the condition fails, so it hangs off the
-                # header — emitted with the loop POPPED, so a `break` inside
-                # it is the enclosing loop's rather than this one's.
-                else_exits = run(getattr(s, "else_body", None) or [], loops,
-                                 [head.index])
-                blocks[head.index].succs += else_exits
+                # The LATCH is the node the loop is in only because its body
+                # ran at least once, and it is what keeps "the condition failed
+                # immediately" (the `head` -> join edge below) apart from "the
+                # condition failed after an iteration" (this node -> join).
+                # A single header cannot express both, which is why this is a
+                # separate block and not a flag on the header: without it the
+                # fixpoint sees one node reached with and without the body's
+                # definitions and the intersection throws the body's away for
+                # every loop, `while True:` included.
+                latch = new([])
+                for be in body_exits:
+                    blocks[be].succs.append(latch.index)
+                for c in frame["continues"]:
+                    blocks[c].succs.append(latch.index)
+                if frame["first"] is not None:
+                    blocks[latch.index].succs.append(frame["first"])
+                # The loop's `else` clause runs when the loop finished without
+                # a `break`, which is the same two paths — so it hangs off the
+                # latch AND, when the body may never run, off the header.
+                # Emitted with this loop POPPED, so a `break` inside it is the
+                # enclosing loop's rather than this one's.
+                exit_from = [latch.index]
+                if not _loop_body_always_runs(s):
+                    exit_from.append(head.index)
+                else_body = getattr(s, "else_body", None)
+                if else_body:
+                    pending = run(else_body, loops, exit_from)
+                else:
+                    pending = exit_from
                 # A `break` in the BODY also reaches the join, and that is what
                 # keeps `for i in range(0, 100): if i > 3: break` then
                 # `return i` legal: the loop's target is defined in the header
                 # and the join is reached from the header's exit edge as well
-                # as from the break.
-                pending = else_exits + frame["exits"]
+                # as from the break. It is also why a `break` is a path to the
+                # join that does NOT go through the latch: the store may be
+                # after the point the break jumped from.
+                pending = pending + frame["exits"]
+                cur = None
                 continue
             if kind == "WithStmt":
                 w = open_block([s], pending)
@@ -2321,10 +2493,27 @@ def _build_cfg(body) -> tuple:
                 # a store in only one handler not a dominating store.
                 if getattr(s, "else_body", None) is not None:
                     arm_exits += run(s.else_body, loops, [t.index])
-                fin_exits = run(getattr(s, "finally_body", None) or [], loops,
-                                [t.index])
-                blocks[t.index].succs += fin_exits
-                pending = fin_exits or arm_exits
+                # The `finally` clause runs on every way OUT of the try, so it
+                # is entered from the ARMS and the statement after the whole
+                # statement is reached only through it. Modelling that
+                # explicitly is what makes a store in `finally` dominating
+                # (`try: … finally: p = 1` then `print(p)` is legal) and a
+                # store in the BODY alone not one.
+                #
+                # The arms themselves are the join when there is no `finally`,
+                # and NOT the try's header: a header that reaches the code
+                # after the try would be a path that stores nothing, which
+                # reported `try: p = 1 / except: p = 2 / print(p)` — every arm
+                # of it storing `p` — as a read before any store. An empty
+                # `finally` falls out of the same branch correctly, because
+                # `run` on an empty run returns the exits that reach it, so
+                # the arms' exits and the finally's exits are the same list.
+                fin = getattr(s, "finally_body", None)
+                if fin is not None:
+                    fin_exits = run(fin, loops, arm_exits or [t.index])
+                    pending = fin_exits
+                else:
+                    pending = arm_exits
                 cur = None
                 continue
             if kind == "MatchStmt":
@@ -2436,7 +2625,12 @@ def _definitely_stored(blocks: list, entry: int, seed: set) -> dict:
                 continue
             merged = None
             for p in b.preds:
-                p_out = out[p] - blocks[p].kills | blocks[p].defs
+                # `(IN | defs) - kills`, and the order is the point: inside one
+                # block the statements run in order, so a `del` after a store
+                # (`p = 1` then `del p`) leaves the name unbound. Applying the
+                # kill BEFORE the defs would put `p` back and miss exactly the
+                # case `kills` exists for.
+                p_out = (out[p] | blocks[p].defs) - blocks[p].kills
                 merged = set(p_out) if merged is None else (merged & p_out)
             if merged is not None and merged != out[b.index]:
                 out[b.index] = merged
@@ -11400,6 +11594,182 @@ def struct_is_one_field(struct_def) -> bool:
     caller asking which of the two representations its receiver gets is
     `struct_is_framed` with `wide_receiver_by_reference` read there."""
     return struct_fits_one_word(struct_def) and struct_field_count(struct_def) == 1
+
+
+# The argument conventions that say "this method may change the object its
+# receiver names". `out` and `inout` are the two the corpus writes; `mut` is the
+# third spelling, and the list is a tuple because adding one is a decision about
+# the language's surface syntax rather than a detail of the walk below.
+MUTATING_RECEIVER_CONVENTIONS = ("out", "inout", "mut")
+
+
+def receiver_writeback_name(fn) -> object:
+    """The receiver a method must HAND BACK, or None when it need not.
+
+    **`out self` on a ONE-FIELD struct, and why the receiver has to come back
+    at all.** A multi-field struct's receiver is the ADDRESS of a frame of
+    8-byte slots, so `self.f = x` in the callee writes into storage the caller
+    still owns and the write is visible with no convention and no help. A
+    one-field struct's receiver IS its field: `_one_word_field_map` rewrites
+    `self.f` to `self` and `c.f` to `c`, so the caller's local and the callee's
+    parameter are the same word in two registers and a store to the callee's
+    copy is a store to a register the caller never reads back. Measured:
+    `self._value = self._value + 4` inside `def bump(out self)` built on both
+    architectures, ran, and printed the value the caller had — the new one is
+    computed and dropped (`bugs/FORMAL_one_field_struct_mutating_method_is_a_no_op.md`).
+
+    So the callee RETURNS the receiver on every path and the caller stores it
+    back over the same expression it passed. The value is a plain word on both
+    sides, so neither backend's call path changes: the call already leaves its
+    result in the return register, and the store is the store the source's
+    `c.f = ...` would have been.
+
+    None for anything else, and the two exclusions are both deliberate:
+
+      * a receiver that is NOT declared mutating. `def f(self): self.x = 1` is
+        not a program on this path — a plain receiver cannot be assigned
+        through — so there is nothing here to give back and guessing would
+        invent a copy semantic the source did not ask for;
+      * a struct that is not one field, whose receiver is an address and
+        therefore already shared.
+    """
+    convs = getattr(fn, "param_convs", None) or {}
+    name = method_receiver_name(fn)
+    if name is None:
+        return None
+    if (convs.get(name) or "") not in MUTATING_RECEIVER_CONVENTIONS:
+        return None
+    return name
+
+
+# One entry of `one_field_mutating_methods`' table: the receiver the method
+# hands back, and the two names the diagnostics need. A named tuple because the
+# call site joins on the KEY and reads only the receiver, while a refusal has to
+# name the construct — and re-deriving the owner from the key at refusal time
+# would be a second lookup that can disagree with the first.
+ReceiverWriteback = collections.namedtuple("ReceiverWriteback",
+                                           "receiver owner member")
+ReceiverWriteback.__doc__ = (
+    "`receiver` is the name to store the call's answer over; `owner`/`member` "
+    "are the class and the method as the source spells them, for "
+    "`mutating_receiver_target_refusal` and "
+    "`mutating_receiver_value_refusal`.")
+
+
+def one_field_mutating_methods(functions, method_owners: dict) -> dict:
+    """`{lifted method name: ReceiverWriteback}` for every one-field mutator.
+
+    Keyed by the function's OWN name, which is the LIFTED `<Struct>_<member>`
+    spelling `formal/build.py`'s `_struct_methods` gives it and the same one
+    `_rewrite_method_calls` puts on the call site — so the call site joins on
+    the name it already carries, with no second lookup and therefore no second
+    answer to "is this call a write-back". A table the call site cannot join on
+    is how those two drift apart.
+
+    `method_owners` is `formal/build.py`'s `{lifted name: StructDef}`: a
+    FunctionDef carries no back-pointer to the class body it was written in, so
+    the owner is the one thing this cannot derive for itself, and `functions` is
+    what carries the receiver's convention.
+    """
+    out = {}
+    for fn in (functions or ()):
+        st = (method_owners or {}).get(fn.name)
+        if st is None or not struct_is_one_field(st):
+            continue
+        recv = receiver_writeback_name(fn)
+        if recv is None:
+            continue
+        # The MEMBER name, read off the class body rather than sliced out of
+        # the lifted name: `method_function_name` is what produced that name, so
+        # asking it the other way round is the one spelling of "which method is
+        # this" that cannot drift from the key.
+        member = next((m.name for m in struct_methods(st)
+                       if method_function_name(st.name, m.name) == fn.name),
+                      fn.name)
+        out[fn.name] = ReceiverWriteback(recv, st.name, member)
+    return out
+
+
+def mutating_receiver_return_refusal(owner: str, member: str) -> str:
+    """The diagnostic for a one-field mutator that also RETURNS a value.
+
+    A formal value is one 64-bit word, so the word a one-field mutator hands
+    back is the receiver and there is no second word to return something else
+    in. Choosing one silently would drop the other, and which one is lost
+    depends on the method rather than on the program — so this asks rather than
+    picks. The two ways out are the two the language already has: give the
+    method a declared return type and no receiver write (so it is a reader of
+    the object, not a mutator of it), or split it into a mutator and a reader.
+    """
+    return (
+        f"{owner}.{member}() both changes its receiver and returns a value, and "
+        f"a formal value is one 64-bit word: on this path the word a one-field "
+        f"struct's mutating method hands back IS the receiver, so there is no "
+        f"second word to return anything else in, and dropping one of the two "
+        f"silently is how a program that builds computes the wrong answer. "
+        f"Split it into a method that changes the receiver and returns nothing, "
+        f"and one that reads it and returns the value — or make it read the "
+        f"receiver instead of writing it, which is the same fix "
+        f"(`formal/model.py`'s `receiver_writeback_name` is the rule, and "
+        f"bugs/FORMAL_one_field_struct_mutating_method_is_a_no_op.md records "
+        f"the measurement).")
+
+
+    return (
+        f"{owner}.{member}() is a one-field struct's mutating method, so the "
+        f"value it hands back IS the receiver, and the caller stores that over "
+        f"the expression the receiver was read from. It is called here as a "
+        f"VALUE rather than as a statement of its own, so there is nowhere to "
+        f"store it — and reading the call's result instead would hand the "
+        f"caller the object's new contents, which is a different program from "
+        f"the one written. Call `{spelled}.{member}(...)` as a statement. "
+        f"(`formal/model.py`'s `receiver_writeback_name` is the rule.)")
+
+
+def mutating_receiver_value_refusal(owner: str, member: str, spelled) -> str:
+    """The diagnostic for a mutator call in a VALUE position.
+
+    The write-back is a store, so it needs a statement to be a statement in, and
+    `x = c.bump(4)` has none: reading the call's result instead would hand `x`
+    the object's new CONTENTS, which is a different program from the one
+    written — the source says the method changes the object and says nothing
+    about what it evaluates to. Refused rather than guessed, because the guess
+    is the defect this mechanism exists to remove wearing a different hat.
+    """
+    return (
+        f"{owner}.{member}() is a one-field struct's mutating method, so the "
+        f"value it hands back IS the receiver, and the caller stores that over "
+        f"the expression the receiver was read from. It is called here as a "
+        f"VALUE rather than as a statement of its own, so there is nowhere to "
+        f"store it — and reading the call's result instead would hand the "
+        f"caller the object's new contents, which is a different program from "
+        f"the one written. Call `{spelled}.{member}(...)` as a statement of its "
+        f"own. (`formal/model.py`'s `receiver_writeback_name` is the rule.)")
+
+
+def mutating_receiver_target_refusal(owner: str, member: str, spelled) -> str:
+    """The diagnostic for a mutating call whose receiver is not a plain name.
+
+    The write-back stores the callee's answer over the expression the receiver
+    was read from, and a NAME is the one such expression this path can store
+    through: a local has a home. A SUBSCRIPT has none — a formal value is one
+    word with no address the compiler took — so `items[0].bump(4)` has nowhere
+    to put the new value, and the alternative is the defect this whole mechanism
+    exists to remove: the callee computes the new value and the caller keeps the
+    old one, with both architectures agreeing on the wrong answer. A FIELD
+    receiver (`h.cell.bump()`) is a different refusal that fires earlier, by the
+    rule that a method call on a frame slot is not a call this path lowers, and
+    is not this one.
+    """
+    return (
+        f"{owner}.{member}() is called on {spelled}, and the receiver of a "
+        f"one-field struct's mutating method is the struct itself, so the new "
+        f"value has to be stored back through the expression the receiver was "
+        f"read from. {spelled} is not a name this path can store through: a "
+        f"formal value is one 64-bit word with no address behind it, so there is "
+        f"no lvalue here. Bind it to a local first — "
+        f"`var it = {spelled}` then `it.{member}(...)` — which is the same "
+        f"computation and one store this path can lower.")
 
 
 def struct_frame_slots(struct_def) -> list:
