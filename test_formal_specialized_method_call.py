@@ -366,13 +366,14 @@ DIFF_CASES = [
      "\n"
      "main()\n"),
 
-    # **THE KEYWORD HALF OF THE BRACKET**, `c.show[scale=2](3)`.  This is
-    # `bugs/FORMAL_keyword_comptime_parameter_is_silently_dropped.md`: the
-    # parser keeps a bracket's keyword items in `SubscriptExpr.attrs` and its
-    # positional items in `.index`, and `specialization_args` read only
-    # `.index` — so `scale` bound to 0, the same word an unsupplied parameter
-    # gets, and the image printed **403** where CPython prints **423**.  It
-    # exited 0 and computed a number the source never wrote.
+    # **THE KEYWORD HALF OF THE BRACKET**, `c.show[scale=2](3)`.  This was a
+    # SILENT WRONG ANSWER, and the two cases below are the fix's whole
+    # assertion: the parser keeps a bracket's keyword items in
+    # `SubscriptExpr.attrs` and its positional items in `.index`, and
+    # `comptime_eval.specialization_args` read only `.index` — so `scale` bound
+    # to 0, the same word an unsupplied parameter gets, and the image printed
+    # **403** where CPython prints **423**.  It exited 0 and computed a number
+    # the source never wrote, which is why it survived as long as it did.
     #
     # `[*, scale: Int]` is the stdlib's own spelling for a defaulted comptime
     # parameter (`std/collections/optional.mojo`'s `_write_to[*, is_repr:
@@ -450,14 +451,13 @@ DIFF_CASES = [
 
     # **GUARD** — the same keyword spelling on a FREE function, with no
     # receiver anywhere, so the answer does not depend on the method lift at
-    # all.  `bugs/FORMAL_keyword_comptime_parameter_is_silently_dropped.md`
-    # records that `mojo/middle/comptime.py` is shared by three paths (the
-    # gimple compiled path, arm64, x86-64) and that the fix therefore has to
-    # live in the ONE reader rather than in a backend; this is the case that
-    # says the reader is the one that changed.  The answer is 110, and a reader
-    # that dropped the keyword gives 7 — the `type` weight is there because a
-    # body that never reads the parameter cannot tell a dropped binding from
-    # any other, which is how the defect stayed invisible for so long.
+    # all.  `mojo/middle/comptime.py` is shared by three compiled paths (the
+    # gimple compiled path, arm64, x86-64), which is why the fix lives in the
+    # ONE reader rather than in a backend; this is the case that says the
+    # reader is the one that changed.  The answer is 110, and a reader that
+    # dropped the keyword gives 7 — the `type` weight is there because a body
+    # that never READS the parameter cannot tell a dropped binding from any
+    # other, which is how the defect stayed invisible for so long.
     ("GUARD_keyword_comptime_parameter_on_a_free_function",
      "def widen[*, type: Int](x: Int, y: Int) -> Int:\n"
      "    return type * 100 + x + y\n"

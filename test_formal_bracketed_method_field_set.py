@@ -279,8 +279,7 @@ DIFF_CASES = [
 # binding is by NAME): a keyword comptime bracket parameter used to bind to 0 —
 # `mojo/middle/comptime.py`'s `specialization_args` read `func.index` and never
 # `func.attrs` — so `c.show[scale=2](3)` printed 403 where CPython printed 423.
-# `bugs/FORMAL_keyword_comptime_parameter_is_silently_dropped.md` is deleted
-# with that fix.
+# Its bug doc was deleted with that fix.
 KNOWN_GAPS = []
 
 
