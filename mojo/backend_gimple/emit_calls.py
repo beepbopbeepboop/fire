@@ -1539,22 +1539,39 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and not gen._locally_binds_name('next')):
         return _lower_next_over_comprehension(gen, node)
     # `next(iter(x))` — the ordinary Python spelling of "some element of x",
-    # over a set or a list. See _lower_next_iter_container. The container is
-    # typed from the TABLES by name, never by `gen.lower_expr`-ing it here:
-    # lowering has side effects (it emits statements and allocates temps), so
-    # probing with it and then falling through would emit the same code twice
-    # — the hazard the SubscriptExpr-callee branch's own comment spells out.
+    # over a set or a list. See _lower_next_iter_container. The container's
+    # type is decided WITHOUT lowering it here: `lower_expr` has side effects
+    # (it emits statements and allocates temps), so probing with it and then
+    # falling through would emit the same code twice — the hazard the
+    # SubscriptExpr-callee branch's own comment spells out.
+    #
+    # Two side-effect-free ways to learn it, in order. The tables are exact
+    # for a bare name (`x`), which is what this branch originally accepted and
+    # is still the common case. `_quick_type` is a pure static estimator —
+    # it reads tables and dispatches on node shape, emitting nothing — so it
+    # is equally safe as a probe, and it is what covers an `x` that is itself
+    # an expression: `next(iter(d.items()))`, `next(iter(HOSTS[p].keys()))`.
+    # That is not a rare spelling to decline: reading a dict's first entry
+    # with it is the ordinary Python idiom, and refusing it pushed the
+    # whole-module refusal onto real files
+    # (`Apple/__main__.py`'s `next(iter(slice_parts.items()))`).
     if (fname_raw == 'next' and 1 <= len(node.args) <= 2
             and isinstance(node.args[0], gimple_ctypes.CallExpr)
             and isinstance(node.args[0].func, gimple_ctypes.IdentExpr)
             and node.args[0].func.name == 'iter'
             and len(node.args[0].args) == 1
-            and isinstance(node.args[0].args[0], gimple_ctypes.IdentExpr)
             and not gen._locally_binds_name('next')):
-        _it_name = node.args[0].args[0].name
-        _it_at = (gen.var_types.get(_it_name)
-                  or getattr(gen, '_global_var_types', {}).get(_it_name)
-                  or getattr(gen, '_actual_types', {}).get(_it_name) or '')
+        _it_inner = node.args[0].args[0]
+        if isinstance(_it_inner, gimple_ctypes.IdentExpr):
+            _it_name = _it_inner.name
+            _it_at = (gen.var_types.get(_it_name)
+                      or getattr(gen, '_global_var_types', {}).get(_it_name)
+                      or getattr(gen, '_actual_types', {}).get(_it_name) or '')
+        else:
+            try:
+                _it_at = gen._quick_type(_it_inner)
+            except Exception:
+                _it_at = ''
         if _it_at in ('MojoSet *', 'MojoList *'):
             return _lower_next_iter_container(gen, node)
     # `next(it)` / `next(it, default)` on a resumable list-iterator local
@@ -2991,13 +3008,34 @@ def _lower_next_iter_container(gen, node: gimple_ctypes.CallExpr) -> tuple[str, 
     _it = node.args[0]
     _inner = _it.args[0] if getattr(_it, 'args', None) else None
     at, av = gen.lower_expr(_inner)
-    elem = gen._elem_of(av) or 'int64_t'
+    # The element type of `x`, which for a DICT-ITEMS list is a pair — a
+    # 2-element MojoList — and not the dict's value type. `_elem_of` reports
+    # `int64_t` here because `.items()` records the dict's VALUE type on
+    # `_dict_items_val_elems` (for the for-loop tuple branch's slot 1), not
+    # the list's element type, so the lookup fell through to the default and
+    # this read became `mojo_list_get_int` — a `char *` key read as a decimal
+    # pointer, or (worse, `at` being an `int64_t`-boxed handle) a
+    # `-Wint-conversion` error naming the caller's line.
+    #
+    # A pair also needs its two SLOT types, which is what the destructuring
+    # target `k, v = next(iter(d.items()))` reads through
+    # (`_tuple_elem_value`'s `_tuple_slot_types` branch): slot 0 is always
+    # the string key, slot 1 the dict's recorded value type. Same two facts
+    # `_gen_for_list`'s dict-items tuple branch uses, from the same table.
+    _dict_items_val = None
+    if av in gen._dict_items_val_elems:
+        elem = 'MojoList *'
+        _dict_items_val = gen._dict_items_val_elems[av] or 'int64_t'
+    else:
+        elem = gen._elem_of(av) or 'int64_t'
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
     if at == 'MojoSet *':
         src = gen._new_val('MojoList *', f"mojo_set_to_list ({av})")
     else:
         src = av
     result = gen._new_temp(elem)
+    if _dict_items_val is not None:
+        gen._tuple_slot_types[result] = ['char *', _dict_items_val]
     n_t = gen._new_val('int64_t', f"mojo_list_len ({src})")
     zero = gen._new_val('int64_t', "(int64_t)0")
     have = gen._new_val('_Bool', f"{n_t} > {zero}")
@@ -6265,7 +6303,18 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         if ret_type == 'MojoList *':
             gen._actual_types[t] = ret_type
         elif ret_type in ('int', 'int64_t'):
-            gen._actual_types[t] = 'MojoList *'
+            if gen._multi_kind_return_funcs.get(fname_raw):
+                # The callee's `return`s produce containers of MORE THAN ONE
+                # kind, which is WHY its return slot is the box — so `MojoList *`
+                # here would be a guess, and a wrong one reads another
+                # container's memory. Record the box's kind as genuinely
+                # unknown instead: consumers dispatch on the runtime
+                # registries (`_repr_boxed_container`, `_coerce_to_list`'s
+                # opaque arm). An element type is also meaningless across
+                # kinds, so it is not recorded here.
+                gen._boxed_container_vals.add(t)
+            else:
+                gen._actual_types[t] = 'MojoList *'
     # A function that RETURNS a generator (`def mk(): return counter(3)`,
     # typed `MojoGenerator *` by Pass 1.3e/1.3f) — record the underlying
     # generator function's api on the call's result temp (Pass 1.3f-gen
@@ -7235,6 +7284,33 @@ def _lower_slice_bounds(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
 
 def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.obj)
+    # A BOXED receiver carries its real kind in `_actual_types`, and every
+    # other container dispatch in this codegen resolves it through
+    # `_get_actual_type` before choosing a helper (`_lower_Subscript`'s
+    # `ot = gen._get_actual_type(ot, ov)` plus its cast, `_gen_print`, the
+    # `in` test). Slicing was the one that did not, so it fell through
+    # every branch below to the generic pointer-arithmetic fallback and did
+    # INTEGER addition on the box: a module-level `L = [10, 20, 30, 40]`
+    # reads back as an `int64_t` field, so `L[1:]` emitted `t + 1` and
+    # printed `33067958273` where CPython prints `[20, 30, 40]`. The
+    # subscript form `L[2]` was already right, which is what made this a
+    # silent wrong answer rather than a visible failure.
+    #
+    # The cast is not optional once the type resolves: every branch below
+    # spells `ov` as a real pointer, so resolving the type without also
+    # re-typing the value turns `mojo_cstr_slice`'s `char *` argument into a
+    # bare `int64_t` (std/sys/info.mojo's `osver[byte = : osver.find(".")]`
+    # — `-Wint-conversion`). Same two-step int64_t-then-pointer dance, for
+    # the same GIMPLE reason, as `_lower_MemberExpr` just above.
+    _ot_orig = ot
+    ot = gen._get_actual_type(ot, ov)
+    if ot != _ot_orig and ot.endswith(' *') and _ot_orig == 'int64_t':
+        _ov_local = gen._ensure_local('int64_t', ov)
+        _ip_cast = gen._new_temp('int64_t')
+        _np_cast = gen._new_temp(ot)
+        gen._emit(f"  {_ip_cast} = (int64_t){_ov_local};")
+        gen._emit(f"  {_np_cast} = ({ot}){_ip_cast};")
+        ov = _np_cast
     start_v, stop_v = gen._lower_slice_bounds(node)
 
     # `x[a:b]` on a builtin-`bytes` subclass instance -> a plain bytes

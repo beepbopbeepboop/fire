@@ -39,6 +39,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as gimple_gen_coro
+import mojo.middle.infra_infer as ginf
 from mojo.middle.exprtypes import _walk_ast
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
@@ -47,6 +48,7 @@ import mojo.backend_gimple.device_select as _gmi_device_select
 import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
+import mojo.middle.funcs_shared as funcs_shared
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 # Re-export shared helpers from mojo.middle.module_shared via explicit imports.
@@ -5050,6 +5052,37 @@ def gen_module_impl(self, stmts):
                 self.struct_field_types[_xf_hstruct][_xf_hfield] = _xf_ct
 
     self._inferred_var_types: dict[str, dict[str, str]] = {}  # func_name -> {var_name -> type}
+    def _reconcile_param_container_kinds():
+        """Rewrite `_inferred_param_types` where a parameter's USAGE evidence
+        and its own body BINDINGS disagree about the container kind.
+
+        The two estimators see different things, and only one of them can see
+        the body: `_infer_param_types` reads uses (a subscript, an iteration, a
+        method call, a call the name is passed to) and runs before this
+        function exists; `resolve_shared._infer_local_var_types` reads
+        bindings, every assignment to the name in the whole body through every
+        branch. When they disagree about which CONTAINER it is, the binding
+        answer wins — see `funcs_shared.param_binding_ctype` for the rule and
+        why it is that narrow.
+
+        Applied to the shared table rather than at a reader, because that
+        table feeds the forward DECLARATION as well as the definition.
+        Correcting only the definition is `conflicting types for 'pick'` at
+        every call site, which is what the first attempt at this did.
+
+        Must run after `_inferred_var_types` is populated and before any
+        signature is emitted, which is why it is called from both of that
+        table's population loops rather than from one of them.
+        """
+        for _rn in list(getattr(self, '_inferred_var_types', None) or {}):
+            _rp = self._inferred_param_types.get(_rn)
+            if not _rp:
+                continue
+            for _rpn in list(_rp.keys()):
+                _fixed = funcs_shared.param_binding_ctype(self, _rn, _rpn, _rp[_rpn])
+                if _fixed != _rp[_rpn]:
+                    _rp[_rpn] = _fixed
+
     for s in all_functions:
         if isinstance(s, FunctionDef):
             # `_as_funcdef_node`, not the isinstance-narrowed `s` directly:
@@ -5074,6 +5107,11 @@ def gen_module_impl(self, stmts):
             for m in s.methods:
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
+                # Same key, for the sibling table the ASSIGNMENT SITE reads
+                # mid-body under `current_func_name` — see
+                # `ginf.alias_multi_kind_locals`.
+                ginf.alias_multi_kind_locals(self, key, m)
+    _reconcile_param_container_kinds()
 
     def _arg_scalar_type(caller_name, a, deep_str=False,
                          prefer_refined_param=False, caller_struct=None):
@@ -6953,6 +6991,11 @@ def gen_module_impl(self, stmts):
             for m in s.methods:
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
+                # Same key, for the sibling table the ASSIGNMENT SITE reads
+                # mid-body under `current_func_name` — see
+                # `ginf.alias_multi_kind_locals`.
+                ginf.alias_multi_kind_locals(self, key, m)
+    _reconcile_param_container_kinds()
 
     self._param_generator_api: dict[str, dict[str, str]] = {}
     self._fn_returns_generator: dict[str, str] = {}
@@ -7553,6 +7596,114 @@ def gen_module_impl(self, stmts):
                                        if _gname in _joined else _t)
         return _joined
 
+    def _phase17_scan_global_reassignments() -> dict:
+        """`{name: {pointer-shaped C type, ...}}` for every assignment any
+        FUNCTION BODY in this compile makes to a name it declared `global`.
+
+        The one thing the flat module-level scans above structurally cannot
+        see. Under real Python scoping
+
+            FW_VERSION_PREFIX = "--undefined--"        # module level
+            def parseOptions():
+                global FW_VERSION_PREFIX
+                FW_VERSION_PREFIX = FW_PREFIX[:] + ["Versions", getVersion()]
+
+        is two assignments to ONE binding, so the two types must be JOINED —
+        but every Phase 1.7 pass walks module-level statements only
+        (`_phase17_own_stmts`), so the name was frozen at `char *` from its
+        first line forever. That is not a cosmetic mismatch: the field
+        emitter, the assignment-site coercion and the read path all route
+        through one conclusion, so the reassignment was coerced to `char *`
+        (a silent re-typing of a `MojoList *`) and the NEXT line — which
+        slices the same global as the list it has just become — sliced a
+        `char *` and then emitted `char * + MojoList *`, a g++ error naming
+        two types the source never mixed.
+
+        Deliberately NOT `ginf._each_binding`, which is the one walker for the
+        three LOCAL overlays and which deliberately stops at a nested
+        `FunctionDef` because a nested def's names are its own locals. Here
+        the relationship is exactly inverted: a `global N` inside a nested
+        `def` still names the MODULE binding, at any nesting depth, so this
+        walker descends. Same traversal order as `_each_binding` (pre-order,
+        every branch that can bind), so the two cannot disagree about which
+        statements bind what.
+
+        Types come from `self._quick_type`, the SAME estimator every other
+        global scan consults, and only a pointer-shaped answer counts as
+        evidence. That is deliberate in both directions: an `int64_t`
+        (unknown) answer contributes nothing rather than being read as a
+        third kind, and no new RHS-type table is introduced for a question
+        the shared estimator already answers. `_quick_type` already resolves
+        `FW_PREFIX[:] + ["Versions", ...]` to `MojoList *` — its BinaryOp
+        row unions the operand kinds with `int64_t` neutral — so this needs
+        no Phase 1.7 table change of its own, and therefore cannot change
+        what any OTHER caller of `_phase17_value_type` sees."""
+        out: dict = {}
+
+        def collect(body) -> list:
+            """Every statement of `body` (and of any `def` nested in it) as a
+            flat pre-order list. Lists, never a generator: this file is in
+            the self-host closure, where a coroutine's symbols are
+            referenced but never defined (`_each_binding`'s own docstring)."""
+            seq: list = []
+            def walk(stmts):
+                for s in (stmts or []):
+                    seq.append(s)
+                    if isinstance(s, FunctionDef):
+                        walk(s.body)
+                    elif isinstance(s, IfStmt):
+                        walk(s.then_body)
+                        walk(getattr(s, 'else_body', None))
+                        for _c, eb in (getattr(s, 'elifs', None) or []):
+                            walk(eb)
+                    elif isinstance(s, (WhileStmt, ForStmt)):
+                        walk(getattr(s, 'body', None))
+                        walk(getattr(s, 'else_body', None))
+                    elif isinstance(s, WithStmt):
+                        walk(s.body)
+                    elif isinstance(s, TryStmt):
+                        walk(s.body)
+                        for h in (getattr(s, 'handlers', None) or []):
+                            walk(getattr(h, 'body', None))
+                        walk(getattr(s, 'else_body', None))
+                        walk(getattr(s, 'finally_body', None))
+            walk(body)
+            return seq
+
+        for _fn_stmt in _phase17_stmts:
+            if not isinstance(_fn_stmt, FunctionDef):
+                continue
+            # Two rounds over one collected list rather than threading the
+            # declared set through the walk: Python scoping makes `global N`
+            # cover the WHOLE function regardless of where the statement
+            # sits relative to the assignments, so the answer cannot depend
+            # on traversal order and does not need to.
+            _seq = collect(_fn_stmt.body)
+            _declared: set = set()
+            for _s in _seq:
+                if isinstance(_s, GlobalStmt):
+                    for _nm in (_s.names or []):
+                        _declared.add(_as_str(_nm))
+            if not _declared:
+                continue
+            for _s in _seq:
+                if isinstance(_s, AssignStmt):
+                    _targets = [_s.target]
+                elif isinstance(_s, MultiAssignStmt):
+                    _targets = list(_s.targets or [])
+                else:
+                    continue
+                for _tgt in _targets:
+                    if not isinstance(_tgt, IdentExpr):
+                        continue
+                    _tn = _as_str(_tgt.name)
+                    if _tn not in _declared:
+                        continue
+                    _qt = self._quick_type(_s.value)
+                    if _qt and _qt.endswith('*'):
+                        out.setdefault(_tn, set()).add(_qt)
+        return out
+
     for _scan_stmt in _phase17_stmts:
         if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
             _gname = _scan_stmt.target.name
@@ -7711,6 +7862,72 @@ def gen_module_impl(self, stmts):
             self._global_c_decl_types[_gn] = 'int64_t'  # boxed by default
         else:
             self._global_c_decl_types[_gn] = _gt
+
+# A global whose BINDING carries values of more than one C type has no
+    # single C type, and the box is the honest declaration — the same answer
+    # `resolve_shared._infer_local_var_types` reaches for a LOCAL bound to
+    # containers of more than one kind. Two tables get two different answers
+    # on purpose, because they answer two different questions:
+    #
+    #  * the C FIELD is the box (`_global_c_decl_types`), because a
+    #    `int64_t` slot is the only field that can hold either kind. This is
+    #    already the convention for every container global (see
+    #    `_gscan_declare_global`'s DictExpr/ListExpr/SetExpr rows and
+    #    `_own_overlay_global_ctype`'s container rule), and it is what
+    #    `_global_dst_ctype` coerces the cross-function store to, so the
+    #    store no longer re-types a `MojoList *` through a `char *` cast.
+    #  * the SEMANTIC type (`_global_var_types`, which the read path uses)
+    #    is the kind the FUNCTION bodies store, when they agree on one. A
+    #    read of this global in any path that reaches the reassignment sees
+    #    that kind, and the read path's own convention (`_lower_IdentExpr`:
+    #    a container `gtype` reads back as an `int64_t` temp carrying the
+    #    container in `_actual_types`) is exactly what every consumer —
+    #    slice, subscript, `in`, print — already dispatches on. With the box
+    #    in `_global_var_types` instead, every one of those consumers saw a
+    #    bare `int64_t` and fell through to its scalar path: `L[:]` became
+    #    INTEGER arithmetic on the box.
+    #
+    # When the function bodies store MORE THAN ONE kind there is no semantic
+    # answer to give, so that case keeps the box in both tables and every
+    # consumer falls back to what it already did for an untracked `int64_t`.
+    # Stated rather than papered over: a read that precedes the reassignment
+    # sees the reassigned kind. That is a real residual of any static answer
+    # here, it is the same trade `_infer_local_var_types` makes for a
+    # multi-kind local, and the alternative — refusing the file — helps
+    # nobody.
+    #
+    # Runs LAST among the global passes, and overwrites all three tables,
+    # because the decision is only knowable once the module-level kinds are
+    # in: `_global_c_decl_types` is set above from `_global_var_types`, and
+    # `_own_overlay_global_ctype` reads both. Setting only one of the three
+    # would leave the field freeze and the assignment site disagreeing — the
+    # exact failure `_own_overlay_global_ctype` exists to prevent.
+    #
+    # A name with no module-level pointer kind is left alone: `global N` with
+    # no `N =` at module scope names no binding this codegen materializes, so
+    # there is nothing to reconcile.
+    _mgk: set = set()
+    for _rgname, _rgkinds in _phase17_scan_global_reassignments().items():
+        _rgbase = self._global_var_types.get(_rgname, '')
+        _rgall = set(_rgkinds)
+        if _rgbase.endswith('*'):
+            _rgall.add(_rgbase)
+        elif _rgbase:
+            # A scalar module-level kind cannot conflict with a pointer:
+            # every cross-function kind here IS pointer-shaped, so this is a
+            # genuine re-typing (an int global replaced by a container, or the
+            # reverse) rather than two kinds in conflict. Out of scope here:
+            # nothing downstream can represent it and it is not what the
+            # box answers.
+            continue
+        if len(_rgall) < 2:
+            continue
+        _rgsem = (_rgkinds.pop() if len(_rgkinds) == 1 else 'int64_t')
+        self._global_var_types[_rgname] = _rgsem
+        self._own_global_var_types[_rgname] = _rgsem
+        self._global_c_decl_types[_rgname] = 'int64_t'
+        _mgk.add(_rgname)
+    self._multi_kind_globals = _mgk
 
     func_parts: list[str] = []
 
@@ -8850,7 +9067,25 @@ def gen_module_impl(self, stmts):
         which names are real struct fields, or code that resolves a
         name via Phase 1.7's `_global_var_types`/`_global_to_module`
         emits `_<mod>_toplev.NAME` for a field this scan never
-        declared, i.e. 'struct _X_toplev has no member named NAME'."""
+        declared, i.e. 'struct _X_toplev has no member named NAME'.
+
+        A name in `self._multi_kind_globals` is left ALONE, and that guard is
+        load-bearing rather than an optimisation. This scan runs AFTER the
+        `global`-reassignment join (which is the only pass that can see a
+        cross-function assignment, so its conclusion is strictly newer), and
+        every branch below writes `_global_var_types[gname]` /
+        `_global_c_decl_types[gname]` from the MODULE-LEVEL RHS — re-freezing
+        the narrow kind the join had just reconciled. The two scans are the
+        re-derivation sites the analysis in
+        `bugs/COMPILE_FAIL_Mac_BuildScript_build-installer.md` named, and this
+        is the second one; the first (the field-freeze loop's
+        `_own_overlay_global_ctype`) already prefers the own-overlay
+        conclusion, which only helps once this scan stops overwriting it.
+        Real: `FW_VERSION_PREFIX = "--undefined--"` at module level and a list
+        at :703 — without the guard the field came out `char *` again and the
+        next line's slice of the same name was typed as a string."""
+        if gname in getattr(self, '_multi_kind_globals', ()):
+            return
         if isinstance(value, DictExpr):
             if _is_dispatch_name(gname):
                 global_decls.append(f"MojoDict * {gname};")
@@ -9416,7 +9651,30 @@ def gen_module_impl(self, stmts):
                 else:
                     init_val = '0'
             elif init_val.startswith('"') or init_val.startswith("'"):
-                pass
+                if c_type.endswith(' *'):
+                    pass
+                else:
+                    # A POINTER literal initializing a NON-pointer field.
+                    # Reachable only for a BOXED global, and the boxing
+                    # convention is what makes it reachable at all: a
+                    # container global's C field is `int64_t` (see
+                    # `_own_overlay_global_ctype`'s container rule and the
+                    # DictExpr/ListExpr/SetExpr rows of
+                    # `_gscan_declare_global`), and so is a global whose
+                    # binding carries values of more than one kind (see the
+                    # `_phase17_scan_global_reassignments` driver above).
+                    # A module-level string initializer for either is
+                    # therefore a `char *` meeting an `int64_t` field:
+                    # `initialization of 'long long int' from 'char *' makes
+                    # integer from pointer without a cast [-Wint-conversion]`
+                    # (Mac/BuildScript/build-installer.py's
+                    # `FW_VERSION_PREFIX = "--undefined--"`, whose field
+                    # became the box because `parseOptions` later assigns it
+                    # a list). Box it the same way every runtime boxing site
+                    # does — pointer, then `void *`, then the integer — so
+                    # the static initializer is an explicit conversion
+                    # rather than an implicit one.
+                    init_val = f'(int64_t)(void *){init_val}'
             elif init_val.lstrip('-').isdigit():
                 pass
             else:

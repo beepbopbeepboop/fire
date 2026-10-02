@@ -251,6 +251,60 @@ def _note_vararg_trailing_param_types(gen, s) -> None:
                 except Exception:
                     pass
 
+def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
+    """The container kind `pname`'s own BINDINGS say it holds, when that
+    disagrees with the container kind USAGE evidence concluded as `ctype`.
+
+    Two estimators type a parameter, and they see different things.
+    `_infer_param_types` reads USES — a subscript, an iteration, a method
+    call, a call it is passed to — and it runs before this function's body
+    exists, so it cannot see a single assignment.
+    `resolve_shared._infer_local_var_types` reads BINDINGS: every assignment
+    to the name, in the whole body, through every branch.
+
+    When both land on a container kind and disagree, the binding-driven
+    answer is the stronger one, and it is the one the body's stores are
+    checked against — the result becomes the DECLARED slot type (`gen_func`'s
+    signature loop seeds `var_types[bare]` from `_param_ctype`, and
+    `_declare_var` is first-decl-wins), so a wrong guess here is not a hint a
+    store refines; it is what every store is then refused against by
+    `_sce_simple_emit`'s container-kind guard.
+
+    Applied by `gen_module_impl`'s `_reconcile_param_container_kinds`, which
+    rewrites `_inferred_param_types` ITSELF rather than correcting one
+    reader: that table feeds the forward DECLARATION as well as the
+    definition, so correcting the definition and not the declaration is
+    `conflicting types for 'pick'` — measured on the first attempt at this,
+    and the reason it is one write to the shared table and not a hook inside
+    `_param_ctype`.
+
+    Real: `Tools/c-analyzer/c_parser/match.py`'s
+    `match_storage(decl, expected)`. `expected` is iterated and tested for
+    truth, which is equally consistent with a list, so usage said
+    `MojoList *`; all four branches assign a SET (`{default}`,
+    `{expected or default}`, `_info.STORAGE` — a frozenset — and a set
+    comprehension), so bindings said `MojoSet *` and the module did not
+    compile at all.
+
+    Narrow on purpose, so that it cannot be the thing that breaks something
+    else. Only when BOTH answers are container kinds among the three this
+    runtime has a distinct struct for, so no scalar, `char *`,
+    `MojoBytes *` or struct-pointer conclusion is touched. A genuinely
+    multi-kind parameter needs no case here: `_infer_local_var_types` joins
+    that to the box, which is not a container kind, so this returns `ctype`
+    unchanged and the body's own multi-kind handling decides (see
+    `resolve_shared._infer_local_var_types`'s `_multi_kind_locals` and
+    `_gen_stmt_AssignStmt`'s `_pin_to_ground_truth`).
+    """
+    if ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+        return ctype
+    _bound = (getattr(gen, '_inferred_var_types', None) or {}).get(
+        func_name, {}).get(pname)
+    if _bound in ('MojoDict *', 'MojoList *', 'MojoSet *') and _bound != ctype:
+        return _bound
+    return ctype
+
+
 def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
                  is_self: bool = False) -> str:
     """Resolve parameter C type, applying argument convention qualifiers."""

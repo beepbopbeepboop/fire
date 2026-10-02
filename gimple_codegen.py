@@ -1444,6 +1444,37 @@ class GimpleGen:
         self._global_dict_val_types: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
+        # Functions whose `return` statements produce containers of MORE THAN
+        # ONE kind (`if k: return names` / `return {x for x in names}`). Such
+        # a function's inferred return type is the int64_t BOX — there is no
+        # single container C type for its value — so a call site cannot know
+        # which kind it will get and every consumer of the result has to ask
+        # the runtime registries instead. Module scope for the same reason
+        # `_return_elem_types` is: the callee's body is emitted before the
+        # caller's call site reads this.
+        #
+        # Without it, the call site recorded a single `_actual_types` entry
+        # from whichever `return` was emitted last, and `print(f(...))` then
+        # read a MojoSet's slots through `_mojo_repr_list` — an out-of-bounds
+        # read past the set's own slot array, so a SEGV rather than a wrong
+        # answer.
+        self._multi_kind_return_funcs: dict[str, bool] = {}
+        # Function name -> the container kinds its `return` statements have
+        # produced SO FAR, so the multi-kind verdict above is only reached
+        # when a second kind really shows up (a function with one container
+        # return stays an ordinary `MojoList *`).
+        self._multi_kind_return_kinds: dict[str, list] = {}
+        # Function name -> the set of its locals bound to containers/structs
+        # of MORE THAN ONE kind (see `resolve_shared._infer_local_var_types`'s
+        # own comment). Such a local's declared C type must be the box, not
+        # whichever kind its first assignment site carries. Module scope, like
+        # `_inferred_var_types`' per-function half it is read beside.
+        self._multi_kind_locals: dict[str, set] = {}
+        # Call-result VALUE names holding a container whose kind the CALLER
+        # cannot know statically (the result of a call to a
+        # `_multi_kind_return_funcs` member). Per-function like the other
+        # value-keyed side tables, since these names are per-function temps.
+        self._boxed_container_vals: set = set()
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module
         # scope, NOT re-created per function the way the value-keyed
