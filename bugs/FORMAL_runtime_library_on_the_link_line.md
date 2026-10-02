@@ -14,6 +14,47 @@ exact list and the cost of closing each.**
 
 Round: agent [5] of the five-agent round of 2026-09-28.
 
+## Re-measured 2026-10-01 (`work/formal3-7`): the payoff grew, and the
+## ceilings below are still the ceilings
+
+The link line is not a fixed thing and this doc's numbers are the ones its
+author measured on 2026-09-28. What is true now, from
+`test_formal_runtime_link.py` (108 passed, 0 failed, which computes these
+rather than asserting them — so it cannot rot into a wrong number without
+going red):
+
+| | this doc | 2026-10-01 |
+|---|---|---|
+| word-shaped, on a formal image's link line | 156 | **240** |
+| …needing no heap handle | 138 | **152** |
+| …needing a `void *` handle the path cannot produce | 18 | **32** |
+| word-shaped but NOT linked (ceiling 1) | 51 | 51, same families |
+
+So the phase-2 payoff has roughly grown by half again, and ceiling 3 (the heap)
+has grown WITH it rather than being closed — which is expected, since a bigger
+linked surface is a bigger surface to need a handle on. `FORMAL.md` phase 6 (the
+proved slab allocator) is still what closes it, and the ratio has got no better.
+
+**Ceiling 1 is unchanged and is still pinned by a test with a measured note.**
+`runtime_dylib` still links `runtime_units(arch, None)` — core, coroutine,
+async scheduler — and not the optional units, and
+`test_word_shaped_but_not_exported_links_nothing` asserts the measured fact
+that `mojo_sqlite3_close` is word-shaped and NOT exported, that a program whose
+only runtime call is that one links nothing, and that the refusal names the
+situation rather than blaming the mechanism. What closing it costs is unchanged
+too: a variant of `runtime_dylib` in `build_stdlib_dylib.py`, keyed per unit
+set, with `fire_ssl.c`'s missing OpenSSL headers on a host that has none — and
+`build_stdlib_dylib.py` is still not `formal/`'s to grow.
+
+**Ceiling 2 is unchanged and `formal/`'s.** Still declarations in
+`runtime/fire_coro_ctx.h` for the six `mojo_tagged_*`/`mojo_double_bits` names,
+still the `mojo_open`/`mojo_close` trap (the dylib exports a DIFFERENT function
+from the one `fire_runtime.c` declares), and still `runtime/`'s file.
+
+Nothing in this doc's three ceilings was closed by anyone in the meantime, and
+nothing was closed by accident either — which is the useful part of the
+re-measurement: the numbers moved, the walls did not.
+
 ---
 
 ## What landed

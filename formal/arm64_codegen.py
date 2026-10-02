@@ -2546,7 +2546,7 @@ dylib_exports: list = None, globals_base: int = None,
             # appended after the code, immediates back-patched in resolve().
             # Interned by content so equal literals share one address —
             # makes pointer equality valid for dict string keys.
-            label = self._intern_string(expr.value)
+            label = self._intern_string(expr)
             self.asm.emit_adrp_add(0, label)
             return
 
@@ -2783,8 +2783,38 @@ dylib_exports: list = None, globals_base: int = None,
             f"unsupported expression {type(expr).__name__} on the formal "
             f"arm64 path")
 
-    def _intern_string(self, s: str) -> str:
-        """Return a stable data label for `s`, emitting bytes on first use."""
+    def _intern_string(self, s) -> str:
+        """Return a stable data label for `s`, emitting bytes on first use.
+
+        `s` is a `StringLiteral` node or a plain string. The node form is what
+        carries `is_raw`, which is why it is accepted rather than only
+        `node.value`: `r"a\\nb"` and `"a\\nb"` are the same four characters
+        once `_strip_string_prefix_and_quotes` has done its work, so a decoder
+        handed only the body cannot tell them apart and would decode the raw one
+        as well. A plain string is already-decoded text — a fold, a manifest
+        value, `GlobalDataImage.string_cells`, a comptime read — and is taken at
+        face value.
+
+        THE decode point for a string literal on this backend, and it is here
+        rather than at the call sites because every byte of every string on this
+        path goes through this one function — and because this path is the one
+        engine in the repository that does NOT hand the literal's text to a C
+        compiler, which is where `fire_compiler.py` leaves escapes decoded-by-
+        proxy. `fire_compiler.decoded_literal` is the tree's one reader of that
+        question (the interpreter and the x86-64 backend delegate to the same
+        one); without it `len("a\\nb")` was 4 on a formal image and the printed
+        bytes carried a literal backslash, on both architectures, while
+        `fire.py run` and `fire.py build` both printed a real newline. See
+        `fire_compiler.decode_c_escapes` and, for the measurement,
+        `bugs/FORMAL_string_literal_escape_is_not_decoded.md` — deleted, since
+        that is fixed.
+
+        Decoding BEFORE the intern lookup is what makes interning by content
+        right: two literals differing only in escape spelling (`"\\t"` and a
+        spelled tab) now get the same key, which is what `==` on a string
+        address already assumes.
+        """
+        s = F.decoded_literal(s)
         if s in self._str_intern:
             return self._str_intern[s]
         label = f"str_{self._str_counter}"
@@ -3343,7 +3373,7 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_key_const(self, e, reg: int) -> None:
         """X{reg} = the canonical 64-bit value of a literal key element."""
         if isinstance(e, F.StringLiteral):
-            self._emit_string_addr(reg, self._intern_string(e.value))
+            self._emit_string_addr(reg, self._intern_string(e))
             return
         if isinstance(e, F.BoolLiteral):
             self._emit_mov_imm(f"X{reg}", 1 if e.value else 0)
@@ -3903,7 +3933,7 @@ dylib_exports: list = None, globals_base: int = None,
         frags, operands = [], []
         for a in args:
             if isinstance(a, F.StringLiteral):
-                frags.append(M.print_literal(a.value))
+                frags.append(M.print_literal(a))
                 continue
             kind = self._expr_str_kind(a)
             if kind == M.STR_KIND:
@@ -3925,7 +3955,14 @@ dylib_exports: list = None, globals_base: int = None,
 
         `file=` is refused unless it is stdout, because this model has exactly
         one stream and a `file=sys.stderr` that quietly went to stdout would be
-        a program whose diagnostics are missing rather than one that failed."""
+        a program whose diagnostics are missing rather than one that failed.
+
+        `sep` and `end` come back as the literal NODES and not as `.value`,
+        which is the whole reason this signature is unchanged while its body is
+        not: `print(sep=r"\t")` must print a backslash and a `t`, and
+        `print_literal` can only know that from the node. The defaults are
+        plain strings, which `print_literal` takes at face value — they are
+        already-decoded text."""
         sep, end = " ", "\n"
         for k, v in e.kwargs:
             if not isinstance(v, F.StringLiteral):
@@ -3935,9 +3972,9 @@ dylib_exports: list = None, globals_base: int = None,
                     f"the line ending are baked into the format string, which "
                     f"is built before the call is emitted")
             if k == "sep":
-                sep = v.value
+                sep = v
             elif k == "end":
-                end = v.value
+                end = v
             elif k == "file":
                 if not (isinstance(v, F.MemberExpr)
                         and v.member == "stdout"):
@@ -7675,13 +7712,26 @@ dylib_exports: list = None, globals_base: int = None,
         # the representation at all. The empty needle is TRUE here, which is
         # Python's rule and also what `strstr` would say, so the constant and
         # the call cannot disagree.
+        #
+        # BOTH SIDES ARE DECODED before the substring test, and that is what
+        # keeps the constant and the call agreeing now that the call's operands
+        # are interned decoded text. `"t" in "\t"` is a needle of `t` against a
+        # haystack of one TAB, so it is FALSE; folding it on the raw source text
+        # made it TRUE, because the raw haystack is a backslash and a `t` and
+        # contains a `t`. Measured: `str_membership_two_literals`-shaped programs
+        # disagreed between the literal fold and the same expression with a name
+        # in it. `fire_compiler.decode_c_escapes` is the one decoder, the same
+        # one `_intern_string` below uses — see
+        # bugs/FORMAL_string_literal_escape_is_not_decoded.md.
         if isinstance(left, F.StringLiteral) and isinstance(right, F.StringLiteral):
             # The EMPTY needle is TRUE, which is Python's rule and what
             # `strstr` returns for it (the haystack itself, non-NULL). Folding
             # it to False because `bool("")` is False made the
             # both-operands-literal case disagree with the call the same
             # expression makes when either side is a name.
-            found = left.value == "" or left.value in right.value
+            needle = F.decoded_literal(left)
+            haystack = F.decoded_literal(right)
+            found = needle == "" or needle in haystack
             self.asm.emit(encode_movz_xd_imm(
                 0, (0 if found else 1) if invert else (1 if found else 0)))
             return

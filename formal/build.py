@@ -1117,12 +1117,23 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
     symbol does not exist.
     """
     from formal.imports import (build_module_dylib, dylib_chain,
-                                imported_modules, resolve_module_path,
+                                imported_modules, own_module_identity,
+                                resolve_module_path,
                                 unresolvable_import_error)
     mods = imported_modules(stmts)
     if not mods:
         return []
     if fmt_wants_macho(arch):
+        # The name THIS file is addressed by, which is what a relative import
+        # inside it resolves against. Without it a relative import at the root
+        # resolved differently depending on which module reached this file
+        # first: the same source produced `___syscalls.<digest>.arm64.dylib`
+        # built on its own and `__syscalls.<digest>.arm64.dylib` reached as
+        # `.path`, with the exports mangled to match — two libraries and two
+        # export spellings for one file, so the digest in the filename stopped
+        # being sufficient to identify the artifact. See
+        # bugs/FORMAL_relative_import_at_the_root_has_no_qualified_identity.md.
+        parent = own_module_identity(source_path, source_path)
         # Per-architecture, and that is load-bearing rather than tidiness.
         # This directory holds BUILT module dylibs, and a dylib is a
         # target-specific image: an arm64 library and an x86-64 library for
@@ -1150,7 +1161,8 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                     unresolvable_import_error(source_path, mod))
             try:
                 dylib = build_module_dylib(mod, path, out_dir, arch,
-                                           project_root=source_path)
+                                           project_root=source_path,
+                                           _parent=parent)
             except ImportBuildError as e:
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
@@ -2697,7 +2709,22 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     returns_frame: dict = {}
     for fn in functions:
         owner = owners.get(fn.name)
-        if owner is not None and owner.name in framed:
+        # `and F.method_receiver_kind(fn)`, and the guard rather than a change
+        # to `struct_receivers` because this asks about ONE method while
+        # `struct_receivers` answers for the whole CLASS. Its unconditional
+        # `{"self"}` seed is right for its other job — deriving the field set,
+        # where `self.n` in ANY method is a field write — and wrong for this
+        # one, which asks "does THIS function take a receiver". A
+        # `@staticmethod` has none, so putting `self` in its holder set made
+        # the call sites hand it a frame: `R__single(self, counter)` is two
+        # arguments to a one-parameter function, and the parameter the
+        # definition reads as `counter` was bound to the receiver.
+        # `fire_compiler.method_receiver_kind` is the tree's single rule for
+        # "does this method declare a receiver" (decorator first, first
+        # parameter's name second), and it is read here rather than a second
+        # answer written beside it. See
+        # bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md.
+        if owner is not None and owner.name in framed and F.method_receiver_kind(fn):
             for recv in M.struct_receivers(owner):
                 holders[_fn_key(fn)].add(recv)
                 hstruct[_fn_key(fn)][recv] = [owner]
@@ -8639,17 +8666,32 @@ def _receiverless_methods(owners: dict, structs_by_name: dict) -> set:
     value — it has no register, no slot and no frame, so the call bound a name
     with no home at all.
 
-    Collected from the DECLARATION (an empty parameter list), not from the
-    spelling, and only for structs `owners` actually resolved: a name two
-    structs declare is ambiguous and `_rewrite_method_calls` already refuses
-    to rewrite it, so there is nothing to decide here."""
+    Collected from the DECLARATION, not from the spelling, and only for structs
+    `owners` actually resolved: a name two structs declare is ambiguous and
+    `_rewrite_method_calls` already refuses to rewrite it, so there is nothing
+    to decide here.
+
+    `or not F.method_receiver_kind(m)`, and that is the other half of
+    `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md`. An empty
+    parameter list recognises `def first():`, which is the shape this was
+    written for, but a `@staticmethod` with PARAMETERS takes no receiver either
+    and was not in the set — so `_rewrite_method_calls` prepended one, and the
+    call passed a receiver to a function whose parameter list has none. The
+    arity check caught it, so it was never a wrong answer, but the refusal it
+    produced compared the RECEIVER against the first declared parameter and
+    every later argument with it: an off-by-one over the whole parameter list,
+    reported against the wrong argument. `def import_module(var module: String)`
+    in `std/python/python.mojo` is the same defect from the other side.
+    `fire_compiler.method_receiver_kind` is the tree's single rule for the
+    question — decorator first, first parameter's name second — so this reads
+    it rather than writing a second answer next to the parameter list."""
     out = set()
     for struct_name in (owners or {}).values():
         st = (structs_by_name or {}).get(struct_name)
         if st is None:
             continue
         for m in M.struct_methods(st):
-            if not (getattr(m, "params", None) or []):
+            if not F.method_receiver_kind(m) or not (getattr(m, "params", None) or []):
                 out.add(m.name)
     return out
 

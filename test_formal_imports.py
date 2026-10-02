@@ -1019,6 +1019,94 @@ def test_wide_struct_runs_by_reference(tmpdir, _shared):
           f"wrote through the receiver)")
 
 
+# ── a module's identity is a function of its SOURCE, not of who reached it ──
+#
+# `build_module_dylib` takes a `_parent` to resolve a relative import against,
+# and nothing computed it: `_resolve_imports` called it with no parent at all.
+# A relative import AT THE ROOT — which is what `formal/hostmods/os/path/
+# __init__.mojo`'s `.._syscalls` is — therefore resolved differently depending
+# on the spelling that reached the file. Built on its own it became
+# `___syscalls.<digest>.arm64.dylib` exporting `___syscalls_fs_chdir_9f63a2`;
+# reached as `.path` from `os/__init__.mojo` in the same process it became
+# `__syscalls.<digest>.arm64.dylib` exporting `__syscalls_fs_chdir_9f63a2`.
+#
+# Nothing failed, which is why it survived: `_BUILT` is keyed by resolved path
+# and every consumer reads the manifest beside the library that was actually
+# built. But `build_module_dylib`'s own comment says the source digest in the
+# filename "is what makes sharing safe rather than merely rare", and for this
+# module the ARTIFACT depended on the spelling rather than on the source, so
+# the digest stopped being sufficient to identify it. Two processes building
+# the same tree in a different order got different libraries for one file.
+
+def test_own_module_identity_is_the_package_chain(tmpdir, _shared):
+    """`own_module_identity` names a file by its package chain.
+
+    A pure function of the PATH, so it is worth pinning on its own rather than
+    only through a build: the property is "the same file always gets the same
+    name", and a build that succeeds either way cannot demonstrate it."""
+    from formal.imports import own_module_identity
+    root = os.path.join(tmpdir, "ident")
+    write_tree(root, {
+        "os/__init__.mojo": "pass\n",
+        "os/_syscalls.mojo": "def chdir(p):\n  return 0\n",
+        "os/path/__init__.mojo": "from .._syscalls import chdir\n",
+        "sys.mojo": "def getargv():\n  return 0\n",
+    })
+    want = {
+        "os/__init__.mojo": "os",
+        "os/_syscalls.mojo": "os._syscalls",
+        "os/path/__init__.mojo": "os.path",
+        # No package anywhere above it, so the roots decide — and this is the
+        # case that is `sys` rather than `ident.sys`, which is what an importer
+        # spelling `import sys` needs.
+        "sys.mojo": "sys",
+    }
+    for rel, expected in want.items():
+        got = own_module_identity(os.path.join(root, rel),
+                                  os.path.join(root, "prog.mojo"))
+        check(got == expected,
+              f"{rel} is addressed as {got!r}, expected {expected!r}")
+    # And the identity does not depend on the ARGUMENT. Every call site passes
+    # the file being compiled as its own project root, so a root that varied
+    # with it would reintroduce the instability this exists to remove.
+    a = own_module_identity(os.path.join(root, "os/_syscalls.mojo"),
+                            os.path.join(root, "prog.mojo"))
+    b = own_module_identity(os.path.join(root, "os/_syscalls.mojo"),
+                            os.path.join(root, "os/path/__init__.mojo"))
+    check(a == b == "os._syscalls",
+          f"the identity moved with the project root: {a!r} then {b!r}")
+    # A non-Mojo file has no module identity to give, and answering with a name
+    # would put a `.py` basename into a C prefix.
+    check(own_module_identity(os.path.join(root, "helper.py"), root) is None,
+          "a .py file was given a module identity")
+
+
+def test_a_relative_import_at_the_root_builds_one_library(tmpdir, _shared):
+    """The end-to-end half: `.._syscalls` inside `os/path` links and RUNS.
+
+    The behaviour, not the spelling — a build that produced a different library
+    for the same source would still pass this, which is what
+    `test_own_module_identity_is_the_package_chain` above is for. What this
+    pins is that qualifying a root-relative import against the importer's own
+    identity did not break the resolution: `.._syscalls` from inside the
+    package `os.path` is the module `os._syscalls`, and the call through it
+    arrives with the right answer."""
+    root = os.path.join(tmpdir, "rootrel")
+    write_tree(root, {
+        "os/__init__.mojo": "pass\n",
+        "os/_syscalls.mojo": "def chdir(p):\n  return 41 + 1\n",
+        "os/path/__init__.mojo": (
+            "from .._syscalls import chdir\n"
+            "def go(p):\n  return chdir(p)\n"),
+        "prog.mojo": ("from os.path import go\n"
+                      "def main():\n  return go(\"/\")\n"),
+    })
+    fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 42, f"returned {code}, expected 42; stderr: {err}")
+
+
 # ── a package whose API is its re-exports ───────────────────────────────────
 #
 # A `pkg/__init__.mojo` that is nothing but `from .sub import name` has a
@@ -1769,6 +1857,10 @@ TESTS = [
     ("a repository sibling resolves", test_repository_sibling_resolves),
     ("a package-relative dotted import resolves",
      test_package_relative_dotted_import_resolves),
+    ("a module's identity is its package chain, not its reach order",
+     test_own_module_identity_is_the_package_chain),
+    ("a relative import at the root builds one library and runs",
+     test_a_relative_import_at_the_root_builds_one_library),
     ("a host module is refused despite a same-named sibling",
      test_host_module_still_refused_despite_same_named_sibling),
     ("a package that only re-exports builds and runs",

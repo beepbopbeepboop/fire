@@ -70,6 +70,36 @@ files are not counted twice in the `other refusal` row: with `re.mojo` and
 `hashlib.mojo` closed by `work/formal-re-refusal`, `tile.mojo` is what is left of
 that row's module-caused entries, and it is the smallest of the three.
 
+## Re-verified 2026-10-01 (`work/formal3-7`): the refusal stands, and "Whose"
+## above is still the operative section
+
+Measured again rather than assumed, because a refusal that has quietly started
+building is the failure this document exists to prevent:
+
+```
+$ python3 tools/memslot.py --gb 8 --label tile -- python3 fire.py build \
+      --formal --no-prove -o .tmp/esc/tile \
+      ../new-modular/Mojo/stdlib/std/algorithm/backend/tile.mojo
+build: workgroup_function[…](…) calls a name this unit does not compile, so the
+brackets cannot be bound. […]
+```
+
+The same refusal, on arm64 (the x86-64 half not repeated this time), so the two
+options below are still the two options and neither has been taken.
+
+**And this is still not `formal/`'s to fix**, which is what "Whose" says and
+what `tools/control.py claims` confirms: `construct:mlir-and-gpu-globals` is
+held by `formal-mlir-gpu`, whose subject is `std/gpu/**` and the MLIR dialect
+constructs, and `workgroup_function` is a GPU launch abstraction at
+`std/algorithm/backend/tile.mojo:48`. The doc records it so that claim is not
+duplicated and so the 4 files are not counted twice in the `other refusal` row.
+
+The one thing a reader should take from the re-verification is negative and
+worth stating: nothing has moved, so nothing here is cheaper or more expensive
+than it was, and the second option (refuse it in the stdlib, which is a
+`new-modular` tree edit outside every worktree here) is still the only one that
+is not a construct.
+
 ## The next step
 
 One of two, and which one is a decision rather than an implementation:

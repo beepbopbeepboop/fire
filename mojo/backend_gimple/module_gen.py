@@ -2530,12 +2530,17 @@ def gen_module_impl(self, stmts):
         # reflection repr iterates `struct_field_types` in insertion order
         # and the later self-host augmentation appends any missing dataclass
         # fields, so the seed has to remain a PREFIX of
-        # `StringLiteral(value, line, col, is_bytes)` or the native repr
-        # emits `value, is_bytes, line, col` and every file with a string
-        # literal diverges from the reference (64 `.ast` diffs).
+        # `StringLiteral(value, line, col, is_bytes, is_raw)` or the native
+        # repr emits `value, is_bytes, line, col` and every file with a
+        # string literal diverges from the reference (64 `.ast` diffs).
+        # `is_raw` is appended at the END for the same reason: it was added
+        # after `is_bytes` (it records an `r` prefix, so
+        # `_strip_string_prefix_and_quotes` no longer carries it), and putting
+        # it anywhere else would reorder the fields the prefix rule protects.
         'line': 'int64_t',
         'col': 'int64_t',
         'is_bytes': '_Bool',
+        'is_raw': '_Bool',
     }
     self.struct_field_types['TstringLiteral'] = {
         'value': 'char *',
