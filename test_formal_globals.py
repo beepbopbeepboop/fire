@@ -547,6 +547,88 @@ CASES = [
      "\n"
      "main(0)\n", "3\n1\n"),
 
+    # The DICT half of the same rule, and the one that is a fault rather than a
+    # refusal. A `ValueKinds` kind cannot carry it — `List[Int]`,
+    # `Tuple[Int, Int]`, `Set[Int]` and `Dict[String, Int]` are all one word here
+    # and all classify as the bare list prefix — so the dict-ness is a separate
+    # answer from the same annotation, and `global_slot_is_dict` asks it. Before
+    # this row `D["a"]` was emitted as a SEQUENCE subscript, so the interned
+    # address of `"a"` became an element offset, the bounds check failed and the
+    # image exited 1 with a green build, on BOTH architectures, where CPython
+    # answers 1. `read_dict_of_strings_by_key` above is the same question asked of
+    # a dict LITERAL, whose shape the initializer states; this one is asked of the
+    # only spelling the initializer says nothing about.
+    #
+    # `printf` and not `print` because `print()` of a subscript still cannot
+    # classify the element on this path (an unannotated dict comprehension's
+    # element kind is the separate row in `test_formal_value_model.py`), and a row
+    # that only checks the BUILD would not notice the fault — which is why this
+    # one executes.
+    ("a_body_filled_dict_global_subscripts_as_a_dict",
+     "def make() -> Dict[String, Int]:\n"
+     "    var d: Dict[String, Int] = {\"a\": 1, \"b\": 2}\n"
+     "    return d\n"
+     "\n"
+     "D = make()\n"
+     "\n"
+     "def main(n):\n"
+     "    x: Int = D[\"a\"]\n"
+     "    y: Int = D[\"b\"]\n"
+     "    printf(\"%d\", x)\n"
+     "    printf(\"%d\", y)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "12"),
+
+    # THE CONTROL for the row above, and it is the half that makes the row mean
+    # something: the same CALLEE shape that says "dict" must not also say "dict"
+    # for a list. `L[1]` is 14 through an address computation over a
+    # `[count][e0][e1]…` blob; read as a pair blob it is a key SCAN that walks
+    # `[npairs][k0][v0]…` looking for the integer 14 as a key word, finds it in
+    # no pair, and exits 1. So one row marked "sequence" and one marked "dict" and
+    # one callee annotation each is the whole of the distinction — a fix that
+    # answered "container" for both would pass the first and fail this one.
+    ("a_body_filled_list_global_subscripts_as_a_sequence",
+     "def make() -> List[Int]:\n"
+     "    return [3, 14, 0]\n"
+     "\n"
+     "L = make()\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%d\", L[0])\n"
+     "    printf(\"%d\", L[1])\n"
+     "    printf(\"%d\", L[2])\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "3140"),
+
+    # A string global printed, not compared — the OTHER reader of the slot's
+    # shape. A `char *` classified as a plain word is an INT on this path, so a
+    # row that lost the shape would print a decimal ADDRESS rather than `hi`,
+    # which is why the expected value is text and why this uses `print` (the
+    # interpreter runs it, so the row has a reference answer and not only a
+    # hand-written one).
+    #
+    # This one PASSED before the dict fix: `print` classifies through
+    # `_expr_str_kind`, which falls back to the whole-function `ValueKinds` and
+    # so already reached `global_slot_kind`. It is here to pin the interaction —
+    # `global_slot_is_string` now asks that same function instead of
+    # re-deciding from the initializer, and the two spellings have to keep
+    # agreeing — rather than as the row that shows the fault. The row that shows
+    # the fault is the dict one above, because `_is_dict_subscript` reads the
+    # slot directly and has no such fallback.
+    ("a_body_filled_string_global_prints_as_text",
+     "def greet() -> String:\n"
+     "    return \"hi\"\n"
+     "\n"
+     "NAME = greet()\n"
+     "\n"
+     "def main(n):\n"
+     "    print(NAME)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "hi\n"),
+
     # ── module boundaries ──
     # A dylib's `__DATA` is emitted with `emit_startup=False`, so there is no
     # startup stub to run an initializer from: the lazy per-function check is

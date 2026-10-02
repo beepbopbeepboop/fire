@@ -19282,21 +19282,27 @@ class GlobalSlot:
     `module_slot_readable_in` then refuses rather than assumes, because the
     conservative answer there is the one that cannot be a wrong number.
 
-    `kind` is the `ValueKinds` kind the slot's value has, for the slots whose
-    initializer does not state it: a slot the MODULE BODY fills is `("unknown",
-    …)`, so the only thing that says what lands in it is the call the store
-    makes, and that call's declared return type says it. Carried on the slot
-    rather than derived at each read because `global_slot_kind` has no access to
-    the unit's functions — and because "what does this name hold" must be ONE
-    answer whether the value folded, was laid out in `__DATA`, or is computed by
-    the module's own top-level statements.
+    `kind` is the `ValueKinds` kind the slot's value has, and `is_dict` is the
+    one distinction that kind cannot carry, for the slots whose initializer does
+    not state them: a slot the MODULE BODY fills is `("unknown", …)`, so the
+    only thing that says what lands in it is the call the store makes, and that
+    call's declared return type says it. Both are carried on the slot rather
+    than derived at each read because `global_slot_kind` and
+    `global_slot_is_dict` have no access to the unit's functions — and because
+    "what does this name hold" must be ONE answer whether the value folded, was
+    laid out in `__DATA`, or is computed by the module's own top-level
+    statements. `is_dict` is a separate field and not a kind for a reason the
+    field's own reader states: every container on this path is one word and one
+    kind, so a `kind` that said "dict" would have to lie about the other three
+    container types to say it.
     """
 
     __slots__ = ("name", "index", "init", "site", "filled_by_body", "body_site",
-                 "kind")
+                 "kind", "is_dict")
 
     def __init__(self, name: str, index: int, init, site=None,
-                 filled_by_body=False, body_site=None, kind=None):
+                 filled_by_body=False, body_site=None, kind=None,
+                 is_dict=False):
         self.name = name
         self.index = index
         self.init = init
@@ -19304,6 +19310,7 @@ class GlobalSlot:
         self.filled_by_body = filled_by_body
         self.body_site = body_site
         self.kind = kind
+        self.is_dict = is_dict
 
     @property
     def is_address(self) -> bool:
@@ -19749,7 +19756,7 @@ def module_slot_for(name: str, local_names):
 
 
 def collect_global_slots(stmts: list, functions: list, int_names=(),
-                         string_names=()) -> dict:
+                         string_names=(), dict_names=()) -> dict:
     """`{name: GlobalSlot}` for every module-level name that needs STORAGE.
 
     The question is one — "can the build FOLD this name, or does something in
@@ -19791,9 +19798,12 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
     taken from the caller for the reason `declared_type_kind` takes them from the
     caller: the two backends must not answer "what does this annotation mean"
     from two private lists, and a default of empty leaves the answer the
-    conservative one rather than a guess. They are read for exactly one name: a
-    slot the module body fills by a call, whose KIND is the call's declared
-    return type (`_body_store_kind`).
+    conservative one rather than a guess. `dict_names` is the third member of the
+    same vocabulary, and the reason it is a separate argument is
+    `_body_store_shape`: a KIND cannot say "dict" (every container is one word
+    here, and `declared_type_kind` answers all four with the bare list prefix),
+    while a SUBSCRIPT has to. They are read for exactly one name: a slot the
+    module body fills by a call.
 
     ORDER is the order the names are first declared at module level, so the
     layout is a function of the source rather than of dictionary iteration and
@@ -19822,31 +19832,41 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
     for index, name in enumerate(order):
         stmt = finals[name]
         value = getattr(stmt, "value", None)
+        kind, is_dict = _body_store_shape(value, rets, int_names, string_names,
+                                          dict_names)
         slots[name] = GlobalSlot(name, index, _static_initializer(value),
                                  site=stmt,
                                  filled_by_body=name in body_written,
                                  body_site=body_sites.get(name),
-                                 kind=_body_store_kind(
-                                     value, rets, int_names, string_names))
+                                 kind=kind, is_dict=is_dict)
     return slots
 
 
-def _body_store_kind(value, rets: dict, int_names, string_names):
-    """The kind a module-level CALL assigns, or None.
+def _body_store_shape(value, rets: dict, int_names, string_names, dict_names):
+    """`(kind, is_dict)` for a module-level CALL's value, from its CALLEE.
 
-    The third source of a value's kind, beside a folded literal and a container
+    The third source of a value's shape, beside a folded literal and a container
     literal, and it completes the set: a name bound at module level to
     `compute()` is stored by the module body, and the only thing that says what
     lands in the slot is the call — so the call's DECLARED return type says it,
-    which is the same evidence `declared_type_kind` reads everywhere else and
-    the same discipline: a callee this unit does not define, or one with no
+    which is the same evidence `declared_type_kind` reads everywhere else and the
+    same discipline: a callee this unit does not define, or one with no
     annotation, claims nothing.
 
-    A `List[Int]` answer is the bare `LIST_PREFIX` rather than
-    `list:<elem>`, because `declared_type_kind` maps a blob annotation to a blob
-    without reading its element — and a bare prefix is the honest "a container,
-    and nothing here says what is in it". It is what a container literal of
+    A `List[Int]` answer is the bare `LIST_PREFIX` rather than `list:<elem>`,
+    because `declared_type_kind` maps a blob annotation to a blob without
+    reading its element — and a bare prefix is the honest "a container, and
+    nothing here says what is in it". It is what a container literal of
     non-word elements already gets, so the two spellings agree.
+
+    `is_dict` is the half a kind cannot carry, and it is asked SEPARATELY rather
+    than by widening the kind vocabulary because the four container annotations
+    are one representation: `List[Int]`, `Tuple[Int, Int]`, `Set[Int]` and
+    `Dict[String, Int]` are all a bare `char *`-shaped word, so a kind that
+    said "dict" would be a lie about the other three. What says it is the
+    annotation's BASE NAME, through the one `formal.types` vocabulary both
+    backends share (`DICT_TYPE_NAMES`), which is the same evidence
+    `global_slot_is_dict` reads off a dict LITERAL's initializer.
 
     Asked only of a bare `CallExpr` to a name. Anything else — a binop, a
     subscript, a dotted call into another image — claims nothing rather than
@@ -19854,11 +19874,13 @@ def _body_store_kind(value, rets: dict, int_names, string_names):
     underwrites deliberately."""
     if not isinstance(value, F.CallExpr) or not isinstance(value.func,
                                                            F.IdentExpr):
-        return None
+        return None, False
     ann = rets.get(value.func.name)
     if not ann:
-        return None
-    return declared_type_kind(ann, int_names, string_names, None)
+        return None, False
+    base = annotation_base_name(ann)
+    return (declared_type_kind(ann, int_names, string_names, None),
+            base is not None and base in dict_names)
 
 
 def _is_container_literal(value) -> bool:
@@ -20301,7 +20323,7 @@ def global_slot_kind(name: str):
     written at run time.
 
     A slot the MODULE BODY fills is the third source and answers from the CALL
-    the store makes (`_body_store_kind`), so `len(G)` and `print()` on a
+    the store makes (`_body_store_shape`), so `len(G)` and `print()` on a
     computed global are the same question with the same answer as the same
     expression bound to a local. Before, this returned None for such a slot
     because `("unknown", …)` states no kind — and a `None` here is not a missing
@@ -20329,9 +20351,20 @@ def global_slot_is_dict(name: str) -> bool:
     exited 1.
 
     Asked from the slot's own initializer, which is where the shape is recorded,
-    so the answer cannot disagree with the bytes the linker laid out."""
+    so the answer cannot disagree with the bytes the linker laid out — and from
+    the CALLEE for the slots the initializer says nothing about, which is the
+    same question asked of a different piece of evidence rather than a second
+    rule. `D = mk()` where `def mk() -> Dict[String, Int]` is the measured case
+    on this tree: a `__DATA` slot the module BODY fills, whose `("unknown", …)`
+    initializer names no layout, so the subscript was emitted as a SEQUENCE one
+    and the image exited 1 on both architectures with a green build. A kind
+    cannot carry the answer (all four container annotations are one word here —
+    see `_body_store_shape`), which is why this is a field of its own and not a
+    fifth `ValueKinds` constant."""
     slot = module_slot(name)
-    return slot is not None and slot.init[0] == "blob" and slot.init[1] == "dict"
+    return slot is not None and (
+        slot.is_dict
+        or (slot.init[0] == "blob" and slot.init[1] == "dict"))
 
 
 def global_slot_is_string(name: str) -> bool:
@@ -20342,9 +20375,14 @@ def global_slot_is_string(name: str) -> bool:
     address as a number and a `==` compares two addresses. Both were right for a
     LOCAL bound to a string literal because `_note_binding` saw the literal; a
     module global's literal is in the module's statement list, not in the
-    function being emitted."""
-    slot = module_slot(name)
-    return slot is not None and slot.init[0] == "str"
+    function being emitted.
+
+    Asked as the KIND rather than as a second predicate over `init`, so the two
+    readers of a slot cannot answer "what does this name hold" differently: for
+    the literal spellings `global_slot_kind` returns `STR_KIND` exactly when
+    `init[0] == "str"`, and for the one spelling it did not cover — a slot the
+    module body fills from a callee declared `-> String` — it is the answer."""
+    return global_slot_kind(name) == STR_KIND
 
 
 def global_slot_bytes(table: dict, base: int) -> bytes:

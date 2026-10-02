@@ -9706,13 +9706,15 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # the module statements in hand.
     # `formal.types`' annotation vocabularies, so the KIND of a slot the module
     # body fills by a call is the callee's declared return type read through the
-    # ONE `declared_type_kind` both backends read. Taken from the caller for the
-    # reason that function takes them from the caller: two private copies of
+    # ONE `declared_type_kind` both backends read, and so a slot holding a DICT
+    # is recognised as one from the same annotation. Taken from the caller for
+    # the reason that function takes them from the caller: two private copies of
     # "what does this annotation mean" is one architecture answering `len()` and
     # the other refusing it.
     slots = M.collect_global_slots(stmts, functions,
                                    int_names=FT.TYPE_NAMES,
-                                   string_names=FT.STRING_TYPE_NAMES)
+                                   string_names=FT.STRING_TYPE_NAMES,
+                                   dict_names=FT.DICT_TYPE_NAMES)
     M.publish_global_slots(slots)
     # A module-level NAME whose value the build can FOLD is substituted at
     # every read, so `G = 5` read from a function is the 5 and not whatever
