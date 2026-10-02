@@ -10,6 +10,25 @@ link; it is now a class (commit `ccd83a2b`), and
 is left is the hole that let it through, which is much wider than one function
 and is not fixed.
 
+**The hole let a SECOND instance through, in the same batch, and that one is
+also fixed at the call site (2026-10-01).** 73799ca2's consolidation of three
+copies of a local-type walk in `mojo/middle/infra_infer.py` turned the recursive
+`walk` into a generator — `_each_binding` is a `yield from` tree — and
+`mojo/middle/infra_infer.py` is in the self-host closure. The static half named
+it exactly ("the stack-switch lowering left _each_binding, walk") and the built
+compiler then segfaulted on its first two-line program. It is an accumulator
+returning a list now, the same conversion (and the same reasoning) as
+`mojo/middle/coro.py`'s `_walk`.
+
+The pattern worth recording is that **the static half is the only cheap detector
+for this class, and it was written before either instance arrived.** Both
+arrived anyway, in the same batch, from branches that had no reason to think
+about the self-host closure at all — one was a `@contextlib.contextmanager` and
+the other a three-copies-into-one refactor. Neither is a generator anyone would
+spot by reading the diff. That is the argument for candidate fix 2 below (refuse
+rather than silently drop) over continuing to rely on one static check per
+landing: the check caught both, but only because someone ran it.
+
 Not fixed here on purpose: the fix changes what every dylib module's compiled C
 looks like (or adds a C++ object per generator-bearing module to the dylib link
 line), which is a `make gate` change, and this was landed by a worker that is not

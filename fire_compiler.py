@@ -1322,15 +1322,38 @@ def _src_loc(src: str, pos: int, filename: str = "") -> str:
     return f"{line}:{col}: "
 
 
-def py_tokenize(src: str, filename: str = "") -> list[Token]:
+def py_tokenize(src: str) -> list[Token]:
     """Tokenize with layout rules derived from the .md spec:
         - Indentation (4 spaces) → INDENT/DEDENT
         - ';' → statement separator
         - '#' → end-of-line comment
         - Multi-line statements use indentation (no backslash continuation)
 
-    `filename` is used only to prefix an "unterminated string literal"
-    diagnostic; omit it and the message carries `line:col:` alone."""
+    The one-argument entry point, and the one every caller but two uses. It
+    is a FIXED C ABI symbol: `py_tokenize` is in
+    `GimpleGen._NO_OVERLOAD_MANGLE`, is declared in `runtime/fire_runtime.h`
+    as `MojoList *py_tokenize(char *source)`, and is in
+    `GimpleGen._KNOWN_SIGS` with that one parameter. A DEFAULTED second
+    parameter therefore silently changed that pinned ABI from one argument to
+    two: the self-host materializes the default at every call site (so it
+    emits `py_tokenize (src, 0)`), while the header's declaration — which is
+    what gcc sees first, and therefore what every call is checked against —
+    still said one. That is 25 "too many arguments to function 'py_tokenize';
+    expected 1, have 2" plus a "conflicting types" at the definition, and it
+    takes the whole self-host build down.
+
+    So the filename-carrying variant is `py_tokenize_named`, an ordinary
+    function whose arity the codegen derives from its definition like any
+    other. Nothing is lost: the two callers that know a filename still get
+    the `file:line:col:` prefix on the refusal."""
+    return py_tokenize_named(src, "")
+
+
+def py_tokenize_named(src: str, filename: str) -> list[Token]:
+    """`py_tokenize(src)`, with `filename` used only to prefix an
+    "unterminated string literal" diagnostic; pass `""` and the message
+    carries `line:col:` alone. Same shape as `Parser._loc`, so a lexer
+    refusal reads exactly like the parser's own."""
     import re
     string_cache = {}
     string_idx = [0]

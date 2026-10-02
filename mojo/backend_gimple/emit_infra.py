@@ -357,6 +357,41 @@ def _reset_func(gen, body: list = None, params: list = None,
     # C-shape divergence only — which is the other reason not to leave it: a
     # divergence nobody can see is one nobody looks for.
     gen._maybe_kinds_vals: set = set()
+    # Values that are a BOX — a heap cell a float had to be written into,
+    # because a float has no int64_t spelling — read out of a heterogeneous
+    # container at a slot index that is not a compile-time constant (see
+    # emit_calls.py's subscript arm and emit_loops.py's loop-target arm, the
+    # two writers). Every int64_t consumer of such a value routes through
+    # `mojo_box_int` / `mojo_repr_boxed` rather than reading the box's own
+    # address.
+    #
+    # Reset HERE for exactly the reason `_maybe_kinds_vals` above is, and it
+    # is the same leak in the same shape: both sets are keyed by C NAMES, the
+    # entries include TEMPS (`_tN`, and `temp_counter` restarts at 0 in every
+    # function's prologue two lines up), and neither was being cleared, so a
+    # later function's `_t160` matched an EARLIER function's box. Measured on
+    # this tree, in emit_loops.py's `_gen_for_dict`:
+    #
+    #     _t160 = _slit_10052;
+    #     _t161 = mojo_box_double (_t160);      /* _t160 is a char * */
+    #
+    # i.e. an ordinary string literal was unboxed as a float because some
+    # earlier function's dict loop had registered a temp of the same name
+    # (gcc: "passing argument 1 of 'mojo_box_double' makes integer from
+    # pointer without a cast"). The dict-loop temp that made this reachable is
+    # `_t160`'s producer in `mojo/backend_gimple/emit_loops.py`'s own
+    # `_mkv` arm — the `_boxed_vals.add(cvar)` there — so the two sites are
+    # one bug, not two.
+    #
+    # Per-function is correct rather than merely safe: like
+    # `_maybe_kinds_vals`, a box is a property of the VALUE, and a temp name
+    # cannot outlive the function that made it — the cross-function half is a
+    # different table entirely (`_return_maybe_kinds`, keyed by CALLEE name).
+    # Left ASSIGNED for the same reason as the four tables above: it is
+    # created in `GimpleGen.__init__`, but a rebind there is a leak under the
+    # self-hosted compiler, so it is emptied where every other per-function
+    # table is.
+    gen._boxed_vals.clear()
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.

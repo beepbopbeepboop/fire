@@ -1781,6 +1781,68 @@ def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list) -> str:
     return t
 
 
+def _bool_not(gen, ctype: str, val: str) -> str:
+    """`_Bool` negation of `val` as its own temp, in valid GIMPLE.
+
+    GIMPLE has no `!` operator: a `__GIMPLE`-tagged body's statement must
+    already BE GIMPLE, and the raw parser rejects `_b = !x` outright
+    ("'!' not valid in GIMPLE before '!' token"). The negation is a
+    COMPARISON against zero, and a raw-GIMPLE comparison additionally
+    requires both operands at the SAME C type ("mismatching comparison
+    operand types"), so the zero is materialized at the value's own type and
+    a pointer is widened through `int64_t` first — the same two-step every
+    other pointer/scalar comparison in the tree already uses.
+
+    This is the ONE place that knows that spelling, for the same reason
+    `_inc_val` is the one place that knows the `+ 1LL` idiom: two callers
+    had each hand-written it and each was a `!` (emit_calls.py's
+    `isinstance(x, list)`-and-not-a-tuple test and emit_exprs.py's
+    `x.__class__ is not T`), so the shape could not drift from what raw
+    GIMPLE accepts.
+    """
+    if ctype.endswith(' *') or ctype == 'void *':
+        iv = gen._new_val('int64_t', f'(int64_t){val}')
+        zt = 'int64_t'
+    elif ctype == '_Bool':
+        iv = gen._new_val('int', f'(int){val}')
+        zt = 'int'
+    elif ctype in ('int', 'int64_t'):
+        iv = val
+        zt = ctype
+    else:
+        iv = gen._new_val('int64_t', f'(int64_t){val}')
+        zt = 'int64_t'
+    # `0LL` for the 64-bit zero (a C-style cast is not a legal gimple
+    # OPERAND — see _inc_val), `(int)0` for the int one, which does need the
+    # cast because it is not a literal this emitter writes bare.
+    zero = (gen._new_val('int64_t', '0LL') if zt == 'int64_t'
+            else gen._new_val('int', '(int)0'))
+    t = gen._new_temp('_Bool')
+    gen._emit(f'  {t} = {iv} == {zero};')
+    return t
+
+
+def _bool_and(gen, left: str, right: str) -> str:
+    """`_Bool` conjunction of two `_Bool` temps as its own temp.
+
+    `&&` is not a GIMPLE operator either ("'&&' not valid in GIMPLE"), and
+    neither is a parenthesized sub-expression on the right of `=`, which is
+    what the shape `_b = (_l != 0) && (_r != 0)` reduces to once the parser
+    gives up on the `&&` ("expected expression before '(' token"). Each half
+    must therefore already be a `_Bool` TEMP (built with `_bool_not` or a
+    plain `_new_val('_Bool', 'x != 0')`), and the two combine with `&`.
+
+    Bitwise `&` on two `_Bool`s is `&&` here: raw GIMPLE requires both
+    operands of a bitwise op to be the same integer type, and these are.
+    The short-circuit `&&` would give is only worth having when an operand
+    has a side effect, which is why every caller of this passes two temps
+    that were already computed.
+    """
+    t = gen._new_temp('_Bool')
+    gen._emit(f'  {t} = {left} & {right};')
+    return t
+
+
 def _void_call(gen, fname: str, arg_pairs: list) -> tuple:
     """Emit a void call, return ('int', zero_temp)."""
     gen._emit_call('void', '', fname, arg_pairs)

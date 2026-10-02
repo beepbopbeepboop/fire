@@ -1485,10 +1485,10 @@ _CONTAINER_LITERAL_CTYPES: dict = {
     'TupleExpr': 'MojoList *',   # a tuple lowers to a real MojoList
 }
 
-def _each_binding(body: list):
-    """Every statement in `body` that can BIND a local, recursing through
-    control flow and never into a nested `FunctionDef` (which has its own
-    locals and its own return inference -- the same boundary
+def _each_binding(body: list) -> list:
+    """Every statement in `body` that can BIND a local, as a LIST, recursing
+    through control flow and never into a nested `FunctionDef` (which has its
+    own locals and its own return inference -- the same boundary
     `mutated_free_names` uses).
 
     ONE walker for the three local-type overlays below. Each of them used to
@@ -1498,30 +1498,45 @@ def _each_binding(body: list):
     overlay is strictly more evidence of the same kind -- it exists to give
     `_quick_type` a better type for a local, and a binding inside an `elif`
     is exactly as real as one inside the `else`.
+
+    Deliberately NOT a generator (it used to be, and so did the nested
+    `walk`): a `yield`/`yield from` function compiles to a REAL
+    stack-switching coroutine in this codegen, and this file is in the
+    self-host closure, so a coroutine here is one the compiled compiler
+    cannot lower in place -- its symbols would be referenced but never
+    defined, and the binary this very module is compiled into segfaults on
+    the first real walk. `test_selfhost.py`'s `closure_coroutines_are_lowerable`
+    names the pair exactly ("the stack-switch lowering left _each_binding,
+    walk"), and `mojo/middle/coro.py`'s `_walk` is the same conversion for
+    the same reason, with the fuller reasoning (a `mojo_raise()` from a
+    try/except elsewhere in this pipeline can longjmp across a suspended
+    coroutine's separate fiber stack). Same pre-order sequence either way.
     """
+    out: list = []
     def walk(stmts):
         for s in (stmts or []):
             if isinstance(s, gimple_ctypes.FunctionDef):
                 continue
-            yield s
+            out.append(s)
             if isinstance(s, gimple_ctypes.IfStmt):
-                yield from walk(s.then_body)
-                yield from walk(getattr(s, 'else_body', None))
+                walk(s.then_body)
+                walk(getattr(s, 'else_body', None))
                 for _cond, eb in (getattr(s, 'elifs', None) or []):
-                    yield from walk(eb)
+                    walk(eb)
             elif isinstance(s, (gimple_ctypes.WhileStmt,
                                 gimple_ctypes.ForStmt)):
-                yield from walk(getattr(s, 'body', None))
-                yield from walk(getattr(s, 'else_body', None))
+                walk(getattr(s, 'body', None))
+                walk(getattr(s, 'else_body', None))
             elif isinstance(s, gimple_ctypes.WithStmt):
-                yield from walk(s.body)
+                walk(s.body)
             elif isinstance(s, gimple_ctypes.TryStmt):
-                yield from walk(s.body)
+                walk(s.body)
                 for h in (getattr(s, 'handlers', None) or []):
-                    yield from walk(getattr(h, 'body', None))
-                yield from walk(getattr(s, 'else_body', None))
-                yield from walk(getattr(s, 'finally_body', None))
-    yield from walk(body)
+                    walk(getattr(h, 'body', None))
+                walk(getattr(s, 'else_body', None))
+                walk(getattr(s, 'finally_body', None))
+    walk(body)
+    return out
 
 
 
@@ -1536,16 +1551,52 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
     first-decl-wins rule. A later rebinding to a DIFFERENT kind therefore
     keeps the first container type, which is the same answer the
     declaration itself will give at codegen time, so the estimate and the
-    body agree."""
+    body agree.
+
+    ONE exception, and it is the difference between a CONTAINER and a
+    STRUCT: a local rebound to a different CONTAINER kind keeps its first
+    one because `d = {}` then `d = []` is a retyping of the same slot, but
+    a local rebound to a different STRUCT kind is not a retyping at all --
+    it is a value of no single C type, and the honest answer is the box.
+    So a name is recorded only while every pointer-shaped binding of it
+    agrees (see `_conflicting` below).
+
+    That exception is not a refinement, it is the whole ballgame for
+    `fire_compiler.Parser._parse_expr`. Its `left` is first bound by the
+    `not` branch's `left = UnaryOp(op="not", operand=operand)`, so
+    first-binding-wins typed it `UnaryOp *`, and `return left` therefore
+    inferred the whole PARSER's `UnaryOp * (Parser *, int64_t)` -- which
+    disagrees with the `int64_t` that three separate hand-written tables
+    (`gimple_codegen._SELFHOST_FUNC_RETURN_TYPES`, module_gen.py's `_sh_ret`
+    and its `_is_selfhost_file` forward-decl block) declare for
+    cross-module callers. Every one of the ~50 call sites then assigned a
+    `UnaryOp *` to an `int64_t` local:
+
+        assignment to 'int64_t' from 'UnaryOp *' makes integer from
+        pointer without a cast [-Wint-conversion]
+
+    while `left` goes on to hold CompareChain/BinaryOp/WalrusExpr/
+    TernaryExpr too as the operator loop refines it, so the answer was
+    never `UnaryOp *` in the first place. `_scan_body_for_local_field_access`
+    (module_gen.py) already refuses a name rebound to different node types
+    for the mirror-image reason -- "a name rebound to different node types in
+    one function ... must not mint fields on ANY of them" -- and this is the
+    same rule applied to the type instead of to the fields."""
     out: dict = {}
+    # Names whose pointer-shaped bindings DISAGREE. Checked before `out`,
+    # so a name that conflicts once can never be recorded again by a later
+    # round (the alias arm below re-reads `out` on every pass).
+    conflicting: set = set()
+
     def note(n):
         if not isinstance(n, gimple_ctypes.AssignStmt):
             return
         if not isinstance(n.target, gimple_ctypes.IdentExpr):
             return
         name = _as_str(n.target.name)
-        if name in out:
+        if name in conflicting:
             return
+        cand = None
         if isinstance(n.value, gimple_ctypes.StringLiteral):
             # A string/bytes literal is the SAME hazard a container literal
             # is, not the "genuine scalar" this function's own docstring
@@ -1553,62 +1604,80 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # default reads a `char *`/`MojoBytes *` bit pattern as a
             # number instead of failing loudly. `def f(): s = 'abc'; return
             # s` printed the pointer's decimal address instead of "abc"
-            # until this case was added; the container literals above
+            # until this case was added; the container literals below
             # already had an identical fix.
-            out[name] = 'MojoBytes *' if n.value.is_bytes else 'char *'
+            cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
+        else:
+            t = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
+            if t:
+                cand = t
+            else:
+                # A local bound from a call whose RESULT is a struct THIS
+                # compile knows: `p = P("a")` (a constructor) and `p = mk()`
+                # (a factory) are both a real `P *` pointer, as much evidence
+                # as the literals above. Restricted to a struct this compile
+                # registered, so an opaque imported class -- whose
+                # constructor/factory this codegen does not inline -- keeps
+                # the int64_t default exactly as before, and no scalar,
+                # container or `char *` answer is touched.
+                #
+                # This is what makes a METHOD CALL on a local resolvable:
+                # the return-type inference types `p.__repr__()` by looking
+                # the receiver's C type up in `gen.var_types` and finding the
+                # callee's registered return type under its mangled name
+                # (`_quick_type`'s `CallExpr`/`MemberExpr` struct-receiver
+                # arm) -- and at return-inference time `var_types` does not
+                # yet hold this function's locals, so the receiver read as
+                # an unknown, the enclosing function was declared `int64_t`,
+                # and the caller's `print` formatted the returned `char *`
+                # as a decimal address. See
+                # bugs/CODEGEN_return_type_not_inferred_from_a_method_call_
+                # result.md. `_quick_type` is the SAME estimator that call
+                # site uses, so the two agree by construction rather than by
+                # a second hand-written rule.
+                _v = n.value
+                if isinstance(_v, gimple_ctypes.CallExpr):
+                    _vt = gen._quick_type(_v)
+                    if _vt.endswith(' *') and _vt[:-2].strip() in gen.struct_field_types:
+                        cand = _vt
+                if cand is None:
+                    # `q = p` -- a local bound from ANOTHER local this map
+                    # already knows, which is the same value under a second
+                    # name (`p = P("a"); q = p; return q.__repr__()`). One
+                    # extra round of the walk below is what makes the order
+                    # irrelevant; an alias never CONFLICTS, because it takes
+                    # the type it aliases rather than a type of its own.
+                    if isinstance(_v, gimple_ctypes.IdentExpr):
+                        _src = _as_str(_v.name)
+                        if _src in out and _src != name:
+                            cand = out[_src]
+        if cand is None:
             return
-        t = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
-        if t:
-            out[name] = t
+        prev = out.get(name)
+        if prev is not None and prev != cand:
+            # Two pointer-shaped bindings of one name, and they disagree: the
+            # name holds values of more than one C type, so there is no
+            # pointer type to record and the int64_t box is the answer.
+            del out[name]
+            conflicting.add(name)
             return
-        # A local bound from a call whose RESULT is a struct THIS compile
-        # knows: `p = P("a")` (a constructor) and `p = mk()` (a factory)
-        # are both a real `P *` pointer, as much evidence as the literals
-        # above. Restricted to a struct this compile registered, so an
-        # opaque imported class — whose constructor/factory this codegen
-        # does not inline — keeps the int64_t default exactly as before,
-        # and no scalar, container or `char *` answer is touched.
-        #
-        # This is what makes a METHOD CALL on a local resolvable: the
-        # return-type inference types `p.__repr__()` by looking the
-        # receiver's C type up in `gen.var_types` and finding the callee's
-        # registered return type under its mangled name
-        # (`_quick_type`'s `CallExpr`/`MemberExpr` struct-receiver arm) —
-        # and at return-inference time `var_types` does not yet hold this
-        # function's locals, so the receiver read as an unknown, the
-        # enclosing function was declared `int64_t`, and the caller's
-        # `print` formatted the returned `char *` as a decimal address.
-        # See bugs/CODEGEN_return_type_not_inferred_from_a_method_call_
-        # result.md. `_quick_type` is the SAME estimator that call site
-        # uses, so the two agree by construction rather than by a second
-        # hand-written rule.
-        _v = n.value
-        if isinstance(_v, gimple_ctypes.CallExpr):
-            _vt = gen._quick_type(_v)
-            if _vt.endswith(' *') and _vt[:-2].strip() in gen.struct_field_types:
-                out[name] = _vt
-                return
-        # `q = p` — a local bound from ANOTHER local this map already knows,
-        # which is the same value under a second name (`p = P("a"); q = p;
-        # return q.__repr__()`). One extra round of the walk below is what
-        # makes the order irrelevant; the first-binding-wins guard above
-        # keeps a real first binding authoritative. Two hops is the same
-        # bound `_infer_return_maybe_kinds` documents for the identical
-        # one-hop propagation, and for the same reason: over-approximating
-        # here would only cost precision, while missing a case is a wrong
-        # signature.
-        if isinstance(_v, gimple_ctypes.IdentExpr):
-            _src = _as_str(_v.name)
-            if _src in out and _src != name:
-                out[name] = out[_src]
+        out[name] = cand
+
     for _n in _each_binding(body):
         note(_n)
-    # One more round, so `q = p` binds even when the alias is visited before
-    # the statement that gives `p` its type (a branch visited first, or a
-    # `for` body). `note` is idempotent — a name already recorded is left
-    # alone — so this only ever adds what the first pass could not resolve.
-    for _n in _each_binding(body):
-        note(_n)
+    # Repeat until the maps stop changing, so an alias binds even when it is
+    # visited before the statement that gives its source its type (a branch
+    # visited first, or a `for` body) and a conflict discovered in one round
+    # still disqualifies the name in the next. `note` is idempotent, `out`
+    # only ever gains names or loses them to `conflicting`, and `conflicting`
+    # only grows, so this terminates; the bound is a backstop, not the
+    # mechanism.
+    for _round in range(4):
+        _before = (len(out), len(conflicting))
+        for _n in _each_binding(body):
+            note(_n)
+        if (len(out), len(conflicting)) == _before:
+            break
     return out
 
 
