@@ -604,6 +604,65 @@ def test_bracket_mixing_keyword_and_positional():
           repr(sub))
 
 
+# ── 11b. A declared DEFAULT on a bracketed comptime parameter is kept ──────
+def test_bracket_param_default_is_captured():
+    """`def f[T, y=0, *, linux=0]()` must record `y`'s and `linux`'s defaults.
+
+    `_parse_generic_params_capture` walked the bracket capturing NAMES only
+    and skipped everything else, so `y=0`'s default was thrown away with the
+    annotation and the `//` separator. That is invisible until a call site
+    omits the parameter: `f[T=Int]()` has exactly one source of truth for
+    `y` — the declaration — and with it dropped the interpreter had nothing
+    to bind and answered None where the source says 0
+    (bugs/CODEGEN_interpreter_evaluates_a_keyword_bracket_call_as_a_subscript.md).
+
+    Kept in its own field rather than folded into `param_defaults`, because
+    that table's LENGTH is the trailing-default offset arithmetic's input
+    (`mojo/middle/exprtypes.py`'s `_trailing_default_at`) and a comptime
+    default in there would shift every RUNTIME default's slot.
+    """
+    fd = _named(_parse('def f[T, y=0, *, linux=0]():\n    return y\n'), 'f')
+    check("bracket_params_keep_their_names",
+          fd.comptime_params == ['T', 'y', 'linux'],
+          repr(fd.comptime_params))
+    check("bracket_param_defaults_are_captured",
+          sorted((fd.comptime_param_defaults or {}).keys()) == ['linux', 'y'],
+          repr(getattr(fd, 'comptime_param_defaults', None)))
+    y = (fd.comptime_param_defaults or {}).get('y')
+    check("bracket_param_default_keeps_its_value",
+          isinstance(y, N.IntLiteral) and y.value == 0, repr(y))
+    check("bracket_param_default_is_not_in_param_defaults",
+          'y' not in (fd.param_defaults or {}), repr(fd.param_defaults))
+
+    # A parameter with no default is absent from the table, not present with
+    # a None value — "no default" and "a default of None" must stay
+    # distinguishable, because the former is what makes an unsupplied
+    # bracketed parameter a refusal.
+    fd2 = _named(_parse('def g[T: Int, U](n: Int) -> Int:\n    return n\n'), 'g')
+    check("bracket_params_without_defaults_are_absent",
+          fd2.comptime_params == ['T', 'U'] and not fd2.comptime_param_defaults,
+          repr(getattr(fd2, 'comptime_param_defaults', None)))
+
+    # A default that is itself an expression, and a `//` comptime/runtime
+    # separator before one: neither may leak tokens into the name list.
+    fd3 = _named(_parse('def h[T: Int, S = [1, 2] //, linux: Int = 7](n):\n'
+                        '    return n\n'), 'h')
+    check("expression_default_does_not_leak_names",
+          fd3.comptime_params == ['T', 'S', 'linux'],
+          repr(fd3.comptime_params))
+    s = (fd3.comptime_param_defaults or {}).get('S')
+    check("expression_default_is_parsed_as_an_expression",
+          isinstance(s, N.ListExpr) and len(s.elements or []) == 2, repr(s))
+
+    # A `=` inside a function-typed annotation's OWN parens is not a default:
+    # it lives at bracket depth > 1, which the capture loop is counting.
+    fd4 = _named(_parse('def w[f_key: def(Int, Int) -> None thin](self):\n'
+                        '    pass\n'), 'w')
+    check("annotation_parens_do_not_become_a_default",
+          fd4.comptime_params == ['f_key'] and not fd4.comptime_param_defaults,
+          repr(getattr(fd4, 'comptime_param_defaults', None)))
+
+
 # ── 12. A MISPARSE is a refusal; a FUNCTION TYPE is still a placeholder ────
 def test_comptime_rhs_misparse_is_refused():
     """The two fates of a `comptime` right-hand side must be DISTINGUISHABLE.
@@ -684,6 +743,7 @@ def run_tests():
                test_decorated_import, test_multi_statement_result,
                test_used_idents_covers_new_syntax,
                test_bracket_mixing_keyword_and_positional,
+               test_bracket_param_default_is_captured,
                test_comptime_rhs_misparse_is_refused):
         print(f"\n--- {fn.__name__}")
         fn()

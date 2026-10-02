@@ -639,6 +639,12 @@ class FunctionDef:
     param_defaults: dict = field(default_factory=dict)  # name -> default value expression AST node
     kwonly: list = field(default_factory=list)  # names appearing after a bare `*,` separator
     comptime_params: list = field(default_factory=list)  # names from `def f[dtype: DType, ...](...)`
+    # Declared defaults of those bracketed parameters (`def f[T, y=0, *, linux=0]()`):
+    # `{name: default_expr_node}` for the ones written `name = expr`. Kept
+    # out of `param_defaults` because that table is the RUNTIME parameter
+    # list's and its LENGTH is the trailing-default offset arithmetic's
+    # input — see Parser._parse_generic_params_capture.
+    comptime_param_defaults: dict = field(default_factory=dict)
     is_generator: bool = False  # True if `yield`/`yield from` appears directly in this
         # function's own body (not inside a nested def/lambda/comprehension — a `yield`
         # there belongs to THAT inner scope, matching real Python scoping rules).
@@ -3369,8 +3375,9 @@ class Parser:
         # names (see _parse_generic_params_capture) so the interpreter can
         # bind `f[Int32]()`'s subscript to them by position.
         comptime_params = []
+        comptime_param_defaults = {}
         if self._peek().kind == "LBRACKET":
-            comptime_params = self._parse_generic_params_capture()
+            comptime_params, comptime_param_defaults = self._parse_generic_params_capture()
         self._expect("LPAREN")
         params = []
         param_convs = {}
@@ -3598,6 +3605,7 @@ class Parser:
                            param_defaults=param_defaults,
                            kwonly=kwonly,
                            comptime_params=comptime_params,
+                           comptime_param_defaults=comptime_param_defaults,
                            is_generator=is_generator,
                            yield_bearing_node_ids=yield_bearing_node_ids,
                            is_async=is_async,
@@ -3859,6 +3867,7 @@ class Parser:
                     param_defaults=_sf.param_defaults,
                     kwonly=_sf.kwonly,
                     comptime_params=_sf.comptime_params,
+                    comptime_param_defaults=_sf.comptime_param_defaults,
                     is_generator=_sf.is_generator,
                     yield_bearing_node_ids=_sf.yield_bearing_node_ids,
                     is_async=_sf.is_async,
@@ -4802,7 +4811,14 @@ class Parser:
                             if self._peek().kind == "COMMA": self._advance()
                             elif self._peek().kind != "RBRACKET": break
                         self._expect("RBRACKET")
-                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0, raw=''), attrs=_attrs)
+                        # The node inherits the CALLEE's position, which is
+                        # where a diagnostic about this bracket belongs —
+                        # `SubscriptExpr(...)` built with the dataclass
+                        # defaults reports `0:0`, which is what
+                        # myinterpreter.py's unbindable-comptime-parameter
+                        # TypeError used to print.
+                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0, raw=''), attrs=_attrs,
+                                             line=expr.line, col=expr.col)
                     else:
                         # Parse a comma-separated list of subscript items. Each
                         # item is a slice (start:stop:step) or a plain expression,
@@ -5888,13 +5904,29 @@ class Parser:
     def _parse_generic_params_capture(self):
         """Consume a `def f[dtype: DType, width: SIMDSize, //, ...](...)`
         generic/comptime parameter block like `_skip_bracketed`, but also
-        return just the parameter names in declaration order (ignoring
-        types, trait bounds, defaults, and the `//` comptime/runtime
-        separator) — enough for the interpreter to bind a call-site
-        subscript (`f[Int32]()`) to names by position, e.g. so the function
-        body can read `dtype` as a plain value."""
+        return the parameter names in declaration order together with the
+        DECLARED DEFAULTS of the ones written `name = expr` — enough for
+        the interpreter to bind a call-site subscript (`f[Int32]()`) to
+        names by position, e.g. so the function body can read `dtype` as a
+        plain value, and to answer `f[T=Int]()` for a parameter the bracket
+        does not supply (`def f[T, y=0, *, linux=0]()`'s `y`).
+
+        Returns `(names, defaults)`: `defaults` is `{name: expr_node}` for
+        the parameters that declare one. It is kept apart from
+        `FunctionDef.param_defaults` because that table is the RUNTIME
+        parameter list's, and its LENGTH is the trailing-default offset
+        arithmetic's input (`_trailing_default_at`) — a comptime default in
+        there would shift every runtime default's slot.
+
+        The default's value is read by `_parse_bracket_param_default`, which
+        takes the token span between the `=` and the next top-level COMMA or
+        RBRACKET — so a `=` is only read as a default at bracket depth 1, and
+        the parameter list's own punctuation after the value (notably the
+        comptime/runtime separator `//`) is not fed to the expression parser.
+        """
         self._expect("LBRACKET")
         names = []
+        defaults = {}
         depth = 1
         expect_name = True
         while depth > 0:
@@ -5920,12 +5952,73 @@ class Parser:
             if t.kind == "COMMA" and depth == 1:
                 self._advance(); expect_name = True; continue
             if depth == 1 and expect_name and t.kind in ("NAME", "KW"):
-                names.append(t.value)
+                _nm = t.value
+                names.append(_nm)
                 self._advance()
                 expect_name = False
+                if self._peek().kind == "ASSIGN":
+                    self._advance()
+                    defaults[_nm] = self._parse_bracket_param_default()
                 continue
             self._advance()
-        return names
+        return names, defaults
+
+    def _parse_bracket_param_default(self):
+        """The declared default of a bracketed (`def f[T, y=0, ...]`)
+        parameter, parsed from the token span that runs from here to the next
+        top-level COMMA or RBRACKET. The span is consumed either way, so the
+        caller's loop resumes at the separator.
+
+        Spanned, not parsed in place, because what FOLLOWS the value is
+        parameter-list punctuation and is not part of it: the
+        comptime/runtime separator `//` (`def f[T: Int //, n: Int]`) lexes as
+        the floor-div OPERATOR, so an in-place `_parse_expr` swallows it
+        looking for a right operand and dies on the `,` — turning a
+        declaration this function used to skip over into a SyntaxError.
+        Parsing the span with a sub-parser is the same shape the rest of the
+        tree uses for a bracket item that has to be a self-contained
+        expression run (`myinterpreter.py`'s subscript re-parse).
+
+        Layout tokens are dropped: a multi-line parameter list carries
+        NEWLINE/INDENT/DEDENT the expression parser must not see.
+        """
+        _start = self._pos
+        _depth = 1
+        _end = _start
+        while _end < len(self._tok):
+            _tk = self._tok[_end]
+            if _tk.kind == "EOF":
+                break
+            if _tk.kind in ("LPAREN", "LBRACE", "LBRACKET"):
+                _depth += 1
+            elif _tk.kind in ("RPAREN", "RBRACE"):
+                _depth -= 1
+            elif _tk.kind == "RBRACKET":
+                if _depth == 1:
+                    break
+                _depth -= 1
+            elif _tk.kind == "COMMA" and _depth == 1:
+                break
+            _end += 1
+        _span = []
+        # A trailing `//` is the comptime/runtime separator, not part of the
+        # value (`def f[T = 1 //, n: Int]`), so it stays in the parameter
+        # list for the caller's loop to step over — as it did before any
+        # default was captured. Only a TRAILING one: `1 // 2` is a floor
+        # division and keeps its operator.
+        if _end > _start and self._tok[_end - 1].kind == "OP" \
+                and self._tok[_end - 1].value == "//":
+            _end -= 1
+        for _i in range(_start, _end):
+            if self._tok[_i].kind in ("NEWLINE", "INDENT", "DEDENT"):
+                continue
+            _span.append(self._tok[_i])
+        self._pos = _end
+        if _end > len(self._tok):
+            self._pos = len(self._tok)
+        if not _span:
+            return None
+        return Parser(_span).with_filename(self._filename)._parse_expr(0)
 
     def _skip_fn_quals(self):
         """Skip function-type qualifiers between a parameter list and `->`:
