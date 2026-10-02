@@ -1237,7 +1237,9 @@ print(d2["k"]())
 """)
 
     # ── `with` teardown: the `as` target is optional, and so is running
-    # ── __exit__ at all (bugs/CODEGEN_with_no_as_target_drops_exit.md).
+    # ── __exit__ at all. Fixed, and the doc
+    # ── (`CODEGEN_with_no_as_target_drops_exit`) is deleted, so this comment
+    # ── is the record.
 
     # `with C():` with NO `as` target used to drop the teardown entirely. The
     # five index-parallel per-item lists `_gen_stmt_WithStmt` feeds
@@ -5407,9 +5409,10 @@ main()
     # `Dialog(5)` emitted `_t3 = (void *)_t5; _t4 = (char *)_t3;` with
     # `_t5 = (int64_t)5`, and the first `mojo_print` then `strlen`ed address
     # 5 — SIGSEGV, exit -11, not even the line before it reached stdout
-    # (bugs/CODEGEN_annotated_str_param_given_an_int_segfaults.md; the same
-    # crash was filed a second time as
-    # bugs/CODEGEN_method_returning_self_str_field_segfaults.md, whose
+    # (both docs FIXED and DELETED with the fix, so this comment is the record:
+    # `CODEGEN_annotated_str_param_given_an_int_segfaults`, and the same crash
+    # filed a second time as
+    # `CODEGEN_method_returning_self_str_field_segfaults`, whose
     # diagnosis pointed at the method's return path and was wrong — the
     # generated C for `Dialog_show` is a correct `char *` load and the fault
     # is entirely upstream, at the constructor's argument).
@@ -5921,7 +5924,9 @@ def main():
 
     test_for_target_bare_one_tuple_matches_paren_ast()
 
-    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md "Item 8": a
+    # Item 8 of `CODEGEN_coro_yield_kind_unresolved_callsite` (a
+    # bugs/hard doc, FIXED and DELETED with the fix, so this comment and the
+    # cases below are the record): a
     # for-loop over a list PARAMETER read every element through
     # `mojo_list_get_int` whenever the argument was a list LITERAL, because
     # the cross-call container element-type contract only ever looked at an
@@ -6445,8 +6450,10 @@ def main():
                             "main()\n",
     }, 'compr_shadow2.py')
 
-    # bugs/CODEGEN_inline_import_string_pool_name_collision.md — an imported
-    # module's string-literal pool, and what that doc's report actually was.
+    # An imported module's string-literal pool. Its doc
+    # (`CODEGEN_inline_import_string_pool_name_collision`) is FIXED and DELETED,
+    # so this comment is the record of what it reported and what is actually
+    # there.
     #
     # It reported a gcc `redefinition of 'char* _slit_10000'` from an inline
     # compile of a package whose sibling yields strings. Re-measured on this
@@ -7150,8 +7157,10 @@ if __name__ == '__main__':
                             "main()\n",
     }, 'compr_shadow2.py')
 
-    # bugs/CODEGEN_inline_import_string_pool_name_collision.md — an imported
-    # module's string-literal pool, and what that doc's report actually was.
+    # An imported module's string-literal pool. Its doc
+    # (`CODEGEN_inline_import_string_pool_name_collision`) is FIXED and DELETED,
+    # so this comment is the record of what it reported and what is actually
+    # there.
     #
     # It reported a gcc `redefinition of 'char* _slit_10000'` from an inline
     # compile of a package whose sibling yields strings. Re-measured on this

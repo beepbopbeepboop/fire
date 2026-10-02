@@ -10,7 +10,8 @@ static left to pick `mojo_dict_contains` / `mojo_list_contains_int` /
 `mojo_set_contains_str` from. The dispatchers' job is to recover the type from
 the runtime's allocation registries, and the int view did not: it had no dict
 branch at all, so `x in <boxed dict>` answered False for every key
-(bugs/CODEGEN_in_dispatch_int_has_no_dict_branch.md), and it asked the INT
+(`CODEGEN_in_dispatch_int_has_no_dict_branch`, FIXED and its doc deleted with
+the fix, so this docstring is the record), and it asked the INT
 predicates about a needle that was really a boxed `char *`, so `x in <boxed
 set of str>` answered False too -- a set's strings live in tag-1 slots, which
 the int-domain probe cannot address at all. Every one of those was a False
@@ -51,8 +52,8 @@ def _p(*lines: str) -> str:
 # line-by-line diff rather than one opaque exit status.
 CASES = [
     # ── the bug: a dict behind an unannotated parameter ─────────────────────
-    # Verbatim the shape in
-    # bugs/CODEGEN_in_dispatch_int_has_no_dict_branch.md: the needle is read
+    # Verbatim the shape in `CODEGEN_in_dispatch_int_has_no_dict_branch` (fixed,
+    # doc deleted): the needle is read
     # out of a list of strings with `mojo_list_get_int`, so it arrives as an
     # int64_t holding a `char *`, and the whole question lowers to the INT
     # view. Note ONE call site per helper: a second call site passing a list

@@ -5595,8 +5595,11 @@ def gen_module_impl(self, stmts):
         the SAME call with the list written in place — inherited nothing. The
         callee then read every element through `mojo_list_get_int` and
         `print(r)` emitted the floats' raw IEEE-754 bit patterns with exit 0.
-        See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md
-        ("Item 8")."""
+        That was "Item 8" of `CODEGEN_coro_yield_kind_unresolved_callsite`, a
+        bugs/hard doc since FIXED and DELETED with this contract; the cases
+        that pin it are `gimple_for_over_list_param_from_float_literal`,
+        `..._from_keyword_literal`, `..._from_str_literal` and
+        `..._nested_list_param_from_literal` in test_gimple_runner.py."""
         if not isinstance(a, ListExpr):
             return None
         els = a.elements

@@ -6198,16 +6198,20 @@ def main():
     # (a) used to be `g(3)` and `g(5)` with the comment "call sites
     # disagree" -- two ints, which AGREE, so the `len(kinds) > 1` branch never
     # fired and the narrowness this test is named for was never exercised at
-    # all (bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md, "A test
-    # hole found on the way"). The conflict now really exists: `x` is
+    # all (found as "A test hole found on the way" in
+    # `CODEGEN_coro_yield_kind_unresolved_callsite`, a bugs/hard doc since
+    # FIXED and DELETED). The conflict now really exists: `x` is
     # unannotated and its two call sites pass an int and a `char *`, while
     # `y` -- the param actually yielded -- is unanimous `double`. `x` is
     # never READ in the body, so this is decidable without a tagged ABI and
     # has a correct answer to assert, which the old arithmetic-use version
     # did not: reading a genuinely conflicting param is the cross-cutting
     # one-C-type-per-slot limitation, and asserting a value for it would
-    # assert the wrong answer. See
-    # bugs/CODEGEN_param_ctype_conflicting_call_sites.md.
+    # assert the wrong answer. That limitation is
+    # bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md, still
+    # OPEN; the `int64_t`-is-not-evidence rule in `_record_param_elem` is the
+    # part of it that is fixed, and this case is where that rule earns its
+    # keep.
     def test_conflicting_callsite_gate_is_narrow():
         global _PASS, _FAIL
         name = "conflicting_callsite_gate_is_narrow"
