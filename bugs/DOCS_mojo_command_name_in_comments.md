@@ -3,6 +3,22 @@
 **Area:** docs/prose. **Behaviour:** none — nothing here prints, and no test
 reads it. **Status:** open, 34 references, all one-line prose edits.
 
+**Not done 2026-10-01, and the reason is unchanged: file ownership.** The list
+below is 15 files, and the largest of them — `myinterpreter.py`,
+`gimple_codegen.py`, `module_loader.py`, `mojo/backend_gimple/funcs_shared.py`,
+`emit_exprs.py`, `types.py` — are the write sets of the codegen claims, which
+were still running. A one-word comment change does not conflict semantically,
+but it does textually, and thirty parallel branches editing the same lines is
+a cost paid by the integrator rather than by the author. The one edit that
+carries its own claim is `fault_tolerance.py:9` ("exactly what `mojo -h`
+documents as the fallback") and `driver.py:2` (the module docstring); both are
+single-line and both are in files no claim names.
+
+The behaviour half of this is done (`a51479c`: the printed name follows
+`sys.argv[0]`, `formal/build.py`'s "written next to the dylib by `mojo dylib
+--formal`", and `test_cli_usage_text.py` guards it), so the cost of leaving
+this is one stale grep result per reader, not a wrong program.
+
 ## What
 
 The tool is `fire.py` (it was `mojo.py`). `fire.py --help`, `-v` and every
