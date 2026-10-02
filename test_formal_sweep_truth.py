@@ -585,5 +585,71 @@ class TestSystemModuleCall(unittest.TestCase):
                       "the tool's contract with a reader who has not read it")
 
 
+# ── 4. an interpreter that cannot import the backend ─────────────────────────
+#
+# Every file in a sweep is answered by `fire.py build --formal` in a child of
+# the interpreter running the sweep, so one that cannot import `formal.build`
+# cannot answer a single file. It fails in the least visible way there is: each
+# child dies inside an import, the classifier reads the traceback as
+# `backend-crash`, and the run comes back as a finding per FILE about the
+# compiler's plumbing. Measured with the `python3` a shell finds by default on
+# this machine (Xcode's 3.9.6, which is what `python3` resolves to before any
+# Homebrew directory is on PATH): 392 of 392 files, `backend-crash`, in about a
+# minute. So the guard is asserted here in both halves — it fires on a backend
+# that will not import, and it is silent on one that will.
+class TestInterpreterGuard(unittest.TestCase):
+    def test_a_healthy_interpreter_is_asked_nothing(self):
+        self.assertEqual(
+            S.interpreter_diagnosis(), "",
+            "this file is running, so the backend imports; the guard must not "
+            "speak on a sweep that could have run")
+
+    def test_a_backend_that_will_not_import_stops_the_sweep_before_any_build(self):
+        """The failure branch, and it is a failure branch that COST a session.
+
+        `formal/model.py` annotates `def call_callee_name(func) -> str | None`,
+        which 3.9 evaluates eagerly and cannot: every x86-64 sweep run on the
+        default `python3` reported one `backend-crash` per file and no coverage
+        number at all. Exit 2 is the documented status for a sweep that did not
+        run, and nothing may be swept or cached on the way out.
+        """
+        boom = TypeError("unsupported operand type(s) for |: 'type' and "
+                         "'NoneType'")
+        argv, real = sys.argv, S.importlib.import_module
+
+        def refuse(name, *a, **kw):
+            if name == "formal.build":
+                raise boom
+            return real(name, *a, **kw)
+
+        S.importlib.import_module = refuse
+        err = io.StringIO()
+        try:
+            sys.argv = ["formal_sweep.py", "--no-stdlib", "formal/model.py"]
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit) as caught:
+                    S.main()
+        finally:
+            S.importlib.import_module = real
+            sys.argv = argv
+        self.assertEqual(caught.exception.code, 2,
+                         "a sweep that could not build anything is 2 ('did not "
+                         "run'), never 1 ('there were findings')")
+        said = err.getvalue()
+        self.assertIn("could have been built", said)
+        self.assertIn(str(boom), said, "the reader needs the exception itself, "
+                     "not a paraphrase of it")
+        self.assertIn(sys.executable, said,
+                      "the message has to name the interpreter that failed, or "
+                      "it is advice about the wrong python")
+        self.assertIn(sys.version.split()[0], said)
+        self.assertIn("backend-crash", said,
+                      "the reader needs to know what the run WOULD have said, "
+                      "because the symptom they came here with is a wall of "
+                      "those lines")
+        self.assertNotIn("Total:", said, "the sweep must stop before it "
+                         "announces a scope it cannot cover")
+
+
 if __name__ == "__main__":
     unittest.main()

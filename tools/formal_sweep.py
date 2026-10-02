@@ -281,6 +281,7 @@ import collections
 import concurrent.futures
 import ctypes
 import datetime
+import importlib
 import json
 import os
 import re
@@ -311,6 +312,55 @@ MEMCAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memcap.py")
 # the cache key and the argv below, so the two cannot drift apart.
 def build_flags(arch: str) -> tuple:
     return ("--formal", "--no-prove", f"--backend={arch}")
+
+
+def interpreter_diagnosis() -> str:
+    """Empty when this interpreter can load the backend; the diagnosis if not.
+
+    Every file in a sweep is answered by `fire.py build --formal` in a child of
+    THIS interpreter, so an interpreter that cannot import the backend cannot
+    answer one file, and it fails in the least visible way there is: each child
+    dies on the same exception inside an import, the classifier reads a
+    traceback ending in a build failure as `backend-crash`, and the run comes
+    back as N findings about the compiler's own plumbing and zero about any
+    source. Measured on this machine with the `python3` a shell finds by
+    default — Xcode's 3.9.6, because it is what `python3` resolves to before
+    any Homebrew directory is on PATH:
+
+        $ python3 tools/formal_sweep.py --no-stdlib --arch x86_64 -j2
+        BACKEND-CRASH: abfulltest_driver.mojo  (the backend raised: TypeError:
+          unsupported operand type(s) for |: 'type' and 'NoneType')
+        ... 392 of them, one per file, in about a minute ...
+        backend-crash                 392
+
+    which reads as "this backend is broken in every file at once" and is
+    actually "no file was built at all". The refusal is not in the backend's
+    coverage and must not be counted in it, so the check is here, before any
+    build, and it exits 2 — the documented status for a sweep that did not run.
+
+    It imports the module rather than testing `sys.version_info` against a
+    number, because the number is not written down anywhere in this repository
+    and a hard-coded floor would be a second, wrong one: what the sweep needs is
+    "the backend imports", and that is a fact this interpreter can answer.
+    """
+    try:
+        importlib.import_module("formal.build")
+    except Exception as e:
+        return (
+            f"this python cannot import the formal backend, so no file in this "
+            f"sweep could have been built: {type(e).__name__}: {e}\n"
+            f"  interpreter: {sys.executable} (python "
+            f"{sys.version.split()[0]})\n"
+            f"  the backend needs a python that can evaluate a PEP 604 "
+            f"annotation (`str | None`) at def time — 3.10 or newer. On macOS "
+            f"`python3` is Apple's 3.9 unless a newer one comes first on PATH, "
+            f"so run this with the interpreter the suite uses, e.g.\n"
+            f"    /opt/homebrew/bin/python3 {sys.argv[0]} ...\n"
+            f"  (or put that directory first on PATH). Nothing was swept and "
+            f"nothing was cached; every file would have been classified "
+            f"`backend-crash`, which is a fact about this interpreter and not "
+            f"about any source.")
+    return ""
 
 
 def _criteria_id() -> str:
@@ -2537,6 +2587,11 @@ def main():
     args = ap.parse_args()
     arch = "x86_64" if args.arch in ("x86-64", "amd64") else args.arch
     flags = build_flags(arch)
+
+    unusable = interpreter_diagnosis()
+    if unusable:
+        print(unusable, file=sys.stderr)
+        sys.exit(2)
 
     # Roots: explicit paths win outright, otherwise repo + stdlib subtrees.
     notes = []

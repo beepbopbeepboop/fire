@@ -56,10 +56,11 @@ The same commands under `/opt/homebrew/bin/python3.11` (3.11.16 — the version
 files normally. `/opt/homebrew/bin/python3` is 3.14.7 and every other worker on
 this machine is already invoking it by absolute path.
 
-## CORRECTION, measured while merging: the floor is 3.12+, not 3.10+, and 3.11 is NOT enough
+## CORRECTION, measured while merging: there are TWO floors, and the
+## recommended version is on the wrong side of one of them
 
 The measurement above is right about the failure and about the direction of the
-answer, and its recommended version is one release too low.
+answer, and its recommended version is one release too low for half the tree.
 
 ```
 $ /opt/homebrew/bin/python3.11 -c "compile(open('formal/arm64_proof_gen.py').read(),'x','exec')"
@@ -69,18 +70,32 @@ SyntaxError: f-string expression part cannot include a backslash
 ```
 
 PEP 701 (backslashes inside f-string expression parts) is **3.12+**, and
-`formal/arm64_proof_gen.py` uses it. So the tree does not merely need `str |
-None` evaluated at def time; it also needs an f-string the 3.11 grammar rejects
-at PARSE time. Two consequences worth stating:
+`formal/arm64_proof_gen.py` uses it. So there are TWO floors in this tree, not
+one, and which one you meet depends on what you are running:
 
-* a 3.11 host produces a *different* and much more confusing symptom — a
-  `SyntaxError` with a bare `"""` for a caret line hundreds of lines from the
-  real one, rather than the `TypeError` the 3.9 measurement caught;
+| what | floor | why |
+|---|---|---|
+| `tools/formal_sweep.py`, `fire.py build --formal --no-prove` | **3.10+** | `formal/build.py` imports only `formal/{model,imports,arm64_codegen,x86_64_codegen,…}`; `arm64_proof_gen` is behind `if prove:`, so `--no-prove` never reaches it |
+| `fire.py build` WITH proofs, `tools/suite.py`'s closure fingerprint, anything importing `formal.arm64_proof_gen` | **3.12+** | PEP 701 in that one file |
+
+Two consequences worth stating:
+
+* a 3.11 host running the second thing produces a *different* and much more
+  confusing symptom than the 3.9 one this doc measured — a `SyntaxError` with
+  a bare `"""` for a caret line hundreds of lines from the real one, rather
+  than the `TypeError` at `formal/model.py:1668`;
 * `doc/mojo-manual-python.md:29`'s `python==3.11` and step 1's
-  `PYTHON ?= python3.11` would both land on the wrong side of this.
+  `PYTHON ?= python3.11` would both land on the wrong side of the SECOND floor
+  while looking like they satisfy the first, which is the worst of the two
+  arrangements: a reader who checked the sweep would conclude 3.11 is enough.
 
-The floor is therefore **3.12+**, and `/opt/homebrew/bin/python3` (3.14.7) is on
-the right side of it. Re-measured on the merged tree:
+`tools/formal_sweep.py`'s own `interpreter_diagnosis()` guard
+(`work/formal4-sweep-x86-a`, `5cd35093`) is right to say 3.10, because the
+guard IMPORTS `formal.build` and the sweep runs `--no-prove` — it checks the
+floor that applies to it rather than the floor that applies to the tree.
+
+`/opt/homebrew/bin/python3` (3.14.7) is on the right side of both.
+Re-measured on the merged tree:
 
 ```
 $ /opt/homebrew/bin/python3.14 -c "import formal.build, formal.model, \
@@ -88,9 +103,10 @@ $ /opt/homebrew/bin/python3.14 -c "import formal.build, formal.model, \
 (clean)
 ```
 
-Nothing else in the tree needs 3.13+ — `compile()` over every top-level `.py`
-in the repo succeeds on 3.14, and the modules above import on 3.14 with no
-warning — so 3.12 is the number to write down and 3.14 is what to run.
+Nothing else in the tree needs 3.13+ — `compile()` over every top-level `.py`,
+plus `formal/*.py` and `tools/*.py`, succeeds on 3.14 with zero syntax failures,
+and the modules above import on 3.14 with no warning — so **3.12 is the number
+to write down** and 3.14 is what to run.
 
 ## The part that is not a machine fact
 

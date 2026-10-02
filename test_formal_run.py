@@ -4656,6 +4656,25 @@ BOTH_ARCH_CASES = [
      "def main(n: Int) -> Int:\n"
      "    var s = Scale(3, 7)\n"
      "    return s.total()\n", 51, None),
+    # THE TRAP, which is the one assertion about augmented division that has no
+    # CPython oracle: `DIV`/`IDIV` by zero is a HARDWARE fault (SIGFPE on this
+    # target), and CPython raises ZeroDivisionError, so neither answer is a
+    # stdout a reference could produce.  x86-64's `_emit_aug_assign` refused
+    # `x //= 0` by name for the whole life of the construct — it had no route to
+    # the divide at all — and arm64 routed all four of `/=` `//=` `%=` `**=` to
+    # the same helper its binary form uses, whose zero arm exits 1.  So the
+    # delegation that closed the two-architecture gap had to bring the trap with
+    # it, and this row is the only place in the suite that can say whether it
+    # did: a lowering that reached the instruction without the check would build,
+    # and die on a signal (exit 136), which is a different number from the one
+    # below and a worse kind of wrong answer than the refusal it replaced.
+    # The four operators' VALUES are `test_formal_x86_64_parity.py`'s
+    # `aug_division_and_power_on_a_name`, which has a CPython oracle for them.
+    ("both_arch_augmented_division_by_zero_exits_one",
+     "def main(n: Int) -> Int:\n"
+     "    x = 7\n"
+     "    x //= 0\n"
+     "    return x\n", 1, None),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [

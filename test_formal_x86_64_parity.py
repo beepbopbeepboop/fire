@@ -248,6 +248,155 @@ CASES = [
      "    sys.stdout.write(\" %d %d %d\" % (\n"
      "        len([1, 2, 3, 4]), len(range(10)), len([])))\n"
      "    return 0\n"),
+    # THE SAME TUPLE STORE INSIDE `__init__`, WHICH USED TO BE A REFUSAL AND IS
+    # NOT ONE ANY MORE — it is in `CASES` because both backends now answer it
+    # with CPython's answer, and this row was the reason the shared REFUSALS list
+    # is shorter than it was.
+    #
+    # `h.x, h.y = p, q` outside a constructor reached a different pass from the
+    # same SPELLING inside one, and the constructor-with-arguments inline needed
+    # the body to BE a straight line of `self.<field> = …` stores.  A tuple
+    # target is not, so it was refused — which was only correct while BOTH
+    # machines said so, and x86-64 used to reach its own `_emit_tuple_assign` and
+    # refuse with a different sentence ("tuple assignment targets must be plain
+    # names on the formal x86-64 path").  Two architectures, two refusals, one
+    # program.
+    #
+    # `_init_statement_field_stores` is what closed it: one table for the single
+    # and the tuple target shape, so the inline performs the tuple store and
+    # `CONSTRUCTION_INIT` carries it.  Measured after the merge:
+    #
+    #     CPython  't=7'
+    #     arm64     exit=0 stdout='t=7'
+    #     x86-64    exit=0 stdout='t=7'
+    #
+    # So the row is here rather than in REFUSALS, where it asserted a refusal
+    # that no longer fires.  The construct it was filed for — the SPELLING being
+    # two-architecture-specific — is still what this file is for; what changed is
+    # that both machines now agree on the answer instead of on the refusal.
+    ("tuple_target_in_a_constructor_body_answers_on_both",
+     "class Tail:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x, self.y = p, q\n"
+     "    def total(self):\n"
+     "        return self.x + self.y\n"
+     "def main(n):\n"
+     "    var t = Tail(3, 4)\n"
+     "    printf(\"t=%d\", t.total())\n"
+     "    return 0\n",
+     "import sys\n\nclass Tail:\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x, self.y = p, q\n"
+     "    def total(self):\n"
+     "        return self.x + self.y\n\n"
+     "def main():\n"
+     "    t = Tail(3, 4)\n"
+     "    sys.stdout.write(\"t=%d\" % t.total())\n"
+     "    return 0\n"),
+    # THE AUGMENTED FORM OF THE FOUR OPERATORS THE ALU TABLE CANNOT EXPRESS.
+    # `/` `//` `%` are a ONE-operand instruction whose zero arm is a trap and
+    # `**` is an unroller, so `_ALU_RR` holds none of them and neither does the
+    # shift table. arm64's `_emit_aug_assign` has always routed all four to the
+    # same two helpers its binary form uses (`_emit_div_shift_pow`); x86-64's
+    # twin had no such route, so `x /= 2`, `x //= 2`, `x %= 2` and `x **= 2`
+    # were REFUSED by name on this backend while arm64 built and ran them — four
+    # spellings of one construct, and a two-architecture disagreement about
+    # ordinary Python that nothing here could see, because every other case in
+    # this file reached the operator through a pointer or a list element rather
+    # than through a name.
+    #
+    # All four in one program, because a delegation that added `/=` and stopped
+    # there would pass a program that used only `/=`.
+    ("aug_division_and_power_on_a_name",
+     "def main():\n"
+     "    a = 20\n"
+     "    a //= 3\n"
+     "    b = 20\n"
+     "    b %= 6\n"
+     "    c = 3\n"
+     "    c **= 3\n"
+     "    d = 20\n"
+     "    d /= 4\n"
+     "    printf(\"%d %d %d %d\", a, b, c, d)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    a = 20; a //= 3\n"
+     "    b = 20; b %= 6\n"
+     "    c = 3;  c **= 3\n"
+     "    d = 20; d /= 4\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (a, b, c, d))\n"
+     "    return 0\n"),
+    # `**` WITH AN EXPONENT ABOVE TWO, in the BINARY form, because the fix above
+    # is a delegation and a delegation can carry a wrong answer with it:
+    # x86-64's `_emit_pow` unrolled a small literal exponent by copying the
+    # accumulator into R11 and popping that same accumulator back into RAX, so
+    # both registers held one word and every step computed `acc * acc`. The
+    # answer was `base ** (2 ** (lit - 1))` — `3 ** 3` answered 81 where the
+    # source says 27, and `3 ** 8` answered 3**128 — built, ran, and disagreed
+    # with arm64, with the whole suite green throughout because exponent 2 is
+    # the one value a squaring gets right and it was the only exponent anything
+    # tested.
+    #
+    # Exponents 3, 4, 5, 8 and 8 over a second base, so a fix that repaired the
+    # first iteration of the unroll and left the rest answers 81 where the source
+    # says 27. The last two are the same exponent over two bases because the
+    # squaring is wrong by a different factor in each, and a base of 1 or 0 hides
+    # it entirely — so neither appears here.
+    ("literal_power_above_two",
+     "def main():\n"
+     "    printf(\"%d %d %d %d %d\", 3 ** 3, 3 ** 4, 3 ** 5, 2 ** 8, 3 ** 8)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    sys.stdout.write(\"%d %d %d %d %d\" % (3 ** 3, 3 ** 4, 3 ** 5,\n"
+     "                                            2 ** 8, 3 ** 8))\n"
+     "    return 0\n"),
+    # THE SAME DELEGATION THROUGH A FRAME SLOT, which is a different route and
+    # not a variation: a plain name loads and stores a local, while `self.x`
+    # goes through `_member_slot_key` into the frame's slot array, and
+    # `_emit_div_mod`/`_emit_pow` reach the target through `_emit_expr` /
+    # `_store_var` rather than through the local path.  A delegation that named
+    # the target correctly but stored it as a local would compute 101 and keep
+    # it in a register, and the case above — which reads a name — would still
+    # pass.
+    #
+    # TWO fields on purpose.  A one-field struct's receiver IS its field rather
+    # than a frame address (`model.struct_fits_one_word` says the same thing in
+    # its own words), and on this backend a field stored by a zero-argument
+    # `__init__` of a one-field struct reads back as 0
+    # (`bugs/FORMAL_one_field_struct_field_stored_in_a_zero_arg_init_reads_as_zero.md`),
+    # so a one-field spelling of this case would be measuring that bug and not
+    # this construct.
+    ("aug_division_through_a_frame_slot",
+     "class Pair:\n"
+     "    def __init__(self):\n"
+     "        self.n = 20\n"
+     "        self.m = 3\n"
+     "\n"
+     "    def shrink(self):\n"
+     "        self.n //= 2\n"
+     "        self.m %= 2\n"
+     "        return self.n * 10 + self.m\n"
+     "\n"
+     "def main():\n"
+     "    var p = Pair()\n"
+     "    printf(\"%d\", p.shrink())\n"
+     "    return 0\n",
+     "import sys\n\nclass Pair:\n"
+     "    def __init__(self):\n"
+     "        self.n = 20\n"
+     "        self.m = 3\n"
+     "\n"
+     "    def shrink(self):\n"
+     "        self.n //= 2\n"
+     "        self.m %= 2\n"
+     "        return self.n * 10 + self.m\n"
+     "\n"
+     "def main():\n"
+     "    p = Pair()\n"
+     "    sys.stdout.write(\"%d\" % p.shrink())\n"
+     "    return 0\n"),
 ]
 
 
@@ -268,36 +417,29 @@ REFUSALS = [
      "    printf(\"%d\\n\", len(a[0]))\n"
      "    return 0\n",
      "'+=' on two strings is refused"),
-    # THE SECOND HALF of the tuple-store divergence, and the reason the first
-    # half needed a positive case to be worth anything.  `h.x, h.y = p, q` is
-    # lowered by both now (`test_formal_value_model.py`'s
-    # `tuple_store_to_self_and_to_a_local` pins it against CPython on both), but
-    # the same SPELLING inside `__init__` reaches a different pass: the
-    # construction-with-arguments inline, which lowers the call by storing each
-    # of the constructor's `self.<field> = …` assignments into the fresh block
-    # and so needs the body to BE a straight line of those.  A tuple target is
-    # not, and it is refused — which is correct, and which is only correct while
-    # BOTH architectures say so.  x86-64 used to reach its own
-    # `_emit_tuple_assign` and refuse with
-    # "tuple assignment targets must be plain names on the formal x86-64 path",
-    # so the two backends answered one program with two different sentences.
+    # `@=` IS THE ONE AUGMENTED SPELLING NEITHER MACHINE LOWERS, and the needle
+    # is the OPERATOR LIST rather than the words around it, because the two
+    # messages necessarily differ in those: `formal/x86_64_codegen.py` says "on
+    # the formal x86-64 path (supports …)" and its arm64 twin says "(formal
+    # arm64 path supports …)".  Both build that list from `model.AUG_OPS`, so
+    # this row is the anti-rot for that sharing: an edit that adds an operator to
+    # one backend's own table instead of the shared constant makes the two
+    # lists differ and this fails, which is the failure mode the shared
+    # constant exists to prevent.
     #
-    # It is here rather than in the positive list because there is no output to
-    # compare: the assertion is that neither machine may answer it, and a case
-    # that pins an answer would be pinning the wrong one.
-    ("a_tuple_target_in_a_constructor_body_is_refused_identically",
-     "class Tail:\n"
-     "    x: int\n"
-     "    y: int\n"
-     "    def __init__(self, p, q):\n"
-     "        self.x, self.y = p, q\n"
-     "    def total(self):\n"
-     "        return self.x + self.y\n"
-     "def main(n):\n"
-     "    var t = Tail(3, 4)\n"
-     "    printf(\"t=%d\", t.total())\n"
-     "    return 0\n",
-     "whose body this path does not inline"),
+    # It also says which spelling is left: `/=` `//=` `%=` `**=` were on this
+    # list until the delegation that removed them, and `+= -= *= &= |= ^= <<=
+    # >>=` never were.
+    ("aug_matmul_refused_with_the_same_operator_list",
+     "def main():\n"
+     "    var m = Mat()\n"
+     "    m.v @= m.w\n"
+     "    return m.v\n"
+     "\n"
+     "struct Mat:\n"
+     "    var v: Int\n"
+     "    var w: Int\n",
+     "+ - * / // % & | ^ << >> **"),
 ]
 
 # The other direction, and it is a PER-PLATFORM limit rather than a shared one:
