@@ -1,5 +1,45 @@
 # FORMAL_env_family_next_terminal: `std/os/env.mojo` lowers, and 55 files land on an unbound `unsafe_ptr`
 
+**Status: steps 1 and 2 below are FIXED (2026-10-02) and the family's terminal
+has MOVED, measured on `env.mojo` itself. Step 3 (the sweep re-measurement) is
+not done — a whole-tree sweep is not this session's to run — and the new
+terminal is recorded below.** The original filing follows.
+
+**What moved.** `env.mojo`'s own body and its three `external_call` calls now
+lower; the file gets past them and past `as_c_string_slice().unsafe_ptr()`, and
+the build stops one level further out:
+
+```
+$ python3 fire.py build --formal --no-prove -o /tmp/env.out <stdlib>/std/os/env.mojo
+build: env.mojo imports 'std.ffi', which cannot be built either:
+       binary_heap.mojo: formal dylib has no public functions: …
+       it declares only the generic struct template(s) BinaryHeap, and a
+       parametric type has no single boundary layout either.
+```
+
+`unsafe_ptr` is no longer in the message, and neither is
+`_CPointer[UInt8, UntrackedOrigin[…]]`. The blocker step 2 named — "a type
+argument in ANY bracketed generic position must not be read as a value" — is
+`model.type_position_nodes`: a bracket list in a TYPE position is now excluded
+from the runtime question rather than asked it and refused
+(`bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`, deleted
+with its fix).
+
+**The new terminal is a documented limit and not this family's work**:
+`binary_heap.mojo` is the row `FORMAL_dylib_export_gate_ceiling.md` measured at
+a ceiling of ZERO files across all three of its candidate fixes, which is why
+that document was deleted rather than worked — the family is now behind the
+module whose `len(self._data)` on a `List[Self.T]` slot has no representable
+value, which is `FORMAL_class_assigns_its_fields_in_init.md`'s neighbourhood.
+
+**What is left here** is step 3 and nothing else: re-run the sweep below and
+read `not-answerable/unresolved-extern` and the top entry of
+`codegen/dependency by family`, which should now be `info.mojo`'s MLIR
+constructs rather than anything this document describes. The number to watch is
+the 56, and it is a sweep this session was not to run.
+
+---
+
 **Filed 2026-09-29, immediately after the `external_call` tuple-subscript fix
 (`4ad34f3`).** The 55-file family named in this worker task is closed; the
 family has not become 55 passing files, and this is where it lands instead.
@@ -100,6 +140,10 @@ the wrong reason. Worth a second look at whether the marker needs a
 narrower form than a substring.
 
 ## The exact next step
+
+**Steps 1 and 2 are DONE** — see the Status at the top. What follows is the
+original text, kept because step 3 is still open and because step 2's shape is
+what `model.type_position_nodes` had to be built to cover.
 
 1. Give the method-rewriting a type for a receiver that is a call result, by
    reading the callee's DECLARED return type when the callee is a function of
