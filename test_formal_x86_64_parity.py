@@ -196,6 +196,63 @@ CASES = [
      "    a[bump()] += 100\n"
      "    sys.stdout.write(\"%d %d %d\" % (a[0], a[1], a[2]))\n"
      "    return 0\n"),
+    # THE AUGMENTED FORM OF THE FOUR OPERATORS THE ALU TABLE CANNOT EXPRESS.
+    # `/` `//` `%` are a ONE-operand instruction whose zero arm is a trap and
+    # `**` is an unroller, so `_ALU_RR` holds none of them and neither does the
+    # shift table. arm64's `_emit_aug_assign` has always routed all four to the
+    # same two helpers its binary form uses (`_emit_div_shift_pow`); x86-64's
+    # twin had no such route, so `x /= 2`, `x //= 2`, `x %= 2` and `x **= 2`
+    # were REFUSED by name on this backend while arm64 built and ran them — four
+    # spellings of one construct, and a two-architecture disagreement about
+    # ordinary Python that nothing here could see, because every other case in
+    # this file reached the operator through a pointer or a list element rather
+    # than through a name.
+    #
+    # All four in one program, because a delegation that added `/=` and stopped
+    # there would pass a program that used only `/=`.
+    ("aug_division_and_power_on_a_name",
+     "def main():\n"
+     "    a = 20\n"
+     "    a //= 3\n"
+     "    b = 20\n"
+     "    b %= 6\n"
+     "    c = 3\n"
+     "    c **= 3\n"
+     "    d = 20\n"
+     "    d /= 4\n"
+     "    printf(\"%d %d %d %d\", a, b, c, d)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    a = 20; a //= 3\n"
+     "    b = 20; b %= 6\n"
+     "    c = 3;  c **= 3\n"
+     "    d = 20; d /= 4\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (a, b, c, d))\n"
+     "    return 0\n"),
+    # `**` WITH AN EXPONENT ABOVE TWO, in the BINARY form, because the fix above
+    # is a delegation and a delegation can carry a wrong answer with it:
+    # x86-64's `_emit_pow` unrolled a small literal exponent by copying the
+    # accumulator into R11 and popping that same accumulator back into RAX, so
+    # both registers held one word and every step computed `acc * acc`. The
+    # answer was `base ** (2 ** (lit - 1))` — `3 ** 3` answered 81 where the
+    # source says 27, and `3 ** 8` answered 3**128 — built, ran, and disagreed
+    # with arm64, with the whole suite green throughout because exponent 2 is
+    # the one value a squaring gets right and it was the only exponent anything
+    # tested.
+    #
+    # Exponents 3, 4, 5, 8 and 8 over a second base, so a fix that repaired the
+    # first iteration of the unroll and left the rest answers 81 where the source
+    # says 27. The last two are the same exponent over two bases because the
+    # squaring is wrong by a different factor in each, and a base of 1 or 0 hides
+    # it entirely — so neither appears here.
+    ("literal_power_above_two",
+     "def main():\n"
+     "    printf(\"%d %d %d %d %d\", 3 ** 3, 3 ** 4, 3 ** 5, 2 ** 8, 3 ** 8)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    sys.stdout.write(\"%d %d %d %d %d\" % (3 ** 3, 3 ** 4, 3 ** 5,\n"
+     "                                            2 ** 8, 3 ** 8))\n"
+     "    return 0\n"),
 ]
 
 

@@ -1891,6 +1891,31 @@ class X86_64Codegen:
             self._expr_str_kind(stmt.value), spelled_op=stmt.op)
         if reason is not None:
             raise CodegenError(reason)
+        # `/` `//` `%` and `**` are neither an ALU table entry nor a shift:
+        # the divide is a ONE-operand instruction whose zero arm is a trap, and
+        # `**` is an unroller or a loop. Both are already lowered by THIS
+        # backend for the binary form — `_emit_binop` routes them to
+        # `_emit_div_mod` and `_emit_pow` — so the augmented form DELEGATES
+        # rather than growing a second copy of either. Delegating is also what
+        # makes `c //= 2` and `c = c // 2` answer the same: the two spellings
+        # were one construct on arm64 (`formal/arm64_codegen.py`'s
+        # `_emit_aug_assign` routes them to `_emit_div_shift_pow` the same way)
+        # and here they were two, so `x /= 2`, `x //= 2`, `x %= 2` and `x **= 2`
+        # were refused by name on this backend and built on that one — a
+        # two-architecture disagreement about ordinary Python, invisible to
+        # every case in the suite that runs one architecture.
+        if op in M.AUG_DIV_OPS or op == "**":
+            node = F.BinaryOp(op=op, left=F.IdentExpr(name=name),
+                              right=stmt.value)
+            if op == "**":
+                self._emit_pow(node)
+            else:
+                self._emit_div_mod(node, op)
+            # Both lowerings truncate to the promoted type themselves, so this
+            # is the store and nothing else — the two steps `_emit_binop` leaves
+            # to its caller.
+            self._store_var(name, Reg.RAX)
+            return
         ttype = self._ttype(stmt.target)
         # The accumulator is R11, not RAX: for `-` and `>>` the variable's
         # OLD value is the left operand and the assigned expression the right
@@ -1915,9 +1940,14 @@ class X86_64Codegen:
             self._emit_shift_reg(op, cmp_signed(
                 M.shift_signedness(self._ttype(F.IdentExpr(name)))))
         else:
+            # The one spelling left is `@=` (matmul), which has no lowering
+            # here or on arm64. The list is `model.AUG_OPS` rather than a
+            # literal so this message and arm64's cannot drift from the table
+            # the two dispatch on — it is the same shared constant arm64 names.
             raise CodegenError(
                 f"unsupported augmented operator {stmt.op!r} on the formal "
-                f"x86-64 path (supports + - * & | ^ << >>)")
+                f"x86-64 path (formal x86-64 path supports "
+                f"{' '.join(M.AUG_OPS)})")
         self._emit_trunc(common_type(ttype, self._ttype(stmt.value)))
         self._store_var(name, Reg.RAX)
 
@@ -4775,13 +4805,27 @@ class X86_64Codegen:
             if lit == 2:
                 self.asm.emit(encode_imul_r64_r64(Reg.RAX, Reg.RAX))
             else:
-                self._push_slot(Reg.RAX)
+                # The BASE has to survive every step of the unroll and the
+                # ACCUMULATOR has to change, and this had them as one word: the
+                # loop copied the accumulator into R11 and popped the
+                # accumulator straight back into RAX, so both registers held
+                # the same value and each step computed `acc * acc`. The answer
+                # was `base ** (2 ** (lit - 1))` — measured, `3 ** 3` answered
+                # 81 where the source says 27, `3 ** 4` answered 3**8 and `3 **
+                # 8` answered 3**128, all built and all ran, while arm64
+                # answered 27, 81 and 6561 for the same three sources. It is
+                # the one place in this backend where a wrong answer was
+                # reachable from ordinary Python, and no case caught it because
+                # every `**` case in the suite used exponent 2, the one value
+                # the squaring happened to get right.
+                #
+                # R11 holds the base for the whole unroll. It is caller-saved
+                # and nothing in the loop can clobber it (there is no call and
+                # no `imul` destination is R11), so the stack round trip the old
+                # shape needed is not needed at all.
+                self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
                 for _ in range(lit - 1):
-                    self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
-                    self._pop_slot(Reg.RAX)
                     self.asm.emit(encode_imul_r64_r64(Reg.RAX, Reg.R11))
-                    self._push_slot(Reg.RAX)
-                self._pop_slot(Reg.R11)
             self._emit_trunc(result_t)
             return
         if lit is not None and lit < 0:
