@@ -7846,7 +7846,106 @@ outer([10, 20, 30])
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_scalar_arity_min_max_params_are_not_containers():
+        """`max(a, b)` must not type `a` as a container.
+
+        `_ITERABLE_CONSUMING_BUILTINS` (infra_infer.py) lists `max`/`min`
+        because their ONE-argument form reduces an iterable, but their
+        MULTI-argument form is `a if a > b else b` — it compares scalars and
+        iterates nothing. Membership alone was therefore enough to mark an
+        unannotated param `is_iterated`, which types it `MojoList *` and
+        turns the very next line into a hard compile error: the 2-arg `max`
+        lowers to the runtime's single-iterable
+        `int64_t mojo_max(void *args)`, so gcc reports "too many arguments
+        to function 'mojo_max'; expected 1, have 2". Real:
+        `Lib/zipfile/__init__.py:1180`'s `n = max(n, self.MIN_READ_SIZE)`
+        inside `ZipExtFile._read1`, which typed `n` as `MojoList *` and
+        emitted
+        `int64_t __GIMPLE ZipExtFile__read1 (ZipExtFile * self, MojoList * n)`.
+
+        Three arities of the same builtin in one program, so the guard
+        cannot pass by disabling the container signal wholesale: `one(xs)`
+        must still infer `xs` as a container (the reduce form genuinely
+        iterates it), while `two(a, b)` and `three(a, b, c)` must not.
+        Asserted against CPython's own stdout rather than a literal, so
+        the reduce form's correctness is measured rather than assumed, and
+        on BOTH pipelines — the single-TU inline path and link mode, which
+        is where the zipfile failure actually surfaced."""
+        global _PASS, _FAIL
+        name = "scalar_arity_min_max_params_are_not_containers"
+        src = '''\
+def one(xs):
+    return max(xs)
+
+def two(a, b):
+    return max(a, b) + min(a, b)
+
+def three(a, b, c):
+    return max(a, b, c) - min(a, b, c)
+
+class R:
+    MIN_READ_SIZE = 4096
+
+    def read1(self, n):
+        return max(n, self.MIN_READ_SIZE)
+
+print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'scalar_arity.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'sa_{mode}.c')
+                exe = os.path.join(td, f'sa_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_cursor_advance_has_no_cast_operand_in_gimple()
+    test_scalar_arity_min_max_params_are_not_containers()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()

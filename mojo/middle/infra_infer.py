@@ -333,11 +333,46 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # containers in every call, but in the shape this fires on (a numeric
     # kernel) they are being consumed element-wise and the caller passes a
     # real list.
+    #
+    # `min`/`max`/`divmod`/`round` are here for their ONE-argument form only,
+    # and `_SCALAR_ARITY_BUILTINS` below is what keeps that true — see its own
+    # comment for why the arity test is not optional.
     _ITERABLE_CONSUMING_BUILTINS = {
         'map', 'zip', 'enumerate', 'sorted', 'reversed', 'iter', 'next',
         'list', 'tuple', 'set', 'frozenset', 'sum', 'any', 'all',
         'min', 'max', 'divmod', 'round',
     }
+
+    # Builtins in `_ITERABLE_CONSUMING_BUILTINS` whose MULTI-argument form
+    # consumes SCALARS and never iterates anything.
+    #
+    # Python's own arity rule: `max(iterable, ...)` is the reduce form and
+    # does consume the argument; `max(a, b)` is `a if a > b else b` and
+    # touches neither argument as a container. So the set membership above is
+    # only half the question — it is necessary but not sufficient, and
+    # treating it as sufficient types a SCALAR parameter as `MojoList *`.
+    #
+    # Real, and a hard compile error rather than an imprecision:
+    # `Lib/zipfile/__init__.py:1180`'s `n = max(n, self.MIN_READ_SIZE)`
+    # inside `ZipExtFile._read1` typed `n` as `MojoList *`, so the emitted
+    # signature was `int64_t __GIMPLE ZipExtFile__read1 (ZipExtFile * self,
+    # MojoList * n)` and the `max(n, ...)` call hit
+    # "too many arguments to function 'mojo_max'; expected 1, have 2"
+    # (`mojo_max`'s runtime prototype is the single-iterable
+    # `int64_t mojo_max(void *args)`). Reduced to a self-contained repro:
+    #
+    #     class R:
+    #         MIN_READ_SIZE = 4096
+    #         def _read1(self, n):
+    #             n = max(n, self.MIN_READ_SIZE)   # n: MojoList *, so the
+    #             return n                          # 2-arg max() is a hard error
+    #     R()._read1(3)
+    #
+    # `divmod(a, b)` and `round(x, n)` are the same shape and are listed for
+    # the same reason; they are corrected here rather than when they are
+    # first hit, because the rule is one rule and a partial list of names is
+    # how the original defect survived.
+    _SCALAR_ARITY_BUILTINS = frozenset(('min', 'max', 'divmod', 'round'))
 
     # Methods that exist ONLY on Python `bytes` (never on str/list/dict/set):
     # `.decode()` turns bytes into str, `.hex()` renders bytes as an ASCII
@@ -705,7 +740,21 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                             # passing a real list hits "invalid operands to
                             # binary *" (real: a Linear-layer forward whose
                             # input vector reached it only through map()).
-                            if func_name in _ITERABLE_CONSUMING_BUILTINS:
+                            #
+                            # `len(expr.args) > 1` is load-bearing for the
+                            # scalar-arity builtins: `max(a, b)`/`min(a, b)`/
+                            # `divmod(a, b)`/`round(x, n)` compare their
+                            # arguments and iterate nothing, so treating
+                            # membership alone as iteration evidence types a
+                            # scalar param as `MojoList *` — which is a hard
+                            # compile error, not an imprecision, because the
+                            # 2-arg `max` then lowers to the single-iterable
+                            # `mojo_max(void *args)`. See
+                            # `_SCALAR_ARITY_BUILTINS`'s own comment and
+                            # bugs/COMPILE_FAIL_zipfile___init__.md.
+                            if (func_name in _ITERABLE_CONSUMING_BUILTINS
+                                    and not (func_name in _SCALAR_ARITY_BUILTINS
+                                             and len(expr.args) > 1)):
                                 _F['is_iterated'] = True
                 elif isinstance(expr.func, gimple_ctypes.MemberExpr):
                     # `struct.pack("<f", x)`: a statically-known format code
