@@ -40,16 +40,37 @@ measured with `ctypes` on this host.
 
 So this document's three numbered next steps read, with what happened to each:
 
-1. **"Make the overflow loud before making it rarer."** NOT DONE, and still the
-   cheapest thing here. `xs.append(v)` past the append-site count is still the
-   Darwin `exit(1)` at `formal/arm64_codegen.py:_emit_list_append`'s bounds
-   path, with no message — a one-line change in that emitter would turn every
-   one of them into a named gap. It helps every container and it is not this
-   document's own code.
+1. **"Make the overflow loud before making it rarer."** **DONE (2026-10-01).**
+   `xs.append(v)` past the append-site count used to be a Darwin `exit(1)` with
+   nothing on either stream — the worst of the three answers this backend can
+   give, and this document is the one that named it as "the cheapest thing
+   here". It is now `model.list_append_overflow_message`, ONE text shared by
+   both backends (two emitters with two copies of a sentence diverge on the
+   fourth word), written to fd 2 through `write(2)` before the program stops:
+
+   ```
+   $ ./p                       # while i < 3: xs.append(7)
+   formal: list.append overflowed 'xs': its capacity is 1, the number of
+   append SITES in the function that built it, and every EXECUTION of a site
+   counts against it — so a list built in a loop outgrows the room the frame
+   reserved for it. …
+   ```
+
+   byte-identical on arm64 and x86-64, pinned by `list_append_overflow_is_loud`
+   in `test_formal_run.py` (which also requires the two architectures' stderr
+   to match exactly). The check stays a RUN-TIME check rather than becoming a
+   refusal, because the overflow is not decidable then: one site in a
+   three-iteration loop is one site and three elements, and no pass over the
+   source can say it fits.
+
 2. **"Then the capacity itself … refuse a `list` whose length is not bounded by
    construction."** NOT DONE, and the framing below is still right: the blob is
    FRAME-resident, so a list of unknown length inside a loop is a frame that
-   grows every iteration. That is FORMAL.md decision 3 and Phase 6.
+   grows every iteration. That is FORMAL.md decision 3 and Phase 6. **Step 1 is
+   what makes this one safe to attempt**, which is why the document listed it
+   second and called the first one "cheapest": until the overflow said which
+   bound it hit, a loop-accumulating list stopped for no stated reason, and the
+   count of such programs in the corpus was unknowable.
 3. **`readdir` needs a name, not a struct.** DONE, and by a different route
    than the one proposed: rather than a C shim on the link line
    (`bugs/FORMAL_runtime_library_on_the_link_line.md`), the name is read out of
