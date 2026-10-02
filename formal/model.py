@@ -12465,15 +12465,18 @@ def field_type_one_word_struct(structs, name, decls: dict):
     named by the class body, so there is no binding to find.
 
     **Why the DEMOTION that produced the one-field struct is not in question.**
-    `bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md` filed this
-    as "the two passes disagree about `struct_is_framed`" and offered to stop
-    the demotion (its option B) as the semantically honest repair. Measured here:
-    the same refusal, byte-identical, with a `struct Inner` that declares
-    exactly ONE field and no class-level default at all — so the demotion is not
-    the trigger and there is no layout to un-cement. What was missing was the
+    This was filed as "the two passes disagree about `struct_is_framed`", with
+    an offer to stop the demotion (its option B) as the semantically honest
+    repair; the filing was `bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md`
+    and it is deleted, its defect fixed and measured. Measured here: the same
+    refusal, byte-identical, with a `struct Inner` that declares exactly ONE
+    field and no class-level default at all — so the demotion is not the
+    trigger and there is no layout to un-cement. What was missing was the
     lowering, and it was missing for every one-field nested field rather than
     for the defaulted ones. Two of three fields defaulted builds; one does not,
-    and the difference is the width and nothing else.
+    and the difference is the width and nothing else. The case that pins it is
+    `test_formal_run.py`'s `one_word_nested_declared_single_field_read`, beside
+    the defaulted `one_word_nested_demoted_width_method_call`.
 
     Returns None for every other case, and `disagree` is not spelled here: a
     caller that gets None cannot tell "not one word" from "disagree", and both

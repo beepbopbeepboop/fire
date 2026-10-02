@@ -819,13 +819,14 @@ def test_a_zero_argument_construction_of_a_constructor_that_needs_arguments(
 # cannot see, which is the CONTRACT ITSELF — the published table, and the layer
 # a refusal names when the table says nothing.
 #
-# `bugs/FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function
-# .md` measured the defect these pin: a function holding no frame published NO
-# contract at all rather than a contract of `Nones`, `[]` is
-# `_export_frame_contract`'s "this compilation could not classify it", and
-# `resolve_frame_parameter_contract` read `position 0 >= len([])` as
-# "not-exported" — a refusal naming a missing EXPORT about a function the
-# manifest lists with an arity.
+# These pin a defect that was measured, fixed, and whose filing is deleted: a
+# function holding no frame published NO contract at all rather than a contract
+# of `Nones`, so `[]` was `_export_frame_contract`'s "this compilation could not
+# classify it" and `resolve_frame_parameter_contract` read `position 0 >=
+# len([])` as "not-exported" — a refusal naming a missing EXPORT about a
+# function the manifest lists with an arity. The filing was
+# `bugs/FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function.md`,
+# and it is deleted: fixed, with these cases as the proof.
 #
 # The module is one framed struct plus a function that holds nothing, which is
 # the ordinary shape of a module with a data class and some helpers, and the

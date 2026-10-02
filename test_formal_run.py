@@ -5428,14 +5428,14 @@ INIT_FIELD_TYPE_REFUSALS = [
 # the analysis was right that there is no nested frame, and the emitter was
 # right that the chain had no slot, because the load had not been placed.
 #
-# `bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md` filed this as
-# "the two passes disagree about `struct_is_framed`" and offered to stop the
-# demotion that produced the one-field struct as its semantically honest repair.
-# The trigger is not the demotion: the same refusal, byte-identical, comes out of
-# a `struct Inner` that declares exactly ONE field and no class-level default at
-# all — which is why the second case below is that spelling and not the
-# defaulted one. What was missing was the lowering, for every one-field nested
-# field rather than for the defaulted ones.
+# Filed as "the two passes disagree about `struct_is_framed`", with an offer to
+# stop the demotion that produced the one-field struct as its semantically honest
+# repair; the filing was `bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md`
+# and it is deleted, its defect fixed. The trigger is not the demotion: the same
+# refusal, byte-identical, comes out of a `struct Inner` that declares exactly ONE
+# field and no class-level default at all — which is why the second case below is
+# that spelling and not the defaulted one. What was missing was the lowering, for
+# every one-field nested field rather than for the defaulted ones.
 ONE_WORD_NESTED_CASES = [
     # THE DOC'S REPRODUCER, verbatim, and 8 is CPython's answer: `Inner.add(2)`
     # is 1 + 2 and `self.tag` is 5. It reads through a nested METHOD CALL, so it

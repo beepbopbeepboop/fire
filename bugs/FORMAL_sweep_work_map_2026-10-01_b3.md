@@ -11,10 +11,11 @@ instrument's SECOND split of what §3 left as a bucket (`other refusal` 50 → 4
 arm64 and 104 → 4 on x86-64), the 20-file Optional row's ceiling measured at 0
 rather than guessed, the 4-file residue listed by hand, two more workers
 enqueued, and a real bug the regression floor turned up — the cross-image frame
-contract is not published for a free function, which is 4 of the floor's 5
-failures and is filed as
-`FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function.md`. Two
-numbers in §2 are corrected there (§2's footnote).**
+contract is not published for a free function, which was 4 of the floor's 5
+failures and was filed as
+`FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function.md` —
+**since fixed, and that filing is deleted** (see §14; the contract is published
+for every export now). Two numbers in §2 were corrected there (§2's footnote).**
 
 Logs: `.tmp/sweep-arm-b3.txt`, `.tmp/sweep-x86-b3.txt`. Both written with
 
@@ -416,7 +417,7 @@ declaration in this tree:
 
 | file | the construct | who |
 |---|---|---|
-| `std/iter/__init__.mojo` (`res._InjectedValues`) | correct Mojo: line 509 declares `comptime _InjectedValues = Tuple[*Self.Ts]` and line 538 reads it. `StructDef.comptime_aliases` is read by **no table on this path** | **enqueued** below; `FORMAL_comptime_class_attribute_read_through_a_receiver.md` has the measurement and the next step |
+| `std/iter/__init__.mojo` (`res._InjectedValues`) | correct Mojo: line 509 declares `comptime _InjectedValues = Tuple[*Self.Ts]` and line 538 reads it. `StructDef.comptime_aliases` is read by **no table on this path** | **enqueued** below; the measurement and the next step were in `FORMAL_comptime_class_attribute_read_through_a_receiver.md`, which is **fixed and deleted** — the field census now reaches an IMPORTED module's classes (`formal/imports.py`'s `_attach_declared_census`), so what is left in that arm is a member whose VALUE is not a literal |
 | `std/python/numpy.mojo` (`shape.is_flat`) | same construct: `std/utils/coord.mojo:220` declares `comptime is_flat = …` | as above |
 | `analyze_benchmarks_types.py`, `check_benchmarks_types.py`, `test_type_system_integration.py` (`gen.type_checker`, `gen._strict_type_checking`) | **not a backend gap.** `grep -rn 'self.type_checker\|self._strict_type_checking' --include='*.py'` over the whole tree returns nothing, so CPython raises `AttributeError` at that line deterministically | source bugs; named here so nobody spends the row's budget on them |
 
@@ -471,8 +472,11 @@ python3 test_formal_sweep.py → Ran 75 tests, OK
 
 ## 14. One bug found by running the floor: the cross-image frame contract is not published for a free function
 
-**`bugs/FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function.md`**,
-filed here. Four of the floor's five failures are ONE construct, and it is a
+**Filed here as
+`bugs/FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function.md`,
+since fixed and since deleted — `_export_frame_contract` publishes a contract
+for every export, and `test_formal_cross_module.py` pins it.** Four of the
+floor's five failures were ONE construct, and it is a
 first-layer fix's own positive cases rather than a stale expectation: the three
 cross-module **method** cases pass with the right answers (36, 68, 70) and the
 three **free-function** cases do not. `formal/build.py:2646`'s publication loop
