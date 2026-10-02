@@ -713,6 +713,19 @@ _REFUSAL_FAMILIES = (
     # A receiver put in a container, which has no layout for a frame address.
     ("is stored in a container, which has no layout",
      "receiver stored in a container"),
+    # A one-field struct's MUTATING method, where the receiver is the struct
+    # itself, so the callee hands the receiver back and the caller has to store
+    # it. Three wordings and one family, because one mechanism refuses all three
+    # and the family's own marker would be a phrase ("a mutating method") that no
+    # message contains. Each wording is its own row in
+    # `bugs/FORMAL_one_field_struct_mutating_method_is_a_no_op.md`'s successor
+    # work: the fix for each is in the message.
+    ("both changes its receiver and returns a value",
+     "one-field mutator has no return convention"),
+    ("rather than as a statement of its own",
+     "one-field mutator has no return convention"),
+    ("is not a name this path can store through",
+     "one-field mutator has no return convention"),
     # A method on a value whose receiver is a frame address, stated as a
     # description of the call rather than as a receiver placement.
     ("is a method on a", "method call on a value"),

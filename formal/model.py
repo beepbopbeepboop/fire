@@ -1751,17 +1751,80 @@ def call_callee_name(func) -> str | None:
 SHIFT_WIDTH = 64
 SHIFT_AMOUNT_MASK = 63
 
+# The status a trapped run-time fact leaves behind. It is the SAME status the
+# divide-by-zero arm of each backend's shift/div emitter already exits with, so
+# "this program could not be answered" is one answer on this path rather than
+# one per check — and it is a named constant rather than a literal repeated in
+# four emitters, because the test asserts the two architectures AGREE on it and
+# a literal in each arm is how they would stop agreeing.
+SHIFT_TRAP_STATUS = 1
+
 
 def shift_saturates(amount, width: int = SHIFT_WIDTH) -> bool:
     """Whether a shift by `amount` is at or past the word's width.
 
     `amount` is whatever the source says: a Python int, possibly a variable's
     unknown value (None, which is never saturating) or a negative one. A
-    negative amount is NOT saturating here — CPython raises `ValueError` for
-    it, and this path's existing behaviour for a negative amount is to let the
-    hardware mask it, which is a separate question from this one and is not
-    what this function is deciding."""
+    negative amount is NOT saturating here — `shift_amount_is_trap` is what
+    decides that one, and asking this function about it would be asking the
+    wrong question: an amount past the width is a VALUE this path knows how to
+    answer, and an amount below zero is a fact it has no value for."""
     return amount is not None and amount >= width
+
+
+def shift_amount_is_trap(amount) -> bool:
+    """Whether a shift AMOUNT is one this path refuses rather than masks.
+
+    The third of the three answers a shift amount can have, and the only one
+    of them that is not a value: an amount at or past the word's width
+    SATURATES (`shift_saturated_is_zero`) and an amount in range SHIFTS, but a
+    NEGATIVE amount is not a shift distance at all. CPython raises
+    `ValueError: negative shift count` for it, and the answer this path had
+    instead was the hardware's: `LSL`/`ASR`/`LSR` use the low six bits of the
+    shift register, so `-1 & 63` is 63 and `1 << -1` was `1 << 63` —
+    `-9223372036854775808`, a plausible high-bit-set word rather than a
+    failure, and `8 >> -1` was `0`.
+
+    The SIGN is a run-time fact (the amount is usually a variable), so this
+    function is asked about a static amount and the emitters ask the same
+    question of the register with a signed compare. It is `True` for a
+    statically-known negative amount and `False` for an unknown one (None) or a
+    non-negative one.
+
+    A "saturate to 0" answer would be a fabrication rather than an
+    approximation, and it is worth saying why rather than leaving it as an
+    option: `x << -1` is not `0` in any reading, and answering 0 would be as
+    wrong as answering `1 << 63`. It is also the answer a saturation rule
+    written with an UNSIGNED compare gives — a negative amount is below 64
+    unsigned's way round — which is the specific trap this shape is separated
+    from `shift_saturates` to keep out of."""
+    return isinstance(amount, int) and not isinstance(amount, bool) \
+        and amount < 0
+
+
+def negative_shift_refusal(op: str, amount) -> str:
+    """The build-time refusal for a shift by a statically negative amount.
+
+    A literal amount is decidable before anything is emitted, and a build-time
+    diagnostic NAMES THE LINE where a run-time trap can only say "something
+    went wrong" — so the two are not alternatives, and this is the one that
+    fires when the build can decide. The run-time trap (`SHIFT_TRAP_STATUS`,
+    read by both backends' register-form shift emitter) is what covers the
+    variable amount, which is the common case.
+
+    One wording for both architectures, from `model.py` rather than from each
+    emitter, for the reason every other rule here lives here: a diagnostic that
+    differs between the two backends is not a diagnostic, it is two facts about
+    one construct."""
+    mask_bits = SHIFT_AMOUNT_MASK.bit_length()
+    return (f"a shift by a negative amount: `{op} {amount}` shifts by "
+            f"{amount}, which is not a shift distance — CPython raises "
+            f"`ValueError: negative shift count` for it, and this path has no "
+            f"value to answer with, since the hardware masks the amount to its "
+            f"low {mask_bits} bits and answers a different shift entirely. The "
+            f"amount has to be a non-negative distance, which a program "
+            f"computes with `& {SHIFT_AMOUNT_MASK}` or a conditional of its "
+            f"own")
 
 
 def shift_saturated_is_zero(op: str, signed: bool) -> bool:
@@ -1994,35 +2057,610 @@ def _merge_reads(into: dict, more: dict) -> None:
         into.setdefault(name, ln)
 
 
+# ── the CFG, and the "definitely stored" fixpoint over it ──────────────────
+#
+# `read_before_store` is a DOMINANCE question wearing a walk's clothes: the
+# defect is a read that not every path to it stores, so the answer is a
+# fixpoint over the function's control-flow graph rather than an ordered pass
+# over its statements. Everything in this section exists to build that graph
+# once, here, and for both backends to read one answer from it — the same
+# reason every other layout decision in this module is shared, and the same
+# reason a second CFG in an emitter would be a second opinion about which path
+# runs.
+
+
+class _Block:
+    """A maximal run of statements with one entry and one set of successors.
+
+    `succs` holds indices into the list `_build_cfg` returns, and `preds` is
+    its transpose — built once at the end rather than maintained by hand,
+    because a CFG whose forward and backward edges can disagree is worse than
+    no CFG.
+
+    `defs` is what the block's own statements STORE, and `kills` is what they
+    `del`. Both are needed and they are not inverses: `del x` removes a name
+    from the definitely-stored set without storing anything, which is what
+    makes `del x` on one arm of a branch a read-before-store on the other."""
+
+    __slots__ = ("index", "stmts", "succs", "preds", "defs", "kills")
+
+    def __init__(self, index, stmts):
+        self.index = index
+        self.stmts = stmts
+        self.succs: list = []
+        self.preds: list = []
+        self.defs: set = set()
+        self.kills: set = set()
+
+    def __repr__(self):
+        return (f"<block {self.index}: {len(self.stmts)} stmt(s), "
+                f"-> {self.succs}>")
+
+
+def _cfg_block_defs(stmts) -> tuple:
+    """`(defs, kills)` for a straight-line run: what it stores, what it dels.
+
+    A NAME walk and nothing else, because a straight-line run has no control
+    flow in it: every statement in the block is reached whenever the block is.
+    That is what makes a block the unit the fixpoint wants.
+
+    `ExprStmt` and `Pass` are here as no-ops deliberately — they end a block
+    for the reader's benefit, not the analysis's, and treating an unrecognised
+    statement as a definition would put a name in `defs` that nothing stores."""
+    defs: set = set()
+    kills: set = set()
+    for s in (stmts or []):
+        kind = type(s).__name__
+        if kind in ("AssignStmt", "AugAssignStmt"):
+            defs |= _store_names(getattr(s, "target", None))
+        elif kind == "VarDecl":
+            n = getattr(s, "name", None)
+            if isinstance(n, str):
+                defs.add(n)
+        elif kind == "MultiAssignStmt":
+            for t in (getattr(s, "targets", None) or []):
+                defs |= _store_names(t)
+        elif kind == "WithStmt":
+            for it in (getattr(s, "items", None) or []):
+                a = getattr(it, "alias", None)
+                if isinstance(a, str):
+                    defs.add(a)
+        elif kind == "TryStmt":
+            for h in (getattr(s, "handlers", None) or []):
+                n = getattr(h, "name", None)
+                if isinstance(n, str):
+                    defs.add(n)
+        elif kind == "DelStmt":
+            for t in (getattr(s, "targets", None) or []):
+                kills |= _store_names(t)
+        elif kind in ("ComptimeVarStmt",):
+            defs |= _store_names(getattr(s, "target", None))
+        elif kind in ("ForStmt", "ComptimeForStmt"):
+            # A loop TARGET is a definition, and it is one in the HEADER rather
+            # than in the body: the body runs zero times on the first entry
+            # and the target is still bound, which is what keeps
+            # `for i in range(0, 100): if i > 3: break` then `return i` legal
+            # (CPython's `for_range_break`, and the reason this decision is
+            # not "the target is stored by the body").
+            defs |= _store_names(getattr(s, "target", None))
+    return defs, kills
+
+
+def _case_is_wildcard(case) -> bool:
+    """Whether a `match` case is irrefutable, so the match has no fall-through.
+
+    A wildcard (`case _`) and a bare capture (`case x`) both match whatever
+    reaches them, so a `match` ending in one is total and a statement after it
+    is reached from every path. `case 1` / `case "s"` / `case [a, b]` are all
+    refutable, and a `case` with a `guard` is refutable however its pattern
+    reads — the guard is the source saying "this one might not match".
+
+    Read off the recorded patterns rather than the source text, because the
+    patterns are what the rest of the analysis reads and a text search for `_`
+    would match a `_` inside a literal.
+
+    The consequence of getting this wrong is a FALSE REFUSAL of a program that
+    is correct, which is why the answer is the conservative one in the
+    direction that matters: an unrecognised pattern shape is treated as
+    REFUTABLE (so the fall-through edge is kept and nothing is refused), never
+    as exhaustive."""
+    if getattr(case, "guard", None) is not None:
+        return False
+    pats = getattr(case, "patterns", None) or []
+    if not pats:
+        return False
+    for p in pats:
+        if isinstance(p, F.IdentExpr):
+            # `_` is the wildcard; any other bare name is a capture, which is
+            # also irrefutable.
+            continue
+        return False
+    return True
+
+
+def _cfg_int_literal(e) -> object:
+    """The `int` an `IntLiteral` node holds, or None for anything else.
+
+    Named apart from the module's other `_int_literal_value` (line ~17500,
+    which handles a boxed handle rather than a node) because two functions with
+    one name and two meanings is how a call site ends up reading the wrong
+    one."""
+    return e.value if isinstance(e, F.IntLiteral) else None
+
+
+def _range_is_nonempty(args) -> bool:
+    """Whether a `range(...)` call with LITERAL arguments yields an item.
+
+    Exactly CPython's own emptiness rule, including the step's sign — `range(5,
+    0)` and `range(0, 5, -1)` are both empty and getting either wrong would
+    drop an edge the program really has. Returns None ("cannot tell") for
+    anything that is not a `range` of 1-3 integer literals, so the caller
+    keeps the zero-iteration path.
+    """
+    if len(args) > 3:
+        return None
+    vals = []
+    for a in args:
+        v = _cfg_int_literal(a)
+        if v is None:
+            return None
+        vals.append(int(v))
+    if len(vals) == 1:
+        start, stop, step = 0, vals[0], 1
+    elif len(vals) == 2:
+        start, stop, step = vals[0], vals[1], 1
+    else:
+        start, stop, step = vals
+    if step == 0:
+        return None                       # a ValueError at run time
+    return len(range(start, stop, step)) > 0
+
+
+_CMP_OPS = {
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+}
+
+
+def _literal_truth(e) -> object:
+    """True/False when `e`'s value is decidable here, None when it is not.
+
+    Only INTEGER LITERALS, and that restriction is the point: an answer
+    computed from a literal is a fact about the program, while an answer
+    computed from a name would be an assumption about what the name holds,
+    and the whole analysis is careful to make no such assumption. Anything
+    unrecognised — a name, a call, a chained comparison with a name in it, a
+    float — is None, and None is the answer that keeps the edge.
+
+    A single `a < b` is a `BinaryOp` in this AST and only a CHAIN of two or
+    more comparisons is a `CompareChain`, so both are here: reading only the
+    chain is how `while 1 < 2:` — the shape a generated bound is written in —
+    came out undecidable.
+    """
+    if isinstance(e, F.BoolLiteral):
+        return bool(e.value)
+    if isinstance(e, F.UnaryOp) and getattr(e, "op", None) == "not":
+        inner = _literal_truth(getattr(e, "operand", None) or
+                               getattr(e, "expr", None))
+        return None if inner is None else (not inner)
+    if isinstance(e, F.BinaryOp) and getattr(e, "op", None) in _CMP_OPS:
+        left = _cfg_int_literal(getattr(e, "left", None))
+        right = _cfg_int_literal(getattr(e, "right", None))
+        if left is None or right is None:
+            return None
+        return bool(_CMP_OPS[e.op](int(left), int(right)))
+    if isinstance(e, F.CompareChain) and (getattr(e, "ops", None) or []):
+        vals = [_cfg_int_literal(o) for o in (getattr(e, "operands", None) or [])]
+        if any(v is None for v in vals):
+            return None
+        for op, a, b in zip(e.ops, vals, vals[1:]):
+            fn = _CMP_OPS.get(op)
+            if fn is None or not fn(int(a), int(b)):
+                return False
+        return True
+    return None
+
+
+def _loop_body_always_runs(s) -> bool:
+    """Whether this loop's body is guaranteed to execute at least once.
+
+    **The one question a CFG cannot answer, and the two cases where it can.**
+    "Is the join reachable without the body having run?" is a property of the
+    ITERABLE (or, for a `while`, of the condition on entry), and the graph
+    built from the statement tree has no such information: both the empty
+    `for` and the never-true `while` look like the same edge. So this asks the
+    narrow question that IS decidable — a literal-true condition, a non-empty
+    literal sequence, a `range` of literals that is not empty — and answers
+    False for everything else, which keeps the zero-iteration path.
+
+    The asymmetry is the whole design: dropping that edge can only ever REMOVE
+    a refusal, and only when the body provably ran, so this cannot introduce a
+    wrong answer. Keeping it when the answer is merely unknown refuses a
+    program that works — `while i < 3: t = 1; i = i + 1` then `print(t)` is
+    such a program, and the cost of answering that one exactly is a constant
+    propagation the model does not do. It is the one limit this analysis has
+    that can break working code, it is recorded in
+    `test_formal_read_before_store.py`, and it is the reason the rule is here
+    at all: without it, every `while True:` in the corpus would have its body's
+    stores treated as non-dominating, which is a false refusal of a shape the
+    language writes constantly.
+    """
+    kind = type(s).__name__
+    if kind == "WhileStmt":
+        return _literal_truth(getattr(s, "condition", None)) is True
+    if kind in ("ForStmt", "ComptimeForStmt"):
+        it = getattr(s, "iterable", None)
+        if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            return bool(getattr(it, "elements", None))
+        if isinstance(it, F.StringLiteral):
+            return bool(it.value)
+        if isinstance(it, F.CallExpr):
+            func = getattr(it, "func", None)
+            if (isinstance(func, F.IdentExpr) and func.name == "range"
+                    and not (getattr(it, "kwargs", None) or [])):
+                return bool(_range_is_nonempty(list(it.args or [])))
+        return False
+    return False
+
+    if kind in ("ForStmt", "ComptimeForStmt"):
+        it = getattr(s, "iterable", None)
+        if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            return bool(getattr(it, "elements", None))
+        if isinstance(it, F.StringLiteral):
+            return bool(it.value)
+        if isinstance(it, F.CallExpr):
+            func = getattr(it, "func", None)
+            if (isinstance(func, F.IdentExpr) and func.name == "range"
+                    and not (getattr(it, "kwargs", None) or [])):
+                return bool(_range_is_nonempty(list(it.args or [])))
+        return False
+    return False
+
+
+def _build_cfg(body) -> tuple:
+    """`(blocks, entry index)` for a function body.
+
+    **The builder's shape, and why it needs two pieces of state rather than
+    one.** A control-flow statement's arms converge on what follows, so the
+    builder has to know both "which blocks fall through to the next statement"
+    (`pending`) and "which block is currently accepting straight-line
+    statements" (`cur`). One list cannot be both: after an `if`, `pending` is
+    the join's predecessors, and appending the next statement to `pending[-1]`
+    would make the join a self-loop and lose the edge that makes the join
+    reachable from the false arm. So `cur is None` after every control-flow
+    statement, and the next straight-line statement opens a block linked from
+    `pending` — which is the join, and is the whole join mechanism.
+
+    That is also why an `if`/`elif`/`else` chain needs no special case for
+    `elif`: an `elif` is an `if` whose "else" arm is the next `if`, so the
+    chain is three statements threading one `pending` list through all three.
+
+    `break` and `continue` are resolved against the `loops` stack rather than
+    emitted as an edge to the next statement, because their target is not the
+    next statement. A `break` in a loop's `else` clause is not that loop's
+    `break` in Python; the `else` clause is emitted with the loop POPPED, so a
+    `break` inside it attaches to the enclosing loop and an `if`-join it forms
+    is the loop's real exit. Getting that wrong would invent an edge to a join
+    the program cannot reach, which is the one direction that could make the
+    fixpoint refuse a legal program.
+
+    Everything unrecognised becomes a leaf statement in the current block, so
+    an unknown SHAPE contributes no edge and no definition rather than a wrong
+    one — the same "silence rather than a wrong answer" the statement walk
+    settled for, and the direction `_definitely_stored`'s top-initialization
+    then makes safe.
+    """
+    blocks: list = []
+
+    def new(stmts) -> _Block:
+        b = _Block(len(blocks), list(stmts or []))
+        b.defs, b.kills = _cfg_block_defs(b.stmts)
+        blocks.append(b)
+        return b
+
+    def open_block(stmts, pending: list) -> _Block:
+        """Open a block for `stmts` and make every `pending` exit reach it."""
+        b = new(stmts)
+        for p in pending:
+            if p is not None and 0 <= p < len(blocks):
+                blocks[p].succs.append(b.index)
+        return b
+
+    def run(stmts, loops: list, pending: list) -> list:
+        """Emit `stmts`, returning the indices that fall through to the end.
+
+        `pending` holds the exits that reach the FIRST statement here; the
+        block it opens is the first thing emitted, and the exits at the end of
+        the run are what the caller joins to whatever comes next. A `break` or
+        `continue` returns `[]` — control does not fall through — while adding
+        itself to the loop stack, which is how the loop's own join collects it.
+        """
+        if not pending:
+            # A run nothing can reach. It still gets a block, so an
+            # unreachable region cannot leave a hole in the index space the
+            # fixpoint walks.
+            b = new([])
+            pending = [b.index]
+        cur = None
+
+        def take() -> _Block:
+            """The block the next straight-line statement joins, opening one
+            if a control-flow statement closed the previous."""
+            nonlocal cur, pending
+            if cur is None:
+                cur = open_block([], pending)
+                pending = [cur.index]
+            return cur
+
+        for s in (stmts or []):
+            kind = type(s).__name__
+            if kind == "IfStmt":
+                cond = open_block([s], pending)
+                pending = [cond.index]
+                cur = None
+                arms = [getattr(s, "then_body", None) or []]
+                arms += [b for _c, b in (getattr(s, "elifs", None) or [])]
+                has_else = getattr(s, "else_body", None) is not None
+                if has_else:
+                    arms.append(s.else_body)
+                arm_exits: list = []
+                for body in arms:
+                    arm_exits += run(body, loops, [cond.index])
+                if not has_else:
+                    arm_exits.append(cond.index)      # the false edge
+                pending = arm_exits
+                continue
+            if kind in ("WhileStmt", "ForStmt", "ComptimeForStmt"):
+                head = open_block([s], pending)
+                pending = [head.index]
+                cur = None
+                loop_body = getattr(s, "body", None) or []
+                # `first` is the block the body opens with, which is the node
+                # the back edge returns to: the condition is re-read at the
+                # TOP of the body, not in the preheader, so routing the back
+                # edge through `head` would put the body's definitions into the
+                # preheader's OUT set — the one path that must not have them.
+                # `len(blocks)` is that index because `run` creates a block for
+                # the first statement of any non-empty body, whatever shape it
+                # is.
+                frame = {"head": head.index, "exits": [], "continues": [],
+                         "first": len(blocks) if loop_body else None}
+                loops.append(frame)
+                body_exits = run(loop_body, loops, [head.index])
+                loops.pop()
+                # The LATCH is the node the loop is in only because its body
+                # ran at least once, and it is what keeps "the condition failed
+                # immediately" (the `head` -> join edge below) apart from "the
+                # condition failed after an iteration" (this node -> join).
+                # A single header cannot express both, which is why this is a
+                # separate block and not a flag on the header: without it the
+                # fixpoint sees one node reached with and without the body's
+                # definitions and the intersection throws the body's away for
+                # every loop, `while True:` included.
+                latch = new([])
+                for be in body_exits:
+                    blocks[be].succs.append(latch.index)
+                for c in frame["continues"]:
+                    blocks[c].succs.append(latch.index)
+                if frame["first"] is not None:
+                    blocks[latch.index].succs.append(frame["first"])
+                # The loop's `else` clause runs when the loop finished without
+                # a `break`, which is the same two paths — so it hangs off the
+                # latch AND, when the body may never run, off the header.
+                # Emitted with this loop POPPED, so a `break` inside it is the
+                # enclosing loop's rather than this one's.
+                exit_from = [latch.index]
+                if not _loop_body_always_runs(s):
+                    exit_from.append(head.index)
+                else_body = getattr(s, "else_body", None)
+                if else_body:
+                    pending = run(else_body, loops, exit_from)
+                else:
+                    pending = exit_from
+                # A `break` in the BODY also reaches the join, and that is what
+                # keeps `for i in range(0, 100): if i > 3: break` then
+                # `return i` legal: the loop's target is defined in the header
+                # and the join is reached from the header's exit edge as well
+                # as from the break. It is also why a `break` is a path to the
+                # join that does NOT go through the latch: the store may be
+                # after the point the break jumped from.
+                pending = pending + frame["exits"]
+                cur = None
+                continue
+            if kind == "WithStmt":
+                w = open_block([s], pending)
+                pending = run(getattr(s, "body", None) or [], loops,
+                              [w.index])
+                cur = None
+                continue
+            if kind == "TryStmt":
+                t = open_block([s], pending)
+                pending = [t.index]
+                cur = None
+                arm_exits = run(getattr(s, "body", None) or [], loops,
+                                [t.index])
+                for h in (getattr(s, "handlers", None) or []):
+                    arm_exits += run(getattr(h, "body", None) or [], loops,
+                                     [t.index])
+                # `else` runs only when the body did NOT raise and `finally`
+                # runs either way, so both are ARMS of the one statement
+                # rather than a chain. That is what makes a `return` inside
+                # `finally` a terminating path rather than a fallthrough, and
+                # a store in only one handler not a dominating store.
+                if getattr(s, "else_body", None) is not None:
+                    arm_exits += run(s.else_body, loops, [t.index])
+                # The `finally` clause runs on every way OUT of the try, so it
+                # is entered from the ARMS and the statement after the whole
+                # statement is reached only through it. Modelling that
+                # explicitly is what makes a store in `finally` dominating
+                # (`try: … finally: p = 1` then `print(p)` is legal) and a
+                # store in the BODY alone not one.
+                #
+                # The arms themselves are the join when there is no `finally`,
+                # and NOT the try's header: a header that reaches the code
+                # after the try would be a path that stores nothing, which
+                # reported `try: p = 1 / except: p = 2 / print(p)` — every arm
+                # of it storing `p` — as a read before any store. An empty
+                # `finally` falls out of the same branch correctly, because
+                # `run` on an empty run returns the exits that reach it, so
+                # the arms' exits and the finally's exits are the same list.
+                fin = getattr(s, "finally_body", None)
+                if fin is not None:
+                    fin_exits = run(fin, loops, arm_exits or [t.index])
+                    pending = fin_exits
+                else:
+                    pending = arm_exits
+                cur = None
+                continue
+            if kind == "MatchStmt":
+                m = open_block([s], pending)
+                pending = [m.index]
+                cur = None
+                arm_exits: list = []
+                exhaustive = False
+                for c in (getattr(s, "cases", None) or []):
+                    arm_exits += run(getattr(c, "body", None) or [], loops,
+                                     [m.index])
+                    if _case_is_wildcard(c):
+                        exhaustive = True
+                # A `match` with no matching case FALLS THROUGH to whatever
+                # follows, and that is a path to the join that stores nothing.
+                # The edge is omitted only when a case is EXHAUSTIVE, which the
+                # source says by ending in a wildcard (`case _`) or an
+                # irrefutable capture — read off the recorded patterns, because
+                # a `match` that always matches is the one case where the
+                # fall-through does not exist and adding the edge anyway would
+                # refuse a legal program. `bugs/FORMAL_read_before_store_dominating_store.md`
+                # names this as the shape a partial rule gets wrong, and a
+                # false refusal is the worse of the two errors here: the old
+                # walk was silent on it and every program it accepted built.
+                if not exhaustive:
+                    arm_exits.append(m.index)
+                pending = arm_exits
+                continue
+            if kind in ("BreakStmt", "ContinueStmt"):
+                b = open_block([s], pending)
+                if loops:
+                    if kind == "BreakStmt":
+                        loops[-1]["exits"].append(b.index)
+                    else:
+                        loops[-1]["continues"].append(b.index)
+                # With no loop around it this is a syntax error CPython
+                # catches, so there is no target: control does not fall
+                # through, and inventing a successor would be an edge to a join
+                # the program cannot reach.
+                return []
+            if kind in ("ReturnStmt", "RaiseStmt"):
+                open_block([s], pending)
+                # No successor: control leaves the function.
+                return []
+            b = take()
+            b.stmts.append(s)
+            d, k = _cfg_block_defs([s])
+            b.defs |= d
+            b.kills |= k
+        if cur is None and not pending:
+            return []
+        return pending
+
+    # The entry block is opened FIRST, before the body is emitted, so it is
+    # index 0 and the fixpoint's seed is a single place no other block can
+    # reach by accident. The body is emitted WITH the entry as its pending
+    # predecessor, which is the edge that makes the seed reach anything: a body
+    # emitted with an empty pending list opens its own unreachable first block,
+    # and every block after it then inherits the universe.
+    entry = new([])
+    entry.succs += run(body, [], [entry.index])
+    for b in blocks:
+        for d in b.succs:
+            if d is not None and 0 <= d < len(blocks):
+                blocks[d].preds.append(b.index)
+    return blocks, entry.index
+
+
+def _definitely_stored(blocks: list, entry: int, seed: set) -> dict:
+    """`{block index: names every path to that block stores}` — the fixpoint.
+
+    The standard "definitely assigned" dataflow: a name is in a block's IN set
+    when it is in EVERY predecessor's OUT set, and a block's OUT set is its IN
+    set plus what it defines. Seeded at the entry with `seed` (the parameter
+    names, which the CALLER stores), and iterated to a fixpoint because a loop
+    makes the answer depend on itself.
+
+    **Initialized from the TOP, not the bottom**, and that is the whole safety
+    property. Every non-entry block starts as "every name is stored" and is
+    narrowed; a block with no predecessor therefore keeps everything, which is
+    the right answer for unreachable code (nothing can read an unstored name
+    in a block nothing reaches) and the right direction in general — this
+    analysis can only ever refuse a name it can PROVE no path stores, never one
+    it merely failed to track.
+
+    Intersection rather than union is what closes the bug this replaced: the
+    statement walk added a branch arm's stores to the set the code after the
+    branch saw, so a name stored in ONE arm looked stored to the join. Here the
+    join intersects, so `if i: t = 1` then `print(t)` reports `t` — which is
+    the defect — and `if c: p = 1 else: p = 2` then `print(p)` does not,
+    because both arms store it. The second case is the one that says the
+    analysis is a fixpoint and not a heuristic: the two shapes are the same
+    graph with different arm sets."""
+    everything = set()
+    for b in blocks:
+        everything |= b.defs
+    for node in iter_nodes([b.stmts for b in blocks]):
+        everything |= set(_expr_reads(node, set()).keys())
+    universe = everything | set(seed)
+    out: dict = {b.index: (set(seed) if b.index == entry else set(universe))
+                 for b in blocks}
+    changed = True
+    rounds = 0
+    while changed:
+        changed = False
+        rounds += 1
+        for b in blocks:
+            if not b.preds:
+                continue
+            merged = None
+            for p in b.preds:
+                # `(IN | defs) - kills`, and the order is the point: inside one
+                # block the statements run in order, so a `del` after a store
+                # (`p = 1` then `del p`) leaves the name unbound. Applying the
+                # kill BEFORE the defs would put `p` back and miss exactly the
+                # case `kills` exists for.
+                p_out = (out[p] | blocks[p].defs) - blocks[p].kills
+                merged = set(p_out) if merged is None else (merged & p_out)
+            if merged is not None and merged != out[b.index]:
+                out[b.index] = merged
+                changed = True
+        # A pathological CFG cannot loop forever (the sets only shrink and
+        # there are finitely many), but the bound makes a cycle in the builder
+        # a wrong answer rather than a hang.
+        if rounds > len(blocks) + 2:
+            break
+    return out
+
+
 def read_before_store(fn, params: set = None, placed: set = None):
     """The first (name, line) a function reads that nothing stores first, or
     None.
 
-    `params` is the function's incoming parameter names: they are stored by
-    the CALLER, so reading one is never reading an unstored name.
+    `params` is the function's incoming parameter names: they are stored by the
+    CALLER, so reading one is never reading an unstored name.
     `placed` restricts the answer to names that have a home at all — a name
     with no home is `check_module_symbols`' refusal to make, and this one
     would be a second, worse message about the same name.
 
-    THE ALGORITHM, and what it is worth. A straight statement walk with a
-    `stored` set, where a name enters `stored` at the point its assignment
-    appears. Reading a name that is not yet in `stored` — and is not a
-    parameter — is this case.
+    **THE ALGORITHM, and what it is worth.** A "definitely stored" fixpoint
+    over the function's CFG: `_build_cfg` cuts the body into basic blocks once,
+    and `_definitely_stored` iterates a name into a block only when EVERY path
+    to that block stores it. A read is this defect when the name is in neither
+    the block's IN set nor the statements preceding it inside the block.
 
-    Branches are walked conservatively: entering an `if`, a loop, a `try` or
-    a `with` body adds that body's stores to `stored` (so a read AFTER the
-    branch is not reported when the branch is the only writer), which is
-    exactly the soundness this version gives up. The alternative — adding
-    nothing — refuses `if c: p = 1` / `print(p)`, which is a program that
-    WORKS whenever `c` is true and raises otherwise, and refusing it would be
-    refusing a legal program on the strength of a path this analysis does not
-    look at.
-
-    So this version is EXACT on the shapes it decides and SILENT on the ones
-    it cannot, and both halves of that are deliberate: a false refusal breaks
-    working code, while a false silence leaves today's behaviour in place for
-    a program that already miscompiles and is now at least named by a bug doc.
-    The shape that survives is a name stored in only SOME arm of a branch:
+    That is a change of question rather than a widening of the old one, and it
+    is what closes the shape the statement-order walk could not see:
 
         def f(n):
             for i in range(3):
@@ -2030,16 +2668,36 @@ def read_before_store(fn, params: set = None, placed: set = None):
                     t = 1
             printf("t=%d", t)
 
-    `t` is stored somewhere in the body, so this walk sees the store and the
-    read as fine; whether the register holds 1 or the caller's leftover
-    depends on which arm ran, and CPython raises UnboundLocalError when
-    `i == 0`. Catching it needs a store to DOMINATE the read — every path
-    from the entry to pass one — which is a reachability computation over the
-    function's CFG and not a walk over its statements. Recorded in
-    bugs/FORMAL_read_before_store_dominating_store.md rather than
-    approximated here, because an approximation that misses some arms is
-    indistinguishable from no check at all.
-    """
+    `t` is stored SOMEWHERE in the body, so the old walk saw the store and the
+    read as fine; whether the register holds 1 or the caller's leftover depends
+    on which arm ran, and CPython raises `UnboundLocalError` when `i == 0`.
+
+    **Two shapes the fixpoint gets right that a "count the arms" heuristic
+    does not**, and they are the reason this is a real analysis rather than a
+    rule:
+
+    * a name stored in EVERY arm of an `if`/`elif`/`else` chain IS dominating —
+      `if c: p = 1 else: p = 2` then `print(p)` is legal, returns 3, and the
+      intersection over arms is exactly the rule;
+    * the `for` target STAYS bound after its loop, because the target is a
+      definition in the loop's HEADER and the join is reached from the header's
+      exit edge — which is what keeps
+      `for i in range(0, 100): if i > 3: break` then `return i` (returns 4, and
+      is legal) out of the answer set. Deciding it needs "did this loop execute
+      at least once", which the CFG answers for free and the old walk could
+      not.
+
+    `try`/`except`/`else`/`finally`, `break` out of one arm of a loop, a
+    `match` with a wildcard arm and a `del` on one path are all ordinary edges
+    here rather than cases, which is what
+    `bugs/FORMAL_read_before_store_dominating_store.md` asked for: it warned
+    that a partial rule "fires on some of them and not others is worse than
+    none in a specific way — it makes the corpus look covered".
+
+    A statement shape the builder does not recognise becomes a leaf statement
+    in its block, so it contributes no edge and no definition: an unknown shape
+    is a silence rather than a wrong answer, and the direction is the safe one
+    because the fixpoint is initialized from the top."""
     params = set(params if params is not None
                  else (getattr(fn, "params", None) or ()))
     params = {p[0] if isinstance(p, (tuple, list)) and p else p for p in params}
@@ -2084,233 +2742,137 @@ def read_before_store(fn, params: set = None, placed: set = None):
             return
         found.append((name, line))
 
-    def walk_expr(e):
-        for name, ln in _expr_reads(e, stored).items():
+    def walk_expr(e, live):
+        for name, ln in _expr_reads(e, live).items():
             note(name, ln if ln is not None else getattr(e, "line", None))
 
-    def walk_stmts(stmts):
-        nonlocal stored
+    def walk_stmts(stmts, live):
+        """The reads of a straight-line run, in order, updating `live`.
+
+        The per-statement rules are the old walk's, unchanged and for the same
+        reasons — they are about what ONE statement does, and the old walk was
+        right about all of them. What changed is what `live` starts as: a
+        block's IN set rather than a running set threaded through the whole
+        function. The `if`/`while`/`for`/`try` arms are not here at all, because
+        the CFG has already accounted for them by the time a block is walked."""
+        live = set(live)
         for s in (stmts or []):
-            walk_stmt(s)
-
-    def stores_of(s) -> set:
-        """The names ONE statement stores, computed without running the walk.
-
-        Used for the branch bodies, where the stores have to be visible to
-        the code after the branch without being attributed to a position
-        inside it."""
-        kind = type(s).__name__
-        if kind in ("AssignStmt", "AugAssignStmt", "ForStmt"):
-            return _store_names(getattr(s, "target", None))
-        if kind == "VarDecl":
-            n = getattr(s, "name", None)
-            return {n} if isinstance(n, str) else set()
-        if kind == "MultiAssignStmt":
-            out: set = set()
-            for t in (getattr(s, "targets", None) or []):
-                out |= _store_names(t)
-            return out
-        if kind == "WithStmt":
-            out = set()
-            for it in (getattr(s, "items", None) or []):
-                a = getattr(it, "alias", None)
-                if isinstance(a, str):
-                    out.add(a)
-            return out
-        if kind == "TryStmt":
-            out = set()
-            for h in (getattr(s, "handlers", None) or []):
-                n = getattr(h, "name", None)
-                if isinstance(n, str):
-                    out.add(n)
-            return out
-        return set()
-
-    def walk_stmt(s):
-        nonlocal stored
-        kind = type(s).__name__
-        line = getattr(s, "line", None)
-        if kind == "AssignStmt":
-            # The VALUE is read before the target is written: `x = x + 1` is
-            # the canonical case, and reading the value after adding the
-            # target to `stored` would make it look initialised.
-            walk_expr(getattr(s, "value", None))
-            stored |= _store_names(getattr(s, "target", None))
-            return
-        if kind == "AugAssignStmt":
-            # `x += 1` READS x. An augmented assignment to a name nothing
-            # stored is the same defect as `x = x + 1` with a shorter
-            # spelling, and it is the one that reads most like ordinary code.
-            walk_expr(getattr(s, "target", None))
-            walk_expr(getattr(s, "value", None))
-            stored |= _store_names(getattr(s, "target", None))
-            return
-        if kind == "VarDecl":
-            walk_expr(getattr(s, "value", None))
-            n = getattr(s, "name", None)
-            if isinstance(n, str):
-                stored.add(n)
-            return
-        if kind == "MultiAssignStmt":
-            walk_expr(getattr(s, "value", None))
-            for t in (getattr(s, "targets", None) or []):
-                stored |= _store_names(t)
-            return
-        if kind == "IfStmt":
-            walk_expr(getattr(s, "condition", None))
-            # Every arm's stores become visible to the code after the `if`.
-            # See the docstring: this is the half of the analysis that is
-            # deliberately not exact, stated rather than implied.
-            for b in (getattr(s, "then_body", None) or []):
-                walk_stmt(b)
-            for _c, b in (getattr(s, "elifs", None) or []):
-                walk_stmt(b)
-            for b in (getattr(s, "else_body", None) or []):
-                walk_stmt(b)
-            return
-        if kind == "WhileStmt":
-            walk_expr(getattr(s, "condition", None))
-            for b in (getattr(s, "body", None) or []):
-                walk_stmt(b)
-            for b in (getattr(s, "else_body", None) or []):
-                walk_stmt(b)
-            return
-        if kind == "ForStmt":
-            # The ITERABLE is read before the target exists (a `for` target is
-            # a fresh binding, not a read of an enclosing one), and the target
-            # is bound BEFORE the body runs — `for v in xs: total += v` reads
-            # a stored `v` and must not be reported.
-            #
-            # The target STAYS stored after the loop, which is a deliberate
-            # divergence from CPython and the right side of it. CPython leaves
-            # it unbound when the iterable is empty, so
-            # `for i in []: pass` then `print(i)` is a NameError; treating
-            # that as this case refuses
-            #
-            #     for i in range(0, 100):
-            #         if i > 3: break
-            #     return i
-            #
-            # which is legal — the loop ran, so `i` is bound, and it returns
-            # 4. That is `test_formal_run.py`'s `for_range_break`, and it is
-            # the shape real code is written in. Deciding it properly needs
-            # "did this loop execute at least once", which is the same
-            # reachability question the branch arms need; refusing the legal
-            # shape to catch the illegal one would break working programs,
-            # and a false refusal is the worse of the two errors here.
-            walk_expr(getattr(s, "iterable", None))
-            stored |= stores_of(s)
-            for b in (getattr(s, "body", None) or []):
-                walk_stmt(b)
-            for b in (getattr(s, "else_body", None) or []):
-                walk_stmt(b)
-            return
-        if kind == "WithStmt":
-            for it in (getattr(s, "items", None) or []):
-                walk_expr(getattr(it, "expr", None))
-            # The `as` ALIAS is bound BEFORE the body runs — that is what
-            # `with … as y:` means, and it is what both emitters already do
-            # (`arm64_codegen._emit_with` / `x86_64_codegen._emit_with` store the
-            # alias to the context expression's own value and then emit the
-            # body). Adding the store AFTER the body walked it reported the
-            # body's own read of the alias as a read before anything stored
-            # it, which is not true of the program: measured, `with 7 as y: x =
-            # y` was refused on BOTH architectures with a message about
-            # `UnboundLocalError` for a program CPython does not even run
-            # (`with 7` is a `TypeError: 'int' object does not support the
-            # context manager protocol`), so the diagnostic named neither the
-            # construct nor a language error the reader could reproduce.
-            stored |= stores_of(s)
-            for b in (getattr(s, "body", None) or []):
-                walk_stmt(b)
-            return
-        if kind == "TryStmt":
-            for b in (getattr(s, "body", None) or []):
-                walk_stmt(b)
-            for h in (getattr(s, "handlers", None) or []):
-                for b in (getattr(h, "body", None) or []):
-                    walk_stmt(b)
-            for b in (getattr(s, "else_body", None) or []):
-                walk_stmt(b)
-            for b in (getattr(s, "finally_body", None) or []):
-                walk_stmt(b)
-            stored |= stores_of(s)
-            return
-        if kind == "MatchStmt":
-            walk_expr(getattr(s, "subject", None))
-            for c in (getattr(s, "cases", None) or []):
-                for b in (getattr(c, "body", None) or []):
-                    walk_stmt(b)
-            return
-        if kind in ("ReturnStmt", "ExprStmt"):
-            walk_expr(getattr(s, "value", None))
-            return
-        if kind == "AssertStmt":
-            walk_expr(getattr(s, "value", None))
-            walk_expr(getattr(s, "msg", None))
-            return
-        if kind == "RaiseStmt":
-            walk_expr(getattr(s, "value", None))
-            return
-        if kind == "DelStmt":
-            # `del x` READS x, and a name nothing stored is the same case.
-            for t in (getattr(s, "targets", None) or []):
-                walk_expr(t)
-            return
-        if kind in ("ComptimeVarStmt",):
-            walk_expr(getattr(s, "value", None))
-            t = getattr(s, "target", None)
-            stored |= _store_names(t)
-            return
-        if kind in ("ComptimeForStmt", "ComptimeIfStmt"):
-            walk_expr(getattr(s, "iterable", None)
-                      if kind == "ComptimeForStmt"
-                      else getattr(s, "condition", None))
-            for b in (getattr(s, "body", None) or getattr(s, "then_body", None)
-                      or []):
-                walk_stmt(b)
-            for _c, b in (getattr(s, "elifs", None) or []):
-                walk_stmt(b)
-            for b in (getattr(s, "else_body", None) or []):
-                walk_stmt(b)
-            if kind == "ComptimeForStmt":
-                t = getattr(s, "target", None)
-                stored |= _store_names(t)
-            return
-        if kind in ("FunctionDef", "StructDef", "TraitDef", "LambdaExpr"):
-            # A nested definition's body is a DIFFERENT frame with its own
-            # parameters, and its locals are not this function's. Walking it
-            # here would report its own unstored names against this
-            # function's `stored` set.
-            return
-        # Anything else: walk its expressions rather than ignore it, so an
-        # unrecognised statement shape is a silence rather than a wrong
-        # answer.
-        for f in getattr(s, "__dataclass_fields__", ()) or ():
-            if f in ("line", "col"):
+            kind = type(s).__name__
+            if kind == "AssignStmt":
+                # The VALUE is read before the target is written: `x = x + 1`
+                # is the canonical case, and reading the value after adding
+                # the target would make it look initialised.
+                walk_expr(getattr(s, "value", None), live)
+                live |= _store_names(getattr(s, "target", None))
                 continue
-            v = getattr(s, f, None)
-            if isinstance(v, (F.IfStmt, F.WhileStmt, F.ForStmt, F.WithStmt,
-                              F.TryStmt, F.MatchStmt, F.ReturnStmt,
-                              F.ExprStmt, F.AssertStmt, F.RaiseStmt,
-                              F.DelStmt, F.AssignStmt, F.AugAssignStmt,
-                              F.VarDecl, F.MultiAssignStmt, F.FunctionDef,
-                              F.StructDef, F.TraitDef, F.LambdaExpr)):
-                walk_stmt(v)
-            elif isinstance(v, list) and v and all(
-                    isinstance(x, (F.IfStmt, F.WhileStmt, F.ForStmt,
-                                   F.WithStmt, F.TryStmt, F.ReturnStmt,
-                                   F.ExprStmt, F.AssertStmt, F.RaiseStmt,
-                                   F.DelStmt, F.AssignStmt, F.AugAssignStmt,
-                                   F.VarDecl, F.MultiAssignStmt))
-                    for x in v):
-                for x in v:
-                    walk_stmt(x)
-            else:
-                walk_expr(v)
+            if kind == "AugAssignStmt":
+                # `x += 1` READS x. An augmented assignment to a name nothing
+                # stored is the same defect as `x = x + 1` with a shorter
+                # spelling.
+                walk_expr(getattr(s, "target", None), live)
+                walk_expr(getattr(s, "value", None), live)
+                live |= _store_names(getattr(s, "target", None))
+                continue
+            if kind == "VarDecl":
+                walk_expr(getattr(s, "value", None), live)
+                n = getattr(s, "name", None)
+                if isinstance(n, str):
+                    live.add(n)
+                continue
+            if kind == "MultiAssignStmt":
+                walk_expr(getattr(s, "value", None), live)
+                for t in (getattr(s, "targets", None) or []):
+                    live |= _store_names(t)
+                continue
+            if kind in ("ForStmt", "ComptimeForStmt"):
+                # The ITERABLE is read before the target exists (a `for` target
+                # is a fresh binding, not a read of an enclosing one), and the
+                # target is bound BEFORE the body runs.
+                walk_expr(getattr(s, "iterable", None), live)
+                live |= _store_names(getattr(s, "target", None))
+                continue
+            if kind == "WhileStmt":
+                walk_expr(getattr(s, "condition", None), live)
+                continue
+            if kind == "IfStmt":
+                walk_expr(getattr(s, "condition", None), live)
+                continue
+            if kind == "MatchStmt":
+                walk_expr(getattr(s, "subject", None), live)
+                continue
+            if kind == "ComptimeIfStmt":
+                walk_expr(getattr(s, "condition", None), live)
+                continue
+            if kind == "WithStmt":
+                for it in (getattr(s, "items", None) or []):
+                    walk_expr(getattr(it, "expr", None), live)
+                    a = getattr(it, "alias", None)
+                    if isinstance(a, str):
+                        live.add(a)
+                continue
+            if kind == "TryStmt":
+                for h in (getattr(s, "handlers", None) or []):
+                    n = getattr(h, "name", None)
+                    if isinstance(n, str):
+                        live.add(n)
+                continue
+            if kind == "DelStmt":
+                # `del x` READS x, and a name nothing stored is the same case.
+                for t in (getattr(s, "targets", None) or []):
+                    walk_expr(t, live)
+                for t in (getattr(s, "targets", None) or []):
+                    live -= _store_names(t)
+                continue
+            if kind == "ComptimeVarStmt":
+                walk_expr(getattr(s, "value", None), live)
+                live |= _store_names(getattr(s, "target", None))
+                continue
+            if kind in ("FunctionDef", "StructDef", "TraitDef", "LambdaExpr"):
+                # A nested definition's body is a DIFFERENT frame with its own
+                # parameters, and its locals are not this function's.
+                continue
+            if kind in ("ReturnStmt", "ExprStmt"):
+                walk_expr(getattr(s, "value", None), live)
+                continue
+            if kind == "RaiseStmt":
+                walk_expr(getattr(s, "value", None), live)
+                continue
+            if kind == "AssertStmt":
+                walk_expr(getattr(s, "value", None), live)
+                walk_expr(getattr(s, "msg", None), live)
+                continue
+            if kind in ("BreakStmt", "ContinueStmt", "Pass", "GlobalStmt",
+                        "NonlocalStmt"):
+                continue
+            # Anything else: walk its expressions rather than ignore it, so an
+            # unrecognised statement shape is a silence rather than a wrong
+            # answer.
+            for f in getattr(s, "__dataclass_fields__", ()) or ():
+                if f in ("line", "col"):
+                    continue
+                v = getattr(s, f, None)
+                if isinstance(v, (F.IfStmt, F.WhileStmt, F.ForStmt, F.WithStmt,
+                                  F.TryStmt, F.MatchStmt, F.ReturnStmt,
+                                  F.ExprStmt, F.AssertStmt, F.RaiseStmt,
+                                  F.DelStmt, F.AssignStmt, F.AugAssignStmt,
+                                  F.VarDecl, F.MultiAssignStmt, F.FunctionDef,
+                                  F.StructDef, F.TraitDef, F.LambdaExpr)):
+                    walk_expr(v, live)
+                else:
+                    walk_expr(v, live)
 
-    stored: set = set()
-    walk_stmts(getattr(fn, "body", None) or [])
+    blocks, entry = _build_cfg(getattr(fn, "body", None) or [])
+    stored_in = _definitely_stored(blocks, entry, params)
+    # Blocks in index order, so the finding is the FIRST in SOURCE order rather
+    # than whatever order the builder happened to finish them in — a diagnostic
+    # that names a later line when an earlier one is the same defect sends the
+    # reader to the wrong place.
+    for b in sorted(blocks, key=lambda x: x.index):
+        if b.index == entry:
+            continue
+        walk_stmts(b.stmts, stored_in.get(b.index, set()))
+        if found:
+            break
     return found[0] if found else None
 
 
@@ -11225,6 +11787,182 @@ def struct_is_one_field(struct_def) -> bool:
     return struct_fits_one_word(struct_def) and struct_field_count(struct_def) == 1
 
 
+# The argument conventions that say "this method may change the object its
+# receiver names". `out` and `inout` are the two the corpus writes; `mut` is the
+# third spelling, and the list is a tuple because adding one is a decision about
+# the language's surface syntax rather than a detail of the walk below.
+MUTATING_RECEIVER_CONVENTIONS = ("out", "inout", "mut")
+
+
+def receiver_writeback_name(fn) -> object:
+    """The receiver a method must HAND BACK, or None when it need not.
+
+    **`out self` on a ONE-FIELD struct, and why the receiver has to come back
+    at all.** A multi-field struct's receiver is the ADDRESS of a frame of
+    8-byte slots, so `self.f = x` in the callee writes into storage the caller
+    still owns and the write is visible with no convention and no help. A
+    one-field struct's receiver IS its field: `_one_word_field_map` rewrites
+    `self.f` to `self` and `c.f` to `c`, so the caller's local and the callee's
+    parameter are the same word in two registers and a store to the callee's
+    copy is a store to a register the caller never reads back. Measured:
+    `self._value = self._value + 4` inside `def bump(out self)` built on both
+    architectures, ran, and printed the value the caller had — the new one is
+    computed and dropped (`bugs/FORMAL_one_field_struct_mutating_method_is_a_no_op.md`).
+
+    So the callee RETURNS the receiver on every path and the caller stores it
+    back over the same expression it passed. The value is a plain word on both
+    sides, so neither backend's call path changes: the call already leaves its
+    result in the return register, and the store is the store the source's
+    `c.f = ...` would have been.
+
+    None for anything else, and the two exclusions are both deliberate:
+
+      * a receiver that is NOT declared mutating. `def f(self): self.x = 1` is
+        not a program on this path — a plain receiver cannot be assigned
+        through — so there is nothing here to give back and guessing would
+        invent a copy semantic the source did not ask for;
+      * a struct that is not one field, whose receiver is an address and
+        therefore already shared.
+    """
+    convs = getattr(fn, "param_convs", None) or {}
+    name = method_receiver_name(fn)
+    if name is None:
+        return None
+    if (convs.get(name) or "") not in MUTATING_RECEIVER_CONVENTIONS:
+        return None
+    return name
+
+
+# One entry of `one_field_mutating_methods`' table: the receiver the method
+# hands back, and the two names the diagnostics need. A named tuple because the
+# call site joins on the KEY and reads only the receiver, while a refusal has to
+# name the construct — and re-deriving the owner from the key at refusal time
+# would be a second lookup that can disagree with the first.
+ReceiverWriteback = collections.namedtuple("ReceiverWriteback",
+                                           "receiver owner member")
+ReceiverWriteback.__doc__ = (
+    "`receiver` is the name to store the call's answer over; `owner`/`member` "
+    "are the class and the method as the source spells them, for "
+    "`mutating_receiver_target_refusal` and "
+    "`mutating_receiver_value_refusal`.")
+
+
+def one_field_mutating_methods(functions, method_owners: dict) -> dict:
+    """`{lifted method name: ReceiverWriteback}` for every one-field mutator.
+
+    Keyed by the function's OWN name, which is the LIFTED `<Struct>_<member>`
+    spelling `formal/build.py`'s `_struct_methods` gives it and the same one
+    `_rewrite_method_calls` puts on the call site — so the call site joins on
+    the name it already carries, with no second lookup and therefore no second
+    answer to "is this call a write-back". A table the call site cannot join on
+    is how those two drift apart.
+
+    `method_owners` is `formal/build.py`'s `{lifted name: StructDef}`: a
+    FunctionDef carries no back-pointer to the class body it was written in, so
+    the owner is the one thing this cannot derive for itself, and `functions` is
+    what carries the receiver's convention.
+    """
+    out = {}
+    for fn in (functions or ()):
+        st = (method_owners or {}).get(fn.name)
+        if st is None or not struct_is_one_field(st):
+            continue
+        recv = receiver_writeback_name(fn)
+        if recv is None:
+            continue
+        # The MEMBER name, read off the class body rather than sliced out of
+        # the lifted name: `method_function_name` is what produced that name, so
+        # asking it the other way round is the one spelling of "which method is
+        # this" that cannot drift from the key.
+        member = next((m.name for m in struct_methods(st)
+                       if method_function_name(st.name, m.name) == fn.name),
+                      fn.name)
+        out[fn.name] = ReceiverWriteback(recv, st.name, member)
+    return out
+
+
+def mutating_receiver_return_refusal(owner: str, member: str) -> str:
+    """The diagnostic for a one-field mutator that also RETURNS a value.
+
+    A formal value is one 64-bit word, so the word a one-field mutator hands
+    back is the receiver and there is no second word to return something else
+    in. Choosing one silently would drop the other, and which one is lost
+    depends on the method rather than on the program — so this asks rather than
+    picks. The two ways out are the two the language already has: give the
+    method a declared return type and no receiver write (so it is a reader of
+    the object, not a mutator of it), or split it into a mutator and a reader.
+    """
+    return (
+        f"{owner}.{member}() both changes its receiver and returns a value, and "
+        f"a formal value is one 64-bit word: on this path the word a one-field "
+        f"struct's mutating method hands back IS the receiver, so there is no "
+        f"second word to return anything else in, and dropping one of the two "
+        f"silently is how a program that builds computes the wrong answer. "
+        f"Split it into a method that changes the receiver and returns nothing, "
+        f"and one that reads it and returns the value — or make it read the "
+        f"receiver instead of writing it. The rule is "
+        f"`formal/model.py`'s `receiver_writeback_name`, and the shape is pinned "
+        f"by `test_formal_run.py`'s "
+        f"`one_field_mutator_with_a_return_value_is_refused`.")
+
+
+    return (
+        f"{owner}.{member}() is a one-field struct's mutating method, so the "
+        f"value it hands back IS the receiver, and the caller stores that over "
+        f"the expression the receiver was read from. It is called here as a "
+        f"VALUE rather than as a statement of its own, so there is nowhere to "
+        f"store it — and reading the call's result instead would hand the "
+        f"caller the object's new contents, which is a different program from "
+        f"the one written. Call `{spelled}.{member}(...)` as a statement. "
+        f"(`formal/model.py`'s `receiver_writeback_name` is the rule.)")
+
+
+def mutating_receiver_value_refusal(owner: str, member: str, spelled) -> str:
+    """The diagnostic for a mutator call in a VALUE position.
+
+    The write-back is a store, so it needs a statement to be a statement in, and
+    `x = c.bump(4)` has none: reading the call's result instead would hand `x`
+    the object's new CONTENTS, which is a different program from the one
+    written — the source says the method changes the object and says nothing
+    about what it evaluates to. Refused rather than guessed, because the guess
+    is the defect this mechanism exists to remove wearing a different hat.
+    """
+    return (
+        f"{owner}.{member}() is a one-field struct's mutating method, so the "
+        f"value it hands back IS the receiver, and the caller stores that over "
+        f"the expression the receiver was read from. It is called here as a "
+        f"VALUE rather than as a statement of its own, so there is nowhere to "
+        f"store it — and reading the call's result instead would hand the "
+        f"caller the object's new contents, which is a different program from "
+        f"the one written. Call `{spelled}.{member}(...)` as a statement of its "
+        f"own. (`formal/model.py`'s `receiver_writeback_name` is the rule.)")
+
+
+def mutating_receiver_target_refusal(owner: str, member: str, spelled) -> str:
+    """The diagnostic for a mutating call whose receiver is not a plain name.
+
+    The write-back stores the callee's answer over the expression the receiver
+    was read from, and a NAME is the one such expression this path can store
+    through: a local has a home. A SUBSCRIPT has none — a formal value is one
+    word with no address the compiler took — so `items[0].bump(4)` has nowhere
+    to put the new value, and the alternative is the defect this whole mechanism
+    exists to remove: the callee computes the new value and the caller keeps the
+    old one, with both architectures agreeing on the wrong answer. A FIELD
+    receiver (`h.cell.bump()`) is a different refusal that fires earlier, by the
+    rule that a method call on a frame slot is not a call this path lowers, and
+    is not this one.
+    """
+    return (
+        f"{owner}.{member}() is called on {spelled}, and the receiver of a "
+        f"one-field struct's mutating method is the struct itself, so the new "
+        f"value has to be stored back through the expression the receiver was "
+        f"read from. {spelled} is not a name this path can store through: a "
+        f"formal value is one 64-bit word with no address behind it, so there is "
+        f"no lvalue here. Bind it to a local first — "
+        f"`var it = {spelled}` then `it.{member}(...)` — which is the same "
+        f"computation and one store this path can lower.")
+
+
 def struct_frame_slots(struct_def) -> list:
     """The slot contents of a framed receiver, in slot order.
 
@@ -11799,6 +12537,73 @@ def holder_rebound_from_a_word_refusal(fn_name: str, name: str,
         f"of a framed struct (`{name} = S(...)`), a COPY of another holder "
         f"(`{name} = other`), or a parameter of a method of a framed struct. Use "
         f"a different name for the word, or copy the value out of {name} first")
+
+
+def receiver_rebound_from_a_word_refusal(fn_name: str, receiver: str,
+                                         value_spelling: str,
+                                         struct_names) -> str:
+    """Why a method cannot rebind its own receiver to a plain word.
+
+    The sibling of `holder_rebound_from_a_word_refusal`, and the reason it has
+    to be a separate message is that the LOCAL rule's two repairs do not exist
+    for a receiver: a receiver is not a name the caller can re-declare, and
+    "copy the value out of it first" is not a thing. So the local check
+    excludes the method's own receiver names — by NAME from
+    `struct_receivers`, which covers `out self` and `inout self` and every
+    other receiver spelling by the same rule — and what the exclusion leaves
+    open is this.
+
+    **The defect, measured.** A method's effect on a field reaches its caller
+    because the caller holds the SAME address the method dereferences; that is
+    the whole of the by-reference receiver. Rebinding the receiver points the
+    method at a different word, so the write does not reach the caller at all —
+    a silently dropped store with an address-shaped cause — and every later
+    field read through the receiver is a load at `base + 8·slot` where `base` is
+    whatever word was assigned:
+
+        struct R:
+            var a: Int
+            var b: Int
+            def rebind(self):
+                self = 5
+            def read(self):
+                return self.a      # a load at 5 + 8·0
+
+    CPython raises `TypeError` on the shape rather than answering it, and that
+    is worth saying in the message: the source is not a program that computes
+    something else, it is a program that does not mean what it looks like.
+
+    **What is allowed, and why each one is not this defect.** A receiver
+    rebound to a CONSTRUCTION of its own struct is the idiomatic Mojo
+    constructor (`self = Self(...)`, and `self = <expr>` where the expression
+    builds a frame of the receiver's own type): that is a fresh object, the
+    address the caller holds is the one being replaced wholesale, and there is
+    no dropped write to report. A receiver rebound to ANOTHER receiver — the
+    same address, copied — is fine for the same reason and deserves a note
+    because a rule of the form "never rebind a receiver" would break it for no
+    reason: it copies the address, the caller's slot already holds it, and the
+    method's field writes still land where the caller expects.
+
+    `struct_names` is the struct the receiver belongs to, so the message can
+    name it rather than making the reader re-derive it from the method."""
+    who = ", ".join(sorted({st.name for st in (struct_names or ())})) or "its own"
+    return (
+        f"{receiver} is assigned {value_spelling} in {fn_name}(), and "
+        f"{receiver} is this method's receiver, so it is the address the CALLER "
+        f"passed rather than a name either side can re-declare. A method's "
+        f"write to a field reaches its caller because the caller holds the same "
+        f"address this method dereferences; rebinding the receiver points the "
+        f"method at a different word, so the write never gets back to the "
+        f"caller at all — measured, the program builds, runs, and prints what "
+        f"the caller built the frame with — and every later field read through "
+        f"{receiver} is a load at `[base + 8·slot]` with base = "
+        f"{value_spelling}. CPython rejects this shape outright, so the source "
+        f"is not a program that computes a different answer, it is one that does "
+        f"not mean what it looks like. What a receiver may be assigned is a "
+        f"CONSTRUCTION of {who} (`{receiver} = Self(...)`, which is how a Mojo "
+        f"constructor rebinds its own object) or another receiver of the same "
+        f"type, which copies the address and leaves the caller's slot pointing "
+        f"where the writes land")
 
 
 def construction_mismatch_refusal(target: str, callee: str, summary: str,

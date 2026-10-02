@@ -1700,12 +1700,14 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     by_name = {st.name: st for st in structs}
     check_frame_field_blob_premises(structs)
     check_frame_subscript_escapes(functions)
-    # Three more late frame checks, each added by a later branch and each paid
+    # Late frame checks, each added by a later branch and each paid
     # for twice while this block was open-coded at both call sites — which is the
     # drift `_run_late_checks` exists to stop. They keep the order they had at
-    # their own call site: a holder rebound from a word, a construction whose
-    # shape does not match, and a module global shadowed by a local read.
+    # their own call site: a holder rebound from a word, a receiver rebound to a
+    # word, a construction whose shape does not match, and a module global
+    # shadowed by a local read.
     check_frame_holder_rebinds(functions)
+    check_receiver_rebinds(functions)
     # …and the one that names a value-position METHOD read for what it is. The
     # field-set derivation already stopped it being a zero, so this is the
     # diagnosis rather than a second verdict, and it is here rather than in the
@@ -3526,6 +3528,12 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                              _name_defs, returns_frame)
     _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
                             by_name_returns_frame)
+    # …and the RECEIVER half of the same question, which the check above cannot
+    # ask because it deliberately skips receiver names (its two repairs — use a
+    # different name, copy the value out — do not exist for a receiver). Needs
+    # no holder set, which is why it is not folded into the call above: a
+    # receiver is not a name the holder analysis knows anything about.
+    _collect_receiver_rebinds(functions, structs_by_name)
     _park_construction_mismatches(functions, framed)
 
 
@@ -3730,6 +3738,121 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
         return st is not None and M.struct_is_framed(st) \
             and M.type_constructor_kind(name) is None
     return False
+
+
+def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
+    """PARK every method that rebinds its own receiver to something that is not
+    a construction of its own struct.
+
+    The receiver half of `_collect_holder_rebinds`, and separate because the
+    local rule's REPAIRS do not exist here: a receiver is not a name the caller
+    can re-declare, and "copy the value out of it first" is not a thing. That is
+    why the local check skips receiver names by NAME (from
+    `model.struct_receivers`, so `out self` and `inout self` are covered by the
+    same rule) — and skipping them there is what leaves this to be asked.
+
+    The rule is `_value_may_be_a_frame` with the receiver's OWN struct as the
+    alias, which is the function the local check already uses and deliberately
+    does not use for this: `self = Self(...)` is a construction (so a frame,
+    and fine), and `self = other_receiver` is a copy (so the address the caller
+    holds is the one still being written, also fine). Everything else — a word,
+    a call, a string — is this finding. It reuses the recognition rather than
+    reimplementing it, because a second copy of "what can be a frame" is how
+    the two came to disagree about `self = Self(...)` in the first place.
+
+    Parked on the function and raised by `check_receiver_rebinds`, like every
+    other finding in this family, so the refusal does not preempt the import
+    diagnosis (`_run_late_checks` is called after imports resolve)."""
+    owners = M.method_owner_names(list((structs_by_name or {}).values()))
+    for fn in functions:
+        owner = owners.get(fn.name)
+        if owner is None:
+            continue
+        # A ONE-FIELD struct's receiver is not an address, so this rule's whole
+        # premise is false there.  `self = self + k` in a one-field mutator is
+        # a store to the struct's own single word, and it reaches the caller
+        # because the method RETURNS the receiver and the call site stores it
+        # back (`model.receiver_writeback_name`) — the mechanism this check
+        # would otherwise forbid, for the same program the check is right about
+        # everywhere else.  Decided by `struct_is_one_field`, the same predicate
+        # the rewrite that makes `self.<field>` mean `self` is decided by, so
+        # the two cannot disagree about which receivers are values.
+        if M.struct_is_one_field(owner):
+            continue
+        receivers = M.struct_receivers(owner)
+        # A receiver rebound to ANOTHER RECEIVER is a copy of the same address,
+        # so the caller's slot already holds the address the method's field
+        # writes land through and there is no dropped store to report. A
+        # receiver is not in the holder set, so `_value_may_be_a_frame`'s "is
+        # the name a holder" answer does not apply to one — the question is
+        # asked from the DECLARATION instead, which is the same evidence
+        # `parameter_declared_structs` exists to give: a parameter typed
+        # `other: Self` (or `other: R`) is an address of the same frame layout
+        # whatever any call site passed, so a rebind to it copies rather than
+        # repoints.
+        same_type = {getattr(st, "name", None) for st in
+                     M.parameter_declared_structs(
+                         fn, structs_by_name, owner).values()}
+        # `owner` is what reduces a bare `Self`, and it is not always supplied:
+        # the call site that reaches this collector with the owner unresolved
+        # answers `{}` for a parameter typed `other: Self` while answering
+        # `{'other': R}` for one typed `other: R`. That is the right behaviour
+        # of a function asked a question it cannot answer, so the reduction is
+        # done HERE from the same place the declaration lives — the parameter
+        # tuple's own annotation — rather than by calling it again with a
+        # different owner and hoping the two agree. A parameter whose
+        # annotation names the receiver's own struct is a same-type copy
+        # whether or not `Self` was reduced for us.
+        own_name = getattr(owner, "name", None)
+        for p in (getattr(fn, "params", None) or ()):
+            pname, ann = (p[0], p[1]) if isinstance(p, (tuple, list)) \
+                else (p, None)
+            if pname in receivers or not ann:
+                continue
+            if own_name and M.annotation_base_name(ann, own_name) == own_name:
+                same_type.add(pname)
+        findings = []
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, (F.AssignStmt, F.VarDecl)):
+                continue
+            if isinstance(node, F.VarDecl):
+                target, value = node.name, node.value
+            else:
+                target = (node.target.name
+                          if isinstance(node.target, F.IdentExpr) else None)
+                value = node.value
+            if not isinstance(target, str) or target not in receivers:
+                continue
+            if value is None:
+                continue
+            if isinstance(value, F.IdentExpr):
+                if value.name in receivers:
+                    continue        # a copy of the receiver itself
+                if value.name in same_type:
+                    continue        # a parameter of the same struct: also a copy
+            if _value_may_be_a_frame(value, structs_by_name, receivers, owner):
+                continue            # a construction of the receiver's own struct
+            findings.append((target, _expr_spelling(value)))
+        if findings:
+            fn._receiver_rebinds = (findings, owner)
+
+
+def check_receiver_rebinds(functions) -> None:
+    """Raise the receiver-rebound findings `_collect_receiver_rebinds` parked.
+
+    One finding, for the reason `check_frame_holder_rebinds` raises one: a
+    method with three of them has one defect with three lines, and the first is
+    enough to act on. The message is `model`'s, so both backends word this
+    construct identically — a receiver's meaning is a property of the by-
+    reference design, not of an instruction either backend chose."""
+    for fn in functions:
+        findings, owner = getattr(fn, "_receiver_rebinds", (None, None))
+        if not findings:
+            continue
+        target, value_spelling = findings[0]
+        names = [owner] if owner is not None else []
+        raise CodegenError(M.receiver_rebound_from_a_word_refusal(
+            fn.name, target, value_spelling, names))
 
 
 def _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
@@ -5864,6 +5987,127 @@ def _sole_field_name(st) -> str:
             f"be declared as `name: Type` or `name = value` to be "
             f"representable on this path")
     return name
+
+
+def _return_the_receiver(fn, wb=None) -> None:
+    """Make every exit of a one-field mutator RETURN its receiver.
+
+    The callee half of `model.receiver_writeback_name`. Three things, and the
+    first two are the ones that are easy to leave out:
+
+      * a `return` with no value becomes `return <receiver>`, so an EARLY exit
+        hands the receiver back too. Rewriting only the fall-through would make
+        `if c: return` return whatever the return register happened to hold, and
+        the caller would store that over the object's value — a build-dependent
+        word, which is the whole class of defect this path refuses elsewhere;
+      * a body that can fall off its end gets a `return <receiver>` appended, so
+        no path returns nothing. `model.returns_on_every_path` is the reader for
+        that, not either backend's private `_always_returns`: this is a build
+        pass, and a pass that grew its own third copy of "does this body always
+        return" is how the two architectures end up disagreeing about it;
+      * a method that already returns a VALUE is refused, because one 64-bit
+        word is already spoken for and dropping one of the two silently is how a
+        program that builds computes the wrong answer. The declared return type
+        is the ordinary way to hit that and a literal `return 1` is the
+        undeclared one, so both are asked here.
+
+    Runs BEFORE `_rewrite_self_fields`, which is what makes the appended
+    `return self` mean the new value: the rewrite turns `self._value` into
+    `self`, so a `return` placed after it reads the word the body just stored.
+    """
+    if (getattr(fn, "return_type", None) is not None
+            or any(isinstance(n, F.ReturnStmt) and n.value is not None
+                   for n in M.iter_nodes(fn.body))):
+        # The MEMBER name, not the lifted one: the reader wrote `c.bump()` and a
+        # diagnostic that says `Cell.Cell_bump()` sends them looking for a
+        # function they never declared. It is carried by the write-back entry
+        # rather than sliced off the symbol for exactly that reason.
+        raise CodegenError(M.mutating_receiver_return_refusal(
+            getattr(wb, "owner", None) or fn.name,
+            getattr(wb, "member", None) or fn.name))
+    recv = M.receiver_writeback_name(fn)
+    if recv is None:
+        return
+    for node in M.iter_nodes(fn.body):
+        if isinstance(node, F.ReturnStmt) and node.value is None:
+            node.value = F.IdentExpr(name=recv)
+    if not M.returns_on_every_path(fn.body):
+        fn.body = list(fn.body) + [
+            F.ReturnStmt(value=F.IdentExpr(name=recv), line=fn.line)]
+
+
+def _writeback_spelling(node) -> str:
+    """The receiver as the reader wrote it, for the refusal's sentence."""
+    if isinstance(node, F.IdentExpr):
+        return node.name
+    if isinstance(node, F.MemberExpr):
+        obj = _writeback_spelling(node.obj)
+        return f"{obj}.{node.member}" if obj else str(node.member)
+    if isinstance(node, F.SubscriptExpr):
+        obj = _writeback_spelling(node.obj)
+        return f"{obj}[…]" if obj else "[…]"
+    return type(node).__name__
+
+
+def _apply_receiver_writeback(node, writebacks: dict) -> None:
+    """`c.bump(4)` as a statement -> `c = Cell_bump(c, 4)`, in place.
+
+    The caller half, and the reason it is a STATEMENT-shaped rewrite: the word
+    the callee handed back has to land in the binding the receiver was read
+    from, and a call in any other position has nowhere to put it. `x = c.bump()`
+    would read the receiver's new value as `x`, which is a different program
+    from the one written; so it is refused, as is a receiver this path cannot
+    store through. Both refusals are the trade the rest of this file makes — a
+    construct that cannot be lowered honestly is named, not emitted.
+
+    A NAME and nothing else, because a name is the one receiver this path can
+    store the answer into — a local's home. A field receiver (`h.cell.bump()`)
+    is already refused further out, by the rule that a method call on a frame
+    slot is not a call this backend lowers, so it never reaches here; a SUBSCRIPT
+    receiver (`items[0].bump(4)`) has no addressable storage on this path at
+    all. Both are named by `model.mutating_receiver_target_refusal` rather than
+    left to fail in an emitter, because a construct that cannot be lowered
+    honestly is named, not emitted.
+
+    The list arm is a `while` loop rather than a `for` because the rewrite
+    REPLACES an element with a different node: iterating a list while changing
+    its length is how a pass like this skips the statement after the one it
+    just rewrote.
+    """
+    if isinstance(node, list):
+        i = 0
+        while i < len(node):
+            item = node[i]
+            if isinstance(item, F.ExprStmt) and isinstance(item.value,
+                                                          F.CallExpr):
+                call = item.value
+                wb = writebacks.get(getattr(call.func, "name", None))
+                if wb is not None:
+                    recv = call.args[0] if call.args else None
+                    if not isinstance(recv, F.IdentExpr):
+                        raise CodegenError(
+                            M.mutating_receiver_target_refusal(
+                                wb.owner, wb.member,
+                                _writeback_spelling(recv)))
+                    node[i] = F.AssignStmt(target=recv, value=call,
+                                           line=item.line)
+                    i += 1
+                    continue
+            _apply_receiver_writeback(item, writebacks)
+            i += 1
+        return
+    if isinstance(node, F.ExprStmt):
+        return                        # a statement: the list arm handled it
+    if isinstance(node, F.CallExpr):
+        wb = writebacks.get(getattr(node.func, "name", None))
+        if wb is not None:
+            recv = node.args[0] if node.args else None
+            raise CodegenError(M.mutating_receiver_value_refusal(
+                wb.owner, wb.member,
+                _writeback_spelling(recv) if recv is not None else "the receiver"))
+        return
+    for field in getattr(node, "__dataclass_fields__", {}):
+        _apply_receiver_writeback(getattr(node, field), writebacks)
 
 
 def _rewrite_self_fields(node, mapping: dict):
@@ -8678,7 +8922,16 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and only the comparison is refused.
     refuse_none_comparisons(functions, structs_by_name,
                             _method_receiver_bases, method_owners)
+    # The ONE-FIELD MUTATOR write-back, decided once for the whole module
+    # because it is a property of the image rather than of one function: the
+    # callee half is "return the receiver on every path" and the caller half is
+    # "store it back over the expression the receiver came from", and the two
+    # halves must agree on the same table or a call site stores an answer from a
+    # method that did not hand one back.
+    writebacks = M.one_field_mutating_methods(functions, method_owners)
     for fn in functions:
+        if fn.name in writebacks:
+            _return_the_receiver(fn, writebacks[fn.name])
         _rewrite_method_calls(fn.body, owners, wide, receiverless)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
@@ -8705,6 +8958,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # from a constructor.
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name))
+        # …and the CALLER half of the one-field mutator write-back, after
+        # `_rewrite_self_fields` so the receiver it stores through is the same
+        # word the callee was handed (`c._value` is `c` by now, and it is `c`
+        # in the argument too). Before it would store through a spelling the
+        # emitter has already rewritten, which is a store to a name nothing
+        # binds.
+        if writebacks:
+            _apply_receiver_writeback(fn.body, writebacks)
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)

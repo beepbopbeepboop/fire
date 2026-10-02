@@ -6680,6 +6680,26 @@ dylib_exports: list = None, globals_base: int = None,
             # fact here, so the operand is still evaluated and `ASR #63`
             # replicates it.
             lit = self._static_int(imm_r)
+            # …and a literal NEGATIVE amount is refused rather than emitted,
+            # which is the build-time half of the same rule: the amount is
+            # decidable here, and a refusal names the line where the run-time
+            # trap in `_emit_shift_reg` can only leave a status behind. It has
+            # to come BEFORE the saturation test, because a negative amount is
+            # below 64 and would otherwise fall through to the register form
+            # and be masked. `model.shift_amount_is_trap` is the decision, so
+            # x86-64 asks the same question and words it identically.
+            #
+            # `fold_literal_expr` rather than this backend's `_static_int`:
+            # both read a literal, but the shared folder is the one that also
+            # answers `0 - 1` and `1 * -1`, and `0 - 1` is the spelling the
+            # reproducer in the bug doc used. Two readers of "what does the
+            # build know this amount is" is how the two spellings of one
+            # literal would come to disagree about whether the build can
+            # decide it.
+            known = M.fold_literal_expr(imm_r)
+            if M.shift_amount_is_trap(known):
+                raise CodegenError(M.negative_shift_refusal(op, known))
+            lit = self._static_int(imm_r)
             if lit is not None and M.shift_saturates(lit):
                 self._emit_saturated(op, signed)
                 self._emit_trunc(result_t)
@@ -7200,29 +7220,39 @@ dylib_exports: list = None, globals_base: int = None,
         and the rule is one rule (`model.shift_saturated_is_zero`), so the
         rule lives here and both callers come to it.
 
-        The amount is compared against 64 and a saturating branch taken
-        BEFORE the shift instruction runs, so the masking is never the
-        answer. The sign for the arithmetic case is X0's own, read before
-        X0 is overwritten.
+        THREE answers for the amount, in this order, and the order is the
+        whole content of this function:
 
-        The compare is SIGNED, which is what keeps this fix to the case it
-        fixes: an amount of 64 or more (signed, so 64..2^63-1) saturates,
-        and a NEGATIVE amount is below 64 and keeps the masking it has
-        always had. That is not an endorsement — CPython raises ValueError
-        for a negative amount, and this path answers with the masked shift
-        — it is a separate question left alone rather than changed under
-        cover of a fix about the saturation boundary. See
-        bugs/FORMAL_negative_shift_amount_masks_instead_of_raising.md, which
-        is also why the compare must not be made unsigned: unsigned, a
-        negative amount would take the saturating branch and answer 0, a
-        THIRD wrong answer rather than this one.
-        """
+        1. **Negative** → `exit(SHIFT_TRAP_STATUS)`. A negative amount is not
+           a shift distance, so there is no value to compute; the hardware
+           would mask it to its low six bits and answer a different shift
+           entirely (`1 << -1` was `1 << 63`). The compare is SIGNED, and it
+           runs BEFORE the saturation compare for exactly the reason
+           `shift_amount_is_trap` is a separate rule from `shift_saturates`:
+           a negative amount is below 64, so unsigned it would take the
+           saturating branch and answer 0 — a third wrong answer rather than
+           the one that was there.
+        2. **At or past the width** → the saturated value, which is 0 for
+           `<<` and for a logical `>>` and the sign-extended word for an
+           arithmetic one (`model.shift_saturated_is_zero`).
+        3. **In range** → the shift instruction.
+
+        The trap is the same three-instruction `exit` the divide-by-zero arm
+        of `_emit_div_shift_pow` emits, and the same status
+        (`model.SHIFT_TRAP_STATUS`), so "this program has no answer" is one
+        answer on this path. A statically negative amount never reaches here —
+        `_emit_div_shift_pow` refuses it at build time, which is the half that
+        can name the line."""
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
+        neg_label = f"{fn}_sh{sid}_neg"
         sat_label = f"{fn}_sh{sid}_sat"
         end_label = f"{fn}_sh{sid}_end"
-        self.asm.emit(encode_cmp_xn_imm(1, 64))
+        self.asm.emit(encode_cmp_xn_imm(1, 0))
+        self.asm.emit(encode_b_cond("lt", 8))
+        self.asm.emit_label_rel(neg_label, here_offset=-4)
+        self.asm.emit(encode_cmp_xn_imm(1, M.SHIFT_WIDTH))
         self.asm.emit(encode_b_cond("ge", 8))
         self.asm.emit_label_rel(sat_label, here_offset=-4)
         if op == "<<":
@@ -7235,6 +7265,17 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit_label_rel(end_label, here_offset=-4)
         self.asm.label(sat_label)
         self._emit_saturated(op, signed)
+        self.asm.emit(encode_b(0))
+        self.asm.emit_label_rel(end_label, here_offset=-4)
+        # The negative-amount trap, laid out after the saturating arm so both
+        # arms are reached by one short forward branch and neither falls into
+        # the other. Darwin arm64 exit(status): x16 = SYS_exit, x0 = status,
+        # svc #0x80 — the same three instructions, and the same status, as the
+        # divide-by-zero arm of `_emit_div_shift_pow` above.
+        self.asm.label(neg_label)
+        self.asm.emit(encode_movz_xd_imm(0, M.SHIFT_TRAP_STATUS))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
         self.asm.label(end_label)
 
     def _emit_saturated(self, op: str, signed: bool) -> None:
