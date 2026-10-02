@@ -19,6 +19,7 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | where the detail lives | covers |
 |---|---|
 | `FORMAL_x86_64_end_to_end_proof.md` | B1–B23, the proof work, the per-form ledger |
+| `FORMAL_x86_64_step_lemma_cqo_states_cdq.md` | **`lib/X86.lean` does not elaborate, so EVERY `--formal` build with a proof fails on both backends.** `x86_step_cqo` still states `cdq` (`x86_sign_extend32`) after `da151f0c` corrected the model's arm to `x86_cqo`, so the lemma is a different instruction from the one the model decodes. Two lines, measured to elaborate clean on a scratch copy. Read this before concluding that any formal build "needs `--no-prove`" — it does not, the library is simply red |
 | `CODEGEN_bootstrap_resource_blowup.md` | the ~192 GB runaway, the 55 GB ceiling, attribution |
 | `CODEGEN_noshim_dumpfull_preexisting_divergence.md` | native-vs-reference `.ci` divergence |
 | *(deleted 2026-09-30)* | the nested-comprehension cluster is CLOSED on both the compiled and the formal backends: a 2+ clause comprehension no longer drops clauses (`_compr_pending_inner`), and the formal backends no longer exit 58/SIGSEGV at random — `_emit_range_list` gave every `range()` in a function one shared `_rabs` label, so the first range branched into the second's block and left through the second's `jmp div_label`. See the two commits on `work/codegen-old-divergences` and the cases in `test_x86_64_containers.py` |
