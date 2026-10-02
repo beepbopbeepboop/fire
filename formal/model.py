@@ -18198,9 +18198,48 @@ def collect_module_symbols(stmts: list) -> dict:
     are all absent, which is the honest answer for each. A `None`-valued
     binding is excluded too, because its folded word is `NONE_WORD` — the
     integer 0 wearing `None`'s spelling — and `7 + <that>` folding to 7 is
-    exactly the conflation `refuse_none_comparisons` exists to prevent."""
+    exactly the conflation `refuse_none_comparisons` exists to prevent.
+
+    AND ONE MORE IS DELIBERATELY LEFT OUT, which is what makes the "so far"
+    above sound rather than merely plausible: a name some FUNCTION writes through
+    `global` never enters `known`, however it was bound at module level.
+
+        G = 5
+        def bump():
+            global G
+            G = 100
+        bump()
+        comptime B = G + 1        # CPython: 101
+
+    `known[G]` is 5, and 5 + 1 is 6. The module-level sequence is not the only
+    thing that runs before that initializer: a module body may CALL a function,
+    and the caller's write lands before the read. So a name that `bump` writes
+    is excluded from resolution and `B` is refused, which is the honest answer
+    for a program this build cannot order. `functions_writing_globals` is the
+    reader, and it is the same one `collect_global_slots` uses for the same
+    reason — the value is stated at module level and the writes are stated
+    inside the bodies, so the question needs both lists — which is also why the
+    gate keys on the `global` DECLARATION and not on the assignment targets: a
+    function that assigns `G` without declaring it global binds a local that
+    shadows the module's, and such a name really is read-only at module level."""
     table: dict = {}
     known: dict = {}
+    written = set(functions_writing_globals(
+        [s for s in (stmts or []) if isinstance(s, F.FunctionDef)]))
+
+    def remember(name, folded, value) -> None:
+        """`known[name] = folded`, unless the name is one of the four cases.
+
+        A name a FUNCTION writes through `global` is never resolvable (see the
+        section note); a `None`-valued binding is not, because its folded word
+        is `NONE_WORD` rather than the integer it is spelled as. Both are
+        absences rather than values, so this is the one place the rule is
+        written and `pop` is what says "not known"."""
+        if name in written or is_none_expr(value):
+            known.pop(name, None)
+        else:
+            known[name] = folded
+
     for stmt in (stmts or []):
         kind = type(stmt).__name__
         if kind in ("ImportStmt", "FromImportStmt"):
@@ -18240,16 +18279,13 @@ def collect_module_symbols(stmts: list) -> dict:
             table[name] = GlobalSymbol(
                 name, folded_literal_node(folded, value), "rebound", None,
                 getattr(stmt, "line", 0) or 0)
-            known[name] = folded
+            remember(name, folded, value)
             continue
         table[name] = GlobalSymbol(name, folded_literal_node(folded, value),
                                    "assigned", None,
                                    getattr(stmt, "line", 0) or 0,
                                    is_none_expr(value))
-        if is_none_expr(value):
-            known.pop(name, None)
-        else:
-            known[name] = folded
+        remember(name, folded, value)
     return table
 
 

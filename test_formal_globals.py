@@ -524,6 +524,31 @@ CASES = [
      "    v: Int = _C\n"
      "    print(v)\n"
      "    return 0\n", "21\n"),
+
+    # THE CONTROL FOR THE REFUSAL BELOW, and it is the half that makes that
+    # refusal correct rather than merely cautious. `bump` assigns `G` and
+    # declares NOTHING, so per CPython's scope rule (decided at compile time
+    # from the whole body — see `local_shadow_of_global_read_before_store_...`
+    # above) `G` inside `bump` is a LOCAL. The module's `G` is therefore
+    # read-only at module level, `bump()` cannot have changed it, and `_B` is
+    # exactly 5 + 1. The interpreter, CPython and both images agree on 6.
+    #
+    # This is the direction a too-broad gate gets wrong: refusing here would be
+    # safe and would also refuse a program whose answer this build can state,
+    # which is the same mistake the `+ - *` row above would hide if `//` were
+    # the only operator tested.
+    ("module_comptime_constant_over_a_locally_shadowed_name",
+     "G = 5\n"
+     "\n"
+     "def bump():\n"
+     "    G = 100\n"
+     "\n"
+     "comptime _B = G + 1\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = _B\n"
+     "    print(v)\n"
+     "    return 0\n", "6\n"),
 ]
 
 # Cases that must be REFUSED, and why each one is a refusal rather than a wrong
@@ -633,6 +658,42 @@ REFUSALS = [
     ("module_comptime_constant_over_a_later_name_refused",
      "comptime _B = _A + 1\n"
      "comptime _A = 7\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = _B\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "does not fold to a compile-time constant"),
+
+    # THE ORDERING THE ROW ABOVE CANNOT SEE, and the one that would FABRICATE.
+    # `_B` is still reading an EARLIER name, so the "bound so far" rule alone
+    # admits it — and `known[G]` is 5, so the fold would be 6. It is wrong,
+    # because a module body may CALL a function:
+    #
+    #     G = 5
+    #     def bump():
+    #         global G
+    #         G = 100
+    #     bump()                       # runs before _B's initializer
+    #     comptime _B = G + 1          # CPython: 101
+    #
+    # "Bound so far" is a statement about the module-level SEQUENCE, and the
+    # sequence is not the only thing that runs before the read: `bump()` is, and
+    # its write lands first. So a name any function declares `global` is not
+    # resolvable here, whatever the table holds for it — which is what
+    # `model.collect_module_symbols`'s `functions_writing_globals` gate decides,
+    # and the same reader `collect_global_slots` uses for the same reason.
+    #
+    # Refusing is not the cautious choice here, it is the only correct one: 6 is
+    # a number no source wrote and nothing would catch it.
+    ("module_comptime_constant_over_a_function_written_name_refused",
+     "G = 5\n"
+     "\n"
+     "def bump():\n"
+     "    global G\n"
+     "    G = 100\n"
+     "\n"
+     "comptime _B = G + 1\n"
      "\n"
      "def main(n):\n"
      "    v: Int = _B\n"
