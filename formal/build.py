@@ -9062,9 +9062,35 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `stmts` — the pass does not have them.
     from formal.imports import (imported_bound_names,
                                 star_imported_modules)
+    # `method_owners`, NOT `owners`, and the two are not the same map: `owners`
+    # (line 8840) is `{bare method name: struct NAME}` for `_rewrite_method_calls`
+    # to dispatch `recv.m(...)` by name, while `method_owners` (line 8890) is
+    # `{lifted function name: struct}` for the passes that need to know which
+    # struct's LAYOUT a body is written against. `_frame_receivers` is the
+    # latter kind of consumer — its `method_owners` parameter is documented as
+    # `{function name: struct}` and both its uses read `.name` off the value —
+    # and it was being handed the former.
+    #
+    # Measured on `std/builtin/reversed.mojo`, arm64:
+    #
+    #   AttributeError: 'str' object has no attribute 'name'
+    #     formal/build.py:6465 in _overridden_comptime_names
+    #       st.name          <- `owners`' value is a struct NAME
+    #     formal/build.py:6255 in publish
+    #       _overridden_comptime_names(structs_by_name, st)
+    #     formal/build.py:6232 <- owner = method_owners.get(fn.name)
+    #
+    # so the sweep classified the file `backend-crash` ("the backend RAISED
+    # rather than refusing"), which is the one class that is never cached and
+    # that means a bug in the compiler's own plumbing rather than a finding
+    # about the source. The lookup only ever HIT because `owners` is keyed by a
+    # BARE method name and a lifted one-field method keeps its bare name, so
+    # every other module missed and silently got an empty census — which is the
+    # quieter half of the same bug and the reason the fix is the argument rather
+    # than a `.name` guard.
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
-                     star_imported_modules(stmts), owners)
+                     star_imported_modules(stmts), method_owners)
     # The slot table is RETURNED as well as published, for the reason
     # `symbols` is: building an import compiles the imported module through this
     # same function, and that nested call publishes ITS globals over ours, so
