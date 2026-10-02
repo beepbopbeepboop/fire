@@ -6485,12 +6485,23 @@ char *mojo_repr_list_intlists(MojoList *l) {
         }
         MojoList *_in = (MojoList *)(intptr_t)_p;
         int64_t _m = mojo_list_len(_in);
-        _buf = mojo_str_cat(_buf, "[");
+        /* Each INNER element is a tuple or a list in its own right, and
+         * `mojo_repr_list_ints`/`_doubles`/`_bytes` all open on
+         * `mojo_is_tuple(this)` for exactly that reason. This helper used
+         * to hardcode "[" / "]" for the inner pair, which made a list of
+         * TUPLES print as a list of lists: `[(5, 0), (5, 1)]` printed
+         * `[[5, 0], [5, 1]]`, and so did `[(5, j) for j in range(2)]`.
+         * The outer brackets stay "[" -- this helper is reached only for a
+         * list whose elements are containers, and a LIST OF TUPLES is
+         * itself a list. */
+        int _in_tup = mojo_is_tuple(_in);
+        _buf = mojo_str_cat(_buf, _in_tup ? "(" : "[");
         for (int64_t _j = 0; _j < _m; _j++) {
             if (_j > 0) _buf = mojo_str_cat(_buf, ", ");
             _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(_in, _j)));
         }
-        _buf = mojo_str_cat(_buf, "]");
+        if (_in_tup && _m == 1) _buf = mojo_str_cat(_buf, ",");
+        _buf = mojo_str_cat(_buf, _in_tup ? ")" : "]");
     }
     return mojo_str_cat(_buf, "]");
 }

@@ -411,6 +411,29 @@ BUILTIN_PROGRAMS = {
             print([i * 100 + j * 10 + k for i in range(2) for j in range(2) for k in range(2)])
             print([i * j for i in range(4) for j in range(4) if j > i])
     """),
+    # A comprehension whose element is a TUPLE or a nested LIST. Both
+    # lowerings append through `_gen_compr_append`, which recorded
+    # `_tuple_slot_types` but NOT `_nested_elem_types` — so `_list_repr_fn`
+    # picked the generic repr, whose None-sentinel heuristic renders a raw 0
+    # slot as `None`. Silent, exit 0: every non-zero slot printed fine,
+    # which is why only the ZEROS exposed it and why it looked like "the
+    # later slots lose their element type".
+    #
+    # The ZEROS are the point of this case; a version without them is the
+    # one that hid the bug. The literal-of-tuples and one-slot-tuple lines
+    # pin the other half: `mojo_repr_list_intlists` opened every inner
+    # element on "[" instead of consulting `mojo_is_tuple`, so a list of
+    # tuples printed as a list of lists.
+    "comprehension_of_tuples_keeps_zero_slots": textwrap.dedent("""\
+        def main():
+            print([(5, j) for j in range(3)])
+            print([[5, j] for j in range(3)])
+            print([[5, y] for y in [7, 0, 9]])
+            print([(5, 0), (5, 1)])
+            print([[5, 0], [5, 1]])
+            print([(7,)])
+            print([(0, 0)])
+    """),
     "global_var": textwrap.dedent("""\
         var counter: Int = 0
 

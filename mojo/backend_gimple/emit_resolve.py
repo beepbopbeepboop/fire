@@ -3017,11 +3017,36 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         gen._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
         # Track element type so downstream for-loops use the right accessor
         gen._elem_types[res] = et
-        # A comprehension of TUPLES (`[(n, f) for n, f in funcs]`) — carry
-        # the heterogeneous tuple's per-slot types so a later
-        # `for n, f in test_funcs:` reads each slot with the right accessor.
-        if et == 'MojoList *' and ev in gen._tuple_slot_types:
-            gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
+        # A comprehension whose element is a TUPLE or a nested LIST
+        # (`[(5, j) for j in range(3)]`, `[[5, y] for y in ys]`) has to
+        # record BOTH maps the equivalent list LITERAL records at
+        # emit_exprs.py's own "A list whose elements are TUPLES" branch —
+        # `_nested_elem_types` AND `_tuple_slot_types`. Carrying only the
+        # second was this bug, and it is silent and exit 0:
+        # `_list_repr_fn` picks the repr helper from `_nested_elem_types`,
+        # so a comprehension of tuples/lists fell to the generic
+        # `_mojo_repr_list`, whose None-sentinel heuristic renders a raw 0
+        # slot as `None`. Every non-zero slot happened to print, which is
+        # why only the ZEROS exposed it and why the bug looked like "the
+        # later slots lose their type": `[(5, j) for j in range(3)]`
+        # printed `[(5, None), (5, 1), (5, 2)]`.
+        #
+        # The doc's control case (`[[5, y] for y in ys]`, all values
+        # non-zero) is NOT actually correct, it is the same bug with the
+        # zeros absent: `[[5, y] for y in [0, 8]]` printed
+        # `[(5, None), (5, 8)]` — the zero AND the list element rendering
+        # as a tuple. Both are this one missing map.
+        #
+        # `setdefault` (as the literal path also uses) so the first
+        # iteration's answer is the one kept, exactly as the literal path
+        # behaves when a literal mixes shapes.
+        if et == 'MojoList *':
+            if ev in gen._elem_types:
+                # `_elem_types[res]` above stays 'MojoList *' (what res
+                # CONTAINS); `_nested_elem_types` says what those hold.
+                gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
+            if ev in gen._tuple_slot_types:
+                gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
     elif node.kind == 'set':
         # Index the 2-tuple, NOT `et, ev = gen.lower_expr(...)`: the
         # unpack boxes `et` on the self-hosted path, so `et == 'char *'`
