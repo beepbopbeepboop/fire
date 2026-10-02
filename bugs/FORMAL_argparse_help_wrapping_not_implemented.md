@@ -84,6 +84,20 @@ comparing the two outputs sees a layout difference, not an error.
 
 ## The exact next step
 
+**Still unmade (2026-10-02), and it is a choice about the API before it is
+work.** Option A changes `help_text`'s signature, which is a decision about what
+a caller may ask for; option B reimplements `textwrap`, which the rest of
+`formal/hostmods/` deliberately does not do. A light worker may not make that
+call and ship half of either, and the honest cost of getting it wrong is a
+`--help` that differs from CPython's in a NEW way rather than the current
+difference, so nothing was touched. What is worth knowing before the choice is
+made: the wrapping is a pure function of `(text, width)` with no host objects in
+it, so **once a width is decided, option B is a self-contained routine with a
+byte-exact oracle already in place** — `test_formal_argparse.py` compares the
+whole `--help` output against CPython's over 63 cases, so a wrong fold is a red
+line, not a silent difference. That harness is what makes B safe to attempt and
+also what would catch it.
+
 Two options, in the order they should be tried.
 
 **A. Make the width askable.** `ioctl(TIOCGWINSZ)` on a descriptor is a

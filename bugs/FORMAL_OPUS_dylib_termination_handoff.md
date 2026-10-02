@@ -9,6 +9,36 @@ route them. Everything untagged is context, not a request.
 
 ---
 
+## 0. What moved under this document on 2026-10-02 (nothing in §2; read this to know what is safe)
+
+A parallel worker on `formal/build.py` and `formal/model.py` changed two
+functions this document's §1 measurements were taken against, neither in the
+write set §4 names, and both PROVED behaviour-preserving so the numbers above
+still stand:
+
+* `formal/model.py::returns_on_every_path` — now iterative over the sibling
+  statement stream and recursive only into an `if`'s branches. It used to
+  recurse once per SIBLING, which is a `RecursionError` from the frame-return
+  fixpoint on any long body that returns a frame. Its answer is unchanged: a
+  differential run of the old walk against the new one over every function body
+  in this repository and `std/` (781 bodies) and over 1,463 generated statement
+  lists covering every arm of the predicate found **0 disagreements**.
+* `formal/model.py::read_before_store` — a `with … as y:` alias is now added to
+  `stored` BEFORE the body is walked, because it is bound before the body runs.
+  Strictly fewer refusals, and none of them was true: the one it removes named
+  `UnboundLocalError` for a program CPython cannot run.
+
+Neither touches `total_of_halts`, the fuel, `_go_defs_for`, `emit_runs` or
+anything else §1 measured, and `formal-receiver-position`'s two `call_callee_name`
+guards are in `struct_returned_frame_sites` / `_frame_return_status`, which
+`generate_dylib_proof` does not call. **So: `OPUS-1` … `OPUS-9` are all still
+exactly as written below, including the open question of what a 400M heartbeat
+budget costs. Nothing here was re-measured** — a lean run is outside what a
+light worker may do, and §1's own note that re-running serves a cached FAIL
+verdict in 0.1 s means a "quick check" would have measured nothing anyway.
+
+---
+
 ## 1. Where the tree is right now
 
 | fact | evidence |
