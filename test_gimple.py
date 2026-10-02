@@ -9253,6 +9253,113 @@ C().sort()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false():
+        """`itertools.filterfalse(f, xs)` must build a real list of the
+        elements its predicate REJECTS.
+
+        It had no lowering at all, so its result was an unmodelled handle of
+        unknown type — and the `next(...)` over it in
+        `Lib/importlib/resources/_common.py:105` then had no honest answer, so
+        that module fell back to source. The refusal named `next` as the
+        missing piece, which was a misdiagnosis: builtin `filter` over the
+        same shape compiled fine (its own rows are in this file), and
+        `next(iter(<list>))` was the landing spot all along.
+
+        The trap this has to avoid is real and was measured: adding a
+        `next(<bare MojoList *>)` lowering to cover the stdlib line would turn
+        two CPython `TypeError`s into values (`next([1, 2])` is a TypeError —
+        a list is not an iterator — while such a lowering would answer `1`).
+        So `next(it)` still refuses, and that is pinned by the next test: a
+        wrong fix here COMPILES AND RUNS, printing a value where CPython
+        raises, which is why the expectation is CPython's stdout on both
+        pipelines and not a hand-written string.
+
+        Four spellings, because each is a separate dispatch site: the
+        qualified member call (`_common.py`'s), the bare name after
+        `from itertools import filterfalse`, a `for` loop over the result, and
+        `list(...)` of it — with a `char *` element type, which is the kind
+        the per-element build has to carry through.
+        """
+        global _PASS, _FAIL
+        name = "itertools_filterfalse_keeps_the_elements_whose_predicate_is_false"
+        src = '''\
+import itertools
+from itertools import filterfalse
+
+def qualified(xs, f):
+    it = itertools.filterfalse(f, xs)
+    return next(iter(it))
+
+def bare(xs, f):
+    it = filterfalse(f, xs)
+    return next(iter(it))
+
+def as_loop(xs, f):
+    out = []
+    for v in itertools.filterfalse(f, xs):
+        out = out + [v]
+    return out
+
+print(qualified([1, 2, 3], lambda v: v < 2))
+print(bare([1, 2, 3, 4], lambda v: v % 2 == 0))
+print(as_loop([5, 6, 7], lambda v: v < 6))
+print(list(itertools.filterfalse(lambda v: v == 'b', ['a', 'b', 'c'])))
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_next_over_a_filter_result_still_refuses_without_iter():
+        """The negative half of the pair above: `next(<filtered list>)` has no
+        lowering and must keep having none.
+
+        In Python a list is NOT an iterator — `hasattr([], '__next__')` is
+        False; only `iter(x)` produces one — so `next(filter(f, xs))`'s
+        Mojo-side equivalent, `next(<the MojoList the filter built>)`, has no
+        honest value to return. A `next` over a `MojoList *` would answer the
+        first element instead, which compiles, runs, exits 0 and is wrong.
+
+        Pinned as a REFUSAL — the module falls back to source with a
+        diagnostic naming the shape — because the alternative assertion, a
+        value, would be pinning the very wrong answer this forbids.
+        """
+        global _PASS, _FAIL
+        name = "next_over_a_filter_result_still_refuses_without_iter"
+        src = '''\
+def bare(xs, f):
+    it = filter(f, xs)
+    return next(it)
+'''
+        for mode, kwargs in (('single-TU', {'do_imports': True}),
+                             ('link-mode', {'link_mode': True})):
+            try:
+                gimple_codegen._run_pipeline(src, filename='p.py', **kwargs)
+            except Exception:
+                continue
+            print(f"FAIL  {name} [{mode}]: next(<a list>) compiled, so a list "
+                  f"is being read as an iterator where CPython raises "
+                  f"TypeError")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_dict_union_right_operand_is_converted_at_runtime():
         """`dict | x` with `x`'s type unresolved must convert, not cast.
 
@@ -9632,6 +9739,8 @@ print(run('x/y.txt'))
     test_scalar_arity_min_max_params_are_not_containers()
     test_list_sort_in_a_method_body_is_gimple_legal()
     test_dict_union_right_operand_is_converted_at_runtime()
+    test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false()
+    test_next_over_a_filter_result_still_refuses_without_iter()
     test_next_inside_for_over_same_iterator_is_one_ahead()
     test_a_program_written_inside_the_checkout_is_not_the_compiler()
     test_struct_unpack_computed_format_compiles()
