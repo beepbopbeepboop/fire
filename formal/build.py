@@ -6715,17 +6715,18 @@ def _rewrite_one_word_field_method_calls(node, one_word: dict,
         `formal/model.py`'s `type_constructor_prefers_local_struct` calls out by
         name.
     """
-    if isinstance(node, list):
-        for x in node:
-            _rewrite_one_word_field_method_calls(x, one_word, structs_by_name,
-                                                 receiverless)
-        return
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr):
-        _lift_one_word_field_method(node, one_word, structs_by_name,
-                                    receiverless)
-    for name in getattr(node, "__dataclass_fields__", {}):
-        _rewrite_one_word_field_method_calls(getattr(node, name), one_word,
-                                             structs_by_name, receiverless)
+    # `model.rewrite_tree` for the `elifs` reason its own comment gives, and
+    # this walk is the SECOND consumer of it — the first is `_rewrite_method_calls`,
+    # which had the same hole and is what `std/testing/prop/random.mojo` hit. A
+    # lift that silently skips an `elif` arm is the same defect as the collapse
+    # it exists to prevent, one conditional deeper.
+    M.rewrite_tree(
+        node,
+        lambda n: None if (isinstance(n, F.CallExpr)
+                           and isinstance(n.func, F.MemberExpr)
+                           and _lift_one_word_field_method(
+                               n, one_word, structs_by_name, receiverless))
+        else n)
 
 
 def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
@@ -10089,46 +10090,52 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     the argument for why that has to happen here rather than being left to the
     link audit. Before it, `bs[0].get()` compiled to a call against a symbol
     spelled `get`."""
-    if isinstance(node, list):
-        for x in node:
-            _rewrite_method_calls(x, owners, wide, receiverless, fn_name,
-                                  imported)
-        return
-    if isinstance(node, F.CallExpr):
-        target = _method_call_target(node, owners)
+    # `model.rewrite_tree`, and the walk it brings with it: `IfStmt.elifs` is a
+    # list of TUPLES, so a recursion that tests `isinstance(node, list)` stops
+    # dead at the first `elif` while `model.iter_nodes` — which every LATE check
+    # uses — walks all of them. That gap is what made a method call inside an
+    # `elif` reach `check_value_position_method_reads` unlifted and be refused
+    # as a value-position method reference, with the message telling the reader
+    # to add parentheses a call already had (`std/testing/prop/random.mojo`'s
+    # `Rng.rand_scalar`, measured 2026-10-02; `model.rewrite_tree`'s comment is
+    # the long form). `None` from `visit` means "handled, do not descend", which
+    # is what the two `return`s below did.
+    def visit(n):
+        if not isinstance(n, F.CallExpr):
+            return n
+        target = _method_call_target(n, owners)
         if target is None:
-            why = _receiver_shape_refusal(node, owners, fn_name, imported)
+            why = _receiver_shape_refusal(n, owners, fn_name, imported)
             if why is not None:
                 raise CodegenError(why)
-        if target is not None:
-            owner, member, receiver = target
-            if (wide or {}).get(owner) is not None:
-                st = wide[owner]
-                raise CodegenError(
-                    f"{owner}.{member}() cannot be lowered: its "
-                    f"receiver has {M.struct_field_summary(st)}, and a formal "
-                    f"value is one 64-bit word, so `self.<field>` has no "
-                    f"representation on this path. The receiver would have to "
-                    f"be a pointer to an out-of-line frame of fields, which is "
-                    f"a change to the value model the two backends AND the Lean "
-                    f"proof share, not to this one function. Concretely, "
-                    f"{M.struct_width_cost(st)}")
-            lifted = F.IdentExpr(name=M.method_function_name(owner, member))
-            if member not in (receiverless or ()):
-                node.args = [receiver] + list(node.args)
-            if isinstance(node.func, F.SubscriptExpr):
-                # The brackets stay, and stay on the callee: they are the
-                # specialization, and the emitter reads them off the callee
-                # (`arm64_codegen._specialization_of`).  Only the BASE is
-                # replaced, which is the one thing that changes — it becomes the
-                # lifted name instead of the receiver's.
-                node.func.obj = lifted
-                return
-            node.func = lifted
-            return
-    for name in getattr(node, "__dataclass_fields__", {}):
-        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless,
-                              fn_name, imported)
+            return n
+        owner, member, receiver = target
+        if (wide or {}).get(owner) is not None:
+            st = wide[owner]
+            raise CodegenError(
+                f"{owner}.{member}() cannot be lowered: its "
+                f"receiver has {M.struct_field_summary(st)}, and a formal "
+                f"value is one 64-bit word, so `self.<field>` has no "
+                f"representation on this path. The receiver would have to "
+                f"be a pointer to an out-of-line frame of fields, which is "
+                f"a change to the value model the two backends AND the Lean "
+                f"proof share, not to this one function. Concretely, "
+                f"{M.struct_width_cost(st)}")
+        lifted = F.IdentExpr(name=M.method_function_name(owner, member))
+        if member not in (receiverless or ()):
+            n.args = [receiver] + list(n.args)
+        if isinstance(n.func, F.SubscriptExpr):
+            # The brackets stay, and stay on the callee: they are the
+            # specialization, and the emitter reads them off the callee
+            # (`arm64_codegen._specialization_of`).  Only the BASE is
+            # replaced, which is the one thing that changes — it becomes the
+            # lifted name instead of the receiver's.
+            n.func.obj = lifted
+            return None
+        n.func = lifted
+        return None
+
+    M.rewrite_tree(node, visit)
 
 
 def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):

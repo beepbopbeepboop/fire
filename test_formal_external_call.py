@@ -242,6 +242,53 @@ CASES = [
      "    return 0\n",
      0, "set=hello|absent=fallback|after=gone|"),
 
+    # The same round trip with the stdlib's OWN spelling of every argument —
+    # `name.as_c_string_span()` rather than the bare `name` the two cases above
+    # write, which is what `std/os/env.mojo:41,45,61,76` says. This is a
+    # separate assertion and not a variant of the case above, because the
+    # conversion is a DIFFERENT construct and it was refused for a different
+    # reason: `as_c_string_span()` builds a `CStringSpan`, and the value-method
+    # path had no lowering for it ("is a method call on a value, and this
+    # backend lowers only append, close, write … and the string methods").
+    #
+    # The lowering is the IDENTITY and not a guess: on this path a `String` IS
+    # its own address (a literal is NUL-terminated, so its address is its
+    # length), and `CStringSpan` is a ONE-FIELD struct whose only field is that
+    # pointer, whose value IS its field. So the conversion computes nothing, and
+    # a `char *` is what the C callee receives — which is the only way this case
+    # can pass: a wrong address here is `setenv` storing the variable under some
+    # other name and `getenv` reading back a value nobody set.
+    ("env_round_trip_with_the_stdlib_spelling_of_every_argument",
+     "def setenv(var name: String, var value: String,\n"
+     "           overwrite: Bool = True) -> Bool:\n"
+     "    var status = external_call[\"setenv\", Int32](\n"
+     "        name.as_c_string_span(), value.as_c_string_span(),\n"
+     "        Int32(1 if overwrite else 0))\n"
+     "    return status == 0\n"
+     "\n"
+     "def unsetenv(var name: String) -> Bool:\n"
+     "    return external_call[\"unsetenv\", c_int](\n"
+     "        name.as_c_string_span()) == 0\n"
+     "\n"
+     "def getenv(var name: String, default: String = \"\") -> String:\n"
+     "    var ptr = external_call[\n"
+     "        \"getenv\", OptionalPointer[UInt8, ImmUntrackedOrigin]\n"
+     "    ](name.as_c_string_span())\n"
+     "    if not ptr:\n"
+     "        return default\n"
+     "    return String(unsafe_from_utf8_ptr=ptr.value())\n"
+     "\n"
+     "def main() -> Int32:\n"
+     f"    if not setenv(\"{VAR}\", \"hello\", True):\n"
+     "        return 1\n"
+     f"    printf(\"set=%s|\", getenv(\"{VAR}\"))\n"
+     f"    printf(\"absent=%s|\", getenv(\"{ABSENT}\", \"fallback\"))\n"
+     "    if not unsetenv(\"{}\"):\n".format(VAR) +
+     "        return 2\n"
+     f"    printf(\"after=%s|\", getenv(\"{VAR}\", \"gone\"))\n"
+     "    return 0\n",
+     0, "set=hello|absent=fallback|after=gone|"),
+
     # ── 3. the declared return type, per kind ─────────────────────────────
     # A 64-bit signed integer is the whole register, so nothing is emitted;
     # a signed 32-bit one is the low half, so the register is extended (see
@@ -382,6 +429,22 @@ REFUSALS = [
      "    j = 2\n"
      "    return a[i, j]\n",
      "is a subscript whose index is a tuple"),
+
+    # A `String` -> `char *` conversion on a receiver this path cannot establish
+    # to be a string. The needle is the CONVERSION's sentence and not the
+    # pointer-bounded one, which is the distinction: `as_c_string_span()` computes
+    # nothing (its answer IS the receiver's address), so a reader told "add it to
+    # the string table" would be sent to a table of methods that read the
+    # receiver's bytes. And the reason it must stay refused is that the identity
+    # is only true of a `char *` — on an integer it hands a C callee the integer.
+    ("refuse_a_c_string_conversion_of_a_word",
+     "def main(n: Int) -> Int:\n"
+     "    var k = 7\n"
+     "    var p = external_call[\"strlen\", Int64](\n"
+     "        k.as_c_string_span())\n"
+     "    printf(\"%d\", p)\n"
+     "    return 0\n",
+     "converts a string to a `char *`, and its receiver"),
 ]
 
 
