@@ -2110,6 +2110,20 @@ def _gen_stmt_ReturnStmt(gen, node):
         # matters, regardless of how the value's own C type reads.
         if v in gen._elem_types:
             gen._return_elem_types[gen.current_func_name] = gen._elem_types[v]
+        # A `return` whose value is a container of a DIFFERENT kind than an
+        # earlier `return` in this same function: the function has no single
+        # container type, so its return slot is the box and a call site cannot
+        # know which container it holds. Recorded so the call site asks the
+        # runtime registries instead of guessing one kind and reading another
+        # one's memory — see `gen._multi_kind_return_funcs`.
+        _fk = gen.current_func_name
+        if (_fk and vtype in ('MojoList *', 'MojoDict *', 'MojoSet *')
+                and gen.func_ret_type == 'int64_t'):
+            _seen = gen._multi_kind_return_kinds.setdefault(_fk, [])
+            if vtype not in _seen:
+                _seen.append(vtype)
+                if len(_seen) > 1:
+                    gen._multi_kind_return_funcs[_fk] = True
         # Same for a multi-value return's PER-SLOT types: `return cfg, Model(cfg)`
         # is a heterogeneous tuple (two different struct pointers) whose
         # single joined element type is the useless int64_t, so a caller's

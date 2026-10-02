@@ -504,6 +504,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     # Mirrors gimple_cpp_core.py's `_cpp_list_iter_cursor` for the old cpp
     # coroutine path. Reset per function like the other body-local tables here.
     gen._list_iter_cursor: dict = {}
+    # Call-result temps holding a container of statically UNKNOWN kind (see
+    # `gen._boxed_container_vals`'s own comment). Value-keyed, so reset per
+    # function with the rest of them.
+    gen._boxed_container_vals: set = set()
     gen._span_mut_params: dict[str, bool]  = {}  # param/var name → literal Span/StringSlice mut=True/False
     # NOTE: _field_elem_types is intentionally NOT reset here — it stores
     # per-struct metadata that must persist across function boundaries
@@ -3946,6 +3950,66 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
         gen._dict_callable_ret[dict_val] = ''
 
 
+def _repr_boxed_container(gen, value: str):
+    """`repr()` of a container held in an `int64_t` box whose KIND is not
+    statically known, as a `char *` temp.
+
+    The box is this codegen's answer for a value with no single C type, and
+    the case that produces one is a real and common one: a function whose
+    `return` statements disagree (`if k: return names` / `return {x for x in
+    names}`) has no container type, so `TypeLattice.join` gives it the box
+    and the CALL SITE cannot know which of the three containers it will get.
+    Every consumer of such a value therefore has to ask at runtime, which is
+    exactly what the three `mojo_is_registered_*` registries are for — the
+    same discrimination `_coerce_to_list`'s opaque-boxed-value arm and
+    `_lower_Subscript`'s dispatch already do, so this is that established
+    shape applied to the repr rather than a new mechanism.
+
+    Without it the caller guessed one kind (the box's own `_actual_types`
+    entry, recorded from whichever `return` happened to be seen last) and
+    `_mojo_repr_list` then read a `MojoSet`'s slots as a `MojoList`'s — a
+    real out-of-bounds read past the set's slot array, i.e. a SEGV rather
+    than a wrong answer.
+
+    The fallback arm keeps a genuine scalar honest: it is the ordinary
+    decimal the numeric path would have produced, so this helper is a strict
+    improvement for every input, never a worse answer than the code it
+    replaces.
+    """
+    _res = gen._new_temp('char *')
+    _it64 = gen._new_val('int64_t', value)
+    bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
+    bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
+    bb_list = gen._new_bb(); bb_not_list = gen._new_bb()
+    bb_after = gen._new_bb()
+    isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', _it64)])
+    gen._emit(f'  if ({isd}) goto {bb_dict}; else goto {bb_not_dict};')
+    gen._emit_label(bb_dict)
+    _dp = gen._coerce_to_type('int64_t', 'MojoDict *', _it64)
+    gen._emit(f'  {_res} = _mojo_repr_dict ({_dp});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_dict)
+    iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', _it64)])
+    gen._emit(f'  if ({iss}) goto {bb_set}; else goto {bb_not_set};')
+    gen._emit_label(bb_set)
+    _sp = gen._coerce_to_type('int64_t', 'MojoSet *', _it64)
+    gen._emit(f'  {_res} = _mojo_repr_set ({_sp});')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_set)
+    isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', _it64)])
+    gen._emit(f'  if ({isl}) goto {bb_list}; else goto {bb_not_list};')
+    gen._emit_label(bb_list)
+    _lp = gen._coerce_to_type('int64_t', 'MojoList *', _it64)
+    _fn, _fargs = gen._list_repr_call(value, _lp)
+    _lv = gen._call_expr('char *', _fn, _fargs)
+    gen._emit(f'  {_res} = {_lv};')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_list)
+    gen._emit(f'  {_res} = mojo_str_from_int ({_it64});')
+    gen._emit_label(bb_after)
+    return _res
+
+
 def _gen_print(gen, args: list, kwargs: list = None):
     # print(..., file=sys.stderr): kwargs used to be silently dropped
     # entirely (the file= expression was never even inspected), so every
@@ -4050,6 +4114,15 @@ def _gen_print(gen, args: list, kwargs: list = None):
             resolved_parts.append(('char *', _res))
             continue
         if atype in ('int', 'int64_t'):
+            if aval in getattr(gen, '_boxed_container_vals', ()):
+                # A call to a function whose returns disagree on container
+                # kind: the result IS a container, but which one is a runtime
+                # fact. Dispatch on the registries rather than reading it as
+                # whichever kind `_actual_types` happened to record.
+                aval = _repr_boxed_container(gen, aval)
+                atype = 'char *'
+                resolved_parts.append((atype, aval))
+                continue
             real = gen._get_actual_type(atype, aval)
             if real == 'char *':
                 aval = gen._new_val('char *', f'(char *){aval}')

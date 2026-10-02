@@ -6161,7 +6161,18 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         if ret_type == 'MojoList *':
             gen._actual_types[t] = ret_type
         elif ret_type in ('int', 'int64_t'):
-            gen._actual_types[t] = 'MojoList *'
+            if gen._multi_kind_return_funcs.get(fname_raw):
+                # The callee's `return`s produce containers of MORE THAN ONE
+                # kind, which is WHY its return slot is the box — so `MojoList *`
+                # here would be a guess, and a wrong one reads another
+                # container's memory. Record the box's kind as genuinely
+                # unknown instead: consumers dispatch on the runtime
+                # registries (`_repr_boxed_container`, `_coerce_to_list`'s
+                # opaque arm). An element type is also meaningless across
+                # kinds, so it is not recorded here.
+                gen._boxed_container_vals.add(t)
+            else:
+                gen._actual_types[t] = 'MojoList *'
     # A function that RETURNS a generator (`def mk(): return counter(3)`,
     # typed `MojoGenerator *` by Pass 1.3e/1.3f) — record the underlying
     # generator function's api on the call's result temp (Pass 1.3f-gen
