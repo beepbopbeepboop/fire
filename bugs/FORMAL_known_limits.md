@@ -12,8 +12,8 @@ the *verified* limits behind the residue of the formal sweep's codegen classes,
 and for the audit that established which of them are true. It replaces the
 "what is still open" list that used to live at the bottom of
 `FORMAL_module_exports_nothing.md` for the one item that belonged here (the
-Stage 5 generic-template limit); that document keeps its own bug and points
-here.
+Stage 5 generic-template limit); that document has since been resolved and
+`git rm`'d, and §1.2 below owns the limit it pointed here for.
 
 **The rule this document exists to enforce.** A refusal in the sweep is a
 *claim about a file*, and a claim that is false is worse than no claim: it
@@ -468,19 +468,22 @@ tried; the leaf fallback then finds the importer's own `__init__.mojo`:
 '…/std/gpu/host/__init__.mojo'                 # what `..` means
 ```
 
-The `nvidia/__init__.mojo` refusal is *true* (the file declares nothing) and it
-is a limit that will never close. But **`tma.mojo` should not be blocked by it**,
-and the same defect inflates the `NOT-ANSWERABLE/UNRESOLVED-IMPORT` class too
-(`…/gpu/memory/__init__.mojo` "imports `.memory`", `…/os/path/__init__.mojo`
-"imports `.path`"). This is also recorded as open in
-`FORMAL_module_exports_nothing.md`; it is repeated here because it is a
-*count* correction, not a limit: **fixing `_candidates` removes at least one
-file from family 1 and is a prerequisite for trusting the family's size.**
-Cost: the leaf fallback in the same function is load-bearing for
-`import formal.types` inside `formal/`, so this needs a real fix (compute
-`..`/`.` against the *importing file's directory*, and try the parent before
-the leaf) rather than a special case. Half a day, and it is not in this
-document's lane — it belongs to whoever owns `formal/imports.py`.
+The `nvidia/__init__.mojo` refusal was *true* (the file declares nothing) and
+it is a limit that will never close — **though the file is no longer in the
+current stdlib at all** (re-measured 2026-10-01: `tools/formal_sweep.py` reports
+"no .py/.mojo files found" for it, see the §1.1 table). But `tma.mojo` should
+not have been blocked by it, and the same defect inflated the
+`NOT-ANSWERABLE/UNRESOLVED-IMPORT` class too (`…/gpu/memory/__init__.mojo`
+"imports `.memory`", `…/os/path/__init__.mojo` "imports `.path`").
+**This is FIXED (re-measured 2026-10-01):** `formal/imports.py` has
+`_relative_candidates`, tried before the four root passes, which resolves `.`
+and `..` against the importing file's own directory and returns `None` on a
+miss rather than falling through to the leaf fallback. Measured:
+`pkg/sub/leaf.mojo` writing `from .. import top_fn` builds and prints 40,
+where CPython prints 40. The paragraph below is kept because it is the cost
+argument that made the fix safe — the leaf fallback that several real stdlib
+`from .sibling import` statements depend on is untouched, because the relative
+form is tried FIRST.
 
 ---
 
@@ -640,11 +643,13 @@ gap.** The module's entire purpose is inline assembly, there is no MLIR in a
 freestanding image for an MLIR operation to become, and nothing about the
 `_get_kgen_string` import it also fails on can change that: the body is fatal
 whether or not the import resolves. See `FORMAL_target_query_evaluator.md`
-Blocker 2 for the cycle that is behind that import, and
-`FORMAL_imported_generic_reported_as_a_module_level_name.md` for the
-diagnostic it produces (which the pre-emption now shadows for this file, so the
-output quoted in that doc no longer reproduces — the defect it describes is
-unchanged).
+Blocker 2 for the cycle that is behind that import. The diagnostic it produces
+is `model.imported_callee_refusal`, which **now also covers the BARE spelling**
+— the defect was that an imported generic reached the LINK AUDIT when called as
+`widen(5)` rather than `widen[Int](5)`, because the bare callee was exempt from
+name placement and only the bracketed one was asked afterwards. Fixed 2026-10-01
+(`bug:FORMAL_imported_generic_reported_as_a_module_level_name`), and the
+pre-emption still shadows it for this file, so no reader sees it here at all.
 
 What DID have to change for the message to be the right one is
 `formal/build.py`'s MLIR pre-pass: `NoneType` at `_assembly.mojo:94` used to

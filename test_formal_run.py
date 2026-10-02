@@ -7621,7 +7621,8 @@ POINTER_DEREF_REFUSALS = [
 # `model.field_access_refusal`, and the two architectures could no longer answer
 # this program differently.  The case stayed — as a refusal — until the
 # DECLARED TYPE could establish what the parameter holds
-# (`bugs/FORMAL_method_param_field_access.md`): `h: One` says `h` IS a `One`,
+# (`formal/build.py`'s `_frame_receivers`, seeding a method's parameters from
+# `frame_field_type_candidates`): `h: One` says `h` IS a `One`,
 # and a one-field struct's receiver is its field, so `h.v` is `h` and the
 # program is answerable.  So the case is now what it should have been from the
 # start, which is the assertion the whole family wants: `raw(o) == 4242` on

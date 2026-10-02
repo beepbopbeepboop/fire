@@ -7797,8 +7797,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # in `structs_by_name`, which is what `compile(structs=…)`
                 # registers), so it binds no symbol and needs none. Asking
                 # without that exclusion refused a program with nothing wrong
-                # with it — measured, the two-file `Info()` reproducer in
-                # `bugs/FORMAL_imported_class_reached_as_a_value.md`.
+                # with it — measured, the two-file `Info()` reproducer: a
+                # module whose only declaration is `struct Info` plus one free
+                # function, and a program that writes `var info = Info()`.
                 #
                 # The remaining three conditions are all necessary and none is a
                 # guess: the build resolved this unit's imports (so an empty
@@ -10585,12 +10586,11 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # that nothing provides: S", which names the link line and not the
     # constructor.
     #
-    # It is a constructor call inside the LIBRARY, not a method call on an
-    # imported class, and the difference is what makes this the fix rather than
-    # the one `bugs/FORMAL_imported_class_reached_as_a_value.md` §2 describes:
-    # nothing crosses the boundary here at all. The library compiles its own
-    # source, and this file's `_formal_module_functions` already returned that
-    # file's StructDefs — they were collected into `structs_by_file` for
+    # It is a constructor call inside the LIBRARY, not a call on an imported
+    # class, and the difference is what makes this the whole of the fix: nothing
+    # crosses the boundary here at all. The library compiles its own source, and
+    # this file's `_formal_module_functions` already returned that file's
+    # StructDefs — they were collected into `structs_by_file` for
     # `_method_exports` and then not handed to the emitter.
     library_structs: list = []
     for source_path in source_paths:
