@@ -8832,7 +8832,7 @@ outer([10, 20, 30])
         The parsers now unwrap a parenthesised single NAME to bare text and
         keep the parens for a 1-element group that really had a comma, so
         the surrounding parens are the disambiguation
-        (`fire_compiler.is_tuple_target`). Asserted against CPython on the
+        (`fire_compiler.for_target_is_tuple`). Asserted against CPython on the
         same text, on both pipelines: a shape whose right answer differs per
         engine is exactly what a hand-written expectation would get wrong.
 

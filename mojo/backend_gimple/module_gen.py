@@ -300,38 +300,49 @@ def _param_slot_kinds(params) -> dict:
 
 
 def _list_literal_slot_kinds(gen, node, param_kinds=None) -> list:
-    """The long-form kind name of EVERY slot of a list literal, in order.
+    """`gen._struct_slot_kinds`' long-form spelling (`'double'` / `'str'` /
+    `'bytes'` / `'int'`) of a heterogeneous list LITERAL's per-slot kinds, or
+    `[]` for anything that is not one.
 
-    This is the per-index half of `_returns_kinds_valued`'s list arm, and it is
-    what a statically indexed read needs: the boolean half can only say "ask
-    the runtime", which for a `char *` slot answers with the raw word. The
-    spelling is the long-form one `gen._struct_slot_kinds` already uses for a
-    `struct.unpack` result, so a statically indexed read of a returned
-    heterogeneous list picks its accessor through the same table. `''` when the
-    literal is not a heterogeneous list — including the `*`-unpack element,
-    which has no compile-time slot count and so no static per-slot kinds at
-    all."""
-    if not isinstance(node, gimple_ctypes.ListExpr) or not node.elements:
-        return ''
+    This is the per-index half of `_returns_kinds_valued`'s list arm, and it has
+    to be computed from the same inputs or the two disagree about which
+    literals are heterogeneous — so it shares `_param_slot_kinds` and
+    `TypeLattice.slot_kind_byte`, and the one-byte runtime alphabet
+    (`'d'`/`'p'`/`'s'`/`'l'`/`'i'`, `mojo_list_set_kinds`'s) is translated to
+    the long form `_struct_slot_kinds` uses. `'l'` (a nested container slot)
+    and `'n'` (`None`) fold to `'int'`: a raw word IS the right read for
+    both — the pointer, and 0 — and the alternative would be a per-slot
+    pointer type this table has never carried.
+
+    Both spellings are translated through ONE `_long` table rather than by
+    appending `param_kinds`' value and `slot_kind_byte(...)`'s value
+    side-by-side: `_param_slot_kinds` answers in the runtime's one-byte
+    alphabet, so an `IdentExpr` element and a literal element of the same type
+    have to reach this list in the same spelling or the same `a[1]` reads
+    through two different accessors depending on which arm filled its slot.
+
+    `[]` for a `*`-unpack element, matching the boolean arm: no compile-time
+    slot count means no per-slot kinds at all."""
+    if not isinstance(node, gimple_ctypes.ListExpr):
+        return []
+    _long = {'d': 'double', 'p': 'str', 's': 'bytes'}
     out = []
     for _el in node.elements:
         if isinstance(_el, gimple_ctypes.UnaryOp) and _el.op == '*':
-            return ''
+            return []
         if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
                 isinstance(_el, gimple_ctypes.IdentExpr)
                 and _el.name == 'None')):
-            out.append('none')
+            out.append('int')
             continue
         if isinstance(_el, gimple_ctypes.IdentExpr) and param_kinds:
             _pk = param_kinds.get(_as_str(_el.name))
             if _pk is not None:
-                out.append(_pk)
+                out.append(_long.get(_pk, 'int'))
                 continue
-        out.append(gimple_ctypes.TypeLattice.slot_kind_name(
-            gen._quick_type(_el)))
-    kinds = set(out)
-    return out if len(kinds) > 1 else ''
-
+        out.append(_long.get(gimple_ctypes.TypeLattice.slot_kind_byte(
+            gen._quick_type(_el)), 'int'))
+    return out
 
 def _returns_kinds_valued(gen, node, param_kinds=None) -> bool:
     """True when `node` is an expression that produces a value whose
@@ -4087,10 +4098,8 @@ def gen_module_impl(self, stmts):
                     if pname != 'self':
                         if ptype:
                             if _as_str(ptype).strip() == 'bool':
-                                pbool.add(pname)
-                            pm[pname] = self._resolve_type(ptype)
-                            if _as_str(ptype).strip() == 'bool':
                                 self._gmi_bool_params.add(pname)
+                            pm[pname] = self._resolve_type(ptype)
                         elif pname in _defaults:
                             _dv = _defaults[pname]
                             if isinstance(_dv, StringLiteral):
@@ -4138,7 +4147,8 @@ def gen_module_impl(self, stmts):
                         else:
                             pm[pname] = 'int64_t'
                 new_fields = {}
-                _gmi_collect_self_assigns(self, s.name, method.body, pm, new_fields, pbool)
+                _gmi_collect_self_assigns(self, s.name, method.body, pm,
+                                          new_fields)
                 for _nf_k in new_fields:
                     fn = _as_str(_nf_k)
                     ft = _as_str(new_fields[_nf_k])

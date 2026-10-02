@@ -30,13 +30,6 @@ from fire_compiler import (
     Parser, py_tokenize, _as_str, _as_set, _as_int, _pair_key, _ptr_slot_in_range,
     _as_ident_node, _as_member_node,
 )
-# Aliased: this module also has a LOCAL `is_tuple_target` (the
-# generator-driven comprehension loop's own flag, which additionally
-# requires known tuple slot types), so the shared predicate could not keep
-# the plain name here without shadowing confusion at both sites.
-from fire_compiler import (is_tuple_target as _for_target_is_tuple,
-                           for_target_slots as _for_target_slots,
-                           _split_top_level_commas as _fc_split_top_level_commas)
 import regex_compile
 import mlir
 import mojo.backend_gimple.device_glue as _gmi_glue
@@ -1586,41 +1579,8 @@ def _list_unpack_name(elem: str) -> str:
     return _gmi_glue._c_unpack_name(elem)
 
 
-def _guard_str_arg(gen, fname: str, argno: int, word: str) -> None:
-    """Emit the runtime check that `word` may be handed to a `char *`
-    parameter, before the cast that pretends it is one.
-
-    An annotation is a STATIC PROMISE with no runtime tag behind it, so
-    `def __init__(self, widgetName: str)` called as `Dialog(5)` used to
-    reach the callee as address 5 and `strlen` it — a SIGSEGV on a program
-    that builds, links and starts cleanly. This is the ONE place in
-    `_emit_call` that knows both halves of that fact (the argument's own
-    C type is an integer, the callee's declared parameter type is
-    `char *`), so the check belongs here and nowhere else.
-
-    `word` is the int64_t the cast is about to consume, so the check reads
-    the value the callee would have seen rather than a second lowering of
-    the argument expression.
-
-    The check is deliberately a RUNTIME call and not a compile-time
-    refusal: an unannotated parameter's slot is `int64_t` by design and
-    legitimately carries a string handle on some call sites and an integer
-    on others (see the sibling branch in `_emit_call`), so the compiler
-    cannot refuse, and a static refusal here is exactly the
-    type-resolution change CLAUDE.md warns can drop dozens of real stdlib
-    modules from compiling without any test noticing. `mojo_require_str_arg`
-    accepts every value `mojo_boxed_is_str` accepts — so every genuine
-    string, literal or heap, and NULL — and raises a catchable TypeError
-    for the rest.
-    """
-    detail = gen._intern_string(
-        gimple_ctypes._c_escape(
-            f"{fname}(): argument {argno}: expected str, got int"))
-    gen._emit_call('void', '', 'mojo_require_str_arg',
-                   [('int64_t', word), ('char *', detail)])
-
-
-def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
+def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
+               arg_nodes: list = None) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
 
     arg_pairs: list of (ctype, varname) for each argument.
@@ -1630,15 +1590,14 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
     `arg_nodes` is the call site's `CallExpr.args`, POSITIONALLY aligned with
     `arg_pairs`, for the callers that have it. Optional because most of the
     ~130 `_emit_call` sites emit a runtime helper or a synthesized call with no
-    `CallExpr` behind it; where it is absent the coercions that need to know
-    what an ARGUMENT MEANT (today: only the bool-vs-int question in
-    `_stringify_value`) fall back to the lowered C type, which is the
-    pre-existing behaviour. Alignment holds for `_apply_kw_keys` (one pair in,
-    one out) and for the vararg packing (which only fires for a callee that
-    declares `*args`, whose string parameter is never the interesting case);
-    a `f(*xs)` spread expands AFTER this point, so a spread argument simply
-    arrives with no node.
-    """
+    `CallExpr` behind it. Its ONE reader is the string slot's coercion below:
+    a lowered `int` carries no bool-ness (`_TYPE_MAP` maps `'bool'` to
+    `'int'`), so `Dialog(True)` and `Dialog(1)` are the same C value and only
+    the node says which one CPython would print. Alignment holds for
+    `_apply_kw_keys` (one pair in, one out) and for the vararg packing (which
+    only fires for a callee that declares `*args`, whose string parameter is
+    never the interesting case); a `f(*xs)` spread expands AFTER this point,
+    so a spread argument simply arrives with no node."""
     fname, arg_pairs = _apply_kw_keys(gen, fname, arg_pairs)
     # Rename certain C library functions to mojo_* wrappers with void* params
     fname = gen._CALL_RENAMES.get(fname, fname)
@@ -1806,30 +1765,41 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                 coerced_args.append(sv)
             else:
-                # An INTEGER-typed word in a `char *` slot. This is where an
-                # annotated-`str` parameter given a non-string argument used
-                # to become a SIGSEGV: `Dialog(5)` emitted
-                # `(char *)(void *)(int64_t)5` and the callee strlen'd
-                # address 5 (bugs/CODEGEN_annotated_str_param_given_an_int_
-                # segfaults.md). Two situations reach here and neither is
-                # distinguishable statically — an unannotated/polymorphic
-                # int64_t slot legitimately holding a string HANDLE (the
-                # pass-through the sibling branch's own comment is written
-                # about, which is why the cast must stay) and a genuine
-                # integer. So the cast stays AND the word is checked: the
-                # runtime's own boxed-any discriminator decides, which is
-                # the one answer every other ambiguous-slot consumer in the
-                # runtime already uses (see mojo_require_str_arg).
-                if atype in ('int',):
-                    ip = gen._new_val('int64_t', f'(int64_t){aval}')
-                else:
-                    ip = gen._ensure_local('int64_t', aval)
-                _guard_str_arg(gen, fname, i + 1, ip)
-                vp = gen._new_temp('void *')
-                cp = gen._new_temp('char *')
-                gen._emit(f'  {vp} = (void *){ip};')
-                gen._emit(f'  {cp} = (char *){vp};')
-                coerced_args.append(cp)
+                # A genuine SCALAR where a `char *` is expected. Python's
+                # answer is `str(value)`, and that is also the only answer
+                # that is not a wild pointer: the `else` branch this
+                # replaces reinterpreted the integer's BITS as an address,
+                # so `class D: __init__(self, w: str)` called as `D(5)`
+                # stored address 5 in a `char *` field and the first
+                # `mojo_print` of it walked to it and SIGSEGV'd — while
+                # `D(2.5)` did not even compile ("cannot convert to a
+                # pointer type"). The comment above this branch already
+                # makes exactly this argument for a `char`; an `int` is the
+                # same case with a wider byte value.
+                #
+                # The two situations that are NOT statically separable —
+                # an unannotated/polymorphic int64_t slot legitimately
+                # holding a string HANDLE, and a genuine integer — are both
+                # answered here, because `_stringify_value` consults
+                # `_actual_types` and hands back a cast for the first rather
+                # than its decimal address. That is why this is the
+                # stringify and not a runtime refusal: a refusal would
+                # DIVERGE from CPython, which prints `5`, and it would have
+                # to be wrong for every one of the `f(d.get(k))` guards in
+                # the tree. `# the comment above this branch already makes
+                # exactly this argument for a `char`'s own case.
+                #
+                # `_stringify_value` is the chokepoint for "stringify this
+                # typed value" and is what `str()`, f-strings and `%s` all
+                # go through, so this reuses it rather than adding a fourth
+                # spelling. It is also what makes the boxed case safe: an
+                # `int64_t` that really holds a `char *` pointer is answered
+                # by its `_actual_types` entry as a cast, not as a decimal.
+                _anode = None
+                if arg_nodes is not None and i < len(arg_nodes):
+                    _anode = arg_nodes[i]
+                coerced_args.append(
+                    gen._stringify_value(actual_atype, aval, _anode))
 
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain
@@ -4120,15 +4090,21 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             _compr_restore_target(gen, _sn, _st)
         return
     elem = _as_str(gen._elem_of(_iv))
-    # `force=_compr_target_is_shadowed(...)`, the same argument the range, set
-    # and generator comprehension loops already pass, and this one site was
-    # the odd one out. It matters twice over, and the second time is the one
-    # that makes it a compile error rather than a silent aliasing bug:
+    # The TUPLE arm above already binds its slots with `_compr_bind_target`
+    # and restores them at its own `return`, so this arm uses the same pair
+    # rather than a bare `_declare_var(force=...)`. One reason, which the
+    # shadow half is not enough of on its own:
     #
     #   1. A comprehension's target is a FRESH binding, so it must not share
     #      the enclosing function's C variable. `_declare_var` is
     #      first-decl-wins, so without `force` a target that shadows an
-    #      already-live name was written straight into that variable.
+    #      already-live name was written straight into that variable; and
+    #      `force` alone leaves the shadow in place until the end of the
+    #      FUNCTION, so the comprehension's last element is what every later
+    #      read of that name sees — `a = [t for t in names]` then `t.k` reads
+    #      the element. `_compr_bind_target`'s `force` is exactly this
+    #      arm's old `_declare_var(..., force=...)`, and its saved token is
+    #      what the `_compr_restore_target` at the bottom needs.
     #   2. `target_type = gen._type_of(...)` below is read AFTER this call, so
     #      a forced declaration also makes the element's OWN type the one the
     #      assignment below coerces to. Without it, a `char *` element whose
@@ -4142,8 +4118,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     #
     # False in the common case — a target name that is not already live — so
     # the single-comprehension program is byte-identical to before.
-    gen._declare_var(_as_str(gen0.target), elem,
-                     force=_compr_target_is_shadowed(gen, gen0.target))
+    saved_target = _compr_bind_target(gen, _as_str(gen0.target), elem)
     # FRESH `char *` view of the loop-target C name: `gen0.target` (an AST
     # str field) erases to int64_t on the self-hosted path, so a bare
     # `f'  {gen0.target} = ...'` LVALUE emitted a raw ASLR pointer decimal

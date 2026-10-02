@@ -627,134 +627,6 @@ class ForStmt:
     col: int = 0
 
 
-def _split_top_level_commas(s: str) -> list:
-    """Split `s` on the commas that are NOT nested inside `()`, `[]` or
-    `{}`.
-
-    The ONE bracket-aware comma split in the tree, for both of its jobs: a
-    type annotation's argument list (`UnsafePointer[X, SomeOrigin]` — the
-    naive split tore `Tuple[Int, Int]`'s inner comma) and a for/comprehension
-    target's slot list (a nested target's own commas must not split the
-    outer list). This used to exist four times — here,
-    `mojo/middle/types.py::_split_top_level_commas`,
-    `emit_infra._split_top_level_comma` and
-    `mojo/middle/boundnames.py::_lbn_split_commas` — each with slightly
-    different bracket sets, which is how they drifted."""
-    parts: list = []
-    depth = 0
-    buf: list = []
-    for ch in s:
-        if ch in '([{':
-            depth += 1
-        elif ch in ')]}':
-            depth = max(0, depth - 1)
-        if ch == ',' and depth == 0:
-            parts.append(''.join(buf).strip())
-            buf = []
-        else:
-            buf.append(ch)
-    parts.append(''.join(buf).strip())
-    return parts
-
-
-def _paren_wrapped(target) -> bool:
-    """Is this target string wrapped in a single layer of parens? (Internal
-    helper; `is_tuple_target` is the public predicate.)"""
-    return (isinstance(target, str) and target.strip().startswith('(')
-            and target.strip().endswith(')'))
-
-
-def is_tuple_target(target: str) -> bool:
-    """Does this `for`/comprehension target string unpack, or bind the whole
-    item to one name?
-
-    **The `target: str` annotation is LOAD-BEARING on the self-hosted path, and
-    must not be "tidied" away as documentation.** Both this function and
-    `for_target_slots` are free functions of a self-host file, imported by name
-    — and under an ALIAS — by `mojo/middle/types.py`, `mojo/middle/boundnames.py`,
-    `mojo/backend_gimple/emit_infra.py`, `mojo/backend_gimple/cpp_core.py` and
-    `myinterpreter.py`. A cross-module free-function call's C symbol is
-    `<defining module>_<name>_<hash of the caller's view of the parameter C
-    types>`, and the two sides derive that parameter list from DIFFERENT
-    evidence: inside this file the body proves `target` is a string (`char *`),
-    while an importer that only has the signature sees an UNANNOTATED parameter
-    and defaults it to `int64_t`. The suffixes then disagree and the closure
-    does not link:
-
-        Undefined symbols for architecture arm64:
-          "_fire_compiler_is_tuple_target_9f63a2", referenced from:
-              _mojo_middle_types__unpack_target_leaf_names_d719e0 in fire.o
-              ...
-
-    `_9f63a2` is `int64_t`; the definition is emitted `_d719e0`, `char *`. The
-    annotation is the one piece of evidence both sides share, so it is what
-    makes the two agree — exactly as `_split_top_level_commas(s: str)` right
-    above already is, which is why that one has never had this problem.
-    (`_NO_OVERLOAD_MANGLE` + `_SELFHOST_SIGS` is the other mechanism, and it
-    does NOT reach this case: `_func_mangleable` is consulted with the name as
-    the CALL SITE spells it, so an aliased import misses the pinned bare name
-    and is mangled anyway. Measured, both spellings.)
-
-    Two spellings say "unpack": the SURROUNDING PARENS, or a top-level comma
-    with no parens at all (which is what `_parse_generator_target` produces
-    for a comprehension's bare `for a, b in ...` — it wraps in parens only
-    when the SOURCE wrote them). Note what is NOT one of them: a comma
-    INSIDE the parens is not necessary, because a 1-tuple target is spelled
-    `"(a)"`, which is the whole disambiguation:
-
-        for (a) in b:    # a parenthesised NAME — binds the whole item
-        for (a,) in b:   # a 1-tuple       — unpacks the item's one element
-
-    Both used to reduce to the IDENTICAL string `"(a)"`, so this predicate
-    could not exist; every consumer instead guessed "tuple" from a comma and
-    therefore got `for (a) in` wrong (the compiled path printed `1` where
-    CPython prints `(1,)`) while getting `for (a,) in` right. The parsers now
-    unwrap a parenthesised single name to bare text and keep the parens for a
-    1-element group that really had a comma, so `"a"` and `"(a)"` are
-    distinct again and this is the ONE place that says which is which.
-
-    Every caller passes a string already (each strips or guards with
-    `isinstance(..., str)` first), so the annotation describes the real
-    contract; the guard below is left for the one value that is a string but
-    not a target at all — `""`, which `_declared_vars_body` hands over for a
-    non-string assignment target — and for a node reaching here from outside."""
-    if not isinstance(target, str):
-        return False
-    t = target.strip()
-    if _paren_wrapped(t):
-        return True
-    return len(_split_top_level_commas(t)) > 1
-
-
-def for_target_slots(target: str) -> list:
-    """The TOP-_LEVEL slot strings of a `for`/comprehension target, in order.
-
-    Bracket-aware: a nested target's own commas do not split the outer list,
-    so `"(a, (b, c))"` yields `['a', '(b, c)']` — the nested group stays
-    intact for the caller to recurse into (`myinterpreter`'s
-    `_bind_one_target`, `boundnames._lbn_target_names`, ...). Drops empty
-    names: a trailing comma is the only thing that could produce one, and
-    neither parser emits a trailing comma into the string (a 1-tuple is
-    spelled `"(a)"`), so an empty slot means a malformed string rather than a
-    shape to bind — binding a variable literally named `''` would be worse
-    than ignoring it.
-
-    Non-string targets answer `[]`: this is for-loop-target text only, and a
-    caller wanting names for an assignment target node has the node.
-
-    `target: str` is load-bearing here for the reason spelled out at
-    `is_tuple_target`: an unannotated cross-module free-function parameter is
-    `int64_t` at the call site and `char *` at the definition, which mangles
-    the two to different C symbols and breaks the self-host link."""
-    if not isinstance(target, str):
-        return []
-    t = target.strip()
-    # `_paren_wrapped`, not `is_tuple_target`: the bare comma form
-    # (`"a, b"`, no parens) is a tuple target but has no parens to strip.
-    inner = t[1:-1] if _paren_wrapped(t) else t
-    return [p for p in _split_top_level_commas(inner) if p]
-
-
 @dataclass
 class FunctionDef:
     name: str
@@ -2571,13 +2443,13 @@ def _target_names(target, out: set):
     """Collect the names a binding target introduces. `target` is a plain
     string for comprehension/`for` targets — possibly a tuple target and
     possibly starred (`a, *rest`) — or an expression node (an ordinary
-    assignment target). The string form splits through `for_target_slots`, so
+    assignment target). The string form splits through `target_slots`, so
     a NESTED target's commas do not tear it into fragments bound as bogus
     names."""
     if isinstance(target, str):
         name = target.strip()
-        if is_tuple_target(name) or ',' in name:
-            for part in for_target_slots(name):
+        if for_target_is_tuple(name):
+            for part in target_slots(_target_group_inner(name) or name):
                 _target_names(part, out)
             return
         if name.startswith('*'):
@@ -5782,6 +5654,21 @@ class Parser:
         self._expect("RBRACE")
         return SetExpr(elements=elems)
 
+    @staticmethod
+    def _rewrap_generator_group(inner: str, saw_comma: bool) -> str:
+        """One level of a target group: `(inner)`, `(inner,)` or `inner`.
+
+        The 1-tuple spelling is `(a,)`, so a group whose slots are exactly ONE
+        needs the comma back when the text lost it, and a group of two or more
+        must not get one. Split out because BOTH joins in
+        `_parse_generator_target` ask it — the parenthesis one and the list
+        one — and they are the same question: a nested `for (i, (j,)) in ...`
+        whose inner comma is dropped here binds the whole inner pair to `j`.
+        """
+        if not saw_comma:
+            return inner
+        return f"({inner},)" if len(target_slots(inner)) == 1 else f"({inner})"
+
     def _parse_generator_target(self):
         """A comprehension/generator `for` clause's target — the sibling
         representation to `_parse_unpack_target`'s (see its docstring for
@@ -5817,7 +5704,31 @@ class Parser:
             self._advance()
             sub, sub_comma = self._parse_generator_target()
             self._expect("RPAREN")
-            target = f"({sub})" if sub_comma else sub
+            # `f"({sub},)"` when the inner group was a 1-TUPLE, `f"({sub})"`
+            # when it was a longer tuple, and the bare text when it consumed no
+            # comma at all (the parenthesised single NAME). `for (a,) in ...`
+            # reaches here with `sub == 'a'` and `sub_comma` True, and
+            # re-wrapping it as `'(a)'` produced a target indistinguishable
+            # from the parenthesised single NAME — so `[y for (y,) in xs]` bound
+            # each whole item to `y` and printed `[(1,), (2,)]` where CPython
+            # prints `[1, 2]`, on the ONE spelling `for_target_is_tuple` exists
+            # to tell apart.
+            #
+            # ONE slot, not merely "does not end in a comma": `for (a, b) in
+            # ...` also has `sub_comma` True, and its `sub` is `a, b`, whose
+            # last element is `b`, so that test alone appended a comma to a
+            # two-slot target and made `for (a, (b, c))` a 1-tuple wrapping its
+            # pair. The trailing comma a 1-tuple needs is the one a
+            # ONE-element slot list cannot carry, and `target_slots` is what
+            # says how many there are.
+            #
+            # Per-slot, not just for the outermost group: the same question is
+            # asked again for every nested group by the recursion, so a nested
+            # 1-tuple's comma has to be re-appended at THIS level too. The
+            # list-form append below is the other half of that — a nested
+            # `(b,)` reached through the `, {inner}` join would otherwise lose
+            # its comma here and come out as the parenthesised name `(b)`.
+            target = self._rewrap_generator_group(sub, sub_comma)
             saw_comma = sub_comma
         elif t.kind == "LBRACKET":
             # List-pattern unpacking target: `for [off] in ...`
@@ -5871,7 +5782,7 @@ class Parser:
                 self._advance()
                 inner, inner_comma = self._parse_generator_target()
                 self._expect("RPAREN")
-                target += f", ({inner})" if inner_comma else f", {inner}"
+                target += f", {self._rewrap_generator_group(inner, inner_comma)}"
             elif sub_t.kind in ("NAME", "KW"):
                 target += ", " + self._advance().value
             else:

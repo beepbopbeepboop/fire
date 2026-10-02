@@ -277,25 +277,29 @@ def test_every_declaration_is_seen():
     # with `op` threaded down -- so this is not 539 and not 541 + 7. One
     # implementation of a fix is one set of names, and the runtime file records
     # which spelling won and why.
-    # 541 -> 542 (2026-10-02, `bugs3-codegen-1-r2`): `mojo_require_str_arg` —
-    # the runtime half of a str-annotated parameter given an int raising a
-    # catchable TypeError instead of reading the int's bits as a `char *`. One,
-    # taken from the call in `_emit_require_str_arg` (`emit_infra.py`).
-    # 542 -> 544 (2026-10-02, `bugs3-codegen-5-r2`), for the container ELEMENT
+    # 541 -> 543 (2026-10-02, `bugs3-codegen-5-r2`), for the container ELEMENT
     # repr: `mojo_list_set_elem_repr` (what the codegen emits on every
     # list/tuple literal whose element type is a registered struct) and
-    # `mojo_list_repr_elem` (what both repr walkers ask per slot). Two, also
+    # `mojo_list_repr_elem` (what both repr walkers ask per slot). Two,
     # taken from the call.
+    #
+    # NOT 542 in between: `bugs3-codegen-1-r2` added
+    # `mojo_require_str_arg`, the runtime half of a str-annotated parameter
+    # given an int RAISING a catchable TypeError, and that is a different
+    # answer to the same question `codegen-3-r2`'s `_stringify_value`
+    # lowering already answers correctly — CPython prints `5` for
+    # `Dialog(5)` because a parameter annotation there is documentation, not
+    # a cast, so refusing is a divergence from the oracle and stringifying is
+    # not. One fix, one spelling: the runtime function went with the lowering
+    # it was written for, and its ledger line with it.
     #
     # Every entry here is read off the CALL, never added up, and the count is
     # read off the merged header rather than being any one branch's total plus
     # its own new names: two branches that each added names did not each add
-    # them to THIS header, and one of them (`codegen-1-r2`) added a name whose
-    # count step had to be written here at all only because it was missed. That
-    # is the whole reason this list is a ledger and not a formula — a name in
-    # the header that no line accounts for is the only way this count can be
-    # wrong silently, and `mojo_require_str_arg` was exactly that for one merge.
-    for header, want in (('fire_runtime.h', 544),
+    # them to THIS header. That is the whole reason this list is a ledger and
+    # not a formula — a name in the header that no line accounts for is the
+    # only way this count can go wrong silently.
+    for header, want in (('fire_runtime.h', 543),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),
