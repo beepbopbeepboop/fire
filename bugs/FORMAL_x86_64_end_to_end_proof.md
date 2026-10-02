@@ -19,7 +19,7 @@ Bug numbers (`B1`…`B23`) are this doc's own, for cross-reference.
 
 | | 2026-09-26 | 2026-10-01 |
 |---|---|---|
-| `formal/x86_64_model_test.py` — model vs hardware | 43/43 agree | 43/43 agree (untouched) |
+| `formal/x86_64_model_test.py` — model vs hardware | 43/43 agree | **44 agree, 1 WRONG** (`udivmod`, see below) |
 | `formal/x86_64_model_coverage_test.py` | 151 samples over 57 forms, all steppable | 151/57, plus **step-lemma APPLICABILITY** at 17 lemmas x 38 real encodings, 354 hypotheses |
 | `formal/x86_64_endtoend_test.py` — terminates, no sorry | **10** | **31** |
 | `formal/x86_64_endtoend_test.py` — terminates, a sorry | 14 | **2** |
@@ -38,6 +38,19 @@ run.
 
 What is left is 10 loops, 2 examples whose tree leaves the function, and 2
 sorries. See **Open, in the order I would take them** below for all of them.
+
+The one thing this pass did NOT touch is the model itself — `lib/X86.lean` gains
+17 theorems and changes no `def`, which is what `git diff master...HEAD -- lib/
+X86.lean` shows and it is worth checking rather than asserting. The one WRONG in
+`x86_64_model_test.py` is `udivmod` (`real=4 model=7905747460161236410`), it is
+**pre-existing**, and it is already written down twice: see
+`bugs/FORMAL_default_int_type_typed_flag_collapse.md` ("very likely the same
+untyped-`n` / `int` collapse") and `bugs/FORMAL_pointer_value_model.md`. Both are
+other workers' claims, so it is neither fixed nor re-filed here. What it does
+mean is that this doc's older "43/43 agree, 0 wrong" line was counting a
+different corpus, and that `udivmod`'s end-to-end proof — the one example left
+with an uncovered form — is the same example whose model is wrong, which is worth
+knowing before spending effort on `group3:idiv`.
 
 Two theorems of very different strength, and the gap between them is the whole
 story of B21. The value theorem is the stronger statement but can only be

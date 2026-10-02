@@ -843,7 +843,7 @@ theorem x86_step_movzx_rax_al (s : X86State) (code : Nat → UInt8) (m : Nat)
     becomes a second copy of `x86_step_movzx_rax_al` with one byte changed.
 
     The destination is a CONCRETE `dst`, with `reg + x86_rex_r rex = dst`
-    beside it, for the reason `x86_step_mov_rm64_mem_disp8_rbp` gives: the model
+    beside it, for the reason `x86_step_mov_rm64_mem_disp8` gives: the model
     writes `x86_set_reg s (reg + x86_rex_r rex) ...` and `simp` will not reduce
     a `match` on a non-literal, so the caller reads the destination out of the
     encoding and supplies it.  The caller is `formal/x86_64_endtoend_test.py`.
