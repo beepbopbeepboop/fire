@@ -195,10 +195,15 @@ a different answer.
 ## 5. The two remaining non-`codegen` classes
 
 * **`not-answerable/unresolved-extern` (2).** `algorithm/backend/cpu/map.mojo`
-  and one other: the image builds and binds a symbol nothing provides. For
-  `map.mojo` the symbol is literally `func`, from `func(i)` where `func` is a
-  **parameter used as a callee**. That is a real construct and a real gap, it is
-  in no `bugs/` doc, and it is **unowned** — see §6 row 1.
+  and `algorithm/backend/cpu/__init__.mojo`: the image builds and binds a symbol
+  nothing provides. For `map.mojo` the symbol is literally `func`, from
+  `func(i)` where `func` is a **parameter declared `Some[def(Int) -> None]` and
+  used as a callee**; `cpu/__init__.mojo` imports it. That is a real construct
+  and a real gap, it is in no `bugs/` doc, and it is **unowned** — see §6 row 1,
+  where its measured ceiling is also given. It is worth noting that
+  `map.mojo` was a `codegen` row before this branch's first commit (a false
+  read-before-store on the loop's own target) and only became visible as this
+  class because the fix let the build finish.
 * **`tool` (7), all `-t 240` timeouts.** `collections/{array,counter,deque,dict,
   list}.mojo` and `collections/string/{string,string_span}.mojo` — the largest
   files in the slice. A `-t` artefact rather than a finding, on the same
@@ -209,15 +214,21 @@ a different answer.
 ## 6. What is left, ranked, with the measurement each one still owes
 
 1. **A parameter used as a callee** (`algorithm/backend/cpu/map.mojo`:
-   `def map(func, size): for i in range(size): func(i)` emits a dangling call to
-   a symbol named `func`). Unowned, no doc, and it is a *lowering* gap rather
-   than a value-model one, which makes it the cheapest real coverage on this
-   list. Reproducer:
+   `def map(size: Int, func: Some[def(Int) -> None])` then `func(i)` emits a
+   dangling call to a symbol literally named `func`). Unowned, no doc, and it is
+   a *lowering* gap rather than a value-model one, which makes it the cheapest
+   real coverage on this list. Reproducer:
    `python3 fire.py build --formal --no-prove --backend=arm64 -o .tmp/m.macho
    ../new-modular/Mojo/stdlib/std/algorithm/backend/cpu/map.mojo`.
-   **Ceiling to measure first:** `grep -rln '^\s*def [a-z_]*(func\|cb\|f,' ` over
-   the stdlib — if the shape is rare, this is a one-file fix and should not be
-   queued as a family.
+   **The ceiling is measured and it is small:** `grep -rl ": Some\[def" --include=
+   '*.mojo'` over `std/` is **20 files**, of which the ones that then CALL the
+   parameter are `algorithm/backend/cpu/map.mojo`,
+   `algorithm/backend/{vectorize,unswitch}.mojo` (this slice),
+   `builtin/_coroutine.mojo` and `testing/assert_aborts.mojo`. So this is a
+   **one-construct, ~5-call-site** gap and should be queued as that, not as a
+   family — and the three files it shares a cause with are all already refused by
+   `tile.mojo`, so the honest expectation is that fixing it wins `map.mojo` alone
+   unless `vectorize`/`unswitch` are reached first.
 2. **Premise (B2): `S()` does not run `__init__`.** The blocker under 37 files
    (§3 row 1) and the largest single thing in this slice. It is a value-model
    change with a `SIGSEGV`-if-emitted history (`model.frame_slot_value_refusal`
