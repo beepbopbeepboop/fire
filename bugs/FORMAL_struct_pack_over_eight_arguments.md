@@ -1,126 +1,132 @@
-# `struct.pack` for a format naming 8 values is refused at the CALL SITE, so `struct.mojo`'s own "return an empty list" is unreachable
+# `struct.pack` for a format naming 8 values was refused at the CALL SITE, so `struct.mojo`'s own "return an empty list" was unreachable
 
 ## Status
 
-OPEN — found 2026-09-30 while registering `test_struct_formal.py` (it was
-named by no spec and in no bucket; it is now `formal-struct`, in `proofs`,
-declared red with `expect=`). **2 of 148 checks fail, on arm64.**
+**FIXED on arm64, measured before and after on this tree, and `test_struct_formal.py` is
+148/148.** x86-64 is a separate wall and still refuses; it is stated below with
+its own next step. The `expect=` marker on `formal-struct` in `tools/suite.py`
+is the kind that retires itself — `test_suite.py` fails any `expect=`-marked
+test that starts passing — so that row has to come off with this, and the
+registry is not this change's to edit.
 
-## What is believed
+## What was true, and what was wrong about it
 
-`formal/hostmods/struct.mojo` declines a format it cannot serve by returning
-an **empty list**, and its own docstring says so:
+`formal/hostmods/struct.mojo` declines a format it cannot serve by returning an
+**empty list**, and its own docstring says so:
 
-> FIVE value slots: the signature is six arguments wide because six is the
-> smaller of the two ABIs' integer argument registers. A format naming more
-> than five values cannot be packed here, and the three corpus formats that do
-> — `<HHHHHH` (6), `<HHIQQQI` (7), `<IIQQQQQQ` (8) — return an empty list
-> rather than a wrong answer.
+> A format naming more than five values cannot be packed here, and the three
+> corpus formats that do — `<HHHHHH` (6), `<HHIQQQI` (7), `<IIQQQQQQ` (8) —
+> return an empty list rather than a wrong answer.
 
-`test_struct_formal.py`'s `UNSERVABLE` group asserts exactly that: build the
-program, run it, and require the printed byte count to be **0** rather than the
-format's real size. That is a good test — it is the difference between a byte
-packer that declines and one that writes eight plausible bytes into a Mach-O
-header.
+`test_struct_formal.py`'s `UNSERVABLE` group pins exactly that, and pinning it
+is the difference between a byte packer that declines and one that writes eight
+plausible bytes into a Mach-O header.
 
-The problem is that for the widest of those formats the call is refused before
-the function is ever entered, so the module's decline cannot happen.
+The refusal that stood above it was **true about the register count and wrong
+about the consequence**. arm64 passes eight integer arguments in X0..X7; the
+ninth goes on the stack; and this path had no stack-argument convention, so the
+call was REFUSED:
 
-## What was run, and what it saw
+```
+$ python3 test_struct_formal.py
+FAIL  pack("<IIQQQQQQ") is refused, not wrong: build failed: build: call pack():
+      9 arguments exceeds the 8 the formal arm64 ABI passes in registers
+146/148 checks passed
+```
 
-    $ python3 tools/memslot.py --gb 8 -- python3 test_struct_formal.py
-    FAIL  pack("<IIQQQQQQ") is refused, not wrong: build failed: build: call
-          pack(): 9 arguments exceeds the 8 the formal arm64 ABI passes in
-          registers
-    FAIL  pack("<4sBBBBBBB5x") is refused, not wrong: (same)
-    146/148 checks passed
+The module carried a branch that could not be reached, and the test that exists
+to pin it could only ever fail.
 
-    # and the two ABIs' limits, from the two emitters:
-    $ grep -n '_ABI_ARG_REGS = ' formal/arm64_codegen.py
-    60:_ABI_ARG_REGS = 8
-    $ python3 -c "from formal.x86_64_codegen import ARG_REGS; print(len(ARG_REGS))"
-    6
+## What landed
 
-## The mechanism, exactly
+AAPCS's stack-argument convention, both ends, on arm64
+(`formal/arm64_codegen.py`). The design and the two places a mistake shows up
+are in the commit (`d6b5dbb3`); the parts worth carrying here are the ones a
+reader of this file would otherwise have to re-derive:
 
-A call is `1 + N` arguments, where `N` is the number of values:
+| | |
+|---|---|
+| **caller** | `_emit_call` `SUB SP` by a multiple of 16 for the outgoing area, store the STACK arguments into it, and only then spill and pop the register arguments into X0..X7 |
+| **callee** | the prologue reads argument `8+k` from `[X29 + 16 + 8k]` — X29 plus the sixteen bytes of saved FP/LR, which is where the callee's SP was before the prologue moved it |
+| **bound** | `_MAX_INCOMING_ARGS` = 24, a FRAME bound (every parameter past the eighth needs a home) and not an ABI one |
+| **still refused** | a VARIADIC callee with arguments past the registers, because `_emit_variadic_area` lays the `...` tail out at the slots the stack arguments now occupy and nothing states an order between the two |
 
-| format | values | call arity | arm64 (limit 8) | x86-64 (limit 6) |
-|---|---|---|---|---|
-| `<HHHHHH` | 6 | 7 | enters, declines with `[]` | **refused at the call site** |
-| `<HHIQQQI` | 7 | 8 | enters, declines with `[]` | **refused at the call site** |
-| `<IIQQQQQQ` | 8 | **9** | **refused at the call site** | **refused at the call site** |
-| `<4sBBBBBBB5x` | 8 | **9** | **refused at the call site** | **refused at the call site** |
+**The caller's ordering is the measurement worth keeping.** Storing the stack
+arguments after the register spills looks equivalent and is not: the eight
+`STP [SP, #-16]!` have already moved SP 128 bytes down, so every `[SP + 8k]`
+lands in the register spill area. Measured, with the offsets correct for the SP
+at the time:
 
-`test_struct_formal.py` pads a format's real value list up to five but keeps
-every real value (`while len(values) < 5: values += [0]`), so a format naming 8
-values produces a 9-argument call. `formal/arm64_codegen.py:5174` raises
-`CodegenError` on it, and the build fails — so the group sees a build failure
-where it expected a run that printed `0`.
+```
+nine(1,…,9)    ->  37      where the source says 45
+ten(1,…,10)    ->  0       where it says 1000000010
+```
 
-Both failures are the two 8-value formats, which is the shape of the table
-above and not a coincidence.
+The ninth argument read as ZERO — the exact wrong answer the original refusal
+existed to prevent, arriving by a different road. A callee cannot tell a
+dropped argument from a caller who passed zero, so this is the one answer that
+must never appear.
 
-Note the scope honestly: `test_struct_formal.py` builds arm64 only
-(`build_and_run` passes `--formal` with no `--backend`), so the x86-64 column
-is read off `ARG_REGS`, not observed. On x86-64 the gap starts one format
-earlier — a 6-value format is already over its limit of 6 arguments.
+`nine_t` (`return h`) is the row that pins the callee half, and it exists
+because a stack slot holding a `char *` is the case a wrong offset is least
+likely to be caught by: `[NINE][EIGHT][ONE]` reads all three of the first,
+last and an in-between argument of a nine-`String` parameter function.
 
-## Why the refusal is right and the test is not wrong to want the module
+## What did NOT land, and why
 
-`formal/arm64_codegen.py:5163` explains the refusal, and the reason is a
-measured silent miscompile:
+**x86-64 still refuses a ninth argument.** Its System V convention passes six
+integer arguments in RDI/RSI/RDX/RCX/R8/R9 and the rest on the stack, and that
+stack area is a second, separate piece of work in
+`formal/x86_64_codegen.py`. The two differ in their limit because the ABIs do,
+not in what they do about it — which is what the pre-fix comment on arm64's
+check already said.
 
-> A ninth has no register, and this path has no stack-argument convention to
-> fall back on, so the call is REFUSED here rather than truncated: the
-> alternative — evaluate the extra arguments for their side effects, drop
-> them, and branch — built an image that ran and read the ninth parameter as
-> ZERO, which is a perfectly good answer to a great many questions (measured:
-> `nine(1,...,9)` returned 1 where the source says 90001). A wrong value is
-> strictly worse than a refusal here, because nothing downstream can tell a
-> dropped argument from a caller who passed zero.
+This is pinned as a STATED limit rather than left to be discovered:
+`test_formal_x86_64_parity.py`'s `X86_ONLY_REFUSALS` group builds x86-64 only,
+requires the refusal, and deliberately does NOT require arm64 to refuse. If a
+later change implements the SysV stack area, that case starts failing and says
+why.
 
-So the refusal must stay. What is broken is that it fires **above** the
-module's own, gentler, in-band decline: the caller cannot reach the function
-that knows how to say "I cannot serve this format".
+The reason the x86-64 half is left is arithmetic, not priority: a module both
+backends compile has to fit the SMALLER convention (that is
+`test_struct_formal.py`'s `test_the_module_builds_on_both_backends`, written
+when `struct.mojo`'s signatures were first written to arm64's ceiling of eight
+and the x86-64 build was refused outright). So widening `pack` past six
+parameters requires the SysV stack area first, and the measurement above is
+what the x86-64 half is worth.
 
 ## The next step, exactly
 
-Two shapes, and the first is the real one:
-
-1. **Give the arm64 emitter a stack-argument convention** for arguments 9 and
-   up: store them to the stack in the callee's frame at entry (mirroring
-   `formal/arm64_codegen.py:872`, which already has the callee-side refusal
-   for a function *reached* without a call site) and push them at the call
-   site in `_emit_call`. That is a real ABI feature and it unblocks every
-   call over eight arguments in the tree, not just this one. It is also the
-   change that makes the x86-64 gap worth closing at the same time, since
-   x86-64 System V passes the first six integer arguments in registers and the
-   rest on the stack for the same reason.
-2. **Or, if the emitter is not getting that soon**: change the `UNSERVABLE`
-   group to assert the *call-site* refusal for the formats whose arity exceeds
-   the ABI — i.e. require the build to fail with `exceeds the 8 … passes in
-   registers` — and keep the empty-list assertion for the formats that do fit
-   (6 and 7 values on arm64). That is a smaller `struct.pack` than the module
-   documents, so `formal/hostmods/struct.mojo`'s docstring has to be corrected
-   with it, and `test_struct_formal.py:451`'s `check(sorted(wide) ==
-   sorted(UNSERVABLE))` needs to know which half it is asserting.
-
-Option 2 is a documentation change dressed as a fix; option 1 is the fix.
-Do not take option 2 and call the module's contract intact.
+1. x86-64's stack area, in `formal/x86_64_codegen.py`'s `_emit_call` and its
+   prologue — the same four corners as arm64's, against
+   `formal/x86_64.py`'s `ARG_REGS` (six). The offsets are `[RBP + 16 + 8k]` for
+   the same reason arm64's are `[X29 + 16 + 8k]`, provided x86-64's spills are
+   also RBP-relative; **verify that before writing it**, it is the one
+   assumption the port rests on.
+2. THEN widen `formal/hostmods/struct.mojo`'s `pack` from five value slots to
+   eight, with the slots DEFAULTED (a slot past `_nvalues(fmt)` is never read,
+   so a caller packing a short format has nothing to say about it) and with
+   `_nvalues(fmt) > 5` becoming `> 8`. That makes the module's decline
+   reachable for the first time, and it CHANGES what `test_struct_formal.py`'s
+   `UNSERVABLE` group is asserting: `<HHHHHH` (6 bytes) and `<4sBBBBBBB5x`
+   (16 bytes) are both in the module's buffer-size ladder and would become
+   PACKED rather than declined, while `<IIQQQQQQ` (56 bytes) has no ladder
+   entry and would still decline. The group would need re-deriving, not
+   deleting.
+3. Do steps 1 and 2 together or not at all: widening `pack` without the SysV
+   area breaks `test_the_module_builds_on_both_backends`, which is a
+   registered check of the module rather than of the ABI.
 
 ## Related
 
-- `formal/arm64_codegen.py:872` — the same limit on the callee side, refused
-  for a function reached without a call site (a dylib export, a
-  reflection-resolved call). Both sides of the same wall have to move
-  together, or a function that can be entered but not called is a second,
-  quieter hole.
+- `formal/arm64_codegen.py`'s `_load_home_from_stack` / `_emit_call`'s outgoing
+  area — the two ends of the one convention, kept together in the commit.
 - `bugs/FORMAL_known_limits.md` — the audit of which sweep refusals are true
-  claims. This one is true, and it is not sweep residue, which is why it has
+  claims. This one was true, and it is not sweep residue, which is why it has
   its own doc.
-- Registered as `formal-struct` in `tools/suite.py` with
-  `expect='bugs/FORMAL_struct_pack_over_eight_arguments.md …'`. The `expect=`
-  is a declaration, not an excuse: `test_suite.py` fails any `expect=`-marked
-  test that starts passing, so this row retires itself the day the arity
-  works.
+- `tools/suite.py`'s `formal-struct` row carries `expect=` naming this file.
+  That row must lose its marker with this change or the suite reports a
+  green test as a failure.
+- `bugs/FORMAL_struct_pack_unservable_format_is_refused_at_the_call.md` is the
+  same finding filed from another branch, with the design question behind it
+  spelled out. It is deleted with this change.
