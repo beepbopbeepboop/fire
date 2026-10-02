@@ -51,10 +51,62 @@ what the class mix is.
 
 ## 2. The final numbers
 
-*(filled in from `.tmp/sweep3-std-c.txt` — see the table at the end of this
-section.)*
+The complete 118-file table is the **run 2** one, with three corrections that
+were each measured directly on the final tree rather than inferred. Stated as
+corrections because a class count is a claim about a run and a run is a claim
+about a tree, and those are two different trees here.
+
+| | run 2 (118 files, `read_before_store` fix only) | **final tree (118 files)** | how the final column was established |
+|---|---|---|---|
+| pass | 7 | **7** | same run; the 7 are `__init__.mojo`, `documentation/{__init__,documentation}.mojo`, `stat/stat.mojo`, `sys/_io.mojo`, `traits/anytype.mojo`, `utils/_visualizers.mojo` |
+| codegen | 4 | **4** | same run; the 4 in-file findings are §3.5/§3.6 and none of the three changes touches them |
+| codegen/dependency | 99 | **104** | +3 `backend-crash` and +2 run-2 artefacts, all five re-measured file by file |
+| not-answerable/* | 0 | **0** | the class is unfired in this slice and no change affects it |
+| backend-crash | 5 | **0** | 3 were the `_frame_receivers` table crash (§3.3), each verified individually to reach a real refusal; **2 were an artefact of an edit of my own in mid-run** (`itertools/itertools.mojo`, `itertools/__init__.mojo`, both reported `NameError: name '_owner_from_receiver_type' is not defined` — a helper I had not written yet) and both are `CODEGEN/DEPENDENCY: builtin_slice.mojo` on the final tree, confirmed in run 3's log |
+| tool (no verdict) | 3 | **3** | §3.8 |
+| codegen coverage | 7/110 = 6.4 % | **7/111 = 6.3 %** | the denominator is the three classes above; the 1-file move is `env.mojo` (§3.7) leaving the family |
+| `cas` | 0 hit / 118 miss | — | every run here was cold, so no verdict in this map is a cache replay |
+
+**The corroborating partial run.** `.tmp/sweep3-std-c.txt` re-ran the same slice
+on the final tree and was **INTERRUPTED at 62 of 118** — killed from outside
+(this machine was carrying load 80 with 35 concurrent compiler processes; the
+sweep published its partial ledger and said so, which is the behaviour
+`FORMAL_sweep_killed.md` asks for). What it did classify agrees with the table
+above on every class: `pass 3, codegen 1, codegen/dependency 57, tool 1,
+backend-crash 0`, and its family breakdown is `binary_heap.mojo` 40 /
+`builtin_slice.mojo` 9 / `_assembly.mojo` 2 over the 58 dependency files
+classified — the same three families, the same order. A fourth run
+(`.tmp/sweep4-std-c.txt`) was started to complete it and had reached 23 of 118
+when this map was written; **it is not part of any number above**, and its
+partial ledger is in the CAS at `.tmp/gmojo2` for whoever wants to finish it.
+
+**Two contaminations in run 2, both stated rather than buried.** (a) The two
+`itertools` crashes above, which were mine. (b) The `POINTER_TYPE_CTORS` change
+(`57a82901`) landed at 04:19 PDT, about 40 minutes into run 2, so files
+classified after that point saw it. Its direction is known and one-way: it can
+only REMOVE the `env.mojo` refusal of §3.7, never add one, and §3.7 is measured
+directly. Everything after 04:58 in run 3 and all of run 4 saw the final tree,
+apart from one comment-only commit (`3b1ce834`) which cannot change a verdict.
+
 
 ## 3. What the slice is actually made of, cause by cause
+
+**The ranking, from the printed chains of the 118-file run** (`codegen/dependency`
+by family, plus the in-file `codegen` findings and the crash class):
+
+| rank | terminal reason | files | class | status |
+|---|---|---|---|---|
+| 1 | `binary_heap.mojo: module exports nothing` | **70** | dependency | documented dead end, ceiling measured at 0 |
+| 2 | `builtin_slice.mojo: StridedSlice_write_to: self.write_to …` | **16** | dependency | **FILED** — a mis-dispatch, §3.4 |
+| 3 | `_assembly.mojo: inlined_assembly: __mlir_op` | 8 | dependency + 2 of the 4 in-file | a documented true limit |
+| 4 | `random.mojo: Rng_rand_scalar: self._next is not a field of Rng` | 3 | dependency | **FILED** — the same check, §3.4b |
+| 5 | `AttributeError: 'str' object has no attribute 'name'` | 3 | **backend-crash** | **FIXED** (§3.3) |
+| 6 | `stat.mojo: exports nothing` (every public function is a GENERIC) | 1 | dependency | the same family as rank 1 |
+| 7 | `env.mojo: external_call['getenv', OptionalPointer[…]]` | 1 | dependency | **FIXED** (§3.7) |
+| 8 | `origin/__init__.mojo` MLIR attribute template, `sys/debug.mojo` + `utils/_select.mojo` `__mlir_op`, `utils/_serialize.mojo` `comptime` does not fold | 4 | codegen | documented true limits |
+| — | timeout, no verdict | 3 | tool | re-run at a larger `-t` (§3.8) |
+| | **total** | **118** | | 7 pass + 4 codegen + 104 dependency + 3 tool |
+
 
 Ranked by files, with the terminal reason read off the printed line (the class
 name, the printed chain and the per-family breakdown all say which level the
@@ -144,7 +196,7 @@ that commit, which is what the project's own rule says a fixed bug's doc gets.
 case, red on `master` for this reason; it is a whole-closure compile of
 `formal/build.py` and was NOT run here (see NOT DONE in the worker report).
 
-### 3.4 `builtin_slice.mojo: StridedSlice_write_to: self.write_to is not a field of StridedSlice` — 16 files, FILED, not fixed
+### 3.4 `builtin_slice.mojo: StridedSlice_write_to: self.write_to is not a field of StridedSlice` — 16 files, and with §3.4b, 19 — FILED, not fixed
 
 A mis-dispatch: `self._inner.write_to(writer)` is rewritten to
 `self.write_to(writer)` — **`StridedSlice`'s own method, i.e. unbounded
@@ -158,6 +210,23 @@ spells.
 measurement, the two candidate fixes with why neither was landed (one turns the
 refusal into an unresolved symbol and LOWERS nothing, the other has no measured
 effect at all), and the next step.
+
+### 3.4b `random.mojo: Rng_rand_scalar: self._next is not a field of Rng` — 3 files, the SAME check from the other side
+
+A struct with **no fields at all** (`struct Rng(Movable)` in
+`std/testing/prop/random.mojo:18`, measured: `fields == []`,
+`struct_is_one_field` False, `struct_is_framed` False) whose line 61 is
+`var uint64 = self._next()`. `_rewrite_self_fields` never touches it — the
+`mapping` it is handed has no `self` entry — so the refusal is
+`check_value_position_method_reads` alone, refusing a call to the struct's own
+method because it cannot tell a callee from a value read. Its own docstring
+says so, and the helper that answers it by POSITION (`_call_receivers`, which
+already looks through a subscript for the specialization case) is not consulted.
+
+**The obvious fix is wrong and is measured**: skipping call receivers moves
+BOTH families off their refusals onto real ones and lowers nothing, while
+deleting the only guard against §3.4's recursion. §3.4's next step is ordered
+so that question is answered first.
 
 **Next step, in order:** (1) let the holder fixpoint visit a function whose only
 holder is a one-field struct's by-value receiver — the `if not hs: continue` at
@@ -228,10 +297,15 @@ statement is that this slice's `python/` subdirectory is UNMEASURED.
    wrong shape, and a pointer alias missing from a name table. All three are in
    shared compiler code, not in this slice's files, and all three moved files
    off a wrong verdict.
-3. **The one substantive codegen gap left in this slice is a mis-dispatch**, and
-   it is a wrong-answer hazard, not a coverage one: a one-field struct's field
-   call receiver is collapsed into the receiver, which renames the callee's
-   struct. Filed with its next step.
+3. **The one substantive codegen gap left in this slice is
+   `check_value_position_method_reads`**, and it is a wrong-answer hazard on one
+   side and a false refusal on the other: a one-field struct's field call
+   receiver is collapsed into the receiver, which renames the callee's struct
+   and makes `self._inner.write_to(w)` unbounded recursion (§3.4, 16 files),
+   while a struct with no fields is refused for calling its own method (§3.4b,
+   3 files). **19 of 118 files, the largest actionable cause in the slice**, and
+   filed with its next step and with the measurement that says why the obvious
+   fix is the wrong one.
 4. **`python/` is unmeasured** (3 timeouts) and should be re-run at a larger `-t`
    before any conclusion is drawn about it.
 5. **Nothing in this slice needs an x86-64 measurement** for the three fixes:

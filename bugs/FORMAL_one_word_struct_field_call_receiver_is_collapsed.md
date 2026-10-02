@@ -140,6 +140,82 @@ The other 5 `write_to` structs in that one file (`Slice_write_to`,
 `ContiguousSlice_write_to`, and `write_repr_to` × 3) are the same shape waiting
 behind the first refusal.
 
+## The SAME check, the other direction: a struct with NO FIELDS, refusing its own method call
+
+`tools/formal_sweep.py` over the `std-c` slice prints a second family with the
+same message and a **different** cause, and it is worth separating because the
+fix direction is the opposite one:
+
+```
+CODEGEN/DEPENDENCY: std/testing/prop/random.mojo  (build: random.mojo imports
+'std.random', which cannot be built either: random.mojo: Rng_rand_scalar:
+self._next is not a field of Rng — _next is one of its METHODS, and nothing in
+Rng stores into an attribute of that name, so in Python this expression is the
+bound method. …)
+```
+
+`std/testing/prop/random.mojo:18` is
+
+```mojo
+struct Rng(Movable):
+    @doc_hidden
+    def __init__(out self, *, seed: Int):
+        seed_fn(seed)
+
+    def _next(mut self, max: UInt64 = UInt64.MAX) raises -> UInt64:
+        …
+```
+
+and line 61 of the same file is `var uint64 = self._next()`. Measured on the
+parsed struct: **`Rng` declares no fields at all** — `Rng.fields == []`,
+`struct_is_one_field(Rng)` is **False**, `struct_is_framed(Rng)` is False, and
+`_sole_field_name(Rng)` raises rather than returning a name. So
+`_rewrite_self_fields` never touches this function: the `mapping` it is handed
+has no `self` entry and the collapse above **did not happen**. The refusal is
+`check_value_position_method_reads` on its own, refusing a call to the struct's
+own method because it cannot tell a callee from a value-position read — which is
+exactly what its own docstring says it cannot do:
+
+> **The walk is `iter_nodes` and that is a limitation, not a choice.** A
+> `MemberExpr` in a method's body cannot be told apart from one that is the
+> CALLEE of a call without a parent.
+
+**The parent is available and the helper for it already exists.**
+`formal/build.py`'s `_call_receivers(fn)` answers "is this node the callee of a
+call" by POSITION, and its docstring says it looks *through* a subscript on the
+callee for the specialization case, so it is one function that already knows
+both spellings. `check_value_position_method_reads` does not consult it.
+
+**And the obvious fix is wrong, which is why this is a next step and not a
+change.** Implemented and measured (`call_recv = _call_receivers(fn)` and
+`if id(node) in call_recv: continue`):
+
+* `std/testing/prop/random.mojo` moves off this refusal onto a real one
+  (`rebind[…](…) calls a name this unit does not compile`);
+* `std/builtin/builtin_slice.mojo` ALSO moves off the mis-dispatch refusal
+  above — onto `StridedSlice___init__ returns a frame address, so it cannot be
+  compiled into a dylib`;
+* **and nothing is lowered either way**, while the change **removes the only
+  guard** standing between the `StridedSlice` recursion of the first section and
+  a silently wrong program. A change that improves two messages and deletes a
+  guard is not a fix; § "The next step, exactly" is ordered so the recursion
+  question is answered FIRST, because the answer decides whether the call
+  receiver may be skipped at all:
+  * if `StridedSlice.__init__` really is a nested frame built by a constructor
+    call (already refused elsewhere — measured), then the `self._inner` case is
+    a representability limit, the recursion is unreachable, and
+    `check_value_position_method_reads` may skip call receivers safely, which
+    closes the 3 `Rng` files here and probably more;
+  * if it is not, then the collapse has to be undone for a call receiver
+    (§ step 1) BEFORE the check may skip one, or the check stops being a guard.
+
+**Exposure in this slice: 3 files** (`std/testing/prop/random.mojo`,
+`std/testing/prop/__init__.mojo`, `std/testing/prop/runner.mojo`), all three
+through `from .random import …` / `from std.random import …`. With the
+`builtin_slice` family above, **19 of 118 files in the slice are this one
+check**, which is what makes it the top remaining actionable cause in
+`bugs/FORMAL_sweep_work_map_2026-10-02_std-c.md`.
+
 ## What was tried, and why neither change landed
 
 Both were implemented, measured, and reverted; the tree carries neither.
