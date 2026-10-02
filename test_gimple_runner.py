@@ -5955,6 +5955,69 @@ d = {'a': 1}
 print(str(d))
 """, "[1, 2, 3]\n[1, 2, 3]\n{1, 2}\n{'a': 1}\n")
 
+    # bugs/CODEGEN_annotated_str_param_given_an_int_segfaults.md: a
+    # `str`-annotated parameter is a STATIC PROMISE the compiled path takes
+    # literally, so `Dialog(5)` reached the constructor as address 5 and the
+    # first `print` strlen'd it — SIGSEGV, exit -11, no output, on a program
+    # that built and started cleanly. The generated C was correct everywhere
+    # except the call-site cast, which is why this is a RUNTIME error rather
+    # than a wrong answer: the diagnostic names the callee and the argument.
+    #
+    # The second case is the half that matters for whether the fix is usable:
+    # the raise goes through mojo_raise_type_error, so a compiled
+    # `except TypeError:` catches it and the program carries on. A `fprintf`
+    # to stderr and exit would have made the first case look fixed and left
+    # every real caller of this shape broken.
+    test_gimple_runtime_error("gimple_str_param_given_an_int_raises_typeerror", """\
+class Dialog:
+    def __init__(self, widgetName: str):
+        self.widgetName = widgetName
+    def show(self):
+        return self.widgetName
+
+def main():
+    a = Dialog(5)
+    print(a.widgetName)
+    print(a.show())
+main()
+""", "TypeError: Dialog___init__(): argument 2: expected str, got int")
+
+    test_gimple_stdout("gimple_str_param_given_an_int_is_catchable", """\
+class Dialog:
+    def __init__(self, widgetName: str):
+        self.widgetName = widgetName
+
+def main():
+    try:
+        a = Dialog(5)
+        print("unreachable")
+    except TypeError:
+        print("caught")
+    b = Dialog("hello")
+    print(b.widgetName)
+main()
+""", "caught\nhello\n")
+
+    # The two exemptions `mojo_require_str_arg` exists for, both of which are
+    # real programs rather than tolerance: a genuine string still arrives, and
+    # so does the NULL that `d.get(k)` hands back for an absent key — the
+    # shape every `f(d.get(k))` guard in the tree is written in. Both were
+    # correct before this change, so a guard that refused either would be a
+    # REGRESSION this test exists to catch.
+    test_gimple_stdout("gimple_str_param_guard_admits_a_string_and_a_null", """\
+def takes(s: str):
+    if s is None:
+        return "none"
+    return s
+
+def main():
+    d = {"A": "1"}
+    print(takes("hello"))
+    print(takes(d.get("MISSING")))
+    print(takes(d.get("A")))
+main()
+""", "hello\nnone\n1\n")
+
 
 def main():
     gcc = find_gcc()

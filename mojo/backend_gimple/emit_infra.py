@@ -1505,6 +1505,40 @@ def _list_unpack_name(elem: str) -> str:
     return _gmi_glue._c_unpack_name(elem)
 
 
+def _guard_str_arg(gen, fname: str, argno: int, word: str) -> None:
+    """Emit the runtime check that `word` may be handed to a `char *`
+    parameter, before the cast that pretends it is one.
+
+    An annotation is a STATIC PROMISE with no runtime tag behind it, so
+    `def __init__(self, widgetName: str)` called as `Dialog(5)` used to
+    reach the callee as address 5 and `strlen` it — a SIGSEGV on a program
+    that builds, links and starts cleanly. This is the ONE place in
+    `_emit_call` that knows both halves of that fact (the argument's own
+    C type is an integer, the callee's declared parameter type is
+    `char *`), so the check belongs here and nowhere else.
+
+    `word` is the int64_t the cast is about to consume, so the check reads
+    the value the callee would have seen rather than a second lowering of
+    the argument expression.
+
+    The check is deliberately a RUNTIME call and not a compile-time
+    refusal: an unannotated parameter's slot is `int64_t` by design and
+    legitimately carries a string handle on some call sites and an integer
+    on others (see the sibling branch in `_emit_call`), so the compiler
+    cannot refuse, and a static refusal here is exactly the
+    type-resolution change CLAUDE.md warns can drop dozens of real stdlib
+    modules from compiling without any test noticing. `mojo_require_str_arg`
+    accepts every value `mojo_boxed_is_str` accepts — so every genuine
+    string, literal or heap, and NULL — and raises a catchable TypeError
+    for the rest.
+    """
+    detail = gen._intern_string(
+        gimple_ctypes._c_escape(
+            f"{fname}(): argument {argno}: expected str, got int"))
+    gen._emit_call('void', '', 'mojo_require_str_arg',
+                   [('int64_t', word), ('char *', detail)])
+
+
 def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
 
@@ -1679,15 +1713,31 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                 coerced_args.append(sv)
             else:
-                vp = gen._new_temp('void *')
-                cp = gen._new_temp('char *')
+                # An INTEGER-typed word in a `char *` slot. This is where an
+                # annotated-`str` parameter given a non-string argument used
+                # to become a SIGSEGV: `Dialog(5)` emitted
+                # `(char *)(void *)(int64_t)5` and the callee strlen'd
+                # address 5 (bugs/CODEGEN_annotated_str_param_given_an_int_
+                # segfaults.md). Two situations reach here and neither is
+                # distinguishable statically — an unannotated/polymorphic
+                # int64_t slot legitimately holding a string HANDLE (the
+                # pass-through the sibling branch's own comment is written
+                # about, which is why the cast must stay) and a genuine
+                # integer. So the cast stays AND the word is checked: the
+                # runtime's own boxed-any discriminator decides, which is
+                # the one answer every other ambiguous-slot consumer in the
+                # runtime already uses (see mojo_require_str_arg).
                 if atype in ('int',):
                     ip = gen._new_val('int64_t', f'(int64_t){aval}')
-                    gen._emit(f'  {vp} = (void *){ip};')
                 else:
-                    gen._emit(f'  {vp} = (void *){aval};')
+                    ip = gen._ensure_local('int64_t', aval)
+                _guard_str_arg(gen, fname, i + 1, ip)
+                vp = gen._new_temp('void *')
+                cp = gen._new_temp('char *')
+                gen._emit(f'  {vp} = (void *){ip};')
                 gen._emit(f'  {cp} = (char *){vp};')
                 coerced_args.append(cp)
+
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain
             # scalar-typed value. TWO unrelated situations reach this one

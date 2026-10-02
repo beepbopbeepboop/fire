@@ -1221,6 +1221,11 @@ void        mojo_raise_key_error(char *key);
  * (struct.Struct's `format`/`size`), which it previously answered with a
  * silent 0. */
 void        mojo_raise_type_error(char *detail);
+/* A `char *` parameter handed a value whose bits are not a plausible string
+ * pointer: raise the same catchable TypeError rather than let the callee
+ * `strlen()` an integer. See mojo_require_str_arg's own comment in the .c
+ * for why NULL is exempt and why the test is `mojo_boxed_is_str`. */
+void        mojo_require_str_arg(int64_t v, char *detail);
 /* Raises a real, catchable ValueError for `detail` — the same mechanism and
  * the same tag derivation (crc32("ValueError") & 0x7fffffff) as
  * mojo_raise_attribute_error / mojo_raise_key_error / mojo_raise_type_error
