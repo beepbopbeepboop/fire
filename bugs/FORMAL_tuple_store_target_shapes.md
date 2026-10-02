@@ -62,10 +62,13 @@ it correctly (`a.x, b = 7, 8` above).  Refusing it would have been refusing a
 program that works.
 
 A **subscript** element target (`a[0], b = 1, 2`) is still refused on x86-64, and
-it SIGSEGVs on arm64 — but that is not a tuple defect, and the plain statement
-`a[0] = 1` with an integer `a` SIGSEGVs on **both** architectures.  That is
-`bugs/FORMAL_subscript_store_on_a_non_container_segfaults.md`, filed from the
-same measurements.
+it SIGSEGVs on arm64 — but that is not a tuple defect, and it was neither of them
+because of the tuple path.  The plain statement `a[0] = 1` with an integer `a`
+SIGSEGV'd on **both** architectures; that half is now a build error
+(`model.non_container_element_refusal`), refused at the subscript choke point on
+both architectures so a read, a store and an augmented assignment get one answer.
+What is still open here is the tuple element TARGET shape, which is a different
+construct from a base that is not a container.
 
 ## The `_STORE_TUPLE` band-aid in the model, still there
 
