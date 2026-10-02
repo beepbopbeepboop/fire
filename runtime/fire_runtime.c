@@ -6303,6 +6303,23 @@ char *mojo_repr_float(double v) {
     return strdup(buffer);
 }
 
+/* `mojo_str_cat` with its LEFT operand released. `mojo_str_cat` allocates a
+   new buffer and deliberately leaves both arguments alone, so a chain of N
+   cats needs the caller to free N-1 buffers. Every repr walker below is such
+   a chain and none of them did, which was only a slow leak on a debug print
+   until these walkers became a dict KEY's renderer
+   (`_container_key_str`), where they run once per key in whatever loop the key
+   is used in: measured +78 B per lookup, the same per-access growth the
+   Int-key side had just been fixed for
+   (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). `a` must be a buffer the
+   caller owns -- every use below is one this file just built -- and `b` is
+   untouched, so passing a shared static (`mojo_repr_obj`'s buffer) is safe. */
+static char *_cat_free(char *a, const char *b) {
+    char *r = mojo_str_cat(a, b);
+    free(a);
+    return r;
+}
+
 /* A list that records its OWN per-slot kinds (mojo_list_set_kinds) is
    described by them more precisely than any single-accessor reader chosen
    for the whole list can be, so every uniform list repr below defers to it
@@ -6528,29 +6545,52 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
-        char _k = (kinds && !kinds[_i]) ? 'i' : kinds[_i];
+        if (_i > 0) _buf = _cat_free(_buf, ", ");
+        /* A NULL kinds string is not "no kinds" but "no kinds to apply": every
+           slot then falls back to the int accessor, which is the documented
+           behaviour for a slot the string does not cover (see the comment
+           above). It was `kinds && !kinds[_i]`, which reads `kinds[_i]` in the
+           else arm anyway — so a NULL kinds string dereferenced NULL, and
+           `mojo_repr_list_kinds(l, NULL)` was only ever safe because every
+           caller happened to pass a non-NULL string first. Two callers did
+           not: the nested-list recursion just below, and a dict key's content
+           key (`_container_key_str`), whose tuple carries no kinds row when
+           codegen appended to it slot by slot. */
+        char _k = (!kinds || !kinds[_i]) ? 'i' : kinds[_i];
+        /* One `_s`, released after the cat, rather than a cat per branch: every
+           repr helper here returns a fresh heap string and none of them was
+           freed, so a repr of a mixed N-slot list leaked N of them. That was
+           only ever a slow leak on a debug print, but this function is now
+           also a dict KEY's renderer (`_container_key_str`), where it runs once
+           per lookup in whatever loop the key is used in — which is exactly the
+           shape that turned a tuple-keyed miss into gigabytes of live memory
+           (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). The one branch
+           that does not own a heap string is 'n' (None), a literal. */
+        char *_s;
         if (_k == 'd') {
-            _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_list_get_double(l, _i)));
+            _s = mojo_repr_float(mojo_list_get_double(l, _i));
         } else if (_k == 's') {
             MojoBytes *_b = (MojoBytes *)(uintptr_t)mojo_list_get_int(l, _i);
-            _buf = mojo_str_cat(_buf, mojo_bytes_repr(_b));
+            _s = mojo_bytes_repr(_b);
         } else if (_k == 'p') {
             char *_p = (char *)(intptr_t)mojo_list_get_int(l, _i);
-            _buf = mojo_str_cat(_buf, mojo_repr_str(_p));
+            _s = mojo_repr_str(_p);
         } else if (_k == 'l') {
             /* A nested list/tuple slot: recurse through the same kinds-aware
              * repr, so `[[1, 2.5], 3]` describes its inner list too. */
             MojoList *_in = (MojoList *)(intptr_t)mojo_list_get_int(l, _i);
-            _buf = mojo_str_cat(_buf, mojo_repr_list_kinds(_in, NULL));
+            _s = mojo_repr_list_kinds(_in, NULL);
         } else if (_k == 'n') {
-            _buf = mojo_str_cat(_buf, "None");
+            _buf = _cat_free(_buf, "None");
+            continue;
         } else {
-            _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
+            _s = mojo_repr_int(mojo_list_get_int(l, _i));
         }
+        _buf = _cat_free(_buf, _s);
+        free(_s);
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
-    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = _cat_free(_buf, ",");
+    return _cat_free(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_obj(int64_t addr) {
@@ -8825,9 +8865,99 @@ static char *_int_str_transient(int64_t v) {
     return out;
 }
 
+/* A registered container (a list, or a tuple -- the two are the same
+   MojoList with a marker) used where a C string is needed, which in practice
+   means as a DICT KEY. The string is the container's VALUE, so `(p, 1.0)` keys
+   as "('p', 1.0)" and two separately-built equal tuples key identically.
+
+   Before this, a container word fell to the decimal-of-the-address branch and
+   keyed as "4372863864": equal keys never hit, and a REUSED address could hit
+   a stale entry. That was not only a wrong answer -- the dict layer then grew
+   one entry per lookup and never hit one, which is where the multi-GB growth
+   on `mojoc --dump-full fire.py` came from (see
+   bugs/CODEGEN_tuple_dict_key_hashed_by_address.md).
+
+   This has to live in the runtime because the value arriving here is an
+   untyped WORD: the key's static type is known where the key is written and
+   thrown away by the `int64_t` the dict call takes. Two sources for the text,
+   in this order:
+
+     - a list that carries its own per-slot kinds (`mojo_list_get_kinds`, set
+       for `struct.unpack` of a mixed format and for a heterogeneous list
+       literal) is rendered by the kinds-aware walker, which is the only thing
+       that can read a FLOAT slot correctly;
+     - otherwise each slot is read by RUNTIME type below, which is what a
+       hand-built tuple needs: codegen appends slot by slot through
+       `mojo_list_append_int`, so there is no kinds row to consult, and the
+       kinds walker with no row renders every slot as an integer -- a string
+       slot as the decimal of its own address, so two tuples holding equal
+       strings at different addresses keyed differently and the bug survived
+       the first attempt at this fix (measured, see the doc).
+
+   This mirrors the codegen-emitted `_mojo_repr_list` /
+   `_mojo_generic_elem_repr` pair, which is the same two-source shape for the
+   same reason: what a slot holds is only knowable at runtime. It is a
+   separate copy rather than a shared one because those two are emitted PER
+   TRANSLATION UNIT with this program's own struct-tag table baked in, which
+   the runtime has no way to see.
+
+   Ownership: an ordinary heap string (the walker's own `strdup` /
+   `mojo_str_cat` blocks), so `mojo_cstr_or_int_release` frees it -- see its
+   second branch. Every per-slot string is freed as it is consumed, and the
+   slot walker always returns a heap string (a strdup of `mojo_repr_obj`'s
+   shared buffer where that is the answer) so the caller can free
+   unconditionally instead of tracking which repr helper returns what. */
+static char *_container_key_str(int64_t v);
+
+static char *_key_slot_str(int64_t v) {
+    if (mojo_is_registered_list(v)) return _container_key_str(v);
+    /* A dict slot is a Python TypeError as a key and unreachable in practice;
+       what matters is that it must not reach `strlen` below, since
+       `mojo_boxed_is_str` accepts a dict pointer (it excludes registered
+       LISTS and boxes, not dicts). The address placeholder is this runtime's
+       own honest answer for a value it cannot describe. */
+    if (mojo_is_registered_dict(v)) return strdup(mojo_repr_obj(v));
+    /* `mojo_boxed_is_str`, the model's own discriminator, rather than a shape
+       test of our own: its 2GiB-floor/2^47-ceiling window is what keeps a word
+       that is NOT a pointer out of strlen. A float slot stored raw is the case
+       that makes the difference — `1.0` is the bit pattern 0x3FF0000000000000,
+       pointer-shaped to any `v > 65536` test, and dereferencing it segfaulted
+       (measured, first attempt at this fix). */
+    if (mojo_boxed_is_str(v)) return mojo_repr_str((char *)(intptr_t)v);
+    /* A zero slot is `0`, not `None`. The emitted `_mojo_generic_elem_repr`
+       answers "None" for one, because in a genuinely DYNAMIC list a 0 can be a
+       boxed null and printing it as 0 would then be a lie; a key cannot afford
+       the guess, and cannot afford the disagreement either -- this walker's
+       other branch, `mojo_repr_list_kinds`, reads the same slot as an int, so
+       leaving None to that function's 'n' kind (and only there) is what makes
+       a tuple key the same text whether or not the list happens to carry a
+       kinds row. Measured: with a 0-is-None rule here, `(('x', 0), 'y')`
+       keyed as `(('x', None), 'y')` and disagreed with itself between the two
+       branches. */
+    return mojo_repr_int(v);
+}
+
+static char *_container_key_str(int64_t v) {
+    MojoList *l = (MojoList *)(intptr_t)v;
+    const char *kinds = mojo_list_get_kinds(l);
+    if (kinds) return mojo_repr_list_kinds(l, kinds);
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return strdup(_is_tup ? "()" : "[]");
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = _cat_free(_buf, ", ");
+        char *_s = _key_slot_str(mojo_list_get_int(l, _i));
+        _buf = _cat_free(_buf, _s);
+        free(_s);
+    }
+    if (_is_tup && _n == 1) _buf = _cat_free(_buf, ",");
+    return _cat_free(_buf, _is_tup ? ")" : "]");
+}
+
 /* An int64_t being used where a C string is needed (a dict key, an f-string
-   field, ...): return it AS itself when it is really a boxed `char *`, else
-   its decimal string.
+   field, ...): return it AS itself when it is really a boxed `char *`, the
+   container's VALUE when it is really a container, else its decimal string.
 
    The codegen's own test for "is this boxed pointer?" is `_actual_types`,
    which only knows about values it saw TYPE-ERASED at some earlier point.
@@ -8841,6 +8971,7 @@ static char *_int_str_transient(int64_t v) {
    ask it here rather than guessing a direction. */
 char *mojo_cstr_or_int_str(int64_t v) {
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
+    if (mojo_is_registered_list(v)) return _container_key_str(v);
     return _int_str_transient(v);
 }
 
@@ -8857,6 +8988,13 @@ char *mojo_cstr_or_int_str(int64_t v) {
    the unreleased conversion. See doc/MEMORY.html, "Transient keys". */
 void mojo_cstr_or_int_release(int64_t orig, char *s) {
     if ((int64_t)(intptr_t)s == orig) return;     /* a borrowed boxed string */
+    /* A content key is an ordinary heap string from the repr walker, NOT a
+     pool block, and pooling one would hand it out later as an Int key's
+     scratch -- so it is freed outright. `orig` is the discriminator because
+     it is the SAME predicate mojo_cstr_or_int_str chose the branch with: a
+     registered list is the only value that produces this kind of string, so
+     the two cannot disagree about which allocation `s` is. */
+    if (mojo_is_registered_list(orig)) { free(s); return; }
     /* `s` is the decimal `mojo_cstr_or_int_str` made through mojo_str_from_int,
      * i.e. a block from `_int_str_block`: back to the pool it came from. */
     *(char **)s = _int_str_pool;

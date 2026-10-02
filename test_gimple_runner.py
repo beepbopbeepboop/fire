@@ -2606,6 +2606,77 @@ def main():
     print(tot)
 """, "5017\n46\n5\nTrue\nFalse\n5\n7\n6\n6\n3\nTrue\nFalse\n266666\n")
 
+    # ── A CONTAINER used as a dict key keys by its VALUE
+    # (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). A tuple word reached
+    # the dict as a bare address: `(p, os.path.getmtime(p))` built twice hit
+    # twice as often as it missed never, so every lookup grew the dict and the
+    # self-hosted `mojoc --dump-full fire.py` carried ~16 GB of it.
+    #
+    # What is asserted here is the whole key path, not one spelling: store,
+    # read, `in`, `get(k, default)`, a dict LITERAL key of the same tuple (the
+    # two must agree or one dict is two dicts), a NESTED tuple (whose inner
+    # list must be walked by value rather than addressed), and — the half that
+    # a literal-only test would pass by accident — a key whose string element
+    # is built at RUN time from a runtime value, so the two builds of it are
+    # different strings at different addresses. That last case is why the
+    # string slot is read by the model's own boxed-string discriminator rather
+    # than by a pointer-shape test.
+    test_gimple_stdout("gimple_tuple_dict_key_is_content_keyed", """\
+def main():
+    d = {}
+    k1 = ("a", 1)
+    k2 = ("a", 1)
+    k3 = ("a", 2)
+    d[k1] = "one"
+    d[("b",)] = "tuple1"
+    d[(1, 2)] = "ints"
+    print(d[k2], d.get(k3, "none"), d[k3] if k3 in d else "none")
+    print(d[("b",)], d[(1, 2)], d.get((2, 1), "none"), d.get(("a", 1), "none"))
+    d[k1] = "again"
+    print(d[k2], len(d))
+    lit = {(9, 9): "lit"}
+    lit[(9, 9)] = "lit2"
+    print(lit[(9, 9)], len(lit))
+    n = {}
+    n[(("x",), "y")] = 1
+    print(n[(("x",), "y")], n.get((("x",), "z"), "none"))
+    for name in ["alpha", "beta", "alpha"]:
+        e = {}
+        e[(name, len(name))] = 1
+        print(e[(name, len(name))], len(e))
+main()
+""", "one none none\ntuple1 ints none one\nagain 3\nlit2 1\n1 none\n"
+       "1 1\n1 1\n1 1\n")
+
+    # The other half of that doc, and the expensive one: a MISSING tuple key
+    # grew the dict by one entry per lookup, which is where ~16 GB of the live
+    # set on `mojoc --dump-full fire.py` went (a cache keyed by
+    # `(module, name)` re-inserting what it had just looked up, every call).
+    # stdout alone cannot see it, so this is the bounded-memory shape: the
+    # answer is identical with or without the leak, and only the peak is not.
+    #
+    # The four keys are built ONCE, before the loop, and only INDEXED inside it.
+    # That is deliberate: a tuple LITERAL in the loop allocates a list per
+    # iteration and nothing ever frees one, which measures a different (also
+    # real, also pre-existing) leak — ~180 B per literal, so 1.2 M of them is
+    # ~220 MB on its own — and would swamp the ~78 B per LOOKUP this is here to
+    # pin. What has to stay flat across the loop is the key rendering and the
+    # dict itself, and those are the only things that move when this test fails.
+    test_gimple_bounded_memory("gimple_tuple_dict_key_lookup_does_not_grow", """\
+def main():
+    keys = [("stable", 0), ("stable", 1), ("stable", 2), ("stable", 3)]
+    d = {}
+    for i in range(300000):
+        d[keys[i % 4]] = i
+        d[keys[i % 4]]
+        if keys[i % 4] in d:
+            d[keys[i % 4]] = i
+        d.get(keys[i % 4], 0)
+    print(len(d))
+    print(d[keys[3]])
+main()
+""", "4\n299999\n", 40)
+
     # ── An unannotated integer local is 64-bit (bugs/CODEGEN_unannotated_int_local_is_32_bit.md).
     # `var a = 0` used to be a 32-bit `int`, so the accumulator wrapped at 2^31 while
     # `var b: Int = 0` and CPython both reached 6000000000.
