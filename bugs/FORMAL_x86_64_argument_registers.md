@@ -68,9 +68,12 @@ problem, and that is worth knowing before anyone prices it as the latter.
 
 ## Why this is NOT a spill, and why the census doc's suggestion is not enough
 
-`bugs/FORMAL_x86_64_hostmods_that_do_not_build.md` §Failure 2 suggests either
-annotating an argument as spilled or restructuring the two modules' wide
-functions. Both are real and both are worth saying precisely what they do:
+The census that first measured this (one row per `formal/hostmods` module, per
+backend) suggested either annotating an argument as spilled or restructuring the
+two modules' wide functions. That census is now `test_formal_hostmods_census.py`
+— the table is a test — and both of those modules have since had their wide
+functions narrowed, so `fnmatch.mojo`'s `match_core(7)` is the only row left.
+Both suggestions are real and both are worth saying precisely what they do:
 
 * **Restructuring `re.mojo` and `hashlib.mojo`** fixes the 2 files and costs
   those modules their signatures. `_subwalk(8)` and `put6(8)` are internal, so
