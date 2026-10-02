@@ -230,6 +230,41 @@ def main():
 '''
 
 
+@case('multi_kind_local_is_the_box_not_the_first_kind')
+def _():
+    # One local bound to a LIST on one branch and a SET on another. Python is
+    # happy with this; the compiled representation cannot be either
+    # container, so it must be the box.
+    #
+    # `_infer_local_var_types` already reached that answer — it joins the two
+    # kinds and reports `int64_t` — but three separate "trust ground truth"
+    # rules in `_gen_stmt_AssignStmt` each read that `int64_t` as a STALE
+    # SCALAR hint the first assignment site refines, and pinned the slot to
+    # `MojoList *`. Every later branch's store was then a container-kind
+    # coercion `_sce_simple_emit` refuses, so the file did not build at all.
+    #
+    # Real: `Tools/build/umarshal.py`'s `Reader.r_object`, whose `retval` is a
+    # list, a dict, a set, a frozenset and a `Code` on five different
+    # branches. That file builds again.
+    #
+    # Printing both branches is what makes it a test rather than a build check:
+    # a box that "works" by being read as a list is exactly the failure, and
+    # the branch ORDER matters because the first assignment site is the one
+    # the pinning rules act on.
+    return '''def pick(kind):
+    if kind == 1:
+        box = [1, 2]
+    else:
+        box = {7, 8}
+    return box
+
+
+def main():
+    print(sorted(pick(1)))
+    print(sorted(pick(2)))
+'''
+
+
 @case('next_iter_over_a_dict_items_expression')
 def _():
     # `next(iter(<expression>))`, where the expression is not a bare name.

@@ -1443,6 +1443,12 @@ class GimpleGen:
         # when a second kind really shows up (a function with one container
         # return stays an ordinary `MojoList *`).
         self._multi_kind_return_kinds: dict[str, list] = {}
+        # Function name -> the set of its locals bound to containers/structs
+        # of MORE THAN ONE kind (see `resolve_shared._infer_local_var_types`'s
+        # own comment). Such a local's declared C type must be the box, not
+        # whichever kind its first assignment site carries. Module scope, like
+        # `_inferred_var_types`' per-function half it is read beside.
+        self._multi_kind_locals: dict[str, set] = {}
         # Call-result VALUE names holding a container whose kind the CALLER
         # cannot know statically (the result of a call to a
         # `_multi_kind_return_funcs` member). Per-function like the other

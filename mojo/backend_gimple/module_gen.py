@@ -39,6 +39,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as gimple_gen_coro
+import mojo.middle.infra_infer as ginf
 from mojo.middle.exprtypes import _walk_ast
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
@@ -4915,6 +4916,10 @@ def gen_module_impl(self, stmts):
             for m in s.methods:
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
+                # Same key, for the sibling table the ASSIGNMENT SITE reads
+                # mid-body under `current_func_name` — see
+                # `ginf.alias_multi_kind_locals`.
+                ginf.alias_multi_kind_locals(self, key, m)
 
     def _arg_scalar_type(caller_name, a, deep_str=False,
                          prefer_refined_param=False, caller_struct=None):
@@ -6622,6 +6627,10 @@ def gen_module_impl(self, stmts):
             for m in s.methods:
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
+                # Same key, for the sibling table the ASSIGNMENT SITE reads
+                # mid-body under `current_func_name` — see
+                # `ginf.alias_multi_kind_locals`.
+                ginf.alias_multi_kind_locals(self, key, m)
 
     self._param_generator_api: dict[str, dict[str, str]] = {}
     self._fn_returns_generator: dict[str, str] = {}

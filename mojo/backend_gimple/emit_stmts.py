@@ -978,11 +978,31 @@ def _gen_stmt_AssignStmt(gen, node):
             # double value is a double — don't silently truncate it.
             if ctype in ('int', 'int64_t') and vtype == 'double':
                 ctype = 'double'
+            # Every "trust ground truth" rule below reads the pre-pass's
+            # `int`/`int64_t` hint as a STALE SCALAR that the freshly-lowered
+            # value refines, and pins the slot to this value's kind. That
+            # reading is wrong for a name the pre-pass found bound to
+            # containers/structs of MORE THAN ONE kind: there its `int64_t`
+            # is not a stale scalar but the honest join of conflicting
+            # containers, this assignment site is only the FIRST of several,
+            # and pinning to its kind makes every later branch's store a
+            # container-kind coercion `_sce_simple_emit` refuses.
+            # `gen._multi_kind_locals` (filled by `_infer_local_var_types`) is
+            # the one place that distinguishes the two meanings of that
+            # `int64_t`. Real: `Tools/build/umarshal.py`'s `r_object`, whose
+            # `retval` is a list, a dict, a set, a frozenset and a `Code` on
+            # five different branches.
+            #
+            # One gate for all of them rather than a check per rule: they are
+            # three steps of one decision, and an earlier attempt guarded only
+            # the container one and was immediately undone by the
+            # generalized-pointer one right below it.
+            _pin_to_ground_truth = tname not in ginf.multi_kind_locals(gen)
             # 'int' (bare) is the hallucination marker — no real answer. If the
             # value is actually a container pointer (e.g. a dict read whose value
             # type is a dict/list/set), trust ground truth so a later
             # .get()/subscript dispatches on the right container.
-            if ctype == 'int' and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+            if _pin_to_ground_truth and ctype == 'int' and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                 ctype = vtype
             # Same rule, one step further: the pre-pass hint is a POINTER
             # that disagrees with a container value. `int` is the
@@ -998,7 +1018,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # to `_mojo_at_char` dereferenced as a `char` — the
             # int+list concat on the next line became `char * + MojoList *`
             # and gimple died with "internal compiler error: in build2".
-            if vtype in ('MojoDict *', 'MojoList *', 'MojoSet *') and ctype != vtype:
+            if _pin_to_ground_truth and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *') and ctype != vtype:
                 ctype = vtype
             # Same "trust ground truth" principle, generalized to ANY pointer
             # type (not just Mojo containers) — this pre-pass hint
@@ -1012,7 +1032,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # int64_t against that pointer value would truncate/reinterpret
             # it as an integer at the coercion below. See
             # bugs/CODEGEN_untyped_param_string_passthrough_wrong.md.
-            if ctype in ('int', 'int64_t') and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
+            if _pin_to_ground_truth and ctype in ('int', 'int64_t') and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
                 ctype = vtype
             # `s: Set[Int] = {}` — an ANNOTATED assignment declares a
             # container kind, and an empty `{}` is a dict DISPLAY: evidence

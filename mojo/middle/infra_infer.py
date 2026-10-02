@@ -1829,6 +1829,62 @@ def _infer_return_type(gen, body: list) -> str:
     through this one entry point, so the fix cannot be half-applied."""
     return _infer_return_type_with_locals(gen, body)
 
+
+def multi_kind_locals(gen) -> set:
+    """The locals of the function `gen` is CURRENTLY emitting that
+    `resolve_shared._infer_local_var_types` found bound to containers/structs
+    of more than one kind — the names whose declared C type must be the box
+    rather than any one of those kinds.
+
+    One resolver because the two sides spell the same function differently and
+    neither spelling is wrong: the pre-pass records it as the source-level
+    name (`_r_object` for a method, `r_object` for a same-named free
+    function), while the consumer is mid-body and holds
+    `gen.current_func_name`, the mangled C symbol (`Reader__r_object`).
+
+    Every candidate spelling is UNIONed rather than the first hit taken, which
+    matters because a struct method and a free function can share a name — a
+    real collision in `Tools/build/umarshal.py`, where the method is
+    `Reader._r_object` and a plain `r_object` also exists. First-hit-wins
+    would silently drop whichever one it did not pick.
+    """
+    tbl = getattr(gen, '_multi_kind_locals', None) or {}
+    fname = _as_str(getattr(gen, 'current_func_name', '') or '')
+    cands = [fname]
+    if '__' in fname:
+        cands.append(fname.replace('__', '_', 1))
+    if '_' in fname:
+        cands.append(fname.rsplit('_', 1)[0])
+    out: set = set()
+    for c in cands:
+        got = tbl.get(c)
+        if got:
+            out |= set(got)
+    return out
+
+
+def alias_multi_kind_locals(gen, key: str, func) -> None:
+    """Re-file `_infer_local_var_types`' `_multi_kind_locals` entry for `func`
+    under `key` as well.
+
+    `_infer_local_var_types` is handed a bare `FunctionDef`, so for a struct
+    METHOD it only knows the method's own name (`_r_object`) — but the
+    consumer is mid-body and holds `gen.current_func_name`, the mangled C
+    symbol (`Reader__r_object`, i.e. `f"{Struct}_{method}"`). The caller that
+    DOES know both is the one building `_inferred_var_types`, and it already
+    computes exactly this key for the sibling table, so the alias is filed
+    there rather than guessed at from the method name (guessing is what made an
+    earlier attempt of this resolver miss: `Reader__r_object` split on `__`
+    yields `r_object`, not `_r_object`).
+    """
+    tbl = getattr(gen, '_multi_kind_locals', None)
+    if tbl is None:
+        return
+    got = tbl.get(_as_str(getattr(func, 'name', '')))
+    if got:
+        tbl.setdefault(_as_str(key), set()).update(got)
+
+
 def _prepass_list_elem(gen, elements) -> str:
     """Element type of a container literal for the pre-pass. Mirrors
     _infer_list_elem_type but resolves identifier elements through the

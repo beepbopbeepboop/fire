@@ -1206,12 +1206,40 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         gen.var_types = _saved_var_types
         gen._scan_scratch_top = _scratch_mark
 
-    # Join all types for each variable using TypeLattice
+# Join all types for each variable using TypeLattice
     result: dict[str, str] = {}
     for vname in inferred:
         types = inferred[vname]
         if types:
             result[_as_str(vname)] = gimple_ctypes.TypeLattice.join_all(types)
+
+    # Names bound to containers/structs of MORE THAN ONE kind, recorded in
+    # their own table because the join above cannot say WHICH of the two
+    # situations produced its `int64_t`: a name whose only evidence is
+    # unknown, and a name whose evidence is two different containers
+    # (`Tools/build/umarshal.py`'s `r_object`, whose `retval` is a list on
+    # the LIST branch, a dict on DICT, a set on SET, a frozenset on FROZENSET
+    # and a `Code` on CODE).
+    #
+    # Only the second must NOT be pinned to whichever kind its first
+    # assignment site carries: `_gen_stmt_AssignStmt`'s "trust ground truth"
+    # rule reads that `int64_t` as a stale scalar hint and declares the local
+    # as that one kind, after which every other branch's store is refused by
+    # `_sce_simple_emit`'s container-kind guard. The box is the honest
+    # answer here, and this says so explicitly rather than leaving the
+    # consumer to guess from an `int64_t` that means two different things.
+    #
+    # A struct pointer counts as a kind: `Code *` vs `MojoList *` is the same
+    # "no single C type" situation and the guard refuses it identically.
+    _known_structs = set(gen.struct_field_types)
+    conflicting: set = set()
+    for vname in inferred:
+        _kinds = [t for t in inferred[vname]
+                  if t in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                  or gimple_exprtypes._is_known_struct_ptr_ctype(t, _known_structs)]
+        if len(_kinds) > 1:
+            conflicting.add(_as_str(vname))
+    gen._multi_kind_locals[_as_str(getattr(func, 'name', ''))] = conflicting
 
     return result
 
