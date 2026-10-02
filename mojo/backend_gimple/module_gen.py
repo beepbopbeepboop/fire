@@ -505,7 +505,7 @@ def _returns_kinds_valued(gen, node, param_kinds=None) -> bool:
     return False
 
 
-def _infer_return_maybe_kinds(gen, body, params=None) -> tuple:
+def _infer_return_maybe_kinds(gen, body, params=None, callee_kinds=None) -> tuple:
     """Does any `return` in this body hand back a kinds-carrying value?
 
     The cross-function half of the per-slot-kinds mechanism. A
@@ -531,6 +531,9 @@ def _infer_return_maybe_kinds(gen, body, params=None) -> tuple:
     `maybe_kinds` is the BOOLEAN half, which reaches the call site as
     `gen._return_maybe_kinds` and becomes a `mojo_list_get_boxed` read for a
     subscript or iteration with no compile-time index;
+    `callee_kinds` is the set of function names ALREADY known to hand one
+    back, so a value that travels out through TWO returns is found rather than
+    missed — see `_valued` below;
     `slot_kinds` is the PER-INDEX half, the long-form kind name of every slot
     of a returned heterogeneous list literal (`'double'` / `'str'` / `'bytes'`
     / `'int'`, the spelling `gen._struct_slot_kinds` already uses). That one
@@ -539,6 +542,41 @@ def _infer_return_maybe_kinds(gen, body, params=None) -> tuple:
     say "ask the runtime", which for a `char *` slot answers with the raw word.
     `''` when nothing per-index is known."""
     _pk = _param_slot_kinds(params)
+    _ck = callee_kinds if callee_kinds is not None else ()
+
+    def _valued(node) -> bool:
+        """Does this EXPRESSION produce a value whose per-slot kinds were
+        recorded on it?
+
+        `_returns_kinds_valued` answers from the expression's own shape. This
+        adds the one hop it cannot see: a call to a function that ITSELF
+        hands back such a value. `mixed` records the kinds on the literal it
+        returns, and `drop_one`'s `kept = mixed(...)` / `return kept` carries
+        that value out through a SECOND frame — which is the shape
+        test_gimple_runner.py's `gimple_kinds_survive_a_sibling_list_being_
+        freed` is, and with the hop missing `drop_one` was not marked, so
+        `b = drop_one()` was not registered in `_maybe_kinds_vals` and
+        `print(b[i])` reached for `mojo_list_get_str` on a list whose slot 0
+        holds `9.5`'s IEEE-754 bits: SIGSEGV after the first line. The whole
+        list's repr was right (the kinds ARE on the value), so the row looked
+        like a repr bug and was not one.
+
+        The callee's OWN name is what is matched, and both spellings the
+        method-mangling scheme produces are spelled here: a bare free
+        function and the `Struct_method` form `_mk` registers methods under.
+        """
+        if _returns_kinds_valued(gen, node, _pk):
+            return True
+        if not isinstance(node, gimple_ctypes.CallExpr):
+            return False
+        _f = node.func
+        if isinstance(_f, gimple_ctypes.IdentExpr):
+            return _as_str(_f.name) in _ck
+        if (isinstance(_f, gimple_ctypes.MemberExpr)
+                and isinstance(_f.obj, gimple_ctypes.IdentExpr)):
+            return f'{_as_str(_f.obj.name)}_{_as_str(_f.member)}' in _ck
+        return False
+
     bound: set = set()
     kinds_out = ''
     for _round in range(2):
@@ -546,12 +584,12 @@ def _infer_return_maybe_kinds(gen, body, params=None) -> tuple:
         for nd in _walk_ast(body):
             if (isinstance(nd, gimple_ctypes.AssignStmt)
                     and isinstance(nd.target, gimple_ctypes.IdentExpr)):
-                if _returns_kinds_valued(gen, nd.value, _pk) or (
+                if _valued(nd.value) or (
                         isinstance(nd.value, gimple_ctypes.IdentExpr)
                         and nd.value.name in bound):
                     bound.add(nd.target.name)
             elif (isinstance(nd, gimple_ctypes.VarDecl) and nd.name
-                    and _returns_kinds_valued(gen, getattr(nd, 'value', None), _pk)):
+                    and _valued(getattr(nd, 'value', None))):
                 bound.add(nd.name)
             elif isinstance(nd, gimple_ctypes.ReturnStmt):
                 v = getattr(nd, 'value', None)
@@ -559,6 +597,8 @@ def _infer_return_maybe_kinds(gen, body, params=None) -> tuple:
                     found = True
                     kinds_out = (_list_literal_slot_kinds(gen, v, _pk)
                                  or kinds_out)
+                elif _valued(v):
+                    found = True
                 elif (isinstance(v, gimple_ctypes.IdentExpr)
                       and v.name in bound):
                     found = True
@@ -4732,36 +4772,63 @@ def gen_module_impl(self, stmts):
     # over every function (twice: free functions and methods) up to 8 times
     # per nesting level. Memoised by body identity so a body is walked once
     # per compile even when the enclosing structure revisits it.
-    _mk_cache: dict = {}
-    def _mk(name, body, params=None):
-        # Memoised by body identity, NOT by `(body, params)`: two definitions
-        # never share a body node, and the params are that node's own, so
-        # keying on the body alone is both correct and the wider reuse.
-        _k = id(body)
-        _v = _mk_cache.get(_k)
-        if _v is None:
-            _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body, params)
-        _maybe, _slotkinds = _v
-        if _maybe:
-            self._return_maybe_kinds.add(name)
-        if _slotkinds:
-            # A returned HETEROGENEOUS list literal, per slot. The boolean
-            # table above only reaches the call site as "ask the runtime",
-            # which is enough for a computed subscript and not enough for
-            # `a[2]`; this one reaches it as the exact kind of every slot, in
-            # the same long-form spelling `gen._struct_slot_kinds` carries for
-            # a `struct.unpack` result, so the statically indexed reads pick
-            # their accessor from it unchanged.
-            self._return_value_slot_kinds[name] = _slotkinds
-    for s in all_functions:
-        if not _is_foreign_main(s) and isinstance(s, FunctionDef):
-            _mk(s.name, s.body, s.params)
-    for s in all_structs_for_methods:
-        if isinstance(s, StructDef):
-            _sk = _as_structdef_node(s)
-            for _m in _sk.methods:
-                if _m.name != '__init__':
-                    _mk(f"{_sk.name}_{_m.name}", _m.body, _m.params)
+    def _mk_round(callee_kinds):
+        # A FRESH cache per round, and that is load-bearing rather than
+        # wasteful: the answer depends on `callee_kinds`, so a cache shared
+        # across rounds would hand round 2 round 1's answers and the
+        # fixpoint would never move. Within a round the cache is what keeps
+        # it cheap — memoised by body identity, NOT by `(body, params)`,
+        # because two definitions never share a body node and the params
+        # are that node's own.
+        _mk_cache: dict = {}
+
+        def _mk(name, body, params=None):
+            _k = id(body)
+            _v = _mk_cache.get(_k)
+            if _v is None:
+                _v = _mk_cache[_k] = _infer_return_maybe_kinds(
+                    self, body, params, callee_kinds)
+            _maybe, _slotkinds = _v
+            if _maybe:
+                self._return_maybe_kinds.add(name)
+            if _slotkinds:
+                # A returned HETEROGENEOUS list literal, per slot. The
+                # boolean table above only reaches the call site as "ask
+                # the runtime", which is enough for a computed subscript
+                # and not enough for `a[2]`; this one reaches it as the
+                # exact kind of every slot, in the same long-form spelling
+                # `gen._struct_slot_kinds` carries for a `struct.unpack`
+                # result, so the statically indexed reads pick their
+                # accessor from it unchanged.
+                self._return_value_slot_kinds[name] = _slotkinds
+
+        for s in all_functions:
+            if not _is_foreign_main(s) and isinstance(s, FunctionDef):
+                _mk(s.name, s.body, s.params)
+        for s in all_structs_for_methods:
+            if isinstance(s, StructDef):
+                _sk = _as_structdef_node(s)
+                for _m in _sk.methods:
+                    if _m.name != '__init__':
+                        _mk(f"{_sk.name}_{_m.name}", _m.body, _m.params)
+
+    # Fixpoint, because the second half of the question is "does this
+    # function hand back what ANOTHER function hands back", and one
+    # function's answer can depend on another's. Bounded at four rounds:
+    # `self._return_maybe_kinds` only ever GROWS here, so the loop is
+    # monotone and the bound is a depth limit rather than a convergence
+    # guess. Round 1 passes no callee set (it is the round that finds the
+    # producers); rounds 2+ read the set the earlier rounds filled.
+    # Deliberately NOT inside Pass 2c's fixpoint below: `_walk_ast`
+    # materialises a whole body as a node list and that loop already runs
+    # over every function eight times per nesting level — putting a walk
+    # in there cost test_silent_noop_iter 5m00s -> 19m48s when it was tried.
+    _mk_round(None)
+    for _mk_iter in range(3):
+        _mk_before = len(self._return_maybe_kinds)
+        _mk_round(self._return_maybe_kinds)
+        if len(self._return_maybe_kinds) == _mk_before:
+            break
     for _pass2c_iter in range(8):
         _c_changed = False
         for s in all_functions:

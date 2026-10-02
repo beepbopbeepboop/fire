@@ -4218,8 +4218,8 @@ class GimpleGen:
         return glo._gen_for_generator_iter(self, var, gen_val, api, body, destroy_after)
     def _emit_generator_pending_exc_check(self, gen_val: str, base: str, destroy_after: bool, bb_not_pending: str):
         return glo._emit_generator_pending_exc_check(self, gen_val, base, destroy_after, bb_not_pending)
-    def _gen_for_struct_iter(self, var: str, struct_type: str, obj_val: str, body: list, shadow_name: str | None=None):
-        return glo._gen_for_struct_iter(self, var, struct_type, obj_val, body, shadow_name)
+    def _gen_for_struct_iter(self, var: str, struct_type: str, obj_val: str, body: list, shadow_name: str | None=None, node=None):
+        return glo._gen_for_struct_iter(self, var, struct_type, obj_val, body, shadow_name, node)
 
     # ---- nested-AST accessors (keep attribute traffic on GimpleGen itself
     # so the self-host closure types these reads/writes in the monolith-era

@@ -7313,6 +7313,102 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not():
+        """`next(<user-defined iterator struct>)` is a real call, and the
+        `for` loop over the same object is a NAMED refusal.
+
+        `next(obj)` is Python's `type(obj).__next__(obj)`, which Mojo spells
+        `__next__`, and `_lower_call` lowers it to `<Struct>___next__(obj)`
+        whenever the receiver's type is resolvable. That half had no test, so
+        it could rot unnoticed — it is asserted here against CPython, on both
+        pipelines, with a receiver the codegen knows (a local struct
+        instance), which is the boundary the real 21-file failure sits
+        behind: `var iter = peekable(list)` types `iter` as `int64_t` because
+        `peekable` returns a `Self.IteratorOwnedType` across a module
+        boundary, and an un-inferred receiver has to stay a refusal
+        (bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+
+        The loop half is the change here. Python's `__next__` signals
+        exhaustion by RAISING, and the compiled raise is
+        `mojo_exc_type_set (...)` + `mojo_raise ()` — nothing for a loop
+        condition to test — so a struct with `__next__` and no `__has_next__`
+        has no expressible loop condition. That emitted `cond = 0` with a
+        `/* TODO */` marker: the body runs zero times, silently, at exit 0.
+        It now calls the same `mojo_unsupported_iter` every other unsupported
+        iterable gets, so the diagnostic names the type, the reason and the
+        loop's file:line. The BEHAVIOUR is deliberately unchanged — the
+        runtime message already ends "the loop body runs zero times" — because
+        making the loop actually work is the type-inference project the doc
+        parks, and inventing a wrong loop here would be worse than both.
+
+        Asserted on the SHAPE (`mojo_unsupported_iter` present, the type named)
+        rather than on stderr, so the row does not depend on how the runtime
+        chooses to word its message; the value assertion above is what pins
+        that `next` itself is right."""
+        global _PASS, _FAIL
+        name = "next_on_a_user_struct_lowers_and_its_for_loop_says_why_not"
+        src = '''\
+class Counter:
+    def __init__(self, start, stop):
+        self.i = start
+        self.stop = stop
+    def __iter__(self):
+        return self
+    def __next__(self):
+        if self.i >= self.stop:
+            raise StopIteration
+        v = self.i
+        self.i = v + 1
+        return v
+def main():
+    c = Counter(5, 8)
+    print(next(c))
+    print(next(c))
+    print(next(Counter(9, 10)))
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        bad = []
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                bad.append(f"[{mode}] next() stdout {got!r} != CPython {want!r}")
+        loop_src = src + '''def drain():
+    c = Counter(1, 3)
+    for x in c:
+        print(x)
+drain()
+'''
+        try:
+            loop_c = compile_to_gimple(loop_src)
+        except Exception as e:
+            bad.append(f"the `for` shape did not compile: "
+                       f"{type(e).__name__}: {e}")
+            loop_c = ''
+        if loop_c:
+            if 'mojo_unsupported_iter' not in loop_c:
+                bad.append("the `for` over a Python-style iterator emitted no "
+                           "mojo_unsupported_iter — a dropped loop body is "
+                           "silently indistinguishable from an exhausted one")
+            if 'Counter (no __has_next__)' not in loop_c:
+                bad.append("the refusal does not name the type or the reason")
+        if bad:
+            for b in bad:
+                print(f"FAIL  {name}: {b}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_user_defined_dunder_repr_value():
         """The same thing with the VALUE checked, on BOTH pipelines
         (single-TU and link mode — they are separate codegen paths and this
@@ -8271,6 +8367,7 @@ outer([10, 20, 30])
     test_scalar_given_a_char_star_parameter_is_stringified()
     test_ctor_of_a_container_reaches_the_comprehension()
     test_a_returned_heterogeneous_list_keeps_its_slot_kinds()
+    test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

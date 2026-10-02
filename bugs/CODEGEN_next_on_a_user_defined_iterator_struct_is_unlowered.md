@@ -1,10 +1,42 @@
 # `next(<user-defined iterator struct>)` has no lowering, and the callee's
 # type is not inferred either
 
-## Status
+## Status (2026-10-30 — the landed half is now PINNED by a test, and the
+## `for` half stopped being silent. The type-inference gap is unchanged and
+## is still parked.)
 
-OPEN. One half landed (see "What is fixed" below); the other half is a
-type-inference project this is now explicitly parked on.
+Both halves of this doc's own diagnosis are confirmed by measurement, and one
+of them had no test at all:
+
+* `next(<a user-defined iterator struct>)` compiles and RUNS correctly
+  whenever the receiver's type is resolvable. `def c = Counter(5, 8);
+  print(next(c))` prints `5`, `6` on both pipelines against CPython's `5`,
+  `6` — nothing undefined, nothing stubbed. `bugs/CODEGEN_next_on_a_user_
+  defined_iterator_struct_is_unlowered.md` claimed this in "What is fixed" but
+  nothing asserted it, so the one half that works could have rotted into the
+  same silence as the half that does not. It is now
+  `test_gimple.py::test_next_on_a_user_struct_lowers_and_its_for_loop_says_
+  why_not`, whose fixture also pins the `__iter__`-returning-self shape.
+* The `for` loop over the SAME object — a struct with `__next__` and no
+  `__has_next__` — emitted `cond = 0` with a `/* TODO: no __has_next__ */`
+  marker: the body runs zero times, silently, exit 0. It now calls the same
+  `mojo_unsupported_iter` every other unsupported iterable gets, so the
+  diagnostic names the type, the reason and the loop's file:line:
+
+      mojo_unsupported_iter: 'for' loop over unsupported iterable type
+      nextstruct.py:18: Counter (no __has_next__) (codegen has no lowering
+      for this container/iterator shape; the loop body runs zero times)
+
+  The BEHAVIOUR is deliberately unchanged. Python's `__next__` signals
+  exhaustion by RAISING, and the compiled raise is `mojo_exc_type_set (...)` +
+  `mojo_raise ()` — verified in the generated `Counter___next__` — which
+  unwinds past the loop with nothing left for a condition to test. There is no
+  expressible loop condition, so the only honest options are "say so" (taken)
+  and "invent a wrong loop" (rejected, and what this doc's "What is missing"
+  already rules out).
+
+  Note what this does NOT do: it does not make the 21 files build. They fail
+  at the type-inference gap below, which is upstream of both halves.
 
 ## What it looks like
 

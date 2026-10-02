@@ -986,7 +986,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 _dsub_dp = gen._new_val('MojoDict *', f"{it_val}->_data")
                 gen._gen_for_dict(var, _dsub_dp, node.body, shadow_name=shadow_name)
             elif has_next in gen.func_return_types or nxt in gen.func_return_types:
-                gen._gen_for_struct_iter(var, it_type, it_val, node.body, shadow_name=shadow_name)
+                gen._gen_for_struct_iter(var, it_type, it_val, node.body,
+                                         shadow_name=shadow_name, node=node)
             else:
                 gimple_ctypes._debug_note(
                     'for loop dropped (no iterator protocol)',
@@ -2842,8 +2843,14 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
 
 
 def _gen_for_struct_iter(gen, var: str, struct_type: str,
-                          obj_val: str, body: list, shadow_name: str | None = None):
-    """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__."""
+                          obj_val: str, body: list, shadow_name: str | None = None,
+                          node=None):
+    """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__.
+
+    A struct that implements PYTHON's `__next__` and not Mojo's `__has_next__`
+    cannot drive this loop, and the refusal is now the same loud one every
+    other unsupported iterable gets rather than a silently false loop
+    condition — see the `else` below."""
     base = gimple_exprtypes._struct_name_of(struct_type)
 
     # Determine iterator type (may be the same struct or a separate iter type)
@@ -2874,9 +2881,32 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         gen._emit(f"  {hn_t} = {has_next_fn} ({iter_var});")
         gen._emit(f"  {cond_t} = {hn_t} != 0;")
     else:
-        gimple_ctypes._debug_note('iterator loop emitted with false condition (no __has_next__)', iter_base)
+        # Python spells exhaustion by RAISING StopIteration out of `__next__`,
+        # and this loop has no way to see a raise: `raise StopIteration` inside
+        # the method lowers to `mojo_exc_type_set (...)` + `mojo_raise ()`
+        # (measured, `Counter___next__` in the generated C), which unwinds
+        # past the loop with nothing left to test. So a struct with `__next__`
+        # and no `__has_next__` has no expressible loop condition.
+        #
+        # It USED to emit `cond = 0` with a `/* TODO */` marker, which is the
+        # same zero-iteration behaviour the runtime diagnostic is built to
+        # describe — `mojo_unsupported_iter`'s own message ends "the loop body
+        # runs zero times" — except SILENTLY. So the program exits 0 having
+        # done nothing and nothing says which of its loops was dropped:
+        #
+        #     class Counter: __iter__ / __next__ but no __has_next__
+        #     for x in c: print(x)          # prints nothing, exit 0
+        #
+        # Calling the shared refusal is strictly that plus a greppable
+        # diagnostic naming the type and the loop's file:line, which is the
+        # whole reason `_emit_unsupported_iter` exists. It is the same call
+        # `_gen_for_iter`'s dispatch makes for a type with NEITHER method, so
+        # "this iterator protocol has no lowering" stops being a property of
+        # which half of the protocol the type happens to implement.
+        gimple_ctypes._debug_note('iterator loop has no __has_next__ (Python-style __next__ exhaustion is a raise)', iter_base)
+        gen._emit_unsupported_iter(f'{iter_base} (no __has_next__)', node)
         cond_t = gen._new_temp('_Bool')
-        gen._emit(f"  {cond_t} = 0;  /* TODO: no __has_next__ on {iter_base} */")
+        gen._emit(f"  {cond_t} = 0;")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
 
     gen._loop_depth += 1
