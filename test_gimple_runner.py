@@ -1422,6 +1422,73 @@ print("early", early())
 nested()
 """)
 
+    # Iterating a value that is not a container RAISES, for every consumer of
+    # the shared chokepoint — and a string, which IS iterable, is answered
+    # rather than refused.
+    #
+    # The chokepoint (`_materialize_as_list`'s ambiguous arm) had two wrong
+    # answers for one decision. It used to WALK whatever it was handed, so
+    # `list(12345678)` died with SIGSEGV; the fail-closed arm that fixed the
+    # crash answered an EMPTY list instead, which is a silent wrong answer —
+    # a program's loop body never runs and nothing says so, exit 0
+    # (bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md). CPython
+    # raises TypeError, so that is what this asserts, one row per consumer
+    # because each is a separate emission site over one chokepoint:
+    # list/all/any/enumerate/str.join/bytes.join.
+    #
+    # A `char *` was excluded from `all`/`any`'s materialization arm only
+    # because the arm could not answer it, and what it used instead was a stub
+    # that never looks at the value: `any("ab")` printed False where CPython
+    # prints True. The string rows below are that fix, on both spellings — a
+    # statically-typed literal and a value boxed through a parameter.
+    test_gimple_runtime_error("gimple_iterating_a_non_container_raises", """\
+def ident(x):
+    return x
+
+print(list(5))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_all_of_a_non_container_raises", """\
+print(all(5))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_any_of_a_non_container_raises", """\
+print(any(12345678))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_enumerate_of_a_non_container_raises", """\
+print(list(enumerate(7)))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_str_join_of_a_non_container_raises", """\
+print(",".join(3))
+""", "TypeError")
+
+    test_gimple_runtime_error("gimple_bytes_join_of_a_non_container_raises", """\
+print(b"".join(9))
+""", "TypeError")
+
+    # A boxed handle that IS a container: `all`/`any` used to answer from a
+    # stub that never looked at the value, so this was True whatever `x` was.
+    test_gimple_stdout("gimple_all_any_of_a_boxed_container_reads_it", """\
+def ident(x):
+    return x
+
+print(all(ident([1, 2])))
+print(any(ident([0, 0])))
+print(all(ident([])))
+""", "True\nFalse\nTrue\n")
+
+    test_gimple_matches_cpython("gimple_a_string_is_iterable_through_the_same_chokepoint", """\
+def ident(x):
+    return x
+
+print(",".join(ident("a,b")))
+print(list(ident("abc")))
+print(any(ident("ab")))
+print(all(ident("")))
+""")
+
     test_gimple_stdout("gimple_list_sort_method_in_place", """\
 def main():
     l = [3, 1, 2]

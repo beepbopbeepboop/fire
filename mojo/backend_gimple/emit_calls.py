@@ -3164,8 +3164,9 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
         # because the representation is not a MojoList.
         bf = 'mojo_bytes_all' if fname_raw == 'all' else 'mojo_bytes_any'
         gen._emit_call('int', t, bf, [('MojoBytes *', av)])
-    elif at == 'MojoList *' or at == 'MojoDict *' or at == 'MojoSet *' \
-            or (at.endswith(' *') and at != 'char *'):
+    elif (at == 'MojoList *' or at == 'MojoDict *' or at == 'MojoSet *'
+          or at in ('int64_t', 'int', '_Bool', 'char *', 'MojoStr *')
+          or at.endswith(' *')):
         # DESIGN.html R1/R5: dict/set materialization (all(d)/any(s) over a
         # dict's keys / a set's elements, not a reinterpret of the header —
         # see bugs/CODEGEN_all_any_dict_set_miscompile.md) shares
@@ -3173,6 +3174,26 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
         # shlex.join(); a genuinely-unknown boxed handle is now also
         # runtime-guarded (mojo_is_registered_dict/_set) there instead of
         # blindly assuming list.
+        #
+        # An `int64_t`/`int`/`_Bool` ARGUMENT belongs here too, and used to
+        # take the stub arm below: `all(5)` printed `True` and `any(7)`
+        # printed `False`, both with exit 0, where CPython raises
+        # `TypeError: 'int' object is not iterable`. A statically-typed
+        # scalar has no container to find, but it can still BE a boxed
+        # handle (`all(ident(some_list))` — an unannotated parameter), and
+        # the registry probes answer that case correctly where the stub
+        # answered `True` without looking at the value at all. So this arm is
+        # strictly more correct on both counts, and `_materialize_as_list`'s
+        # not-a-container arm is what raises (see
+        # bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md).
+        #
+        # A `char *` was excluded from this arm only because the
+        # materialization could not answer it — a string IS iterable, so the
+        # exclusion kept the raise off one. What it kept instead was the stub,
+        # and the stub never looks at the value: `any("ab")` printed `False`
+        # where CPython prints `True` (`all("")` was right by the stub's own
+        # accident). Now the string becomes its characters and both answers
+        # are read off the real thing.
         lv = gen._materialize_as_list(at, av)
         gen._emit_call('int', t, runtime_fn, [('MojoList *', lv)])
     else:
