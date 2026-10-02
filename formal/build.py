@@ -4213,7 +4213,7 @@ def check_frame_holder_rebinds(functions) -> None:
 def check_value_position_method_reads(functions, structs) -> None:
     """Raise a `<recv>.<name>` read that is a METHOD of the receiver's own struct.
 
-    `model.struct_receiver_reads` already REMOVES these names from the derived
+    `model.struct_method_receiver_reads` already REMOVES these names from the derived
     field set, so the wrong answer is gone before this runs; what is left is the
     diagnosis, and it is a separate check because the frame pass cannot give it:
     the frame pass only sees reads whose base it has already classified as a
@@ -4244,7 +4244,7 @@ def check_value_position_method_reads(functions, structs) -> None:
     and STORES into is an instance attribute and stays a field, so a read of it
     is a field read and is not this check's — `u13b.py` is that case and it still
     builds and computes what CPython computes. Only a name nothing stores into is
-    a method here, which is exactly the set `struct_receiver_reads` demoted, so
+    a method here, which is exactly the set `struct_method_receiver_reads` demoted, so
     the two cannot disagree about which names are which.
 
     **The walk is `iter_nodes` and that is a limitation, not a choice.** A
@@ -4257,14 +4257,25 @@ def check_value_position_method_reads(functions, structs) -> None:
     absence of that.
     """
     owners = M.method_owner_names(list(structs or ()))
+    # Keyed by `id(owner)` and NOT by the struct: `StructDef` is a plain
+    # dataclass, so it is unhashable, and this dict lives no longer than the
+    # loop below — which only reads — so there is nothing for a stale entry to
+    # outlive.
+    demoted_by_owner = {}
     for fn in functions:
         owner = owners.get(fn.name)
         if owner is None:
             continue
         receivers = M.struct_receivers(owner)
-        methods = {m.name for m in M.struct_methods(owner)
-                   if getattr(m, "name", None)}
-        demoted = methods - M.struct_receiver_stores(owner, receivers)
+        # `struct_demoted_method_names` and NOT `methods - struct_receiver_stores`
+        # spelled here: the census is a property of the STRUCT, so asking it of
+        # one function re-walked every method's body once per method — the same
+        # defect `struct_method_receiver_reads` was fixed for on the model's
+        # side, and the one place here that had its own copy of the rule.
+        demoted = demoted_by_owner.get(id(owner))
+        if demoted is None:
+            demoted = M.struct_demoted_method_names(owner, receivers)
+            demoted_by_owner[id(owner)] = demoted
         if not demoted:
             continue
         for node in M.iter_nodes(getattr(fn, "body", None)):
@@ -6692,8 +6703,26 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
     if not structs_by_name:
         return sites
     bound = _names_bound_in(fn)
+    # The names this body SPELLS, which is what decides the loop below, and the
+    # reason the loop is not over `structs_by_name` unconditionally: a site is
+    # keyed `"<base>.<name>"` and the only thing that ever looks one up is a
+    # `MemberExpr` over an `IdentExpr` in THIS body — `_constant_read_spelling`
+    # builds the key from exactly that node and `_apply_constant_sites` matches
+    # exactly that shape. So a struct whose name this body never spells has no
+    # site anybody can reach, and asking it for its class constants walks every
+    # method of every struct in the module once per function.
+    #
+    # Measured on `gimple_codegen.py` (arm64, the worst case in the tree):
+    # 400,000 struct-constant questions for ~100 structs and ~2,000 functions,
+    # and 87% of the build's time. The filter is a superset — `iter_nodes`
+    # descends into every dataclass field, so anything `_apply_constant_sites`
+    # can reach is in `spelled` — which is the direction that cannot lose a
+    # site: a name it lists is still asked, a name it does not is one no node
+    # in this body could have matched.
+    spelled = {node.name for node in M.iter_nodes(getattr(fn, "body", None) or [])
+               if isinstance(node, F.IdentExpr)}
     for st in structs_by_name.values():
-        if st.name in bound:
+        if st.name in bound or st.name not in spelled:
             continue
         for name, _default in M.struct_class_constants(st):
             sites[f"{st.name}.{name}"] = (

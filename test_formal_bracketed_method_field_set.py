@@ -32,7 +32,7 @@ the ctor store one in a field.
 This is one half of a pair of defects in this derivation.  The other half — a
 bare `self.helper` in VALUE position — IS ambiguous (an instance attribute
 shadows a class method in Python), so it was settled by Python's own rule rather
-than by the exemption below: `model.struct_receiver_reads` DEMOTES a name the
+than by the exemption below: `model.struct_method_receiver_reads` DEMOTES a name the
 struct declares as a method and never stores into, and
 `a_method_name_the_struct_stores_into_is_still_a_field` is the other half of
 THAT (the store keeps it a field).  What the exemption below handles is the
@@ -366,7 +366,7 @@ FIELDSET_CASES = [
     # nothing ever writes, so the read answered ZERO — a number the source never
     # wrote, from a program that built, ran and exited.
     #
-    # `model.struct_receiver_reads` DEMOTES it, so the derived set is `_value`
+    # `model.struct_method_receiver_reads` DEMOTES it, so the derived set is `_value`
     # alone and the read is refused by name instead
     # (`refuse_a_value_position_method_reference_is_still_refused`, below).
     # Before that demotion this row EXPECTED `["_value", "helper"]`, and it was
@@ -445,7 +445,7 @@ REFUSALS = [
     # The bracketed call is now recognised as a CALL, which leaves the
     # value-position reference as the shape that has no representation — and it
     # must still be REFUSED rather than lowered to a load of a slot nothing ever
-    # writes.  Both halves of that defect's fix are in: `model.struct_receiver_reads`
+    # writes.  Both halves of that defect's fix are in: `model.struct_method_receiver_reads`
     # DEMOTES the name out of the derived field set (see
     # `a_value_position_method_reference_is_not_a_field`), so there is no slot
     # left to load, and `build.check_value_position_method_reads` names the

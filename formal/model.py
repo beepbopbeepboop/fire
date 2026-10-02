@@ -11720,13 +11720,31 @@ def struct_receiver_stores(struct_def, receivers) -> set:
     return out
 
 
-def struct_receiver_reads(struct_def, receivers, method) -> set:
-    """The field names `method` reaches through a receiver, DEMOTED.
+def struct_demoted_method_names(struct_def, receivers) -> set:
+    """The names this struct declares as a METHOD and no method of it stores into.
 
-    `_receiver_names`, less every name that is a METHOD of this struct and that
-    no method of it stores into. Those are not fields at all: `self.helper` in a
-    value position is the bound method, which is not a word, so counting it
-    invents a slot that nothing ever writes and every read of it returns zero.
+    The demotion set of Python's own shadowing rule, in one place, because two
+    questions ask it (`struct_method_receiver_reads` below, which subtracts it
+    from what a body reaches, and `formal/build.py`'s
+    `check_value_position_method_reads`, which refuses a read of one) and each
+    of them used to derive it from `struct_receiver_stores` on its own — a
+    census over EVERY method's body, so a question asked per method asked it
+    once per method squared.
+    """
+    methods = {m.name for m in struct_methods(struct_def)
+               if getattr(m, "name", None)}
+    return methods - struct_receiver_stores(struct_def, receivers)
+
+
+def struct_method_receiver_reads(struct_def, receivers) -> list:
+    """`[(method, reached, fields)]` per method of this struct.
+
+    `reached` is `_receiver_names` — every name the method spells as
+    `<receiver>.<name>` — and `fields` is that less the demotion: every name
+    that is a METHOD of this struct and that no method of it stores into. A
+    demoted name is not a field at all: `self.helper` in a value position is
+    the bound method, which is not a word, so counting it invents a slot that
+    nothing ever writes and every read of it returns zero.
 
     **The rule is Python's own, and both halves of it matter.** An instance
     attribute SHADOWS the class's method, so a name this struct both declares
@@ -11734,15 +11752,37 @@ def struct_receiver_reads(struct_def, receivers, method) -> set:
     `struct_receiver_stores` above establishes. A name it only READS is the
     method.
 
-    …and a name that is neither is untouched, which is why this is a subtraction
-    of a set this struct's own declarations produce rather than a filter on
-    everything: `self.x = 1` in a class with no method `x` is a field, and the
-    overwhelming majority of fields are exactly that.
-    """
-    reached = _receiver_names(getattr(method, "body", None), receivers)
-    methods = {m.name for m in struct_methods(struct_def)
-               if getattr(m, "name", None)}
-    return reached - (methods - struct_receiver_stores(struct_def, receivers))
+    …and a name that is neither is untouched, which is why the demotion is a
+    subtraction of a set this struct's own declarations produce rather than a
+    filter on everything: `self.x = 1` in a class with no method `x` is a
+    field, and the overwhelming majority of fields are exactly that.
+
+    **ONE census and ONE walk per method for the whole struct, which is why this
+    is a list and not a question about one method.** Both halves of the answer
+    are properties of the struct, and asking either per method re-walked every
+    method's body once per method: `analyze_benchmarks_types.py`'s
+    `build --formal` made 15,618 whole-struct walks for 18 distinct structs,
+    322M node visits, and 91% of the build's time — which is why 361 of the 644
+    files in the 2026-10-02 sweep had no verdict at all (every one a timeout at
+    `-t 30`, not one a memory kill). Measured after: that file's build went
+    65.9s to 4.8s of CPU and `std/builtin/int.mojo`'s 30.1s to 3.9s, same
+    verdict from both. Both in-tree callers take the whole list.
+
+    **Both sets are returned, not just the demoted one**, because
+    `_split_declaration` needs the union of the UNDEMOTED reads for its
+    class-level clause (a name the class body DECLARED is storage the language
+    spells out, so a method that reads it makes it a field even when the name
+    is also a method) and the per-method demoted sets for the undeclared ones.
+    Returning one walk's two answers is what keeps that from being two walks
+    over every method body, which is what it was: the same
+    `_receiver_names` result was derived once for the union and again per
+    method."""
+    demoted = struct_demoted_method_names(struct_def, receivers)
+    out = []
+    for method in struct_methods(struct_def):
+        reached = _receiver_names(getattr(method, "body", None), receivers)
+        out.append((method, reached, reached - demoted))
+    return out
 
 
 def _self_field_names(node, out: set, receivers=("self",)) -> None:
@@ -11786,7 +11826,7 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
     (`bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`).
     The SIBLING shape — a bare `self.helper` in VALUE position, which is not a
     call at all — is not this guard's business and is not settled here either;
-    `struct_receiver_reads` is what decides it, by demoting a name the struct
+    `struct_method_receiver_reads` is what decides it, by demoting a name the struct
     declares as a method and never stores into.
 
     The subscript's own base is unwrapped for the guard and the brackets are
@@ -11822,7 +11862,7 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
     and says so in its own docstring. It is the last of three such spellings
     this function has had to be taught; the bracketed method call in this
     docstring is the second. The third — the value-position method reference,
-    which this walker deliberately KEEPS counting and `struct_receiver_reads`
+    which this walker deliberately KEEPS counting and `struct_method_receiver_reads`
     demotes — is the other half of the pair, and both are pinned together by
     `test_formal_bracketed_method_field_set.py`'s field-set group, which is where
     a change to either has to show up."""
@@ -11853,9 +11893,7 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
             and node.obj.name in receivers:
         out.add(node.member)
         return
-    for fname in getattr(node, "__dataclass_fields__", {}):
-        if fname in ("line", "col"):
-            continue
+    for fname in _node_subtree_fields(node) or ():
         _self_field_names(getattr(node, fname, None), out, receivers)
 
 
@@ -12307,20 +12345,26 @@ def _split_declaration(struct_def):
         return None
     written, dynamic = evidence
     receivers = struct_receivers(struct_def)
-    # clause 2, over the whole struct: every name any of its own methods
-    # reaches through the receiver, whatever the unit-wide write census says.
+    # The two per-method questions, asked ONCE: clause 2 wants every name any
+    # method reaches through the receiver (the UNDEMOTED union), and the
+    # per-method loop at the bottom of this function wants the same walks
+    # DEMOTED. Both are the same `_receiver_names` result, so `reached` is the
+    # union of what `struct_method_receiver_reads` just derived rather than a
+    # second walk of every method body — which is what it was, and a whole extra
+    # pass over the struct on every `_split_declaration` call.
     #
-    # `_self_field_names` and NOT `struct_receiver_reads`, and the two ask
-    # DIFFERENT questions on purpose. This one is "does a method spell this name
-    # as `self.NAME`", asked about a name the CLASS BODY also declared, so what
-    # it decides is field-versus-class-constant — and a declared name is storage
-    # the language spells out, so a method that reads it is evidence and the
-    # answer is a field either way. The per-method loop below is where a name
-    # enters the field set with no declaration behind it, and that is the loop
-    # that has to ask whether the name is a method instead.
+    # The two ask DIFFERENT questions on purpose, which is why both sets come
+    # back. Clause 2 is "does a method spell this name as `self.NAME`", asked
+    # about a name the CLASS BODY also declared, so what it decides is
+    # field-versus-class-constant — and a declared name is storage the language
+    # spells out, so a method that reads it is evidence and the answer is a
+    # field either way, demoted or not. The per-method loop below is where a
+    # name enters the field set with no declaration behind it, and that is the
+    # loop that has to ask whether the name is a method instead.
+    per_method = struct_method_receiver_reads(struct_def, receivers)
     reached = set()
-    for method in struct_methods(struct_def):
-        _self_field_names(getattr(method, "body", None), reached, receivers)
+    for _method, names, _fields in per_method:
+        reached |= names
     fields, constants, seen = [], [], set()
     for field in struct_fields(struct_def):
         slots = _slots_names(field.value) \
@@ -12408,8 +12452,8 @@ def _split_declaration(struct_def):
     # read of the class's value, and the substitution materializes it (or
     # refuses by name) rather than leaving it to a slot nothing writes.
     #
-    # `struct_receiver_reads` and not `_receiver_names`, and the difference is
-    # the whole of the method-name defect: a name this struct declares as a
+    # `struct_method_receiver_reads` and not `_receiver_names`, and the difference
+    # is the whole of the method-name defect: a name this struct declares as a
     # METHOD and never stores into is a BOUND METHOD here, not a field, and
     # counting it invented a slot that nothing writes — so every read of it
     # returned zero, which is a number the source never wrote.
@@ -12421,8 +12465,7 @@ def _split_declaration(struct_def):
     # other — a demotion that ignored the store would delete real storage and
     # build, which is the failure a layout bug is worst at, because nothing
     # refuses it.
-    for method in struct_methods(struct_def):
-        touched = struct_receiver_reads(struct_def, receivers, method)
+    for _method, _reached, touched in per_method:
         for name in sorted(touched):
             if name in seen:
                 continue
@@ -12672,14 +12715,14 @@ own function rather than inlined so the two derivations cannot drift apart
         else:
             add(struct_field_name(field))
     receivers = struct_receivers(struct_def)
-    for method in struct_methods(struct_def):
-        # `struct_receiver_reads` and not the bare walker, for the same reason
-        # `_split_declaration`'s per-method loop uses it: a name this struct
-        # declares as a METHOD and never stores into is a bound method, and
-        # counting it as a field put a slot in the frame that nothing writes.
-        # The DECLARED names above are untouched — a class-level `var x: Int` is
-        # storage the language spells out, whatever else the struct calls `x`.
-        touched = struct_receiver_reads(struct_def, receivers, method)
+    # `struct_method_receiver_reads` and not the bare walker, for the same reason
+    # `_split_declaration`'s per-method loop uses it: a name this struct declares
+    # as a METHOD and never stores into is a bound method, and counting it as a
+    # field put a slot in the frame that nothing writes.
+    # The DECLARED names above are untouched — a class-level `var x: Int` is
+    # storage the language spells out, whatever else the struct calls `x`.
+    for _method, _reached, touched in struct_method_receiver_reads(
+            struct_def, receivers):
         for name in sorted(touched):
             add(name)
     return names
@@ -16690,6 +16733,58 @@ def struct_frame_fits_encoder(struct_def) -> bool:
     return struct_field_count(struct_def) <= MAX_FRAME_SLOT + 1
 
 
+# Per node CLASS, not per node: both caches below are keyed by `type(node)`
+# and are sound without invalidation because a dataclass's field set is
+# fixed at class-creation time (see each function's docstring).
+_NODE_FIELDS: dict = {}
+_NODE_SUBTREE_FIELDS: dict = {}
+
+
+def _node_field_names(node) -> tuple:
+    """`(all field names)` of a node's dataclass, or None if it is not one.
+
+    Per CLASS, once, and the cache is sound with no invalidation logic because a
+    dataclass's field set is fixed when the class is created: `__dataclass_fields__`
+    is a class attribute, so every instance of a node type has the same one, and
+    a type that is not a dataclass at all has none (that is the `None`, and it is
+    why `None` and `()` are different answers — a dataclass with no fields must
+    still be YIELDED by `iter_nodes`, which is what walks on it).
+
+    The two walkers that use this, `iter_nodes` and `_self_field_names`, are the
+    hottest loops in a `build --formal` over a large file: they re-derived this
+    list for every node visit and, in `_self_field_names`'s case, re-tested every
+    field name against `("line", "col")` to drop the two that carry no subtree.
+    Measured on `gimple_codegen.py` (arm64): the descent was 87% of the build's
+    samples before this and 71% after, with the traversal order and the node
+    sequence byte-for-byte the same (the filter is by NAME, which is what makes
+    the `line`/`col` exclusion a property of the class rather than of the
+    instance)."""
+    cls = type(node)
+    names = _NODE_FIELDS.get(cls, False)
+    if names is False:
+        fields = getattr(cls, "__dataclass_fields__", None)
+        names = None if fields is None else tuple(fields)
+        _NODE_FIELDS[cls] = names
+    return names
+
+
+def _node_subtree_fields(node) -> tuple:
+    """`_node_field_names`, less the two that hold no subtree.
+
+    `("line", "col")` are a source position, so no walker that is looking for
+    statements has anything to descend into; filtering them once per class is
+    what lets `_self_field_names` drop them without a membership test per field
+    per node."""
+    cls = type(node)
+    names = _NODE_SUBTREE_FIELDS.get(cls, False)
+    if names is False:
+        all_names = _node_field_names(node)
+        names = None if all_names is None else tuple(
+            f for f in all_names if f not in ("line", "col"))
+        _NODE_SUBTREE_FIELDS[cls] = names
+    return names
+
+
 def iter_nodes(node):
     """Every dataclass node in a statement tree, parents before children.
 
@@ -16705,7 +16800,7 @@ def iter_nodes(node):
     if not hasattr(node, "__dataclass_fields__"):
         return
     yield node
-    for name in node.__dataclass_fields__:
+    for name in _node_field_names(node):
         yield from iter_nodes(getattr(node, name))
 
 
