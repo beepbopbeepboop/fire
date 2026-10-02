@@ -47,6 +47,7 @@ import mojo.backend_gimple.device_select as _gmi_device_select
 import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
+from mojo.middle.methods_shared import _is_selfhost_source_file
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 # Re-export shared helpers from mojo.middle.module_shared via explicit imports.
@@ -212,100 +213,6 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             # ambiguity this pass exists to settle. Leave it alone.
             continue
         ipt.setdefault(fname, {})[pname] = call_type
-
-
-def _is_selfhost_source_dir(_dir: str) -> bool:
-    """Is `_dir` a directory holding a genuine checkout of this compiler's
-    own source (not necessarily THIS checkout)? Every real call site that
-    used to compare `_cur_abs == _SELFHOST_DIR` (or a `.startswith` prefix
-    of it) broke the moment the compiler's own `gimple_*.py`/fire_compiler.py
-    sources are compiled from a DIFFERENT checkout than the one currently
-    running as the driver — e.g. a downstream project (a GCC frontend)
-    vendoring a byte-identical copy of this compiler's backend at its own
-    path: `_SELFHOST_DIR` is hardcoded to wherever `gimple_codegen.py`
-    itself was loaded from, so an equality/prefix check against it is
-    FALSE for any other, otherwise-identical checkout (confirmed:
-    `/Users/mrs/net/gcc/gcc/fire`'s vendored copy). Same path-independent
-    signal `_run_pipeline`'s own `_selfhost_register_gimplegen` gate
-    already uses successfully (`_sh_sibling`): a `fire_compiler.py` living
-    right next to `_dir` is true only for a genuine compiler-source
-    directory, never for an ordinary user program's directory that
-    happens to contain a same-named file.
-
-    Defined HERE (not in gimple_codegen.py, its original home) and used
-    only within this file: a cross-module `from gimple_codegen import
-    _is_selfhost_source_dir` reference broke self-hosted with an
-    "unavailable in compiled mode (imported from an unresolved external/
-    relative module)" weak-stub fallback that always returned 0/False —
-    traced to `_local_sibling_module_exports`'s `gen._parsed_import(
-    'gimple_codegen')` itself returning a falsy path self-hosted (a
-    genuine, deeper self-hosted-only resolution gap for THIS one module
-    name, unrelated to this function specifically), even though the
-    shim's own compile resolves it fine. Every OTHER name imported from
-    gimple_codegen.py on the same import line is either a struct/class
-    type (never routed through this function-resolution path at all) or
-    a `gen`/`self`-first-param extracted GimpleGen helper already covered
-    by the separate, independently-working `_selfhost_extracted_fn_index`
-    mechanism — this plain, `str`-first-param utility function was the
-    only thing actually relying on the broken path. A local, single-file
-    definition sidesteps the whole cross-module resolution gap rather
-    than working around it."""
-    if not _dir:
-        return False
-    # NOT `_dir == _SELFHOST_DIR or _dir.startswith(_SELFHOST_DIR + os.sep)
-    # or ...`: this function's docstring already argues this equality-
-    # against-`_SELFHOST_DIR` signal is the WEAKER, position-dependent one
-    # (false for any vendored/downstream checkout) versus the sibling-file
-    # check below — and it is now additionally, actively BROKEN when this
-    # function itself runs self-hosted (i.e. compiled INTO `mojoc`, not run
-    # under the `python3 fire.py` shim). `_SELFHOST_DIR` is a module-level
-    # global defined in gimple_codegen.py; every cross-module *read* of a
-    # self-hosted module-level global falls back to its boxed int64_t
-    # "home" representation unless a separate pre-pass
-    # (`_seed_selfhost_module_globals`, gated by THIS function's own
-    # result) has already corrected its type for this call site — a
-    # chicken-and-egg gap this function cannot use to decide whether to run
-    # that very pre-pass. Confirmed via a direct debug print built into a
-    # rebuilt `mojoc`: reading `_SELFHOST_DIR` here evaluated to the bare
-    # integer `0`, not a path string, so `_dir.startswith(_SELFHOST_DIR +
-    # os.sep)` was really `_dir.startswith('0' + os.sep)`... and even after
-    # fixing `os.path.realpath` (BLOW.md's originally-suspected sole cause
-    # — real, but not sufficient) `_SELFHOST_DIR` still read back as the
-    # bare integer `0`, which Python's `+` coerces jointly with `os.sep`
-    # into `_dir.startswith(os.sep)` — trivially TRUE for every absolute
-    # path. Dropping the `_SELFHOST_DIR`-dependent checks entirely sidesteps
-    # this whole cross-module global-boxing gap rather than chasing it
-    # further; the sibling-file check the docstring already prefers needs
-    # no module-level global at all.
-    if os.path.isfile(os.path.join(_dir, 'fire_compiler.py')):
-        return True
-    # A subdirectory (`mojo/middle`, `mojo/backend_gimple`) of a genuine
-    # compiler-source tree: walk up to find the `fire_compiler.py` that
-    # marks the tree's root.
-    #
-    # `if not _cand: _cand = os.sep` (not `_cand = ... or os.sep`): for an
-    # absolute `_rdir` (`os.path.realpath` always returns one),
-    # `_rdir.split(os.sep)[:1]` joined back is `''` (`'/tmp'.split('/')[:1]
-    # == ['']`), and `os.path.isfile(os.path.join('', 'fire_compiler.py'))`
-    # silently degrades into a CWD-relative check instead of the intended
-    # filesystem-root one — invoking `./mojoc` from a CWD that happens to
-    # hold a `fire_compiler.py` (true for every dev checkout) would
-    # spuriously match here for an unrelated `_dir`. This was the
-    # mechanism BLOW.md originally (and incompletely) blamed; see the
-    # module docstring above and BLOW.md §0 for the fuller chain. The
-    # explicit `if not _cand:` (not `or os.sep`) deliberately avoids
-    # self-hosted `or` on strings — see CRASH.md's `and`/`or`
-    # mixed-operand miscompilation class.
-    _rdir = os.path.realpath(_dir)
-    for _p in range(len(_rdir.split(os.sep)), 0, -1):
-        _cand = os.sep.join(_rdir.split(os.sep)[:_p])
-        if not _cand:
-            _cand = os.sep
-        if os.path.isfile(os.path.join(_cand, 'fire_compiler.py')):
-            return True
-    return False
-
-
 
 
 def _free_func_param_ctypes(self, s) -> list:
@@ -1677,12 +1584,12 @@ def gen_module_impl(self, stmts):
     # computed inline here since that flag is set further below).
     if (self.do_imports or self.link_imports):
         _sg_cf = getattr(self, '_current_filename', None)
-        if _sg_cf:
-            _sg_abs = os.path.abspath(os.path.dirname(_sg_cf))
-            if _is_selfhost_source_dir(_sg_abs):
-                _seed_selfhost_module_globals(self)
-                _seed_selfhost_struct_dict_field_types(self)
-                _seed_selfhost_return_elem_types(self)
+        # The FILE, not its directory: see the `_is_selfhost_file` comment
+        # at the other call site below for why the dir variant was over-broad.
+        if _sg_cf and _is_selfhost_source_file(_sg_cf):
+            _seed_selfhost_module_globals(self)
+            _seed_selfhost_struct_dict_field_types(self)
+            _seed_selfhost_return_elem_types(self)
 
     imported_code = []
     imported_stmts = []
@@ -2136,8 +2043,17 @@ def gen_module_impl(self, stmts):
     }
 
     _cur_file = getattr(self, '_current_filename', None)
-    _is_selfhost_file = bool(_cur_file) and _is_selfhost_source_dir(
-        os.path.abspath(os.path.dirname(_cur_file)))
+    # `_is_selfhost_source_file`, not `_is_selfhost_source_dir`. The question
+    # is "is the file being compiled the compiler's own source?", and the file
+    # is right here. The dir variant walked UP looking for a `fire_compiler.py`
+    # ancestor, so it answered True for every descendant of this checkout —
+    # `.tmp/`, `build/`, `tools/`, `formal/`, anything — and a user program that
+    # merely sat inside the checkout was then handed the COMPILER's own
+    # AST-node struct layouts below (`Scope`, `Token`, `Parser`, ...). That
+    # was a 355-line difference in the generated C for a program with no AST
+    # in it at all, changing only because of where the file was written. See
+    # bugs/CODEGEN_selfhost_source_dir_claims_any_file_under_the_checkout.md.
+    _is_selfhost_file = _is_selfhost_source_file(_cur_file)
     if _is_selfhost_file:
         self.struct_field_types['Scope'] = {
             'parent': 'Scope *',
