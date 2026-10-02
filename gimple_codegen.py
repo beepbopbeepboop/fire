@@ -5661,8 +5661,8 @@ def compile_to_gimple_cached(mojo_src: str, do_imports: bool = False, filename: 
     The full tokenize -> parse -> AST-rewrite -> gen_module pipeline is
     content-addressed: the key covers everything it reads — the entry source,
     mode, filename, the compiler + stdlib fingerprints, and the sibling-import
-    closure digest — so every caller (--dump, build_executable, build_mojo_cli,
-    build_module, Makefile dump loops) shares one cache line per unique input
+    closure digest — so every caller (--dump, build_executable, build_module,
+    Makefile dump loops) shares one cache line per unique input
     set, and editing any transitively imported file invalidates it with no
     manual versioning.
 

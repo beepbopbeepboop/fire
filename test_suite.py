@@ -2452,6 +2452,76 @@ def test_selfhost_key_is_complete():
           'a codegen source missing from the self-host key')
 
 
+def test_selfhost_key_hashes_nothing_dead():
+    """The OTHER direction of the key, and the one that was unchecked.
+
+    `test_selfhost_key_is_complete` above asks "does the key cover everything
+    the closure reaches?". This asks "does the key cover anything the closure
+    does NOT reach?", and the asymmetry is deliberate in one direction only:
+    too narrow serves a stale binary, too wide only costs a rebuild — which is
+    true, and is also why a dead entry is invisible forever. `build_mojo_cli.py`
+    was in the key for its whole life with no importer, no Makefile rule and no
+    caller — a second generator of the `build/mojo` CLI script, next to the real
+    one — and `python3 build_mojo_cli.py` still "worked", so nothing failed.
+    Deleted, and this is what keeps the next one loud.
+
+    Two halves, because they fail differently:
+
+      * `missing` — a hashed file that does not exist. The fingerprint
+        tolerates this by folding `\0missing:<name>` into the key, so a deleted
+        input looks like a present one instead of failing, and the key goes on
+        "covering" it.
+      * `unreached` — a hashed file no import walk reaches, which is either dead
+        or an entry point. Entry points are run rather than imported, so they
+        are declared as entries in `cas._SELFHOST_ENTRIES` rather than excused
+        here: an unstated exception is the thing this check exists to end.
+
+    Each half is mutation-tested below, because a check that cannot be shown to
+    fail is the trap `bugs/UNTESTED.md` §4 documents.
+    """
+    import cas
+    report = cas.selfhost_extra_is_justified()
+    check('self-host key: no hashed input is a file that is not there',
+          not report['missing'],
+          f'deleted but still hashed, so the fingerprint is folding a '
+          f'"missing" marker and going on: {report["missing"]}')
+    check('self-host key: no hashed input is a file nothing reaches',
+          not report['unreached'],
+          'in the key with no importer and no declared entry point, so it is a '
+          'live dependency on a file nothing builds against — delete it and its '
+          f'_SELFHOST_EXTRA entry together: {report["unreached"]}')
+
+    # Anti-vacuity, the same two guards the orphan walk has: neither half can
+    # be empty-because-broken. A walk that reached nothing would make
+    # `unreached` everything and this check red anyway, but the reverse
+    # failure — a check that reads an empty list and calls it a pass — is what
+    # these guards are for.
+    check('self-host key: ...and the walk it judges against really walked',
+          len(report['reached']) > 30,
+          f'only reached {len(report["reached"])} files from '
+          f'{len(cas._SELFHOST_ENTRIES)} entries, so "nothing hashes an '
+          f'unreached file" would be a statement about a walk that did not run')
+    check('self-host key: ...and the entries are declared, not inferred',
+          all(os.path.isfile(os.path.join(HERE, e))
+              for e in cas._SELFHOST_ENTRIES)
+          and len(set(cas._SELFHOST_EXTRA) & set(cas._SELFHOST_ENTRIES)) == len(
+              cas._SELFHOST_ENTRIES),
+          f'entries={cas._SELFHOST_ENTRIES}: every declared entry point must '
+          f'exist AND be in _SELFHOST_EXTRA, or the declaration is a way to '
+          f'remove a file from the walk without removing it from the key')
+
+    # And the mutation test, run for real rather than argued: hand the checker
+    # a key with one dead file in it and require it to say so. This is the
+    # property `build_mojo_cli.py` violated, exercised on a file that exists.
+    victim = 'fire_main.py'
+    widened = cas.selfhost_extra_is_justified(
+        entries=[e for e in cas._SELFHOST_ENTRIES if e != victim])
+    check('self-host key: ...and the check detects an unreached file',
+          victim in widened['unreached'],
+          f'dropping {victim} from the declared entries made no difference, so '
+          f'the "unreached" half is vacuous: {widened["unreached"]}')
+
+
 def test_the_compiler_imports_from_every_real_entry_point():
     """Every module the compiler is entered through must import FIRST.
 
@@ -3845,6 +3915,7 @@ def main():
                test_a_status_with_no_counter_stops_the_runner,
                test_artifact_cache,
                test_selfhost_key_is_complete,
+               test_selfhost_key_hashes_nothing_dead,
                test_the_compiler_imports_from_every_real_entry_point,
                test_a_disabled_test_is_registered_but_never_runs,
                test_the_disabled_markers_in_the_registry_are_honest,
