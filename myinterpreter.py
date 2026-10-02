@@ -136,11 +136,14 @@ class Scope:
 class MojoFunction:
     """Represents a function defined in Mojo code."""
     def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
-                 is_generator=False, is_async=False):
+                 is_generator=False, is_async=False, interpreter=None):
         self.name = name
         self.params = params
         self.body = body
         self.closure_scope = closure_scope
+        # The interpreter that DEFINED this function, recorded so `__call__`
+        # does not depend on the caller volunteering it. See `__call__`.
+        self._interp = interpreter
         # Names from `def f[dtype: DType, ...](...)`'s bracketed generic
         # parameter list (see fire_compiler.py's _parse_generic_params_capture)
         # — bound by `__getitem__` when the call site subscripts the
@@ -163,8 +166,34 @@ class MojoFunction:
         # the original FunctionDef node around at call time.
         self.is_async = is_async
 
-    def __call__(self, interpreter, *args, **kwargs):
-        return self._invoke(interpreter, {}, args, kwargs)
+    def __call__(self, *args, **kwargs):
+        # The interpreter used to be a REQUIRED first positional argument, so
+        # every caller had to know about it: `Interpreter.invoke` threads it
+        # in, and a builtin that takes a callback (`sorted(key=...)`) had no
+        # way to and handed the callee's FIRST REAL ARGUMENT over instead.
+        # That is not a per-builtin bug — `sorted([1,2,3], key=lambda a: -a)`
+        # died in `_invoke` with "AttributeError: 'int' object has no
+        # attribute 'scope'", and every other Python callable that invokes a
+        # value it was handed (`map(f, xs)`, `min(key=...)`, a `list.sort`
+        # key, a callback this compiler never sees) has the same hole.
+        #
+        # So the interpreter is resolved HERE, from the function's own record
+        # of the interpreter that defined it, and a leading argument that IS
+        # that interpreter is dropped for compatibility with `invoke` (and
+        # with `MojoInstance`'s `method(interpreter, self)` callers). The
+        # alternative — making every callback-taking builtin wrap its callback
+        # in `_MojoInvokeWrapper` the way `map[f](...)` already does — leaves
+        # the hole open for every callback site nobody enumerated.
+        interp = self._interp
+        if interp is not None:
+            if args and args[0] is interp:
+                args = args[1:]
+        elif args:
+            # No recorded owner (a hand-constructed MojoFunction): fall back
+            # to the old positional convention rather than failing.
+            interp = args[0]
+            args = args[1:]
+        return self._invoke(interp, {}, args, kwargs)
 
     def __getitem__(self, item):
         values = item if isinstance(item, tuple) else (item,)
@@ -997,8 +1026,20 @@ class _MojoBoundComptimeFunction:
         self.func = func
         self.comptime_bindings = comptime_bindings
 
-    def __call__(self, interpreter, *args, **kwargs):
-        return self.func._invoke(interpreter, self.comptime_bindings, args, kwargs)
+    def __call__(self, *args, **kwargs):
+        # `f[DType](x)` curried into a callable is handed to builtins as an
+        # ordinary value (`sorted(xs, key=f[Int])`), so — exactly as in
+        # `MojoFunction.__call__` — the interpreter is resolved from the
+        # underlying function's own record rather than demanded positionally.
+        func = self.func
+        interp = func._interp
+        if interp is not None:
+            if args and args[0] is interp:
+                args = args[1:]
+        elif args:
+            interp = args[0]
+            args = args[1:]
+        return func._invoke(interp, self.comptime_bindings, args, kwargs)
 
 
 class _NoOverloadMatch(TypeError):
@@ -1017,9 +1058,14 @@ class MojoOverloadSet:
     than a silent first-pick, matching this project's own compiled-path
     overload-resolution philosophy (see gimple_codegen's "no-match overload
     returns None" test)."""
-    def __init__(self, name):
+    def __init__(self, name, interpreter=None):
         self.name = name
         self.candidates = []  # list of (MojoFunction, required, optional, kwonly, has_var_kwargs)
+        # Same reason as `MojoFunction._interp`, and for the same reason
+        # `__call__` resolves it the same way: a builtin receiving this set as
+        # a `key=`/callback argument invokes it directly, with no interpreter
+        # to thread through.
+        self._interp = interpreter
 
     def add(self, func, required, optional, kwonly, has_var_kwargs):
         self.candidates.append((func, required, optional, kwonly, has_var_kwargs))
@@ -1041,11 +1087,21 @@ class MojoOverloadSet:
                 return False
         return True
 
-    def __call__(self, interpreter, *args, **kwargs):
+    def __call__(self, *args, **kwargs):
+        # `interpreter` used to be a required first positional argument; see
+        # `MojoFunction.__call__` for why it no longer is and how it is
+        # resolved instead.
+        interp = self._interp
+        if interp is not None:
+            if args and args[0] is interp:
+                args = args[1:]
+        elif args:
+            interp = args[0]
+            args = args[1:]
         for spec in self.candidates:
             if self._matches(spec, args, kwargs):
                 func = spec[0]
-                return func(interpreter, *args, **kwargs)
+                return func._invoke(interp, {}, args, kwargs)
         raise _NoOverloadMatch(
             f"no overload of '{self.name}' matches {len(args)} positional "
             f"arg(s) and keyword(s) {sorted(kwargs.keys())}"
@@ -1116,6 +1172,24 @@ class MojoInstance:
         if method is not None:
             return method(self._mojo_class.interpreter, self, key, value)
         raise KeyError(key)
+
+    def __call__(self, *args, **kwargs):
+        """An instance of a struct that defines `__call__` IS callable — the
+        `functor` idiom, and the reason a callable OBJECT reaches a builtin's
+        callback slot at all (`sorted(xs, key=ByLength())`).
+
+        Without this the object was simply not callable, so
+        `sorted([1,2,3], key=Callable(10))` raised "TypeError:
+        'MojoInstance' object is not callable" — a hole right next to the one
+        `MojoFunction.__call__` had. Resolved through the SAME
+        `self._mojo_class.methods` table and the same
+        `method(interpreter, self, ...)` shape as `__len__`/`__getitem__`/
+        `__setitem__` above, so `__call__` is bound exactly the way every
+        other dunder on this class is."""
+        method = self._mojo_class.methods.get('__call__')
+        if method is None:
+            raise TypeError(f"object of type '{self._mojo_class.name}' is not callable")
+        return method(self._mojo_class.interpreter, self, *args, **kwargs)
 
 
 class BoundMethod:
@@ -2101,8 +2175,37 @@ def _mojo_isfinite(x):
     return x == x and (x - x) == 0
 
 
-def _mojo_max(*args, **kwargs):
-    """Mojo overloads `max` for SIMD to mean elementwise max, not "pick one
+def _mojo_extreme(items, key, want_max):
+    """The largest/smallest element of `items` by `key` (identity by
+    default). ONE implementation for `_mojo_min` and `_mojo_max`: they differ
+    only in which comparison wins, and a user `key=` makes that the whole
+    behaviour, so a shared walker is what keeps the two from drifting apart
+    again.
+
+    `key` is invoked as `key(x)` on the value itself, deliberately NOT through
+    `Interpreter.invoke`: a `MojoFunction`'s `__call__` resolves the
+    interpreter from its own record now (see its docstring), so a bare call is
+    correct for a user-defined callee, and a plain Python callable needs no
+    threading at all."""
+    result = None
+    best_key = None
+    have_result = False
+    for x in items:
+        k = x if key is None else key(x)
+        if not have_result:
+            result = x
+            best_key = k
+            have_result = True
+        elif (k > best_key if want_max else k < best_key):
+            result = x
+            best_key = k
+    return result
+
+
+def _mojo_minmax(want_max, *args, **kwargs):
+    """Shared body of `_mojo_max` / `_mojo_min`.
+
+    Mojo overloads `max` for SIMD to mean elementwise max, not "pick one
     of these two whole values" like Python's own builtin. Deliberately
     avoids ever calling the bare name `max(...)`/`min(...)`: this file is
     self-hosted-compiled together with gimple_codegen.py, which has an
@@ -2110,40 +2213,29 @@ def _mojo_max(*args, **kwargs):
     (`max(survivors, key=_score)`) that fixes the self-host compiler's
     static arity inference for the global `max` symbol at 1 argument —
     calling it here with 2 positional args breaks that compile
-    ("too many arguments to function 'mojo_max'")."""
+    ("too many arguments to function 'mojo_max'").
+
+    `key=` is honoured here rather than delegated to Python's builtin (same
+    reason the two-positional SIMD form cannot be). It was not honoured at
+    all: `min([3, 1, 2], key=lambda a: -a)` returned `1` — the unkeyed
+    minimum — and `max(...)` returned `3`, so both silently answered a
+    different question than the one asked."""
+    scalar_max2 = _scalar_max2 if want_max else _scalar_min2
     if len(args) == 2 and not kwargs:
         a, b = args
         if isinstance(a, _MojoSIMD) or isinstance(b, _MojoSIMD):
-            return _mojo_simd_elementwise(a, b, _scalar_max2)
-        return _scalar_max2(a, b)
+            return _mojo_simd_elementwise(a, b, scalar_max2)
+        return scalar_max2(a, b)
     items = args[0] if len(args) == 1 else args
-    result = None
-    have_result = False
-    for x in items:
-        if not have_result:
-            result = x
-            have_result = True
-        elif x > result:
-            result = x
-    return result
+    return _mojo_extreme(items, kwargs.get('key'), want_max)
+
+
+def _mojo_max(*args, **kwargs):
+    return _mojo_minmax(True, *args, **kwargs)
 
 
 def _mojo_min(*args, **kwargs):
-    if len(args) == 2 and not kwargs:
-        a, b = args
-        if isinstance(a, _MojoSIMD) or isinstance(b, _MojoSIMD):
-            return _mojo_simd_elementwise(a, b, _scalar_min2)
-        return _scalar_min2(a, b)
-    items = args[0] if len(args) == 1 else args
-    result = None
-    have_result = False
-    for x in items:
-        if not have_result:
-            result = x
-            have_result = True
-        elif x < result:
-            result = x
-    return result
+    return _mojo_minmax(False, *args, **kwargs)
 
 
 class _MojoSIMD:
@@ -3354,7 +3446,7 @@ class Interpreter:
             return existing
         if isinstance(existing, MojoFunction):
             prev_spec = self._func_specs.get(id(existing), ([], [], [], False))
-            overload_set = MojoOverloadSet(name)
+            overload_set = MojoOverloadSet(name, interpreter=self)
             overload_set.add(existing, *prev_spec)
             overload_set.add(func, *spec)
             container[name] = overload_set
@@ -3370,7 +3462,7 @@ class Interpreter:
         _pdv = list(_pd.items()) if _pd else None
         func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
                              is_generator=getattr(node, 'is_generator', False),
-                             is_async=getattr(node, 'is_async', False))
+                             is_async=getattr(node, 'is_async', False), interpreter=self)
         spec = self._classify_params(node)
         bound = self._register_function(self.scope.vars, node.name, func, spec)
         # The rebinding a decorator IS: the decorated value replaces the
@@ -3520,7 +3612,7 @@ class Interpreter:
             _pdl = list(_pd.items()) if _pd else None
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
                                         is_generator=getattr(m, 'is_generator', False),
-                                        is_async=getattr(m, 'is_async', False))
+                                        is_async=getattr(m, 'is_async', False), interpreter=self)
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -3621,7 +3713,7 @@ class Interpreter:
                 _pdl = list(_pd.items()) if _pd else None
                 method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
                                         is_generator=getattr(m, 'is_generator', False),
-                                        is_async=getattr(m, 'is_async', False))
+                                        is_async=getattr(m, 'is_async', False), interpreter=self)
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -4529,7 +4621,7 @@ class Interpreter:
         body = [N.ReturnStmt(value=expr.body)]
         defaults = [(p[0], p[1]) for p in expr.params if p[1] is not None]
         return MojoFunction('<lambda>', params, body, self.scope,
-                            param_defaults=defaults or None)
+                            param_defaults=defaults or None, interpreter=self)
 
     def _current_yield_fn(self, expr):
         """The `yield_fn` of the generator/coroutine whose body is
