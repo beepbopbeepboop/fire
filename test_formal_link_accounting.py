@@ -237,24 +237,38 @@ def provided_modules():
 
 
 def written_modules():
-    """The host-set names that have been PROVIDED, and so have left the set.
+    """Every host-set name this tree can now ANSWER for, whatever became of it.
 
     A name belongs here when this tree can answer for the module — either real
     source that `resolve_module_path` finds, or a front-end transform
     (`provided_modules()` above). That is the whole test: the host set exists to
-    say "there is nothing here to compile", and a name something here can
-    answer for is not in that condition however much of CPython it covers.
-    `os` was the first entry — 87 files of the arm64 sweep stopped on it — and
-    the entry is DERIVED rather than typed, so writing the next module updates
-    this by being written, and no list in this file can drift away from what is
-    on disk or in the tree.
+    say "there is nothing here to compile", and a name something here can answer
+    for is not in that condition however much of CPython it covers. `os` was the
+    first entry — 87 files of the arm64 sweep stopped on it — and the entry is
+    DERIVED rather than typed, so writing the next module updates this by being
+    written, and no list in this file can drift away from what is on disk or in
+    the tree.
+
+    TWO KINDS NOW, and that is why this walks two pools.  A provided module either
+    LEFT the host set (tier `''`: `os`, `sys`, `struct`, `re`, …) or stayed in it
+    under `HOST_ADMITTED` (a module this tree answers for, whose host-dependent
+    operations are declared contracts).  Both are "provided"; only the first left,
+    and `ADMITTED_HOST_MODULE_TESTS` below exists because the second kind makes a
+    different claim and is kept honest by a different test.
+
+    `HOST_ADMITTED` is walked as well as `PRE_SPLIT_HOST_MODULES` because
+    `fcntl` was in NEITHER: it is not in the pre-split list, so only the tier
+    finds it — and a derivation that missed it would let the one name this change
+    ADDED to the host set go unaccounted, which is exactly the case the account
+    is for.
     """
     found = set()
-    for name in sorted(PRE_SPLIT_HOST_MODULES):
-        if name in I.HOST_MODULES:
-            continue
+    pool = set(PRE_SPLIT_HOST_MODULES) | set(getattr(I, "HOST_ADMITTED", ()))
+    for name in sorted(pool):
         if I.is_frontend_provided(name):
             found.add(name)
+            continue
+        if name in I.HOST_MODULES and I.host_module_tier(name) != 'admitted':
             continue
         try:
             path = I.resolve_module_path(name, project_root=HERE)
@@ -290,13 +304,51 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "fnmatch": "test_formal_fnmatch.py",
 }
 
+# …and the ADMITTED ones, which left the host set by being written under a
+# DECLARED CONTRACT rather than by being computed.  Separate from the table above
+# because the claim they make is different: a name there says "this tree answers
+# this module, and the answer to its host-dependent operations is a named `sorry`
+# in every proof that uses it" — which is a test about the TRUST, not about the
+# module's own arithmetic, so one file (`test_formal_admitted.py`) keeps all of
+# them honest and it carries the ratchet.
+ADMITTED_HOST_MODULE_TESTS = {
+    "subprocess": "test_formal_admitted.py",
+    "ctypes": "test_formal_admitted.py",
+    "fcntl": "test_formal_admitted.py",
+    "concurrent": "test_formal_admitted.py",
+    "concurrent.futures": "test_formal_admitted.py",
+    "threading": "test_formal_admitted.py",
+}
+
+
+# Names added to the host set rather than leaving it, each with the wrongness it
+# corrects.  Kept as a table rather than folded into the subset check so that
+# adding one is a deliberate edit somebody has to justify here.
+HOST_SET_ADDED_WITH_SOURCE = {
+    # Was in NEITHER tier, so every file importing it was classified
+    # `not-answerable/unresolved-import` -- "not a stdlib or sibling module" --
+    # which is false of a CPython standard-library module. It is unreachable in
+    # the ordinary sense (a kernel-held advisory lock) AND now has a model, so
+    # `HOST_ADMITTED` is where both halves of that are true.
+    "fcntl",
+}
+
 
 def test_host_tiers():
     check(I._host_tier_conflicts() == [],
           'no host module is in both tiers', str(I._host_tier_conflicts()))
-    union = set(I.HOST_UNREACHABLE) | set(I.HOST_MODELLED)
+    # THREE tiers, and the third one is not a bookkeeping convenience.  A name
+    # with a Mojo source used to have exactly two fates: it LEFT the host set
+    # entirely (tier ''), or it was 'modelled'.  2026-10-02 added the third:
+    # `subprocess`, `ctypes`, `fcntl`, `concurrent`, `concurrent.futures` and
+    # `threading` have a source AND cannot be computed here, so they answer under
+    # DECLARED CONTRACTS and sit in `HOST_ADMITTED` — still host modules (the
+    # predicate `HOST_MODULES` backs must cover them), but neither 'modelled'
+    # (nothing left to write) nor 'unreachable' (they build).
+    union = (set(I.HOST_UNREACHABLE) | set(I.HOST_MODELLED)
+             | set(I.HOST_ADMITTED))
     check(union == set(I.HOST_MODULES),
-          'HOST_MODULES is exactly the union of the two tiers',
+          'HOST_MODULES is exactly the union of the three tiers',
           f"sym-diff {sorted(union ^ set(I.HOST_MODULES))}")
     orig = _original_host_modules()
     if orig is not None:
@@ -308,32 +360,72 @@ def test_host_tiers():
         # check is a SUBSET relation plus an exact account of what left, rather
         # than equality — equality would make writing a module a test failure,
         # and a name that comes BACK would pass unnoticed.
-        check(union <= orig,
-              'nothing has been ADDED to the host set: a name enters it when a '
-              'module is unreachable, never because one is hard to write',
+        # A name enters the host set when it is a CPython standard-library
+        # module this backend has no source for, never because one is hard to
+        # write.  The rule is SUBSET-with-a-named-exception rather than subset,
+        # because `fcntl` is a deliberate addition and the reason is worth
+        # stating: `fcntl` was in NEITHER tier before 2026-10-02, so
+        # `tools/formal_sweep.py` was classifying every file importing it as
+        # `not-answerable/unresolved-import` -- "not a stdlib or sibling module",
+        # which is FALSE, since `fcntl` is both a CPython stdlib module and the
+        # thing three files in this tree import.  Adding it with its model is a
+        # correction of a wrong class, not work dodged: nothing about `fcntl`
+        # became easier.
+        check(union - orig <= set(HOST_SET_ADDED_WITH_SOURCE),
+              'nothing has been ADDED to the host set beyond the names that '
+              'were being MISCLASSIFIED, and each of those has real source',
               f'added {sorted(union - orig)}')
-        check(written_modules() <= (orig - union),
+        for name in sorted(HOST_SET_ADDED_WITH_SOURCE):
+            check(os.path.isfile(os.path.join(
+                      HERE, "formal", "hostmods", f"{name}.mojo")),
+                  f'{name} was added to the host set; the claim is that it was '
+                  f'being misclassified as unresolved, and that needs a source')
+        # Everything provided that is not an admitted name left the set, so the
+        # ORIGINAL list must contain it; the admitted ones did not leave, so
+        # requiring that of them would be requiring `fcntl` — which was never in
+        # `orig` — to have been there before.
+        left = written_modules() - set(ADMITTED_HOST_MODULE_TESTS)
+        check(left <= (orig - union),
               'every name that left the host set is one with real source '
               'behind it',
-              f'left without source {sorted((orig - union) - written_modules())}')
-        check(set(orig) - union == written_modules(),
+              f'left without source {sorted((orig - union) - left)}')
+        check(set(orig) - union == left,
               'the account of what left the host set is exact',
-              f'unaccounted {sorted((orig - union) ^ written_modules())}')
-        check(set(IMPLEMENTED_HOST_MODULE_TESTS) == written_modules(),
+              f'unaccounted {sorted((orig - union) ^ left)}')
+        all_written = {**IMPLEMENTED_HOST_MODULE_TESTS,
+                       **ADMITTED_HOST_MODULE_TESTS}
+        check(set(all_written) == written_modules(),
               'every written module names the test that keeps it honest, and '
               'no other name claims one',
-              f'sym-diff '
-              f'{sorted(set(IMPLEMENTED_HOST_MODULE_TESTS) ^ written_modules())}')
-        for name, test_file in sorted(IMPLEMENTED_HOST_MODULE_TESTS.items()):
+              f'sym-diff {sorted(set(all_written) ^ written_modules())}')
+        for name, test_file in sorted(all_written.items()):
             check(os.path.isfile(os.path.join(HERE, test_file)),
                   f'{name} left the host set on the strength of {test_file}, '
                   f'and that test exists')
+        # The admitted half is checked against the TREE and not only against the
+        # table above: a name in `HOST_ADMITTED` with no `formal/hostmods` source
+        # would be a claim the table cannot keep true by itself, and a hostmod
+        # declaring a contract without its module being in the tier would let a
+        # proof rest on a contract the tier does not admit to.
+        check(not I._admitted_tier_conflicts(),
+              'HOST_ADMITTED and formal/hostmods agree, in both directions',
+              '; '.join(I._admitted_tier_conflicts()))
     else:
         check(False, 'the pre-split HOST_MODULES list could be read from git',
               'git show HEAD:formal/imports.py did not yield it')
     # The written modules are not in either tier at all, and the resolver
     # reaches them instead — checked in both directions, so neither a leftover
     # entry with a source behind it nor a removal without one can pass.
+    # …and the ADMITTED half is the mirror image: these ARE still host modules,
+    # because `_is_host_module` has to keep covering them or a file importing one
+    # is refused for "not a stdlib or sibling module" and a reader goes looking
+    # for a broken module path instead of at the contract.  What they are not is
+    # 'unreachable', which would feed `tools/formal_sweep.py`'s reach line a
+    # "permanent fact about the target" for a module that builds.
+    for m in sorted(ADMITTED_HOST_MODULE_TESTS):
+        check(I._is_host_module(m) and I.host_module_tier(m) == 'admitted',
+              f'{m} is an ADMITTED host module: still a host module (the '
+              f'predicate must cover it), but neither unreachable nor modelled')
     for m in sorted(IMPLEMENTED_HOST_MODULE_TESTS):
         check(not I._is_host_module(m) and I.host_module_tier(m) == '',
               f'{m} is no longer a host module: this tree provides it now')
@@ -395,10 +487,20 @@ def test_host_tiers():
     # over `IMPLEMENTED_HOST_MODULE_TESTS` above already says about every
     # written name, and a second copy of it would be the duplicate the pair
     # above exists to prevent.
-    for m in ('subprocess', 'ctypes', 'asyncio', 'threading', 'socket',
-              'tempfile', 'shutil', 'concurrent.futures', 'zlib', 'traceback'):
+    for m in ('asyncio', 'socket', 'tempfile', 'shutil', 'zlib', 'traceback',
+              'getpass', 'webbrowser', 'logging', 'unittest'):
         check(I.host_module_tier(m) == 'unreachable',
               f'{m} is unreachable (needs an object the target does not have)')
+    # The five that were on that roster until 2026-10-02 and are now ADMITTED —
+    # named here rather than dropped, because a silently shortened roster is how
+    # "unreachable" becomes a set nobody reads.  What is still true of each is
+    # that the object is missing; what changed is that the module answers anyway,
+    # under a declared contract.
+    for m in ('subprocess', 'ctypes', 'threading', 'concurrent.futures',
+              'fcntl'):
+        check(I.host_module_tier(m) == 'admitted',
+              f'{m} needs an object this target does not have, and answers '
+              f'under a DECLARED CONTRACT rather than being unreachable')
     for m in ('unittest.mock', 'importlib.util'):
         check(I.host_module_tier(m) != '',
               f'the dotted form {m} still classifies')
