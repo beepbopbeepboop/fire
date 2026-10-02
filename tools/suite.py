@@ -32,9 +32,9 @@ this file is the fix for all three:
 
    A ceiling still is not a bound on the machine. On 2026-09-29 the
    `bootstrap-stage*-dumps` fanouts ran about thirty items at once, each
-   inside its own 24 GB ceiling and each observed between 30 and 43 GB, until
-   the box collapsed — thirty jobs each *allowed* 24 GB is 720 GB of
-   allowance. So the ceiling is also a RESERVATION: every job takes its
+   inside its own 24 GB ceiling, until the box collapsed — thirty jobs each
+   *allowed* 24 GB is 720 GB of allowance, whatever any one of them measured.
+   So the ceiling is also a RESERVATION: every job takes its
    memclass out of one machine-wide budget (`tools/memslot.py`, strict FIFO)
    before it is spawned, and gives it back when it exits. That is what makes
    "18 x 24 GB" mean "four at a time", and it counts the other worktrees and
@@ -111,8 +111,10 @@ line has to say why, in `memwhy`, and `--list` prints it.
 
 A **reservation** is per machine, and it is not optional. A ceiling bounds one
 tree and says nothing about how many may run at once, which is not a bound at
-all: on 2026-09-29 about thirty compiler processes at 30-43 GB each, every one
-of them inside its own ceiling, collapsed the box. So every job takes its
+all: on 2026-09-29 about thirty compiler processes, every one of them inside
+its own ceiling, collapsed the box. (This sentence used to say "30-43 GB each",
+which does not reproduce; see the admission comment below for the measurement
+that replaced the number and kept the shape.) So every job takes its
 memclass out of ONE machine-wide budget (`tools/memslot.py`, strict FIFO,
 `~/.gmojo/memslot`, `MEMSLOT_BUDGET_GB`, default 96) *before* it is spawned,
 and gives it back when it exits — so "18 x 24 GB" means four at a time, and
@@ -620,22 +622,23 @@ def memclass_for(spec) -> str:
 # the three `bootstrap-stage*-dumps` fanouts are 47 items each, and `-j18` of
 # them at the `module` class it used to be was 18 x 24 GB = 432 GB of ALLOWED
 # ceiling on a 128 GB box. That is not hypothetical — on 2026-09-29 those
-# fanouts ran about thirty items at once, each OBSERVED between 30 and 43 GB,
-# until the machine collapsed and a human killed them by hand. Every individual
-# process was inside its own cap the whole time, which is exactly the point: a
-# per-process ceiling cannot be defeated by width unless something bounds the
-# SUM.
+# fanouts ran about thirty items at once until the machine collapsed and a
+# human killed them by hand. Every individual process was inside its own cap
+# the whole time, which is exactly the point: a per-process ceiling cannot be
+# defeated by width unless something bounds the SUM.
 #
-# That 30-43 GB figure is NOT reproducible as a summed-RSS peak and the two
-# things said about it here used to contradict each other: the same per-file
-# `--dump` measures 0.5 GB and the same sources as one closure dump measure
-# 1.1-1.2 GB, through this same wrapper. Either the observation was a footprint
-# reading rather than RSS, or it was the python side on a tree state that
-# carried the self-hosting pre-pass (15-30 GB per call, BLOW.md §0), or it
-# summed shared pages. bugs/MEMCAP_module_class_under_the_stage_dumps_peak.md
-# has the three candidates and the command that settles it; what is not in
-# doubt is the SHAPE of the failure, which is why the reservation below exists
-# regardless of which number was right.
+# The per-item figure this comment used to carry — "each observed between 30
+# and 43 GB" — is GONE, because it does not reproduce and never did, on either
+# side of the fanout. Measured 2026-10-01 through the same instrument, one at
+# a time: the compiled side is 0.5 GB per item (`MEASURED_PEAK_GB`) and the
+# PYTHON side is 0.04 GB for an actual fanout item and 0.09 GB for the worst
+# case on it (dumping gimple_codegen.py / fire_compiler.py / myinterpreter.py
+# through `fire.py --dump`, three of them, 4-5 s each). A tree state carrying
+# the self-hosting pre-pass could have been 15-30 GB per call
+# (BLOW.md §0), but that is not this tree, and a number that only held on a
+# tree nobody can name is not a number to leave in a file people read. What is
+# NOT in doubt is the SHAPE — width defeated a per-process cap — which is why
+# the reservation below exists regardless of what any one item measured.
 #
 # So the ceiling is also a RESERVATION, taken out of one machine-wide budget
 # before the job is spawned (`tools/memslot.py`, the ledger in
@@ -1815,11 +1818,9 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='tiny',
      desc='gcc -fgimple + link: stage1/fire.ci -> stage2/mojo')
 
 # `tiny` (4), down from `module` (24): 0.5 GB measured PER ITEM, the only
-# fanout item peak in the table, so the ratchet assigns 0.75 GB. This is the
-# shape bugs/MEMCAP_module_class_under_the_stage_dumps_peak.md was opened for,
-# and the measurement settles it in the other direction from what that doc
-# feared: 24 was never close to the workload, it was 48x it, and the reason
-# that mattered was never the ceiling — it was the reservation.
+# fanout item peak in the table, so the ratchet assigns 0.75 GB. `module` was
+# never close to this workload — it was ~48x it — and what made the number
+# matter was never the ceiling, it was the reservation the class stands for.
 fanout('bootstrap-stage2-dumps',
        ['./mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage2',

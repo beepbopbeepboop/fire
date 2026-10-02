@@ -7,7 +7,7 @@
 A ceiling that kills a process after it has already eaten the machine (tools/memcap.py) is not
 enough: 30 jobs each *allowed* 24 GB is 720 GB of allowance on a 128 GB box, and every one of
 them can sit under its own ceiling while the machine collapses (2026-09-29: about 30 compiler
-processes at ~30 GB each, killed by hand). So memory is *allocated to a job before it starts*,
+processes, killed by hand). So memory is *allocated to a job before it starts*,
 out of one machine-wide budget, exactly like a counting semaphore of gigabytes:
 
   * a 51 GB job takes 51 of the budget; with the default 96 GB budget a second one waits;
@@ -77,8 +77,9 @@ HELD = 'MEMSLOT_HELD'
 # concurrent compiles, and the ledger's view of the machine while they ran was
 # a single 55 GB holder against an actual allowance of twenty per-file ceilings.
 # A per-process ceiling is not a bound on a sum, which is the whole reason the
-# reservation exists (2026-09-29: ~30 processes at 30-43 GB each, every one
-# inside its own ceiling, until the box collapsed).
+# reservation exists (2026-09-29: ~30 processes, every one inside its own
+# ceiling, until the box collapsed — the width was the finding, whatever any
+# single item measured).
 #
 # So a child that opts in with `Slot(..., pool=True)` takes its gigabytes from
 # a sub-ledger keyed by POOL and capped at POOL_GB — the parent's own class —

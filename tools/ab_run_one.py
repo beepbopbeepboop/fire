@@ -24,17 +24,20 @@ The per-file compile is capped AND reserved. This harness is the bounded
 per-file alternative the Makefile and `wholeprogram-help` point at, and it is
 bounded by TIMEOUT_S and by memory: `make -j20 bside` is twenty concurrent
 native compiles, and the corpus deliberately contains this compiler's own
-sources, where one `--dump` has been measured at 15-30 GB (see
-SELFHOST_TOKENIZE_BLOWUP in tools/suite.py and BLOW.md §0's "NOT closed"
-addendum). The ceiling is the `module` class — the same one the three
+sources, where a single `--dump` on a self-hosted input has been measured at
+15-30 GB (see SELFHOST_TOKENIZE_BLOWUP in tools/suite.py and BLOW.md §0's "NOT
+closed" addendum). The ceiling is the `module` class — the same one the three
 `bootstrap-stage*-dumps` fanouts give the identical per-file `--dump` — read
 from tools/suite.py's MEMCLASS rather than spelled here, so `MEMLIMIT_GB` moves
 it and `MEMLIMIT_GB=0` removes it exactly as it does for every job in the suite.
 
 A ceiling alone was not enough, and this file is where that showed up hardest:
 a cap bounds ONE process, so twenty of them are twenty times the cap, and on
-2026-09-29 the equivalent fanouts ran about thirty at once at 30-43 GB each
-until the machine collapsed. So each file also RESERVES its class out of the
+2026-09-29 the equivalent fanouts ran about thirty at once until the machine
+collapsed. (The per-item figure once attached to that sentence — 30-43 GB —
+does not reproduce: measured 2026-10-01, a python-side fanout item peaks at
+0.04 GB and the compiled side at 0.5 GB. The WIDTH was the finding; the number
+was never one.) So each file also RESERVES its class out of the
 one machine-wide budget (`tools/memslot.py`, `memslot.Slot`) before it starts,
 and gives it back when it ends. `make -j20` still says how many files may be
 ready; the ledger says how many may run, and the answer to the second is 4 on a
@@ -60,8 +63,8 @@ second half of that sentence is for.** Twenty children each told "already
 accounted for" are twenty processes each permitted its own 24 GB per-file
 ceiling, and the ledger's view of the machine while they ran was a single 55 GB
 holder — an allowance of up to 480 GB accounted for by 55, which is the
-2026-09-29 shape (about thirty processes at 30-43 GB each, every one inside
-its own ceiling) and not a bound. So under a suite job this file draws from the
+2026-09-29 shape (about thirty processes, every one inside its own ceiling)
+and not a bound. So under a suite job this file draws from the
 POOL that job's reservation opens (`memslot.Slot(..., pool=True)`): a
 sub-ledger capped at the admitting job's own class, which the machine-wide
 ledger does not double-count because the pool's usage is inside that
