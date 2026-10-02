@@ -3460,6 +3460,43 @@ def frame_blob_refusal(what: str, wanted: int, available: int) -> str:
             f"functions so each gets its own budget.")
 
 
+def list_append_overflow_message(name: str, capacity: int) -> str:
+    """The ONE text an over-capacity `xs.append(v)` writes to fd 2 before it
+    stops the program — for BOTH backends, because two architectures printing
+    two different sentences for one limit is how a reader ends up looking for a
+    construct one of them invented.
+
+    Why a run-time message at all, when `frame_blob_refusal` above is a
+    COMPILE-time refusal: the overflow is not always decidable then. A list's
+    capacity is the number of `append` SITES in the function that builds it
+    (`_scan_list_caps`), and every EXECUTION of a site counts against it — so
+    `while i < 3: xs.append("ab")` is one site run three times, and no pass over
+    the source can say it fits. The bound that IS checkable is checked (an
+    unrepresentable capacity is refused by name in the emitter), and this
+    covers the rest.
+
+    The reason it was silent is the reason this exists. The overflow used to be
+    a bare `exit(1)`: no output, no message, nothing on either stream, and a
+    program whose only symptom is that it stopped. That is the worst of the
+    three possible answers — not a wrong number (which a reader can compare),
+    not a named refusal (which a reader can act on), but silence. Every other
+    bounded container operation on this path makes the same bargain and every
+    other one says which bound it hit.
+
+    No `printf` on this path, so the name and the capacity are spelled into the
+    text by the build rather than formatted at run time; `name` is the local the
+    receiver resolved to, which is the only thing about the site this path knows.
+    """
+    return (f"formal: list.append overflowed {name!r}: its capacity is "
+            f"{capacity}, the number of append SITES in the function that "
+            f"built it, and every EXECUTION of a site counts against it — so a "
+            f"list built in a loop outgrows the room the frame reserved for it. "
+            f"There is no heap on this path, so the blob cannot grow. Build the "
+            f"list with the elements it needs at construction time, or move "
+            f"the appends into a function of their own so the capacity each "
+            f"one sees is its own.")
+
+
 def string_binary_refusal(op: str, left_kind, right_kind,
                           spelled_op: str | None = None,
                           left=None, right=None, fn=None,
