@@ -808,6 +808,114 @@ def test_a_zero_argument_construction_of_a_constructor_that_needs_arguments(
     refuses(result, "none of them takes that count")
 
 
+# ── (6) a frame address handed across the boundary ──────────────────────────
+#
+# The other kind of thing that crosses: not an ARGUMENT but a frame ADDRESS,
+# and whether it can mean what the caller thinks depends on a contract the
+# DEFINING module has to publish (`formal/build.py`'s `_frame_param_contract`,
+# read by `formal/model.py`'s `resolve_frame_parameter_contract`).  The positive
+# and negative cases of the construct live in `test_formal_run.py`'s
+# `CROSS_MODULE_CASES` as built-and-run programs; what is HERE is the thing those
+# cannot see, which is the CONTRACT ITSELF — the published table, and the layer
+# a refusal names when the table says nothing.
+#
+# `bugs/FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function
+# .md` measured the defect these pin: a function holding no frame published NO
+# contract at all rather than a contract of `Nones`, `[]` is
+# `_export_frame_contract`'s "this compilation could not classify it", and
+# `resolve_frame_parameter_contract` read `position 0 >= len([])` as
+# "not-exported" — a refusal naming a missing EXPORT about a function the
+# manifest lists with an arity.
+#
+# The module is one framed struct plus a function that holds nothing, which is
+# the ordinary shape of a module with a data class and some helpers, and the
+# middle case between the two that were already right: a module with no framed
+# struct at all publishes `[None] * n` for everything, and a function the fixpoint
+# classified publishes its real entries.
+CONTRACT_LIB = """\
+struct P:
+    var a: Int
+    var b: Int
+
+
+def plain(x: Int, by: Int) -> Int:
+    return x + by
+
+
+def takes_frame(p: P) -> Int:
+    return p.a * 10 + p.b
+"""
+
+CONTRACT_PROG = """\
+from conlib import P, plain
+
+def main(k):
+    var p = P()
+    p.a = 3
+    p.b = 4
+    return plain(p, k)
+"""
+
+
+def _contract_for(dylib, name):
+    """`{export name: frame_params}` out of a dylib's own manifest."""
+    import json
+    with open(dylib + ".manifest.json") as f:
+        payload = json.load(f)
+    return {e["name"]: e.get("frame_params") for e in payload.get("exports")}
+
+
+def test_every_exported_function_publishes_a_per_parameter_contract(tmpdir, _):
+    """Both functions in `CONTRACT_LIB` publish one entry per parameter.
+
+    The publication itself rather than the hand-off it enables, because
+    `test_formal_run.py` measures the hand-off and would report the same red for
+    a dozen different reasons: it cannot say WHICH half was wrong.  Two entries
+    in this table and the hand-off cases settle which.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "contract")
+    os.makedirs(root)
+    write_tree(root, {"conlib.mojo": CONTRACT_LIB})
+    _r, dylib = build_dylib(root, "conlib.dylib", ["conlib.mojo"])
+    table = _contract_for(dylib, "conlib")
+    check("plain" in table and "takes_frame" in table,
+          f"precondition: both functions are exported, got {sorted(table)}")
+    check(table["plain"] == [None, None],
+          f"a function holding no frame must publish one `None` per parameter, "
+          f"not {table['plain']!r} — `[]` is read as 'could not classify it' "
+          f"and a missing entry as 'not an export'")
+    check(table["takes_frame"] == [["P"]],
+          f"a parameter declared `p: P` is a holder of P by construction: "
+          f"{table['takes_frame']!r}")
+
+
+def test_a_frame_address_reaching_an_ordinary_word_names_the_contract(tmpdir, _):
+    """`plain(p, k)` is refused as a PLAIN PARAMETER, not as a missing export.
+
+    The diagnostic half of the case above, and it is why the table is worth
+    pinning. Both sentences refuse the program, and only one of them is TRUE
+    about it: `plain` is on the manifest with an arity of 2, so "the manifest
+    does not list it as an export" sends the reader to check an export that is
+    there, while what actually happened is that the callee's own compilation
+    published `plain`'s parameter 0 as a word.
+
+    The refusal's WORDS are the assertion — the verdict (refused) is identical
+    under both mistakes, and a diagnostic that points at the wrong layer is the
+    failure mode this backend's messages are otherwise written against.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "contract_plain")
+    os.makedirs(root)
+    write_tree(root, {"conlib.mojo": CONTRACT_LIB, "prog.mojo": CONTRACT_PROG})
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    text = result.stderr or result.stdout
+    refuses(result, "is an ordinary word, NOT a frame holder")
+    check("does not list it as an export" not in text,
+          f"the refusal blamed a missing EXPORT for a function the manifest "
+          f"lists with an arity of 2:\n{text.strip()[-500:]}")
+
+
 # ── one measurement, not two: the executor's own copy ───────────────────────
 
 def test_the_executors_answer_the_same_questions(tmpdir, _):
@@ -884,6 +992,11 @@ TESTS = [
     ("a zero-argument construction of a constructor that needs arguments is "
      "refused",
      test_a_zero_argument_construction_of_a_constructor_that_needs_arguments),
+    ("every exported function publishes a per-parameter frame contract",
+     test_every_exported_function_publishes_a_per_parameter_contract),
+    ("a frame address reaching an ordinary word names the contract, not the "
+     "export",
+     test_a_frame_address_reaching_an_ordinary_word_names_the_contract),
     ("arm64 and x86-64 return the same verdicts",
      test_the_executors_answer_the_same_questions),
 ]

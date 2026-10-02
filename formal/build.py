@@ -3039,6 +3039,88 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # `_check_holder_agreements` at the end of this function is what would
     # otherwise have said the parameter is not a holder, by name, at the call
     # site.
+    #
+    # THE PER-PARAMETER CONTRACT, published for EVERY function above the loop
+    # below rather than inside it, and that placement is the whole content of
+    # this pass's last step.
+    #
+    # The question it answers is for an IMPORTING module that cannot answer it
+    # for itself: "did your compilation make parameter 2 a frame holder, and of
+    # which struct?"  That is a fact about a compilation this process did not
+    # perform, and the refusal an importing module used to raise said so — which
+    # was true and unhelpful, because the information EXISTS, on the other side
+    # of the module boundary, in this table.
+    #
+    # Published HERE rather than derived at the manifest writer because here is
+    # where the fixpoint has just settled it, and a second derivation would be a
+    # second recognition of "is this parameter a frame holder" — the pair of
+    # recognitions that agrees until the day it does not, which is the failure
+    # mode `_frame_candidates` exists to prevent and which this must not
+    # reintroduce one function along.
+    #
+    # For EVERY function, and not for the ones the loop below happens to reach.
+    # A function this image holds no frame in was published **no contract at
+    # all** — not a contract of `Nones` — and `_export_frame_contract` spells a
+    # missing contract as `[]`, which is its "this compilation could not classify
+    # it".  So `model.resolve_frame_parameter_contract` read `position 0 >=
+    # len([])` and reported `CONTRACT_ABSENT_REASONS["not-exported"]`: a refusal
+    # naming a missing EXPORT about a function the manifest lists with an
+    # arity.  Measured, both architectures:
+    #
+    #     struct P:            # a module WITH a framed struct
+    #         var a: Int
+    #         var b: Int
+    #     def plain(x: Int, by: Int) -> Int:      # …and a function holding none
+    #         return x + by
+    #
+    # → `plain` in the manifest: `{"arity": 2, "frame_params": [], …}`, and the
+    # caller refused with "does not list it as an export".  It does.  The gap is
+    # the middle case between the two that were already answered: a module with
+    # no framed struct at all publishes `[None] * n` (see the early return
+    # above, and why its comment says why), and a function whose parameters the
+    # fixpoint classified publishes their real entries.  What was missing is a
+    # module that HAS a framed struct and a function in it that holds nothing —
+    # which is the ordinary shape of a module with one data class and some
+    # helpers, and the exact shape a free function takes when no call site of its
+    # own exists in its unit.
+    #
+    # So this is the module-level rule applied per FUNCTION, and it costs one
+    # loop: `params_of` is complete before the fixpoint runs and nothing in the
+    # loop below mutates `holders`/`hstruct`/`declared_holders`, so a function
+    # the loop skips is published from the same settled tables the loop would
+    # have read.  `bugs/FORMAL_cross_image_frame_contract_is_not_published_
+    # for_a_free_function.md` measured this and named the misattributed
+    # sentence; the refusal it turns into is `cross_image_plain_parameter_
+    # refusal`, which is true of a parameter the callee's own compilation
+    # compiled as a word.
+    #
+    # POSITIONALLY, keyed on the parameter list rather than by name, because
+    # that is what a CALL SITE has: the importing module knows the argument
+    # index and has no idea what the callee called its parameters.  The value is
+    # the SET of structs the parameter might be a holder of, for the same reason
+    # `hstruct` is a set rather than one struct — a set of one is the ordinary
+    # case and a set of two is a disagreement the consumer is entitled to see.
+    #
+    # `_fn_key(fn)` and NOT `fn.name`, for the reason the table's own docstring
+    # gives: `params_of`, `holders`, `hstruct` and `declared_holders` are all
+    # filed under `id(fn)` because each answers "what does THIS body do with its
+    # own names", and Mojo overloads make one name several bodies.  Reading them
+    # by name was the same defect at the one call site `_fn_key` was introduced
+    # to close, and it was worse than a style disagreement: a name is not a key
+    # in any of the four, so all four `.get`s returned None,
+    # `_parameter_frame_contract` iterated an empty parameter list, and every
+    # module dylib published `frame_params: []`.  `[]` is
+    # `_export_frame_contract`'s "this compilation could not classify it", so
+    # every cross-module frame hand-off was refused as `not-exported` — a
+    # refusal naming a missing EXPORT about a function the manifest lists with an
+    # arity.
+    for fn in functions:
+        fn._frame_param_contract = _parameter_frame_contract(
+            fn, params_of.get(_fn_key(fn)) or (),
+            holders.get(_fn_key(fn)) or (),
+            hstruct.get(_fn_key(fn)) or {},
+            declared_holders.get(_fn_key(fn)) or {})
+
     for fn in functions:
         hs = holders[_fn_key(fn)]
         if not hs and not _stores_a_frame_returning_call(fn,
@@ -3372,46 +3454,6 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         fn._frame_holders = hs
         fn._frame_nested_slots = nested_slots
         fn._frame_slots = slots
-        # THE PER-PARAMETER CONTRACT, and it is the answer to a question an
-        # IMPORTING module cannot answer for itself: "did your compilation
-        # make parameter 2 a frame holder, and of which struct?"  That is a
-        # fact about a compilation this process did not perform, and the
-        # refusal an importing module used to raise said so — which was true
-        # and unhelpful, because the information EXISTS, on the other side of
-        # the module boundary, in this table.
-        #
-        # Published here rather than derived at the manifest writer because
-        # here is where the fixpoint has just settled it, and a second
-        # derivation would be a second recognition of "is this parameter a
-        # frame holder" — the pair of recognitions that agrees until the day
-        # it does not, which is the failure mode `_frame_candidates` exists to
-        # prevent and which this must not reintroduce one function along.
-        #
-        # POSITIONALLY, keyed on the parameter list rather than by name, because
-        # that is what a CALL SITE has: the importing module knows the argument
-        # index and has no idea what the callee called its parameters. The
-        # value is the SET of structs the parameter might be a holder of, for
-        # the same reason `hstruct` is a set rather than one struct — a set of
-        # one is the ordinary case and a set of two is a disagreement the
-        # consumer is entitled to see.
-        # `_fn_key(fn)` and NOT `fn.name`, for the reason the table's own
-        # docstring gives: `params_of`, `holders`, `hstruct` and
-        # `declared_holders` are all filed under `id(fn)` because each answers
-        # "what does THIS body do with its own names", and Mojo overloads make
-        # one name several bodies. Reading them by name was the same defect at
-        # the one call site `_fn_key` was introduced to close, and it was worse
-        # than a style disagreement: a name is not a key in any of the four, so
-        # all four `.get`s returned None, `_parameter_frame_contract` iterated
-        # an empty parameter list, and every module dylib published
-        # `frame_params: []`. `[]` is `_export_frame_contract`'s "this
-        # compilation could not classify it", so every cross-module frame
-        # hand-off was refused as `not-exported` — a refusal naming a missing
-        # EXPORT about a function the manifest lists with an arity.
-        fn._frame_param_contract = _parameter_frame_contract(
-            fn, params_of.get(_fn_key(fn)) or (),
-            holders.get(_fn_key(fn)) or (),
-            hstruct.get(_fn_key(fn)) or {},
-            declared_holders.get(_fn_key(fn)) or {})
         # `by_name` itself, published, and the reason is a CONSTRUCTION rather
         # than a field read: a copy construction `S(x)` needs to know what `x`
         # IS, and the holder analysis is the only thing in the compiler that
