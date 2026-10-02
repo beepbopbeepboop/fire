@@ -767,7 +767,6 @@ const char *mojo_list_get_kinds(MojoList *l)
 
 static void _kinds_forget(uint64_t addr);
 
-
 void mojo_list_set_kinds(MojoList *l, const char *kinds)
 {
     if (!l) return;
@@ -795,11 +794,9 @@ char mojo_list_slot_kind(MojoList *l, int64_t i)
  * `m[:]` are right rather than only the original.
  *
  * The ELEMENT REPR travels with it for the same reason and by the same route:
- * a copy holds the same values, so it reprs them the same way, and
- * `list(mixed_tuple)` printing a raw pointer decimal while the original prints
- * `R<a>` would be the same bug one call away. Renamed from nothing — this
- * function already existed under this name and this contract; the second line
- * is the addition. */
+ * a copy holds the same values, so it reprs them the same way, and `list(t)`
+ * printing a raw pointer decimal where `t` printed `R<a>` would be the same
+ * bug one call away. */
 void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
 {
     if (!dst || !src) return;
@@ -1846,19 +1843,6 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
      * has ONE slot array and no single correct answer, so nothing is
      * recorded rather than something wrong. The repeated string is a fresh
      * allocation because the source's is shared with every copy of it. */
-    /* The element repr propagates on the same terms as the kinds string
-     * below: recorded on ONE side and nothing on the other, or recorded on
-     * both and the SAME function. Two lists of different struct types
-     * concatenated record nothing, because one slot array cannot describe
-     * both -- which leaves the generic reader, exactly as before. */
-    {
-        _KindRow *ra = _kinds_row((uint64_t)(uintptr_t)a);
-        _KindRow *rb = _kinds_row((uint64_t)(uintptr_t)b);
-        char *(*rfa)(int64_t) = ra ? ra->repr_fn : NULL;
-        char *(*rfb)(int64_t) = rb ? rb->repr_fn : NULL;
-        if (rfa && !rfb) mojo_list_set_elem_repr(r, (void *)rfa);
-        else if (rfa && rfb && rfa == rfb) mojo_list_set_elem_repr(r, (void *)rfa);
-    }
     {
         const char *ka = mojo_list_get_kinds(a);
         const char *kb = mojo_list_get_kinds(b);
@@ -1872,6 +1856,19 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
             kk[na + nb] = '\0';
             mojo_list_set_kinds(r, kk);
         }
+    }
+    /* The element repr propagates on the same terms as the kinds string
+     * above: recorded on ONE side and nothing on the other, or recorded on
+     * both and the SAME function. Two lists of different struct types
+     * concatenated record nothing, because one slot array cannot describe
+     * both -- which leaves the generic reader, exactly as before. */
+    {
+        _KindRow *ra = _kinds_row((uint64_t)(intptr_t)a);
+        _KindRow *rb = _kinds_row((uint64_t)(intptr_t)b);
+        char *(*rfa)(int64_t) = ra ? ra->repr_fn : NULL;
+        char *(*rfb)(int64_t) = rb ? rb->repr_fn : NULL;
+        if (rfa && !rfb) mojo_list_set_elem_repr(r, (void *)rfa);
+        else if (rfa && rfb && rfa == rfb) mojo_list_set_elem_repr(r, (void *)rfa);
     }
     return r;
 }
