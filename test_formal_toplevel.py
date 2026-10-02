@@ -625,11 +625,17 @@ T1 = "import sys\nsys.exit(3)\n"
 # array_ops_jit.mojo in this repository, in full. Before the fix this built
 # and printed NOTHING: `arr = …`, the `for` that sums it, and the three
 # `print`s that report the answer were all dropped, and the sweep counted the
-# file a pass. It is now refused — on `print` of a subscript, and on a `dict`
-# subscript — which is progress: the sweep is counting a construct it can name
-# instead of a file that does not run. Measured, not assumed: the whole shape
-# was tried and the terminal finding is the print, so the case asserts the
-# print and says so.
+# file a pass. It was then refused — on `print` of a subscript, and on a `dict`
+# subscript — and that refusal was this file's `body_next_finding` row for a
+# while.
+#
+# **It now BUILDS AND RUNS**, and the two things that made it run are both a
+# value model reading a fact the source states: a container literal's ELEMENT
+# kind (`model.container_literal_elem_kind`, which is what the dict subscript
+# needed) and a constructed frame's FIELD kind
+# (`model.struct_ctor_field_value`). Measured, both architectures, this exact
+# text, with CPython as the oracle: `Sum: 15 / Length: 5 / Value of a: 10`,
+# byte for byte.
 ARRAY_OPS = """\
 arr = [1, 2, 3, 4, 5]
 sum_val = 0
@@ -641,6 +647,20 @@ print("Length:", len(arr))
 
 d = {"a": 10, "b": 20}
 print("Value of a:", d["a"])
+"""
+
+# …and the NEXT construct the body cannot lower, which is what
+# `body_next_finding` now refuses on. Every statement above `n = 5` is one the
+# body lowers — the loop, the module-global int the loop accumulated into, both
+# container subscripts and the dict subscript — so the body demonstrably got
+# FURTHER rather than being refused earlier, which is the whole claim that row
+# makes. `len()` of an integer is a live gap with its own message and no
+# storage or representation question behind it (an integer has no length
+# whether the word is 5 or 0), so it will not be papered over by a later fix to
+# the element kind.
+BODY_THEN_LEN_OF_AN_INT = ARRAY_OPS + """
+n = 5
+print(len(n))
 """
 
 # `class_jit.mojo`'s shape — a struct construction with arguments, written in a
@@ -686,6 +706,31 @@ p = P(3)
 printf("x=%d y=%d", p.x, p.y)
 """
 
+# `class_jit.mojo`'s exact text — which is the same construction as the two
+# fixtures above with the ANNOTATIONS REMOVED, and that is the whole difference:
+# `model.struct_field_kind`'s gate is a claim about the VALUE in the slot and
+# reads the field's DECLARED type, so with no `x: Int` anywhere there was no
+# declaration to claim from at all and the read was unclassified.
+#
+# It is here, in the module-body file, rather than only in
+# `test_formal_value_model.py` because that is where the construction is written:
+# `class_jit.mojo` puts `p = Point(3, 4)` at top level, and a module body is the
+# entry, so this is a field read out of a frame the body itself built.
+#
+# `print`, not `printf`, because the refusal this replaces was `print()`'s —
+# `print` is the one builtin that must choose between two renderings before it
+# emits anything, so it is where an unclassifiable field first shows up, and a
+# lowering that guessed would print a frame address as a number.
+BODY_CONSTRUCTION_UNANNOTATED = """\
+class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+p = Point(3, 4)
+print("Point:", p.x, p.y)
+"""
+
 
 def test_t1_is_a_named_finding_not_a_pass(tmpdir, verbose):
     """`t1.mojo` refuses, naming why — it does not exit 0 in silence.
@@ -725,15 +770,50 @@ def test_t1_is_a_named_finding_not_a_pass(tmpdir, verbose):
 def test_a_module_body_reaches_its_next_real_finding(tmpdir, verbose):
     """A body that runs reaches the NEXT construct the backend cannot lower.
 
-    `array_ops_jit.mojo`'s shape: a loop and a subscript over a local list
-    inside a top-level body. Before the fix the whole body was dropped, so
-    the file passed. Now it is refused — on the `printf` of a subscript, a
-    real gap with its own message — which is progress rather than a
-    regression: the sweep is now counting a construct it can name instead of
-    a file that does not run."""
+    `array_ops_jit.mojo`'s shape: a loop and a subscript over a module-level
+    list inside a top-level body. Before the fix the whole body was dropped, so
+    the file passed. It was then refused — on the `print` of a subscript, a real
+    gap with its own message — which was progress rather than a regression: the
+    sweep was counting a construct it could name instead of a file that did not
+    run.
+
+    **Both of those refusals are gone**, so the fixture is `ARRAY_OPS` plus one
+    more statement and the row keeps its meaning: every statement above `n = 5`
+    lowers, and what the build stops at is the `len()` of an integer. Moving the
+    needle rather than deleting the row is the point — a row that asserted "this
+    file is refused" would have been satisfied by the file getting worse, which
+    is the direction this file exists to notice. `body_subscript_and_dict_run`
+    beside it pins the new answer, so the thing that moved is measured rather
+    than merely no longer red.
+
+    `len()` of an integer is chosen over the alternatives on purpose: it is a
+    representation fact (an integer has no length) rather than a storage one, so
+    the element-kind work that unblocked the statements above it cannot be
+    extended to reach this, and the row will keep saying something true."""
     return case_refused(
-        "body_next_finding", ARRAY_OPS,
-        "print() cannot tell whether", tmpdir, verbose)
+        "body_next_finding", BODY_THEN_LEN_OF_AN_INT,
+        "is len() of a value classified as 'int'", tmpdir, verbose)
+
+
+def test_a_module_body_subscript_and_dict_run(tmpdir, verbose):
+    """The `body_next_finding` fixture's own text now runs, and is RIGHT.
+
+    This file's discipline for a construct written in a module body: build the
+    image, EXECUTE it, and compare the answer against CPython. A refusal only
+    says the backend declined; a run says the number is right, and this one is
+    the anti-rot for the refusal the row above used to assert — so a regression
+    in either direction (the dict subscript stops lowering, or it lowers to the
+    wrong word) is a failure of THIS row rather than a change of which row is
+    red.
+
+    All three numbers are the program's own: the loop's sum, the container's
+    length, and the dict value under `"a"`. The dict one is the interesting
+    half — it is a pair-blob key SCAN, and a lowering that took the element path
+    would answer the wrong word with a plausible number, which is why the
+    expectation is CPython's output rather than a fixed `10`."""
+    return case_agrees_with_cpython(
+        "body_subscript_and_dict_run", ARRAY_OPS, tmpdir, verbose,
+        expect_stdout="Sum: 15\nLength: 5\nValue of a: 10\n", expect_exit=0)
 
 
 def test_a_module_body_construction_with_arguments_runs(tmpdir, verbose):
@@ -830,6 +910,32 @@ def test_a_module_body_construction_leaves_an_unassigned_field_at_its_default(
     return case_agrees_with_cpython(
         "body_construction_class_default", BODY_CONSTRUCTION_CLASS_DEFAULT,
         tmpdir, verbose, expect_stdout="x=3 y=0", expect_exit=0)
+
+
+def test_a_module_body_construction_without_field_annotations_runs(tmpdir,
+                                                                   verbose):
+    """The same construction with NO annotations, read through `print`, runs.
+
+    The two fixtures above declare `x: Int` / `y: Int`; this one declares
+    nothing, and that is the difference the whole case is about. A field's kind
+    on this path comes from its DECLARED type, gated by a rule that is a claim
+    about the VALUE in the slot (`struct_field_kind`: `S()` does not run
+    `__init__`, so a fresh instance's slot holds the class-level default). With
+    no declaration there is nothing for that rule to read, so `print(p.x)` was
+    refused — `print() cannot tell whether MemberExpr is a string or a number`,
+    which is a refusal about a value the constructor had just put there.
+
+    It is now answered from the CONSTRUCTION instead
+    (`model.struct_ctor_field_value`, which asks `init_body_stores` — so the
+    kind is read off the expression the image evaluates into the slot), and it
+    is asked only when the declaration said nothing.
+
+    CPython is the oracle, so a lowering that read the wrong word of the frame
+    — which for a two-field struct means `x=4 y=3`, both plausible numbers —
+    is a failure of this row rather than a different number to re-pin."""
+    return case_agrees_with_cpython(
+        "body_construction_unannotated", BODY_CONSTRUCTION_UNANNOTATED,
+        tmpdir, verbose, expect_stdout="Point: 3 4\n", expect_exit=0)
 
 
 # ── the classifier itself, as a unit ───────────────────────────────────────
@@ -1005,8 +1111,10 @@ def main():
         test_dylib_path_refuses_a_module_body,
         test_t1_is_a_named_finding_not_a_pass,
         test_a_module_body_reaches_its_next_real_finding,
+        test_a_module_body_subscript_and_dict_run,
         test_a_module_body_construction_with_arguments_runs,
         test_a_module_body_construction_leaves_an_unassigned_field_at_its_default,
+        test_a_module_body_construction_without_field_annotations_runs,
         test_a_module_body_can_still_be_refused_by_the_ordinary_codegen,
         test_a_name_collision_with_the_body_function_is_refused,
         test_a_folded_constant_the_body_rebinds_keeps_its_store,

@@ -2543,12 +2543,20 @@ FD_CASES = [
   "    f.close()\n"
   "    return 0\n",
    0, None),
- # A FRAME SLOT holding what is syntactically a descriptor. Refused, and the
+# A FRAME SLOT holding what is syntactically a descriptor. Refused, and the
  # message names the receiver's SHAPE as well as the requirement, because
  # proving a field holds a descriptor is cross-field flow and this path cannot
  # see it — a correct-looking `self._fd.write(s)` must not be lowered on the
  # strength of a name the model does not have.
- ("fd_write_on_frame_slot_refused",
+ #
+ # The needle says "classified as 'int'" where it used to say nothing about a
+ # kind, and the wording moved because `Box.__init__` literally stores `3`:
+ # `model.struct_ctor_field_value` reads the field's value off the construction
+ # that filled the slot, so the receiver now HAS a kind and the message can name
+ # it.  That is the same refusal on the same program — a word that is not a
+ # descriptor — with more said about it, and `3` is a true claim about `b.fd`
+ # rather than a convenient one.
+("fd_write_on_frame_slot_refused",
   "struct Box:\n"
   "    fd: Int\n"
   "    n: Int\n"
@@ -2560,7 +2568,7 @@ FD_CASES = [
   "    b = Box()\n"
   "    b.fd.write(\"x\")\n"
   "    return 0\n",
-  "refuse:and it is a frame slot", None),
+  "refuse:frame slot classified as 'int'", None),
 ]
 
 # ── a multi-field receiver, BY REFERENCE ───────────────────────────────────

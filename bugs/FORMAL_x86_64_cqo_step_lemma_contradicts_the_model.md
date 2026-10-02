@@ -77,10 +77,37 @@ about the hardware, by the way: `cqo` sign-extends RAX's top bit into RDX, and
 Lean layer.** `lib/X86.lean` is imported by the proof library
 (`formal/lean.py`'s `ensure_library`, the `prooflib` step), so a library that
 does not compile fails **every** build that typechecks a proof, not just the
-x86-64 `cqo` path: `formal-dylib`'s `default path emits a checked proof` above,
-and anything registered with `deps=['prooflib']`. `tools/suite.py` registers
-`formal-dylib` with **no** `expect=` marker, so this is an undeclared red in the
-gate rather than a known failure.
+x86-64 `cqo` path. Measured, on this tree, the suites that go red for exactly
+this reason and nothing else:
+
+```
+$ python3 test_formal_dylib.py
+  FAIL  default path emits a checked proof          (one case of 13)
+$ python3 test_formal_short_circuit_cond.py
+  FAIL  test_generated_proofs_typecheck_with_no_sorries (program='both')
+  FAIL  test_generated_proofs_typecheck_with_no_sorries (program='either')
+  FAIL  test_generated_proofs_typecheck_with_no_sorries (program='short_and')
+  FAIL  test_generated_proofs_typecheck_with_no_sorries (program='short_or')
+Ran 12 tests ... FAILED (failures=4)
+```
+
+Every one of those five failures carries `proof library build failed:
+lib/X86.lean:…` in its message, and the case that names the *actual* error is
+the direct run under "What I ran" — the suite messages are truncated to a
+diagnostic tail, and which LINE they name varies with the output ordering, so
+`lib/X86.lean:749` and `lib/X86.lean:1984` are the same single error seen
+through two different tails.
+
+`formal-dylib` is registered in `tools/suite.py` with **no** `expect=` marker, so
+it is an undeclared red in the gate.
+`test_formal_short_circuit_cond.py` is not registered at all (nothing in
+`tools/suite.py` mentions it, and `python3 tools/suite.py --list | grep -i
+short` is empty), so its four failures are a coverage hole rather than a gate
+red — the same class
+`bugs/TEST_registered_tests_in_no_bucket_never_run.md` is about. Worth knowing
+when the fix lands: it is a suite that has been silently rotting for the whole
+time this has been broken, and it is the one whose SUBJECT (short-circuit `and`/
+`or` in a condition) is furthest from `cqo`.
 
 ## Why it was not noticed
 

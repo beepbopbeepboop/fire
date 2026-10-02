@@ -9848,11 +9848,18 @@ class ValueKinds:
             return
         if isinstance(value, F.CallExpr) and isinstance(value.func,
                                                         F.IdentExpr):
-            sites = self._ctor_calls.get(name)
+            if name not in self._ctor_calls:
+                self._ctor_calls[name] = {}
+            sites = self._ctor_calls[name]
             # A tombstone is not replaced by a later construction, which is what
             # makes the answer independent of where in the body the two bindings
             # sit — so this reads the existing entry rather than `setdefault`ing
-            # one, because a tombstone has nothing to subscript.
+            # one.  The `in` test above is what tells an ABSENT entry from a
+            # tombstone: `dict.get` answers None for both, and conflating them
+            # silently dropped every construction with no retraction before it,
+            # which is measured and pinned in `test_formal_value_model.py`'s
+            # `a_constructed_field_prints` — a whole evidence source that reads
+            # as "this function constructs nothing".
             if sites is not None:
                 sites[id(value)] = (value.func.name, value)
         else:
