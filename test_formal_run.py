@@ -2006,6 +2006,52 @@ CASES = [
      "    printf(\"r=%d\\n\", r)\n"
      "    return 0\n", 0, "r=1"),
 
+    # ── ITERATING a string is refused, and the refusal is measured ──────────
+    #
+    # `bugs/FORMAL_string_iteration_reads_a_count.md`. The loop family — `for x
+    # in s` and `[x for x in s]` — walks its iterable as a BLOB, and a blob's
+    # first word is its element COUNT. A `char *` has no header word, so the
+    # count is the first eight bytes of TEXT: on the tree this was measured on,
+    # `for c in "abc"` returned 97 on x86-64 ('a' read as the count) and died
+    # of SIGBUS on arm64, for the SAME source. Refusing is the honest answer
+    # because a string has no length in this representation — see the case
+    # below for what is still true of it.
+    #
+    # Both shapes are here because `_emit_compr_gen` is a SEPARATE lowering
+    # from the for-in, and each raises from its own place: a fix that added the
+    # check to one of them would leave the other building a wrong answer.
+    ("string_iteration_for_in_is_refused",
+     "def main(n):\n"
+     "    var t = 0\n"
+     "    for c in \"abc\":\n"
+     "        t = t + 1\n"
+     "    return t\n",
+     "refuse:iterating a string is a CONTAINER operation", None),
+    ("string_iteration_comprehension_is_refused",
+     "def main(n):\n"
+     "    var xs = [c for c in \"abc\"]\n"
+     "    return len(xs)\n",
+     "refuse:iterating a string is a CONTAINER operation", None),
+    # The two surfaces that DO work on a `char *`, in the same program as the
+    # refusal above, so a fix that widened the refusal to strings generally
+    # would go red here rather than looking like a stricter backend. `len` is
+    # a `strlen` to the NUL and `s[i]` is `s + i`; neither reads a count word.
+    ("string_len_and_subscript_still_work",
+     "def main(n):\n"
+     "    printf(\"%d %d\\n\", len(\"abcd\"), \"abcd\"[1])\n"
+     "    return 0\n", 0, "4 98"),
+    # And a comprehension over a LIST OF STRINGS, which is the spelling the
+    # refusal's own message recommends and the one the stdlib reaches for. It
+    # is a different lowering from either case above — the elements are
+    # `char *` and the walk is over the blob — so it is the case that shows the
+    # refusal is about the ITERABLE's representation and not about strings
+    # being unable to be elements.
+    ("a_comprehension_over_a_list_of_strings_is_not_refused",
+     "def main(n):\n"
+     "    var xs = [c for c in [\"a\", \"b\", \"c\"]]\n"
+     "    printf(\"%d %s\\n\", len(xs), xs[2])\n"
+     "    return 0\n", 0, "3 c"),
+
     # ── the named item 2: `+=` on a string ─────────────────────────────────
     #
     # Observed on the pre-change tree, on BOTH backends, for this source:
