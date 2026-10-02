@@ -2596,8 +2596,7 @@ def _holder_state(holders: dict, hstruct: dict, returns_frame: dict) -> tuple:
 
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
-                     star_imports: tuple = (),
-                     method_owners: dict = None) -> None:
+                     star_imports: tuple = ()) -> None:
     """Annotate every function with its frame-pointer receivers and field slots.
 
     Writes `fn._frame_holders` (the names holding a frame address) and
@@ -2608,12 +2607,20 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     are flattened and lambdas lifted, because a lifted lambda is a function
     with its own locals and its own receivers.
 
-    `method_owners` is `{function name: struct}` and it is needed HERE rather
-    than only at the class-constant rewrites that follow: a `comptime` binding
-    read through a receiver is the same read whichever order the two passes run
-    in, and `refuse_none_comparisons` runs BEFORE the rewrite that would
-    materialize it — so asking it a census that does not know which functions are
-    methods is asking a different question than the substitution asks.
+    The method census is BUILT here rather than passed, and that used to be the
+    whole of `bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`:
+    the sixth parameter was documented as `{function name: struct}` and the one
+    call site handed it `owners`, which is `{bare method name: struct NAME}` —
+    a `str`. `refuse_none_comparisons` and the `publish` call read it as a
+    `StructDef` and did `st.name` on a `str`, so `AttributeError` out of the
+    compiler, on any unit where a module-level function shares a bare name with
+    a method of a struct the unit IMPORTS.  The census is a pure function of
+    `structs_by_name`, which is already a parameter, so there is nothing to pass
+    and nothing that can be passed wrong: `method_owners` below is the one
+    table, and it is needed BEFORE the class-constant rewrites as well as after
+    them, because a `comptime` binding read through a receiver is the same read
+    whichever order the two passes run in and `refuse_none_comparisons` runs
+    first.
 
     The fixpoint is over one edge only: a call `f(c, …)` in some function where
     `c` is a holder makes `f`'s FIRST parameter a holder. That is the whole of
@@ -2647,10 +2654,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             fn._frame_param_contract = [None] * len(
                 M.function_param_shape(fn).names)
         return
-    owners = M.method_owner_names(structs)
+    # {LIFTED `<Struct>_<method>`: struct} — the census every consumer below
+    # wants, and the one that used to arrive as a parameter and be the other
+    # table (see the docstring).
+    method_owners = M.method_owner_names(structs)
     # {BARE method name: [struct, …]}, which is the other direction and is not
-    # the same table: `owners` is keyed by the lifted `<Struct>_<method>` a
-    # rewritten call spells, and a MemberExpr's `.member` is the bare name.  A
+    # the same table: `method_owners` is keyed by the lifted `<Struct>_<method>`
+    # a rewritten call spells, and a MemberExpr's `.member` is the bare name.  A
     # name two structs declare is left with both, so a caller can tell "one
     # owner" from "ambiguous" rather than seeing whichever came last.
     by_method = {}
@@ -2760,7 +2770,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # when two definitions of one name disagreed.
     returns_frame: dict = {}
     for fn in functions:
-        owner = owners.get(fn.name)
+        owner = method_owners.get(fn.name)
         # `and M.method_receiver_name(fn) is not None`, and the guard rather
         # than a change to `struct_receivers` because this asks about ONE
         # method while `struct_receivers` answers for the whole CLASS. Its
@@ -3196,9 +3206,9 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 # describes it. Deciding them here is what keeps a frame
                 # diagnostic from being printed for a call that never had a
                 # layout question.
-                # `owners` is keyed by the LIFTED name `<Struct>_<method>`, and
-                # this is the BARE name the source spells, so the lookup is
-                # `by_method`.  A name two structs declare is genuinely
+                # `method_owners` is keyed by the LIFTED name
+                # `<Struct>_<method>`, and this is the BARE name the source
+                # spells, so the lookup is `by_method`.  A name two structs declare is genuinely
                 # ambiguous, and `_rewrite_method_calls` already refused to
                 # rewrite it, so there is nothing to say about it here that it
                 # has not said — hence the `== 1` and not a pick.
@@ -3452,7 +3462,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # believe about the parameter it lands in, which is not a fact this
         # function can see.  `params_of` is complete before the fixpoint runs,
         # so it is complete here.
-        _check_frame_escapes(fn, hs, by_name, param0, owners, structs_by_name,
+        _check_frame_escapes(fn, hs, by_name, param0, method_owners,
+                             structs_by_name,
                              set(_constructor_bindings(
                                  fn, framed,
                                  [f.name for f in functions])), rets,
@@ -3460,7 +3471,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                              _callee_defs(functions), imported,
                              star_imports, _name_defs,
                              by_name_returns_frame)
-        _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
+        _check_method_receiver_types(fn, hs, by_name, method_owners,
+                                     structs_by_name)
         fn._frame_holders = hs
         fn._frame_nested_slots = nested_slots
         fn._frame_slots = slots
@@ -9064,7 +9076,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                                 star_imported_modules)
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
-                     star_imported_modules(stmts), owners)
+                     star_imported_modules(stmts))
     # The slot table is RETURNED as well as published, for the reason
     # `symbols` is: building an import compiles the imported module through this
     # same function, and that nested call publishes ITS globals over ours, so

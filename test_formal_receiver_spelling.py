@@ -164,6 +164,59 @@ DIFF_CASES = [
      "    sys.stdout.write(\"%d\" % D.twelve())\n"
      "main()\n"),
 
+    # A module-level function whose name is a BARE METHOD name of a struct in
+    # the same unit, in a unit that has a class-level `None` binding — which is
+    # the pair `bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`
+    # measured, and it crashed the compiler rather than refusing the program.
+    #
+    # Two tables in `formal/build.py` are both called "owners":
+    # `M.method_owner_names` is keyed by the LIFTED `<Struct>_<method>` a
+    # rewritten call spells and carries a `StructDef`; `_method_owners` is keyed
+    # by the BARE name a `MemberExpr`'s `.member` is and carries a `str`.  The
+    # frame pass was handed the second and every consumer inside it wanted the
+    # first, so a function named `parse` next to a method named `parse` made
+    # `owners.get(fn.name)` return a string and the pass did `owner.name` on it:
+    # `AttributeError: 'str' object has no attribute 'name'`, out of the
+    # compiler, on a program that is correct Mojo.  Three stdlib files in the
+    # `std-c` sweep slice hit it (`std/subprocess/subprocess.mojo`,
+    # `std/runtime/_asyncrt.mojo`, `std/_gpu/primitives/warp.mojo`), and
+    # `test_dataclasses_formal.py`'s corpus case had it red on master.
+    #
+    # `Holder` is TWO fields on purpose: a one-field struct's receiver is a word
+    # handed over by value, so the unit has no FRAMED struct, the frame pass
+    # returns before it consults any table, and the case would pass for the
+    # wrong reason.  `var tag: String = None` is the class-level `None` binding
+    # the `refuse_none_comparisons` guard needs; without it the crash is not
+    # reached.  `len` is 2 on both sides, so the case is a value as well as a
+    # build.
+    ("a_module_level_function_named_like_a_method_does_not_crash_the_pass",
+     "struct Holder:\n"
+     "    var tag: String = None\n"
+     "    var other: Int = 0\n"
+     "\n"
+     "    def parse(this, s: String) -> String:\n"
+     "        return s\n"
+     "\n"
+     "def parse(s: String) -> String:\n"
+     "    return s\n"
+     "\n"
+     "def main() -> Int32:\n"
+     "    var h = Holder(\"x\", 0)\n"
+     "    printf(\"%d\", len(h.parse(\"hi\")))\n"
+     "    return 0\n",
+     "class Holder:\n"
+     "    def __init__(self):\n"
+     "        self.tag = None\n"
+     "        self.other = 0\n"
+     "    def parse(self, s):\n"
+     "        return s\n"
+     "\n"
+     "def parse(s):\n"
+     "    return s\n"
+     "\n"
+     "import sys\n"
+     "sys.stdout.write(\"%d\" % len(Holder().parse(\"hi\")))\n"),
+
     # A `@classmethod`'s receiver is `cls`, and the rule has to thread it as one
     # — but there is NO case for it here, and that is a fact about this path
     # rather than about the rule: reaching a `@classmethod` means naming the
