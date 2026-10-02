@@ -224,28 +224,31 @@ CASES = [
     # The empty string is here too, because a scan that forgets the terminator
     # walks off the end of the buffer, and 0 is the answer that says it did not.
     #
-    # TWO printfs, not one, and the reason is this suite's own subject rather
-    # than taste: SysV x86-64 passes six integer arguments in registers, so a
-    # single `printf` of seven values is refused on x86-64 and built on arm64 —
-    # which is a different divergence than the one this case exists to close
-    # (bugs/FORMAL_x86_64_argument_registers.md).  A case that tripped it would
-    # report that filing and not this one.
+    # ONE printf of SEVEN values, which used to be two printfs of four and
+    # three.  The split was this suite's own subject rather than taste — SysV
+    # x86-64 passed six integer arguments in registers, so a seven-value
+    # `printf` was refused on x86-64 and built on arm64, and a case that tripped
+    # it would have reported that filing instead of this one
+    # (bugs/FORMAL_x86_64_argument_registers.md).  It is one call again now that
+    # both conventions have a stack area, and
+    # `a_variadic_printf_with_an_argument_in_the_frame` below is the row that
+    # says so.
     ("len_of_every_operand_shape",
      "def main():\n"
      "    m = \"hello\"\n"
      "    w = \"  hi\".lstrip()\n"
      "    e = \"\"\n"
      "    var xs = [1, 2, 3]\n"
-     "    printf(\"%d %d %d %d\", len(m), len(w), len(e), len(xs))\n"
-     "    printf(\" %d %d %d\", len([1, 2, 3, 4]), len(range(10)), len([]))\n"
+     "    printf(\"%d %d %d %d %d %d %d\", len(m), len(w), len(e), len(xs),\n"
+     "           len([1, 2, 3, 4]), len(range(10)), len([]))\n"
      "    return 0\n",
      "import sys\n\ndef main():\n"
      "    m = \"hello\"\n"
      "    w = \"  hi\".lstrip()\n"
      "    e = \"\"\n"
      "    xs = [1, 2, 3]\n"
-     "    sys.stdout.write(\"%d %d %d %d\" % (len(m), len(w), len(e), len(xs)))\n"
-     "    sys.stdout.write(\" %d %d %d\" % (\n"
+     "    sys.stdout.write(\"%d %d %d %d %d %d %d\" % (\n"
+     "        len(m), len(w), len(e), len(xs),\n"
      "        len([1, 2, 3, 4]), len(range(10)), len([])))\n"
      "    return 0\n"),
     # THE SAME TUPLE STORE INSIDE `__init__`, WHICH USED TO BE A REFUSAL AND IS
@@ -397,6 +400,153 @@ CASES = [
      "    p = Pair()\n"
      "    sys.stdout.write(\"%d\" % p.shrink())\n"
      "    return 0\n"),
+    # ── THE STACK-ARGUMENT CONVENTION, WHICH IS WHERE THE TWO REGISTERS DISAGREE
+    # about the ANSWER and not only about the arity ──────────────────────────────
+    #
+    # AAPCS passes arguments 0..7 in registers and the rest in the caller's frame;
+    # SysV AMD64 passes 0..5 and the rest in the caller's frame.  So a SEVEN-
+    # argument function is a program that travels in a register on one
+    # architecture and in the CALLER'S FRAME on the other, and a defect in either
+    # half of that convention — the caller's `SUB`/`store`/`ADD`, or the callee's
+    # `[RBP + 16 + 8k]` load — is invisible on the machine that does not use the
+    # frame at all.  That is why these rows are here rather than in one backend's
+    # own suite: before the convention x86-64 REFUSED this program and arm64
+    # answered it, which is the two-architecture disagreement about one source
+    # file this file exists to end.
+    #
+    # `a6` is the argument the two conventions disagree about, and the answer is
+    # built from it: `a6 * 1000000 + a0` reads it twice over (once scaled, once
+    # not), so a slot holding the right CONSTANT but the wrong argument still
+    # fails, and 7000001 is not reachable from any of the neighbouring offsets.
+    ("seven_arguments_arrive",
+     "def seven(a0: int, a1: int, a2: int, a3: int,\n"
+     "          a4: int, a5: int, a6: int) -> int:\n"
+     "    return a6 * 1000000 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"seven=%d\", seven(1, 2, 3, 4, 5, 6, 7))\n"
+     "    return 0\n",
+     "import sys\n\ndef seven(a0, a1, a2, a3, a4, a5, a6):\n"
+     "    return a6 * 1000000 + a0\n\ndef main():\n"
+     "    sys.stdout.write(\"seven=%d\" % seven(1, 2, 3, 4, 5, 6, 7))\n"
+     "    return 0\n"),
+    # NINE arguments and SIXTEEN, and the reason for the second is the SHAPE of
+    # the outgoing area rather than the count.  SysV spacing is 8 bytes per
+    # argument, so an ODD number of them leaves the area 8 bytes short of the
+    # 16-byte alignment the `call` itself requires: seven arguments round up to
+    # sixteen bytes with the padding at the HIGH end so `a6` is still at
+    # `[rsp+0]`, and sixteen fill it exactly.  A convention that reserved
+    # `8 * n` without the rounding misaligns every odd-arity call, which faults
+    # in a callee that uses SSE and silently corrupts one that does not — and
+    # `a8 * 10000` and `a15 + a8 * 10` read the LAST stack slot of each, which is
+    # where a padding byte placed at the wrong end lands.
+    #
+    # 107 is 15 + 8 * 10 + 1 in CPython's arithmetic, and the three terms are
+    # three different arguments at three different offsets.
+    ("nine_and_sixteen_arguments_arrive",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def wide(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
+     "         a6: int, a7: int, a8: int, a9: int, a10: int, a11: int,\n"
+     "         a12: int, a13: int, a14: int, a15: int) -> int:\n"
+     "    return a15 + a8 * 10 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n"
+     "    printf(\" wide=%d\", wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))\n"
+     "    return 0\n",
+     "import sys\n\ndef nine(a0, a1, a2, a3, a4, a5, a6, a7, a8):\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def wide(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11,\n"
+     "         a12, a13, a14, a15):\n"
+     "    return a15 + a8 * 10 + a0\n\ndef main():\n"
+     "    sys.stdout.write(\"nine=%d\" % nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n"
+     "    sys.stdout.write(\" wide=%d\" % wide(1, 2, 3, 4, 5, 6, 7, 8, 9,\n"
+     "                                         10, 11, 12, 13, 14, 15, 16))\n"
+     "    return 0\n"),
+    # THE STACK ARGUMENT AS A CALLER'S PARAMETER, which is the direction a
+    # compiler can get wrong by FOLDING: the value that lands in the outgoing
+    # slot is whatever the caller held at run time, not a constant the emitter
+    # could have checked against the callee's declaration.
+    #
+    # And a NESTED CALL in the ninth position, which is the direction it can get
+    # wrong by ORDER: an argument expression that itself calls pushes and pops
+    # around RSP, so the outgoing slots have to be reserved BEFORE it is
+    # evaluated and the store has to survive the call.  Storing the register
+    # arguments first puts the six `_SLOT` pushes between the reservation and the
+    # store, and the seventh argument then reads as zero — the one answer a callee
+    # cannot tell from a caller who passed zero.
+    ("a_stack_argument_from_a_parameter_and_a_nested_call",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def one() -> int:\n"
+     "    return 7\n\n"
+     "def call_it(w: int) -> int:\n"
+     "    return nine(1, 2, 3, 4, 5, 6, 7, 8, w)\n"
+     "\n"
+     "def main() -> int:\n"
+     "    printf(\"param=%d\", call_it(9))\n"
+     "    printf(\" nested=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n"
+     "    return 0\n",
+     "import sys\n\ndef nine(a0, a1, a2, a3, a4, a5, a6, a7, a8):\n"
+     "    return a8 * 10000 + a0\n\ndef one():\n"
+     "    return 7\n\ndef call_it(w):\n"
+     "    return nine(1, 2, 3, 4, 5, 6, 7, 8, w)\n\ndef main():\n"
+     "    sys.stdout.write(\"param=%d\" % call_it(9))\n"
+     "    sys.stdout.write(\" nested=%d\" % nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n"
+     "    return 0\n"),
+    # A VARIADIC EXTERN CALL whose seventh argument is in the caller's frame,
+    # and it is here because libc is the one caller of this convention whose
+    # code this project does NOT own: `printf` reads that argument out of
+    # `[rsp+8]` and AL has to say how many vector registers were used.  On arm64
+    # the same seven values are all registers, so the row is a statement about
+    # the frame and not about the count.
+    #
+    # SEVEN and not nine, and the boundary is arm64's rather than this one's:
+    # a variadic callee with arguments past the register file is refused there
+    # (`formal/arm64_codegen.py`'s `_emit_call`, because its `...` tail is laid
+    # out in a separate stack area), so a nine-value printf cannot be a
+    # two-backend case.  `len_of_every_operand_shape` above still splits its
+    # seven-value printf in two, and it can stop doing that now.
+    ("a_variadic_printf_with_an_argument_in_the_frame",
+     "def main():\n"
+     "    printf(\"%d %d %d %d %d %d %d\", 1, 2, 3, 4, 5, 6, 7)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    sys.stdout.write(\"%d %d %d %d %d %d %d\" % (1, 2, 3, 4, 5, 6, 7))\n"
+     "    return 0\n"),
+    # A STACK ARGUMENT ALONGSIDE A FRAME RECEIVER, in METHOD position, for the
+    # shape rather than the count.  A parameter with no register home is loaded
+    # into R11 — the scratch `_store_var` uses on the spill path — and then
+    # stored, so a load that borrowed that scratch for the ADDRESS would
+    # overwrite the value before the store; and a method's receiver is the
+    # parameter whose home assignment is the most complicated thing in the
+    # prologue.  `self.a` is READ as well as the arguments passed, so a frame
+    # read that landed on the outgoing area shows up in the answer instead of
+    # passing quietly.
+    ("a_stack_argument_on_a_method_with_a_frame_receiver",
+     "struct P:\n"
+     "    var a: int\n"
+     "    var b: int\n"
+     "    def wide(self, a0: int, a1: int, a2: int, a3: int,\n"
+     "             a4: int, a5: int, a6: int) -> int:\n"
+     "        return a6 * 1000 + a0 + self.a\n\n"
+     "def main() -> int:\n"
+     "    var q = P()\n"
+     "    q.a = 5\n"
+     "    q.b = 6\n"
+     "    printf(\"recv=%d\", q.wide(1, 2, 3, 4, 5, 6, 7))\n"
+     "    return 0\n",
+     "import sys\n\nclass P:\n"
+     "    a = 0\n"
+     "    b = 0\n\n"
+     "    def wide(self, a0, a1, a2, a3, a4, a5, a6):\n"
+     "        return a6 * 1000 + a0 + self.a\n\ndef main():\n"
+     "    q = P()\n"
+     "    q.a = 5\n"
+     "    q.b = 6\n"
+     "    sys.stdout.write(\"recv=%d\" % q.wide(1, 2, 3, 4, 5, 6, 7))\n"
+     "    return 0\n"),
 ]
 
 
@@ -442,32 +592,23 @@ REFUSALS = [
      "+ - * / // % & | ^ << >> **"),
 ]
 
-# The other direction, and it is a PER-PLATFORM limit rather than a shared one:
-# a NINE-argument call.  arm64 grew AAPCS's stack-argument convention on
-# 2026-10-01, so argument 8 travels in the caller's frame and both ends of it
-# load and store there; x86-64's SysV convention — six integer argument
-# registers and then the stack — is still unimplemented here, so the ninth
-# argument is still refused there.  Both answers are correct for their
-# platform, and the point of pinning the x86-64 one is that it is a STATED
-# LIMIT rather than an oversight: if a later change implements the SysV stack
-# area, this case starts failing and says so
-# (`bugs/FORMAL_struct_pack_over_eight_arguments.md` §"the x86-64 gap", which
-# is the same wall from the `struct.pack` side).
+# The other direction, and it is a PER-PLATFORM limit rather than a shared one,
+# is where this file USED to end.  A nine-argument call was refused on x86-64
+# and answered on arm64: AAPCS passes arguments 0..7 in registers and the rest in
+# the caller's frame, SysV AMD64 passes 0..5 and the rest in the caller's frame,
+# and only AAPCS's half was implemented here.  That limit was pinned in a group
+# of its own (`X86_ONLY_REFUSALS`, built on x86-64 alone and required to refuse)
+# so that it would read as a STATED LIMIT rather than an oversight — and it was:
+# when the SysV stack area landed, that group started failing and said why.
 #
-# `test_formal_run.py`'s `nine_arguments_arrive` is the arm64 half, and the
-# nine-parameter CALLEE with no call site is pinned there too — a dylib export
-# is the only way to reach a function without a call site, and
-# `_load_home_from_stack` is what such a function's prologue uses.
-X86_ONLY_REFUSALS = [
-    ("nine_arguments_are_still_refused_on_x86_64",
-     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
-     "    return a8 * 10000 + a0\n\n"
-     "def main() -> int:\n"
-     "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n"
-     "    return 0\n",
-     "9 arguments exceeds the"),
-]
+# The group is gone and its subject is five `CASES` rows instead, because the
+# interesting property is not "x86-64 refuses this" but "the two machines put the
+# seventh argument in DIFFERENT PLACES and both deliver it".  A one-sided
+# assertion stays green through the whole class of defect a stack-argument
+# convention can have — the caller's `SUB`/`store`/`ADD`, or the callee's
+# `[RBP + 16 + 8k]` load — because the machine not using the frame cannot see
+# any of it.  `run_x86_refusal` went with it: it existed for that one limit, and
+# a runner with no case is a runner to maintain.
 
 
 def build(src, out, backend):
@@ -555,35 +696,6 @@ def run_refusal(name, mojo_src, needle, tmpdir, verbose):
     return True, ""
 
 
-def run_x86_refusal(name, mojo_src, needle, tmpdir, verbose):
-    """`run_refusal` for a limit that is ONE PLATFORM's, not the model's.
-
-    `run_refusal` requires both backends to refuse with the same words, which
-    is the right assertion for a construct absent from the value model and the
-    WRONG one here: arm64 lowers a nine-argument call, because AAPCS's stack
-    area is implemented on it. So this builds x86-64 only, requires the refusal,
-    and — deliberately — does NOT require arm64 to refuse, because a later
-    change implementing the SysV stack area would make arm64's behaviour
-    irrelevant to this case rather than wrong.
-    """
-    src = os.path.join(tmpdir, name + ".mojo")
-    with open(src, "w") as f:
-        f.write(mojo_src)
-    out = os.path.join(tmpdir, f"{name}.x86_64")
-    rc, text = build(src, out, "x86_64")
-    if rc == 0:
-        return False, ("x86-64 BUILT a construct its own SysV convention does "
-                       "not yet implement (six integer argument registers, and "
-                       "the stack area past them is unimplemented here); the "
-                       "binary is the real answer")
-    if needle not in text:
-        return False, (f"x86-64 refused, but not naming {needle!r}: "
-                       f"{text.strip()[-200:]}")
-    if verbose:
-        print(f"      x86-64 refused, naming {needle!r}")
-    return True, ""
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -596,14 +708,10 @@ def main():
             print(f"  case    {name}")
         for name, _s, needle in REFUSALS:
             print(f"  refusal {name}  ({needle!r})")
-        for name, _s, needle in X86_ONLY_REFUSALS:
-            print(f"  x86-only refusal {name}  ({needle!r})")
         return 0
 
-    known = ({c[0] for c in CASES} | {c[0] for c in REFUSALS}
-             | {c[0] for c in X86_ONLY_REFUSALS})
-    wanted = ([(c, False) for c in CASES] + [(c, True) for c in REFUSALS]
-              + [(c, "x86") for c in X86_ONLY_REFUSALS])
+    known = {c[0] for c in CASES} | {c[0] for c in REFUSALS}
+    wanted = [(c, False) for c in CASES] + [(c, True) for c in REFUSALS]
     if args.cases:
         missing = set(args.cases) - known
         if missing:
@@ -615,10 +723,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         for (name, mojo_src, third), is_refusal in wanted:
             try:
-                if is_refusal == "x86":
-                    ok, detail = run_x86_refusal(name, mojo_src, third, tmpdir,
-                                                 args.verbose)
-                elif is_refusal:
+                if is_refusal:
                     ok, detail = run_refusal(name, mojo_src, third, tmpdir,
                                              args.verbose)
                 else:
