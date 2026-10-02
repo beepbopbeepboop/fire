@@ -88,7 +88,6 @@ BASELINE = {
     'bugs/FORMAL_sweep_work_map_2026-09-30_r2.md': 2,
     'bugs/FORMAL_sweep_work_map_2026-10-01.md': 2,
     'bugs/FORMAL_time_struct_shaped_answers.md': 2,
-    'bugs/FORMAL_wide_receiver_by_reference.md': 1,
     'bugs/FORMAL_x86_64_hostmods_that_do_not_build.md': 2,
     'bugs/FORMAL_x86_64_tuple_assignment_member_target.md': 1,
     'bugs/PERF_char_scan_peak_rss_over_its_ceiling.md': 1,

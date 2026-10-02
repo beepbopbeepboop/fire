@@ -12,15 +12,16 @@ cannot be returned today is that its creator's scratch dies with the creator.
 These cases are about the LAYOUT, and they are deliberately not about whether
 the fix has landed end to end. It has not:
 
-  * `formal/build.py` raises the refusal (`:2423`, `frame_return_refusal`) and
-    that file is in nobody's write set this round — see
-    `bugs/INTERFACE_REQUEST_4_to_formal_build.md`;
   * the hidden argument is a calling-convention change whose proof-side
-    obligation is a `lib/Refine.lean` predicate, owned by [3].
+    obligation is a `lib/Refine.lean` predicate.  That predicate now exists
+    (`FrameOk_into` / `ReturnsBlockInto`, below), so of the two halves of the
+    original caveat only the layout's own — that the emitters consume the
+    block the layout hands them — is left.
 
 So a case here that passed end to end would be a lie, and this file asserts
 only what is true today: the layout is computed, it is the shape the emitters
-need, and the two machines would agree on it because they read one function.
+need, the two machines would agree on it because they read one function, and
+the callee contract a returning callee owes its caller is stated and proved.
 
 Usage:
     python3 test_returned_frame_layout.py [-v]
@@ -322,6 +323,41 @@ def main(argv):
     check('an_if_without_else_can_fall_off_the_end',
           M.returns_on_every_path(make_fn.body) is False,
           'the `if` has no else, so one path ends the body')
+
+    # 11. The PROOF-SIDE half, which was the last thing standing between this
+    #     file and an end-to-end claim: the callee contract for a callee that
+    #     RETURNS a frame.  `lib/Refine.lean` carries it now —
+    #     `FrameOk_into` (the caller's window, plus every 8-byte word outside
+    #     the destination block, unchanged) and `ReturnsBlockInto` (that, and
+    #     the return word IS the block the caller passed).
+    #
+    #     A textual check, deliberately.  The elaborate is `prooflib`'s job —
+    #     it is the `deps` of every proof-checking test — so a `Refine.lean`
+    #     that stopped typechecking is already a red gate; what THIS file pins is
+    #     that the predicate the request asked for exists under the name the
+    #     request named, because a renamed or deleted contract would leave the
+    #     gate green with the obligation unmet.
+    refine = os.path.join(HERE, 'lib', 'Refine.lean')
+    try:
+        text = open(refine, encoding='utf-8').read()
+    except OSError as e:
+        check('the_returned_frame_callee_contract_exists', False, repr(e))
+    else:
+        present = [n for n in ('def OutsideBlock', 'def FrameOk_into',
+                               'def ReturnsBlockInto',
+                               'theorem frameWrites_into_block',
+                               'theorem ReturnsBlockInto_of_copy',
+                               'theorem FrameOk_into_zero')
+                   if n not in text]
+        check('the_returned_frame_callee_contract_exists', not present,
+              f'lib/Refine.lean is missing: {present} — the callee contract '
+              f'a returning callee owes its caller')
+        # The recovery argument is the reason adding a predicate is safe, so it
+        # is checked as a NAME and not left to the reader: an empty block has
+        # to recover the plain predicate every existing proof uses.
+        check('an_empty_block_recovers_FrameOk',
+              'FrameOk_into_zero' in text and 'FrameOk_into_window' in text,
+              'the recovery lemma and the window lemma are both gone')
 
     print(f'\n{_PASS} passed, {_FAIL} failed')
     return 1 if _FAIL else 0
