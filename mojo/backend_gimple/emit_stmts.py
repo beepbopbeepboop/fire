@@ -755,6 +755,12 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str) -> None:
     if v in gen._actual_types:
         gen._actual_types[tname] = gen._actual_types[v]
     ginf.carry_callable_ret_types(gen, v, tname)
+    # …and the WHOLE-PROGRAM half of the same fact. `carry_callable_ret_types`
+    # writes the per-function tables, which are keyed by the lowered VALUE, and
+    # this function RETURNS right here — so a store into a globals-struct field
+    # loses them the same way. A call through `_root_globals.<name>` still
+    # knows the NAME, which is what `_note_global_callable_store` is keyed on.
+    ginf._note_global_callable_store(gen, tname, v)
 
 
 def _gen_stmt_AssignStmt(gen, node):
@@ -2218,6 +2224,14 @@ def _gen_stmt_ReturnStmt(gen, node):
         # since unlike plain C it does not implicitly convert.
         if gen.current_func_name and v in gen._tuple_slot_types:
             gen._return_slot_types[gen.current_func_name] = gen._tuple_slot_types[v]
+        # Same idea for a returned CALLABLE: `def mk(): return lambda: False`
+        # hands back a `void *`, and the `mk()(...)` call site would then read
+        # the homogenized int64_t box. The lowered value is what
+        # `_lower_LambdaExpr` recorded the real type against, so this is the
+        # one site that can see it.
+        if gen.current_func_name and v in gen._callable_ret_types:
+            gen._return_callable_ret_types[gen.current_func_name] = \
+                gen._callable_ret_types[v]
         ret = gen.func_ret_type
         if ret == 'void':
             gen._emit(gimple_codegen._RETURN)

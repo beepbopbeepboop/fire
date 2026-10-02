@@ -1262,7 +1262,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             if _callee_t == 'MojoBoundMethod *':
                 return gen._lower_bound_method_call_value(_callee_v, node)
             if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
-                return gen._lower_fnptr_call_value(_callee_t, _callee_v, node)
+                # `factory()(...)`, where the factory returns a callable: the
+                # callee's own return type rides on its CallExpr node (see
+                # `lower_expr`'s own comment) because the result has already
+                # been cast into `_callee_v` by the time this runs, so no
+                # value-keyed table can still match it.
+                return gen._lower_fnptr_call_value(
+                    _callee_t, _callee_v, node,
+                    getattr(node.func, '_callable_ret', 'int64_t'))
         # `SomeGeneric[ExplicitArg](args)` where SomeGeneric ALSO has
         # implicit/inferred bracket params this elaborator can't bind
         # (e.g. std.python.numpy.from_numpy_array[mut, //, dtype,
@@ -1328,7 +1335,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # read its type from, and guessing is what this bug was.
         if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-                and node.func.obj.name in gen._dict_callable_ret):
+                and (node.func.obj.name in gen._dict_callable_ret
+                     or node.func.obj.name in gen._global_dict_callable_ret)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
                 return gen._lower_bound_method_call_value(_callee_v, node)
@@ -1353,7 +1361,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # call to a `next` symbol that does not exist, so
                 # `fire.py --dump-full` compiled clean and then failed at
                 # `ld: undefined _next` out of this very function.
-                _vt = gen._dict_callable_ret.get(node.func.obj.name) or 'int64_t'
+                _vt = gen._dict_callable_ret.get(node.func.obj.name)
+                if _vt is None:
+                    # A dict held in a MODULE GLOBAL, read from `_toplevel`.
+                    # `_reset_func`'s seed excludes any name this function
+                    # binds itself, and `_toplevel` binds every module-level
+                    # name by definition — so only the never-reset
+                    # whole-program table can answer here. Same two-table
+                    # shape as `_lower_fnptr_call`'s global callee lookup.
+                    _vt = gen._global_dict_callable_ret.get(node.func.obj.name)
+                if not _vt:
+                    _vt = 'int64_t'
                 return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
@@ -3814,6 +3832,20 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     return 'MojoList *', res
 
 
+# The iterable C types `_lower_comprehension` has a real arm for: a `range`
+# is a NODE shape (`is_range`), not a type, so it is not in here. Anything
+# outside this set reaching that function's dispatch produced an empty
+# comprehension with a `/* TODO: comprehension over <type> */` marker and no
+# diagnostic, which is why the callers that can see an ambiguous handle have to
+# resolve it themselves rather than hand it over. Named here, beside the one
+# caller that needs it, so it cannot drift from `_lower_comprehension`'s own
+# dispatch chain — check them against each other if either changes.
+_COMPREHENSION_ITER_TYPES = (
+    'MojoList *', 'MojoStr *', 'char *', 'MojoDict *', 'MojoSet *',
+    'MojoGenerator *',
+)
+
+
 def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Shared `set(iterable)` / `list(iterable)` lowering: build a
     synthetic `{x for x in <arg>}` / `[x for x in <arg>]` Comprehension
@@ -3878,28 +3910,72 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
         # `var_types` lowers straight back to itself with this ctype.
         gen.var_types[_av] = _at
         _arg0 = gimple_ctypes.IdentExpr(_av, node.line, node.col)
-    # `list(<a list>)` is a slot-for-slot copy, so the result describes its
-    # slots exactly as the source does — and for a list that carries its own
-    # per-slot kinds (a `struct.unpack` of a mixed format, a heterogeneous
-    # literal) that description is the only thing standing between a copy and
-    # raw IEEE-754 bit patterns. The comprehension below emits the copy as an
-    # explicit append loop, which loses the kinds by itself, so hand them
-    # over once it has run. Done at RUNTIME lookup rather than from the
-    # codegen's own table on purpose: the source is reached through a value
-    # the codegen may have no kinds for (a copy of a copy, a list returned
-    # from a function) while the runtime does. Only for `list` — a `set`
-    # re-reads its elements through the set's own per-slot accessors and
+    # `list` and `tuple` both walk their argument through the comprehension
+    # below, which dispatches on the argument's STATIC type and has no arm for
+    # a value of unknowable kind — it emits `/* TODO: comprehension over
+    # int64_t */` and produces an EMPTY list. That is how
+    # `self.func_param_types[_mangled] = list(_pcs)` silently became `[]` for
+    # every `GimpleGen_*` signature in the SELF-HOSTED compiler (the frozen
+    # signature table's element type is erased there, so `_pcs` arrives as a
+    # bare handle), and how `list(_dflts)` walked a list of `(name, default)`
+    # pairs as though it were a dict.
+    #
+    # So resolve the argument ONCE, here — one lowering, no duplicated side
+    # effects — and if its kind is not statically knowable, hand it to the
+    # `_materialize_as_list` chokepoint DESIGN.html R1/R5 exists for. That
+    # helper already answers "give me a list I can walk" for an ambiguous
+    # handle by consulting the runtime registries (`mojo_is_registered_dict`
+    # /`_set`) instead of guessing, and it is what keeps `list(x)` agreeing
+    # with `all(x)`, `enumerate(x)` and `','.join(x)` about what an ambiguous
+    # handle is. Reusing it is the point: a second spelling of that dispatch
+    # here is exactly the kind of drift the R1 consolidation removed.
+    #
+    # `_copy_src` is the per-slot kinds hand-off: `list(<a list>)` is a
+    # slot-for-slot copy, so the result must describe its slots exactly as the
+    # source does — for a list carrying its own per-slot kinds (a
+    # `struct.unpack` of a mixed format, a heterogeneous literal) that
+    # description is the only thing standing between a copy and raw IEEE-754
+    # bit patterns. The comprehension emits the copy as an explicit append
+    # loop, which loses the kinds by itself. Looked up at RUNTIME rather than
+    # from the codegen's own table on purpose: the source is reached through a
+    # value the codegen may have no kinds for (a copy of a copy, a list
+    # returned from a function) while the runtime does. Only for `list` — a
+    # `set` re-reads its elements through the set's own per-slot accessors and
     # genuinely produces a different container.
     _copy_src = None
-    if kind == 'list':
-        _lt, _lv = gen.lower_expr(_arg0)
-        if _lt == 'MojoList *':
-            # Same anti-double-side-effect discipline as the set branch
-            # above: re-use the value we just lowered, do not lower the
-            # argument expression a second time.
-            gen.var_types[_lv] = _lt
-            _arg0 = gimple_ctypes.IdentExpr(_lv, node.line, node.col)
-            _copy_src = _lv
+    if kind == 'list' or kind == 'tuple':
+        _ct, _cv = gen.lower_expr(_arg0)
+        if _ct == 'MojoList *':
+            # Hand the ALREADY-lowered value on as a plain name rather than
+            # re-lowering `node.args[0]` (which would emit its side effects
+            # twice); a name registered in `var_types` lowers straight back to
+            # itself with this ctype.
+            gen.var_types[_cv] = _ct
+            _arg0 = gimple_ctypes.IdentExpr(_cv, node.line, node.col)
+            if kind == 'list':
+                _copy_src = _cv
+        elif ((gen._get_actual_type(_ct, _cv) or _ct)
+              not in _COMPREHENSION_ITER_TYPES):
+            # Opaque handle: get a walkable list for it, per the dispatch
+            # above. A dict materializes its KEYS and a set its own insertion
+            # order, which is what Python does for both.
+            #
+            # Only for a type NOBODY can read, and deliberately NOT for one
+            # `_get_actual_type` merely refines to `MojoList *`: that arm is
+            # left to `_lower_comprehension`, which re-lowers the iterable
+            # into a fresh temp and carries the element-type record onto that
+            # new name (see its own `_get_actual_type` block). Substituting
+            # the pre-existing boxed name here instead loses that record, and
+            # the record is the only thing that says whether the slots hold
+            # ints or strings — `list(ident([1, 2, 3]))` next to
+            # `",".join(ident(["a", "b"]))` in one function read the first
+            # through `mojo_list_get_str` and stopped compiling.
+            _ml = gen._materialize_as_list(
+                gen._get_actual_type(_ct, _cv) or _ct, _cv)
+            gen.var_types[_ml] = 'MojoList *'
+            _arg0 = gimple_ctypes.IdentExpr(_ml, node.line, node.col)
+            if kind == 'list':
+                _copy_src = _ml
     gen.temp_counter += 1
     var = f"_ctor_elem{gen.temp_counter}"
     synth_gen = gimple_ctypes.Generator(target=var, iterable=_arg0, conditions=[],
@@ -4962,11 +5038,20 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         # Materialize the env exactly as the closing-lambda path below does;
         # a variadic lambda that ALSO captures is the same `self, then the
         # real parameters` convention, just with the tail packed.
-        _env_void = '0'
+        _env_void = gen._new_val('void *', '(void *)0')
         if _env_struct:
             _vp = gen._new_temp('void *')
+            _sz = gen._new_temp('int64_t')
+            # `sizeof(S)` and a bare `(void *)f` are both invalid GIMPLE
+            # operands (see GimpleGen._c_sizeof_helper / _c_fnaddr_helper),
+            # which is why the closing-lambda path a few lines below reaches
+            # both through tiny `static` accessors the body calls. Same two
+            # helpers here; this path previously spelled both out inline and
+            # so failed to compile only when its lambda was referenced from a
+            # `__GIMPLE`-tagged body.
+            gen._emit(f'  {_sz} = {gen._c_sizeof_helper(_env_struct)} ();')
+            gen._emit(f'  {_vp} = malloc ({_sz});')
             _envp = gen._new_temp(f'{_env_struct} *')
-            gen._emit(f'  {_vp} = malloc (sizeof({_env_struct}));')
             gen._emit(f'  {_envp} = ({_env_struct} *) {_vp};')
             _default_src = {pn: dv for pn, dv in node.params if dv is not None}
             for _cn, _ct in _env_fields:
@@ -4983,12 +5068,27 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                     _cv = gen._new_val('int64_t', f'(int64_t){_cn}')
                 gen._emit(f'  {_envp}->{_cn} = {_cv};')
             _env_void = gen._new_val('void *', f'(void *){_envp}')
-        _fnv = gen._new_val('void *', f'(void *){lifted_name}')
+        _fnv = gen._new_temp('void *')
+        gen._emit(f'  {_fnv} = {gen._c_fnaddr_helper(lifted_name)} ();')
+        _nfv = gen._new_val('int64_t', str(_n_fixed))
+        _kdv = gen._new_val('int64_t', str(_kind))
+        _hsv = gen._new_val('int64_t', str(1 if _env_struct else 0))
+        # The three counts go through `_new_val` as real temps, NOT as
+        # parenthesized literals. A parenthesized sub-expression is not a
+        # legal GIMPLE operand, so `(0)` here is a hard parse failure — but
+        # only inside a `__GIMPLE`-tagged body, which is why it went
+        # unnoticed: a `lambda *a: ...` referenced from an ordinary top-level
+        # or free function compiled fine (GCC lowers plain C to GIMPLE
+        # itself) and the same lambda inside a struct method or a nested
+        # `def` died with "expected expression before '(' token" and
+        # "invalid argument to gimple call". `_new_val`'s own cast handling
+        # is what makes `(int64_t)0` safe as a STATEMENT; an argument slot is
+        # where a cast is not.
         _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
                              [('void *', _fnv), ('void *', _env_void),
-                              ('int64_t', f'({_n_fixed})'),
-                              ('int64_t', f'({_kind})'),
-                              ('int64_t', f'({1 if _env_struct else 0})')])
+                              ('int64_t', _nfv),
+                              ('int64_t', _kdv),
+                              ('int64_t', _hsv)])
         # NOT in `_funcptr_builtins_needed`: the bare static function-pointer
         # form has the wrong signature for this shape, same as the env case.
         return 'void *', gen._new_val('void *', f'(void *){_vf}')
@@ -5206,6 +5306,25 @@ def _lower_fnptr_call(gen, fname_raw: str, var_ctype: str,
         fp_raw = gen._c_names.get(fname_raw, fname_raw)
         fp_type = var_ctype
     ret_type = gen.func_return_types.get(fname_raw, 'int64_t')
+    if ret_type == 'int64_t':
+        # A callable held in a MODULE GLOBAL. `_callable_ret_types` is keyed
+        # by the VALUE (`_tN`, or a local's C name), and the value a global
+        # callee reads back through is a fresh temp loaded out of
+        # `_root_globals`, so the NAME is the only key that survives the box
+        # — which is exactly why a `lambda: False` printed `0` at module
+        # scope while the same lambda bound to a local printed `False`.
+        # Both tables are consulted because they answer for different
+        # scopes: `_global_callable_ret_types` is the module-global one and
+        # never reset, while `_callable_ret_types` also carries this name
+        # when `_reset_func` seeded it for a function that does not rebind
+        # the global (`_toplevel` itself rebinds it, so it is excluded from
+        # that seed by the usual shadowing rule and only the global table
+        # can answer there).
+        _grt = gen._global_callable_ret_types.get(fname_raw)
+        if _grt is None:
+            _grt = gen._callable_ret_types.get(fname_raw)
+        if _grt is not None:
+            ret_type = _grt
     # A libm call's C return type is a property of the C FUNCTION, not of
     # this module's inference: `sqrt` is `double sqrt(double)` whatever the
     # argument infers as. Without this the call was typed int64_t and the
@@ -6285,7 +6404,9 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
 
     if ret_type == 'void':
         return gen._void_call(fname, arg_pairs)
-    t = gen._call_expr(ret_type, fname, arg_pairs)
+    # `node.args` positionally, so an argument coercion can tell what each
+    # argument MEANT (see `_emit_call`'s `arg_nodes`).
+    t = gen._call_expr(ret_type, fname, arg_pairs, node.args)
     # A multi-value return's per-slot types, carried across the call (see
     # gen._return_slot_types's declaration). Same reason and same shape as
     # the `_return_elem_types` block just below: the callee's slot types are
@@ -6340,6 +6461,25 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # emitted.
     if ret_type == 'MojoList *' and fname_raw in getattr(gen, '_return_maybe_kinds', ()):
         gen._maybe_kinds_vals.add(t)
+    # ...and, for a returned heterogeneous list LITERAL, the per-slot kinds
+    # themselves. Same whole-program scan (`_infer_return_maybe_kinds`), same
+    # key, one step finer: the boolean above can only tell a read with no
+    # compile-time index to ask the runtime, while a literal's slot kinds ARE
+    # compile-time facts and die at the function boundary unless they are
+    # carried. Seeded under `_struct_slot_kinds` — the table that already
+    # means "the per-slot kinds of this value, known statically", filled for a
+    # `struct.unpack` result — so every statically indexed read (the MojoList
+    # subscript arm below, `a, b = t` destructuring, the whole-result repr)
+    # picks its accessor with no new site. Without it:
+    # `def mixed(x: Float64, s: String): return [x, 1, s]` gave the caller's
+    # local the unknown-element default `str`, `a[0]` handed `2.5`'s
+    # IEEE-754 bits to `strlen` (SIGSEGV), and `a[2]` answered the decimal of
+    # its own pointer — bugs/CODEGEN_list_element_read_defaults_to_str_across
+    # _a_call.md.
+    if ret_type == 'MojoList *':
+        _rsk = getattr(gen, '_return_value_slot_kinds', {}).get(fname_raw)
+        if _rsk:
+            gen._struct_slot_kinds[t] = _rsk
     return ret_type, t
 
 
@@ -6426,6 +6566,10 @@ def _lower_struct_constructor(gen, struct_name: str,
     # _struct_method_signatures entry — see ~line 2672) fall through to
     # the single-signature path below unchanged; cross-module overload
     # resolution is a separate follow-on (elaborate.py extension).
+    # The leading None lines the receiver pair up with the call site's own
+    # `args`, so an argument coercion can still tell what each argument MEANT
+    # (see `_emit_call`'s `arg_nodes`).
+    _arg_nodes = [None] + list(args) if args else None
     _init_candidates = gen._struct_method_signatures.get(_sms_key(struct_name, '__init__'))
     if _init_candidates:
         _chosen = gen._resolve_overload(_init_candidates, args, kwargs)
@@ -6435,7 +6579,7 @@ def _lower_struct_constructor(gen, struct_name: str,
                 gen._build_call_args_for_candidate(
                     _chosen, args, kwargs,
                     gen._struct_init_defaults.get(struct_name, {}))
-            gen._emit_call('void', '', init_fname, arg_pairs)
+            gen._emit_call('void', '', init_fname, arg_pairs, _arg_nodes)
             return ctype, t
         # No candidate could be resolved — either no candidate's arity fits
         # this call at all, or (same arity, but every candidate erases to
@@ -6544,7 +6688,7 @@ def _lower_struct_constructor(gen, struct_name: str,
                     _cv = gen._new_temp(_want)
                     gen._safe_coerce_emit(_have_t, _want, _have_v, _cv)
                     arg_pairs[_ai] = (_want, _cv)
-        gen._emit_call('void', '', init_fname, arg_pairs)
+        gen._emit_call('void', '', init_fname, arg_pairs, _arg_nodes)
     if (not _did_init_call) and (_n_kw > 0 or _n_args > 0):
         # Positional args + keyword args — assign fields by position then by
         # name. Iterate `gen.struct_field_types[struct_name]` (a real dict)
@@ -6885,6 +7029,17 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                                        f"mojo_list_get_int ({ov}, {idx64})")
                     return 'MojoBytes *', gen._new_val(
                         'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
+                if _skd == 'str':
+                    # A `char *` slot, held in the raw int64_t slot (see
+                    # fire_runtime.h's MojoList comment), so this is the
+                    # string accessor and NOT a coercion: the word IS the
+                    # pointer. `'str'` reaches this table two ways — a
+                    # `struct.unpack` format can never produce it, so it is
+                    # always a heterogeneous list LITERAL, including one that
+                    # came back through a `return`
+                    # (`gen._return_value_slot_kinds`).
+                    return 'char *', gen._new_val(
+                        'char *', f"mojo_list_get_str ({ov}, {idx64})")
                 return 'int64_t', gen._new_val(
                     'int64_t', f"mojo_list_get_int ({ov}, {idx64})")
         suf  = gimple_ctypes.TypeLattice.list_suffix(elem)

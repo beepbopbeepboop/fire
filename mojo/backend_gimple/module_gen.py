@@ -267,52 +267,154 @@ def _seed_selfhost_return_elem_types(self):
             self._return_elem_types[_k] = _e
 
 
-def _returns_kinds_valued(gen, node) -> bool:
+def _param_slot_kinds(params) -> dict:
+    """`{parameter name: per-slot kind byte}` for the ANNOTATED parameters of
+    a function definition.
+
+    This pre-pass runs over every body BEFORE the per-function locals exist,
+    so `gen._quick_type(IdentExpr('x'))` for a parameter answers the erased
+    `int64_t` for every parameter in the program — which is exactly what
+    made the list-literal arm of `_returns_kinds_valued` answer "homogeneous"
+    for `return [x, 1, s]` and hand a float's bits to `strlen`. A parameter's
+    DECLARED type is not erased: it is the annotation, and it is what the
+    slot will hold. Unannotated parameters contribute nothing, so the answer
+    stays as weak as it was for them rather than being invented.
+
+    `gimple_ctypes._mojo_type` is the shared annotation-to-C-type answer
+    (`_quick_type` itself goes through `_TYPE_MAP`), so the kind byte comes
+    from the same table the emitter's own `slot_kind_byte` mapping uses.
+    """
+    out = {}
+    if not params:
+        return out
+    for _p in params:
+        try:
+            _nm, _ann = _p[0], _p[1]
+        except (TypeError, IndexError):
+            continue
+        if not isinstance(_ann, str) or not _ann:
+            continue
+        out[_as_str(_nm)] = gimple_ctypes.TypeLattice.slot_kind_byte(
+            gimple_ctypes._mojo_type(_ann))
+    return out
+
+
+def _list_literal_slot_kinds(gen, node, param_kinds=None) -> list:
+    """The long-form kind name of EVERY slot of a list literal, in order.
+
+    This is the per-index half of `_returns_kinds_valued`'s list arm, and it is
+    what a statically indexed read needs: the boolean half can only say "ask
+    the runtime", which for a `char *` slot answers with the raw word. The
+    spelling is the long-form one `gen._struct_slot_kinds` already uses for a
+    `struct.unpack` result, so a statically indexed read of a returned
+    heterogeneous list picks its accessor through the same table. `''` when the
+    literal is not a heterogeneous list — including the `*`-unpack element,
+    which has no compile-time slot count and so no static per-slot kinds at
+    all."""
+    if not isinstance(node, gimple_ctypes.ListExpr) or not node.elements:
+        return ''
+    out = []
+    for _el in node.elements:
+        if isinstance(_el, gimple_ctypes.UnaryOp) and _el.op == '*':
+            return ''
+        if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
+                isinstance(_el, gimple_ctypes.IdentExpr)
+                and _el.name == 'None')):
+            out.append('none')
+            continue
+        if isinstance(_el, gimple_ctypes.IdentExpr) and param_kinds:
+            _pk = param_kinds.get(_as_str(_el.name))
+            if _pk is not None:
+                out.append(_pk)
+                continue
+        out.append(gimple_ctypes.TypeLattice.slot_kind_name(
+            gen._quick_type(_el)))
+    kinds = set(out)
+    return out if len(kinds) > 1 else ''
+
+
+def _returns_kinds_valued(gen, node, param_kinds=None) -> bool:
     """True when `node` is an expression that produces a value whose
     per-slot element kinds are recorded on the VALUE itself — a
     `struct.unpack` of a format that mixes kinds, a `Struct` handle's
-    `unpack`/`iter_unpack` on such a format, or a heterogeneous list/tuple
+    `unpack`/`iter_unpack` on such a format, or a heterogeneous list
     LITERAL. The kinds then survive a `return` even though the compile-time
     NAME they were recorded against does not, which is the whole reason this
     question needs answering at the callee (see `_infer_return_maybe_kinds`).
 
     Only literal formats answer, the same bar `_struct_ctor_format` sets:
     a computed format is not statically known, and guessing would be the
-    wrong-static-answer failure the whole table exists to avoid. The list
-    case is decided by the same rule `_lower_list_literal` records under —
-    a kind byte per element (`mojo_list_set_kinds`'s own alphabet, which
-    `_list_literal_slot_kind` maps), emitted only when they are not all the
-    same — so the two cannot disagree about which literals describe
-    themselves.
+wrong-static-answer failure the whole table exists to avoid.
 
-    The heterogeneous-literal case is what makes `def mixed(x: Float64, s:
-    String) -> List: return [x, 1, s]` readable through a call. Its
-    elements' joined type is `char *` (`TypeLattice.join` resolves
-    double-vs-char* to char*), so the caller binds the result's element type
-    from `_return_elem_types` and `a[p]` lowers to `mojo_list_get_str` — a
-    float slot's IEEE-754 bits handed to `strlen`, which SIGSEGVs. The kinds
-    ARE recorded, by the callee's own literal lowering; marking the call
-    result makes the read a boxed one and lets the runtime answer per slot."""
+    The list-literal arm was MISSING, and the omission is what
+    `bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md` is:
+    `_lower_list_literal` records the per-slot kinds of a heterogeneous
+    literal on the value (`mojo_list_set_kinds`) and marks it in
+    `gen._maybe_kinds_vals` — but only while THAT function is being
+    lowered. A `return [x, 1, s]` therefore described itself perfectly
+    and lost every word of it at the boundary, because this function
+    (which decides the cross-function half) did not recognise the one
+    producer that is not a `struct.unpack`. So
+    `def mixed(x: Float64, s: String): return [x, 1, s]` bound to a local in
+    the caller left that local's element type at the unknown-element default
+    `str`, and every read of it went through `mojo_list_get_str` — so `a[0]`,
+    which holds `2.5`'s IEEE-754 bit pattern `0x4004000000000000`, was handed
+    to `strlen` and the program died with SIGSEGV. Marking the callee makes
+    the call site register the result in `_maybe_kinds_vals`
+    (`emit_calls.py`'s `_lower_named_call`), which is the flag the subscript
+    and iteration lowerings already consult for `mojo_list_get_boxed`.
+
+    The heterogeneous-literal case is what makes
+    `def mixed(x: Float64, s: String) -> List: return [x, 1, s]` readable
+    through a call. Its elements' joined type is `char *` (`TypeLattice.join`
+    resolves double-vs-char* to char*), so the caller binds the result's
+    element type from `_return_elem_types` and `a[p]` lowers to
+    `mojo_list_get_str` — a float slot's IEEE-754 bits handed to `strlen`,
+    which SIGSEGVs. The kinds ARE recorded, by the callee's own literal
+    lowering; marking the call result makes the read a boxed one and lets the
+    runtime answer per slot.
+
+    The "not all the same kind" test is the emitter's own, applied
+    statically: one kind byte per element, from `_param_slot_kinds` where the
+    element is a bare parameter, else `_quick_type`. A `*`-unpack element has
+    no compile-time slot count and so no static per-slot kinds at all —
+    answering False for it keeps that case exactly where it was.
+
+    `gen is None` is the predicate's own no-type-context mode, which
+    test_gimple.py's struct-format case calls it in (that case is about the
+    CallExpr arm below and needs no types). With no context an identifier
+    element cannot be typed, so the literal half answers what it can — LITERAL
+    elements only — rather than claiming to have seen the whole literal. That
+    is also why the `gen is None` test sits where it does: a mode that
+    silently guessed `int64_t` for every element would answer "homogeneous"
+    for `return [1, 2, 3]` on a wrong premise rather than declining.
+
+    `TupleExpr` is in the isinstance test for the same reason it is in
+    `_lower_list_literal`'s: a tuple literal is a list literal that prints
+    with parentheses, and its per-slot kinds are recorded the same way."""
     if isinstance(node, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
-        # `gen is None` is the predicate's own no-type-context mode, which
-        # test_gimple.py's struct-format case calls it in (that case is about
-        # the CallExpr arm below and needs no types). With no context an
-        # identifier element cannot be typed, so the literal half answers what
-        # it can — LITERAL elements only — rather than claiming to have seen
-        # the whole literal.
         _kinds = set()
         _saw_typed = False
         for _el in (node.elements or []):
-            if isinstance(_el, (gimple_ctypes.NoneLiteral,)) or (
-                    isinstance(_el, gimple_ctypes.IdentExpr) and _el.name == 'None'):
+            if isinstance(_el, gimple_ctypes.UnaryOp) and _el.op == '*':
+                return False
+            if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
+                    isinstance(_el, gimple_ctypes.IdentExpr)
+                    and _el.name == 'None')):
                 _kinds.add('n')
                 _saw_typed = True
-            elif gen is None:
                 continue
-            else:
-                _kinds.add(gimple_ctypes.TypeLattice.slot_kind_byte(
-                    gen._quick_type(_el)))
-                _saw_typed = True
+            if gen is None:
+                continue
+            if isinstance(_el, gimple_ctypes.IdentExpr) and param_kinds:
+                _pk = param_kinds.get(_as_str(_el.name))
+                if _pk is not None:
+                    _kinds.add(_pk)
+                    _saw_typed = True
+                    continue
+            _kinds.add(gimple_ctypes.TypeLattice.slot_kind_byte(
+                gen._quick_type(_el)))
+            _saw_typed = True
         return _saw_typed and len(_kinds) > 1
     if not isinstance(node, gimple_ctypes.CallExpr):
         return False
@@ -345,7 +447,8 @@ def _returns_kinds_valued(gen, node) -> bool:
     return False
 
 
-def _infer_return_maybe_kinds(gen, body, func_def) -> bool:
+def _infer_return_maybe_kinds(gen, body, params=None,
+                            callee_kinds=None) -> tuple:
     """Does any `return` in this body hand back a kinds-carrying value?
 
     The cross-function half of the per-slot-kinds mechanism. A
@@ -365,49 +468,119 @@ def _infer_return_maybe_kinds(gen, body, func_def) -> bool:
     not — recorded rather than approximated, since over-approximating here
     would only cost a boxed read on a value the runtime then reports as
     unboxed, while under-approximating costs a wrong answer, and a missing
-    case is a missing case either way.
+`case is a missing case either way.
 
-    `func_def` is the definition this body belongs to, and its ANNOTATED
-    params are seeded into `var_types` for the duration of the walk: the
+    Returns `(maybe_kinds, slot_kinds)`:
+    `maybe_kinds` is the BOOLEAN half, which reaches the call site as
+    `gen._return_maybe_kinds` and becomes a `mojo_list_get_boxed` read for a
+    subscript or iteration with no compile-time index;
+    `callee_kinds` is the set of function names ALREADY known to hand one
+    back, so a value that travels out through TWO returns is found rather than
+    missed — see `_valued` below;
+    `slot_kinds` is the PER-INDEX half, the long-form kind name of every slot
+    of a returned heterogeneous list literal (`'double'` / `'str'` / `'bytes'`
+    / `'int'`, the spelling `gen._struct_slot_kinds` already uses). That one
+    is what makes a STATICALLY indexed read exact — `a[2]` on
+    `[x, 1, s]` has to come back as a `char *`, and the boolean alone can only
+    say "ask the runtime", which for a `char *` slot answers with the raw word.
+    `[]` when nothing per-index is known.
+
+    `params` is the definition's own parameter list, and it is threaded in for
+    the same reason `_infer_return_elem_type` takes `func_def`: the
     heterogeneous-literal test reads each element's type, and a parameter is
     the most ordinary element there is — `return [x, 1, s]` in
     `def mixed(x: Float64, s: String) -> List` is three elements of which two
-    are params. With `var_types` unseeded `_quick_type` answers int64_t for
-    every identifier, so all three read as one kind and the literal looks
-    homogeneous. Seed and restore are the same save/overlay/restore
-    `_infer_return_elem_type` does for the same reason."""
+    are params. This pre-pass runs before the per-function locals exist, so
+    `gen._quick_type(IdentExpr('x'))` answers the erased `int64_t` for every
+    parameter in the program and all three elements read as one kind.
+
+    It is read TWO ways, deliberately, because a parameter's type is needed by
+    two different consumers. `_param_slot_kinds` answers for a bare
+    `IdentExpr` element with no `gen` state at all, which is what makes the
+    `gen is None` no-type-context mode still able to say "heterogeneous"; and
+    `var_types` is overlaid with the same annotations so an element that is an
+    ARITHMETIC expression over a parameter (`return [x + 1, s]`) is typed too.
+    The overlay is saved and restored exactly as `_infer_return_elem_type`
+    does it, because this function is called from inside a fixpoint that owns
+    `gen.var_types`."""
+    _pk = _param_slot_kinds(params)
+    _ck = callee_kinds if callee_kinds is not None else ()
     _saved_vt = gen.var_types if gen is not None else None
     if gen is not None:
         gen.var_types = dict(_as_dict(_saved_vt))
-        if func_def is not None:
-            for _pname, _ptype in (func_def.params or []):
-                if _ptype:
-                    gen.var_types[_pname] = gimple_ctypes._mojo_type(_ptype)
+        for _p in (params or []):
+            try:
+                _pname, _ptype = _p[0], _p[1]
+            except (TypeError, IndexError):
+                continue
+            if isinstance(_ptype, str) and _ptype:
+                gen.var_types[_as_str(_pname)] = gimple_ctypes._mojo_type(_ptype)
+
+    def _valued(node) -> bool:
+        """Does this EXPRESSION produce a value whose per-slot kinds were
+        recorded on it?
+
+        `_returns_kinds_valued` answers from the expression's own shape. This
+        adds the one hop it cannot see: a call to a function that ITSELF
+        hands back such a value. `mixed` records the kinds on the literal it
+        returns, and `drop_one`'s `kept = mixed(...)` / `return kept` carries
+        that value out through a SECOND frame — which is the shape
+        test_gimple_runner.py's `gimple_kinds_survive_a_sibling_list_being_
+        freed` is, and with the hop missing `drop_one` was not marked, so
+        `b = drop_one()` was not registered in `_maybe_kinds_vals` and
+        `print(b[i])` reached for `mojo_list_get_str` on a list whose slot 0
+        holds `9.5`'s IEEE-754 bits: SIGSEGV after the first line. The whole
+        list's repr was right (the kinds ARE on the value), so the row looked
+        like a repr bug and was not one.
+
+        The callee's OWN name is what is matched, and both spellings the
+        method-mangling scheme produces are spelled here: a bare free
+        function and the `Struct_method` form `_mk` registers methods under.
+        """
+        if _returns_kinds_valued(gen, node, _pk):
+            return True
+        if not isinstance(node, gimple_ctypes.CallExpr):
+            return False
+        _f = node.func
+        if isinstance(_f, gimple_ctypes.IdentExpr):
+            return _as_str(_f.name) in _ck
+        if (isinstance(_f, gimple_ctypes.MemberExpr)
+                and isinstance(_f.obj, gimple_ctypes.IdentExpr)):
+            return f'{_as_str(_f.obj.name)}_{_as_str(_f.member)}' in _ck
+        return False
     bound: set = set()
+    kinds_out: list = []
     try:
         for _round in range(2):
             found = False
             for nd in _walk_ast(body):
                 if (isinstance(nd, gimple_ctypes.AssignStmt)
                         and isinstance(nd.target, gimple_ctypes.IdentExpr)):
-                    if _returns_kinds_valued(gen, nd.value) or (
+                    if _valued(nd.value) or (
                             isinstance(nd.value, gimple_ctypes.IdentExpr)
                             and nd.value.name in bound):
                         bound.add(nd.target.name)
                 elif (isinstance(nd, gimple_ctypes.VarDecl) and nd.name
-                        and _returns_kinds_valued(gen, getattr(nd, 'value', None))):
+                        and _valued(getattr(nd, 'value', None))):
                     bound.add(nd.name)
                 elif isinstance(nd, gimple_ctypes.ReturnStmt):
                     v = getattr(nd, 'value', None)
-                    if _returns_kinds_valued(gen, v):
+                    if _returns_kinds_valued(gen, v, _pk):
+                        found = True
+                        kinds_out = (_list_literal_slot_kinds(gen, v, _pk)
+                                     or kinds_out)
+                    elif _valued(v):
                         found = True
                     elif (isinstance(v, gimple_ctypes.IdentExpr)
                           and v.name in bound):
                         found = True
             if found:
-                return True
-        return False
+                return True, kinds_out
+        return False, kinds_out
     finally:
+        # The `var_types` overlay above is this function's, and the fixpoint
+        # that calls it owns the real one; leaving the overlay behind would
+        # make every later round answer from annotations this body invented.
         if gen is not None:
             gen.var_types = _saved_vt
 
@@ -1087,6 +1260,46 @@ def _gmi_is_ctor_container_ctype(t) -> bool:
         if _ts == _ct:
             return True
     return False
+
+
+def _lambda_ret_type(gen, node) -> str:
+    """The C return type `_lower_LambdaExpr` will declare for this lambda.
+
+    That lowering builds the synthetic body `return <node.body>` and calls
+    `_infer_return_type` on it, which is `TypeLattice.join_all` over
+    `_quick_type` of that one expression. Computed here from the same two
+    facts, so the answer is the lifted definition's declared type by
+    construction rather than by coincidence -- and available without
+    lifting, which is what lets the Phase 1.7 pre-scan record it.
+
+    `void` (a `None` body) is normalized to `int64_t`, matching the
+    lifted definition: `_collect_return_types` yields the `void` string for
+    a value-less `return`, and `_lower_fnptr_call_value`'s `ret_type ==
+    'void'` arm already handles it, so it needs no special case here."""
+    if node.body is None:
+        return 'int64_t'
+    return _as_str(TypeLattice.join_all([_as_str(gen._quick_type(node.body))]))
+
+
+def _lambda_pairs_ret_type(gen, pairs) -> str:
+    """The single callable return type stored in a dict LITERAL of lambdas,
+    or '' when they disagree (or are not all lambdas).
+
+    The unanimity-or-nothing rule is `note_dict_callable_ret`'s, applied at
+    the one site that knows every element before the dict exists. '' is the
+    ambiguous answer, and every consumer reads it with `or 'int64_t'`, so
+    this can only preserve the pre-existing behaviour, never invent one."""
+    agreed = ''
+    for _pair in pairs:
+        _val = _pair[1]
+        if not isinstance(_val, LambdaExpr):
+            return ''
+        _rt = _lambda_ret_type(gen, _val)
+        if agreed == '':
+            agreed = _rt
+        elif agreed != _rt:
+            return ''
+    return agreed
 
 
 
@@ -4639,43 +4852,61 @@ def gen_module_impl(self, stmts):
     # over every function (twice: free functions and methods) up to 8 times
     # per nesting level. Memoised by body identity so a body is walked once
     # per compile even when the enclosing structure revisits it.
-    _mk_cache: dict = {}
-    def _mk(name, body, fdef=None):
-        _k = id(body)
-        _v = _mk_cache.get(_k)
-        if _v is None:
-            _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body, fdef)
-        if _v:
-            self._return_maybe_kinds.add(name)
-    # NO default parameter: the self-hosted backend lowers a cross-module call
-    # with a default by re-declaring the callee's signature, and a default
-    # reached through `None` is one more thing to get right there. Every call
-    # site — including test_gimple.py's, which passes None for both — passes
-    # all three explicitly.
-    _mk_targets = []
-    for s in all_functions:
-        if not _is_foreign_main(s) and isinstance(s, FunctionDef):
-            _mk_targets.append((s.name, s.body, s))
-    for s in all_structs_for_methods:
-        if isinstance(s, StructDef):
-            _sk = _as_structdef_node(s)
-            for _m in _sk.methods:
-                if _m.name != '__init__':
-                    _mk_targets.append((f"{_sk.name}_{_m.name}", _m.body, _m))
-    # To a FIXPOINT, not once. `_returns_kinds_valued`'s call arm answers from
-    # `_return_maybe_kinds`, so a function that RETURNS another such function's
-    # value needs that callee answered first — and either order is possible in
-    # the source or across the closure's modules. One extra round covers the
-    # one-hop chain (`def drop_one(): var kept = mixed(...); return kept`,
-    # measured); the loop stops as soon as a round adds nothing, which is what
-    # a program with no such chain does after the first. `_mk_cache` is
-    # per-round for the same reason: an answer computed before its callee was
-    # known is not reusable after.
-    for _mk_round in range(4):
+    def _mk_round(callee_kinds):
+        # A FRESH cache per round, and that is load-bearing rather than
+        # wasteful: the answer depends on `callee_kinds`, so a cache shared
+        # across rounds would hand round 2 round 1's answers and the
+        # fixpoint would never move. Within a round the cache is what keeps
+        # it cheap — memoised by body identity, NOT by `(body, params)`,
+        # because two definitions never share a body node and the params
+        # are that node's own.
+        _mk_cache: dict = {}
+
+        def _mk(name, body, params=None):
+            _k = id(body)
+            _v = _mk_cache.get(_k)
+            if _v is None:
+                _v = _mk_cache[_k] = _infer_return_maybe_kinds(
+                    self, body, params, callee_kinds)
+            _maybe, _slotkinds = _v
+            if _maybe:
+                self._return_maybe_kinds.add(name)
+            if _slotkinds:
+                # A returned HETEROGENEOUS list literal, per slot. The
+                # boolean table above only reaches the call site as "ask
+                # the runtime", which is enough for a computed subscript
+                # and not enough for `a[2]`; this one reaches it as the
+                # exact kind of every slot, in the same long-form spelling
+                # `gen._struct_slot_kinds` carries for a `struct.unpack`
+                # result, so the statically indexed reads pick their
+                # accessor from it unchanged.
+                self._return_value_slot_kinds[name] = _slotkinds
+
+        for s in all_functions:
+            if not _is_foreign_main(s) and isinstance(s, FunctionDef):
+                _mk(s.name, s.body, s.params)
+        for s in all_structs_for_methods:
+            if isinstance(s, StructDef):
+                _sk = _as_structdef_node(s)
+                for _m in _sk.methods:
+                    if _m.name != '__init__':
+                        _mk(f"{_sk.name}_{_m.name}", _m.body, _m.params)
+
+    # Fixpoint, because the second half of the question is "does this
+    # function hand back what ANOTHER function hands back", and one
+    # function's answer can depend on another's. Bounded at four rounds:
+    # `self._return_maybe_kinds` only ever GROWS here, so the loop is
+    # monotone and the bound is a depth limit rather than a convergence
+    # guess. Round 1 passes no callee set (it is the round that finds the
+    # producers); rounds 2+ read the set the earlier rounds filled.
+    # Deliberately NOT inside Pass 2c's fixpoint below: `_walk_ast`
+    # materialises a whole body as a node list and that loop already runs
+    # over every function eight times per nesting level — putting a walk
+    # in there cost test_silent_noop_iter 5m00s -> 19m48s when it was tried.
+    _mk_round(None)
+    for _mk_iter in range(3):
         _mk_before = len(self._return_maybe_kinds)
-        _mk_cache = {}
-        for _t in _mk_targets:
-            _mk(*_t)
+        _mk_round(self._return_maybe_kinds)
         if len(self._return_maybe_kinds) == _mk_before:
             break
     for _pass2c_iter in range(8):
@@ -7578,6 +7809,24 @@ def gen_module_impl(self, stmts):
             for _k, _v in _value.pairs[1:]:
                 _vt = TypeLattice.join(_vt, self._quick_type(_v))
             self._global_dict_val_types[_gname] = _vt
+            # A dict literal of LAMBDAS: what a later `d['k'](...)` call site
+            # needs is the callee's return type, and the dict's own value
+            # type (`void *`) does not carry it. Recorded with the same
+            # unanimity-or-nothing rule `note_dict_callable_ret` applies at a
+            # runtime store (a dict has one value slot, so the answer is only
+            # usable when every callable in it agrees).
+            self._global_dict_callable_ret[_gname] = \
+                _lambda_pairs_ret_type(self, _value.pairs)
+        elif isinstance(_value, LambdaExpr):
+            # `e = lambda: False` at module scope. The lambda's own C return
+            # type is `join_all([_quick_type(body)])` -- exactly what
+            # `_infer_return_type` computes for the synthetic
+            # `return <body>` body `_lower_LambdaExpr` builds -- so this
+            # records the lifted definition's declared return type without
+            # lifting anything. It has to be here, in the pre-scan, because
+            # a function that CALLS `e` is emitted before `_toplevel`
+            # lowers the lambda at all.
+            self._global_callable_ret_types[_gname] = _lambda_ret_type(self, _value)
 
     def _phase17_scan_try_branches(_try_stmt):
         """Collect {name: C type} for every AssignStmt/MultiAssignStmt

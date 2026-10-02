@@ -567,7 +567,19 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_lower_LambdaExpr`) and read by `_lower_fnptr_call_value`.
     # Reset per function for the same reason _bound_method_ret_types is: temp
     # names (_tN) recycle across functions.
-    gen._callable_ret_types: dict[str, str] = {}
+    #
+    # Seeded from self._global_callable_ret_types (Phase 1.7, never reset)
+    # for the same reason `_elem_types` is seeded from `_global_elem_types`
+    # below: a MODULE global's callable return type means the same thing in
+    # every function, and the store that would record it (`_toplevel`) is
+    # emitted after every ordinary function, so without the seed the very
+    # call this table exists for — `e = lambda: False` at module scope, then
+    # `print(e())` inside a function — kept the widened int64_t answer.
+    gen._callable_ret_types = {}
+    for _gvk in gen._global_callable_ret_types:
+        _gvk_s = _as_str(_gvk)
+        if _gvk_s not in _reset_locally_bound:
+            gen._callable_ret_types[_gvk_s] = _as_str(gen._global_callable_ret_types[_gvk])
     # A DICT's lowered value -> the SINGLE callable return type stored into
     # it, or '' for "more than one distinct type, so no answer". The rule is
     # the same unanimity-or-nothing rule every other inference in this file
@@ -599,7 +611,23 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unanimity rule is unchanged and is now enforced where the value is
     # stored, where the store site actually knows.
     # Reset per function for the same reason as the maps above.
-    gen._dict_callable_ret: dict[str, str] = {}
+    gen._dict_callable_ret = {}
+    # Seeded from self._global_dict_callable_ret (Phase 1.7, never reset)
+    # for the same reason `_elem_types` is seeded from `_global_elem_types`
+    # just above: a module-level dict of callables means the same thing in
+    # every function, and without the seed a `d['k']()` inside any FUNCTION
+    # kept the homogenized int64_t answer — the store lives in `_toplevel`,
+    # which is emitted AFTER every ordinary function, so the per-function
+    # reset wiped whatever the store had recorded. A '' entry (the ambiguity
+    # answer) is carried across verbatim, and every consumer reads it
+    # `or 'int64_t'`, so seeding it is the pre-existing behaviour and never
+    # a new wrong one. Explicit loop + `_as_str`, NOT a dict comprehension
+    # over `.items()`: the same self-host boxing gap the `_elem_types` seed
+    # above records.
+    for _gck in gen._global_dict_callable_ret:
+        _gck_s = _as_str(_gck)
+        if _gck_s not in _reset_locally_bound:
+            gen._dict_callable_ret[_gck_s] = _as_str(gen._global_dict_callable_ret[_gck])
     # Builtin-container method bound as a first-class VALUE (`append =
     # l.append`, the classic accumulator-aliasing idiom) — key: the C
     # name of the temp/var holding the boxed value; value: (receiver
@@ -1558,12 +1586,25 @@ def _list_unpack_name(elem: str) -> str:
     return _gmi_glue._c_unpack_name(elem)
 
 
-def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
+def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
+               arg_nodes: list = None) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
 
     arg_pairs: list of (ctype, varname) for each argument.
     For each argument, if the declared parameter type differs from the
     passed type, emit an intermediate temp with the correct cast.
+
+    `arg_nodes` is the call site's `CallExpr.args`, POSITIONALLY aligned with
+    `arg_pairs`, for the callers that have it. Optional because most of the
+    ~130 `_emit_call` sites emit a runtime helper or a synthesized call with no
+    `CallExpr` behind it; where it is absent the coercions that need to know
+    what an ARGUMENT MEANT (today: only the bool-vs-int question in
+    `_stringify_value`) fall back to the lowered C type, which is the
+    pre-existing behaviour. Alignment holds for `_apply_kw_keys` (one pair in,
+    one out) and for the vararg packing (which only fires for a callee that
+    declares `*args`, whose string parameter is never the interesting case);
+    a `f(*xs)` spread expands AFTER this point, so a spread argument simply
+    arrives with no node.
     """
     fname, arg_pairs = _apply_kw_keys(gen, fname, arg_pairs)
     # Rename certain C library functions to mojo_* wrappers with void* params
@@ -1703,7 +1744,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             else:
                 gen._emit(f'  {ct} = (int64_t){aval};')
             coerced_args.append(ct)
-        elif ptype == 'char *' and atype in ('int', 'int64_t', 'char'):
+        elif ptype == 'char *' and atype in ('int', 'int64_t', 'char', 'double', '_Bool'):
             # A raw single char whose DECLARED type was widened to
             # int64_t (joining another assignment site in the same
             # function — e.g. `qch = stmt[i]` in fire_compiler.py's own
@@ -1746,7 +1787,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                     gen._emit(f'  {vp} = (void *){aval};')
                 gen._emit(f'  {cp} = (char *){vp};')
                 coerced_args.append(cp)
-            else:
+            elif atype in ('int', 'int64_t'):
                 # An UNTRACKED int64_t going into a `char *` parameter.
                 #
                 # `char *` IS this dialect's string slot: `_TYPE_MAP` maps
@@ -1807,6 +1848,40 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                     sv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                         [('int64_t', iv)])
                 coerced_args.append(sv)
+            else:
+                # The remaining `char *`-parameter shapes are REAL scalars of
+                # another kind — a `double`, a `_Bool` — and a struct pointer
+                # that `actual_atype` has not resolved. Python's answer is
+                # `str(value)`, and for a double that is also the only answer
+                # that is not a wild pointer: this branch used to reinterpret
+                # the value's BITS as an address, so
+                # `class D: __init__(self, w: str)` called as `D(2.5)` did not
+                # even compile ("cannot convert to a pointer type") and
+                # `D(5)` stored address 5 in a `char *` field and the first
+                # `mojo_print` of it walked to it and SIGSEGV'd. The arm
+                # above already made exactly this argument for an `int`; a
+                # `double` is the same case with a wider value.
+                #
+                # `_stringify_value` is the chokepoint for "stringify this
+                # typed value" and is what `str()`, f-strings and `%s` all go
+                # through, so this reuses it rather than adding a fourth
+                # spelling of the same answer. It is also what makes the
+                # untracked-int64 case safe on this path: an `int64_t` that
+                # really holds a `char *` is answered from its `_actual_types`
+                # entry as a cast, not as a decimal.
+                #
+                # The int/int64_t arm ABOVE is kept rather than folded in
+                # because it is the one that has to ask the runtime:
+                # `_stringify_value`'s int arm calls `mojo_str_from_int`
+                # unconditionally, which is right for a value the codegen
+                # knows is an integer and wrong for one that is an UNTRACKED
+                # word, and `_int_word_vals` is the evidence that separates
+                # them.
+                _anode = None
+                if arg_nodes is not None and i < len(arg_nodes):
+                    _anode = arg_nodes[i]
+                coerced_args.append(
+                    gen._stringify_value(actual_atype, aval, _anode))
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain
             # scalar-typed value. TWO unrelated situations reach this one
@@ -3055,6 +3130,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         result = gen._new_temp('MojoList *')
         bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
         bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
+        bb_list = gen._new_bb(); bb_none = gen._new_bb()
         bb_after = gen._new_bb()
         isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', it64)])
         gen._emit(f"  if ({isd}) goto {bb_dict}; else goto {bb_not_dict};")
@@ -3062,6 +3138,22 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         _dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
         _dk = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', _dp)])
         gen._emit(f"  {result} = {_dk};")
+        # NO `gen._elem_types[result]` here, and that is load-bearing rather
+        # than an omission. This arm merges FOUR different containers into one
+        # temp, and the element type is a property of WHICH ONE, so a record
+        # made for the dict branch is a lie for the other three: recording
+        # `char *` (dict keys are strings) retyped the loop variable of every
+        # non-dict consumer, so `a, b = <a boxed int tuple>` read its two
+        # slots with `mojo_list_get_str` and `yield a + b` printed the decimal
+        # of the first slot's own pointer — the generator suite's
+        # `generator_pops_heterogeneous_tagged_stack` and
+        # `generator_pops_stack_two_level_tuple_unpack` both went from `7/99/3`
+        # to `4382923312/99/4382923328` on that one line. The
+        # `src_type == 'MojoDict *'` arm above can record `char *` because
+        # there is exactly one arm. An element type that is only knowable per
+        # runtime branch needs a per-slot runtime read (`mojo_list_get_boxed`
+        # + the tagged reader `_tagged_dyn_read` consumes), which is the open
+        # half — bugs/CODEGEN_materialized_container_has_no_element_type.md.
         gen._emit(f"  goto {bb_after};")
         gen._emit_label(bb_not_dict)
         iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', it64)])
@@ -3072,8 +3164,34 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._emit(f"  {result} = {_sl};")
         gen._emit(f"  goto {bb_after};")
         gen._emit_label(bb_not_set)
+        # The unguarded `(MojoList *)value` this replaces walked `value->len`
+        # off whatever address it was handed, and an address that is not a
+        # list is not something to walk: a plain int, a bool, a float's bit
+        # pattern, a struct type-tag, a function pointer, a `mojo_box_t` box
+        # (whose first word is a MAGIC, not a `data` pointer — reading it as a
+        # MojoList reads the magic as `data` and `bits` as `len`). So ask the
+        # registry instead of casting, which is the same fail-closed rule the
+        # dict and set arms above already follow.
+        isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', it64)])
+        gen._emit(f"  if ({isl}) goto {bb_list}; else goto {bb_none};")
+        gen._emit_label(bb_list)
         _lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
         gen._emit(f"  {result} = {_lp};")
+        gen._emit(f"  goto {bb_after};")
+        gen._emit_label(bb_none)
+        # NOT a container at all: a plain int, a bool, a float's bit pattern, a
+        # struct type-tag, a function pointer — every shape that reaches an
+        # iterable-typed slot in this dynamic model. Answer an EMPTY list
+        # rather than walk it, because walking it is the crash this test
+        # exists to stop: `list(12345678)`, `all(<a small int>)` and
+        # `','.join(<a struct tag>)` all died with SIGSEGV before it. An
+        # empty answer is what every consumer that reached here already
+        # produced on the pre-R1 path, so this is strictly the removal of a
+        # segfault. CPython raises TypeError for all of these; making that a
+        # real refusal is the open half, recorded in
+        # bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md.
+        _ne = gen._call_expr('MojoList *', 'mojo_list_new', [])
+        gen._emit(f"  {result} = {_ne};")
         gen._emit_label(bb_after)
         return result
     return gen._coerce_to_type(src_type, 'MojoList *', value)
@@ -3265,11 +3383,15 @@ def _list_repr_fn(gen, rav: str) -> str:
     return '_mojo_repr_list'
 
 
-# The one-byte-per-slot spelling of a `struct.unpack` result's per-slot kinds
-# ('i'/'d'/'s'), interned as a string-pool constant, or None when the value has
-# no known kinds or its kinds are all the same (see _list_repr_fn's last branch).
-# The bytes are from a fixed alphabet, so the pooled string needs no C escaping.
-_STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's'}
+# The one-byte-per-slot spelling of a VALUE's per-slot kinds, interned as a
+# string-pool constant, or None when the value has no known kinds or its kinds
+# are all the same (see _list_repr_fn's last branch). The bytes are from the
+# fixed `mojo_list_set_kinds` alphabet, so the pooled string needs no C
+# escaping. 'str' -> 'p' is the `char *` slot, which only a heterogeneous list
+# LITERAL records (a `struct.unpack` format has no such code) and which
+# reaches here either from the literal itself or across a `return`
+# (`gen._return_value_slot_kinds`).
+_STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's', 'str': 'p'}
 
 # The same alphabet for a list of inner lists/tuples that share one per-slot
 # pattern — `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]`. Keyed on the CTYPE
@@ -4487,6 +4609,31 @@ def _is_may_hold_str_param(gen, node) -> bool:
         _rets = getattr(gen, '_ret_may_hold_str', None)
         return bool(_rets) and _as_str(node.func.name) in _rets
     return False
+
+
+def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
+    """A callable (or a dict of callables) stored into a MODULE GLOBAL keeps
+    its return type for a later call through that global's name.
+
+    The store boxes the value into an `int64_t` struct field, so the
+    per-function tables — which are keyed by the lowered VALUE — cannot
+    survive it. These two whole-program tables are keyed by NAME, which is
+    what a call through `_root_globals.<name>` still knows, and they are
+    never reset. Phase 1.7 already records the literal case
+    (`e = lambda: False`, `d = {"k": lambda: False}`) before any function is
+    emitted; this covers everything it cannot see — a callable returned by a
+    call, and any store that happens inside a function body.
+
+    Called from both module-global store paths (a `global`-declared write and
+    a `_toplevel` write), beside the `_dict_val_types`/`_elem_types`
+    propagation each already does. A value with no callable return type is a
+    no-op, so the common non-callable store costs two dict misses."""
+    _rt = gen._callable_ret_types.get(value_text)
+    if _rt:
+        gen._global_callable_ret_types[gname] = _rt
+    _drt = gen._dict_callable_ret.get(value_text)
+    if _drt is not None:
+        gen._global_dict_callable_ret[gname] = _drt
 
 
 def _gen_print(gen, args: list, kwargs: list = None):

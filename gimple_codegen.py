@@ -1442,6 +1442,28 @@ class GimpleGen:
         # type_inference.md.
         self._global_elem_types: dict[str, str] = {}
         self._global_dict_val_types: dict[str, str] = {}
+        # Module-level GLOBAL name -> the return type of the CALLABLE stored
+        # in it (`e = lambda: False` at module scope), and module-level name
+        # -> the single callable return type stored in that dict (`d = {"k":
+        # lambda: False}`), '' for "more than one distinct type, so no
+        # answer". Same module-scope rationale as the two tables above:
+        # a module global's callable return type means the same thing in
+        # every function, unlike a recycled temp name, so it must survive
+        # _reset_func. Populated by gen_module's Phase 1.7 pre-scan (which
+        # runs BEFORE any function body is emitted, since a function that
+        # calls `e()` is emitted before `_toplevel` lowers the lambda) and
+        # consulted by _reset_func to re-seed the per-function
+        # _callable_ret_types/_dict_callable_ret.
+        #
+        # Without this, a lambda bound to a MODULE global lost its return
+        # type at the box: `e = lambda: False; print(e())` printed `0`, and
+        # `e = lambda: "hi"; print(e())` printed the pointer decimal --
+        # the same shapes that are correct for a lambda bound to a LOCAL,
+        # because the local store propagates _callable_ret_types through
+        # the name (see _gen_stmt_AssignStmt). See
+        # bugs/CODEGEN_lambda_bool_return_prints_as_int.md.
+        self._global_callable_ret_types: dict[str, str] = {}
+        self._global_dict_callable_ret: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
         # Functions whose `return` statements produce containers of MORE THAN
@@ -1475,6 +1497,18 @@ class GimpleGen:
         # `_multi_kind_return_funcs` member). Per-function like the other
         # value-keyed side tables, since these names are per-function temps.
         self._boxed_container_vals: set = set()
+        # Function name -> the return type of the CALLABLE it returns
+        # (`def mk(): return lambda: False`). Module scope for the same
+        # reason as `_return_slot_types` above: the point is to carry a
+        # callee's knowledge to a call site, and a per-function reset would
+        # discard a callee whose body was emitted before its caller's. The
+        # call site records it on the CallExpr NODE (not on the lowered
+        # value) because a call result is immediately cast to its lowered
+        # type — `f = mk()` then `f()` reads `_root_globals.f`, and
+        # `mk()()` casts the result into a fresh temp — so a value-keyed
+        # table cannot match it. See
+        # bugs/CODEGEN_lambda_bool_return_prints_as_int.md.
+        self._return_callable_ret_types: dict[str, str] = {}
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module
         # scope, NOT re-created per function the way the value-keyed
@@ -2114,6 +2148,16 @@ class GimpleGen:
         # reason — see _infer_return_maybe_kinds in
         # mojo/backend_gimple/module_gen.py.
         self._return_maybe_kinds: set = set()
+        # Function name -> the per-slot kind of EVERY slot of a returned
+        # heterogeneous list literal, in `gen._struct_slot_kinds`' long-form
+        # spelling ('double' / 'str' / 'bytes' / 'int'). The set above is the
+        # boolean half of the same question and answers only "ask the
+        # runtime", which is what a subscript with no compile-time index
+        # needs; this one answers it per index, which is what `a[2]` on
+        # `[x, 1, s]` needs to come back as a `char *` rather than the raw
+        # word. Both filled by the same whole-program scan — see
+        # _infer_return_maybe_kinds in mojo/backend_gimple/module_gen.py.
+        self._return_value_slot_kinds: dict[str, list] = {}
         self._nested_elem_types: dict[str, str] = {}
         self._param_struct_types: dict[str, str] = {}
         self._dict_val_types: dict[str, str] = {}
@@ -4347,8 +4391,8 @@ class GimpleGen:
         return glo._gen_for_generator_iter(self, var, gen_val, api, body, destroy_after)
     def _emit_generator_pending_exc_check(self, gen_val: str, base: str, destroy_after: bool, bb_not_pending: str):
         return glo._emit_generator_pending_exc_check(self, gen_val, base, destroy_after, bb_not_pending)
-    def _gen_for_struct_iter(self, var: str, struct_type: str, obj_val: str, body: list, shadow_name: str | None=None):
-        return glo._gen_for_struct_iter(self, var, struct_type, obj_val, body, shadow_name)
+    def _gen_for_struct_iter(self, var: str, struct_type: str, obj_val: str, body: list, shadow_name: str | None=None, node=None):
+        return glo._gen_for_struct_iter(self, var, struct_type, obj_val, body, shadow_name, node)
 
     # ---- nested-AST accessors (keep attribute traffic on GimpleGen itself
     # so the self-host closure types these reads/writes in the monolith-era
@@ -4446,6 +4490,15 @@ class GimpleGen:
         # freshness); the top-level RHS node is the one to remember.
         if node is self._decl_value_node:
             self._decl_rhs_val = _lv
+        # A call to a function that RETURNS A CALLABLE (`def mk(): return
+        # lambda: False`) carries that callable's return type on the node,
+        # for the `mk()(...)` callee branch in `_lower_call` to read. The
+        # value-keyed `_callable_ret_types` cannot serve there: the result is
+        # cast into a fresh temp before the outer call sees it.
+        if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
+            _frt = self._return_callable_ret_types.get(node.func.name)
+            if _frt:
+                node._callable_ret = _frt
         return _lt, _lv
     def _lower_IntLiteral(self, node) -> tuple[str, str]:
         return gex._lower_IntLiteral(self, node)
@@ -4643,8 +4696,9 @@ class GimpleGen:
         return ginf._emit_str_cat(self, lv, rv, free_left, free_right)
     def _is_fresh_operand(self, node, val: str) -> bool:
         return ginf._is_fresh_operand(self, node, val)
-    def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
-        return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs)
+    def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
+                    arg_nodes: list = None) -> None:
+        return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs, arg_nodes)
     def _declared_int_ctype(self, val: str) -> str | None:
         return ginf._declared_int_ctype(self, val)
     def _ensure_local(self, ctype: str, val: str) -> str:
@@ -4737,6 +4791,8 @@ class GimpleGen:
                                    val_node) -> None:
         return ginf.emit_dict_int_value_store(self, dict_val, key_ctype, key_val,
                                               val_ctype, val, val_node)
+    def _note_global_callable_store(self, gname: str, value_text: str) -> None:
+        return ginf._note_global_callable_store(self, gname, value_text)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
     def _eval_const_bool(self, node) -> bool | None:
@@ -4765,8 +4821,8 @@ class GimpleGen:
         return grsl._new_val(self, ctype, rhs)
     def _inc_val(self, base: str) -> str:
         return grsl._inc_val(self, base)
-    def _call_expr(self, ret_type: str, fname: str, arg_pairs: list) -> str:
-        return grsl._call_expr(self, ret_type, fname, arg_pairs)
+    def _call_expr(self, ret_type: str, fname: str, arg_pairs: list, arg_nodes: list = None) -> str:
+        return grsl._call_expr(self, ret_type, fname, arg_pairs, arg_nodes)
     def _bool_not(self, ctype: str, val: str) -> str:
         return grsl._bool_not(self, ctype, val)
     def _bool_and(self, left: str, right: str) -> str:
