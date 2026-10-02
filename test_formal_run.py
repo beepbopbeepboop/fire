@@ -4750,6 +4750,41 @@ BOTH_ARCH_CASES = [
      "    printf(\"param=%d\", call_it(9))\n"
      "    printf(\" nested=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n"
      "    return 0\n", 0, "param=90001 nested=70001"),
+    # RECURSION, which is the one caller whose outgoing area is the SAME
+    # function's own incoming arguments: `f`'s ninth argument lives in its
+    # caller's frame at `[rbp + 16 + 16]`, and the recursive call inside `f`
+    # reserves its own outgoing area BELOW `f`'s own RSP \u2014 so the two cannot
+    # overlap, which is exactly what a convention that put the outgoing area
+    # above RSP would get wrong.  37 is 2 + 5*7: the base case doubles `a0` and
+    # every level adds `a6`, so a stack argument read as zero rather than 7
+    # answers 2 and one read as a neighbour answers something in between.
+    ("both_arch_stack_arguments_survive_recursion",
+     "def dbl(v: int) -> int:\n"
+     "    return v * 2\n\n"
+     "def f(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "      a5: int, a6: int, a7: int, n: int) -> int:\n"
+     "    if n <= 0:\n"
+     "        return dbl(a0)\n"
+     "    return f(a0, a1, a2, a3, a4, a5, a6, a7, n - 1) + a6\n\n"
+     "def main() -> int:\n"
+     "    printf(\"rec=%d\", f(1, 2, 3, 4, 5, 6, 7, 8, 5))\n"
+     "    return 0\n", 0, "rec=37"),
+    # A DEFAULTED parameter past the sixth, which is the direction the convention
+    # is most likely to be got wrong by FOLDING rather than by dropping: the
+    # value in the outgoing slot is the DEFAULT the callee's own declaration
+    # names, filled in by `bind_call_args` rather than by any call site, and the
+    # two printfs differ only in whether the caller supplies those two at all.
+    # Both answers are stated: `def=87` is 8*10+7, the defaults, and `870` is the
+    # explicit 80 and 70 \u2014 so a convention that made the defaulted call read
+    # the caller\u0027s register leftovers fails the first and not the second.
+    ("both_arch_a_defaulted_stack_argument",
+     "def f(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
+     "      a6: int = 7, a7: int = 8) -> int:\n"
+     "    return a7 * 10 + a6\n\n"
+     "def main() -> int:\n"
+     "    printf(\"def=%d\", f(1, 2, 3, 4, 5, 6))\n"
+     "    printf(\" %d\", f(1, 2, 3, 4, 5, 6, 70, 80))\n"
+     "    return 0\n", 0, "def=87 870"),
     # SIX arguments still work, and it is here as the boundary from the other
     # side: the fix is a stack argument PAST the register file, not a smaller
     # register file.  Without this row a change that cut either convention to the

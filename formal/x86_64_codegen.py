@@ -1136,9 +1136,13 @@ class X86_64Codegen:
         load goes into R11 and the home assignment follows; it never borrows the
         scratch for the address itself, which would overwrite the value before
         the store.  The displacement grows at 8 bytes per argument and crosses
-        127 at the sixteenth stack argument (`formal/x86_64.py`'s `_rm_disp`
-        then emits a disp32), which is inside `_MAX_INCOMING_ARGS` and needs no
-        encoder change.
+        127 at the FIFTEENTH stack argument — parameter index 20, measured:
+        index 19 encodes `4c 8b 5d 78` and index 20 `4c 8b 9d 80 00 00 00` —
+        so `formal/x86_64.py`'s `_rm_disp` emits a disp32 for the last four
+        parameters a 24-argument function can have, and needs no change to do
+        it.  Nothing HERE has a step lemma for that load;
+        `bugs/FORMAL_x86_64_stack_argument_past_the_twentieth_needs_a_disp32_
+        lemma.md` is the gap and the instruction it affects.
         """
         self.asm.emit(encode_mov_r64_rm64(
             Reg.R11, Reg.RBP, _STACK_ARG_OFF + 8 * (index - len(ARG_REGS))))
