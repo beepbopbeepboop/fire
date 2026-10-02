@@ -8956,10 +8956,24 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # halves must agree on the same table or a call site stores an answer from a
     # method that did not hand one back.
     writebacks = M.one_field_mutating_methods(functions, method_owners)
+    # `{(receiver, field): struct}`, per function, for the calls whose receiver
+    # is a FIELD rather than a name — `_method_call_target`'s second arm. It is
+    # built HERE and passed down rather than read from inside the rewrite
+    # because the rewrite runs before anything downstream knows which struct a
+    # receiver holds, and because it must run before `_rewrite_self_fields`
+    # below: that pass collapses `self.<field>` to `self` for a one-word struct,
+    # and once it has, `self._inner.write_to(w)` is spelled `self.write_to(w)`
+    # and the field's declared type — the only evidence that says the callee is
+    # `Slice`'s and not `StridedSlice`'s — is no longer in the tree. Computed
+    # per function because only a function that IS a method of a struct knows
+    # that its `self` is one.
+    field_types_by_fn = {fn.name: _receiver_field_types(
+        structs_by_name, method_owners.get(fn.name)) for fn in functions}
     for fn in functions:
         if fn.name in writebacks:
             _return_the_receiver(fn, writebacks[fn.name])
-        _rewrite_method_calls(fn.body, owners, wide, receiverless)
+        _rewrite_method_calls(fn.body, owners, wide, receiverless,
+                              field_types_by_fn.get(fn.name))
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
         # gives. Everything else about it is `_rewrite_class_constants`.
@@ -9062,9 +9076,37 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `stmts` — the pass does not have them.
     from formal.imports import (imported_bound_names,
                                 star_imported_modules)
+    # `method_owners`, NOT `owners`.  The pass documents its parameter as
+    # `{function name: struct}` — the LIFTED `<Struct>_<method>` key against a
+    # StructDef — and both of its uses ask it by FUNCTION name: which struct is
+    # `fn` a method of.  `owners` is the other direction and a different value
+    # type: `{BARE method name: struct NAME}` for the name-based call dispatch,
+    # over this module AND every imported struct.  Handing it over made both
+    # reads wrong, and one of them crashed.
+    #
+    # The crash, measured on `std/builtin/reversed.mojo` (a `backend-crash` in
+    # the 2026-10-02 x86-64 sweep, `AttributeError: 'str' object has no
+    # attribute 'name'`): `SIMD.reversed` exists — `std/simd.mojo:3475` — so
+    # `owners['reversed'] == 'SIMD'`, a string; and `reversed.mojo` declares a
+    # module-level `def reversed`, whose lifted-and-bare name is the same
+    # `reversed`.  `_frame_receivers` read `method_owners.get('reversed')`,
+    # got the STRING, and passed it on as the struct that declares
+    # `reversed.mojo`'s `reversed` is a method of.  `_overridden_comptime_names`
+    # then asked it for `.name` and the compiler fell over — so a file whose
+    # only defect was a name collision with an imported struct's method could
+    # not be classified at all.
+    #
+    # The other read is the same substitution without the crash, and it is why
+    # this is worth more than the traceback: a free function that shares a name
+    # with ANY imported struct's method was handed a phantom struct, so its
+    # `comptime` bindings were read as that struct's and `None`-valued
+    # comparisons were refused against a census that was never this function's.
+    # `refuse_none_comparisons` and `_rewrite_class_constants` are called with
+    # `method_owners` at their other site (in `_prepare_functions`, above) for
+    # exactly this reason; this call site was the one that disagreed.
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
-                     star_imported_modules(stmts), owners)
+                     star_imported_modules(stmts), method_owners)
     # The slot table is RETURNED as well as published, for the reason
     # `symbols` is: building an import compiles the imported module through this
     # same function, and that nested call publishes ITS globals over ours, so
@@ -9145,7 +9187,7 @@ def _receiverless_methods(owners: dict, structs_by_name: dict) -> set:
     return out
 
 
-def _method_call_target(call, owners: dict):
+def _method_call_target(call, owners: dict, field_types: dict = None):
     """`recv.m` or `recv.m[T]` on a CallExpr: (owner, member, receiver), or None.
 
     The one recogniser for "this call's callee is a method of a struct this
@@ -9160,16 +9202,151 @@ def _method_call_target(call, owners: dict):
     `None` for every other callee, which is the answer `owners` itself gives for
     a name two structs declare — dispatch here is by NAME, so an ambiguous one
     has no owner to lift to.
+
+    **A base that is a FIELD is dispatched by the field's DECLARED TYPE**, which
+    is the one thing on this path that says what the word in the slot is, and it
+    is strictly more evidence than the name: `field_types` is
+    `{(receiver, field): struct name}` and is only populated where the receiver's
+    struct is known.  See `_field_method_call_target` for the shape, the reason
+    the name-based arm could not answer it, and the guard that keeps a subclass
+    out of it.
     """
     func = call.func
     if isinstance(func, F.SubscriptExpr):
         func = func.obj
-    if not (isinstance(func, F.MemberExpr) and isinstance(func.obj, F.IdentExpr)):
+    if not isinstance(func, F.MemberExpr):
         return None
-    owner = owners.get(func.member)
+    if isinstance(func.obj, F.IdentExpr):
+        owner = owners.get(func.member)
+        if owner is None:
+            return None
+        return owner, func.member, func.obj
+    return _field_method_call_target(func, field_types)
+
+
+def _field_method_call_target(func, field_types: dict):
+    """`recv.f.m(…)` → the struct `recv.f`'s DECLARED TYPE names, or None.
+
+    The second arm of `_method_call_target`, and it exists because the first one
+    cannot see this call at all.  The name-based arm requires the receiver to be
+    a plain `IdentExpr`, so `self._inner.write_to(w)` reached the emitter as a
+    call spelled `self._inner.write_to`, and then `_rewrite_self_fields` — which
+    runs later in the same pass and holds for a one-word struct that its only
+    field IS its receiver — collapsed the base and left `self.write_to(w)`. By
+    then the evidence was gone: `write_to` is a name two structs of that file
+    declare, so nothing could lift it, and
+    `check_value_position_method_reads` read the leftover as a bound method of
+    the enclosing struct and refused correct stdlib Mojo.
+
+    Measured on `std/builtin/builtin_slice.mojo`'s `StridedSlice_write_to`,
+    where `StridedSlice` has the single field `var _inner: Slice` and the body
+    is `self._inner.write_to(writer)`:
+
+        StridedSlice_write_to: self.write_to is not a field of StridedSlice —
+        write_to is one of its METHODS …
+
+    7 of the 38 files an x86-64 sweep of `std/builtin` + `std/collections`
+    reached on 2026-10-02 were refused this way, one level down, through
+    `std.format._utils` → `std.collections` → `std.collections.string.string_span`.
+
+    Dispatching here is not a guess where the name-based arm is a guess.  That
+    arm has ONE fact — the spelling — and refuses when two structs share it.  This
+    one has the receiver's struct, the field's name and the field's declared type,
+    and those fix the callee: `self` IS `_inner` on this path (that is what the
+    one-word alias asserts, and it is asserted in the same pass that rewrites the
+    call), so the word `Slice_write_to` is handed is the word `_inner` holds, and
+    the struct that declared `write_to` for it is `Slice`.  The base `StridedSlice`
+    declares a method of the same name too, and that is irrelevant: it is a
+    different receiver.
+
+    **A SUBCLASS is refused, not resolved.**  `_typed_nested_frame` already takes
+    this position for the same reason — a declared type names the BASE, and a
+    value of a derived class would then be handed a method compiled against the
+    base's layout.  So a struct in this unit that derives from the declared type
+    AND declares the same method makes the call ambiguous again, and `None` is
+    returned for the existing diagnostics to describe.
+    """
+    base = func.obj
+    if not (isinstance(base, F.MemberExpr) and isinstance(base.obj, F.IdentExpr)):
+        return None
+    declared = (field_types or {}).get((base.obj.name, base.member))
+    if declared is None:
+        return None
+    return declared, func.member, base
+
+
+def _receiver_field_types(structs_by_name: dict, owner) -> dict:
+    """`{(receiver, field): struct name}` for `owner`'s own typed fields.
+
+    The evidence `_method_call_target`'s second arm needs, and it is built from
+    DECLARATIONS only: a field's declared type, reduced to its base name
+    (`model.annotation_base_name`, so `List[Self.T]` → `List` and `Self` → the
+    enclosing struct), and only when that base names a struct of THIS unit.
+
+    Every receiver spelling is registered, not just `self`, because
+    `model.struct_receivers` is the one function that decides which names bind a
+    receiver for this struct — and the same function `struct_field_names` derives
+    the field set from, so a field this table names and a field the struct has
+    cannot come apart.
+
+    **A field that is not a PLACED NESTED FRAME is left out**, and this is the
+    condition that keeps the lift inside the lifetime the frame layout already
+    reasoned about.  `model.struct_nested_frame_fields` is the authority — the
+    same table `_rewrite_nested_method_calls` lifts its own `h.a.m(x)` calls
+    from, and consulting it rather than re-deriving the condition is what keeps
+    the two recognisers from disagreeing about which receivers are frames.
+
+    It is not a formality.  Measured on `test_formal_run.py`'s
+    `byref_refuse_write_over_a_nested_frame` — `struct P { var in1: Inner; var z:
+    Int }` whose `go()` does `self.in1 = t` and then `return self.in1.total()` —
+    lifting without it turns a REFUSAL into a build: the slot holds a frame
+    belonging to whichever function ran the assignment, so `Inner_total` would
+    read another activation's storage.  `struct_nested_frame_fields(P)` is empty
+    precisely because `P.go` writes `in1`, so the field is not published and the
+    call goes on to be refused by `_typed_nested_frame`'s `_REASSIGNED` arm with
+    the words that describe the hazard.  `StridedSlice._inner` IS published, so
+    the `std/builtin/builtin_slice.mojo` shape still lifts; the two differ because
+    the table is answering a question about storage lifetime, not about how many
+    fields the struct has.
+
+    **A field whose type resolves to a struct that a DERIVED struct of this unit
+    also declares a method of is left out** for the second, independent reason
+    `_field_method_call_target`'s docstring gives: the declared type names the
+    base, so a value of a derived class would be handed a method compiled against
+    the base's layout.  Withholding the ENTRY (rather than checking at each call)
+    means both conditions are decided once, from the same tables, and
+    `_method_call_target` stays a recogniser with no policy in it.
+    """
     if owner is None:
-        return None
-    return owner, func.member, func.obj
+        return {}
+    out = {}
+    receivers = M.struct_receivers(owner)
+    placed = {name for name, _slot, _child
+              in M.struct_nested_frame_fields(owner, structs_by_name)}
+    for field in M.struct_field_names(owner):
+        if field not in placed:
+            continue
+        _base, ann, _ev, _why = M.struct_field_type(owner, field)
+        if ann is None:
+            continue
+        named = M.annotation_base_name(ann, owner.name)
+        if named is None or named not in structs_by_name:
+            continue
+        st = structs_by_name[named]
+        for derived_name in M.struct_derived_names(
+                list(structs_by_name.values()), named):
+            derived = structs_by_name.get(derived_name)
+            if derived is None:
+                continue
+            if {m.name for m in M.struct_methods(derived)} & {
+                    m.name for m in M.struct_methods(st)}:
+                named = None
+                break
+        if named is None:
+            continue
+        for receiver in receivers:
+            out[(receiver, field)] = named
+    return out
 
 
 def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
@@ -9194,7 +9371,8 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
 
 
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,
-                          receiverless: set = None) -> None:
+                          receiverless: set = None,
+                          field_types: dict = None) -> None:
     """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
 
     Rewriting the CALL rather than special-casing a method call in the
@@ -9219,13 +9397,20 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     puts a generic's comptime parameters first and arm64's `_emit_call` passes
     the bracket expressions first, so `Struct_m[T](recv, a)` and
     `Struct_m(recv, a)` reach the callee's parameters identically.  See
-    `_specialized_method_call`."""
+    `_specialized_method_call`.
+
+    `field_types` is `{(receiver, field): struct name}` for THIS function, and it
+    is what lets `_method_call_target` dispatch a call whose receiver is a field
+    rather than a name — the second arm, documented there. It is per-function
+    because the receiver's struct is: only a function that IS a method of `S`
+    knows that its `self` is an `S`, and threading one module-wide table would
+    hand a free function a receiver it does not have."""
     if isinstance(node, list):
         for x in node:
-            _rewrite_method_calls(x, owners, wide, receiverless)
+            _rewrite_method_calls(x, owners, wide, receiverless, field_types)
         return
     if isinstance(node, F.CallExpr):
-        target = _method_call_target(node, owners)
+        target = _method_call_target(node, owners, field_types)
         if target is not None:
             owner, member, receiver = target
             if (wide or {}).get(owner) is not None:
@@ -9253,7 +9438,8 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
             node.func = lifted
             return
     for name in getattr(node, "__dataclass_fields__", {}):
-        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless)
+        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless,
+                              field_types)
 
 
 def dylib_manifest_path(dylib_path: str) -> str:
