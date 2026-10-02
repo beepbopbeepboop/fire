@@ -1632,15 +1632,25 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _recv_t = gen._get_actual_type(_recv_t, _recv_v)
         _rbase = gimple_exprtypes._struct_name_of(_recv_t or '')
         if _rbase:
-            _rnext = f"{_rbase}___next__"
+            # `gen._struct_method_csym`, the tree's ONE composer for a struct
+            # method's C name, not an f-string `{Struct}___{method}__` spelled
+            # out again: the hand-written form omits the home-module qualifier,
+            # so `from mod import Struct` + `next(obj)` emitted a call to the
+            # BARE name — "implicit declaration of function 'It___next__'; did
+            # you mean 'itmod_It___next__'?" — which gcc's implicit-int
+            # fallback then made an `int`, so the call returned a pointer's
+            # bits as a value. `_gen_for_struct_iter` had the identical defect
+            # on all three of its symbols; see its own comment.
+            _rnext = gen._struct_method_csym(_rbase, '__next__', '')
             # `__iter__` may hand back a DIFFERENT iterator type; the
             # for-loop path resolves that, so this must too, or `next()` and
             # `for` would advance different objects.
-            _ritr = f"{_rbase}___iter__"
+            _ritr = gen._struct_method_csym(_rbase, '__iter__', '')
             if _ritr in gen.func_return_types:
                 _rit = gen.func_return_types[_ritr]
                 if gimple_exprtypes._struct_name_of(_rit or ''):
-                    _rnext = f"{gimple_exprtypes._struct_name_of(_rit)}___next__"
+                    _rnext = gen._struct_method_csym(
+                        gimple_exprtypes._struct_name_of(_rit), '__next__', '')
             if _rnext in gen.func_return_types:
                 return _lower_next_struct_iter(
                     gen, node, _recv_t, _recv_v, _rnext)

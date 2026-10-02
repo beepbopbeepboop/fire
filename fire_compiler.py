@@ -614,6 +614,100 @@ class ForStmt:
     line: int = 0
     col: int = 0
 
+
+def _split_top_level_commas(s: str) -> list:
+    """Split `s` on the commas that are NOT nested inside `()`, `[]` or
+    `{}`.
+
+    The ONE bracket-aware comma split in the tree, for both of its jobs: a
+    type annotation's argument list (`UnsafePointer[X, SomeOrigin]` — the
+    naive split tore `Tuple[Int, Int]`'s inner comma) and a for/comprehension
+    target's slot list (a nested target's own commas must not split the
+    outer list). This used to exist four times — here,
+    `mojo/middle/types.py::_split_top_level_commas`,
+    `emit_infra._split_top_level_comma` and
+    `mojo/middle/boundnames.py::_lbn_split_commas` — each with slightly
+    different bracket sets, which is how they drifted."""
+    parts: list = []
+    depth = 0
+    buf: list = []
+    for ch in s:
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth = max(0, depth - 1)
+        if ch == ',' and depth == 0:
+            parts.append(''.join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append(''.join(buf).strip())
+    return parts
+
+
+def _paren_wrapped(target) -> bool:
+    """Is this target string wrapped in a single layer of parens? (Internal
+    helper; `is_tuple_target` is the public predicate.)"""
+    return (isinstance(target, str) and target.strip().startswith('(')
+            and target.strip().endswith(')'))
+
+
+def is_tuple_target(target) -> bool:
+    """Does this `for`/comprehension target string unpack, or bind the whole
+    item to one name?
+
+    Two spellings say "unpack": the SURROUNDING PARENS, or a top-level comma
+    with no parens at all (which is what `_parse_generator_target` produces
+    for a comprehension's bare `for a, b in ...` — it wraps in parens only
+    when the SOURCE wrote them). Note what is NOT one of them: a comma
+    INSIDE the parens is not necessary, because a 1-tuple target is spelled
+    `"(a)"`, which is the whole disambiguation:
+
+        for (a) in b:    # a parenthesised NAME — binds the whole item
+        for (a,) in b:   # a 1-tuple       — unpacks the item's one element
+
+    Both used to reduce to the IDENTICAL string `"(a)"`, so this predicate
+    could not exist; every consumer instead guessed "tuple" from a comma and
+    therefore got `for (a) in` wrong (the compiled path printed `1` where
+    CPython prints `(1,)`) while getting `for (a,) in` right. The parsers now
+    unwrap a parenthesised single name to bare text and keep the parens for a
+    1-element group that really had a comma, so `"a"` and `"(a)"` are
+    distinct again and this is the ONE place that says which is which.
+
+    Non-string targets (an ordinary assignment target node) are not for-loop
+    targets at all and answer False."""
+    if not isinstance(target, str):
+        return False
+    t = target.strip()
+    if _paren_wrapped(t):
+        return True
+    return len(_split_top_level_commas(t)) > 1
+
+
+def for_target_slots(target) -> list:
+    """The TOP-LEVEL slot strings of a `for`/comprehension target, in order.
+
+    Bracket-aware: a nested target's own commas do not split the outer list,
+    so `"(a, (b, c))"` yields `['a', '(b, c)']` — the nested group stays
+    intact for the caller to recurse into (`myinterpreter`'s
+    `_bind_one_target`, `boundnames._lbn_target_names`, ...). Drops empty
+    names: a trailing comma is the only thing that could produce one, and
+    neither parser emits a trailing comma into the string (a 1-tuple is
+    spelled `"(a)"`), so an empty slot means a malformed string rather than a
+    shape to bind — binding a variable literally named `''` would be worse
+    than ignoring it.
+
+    Non-string targets answer `[]`: this is for-loop-target text only, and a
+    caller wanting names for an assignment target node has the node."""
+    if not isinstance(target, str):
+        return []
+    t = target.strip()
+    # `_paren_wrapped`, not `is_tuple_target`: the bare comma form
+    # (`"a, b"`, no parens) is a tuple target but has no parens to strip.
+    inner = t[1:-1] if _paren_wrapped(t) else t
+    return [p for p in _split_top_level_commas(inner) if p]
+
+
 @dataclass
 class FunctionDef:
     name: str
@@ -2120,15 +2214,15 @@ def genexp_body(expr, outer_iterable) -> list:
 
 def _target_names(target, out: set):
     """Collect the names a binding target introduces. `target` is a plain
-    string for comprehension/`for` targets — possibly comma-joined and
+    string for comprehension/`for` targets — possibly a tuple target and
     possibly starred (`a, *rest`) — or an expression node (an ordinary
-    assignment target)."""
+    assignment target). The string form splits through `for_target_slots`, so
+    a NESTED target's commas do not tear it into fragments bound as bogus
+    names."""
     if isinstance(target, str):
         name = target.strip()
-        if name.startswith('(') and name.endswith(')'):
-            name = name[1:-1].strip()
-        if ',' in name:
-            for part in name.split(','):
+        if is_tuple_target(name) or ',' in name:
+            for part in for_target_slots(name):
                 _target_names(part, out)
             return
         if name.startswith('*'):
@@ -5163,25 +5257,52 @@ class Parser:
         return SetExpr(elements=elems)
 
     def _parse_generator_target(self):
+        """A comprehension/generator `for` clause's target — the sibling
+        representation to `_parse_unpack_target`'s (see its docstring for
+        the differences: here a bare comma list keeps NO wrapping parens, so
+        `for a, b in ...` is the literal string `"a, b"`).
+
+        Returns `(target, saw_comma)` where `saw_comma` says a comma was
+        consumed AT THIS LEVEL, which is what distinguishes a 1-tuple from
+        a parenthesised single name — the same disambiguation
+        `_parse_unpack_target` makes, for the same reason and with the same
+        spelling: `for (a) in b:` binds the whole item while `for (a,) in
+        b:` unpacks its single element, and both used to reduce to the
+        IDENTICAL string `"(a)"`.
+
+        So a parenthesised group that consumed no comma unwraps to its bare
+        text, exactly as `_parse_unpack_target` does, and a 1-element group
+        that did keeps its parens. A trailing comma at the top level
+        (`for a, in ...`) therefore produces `"(a)"`, not the bare `"a"`
+        it used to — that bare form was the same bug wearing a different
+        spelling."""
         t = self._peek()
+        saw_comma = False
         if t.kind == "LPAREN":
             self._advance()
-            sub = self._parse_generator_target()
+            sub, sub_comma = self._parse_generator_target()
             self._expect("RPAREN")
-            target = f"({sub})"
+            target = f"({sub})" if sub_comma else sub
+            saw_comma = sub_comma
         elif t.kind == "LBRACKET":
             # List-pattern unpacking target: `for [off] in ...`
             self._advance()
-            sub = self._parse_generator_target()
+            sub, _ = self._parse_generator_target()
             self._expect("RBRACKET")
             target = f"[{sub}]"
+            saw_comma = True
         elif t.kind in ("NAME", "KW"):
             target = self._advance().value
         else:
             target = self._expect("NAME").value
         while self._peek().kind == "COMMA":
+            saw_comma = True
             self._advance()
             if self._is_kw("in"):
+                # Trailing comma at the TOP level: `for a, in ...` is a
+                # 1-tuple, so it needs the parens that make the string a
+                # tuple target.
+                target = f"({target})"
                 break
             # Trailing comma inside a paren/bracket pattern: `(fpath,)` /
             # `[off,]` — leave the closer for the caller's _expect.
@@ -5190,18 +5311,18 @@ class Parser:
             sub_t = self._peek()
             if sub_t.kind == "LPAREN":
                 self._advance()
-                inner = self._parse_generator_target()
+                inner, inner_comma = self._parse_generator_target()
                 self._expect("RPAREN")
-                target += f", ({inner})"
+                target += f", ({inner})" if inner_comma else f", {inner}"
             elif sub_t.kind in ("NAME", "KW"):
                 target += ", " + self._advance().value
             else:
                 target += ", " + self._expect("NAME").value
-        return target
+        return target, saw_comma
 
     def _parse_generator(self):
         self._expect("KW", "for")
-        target = self._parse_generator_target()
+        target, _ = self._parse_generator_target()
         self._expect("KW", "in")
         iterable = self._parse_expr(1)
         conditions = []
@@ -5853,11 +5974,33 @@ class Parser:
         if self._peek().kind == "LPAREN":
             self._advance()
             parts = []
+            saw_comma = False
             while self._peek().kind != "RPAREN" and self._peek().kind != "EOF":
                 parts.append(self._parse_unpack_target())
                 if self._peek().kind == "COMMA":
+                    saw_comma = True
                     self._advance()
             self._expect("RPAREN")
+            # `for (a) in b:` is a PARENTHESISED NAME, not a 1-tuple: Python
+            # binds the whole item to `a`. `for (a,) in b:` IS a 1-tuple and
+            # unpacks the item's single element. Both used to reduce to the
+            # IDENTICAL string "(a)" (a trailing comma at the top level
+            # reuses this spelling too — see _parse_for), so the compiled
+            # path's `for (a) in ...` unpacked instead of binding and
+            # printed `1` where CPython prints `(1,)`.
+            #
+            # The parens are the whole disambiguation, and keeping them is
+            # not optional: every consumer already reads a parenthesised
+            # target as "this is a tuple target" (that is what makes
+            # `for (a,) in b:` unpack correctly today) and a bare name as
+            # "bind the whole item". So the parenthesised single name
+            # unwraps to its bare text — `a` — which is exactly the
+            # representation `for a in b:` already produces, and a 1-element
+            # group that really did have a comma keeps "(a)". No trailing
+            # comma is ever emitted, so no consumer has to learn to drop an
+            # empty split element.
+            if len(parts) == 1 and not saw_comma:
+                return parts[0]
             return "(" + ", ".join(parts) + ")"
         elif self._peek().kind == "OP" and self._peek().value == "*":
             self._advance()

@@ -23,7 +23,7 @@ import re
 import sys
 import zlib
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal, _split_top_level_commas as _fc_split_top_level_commas, is_tuple_target as _fc_is_tuple_target, for_target_slots as _fc_for_target_slots
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -631,20 +631,14 @@ def _split_top_level_commas(s: str) -> list[str]:
     """Split `s` on commas that are not nested inside ([{ }]). Used to pull
     just the element-type segment out of a multi-arg bracket annotation like
     `UnsafePointer[X, SomeOrigin]` without splitting inside a nested `X` that
-    itself contains a bracketed, comma-bearing type arg (e.g. `Tuple[Int, Int]`)."""
-    parts, depth, buf = ([], 0, [])
-    for c in s:
-        if c in '([{':
-            depth += 1
-        elif c in ')]}':
-            depth = max(0, depth - 1)
-        if c == ',' and depth == 0:
-            parts.append(''.join(buf))
-            buf = []
-        else:
-            buf.append(c)
-    parts.append(''.join(buf))
-    return parts
+    itself contains a bracketed, comma-bearing type arg (e.g. `Tuple[Int, Int]`).
+
+    A thin re-export of `fire_compiler._split_top_level_commas`, which is the
+    one implementation (it strips each part; every caller here did its own
+    `.strip()` at the use site). This module cannot `from fire_compiler import
+    *` — see the note at its import block — so the name is bound explicitly to
+    keep ONE splitter rather than the four this used to have."""
+    return _fc_split_top_level_commas(s)
 
 def _class_attr_ctype(v) -> str | None:
     """C pointer type for a container-valued class-body attribute initializer
@@ -1764,9 +1758,9 @@ def _unpack_target_leaf_names(target: str) -> list:
     fragments that then leaked into declared-name sets (or worse, into
     emitted C declarations verbatim)."""
     t = target.strip()
-    if t.startswith('(') and t.endswith(')'):
+    if _fc_is_tuple_target(t):
         names = []
-        for part in _split_top_level_commas(t[1:-1]):
+        for part in _fc_for_target_slots(t):
             names.extend(_unpack_target_leaf_names(part))
         return names
     return [t] if t else []
@@ -1780,7 +1774,7 @@ def _declared_vars_body(stmts) -> set[str]:
         elif isinstance(node, ForStmt):
             tgt = node.target
             name = tgt if isinstance(tgt, str) else getattr(tgt, 'name', '')
-            if isinstance(name, str) and name.startswith('(') and name.endswith(')'):
+            if _fc_is_tuple_target(name):
                 result.update(_unpack_target_leaf_names(name))
             elif name:
                 result.add(name)

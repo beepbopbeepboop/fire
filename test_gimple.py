@@ -7846,7 +7846,255 @@ outer([10, 20, 30])
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_paren_name_vs_one_tuple_for_target_differ():
+        """`for (a) in b:` binds the whole item; `for (a,) in b:` unpacks it.
+
+        Both reduced to the IDENTICAL target string `"(a)"`, and every
+        consumer decided "tuple" by looking for a comma — so the one shape
+        Python keeps distinct was decided wrongly, silently and in opposite
+        directions: the compiled path printed `1` for `for (a) in [(1,)]`
+        where CPython prints `(1,)`, and the interpreter printed `(1,)` for
+        `for (a,) in [(1,)]` where CPython prints `1`.
+
+        The parsers now unwrap a parenthesised single NAME to bare text and
+        keep the parens for a 1-element group that really had a comma, so
+        the surrounding parens are the disambiguation
+        (`fire_compiler.is_tuple_target`). Asserted against CPython on the
+        same text, on both pipelines: a shape whose right answer differs per
+        engine is exactly what a hand-written expectation would get wrong.
+
+        All four spellings are here for each of `for` and a comprehension,
+        because the comprehension generator target is a SEPARATE parser
+        (`_parse_generator_target`) with its own representation — a bare
+        comma list carries no parens there — and it had the same collision
+        plus its own version of the trailing comma (`[y for y, in z]`
+        produced the bare `"y"`). Nested `for (a, (b, c)) in ...` is here
+        because the per-slot split has to be bracket-aware.
+        """
+        global _PASS, _FAIL
+        name = "paren_name_vs_one_tuple_for_target_differ"
+        src = '''\
+def plain(items):
+    out = []
+    for (a) in items:
+        out.append(a)
+    return out
+
+def one_tuple(items):
+    out = []
+    for (a,) in items:
+        out.append(a)
+    return out
+
+def bare_comma(items):
+    out = []
+    for a, in items:
+        out.append(a)
+    return out
+
+def nested(items):
+    out = []
+    for (a, (b, c)) in items:
+        out.append(str(a) + str(b) + str(c))
+    return out
+
+print(plain([(1,), (2,)]))
+print(one_tuple([(1,), (2,)]))
+print(bare_comma([(1,), (2,)]))
+print(nested([(1, (2, 3)), (4, (5, 6))]))
+print([y for (y) in [(1,), (2,)]])
+print([y for (y,) in [(1,), (2,)]])
+print([y for y, in [(1,), (2,)]])
+print([y for y in [(1,), (2,)]])
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'paren_target.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            # The interpreter is the third engine: it had the OPPOSITE wrong
+            # answer (`for (a,) in` bound the whole item), so a compiled-only
+            # comparison could not have caught the bug.
+            it = subprocess.run([sys.executable, os.path.join(_PROJECT_DIR, 'fire.py'),
+                                 'run', entry], capture_output=True, text=True,
+                                cwd=td, timeout=120)
+            if it.returncode != 0 or it.stdout != want:
+                print(f"FAIL  {name} [interp]: exit {it.returncode}, printed "
+                      f"{it.stdout!r}, CPython printed {want!r} "
+                      f"({(it.stderr or '').strip()[-300:]})")
+                _FAIL += 1
+                return
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'paren_{mode}.c')
+                exe = os.path.join(td, f'paren_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_next_inside_for_over_same_iterator_advances_once():
+        """`next(it)` inside `for x in it:` must read the FOLLOWING element.
+
+        `it = iter(<list>)` lowers to a shared list plus an int64_t cursor.
+        Both consumers of that cursor have to agree on what it means: Python's
+        `list_iterator.__next__` advances BEFORE returning, so by the time the
+        loop body runs, the iterator is already one past the element the loop
+        yielded, and a `next(it)` in the body reads the one after that. The
+        GIMPLE `for` lowering used to advance in its post block — after the
+        body — so `next(it)` re-read the element the loop had just handed out:
+        half the list consumed, every element reported twice
+        (`walk([1,2,3,4])` -> `[1, 1, 3, 3]`).
+
+        This is exactly CPython's own shape, in
+        `Tools/cases_generator/analyzer.py::check_escaping_calls`:
+
+            tkn_iter = iter(stmt.contents)
+            for tkn in tkn_iter:
+                ...
+                    next(tkn_iter)
+
+        so the answer is compared against CPython on the SAME text rather
+        than a hand-written expectation. The `continue` and `break` arms are
+        here because the fix moves the advance out of the post block: they
+        must still land in a place where the advance has happened."""
+        global _PASS, _FAIL
+        name = "next_inside_for_over_same_iterator_advances_once"
+        src = '''\
+def walk(items):
+    it = iter(items)
+    out = []
+    for x in it:
+        out.append(x)
+        out.append(next(it))
+    return out
+
+def every_other(items):
+    it = iter(items)
+    out = []
+    for x in it:
+        if x % 2:
+            continue
+        out.append(x)
+    return out
+
+def bail_on_sentinel(items):
+    it = iter(items)
+    out = []
+    for x in it:
+        if x == 99:
+            break
+        out.append(x)
+    return out
+
+def resumes_after_next(items):
+    it = iter(items)
+    out = []
+    print(next(it))
+    for x in it:
+        out.append(x)
+    return out
+
+print(walk([1, 2, 3, 4]))
+print(every_other([1, 2, 3, 4, 5, 6]))
+print(bail_on_sentinel([1, 2, 99, 3]))
+print(resumes_after_next([7, 8, 9]))
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'cursor_once.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'once_{mode}.c')
+                exe = os.path.join(td, f'once_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_cursor_advance_has_no_cast_operand_in_gimple()
+    test_next_inside_for_over_same_iterator_advances_once()
+    test_paren_name_vs_one_tuple_for_target_differ()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()

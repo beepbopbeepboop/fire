@@ -2522,6 +2522,28 @@ def main():
         print(v)
 """, "1\n2\n3\n4\n")
 
+    # A generator body that calls `next(it)` from INSIDE `for x in it:` over
+    # the same cursor. An A3 stack-switch body goes through the ordinary
+    # codegen's `_gen_for_list_iter_cursor`, whose cursor is the index of the
+    # next UNCONSUMED element (the advance is part of reading the element, not
+    # a post-body step) — so `next(it)` in the body reads the FOLLOWING
+    # element, as CPython's `list_iterator.__next__` does, and all four
+    # elements are seen exactly once. Before that invariant was restored the
+    # post-block advance made `next(it)` re-read the element the loop had just
+    # yielded: `1\n1\n3\n3`. Same shape as CPython's own
+    # `Tools/cases_generator/analyzer.py::check_escaping_calls`.
+    test_generator_stdout("generator_next_inside_for_over_same_it", """\
+def scan(xs):
+    it = iter(xs)
+    for x in it:
+        yield x
+        yield next(it)
+
+def main():
+    for v in scan([1, 2, 3, 4]):
+        print(v)
+""", "1\n2\n3\n4\n")
+
     # ── yield-kind inference for identifier / self.field / list-local refs ──
     # (bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md)
     # The Layer-1 pre-pass's _yield_kind() used to have no case for a bare

@@ -1933,7 +1933,7 @@ def _async_for_ok(fn: N.FunctionDef) -> bool:
     _async_for_drive_stmts desugars."""
     for n in _walk(fn):
         if isinstance(n, N.ForStmt) and getattr(n, 'is_async', False):
-            if not isinstance(n.target, str) or ',' in n.target:
+            if not isinstance(n.target, str) or N.is_tuple_target(n.target):
                 return False
             if _await_target_name(n.iterable) is None:
                 return False
