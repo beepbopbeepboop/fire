@@ -196,6 +196,58 @@ CASES = [
      "    a[bump()] += 100\n"
      "    sys.stdout.write(\"%d %d %d\" % (a[0], a[1], a[2]))\n"
      "    return 0\n"),
+    # `len` is on this list because the two architectures answered it the SAME
+    # wrong way, which is the shape a one-backend fix would hide: `_emit_call`
+    # special-cased `range` and treated every other callee as a known function
+    # or an extern, and `len` matched neither, so it became a call to a libc
+    # symbol that does not exist.  Both backends therefore returned whatever
+    # the call left in the return register — measured, -6 for `len(range(10))`
+    # on BOTH — and one architecture being right would have been as much a bug
+    # as both being wrong.  (`bugs/FORMAL_x86_64_formal_backend_gaps.md`.)
+    #
+    # Four operand shapes in one line, because the fix is not one rule and the
+    # four are the four ways to be wrong about it:
+    #
+    #   * a `range` blob — the count field at offset 0;
+    #   * a LIST literal and a list LOCAL — the same field, and the local is the
+    #     one a fall-through reads through an unclassified word;
+    #   * a string LOCAL — a bare `char *`, and its length is a COMPUTATION
+    #     (`strlen`) rather than a field, because a NUL-terminated run has no
+    #     count word.  Measured before the fix, on both architectures:
+    #     1819043176 = 0x6C6C6568 = "hell" read little-endian;
+    #   * a string that is a METHOD RESULT — `lstrip` yields an INTERIOR
+    #     pointer, so this is the case that pins the scan to the NUL from
+    #     wherever the pointer starts rather than from the original literal.
+    #     Measured before the fix, on both: 536897896 = 0x20006869, "hi"
+    #     followed by the two spaces that had just been trimmed.
+    #
+    # The empty string is here too, because a scan that forgets the terminator
+    # walks off the end of the buffer, and 0 is the answer that says it did not.
+    #
+    # TWO printfs, not one, and the reason is this suite's own subject rather
+    # than taste: SysV x86-64 passes six integer arguments in registers, so a
+    # single `printf` of seven values is refused on x86-64 and built on arm64 —
+    # which is a different divergence than the one this case exists to close
+    # (bugs/FORMAL_x86_64_argument_registers.md).  A case that tripped it would
+    # report that filing and not this one.
+    ("len_of_every_operand_shape",
+     "def main():\n"
+     "    m = \"hello\"\n"
+     "    w = \"  hi\".lstrip()\n"
+     "    e = \"\"\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"%d %d %d %d\", len(m), len(w), len(e), len(xs))\n"
+     "    printf(\" %d %d %d\", len([1, 2, 3, 4]), len(range(10)), len([]))\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    m = \"hello\"\n"
+     "    w = \"  hi\".lstrip()\n"
+     "    e = \"\"\n"
+     "    xs = [1, 2, 3]\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (len(m), len(w), len(e), len(xs)))\n"
+     "    sys.stdout.write(\" %d %d %d\" % (\n"
+     "        len([1, 2, 3, 4]), len(range(10)), len([])))\n"
+     "    return 0\n"),
 ]
 
 
