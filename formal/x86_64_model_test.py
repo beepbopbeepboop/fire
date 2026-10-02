@@ -29,8 +29,10 @@ Exit: 0 iff every example agrees.
 
 import glob
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -109,8 +111,25 @@ def main(argv):
         print("lean not found (see ./lean-toolchain)")
         return 1
     cases = _build_cases()
-    workdir = os.path.join("/tmp", "x86_model_test")
-    os.makedirs(workdir, exist_ok=True)
+    # A PRIVATE work directory, not a fixed path under /tmp. This file is a
+    # registered job (`formal-x86-machine-model`) and the runner admits the
+    # `x86` bucket several ways wide, so two concurrent runs -- two checkouts
+    # of this repo, or a worker and a human at the keyboard -- both wrote
+    # `ModelCheck.lean` to the same `/tmp/x86_model_test/` and each `lean`
+    # then read whichever of the two files the other had half-written. That is
+    # the write-into-shared-state failure `bugs/UNTESTED.md` §4.1 records for
+    # a test that writes where it should not, and it is invisible: the verdict
+    # is a number, not an error. `tempfile.mkdtemp` lands under $TMPDIR (so
+    # inside the run's own scratch when the runner sets one), is unique per run
+    # by construction, and is removed rather than leaving a `.olean` per run.
+    workdir = tempfile.mkdtemp(prefix='x86_model_test-')
+    try:
+        return _check(cases, workdir, lean, lib, verbose)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _check(cases, workdir, lean, lib, verbose):
     src = os.path.join(workdir, "ModelCheck.lean")
     with open(src, "w") as f:
         f.write(_lean_source(cases))

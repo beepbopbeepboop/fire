@@ -43,8 +43,10 @@ Exit: 0 iff every emittable form steps.
 """
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -224,8 +226,23 @@ def main():
             print("  " + u)
         return 1
 
-    workdir = os.path.join("/tmp", "x86_model_coverage")
-    os.makedirs(workdir, exist_ok=True)
+    # A PRIVATE work directory, not a fixed path under /tmp — the same reason
+    # `formal/x86_64_endtoend_test.py` uses `NamedTemporaryFile` and
+    # `formal/x86_64_model_test.py` a `mkdtemp`: this is a registered job
+    # (`formal-x86-model`) and the runner admits the `x86` bucket several ways
+    # wide, so two concurrent runs both wrote `Coverage.lean` to the same
+    # `/tmp/x86_model_coverage/` and each `lean` read whichever of the two the
+    # other had half-written. The verdict here is a LIST OF FORMS THAT DID NOT
+    # STEP, so an interleaved write is indistinguishable from a model
+    # regression. Unique per run, under $TMPDIR, removed afterwards.
+    workdir = tempfile.mkdtemp(prefix='x86_model_coverage-')
+    try:
+        return _step_coverage(samps, workdir, lean, lib)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _step_coverage(samps, workdir, lean, lib):
     src = os.path.join(workdir, "Coverage.lean")
     with open(src, "w") as f:
         f.write(lean_source(samps))

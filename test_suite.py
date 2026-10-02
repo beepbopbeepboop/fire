@@ -3241,6 +3241,22 @@ UNREGISTERED = {
         'silently lost every entry the moment the tuple stopped living (17 '
         'programs). Unregistered for the reason `test_container_equality.py` '
         'above gives.',
+    # ── the other spelling, and what widening the estate check revealed ──
+    #
+    # `is_test_file_name` above now counts `*_test.py` as well as `test_*.py`,
+    # because this repo uses both and four files were outside the inventory
+    # entirely. Two of them are registered (`formal/x86_64_endtoend_test.py`,
+    # `formal/x86_64_model_coverage_test.py`) and are now REGISTERED rather
+    # than excused; the other two are here.
+    'scripts/bootstrap_full_test.py': 'A REPORT GENERATOR, not a test: it '
+        'shells out to the bootstrap stages with a 30 s timeout each and '
+        'prints a per-stage ✓/✗ table with no assertion of its own, so its '
+        'exit status is a summary of subprocess statuses rather than a verdict '
+        'on anything. Registering it would add a job that can only fail when '
+        'a SUBPROCESS fails, which is what the bootstrap stages themselves '
+        'already report. Found by widening the estate check to this file\'s '
+        'spelling; see bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md.',
+
     'test_imports.py': 'That import statements generate extern declarations. '
         'A missing extern is a link failure attributed to something else.',
     'test_kwargs_stmt.py': 'kwargs in statement-level calls, a shape the '
@@ -3287,8 +3303,42 @@ def _unregistered_reason_table():
     return out
 
 
+def is_test_file_name(fn: str) -> bool:
+    """ONE predicate for "is this a test file", both spellings.
+
+    This repo uses `test_*.py` and `*_test.py`, and the estate check read only
+    the first. Four files were therefore outside the inventory entirely: two
+    that a registered spec names (`formal/x86_64_endtoend_test.py`,
+    `formal/x86_64_model_coverage_test.py` — found by the `named` half, not by
+    the walk, which is why the mismatch was visible in the arithmetic at all)
+    and two in neither a spec nor `UNREGISTERED`
+    (`formal/x86_64_model_test.py`, `scripts/bootstrap_full_test.py`), which
+    nothing counted and nothing checked.
+
+    The live consequence was not cosmetic:
+    `formal/x86_64_model_test.py` is the only check on `lib/X86.lean` that
+    EXECUTES a machine model rather than typechecking it, and it ran by
+    nothing. A deletion of either registered file left a spec pointing at
+    nothing with nothing to say so, which is what step 4 below now reports.
+
+    Derived here and read by `_test_files_in_repo` and by nothing else, so the
+    two walks (`test_suite.py`'s and `checked_run.expand_globs`') cannot
+    disagree about what a test file is — the failure
+    `bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md` records.
+    The matching cache-key half is `suite-self-test`'s `extraglob`, which must
+    name BOTH patterns; `test_the_estate_check_is_in_a_gate_and_can_see_its_
+    own_subject` is what keeps the two in step.
+    """
+    return fn.endswith('.py') and (fn.startswith('test_') or fn.endswith('_test.py'))
+
+
+# The two glob patterns that say the same thing, kept next to the predicate so
+# the walk and the cache key are changed together or not at all.
+TEST_FILE_GLOBS = ('**/test_*.py', '**/*_test.py')
+
+
 def _test_files_in_repo():
-    """Every `test_*.py` in the repo, repo-relative.
+    """Every test file in the repo under EITHER spelling, repo-relative.
 
     The skip list is `checked_run.DERIVED_DIRS` and not a second copy of it:
     `build/`, `__pycache__`, `aside/` and `bside/` are all trees whose contents
@@ -3298,19 +3348,16 @@ def _test_files_in_repo():
     version of the estate check and its cache key each had their own, and a
     subdirectory was found by one and invisible to the other.
 
-    The spelling is still `test_*.py` only, and the gap that leaves is written
-    down rather than fixed here: `formal/x86_64_endtoend_test.py` and
-    `formal/x86_64_model_coverage_test.py` are registered but outside the
-    inventory (both spellings are in use in this repo), plus two `*_test.py`
-    files that are in neither a spec nor a list. See
-    `bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md`.
+    What counts as a test file is `is_test_file_name` above, one predicate for
+    both spellings and both walkers; `TEST_FILE_GLOBS` is the same answer
+    spelled for `suite-self-test`'s cache key.
     """
     import checked_run
     found = []
     for dirpath, dirnames, filenames in os.walk(HERE):
         dirnames[:] = [d for d in dirnames if not checked_run.is_derived_dir(d)]
         for fn in filenames:
-            if fn.startswith('test_') and fn.endswith('.py'):
+            if is_test_file_name(fn):
                 found.append(os.path.relpath(os.path.join(dirpath, fn), HERE))
     return sorted(set(found))
 
@@ -3324,6 +3371,22 @@ def _registered_test_files():
             for m in re.findall(r'[\w./-]*test[\w./-]*\.py', str(c)):
                 out.add(os.path.basename(m))
     return out
+
+
+def _any_path_for_basename(basename: str) -> bool:
+    """True if `basename` is a test file that exists somewhere in the repo.
+
+    The `named` half of the estate check works in basenames (a spec's `cmd` is
+    a list of argv strings, and the file it names is wherever it names it), so
+    answering "is that name real?" means going back to the walk. A basename is
+    not unique — `formal/model.py` and `test_formal_model.py` both end in
+    `model` — but `is_test_file_name` has already constrained the question to
+    names this repo would treat as tests, and the check this serves only asks
+    whether AT LEAST ONE real file has the name, which is the question "does
+    this registration point at something that exists".
+    """
+    return os.path.basename(basename) in {
+        os.path.basename(p) for p in _test_files_in_repo()}
 
 
 def test_cached_spec_names_its_own_test():
@@ -3399,9 +3462,35 @@ def test_every_test_file_is_registered():
     thin = sorted(p for p, why in excused.items() if len(why) < 40)
     check('the estate: every excuse is a reason, not a shrug', not thin,
           f'too short to be a reason: {thin}')
+
+    # The direction nothing computed, and the one that has a live consequence.
+    # `named` counts basenames, so it cannot distinguish "a spec runs this
+    # file" from "a spec's command line contains this string" — but it CAN
+    # distinguish a name that is in the repo from one that is not, and a spec
+    # naming a file that is gone (renamed, deleted, moved) is a broken
+    # registration: `fire.py build formal/x86_64_endtoend_test.py` fails at
+    # the runner's own argv check, or worse, a spec with a `Fanout` simply
+    # loses an item. Nothing said so until this check.
+    #
+    # It could not have been written before the subject set was widened: with
+    # `test_*.py` alone, the two registered `formal/*_test.py` files were
+    # "named but not on disk" on every run, so the property was untestable
+    # rather than false, and it would have passed vacuously about exactly the
+    # four files the widening is for. The resolution asks "does a real file
+    # have this name" rather than joining on a path, because `named` is
+    # basenames by construction (a spec's `cmd` is argv strings) and a basename
+    # is not unique across the repo (`formal/model.py` and
+    # `test_formal_model.py` both end in `model`) — so a path join would report
+    # a collision as a deletion.
+    dangling = sorted(n for n in named if not _any_path_for_basename(n))
+    check('the estate: every test file a spec NAMES is a file that exists',
+          not dangling,
+          f'registered specs name {len(dangling)} test file(s) that are not in '
+          f'the repo under either spelling — a renamed or deleted file leaves '
+          f'the registration pointing at nothing: {dangling}')
     print(f'      the estate: {len(on_disk)} test files, {len(named - orphans)} '
           f'of them run by a registered spec, {len(excused)} declared with a '
-          f'reason, {len(undeclared)} undeclared')
+          f'reason, {len(undeclared)} undeclared, {len(dangling)} dangling')
 
 
 def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
@@ -3454,10 +3543,12 @@ def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
           'was supposed to catch it')
 
     check('the estate: ...and it is cached, so its key has to see the subject',
-          spec.cache and '**/test_*.py' in spec.extraglob,
+          spec.cache and set(TEST_FILE_GLOBS) <= set(spec.extraglob),
           f'cache={spec.cache}, extraglob={list(spec.extraglob)}: a cached PASS '
           f'is replayed, so a key that cannot see a new test file serves the '
-          f'last green run instead of running this check')
+          f'last green run instead of running this check. Both spellings have '
+          f'to be there: the walk finds {TEST_FILE_GLOBS[0][2:]} AND '
+          f'{TEST_FILE_GLOBS[1][3:]}')
 
     on_disk = set(_test_files_in_repo())
     nested = sorted(f for f in on_disk if os.path.dirname(f))

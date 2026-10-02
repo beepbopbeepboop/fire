@@ -490,6 +490,17 @@ MEASURED_PEAK_GB = {
     'formal-receiver-position': (0.07, 'measured'),  # 2 s, 12 cases
     'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases
     'formal-x86-dylib':       (0.09, 'measured'),   # 2 s, 9 cases
+    # The x86-64 MACHINE MODEL against the hardware, which had never been run
+    # by anything: `formal/x86_64_model_test.py` is spelled `*_test.py` and the
+    # estate check's walk counted only `test_*.py`, so it was in no bucket and
+    # no suite. Measured one at a time under `tools/memslot.py --gb 8` on
+    # 2026-10-02, arm64 host (the job itself is x86-64 + Rosetta), ~20 min for
+    # 45 sequential formal builds, 45 Rosetta runs and one `lean` `#eval!` over
+    # all 180 runs. 1.4 GB is memcap's own tree poll — the instrument every
+    # other row here uses — and it is 2.9x under `tiny`, which is the number
+    # worth having: this is the job whose SHAPE (45 builds plus a Lean
+    # interpreter run) argues for `stage`, and its measurement says `tiny`.
+    'formal-x86-machine-model': (1.4, 'measured'),
     # The eleven `expect=`-marked tests that were registered and in NO BUCKET,
     # so no run ever executed them and no `expect=` anti-rot could fire on any
     # of them (bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md). Same
@@ -1519,11 +1530,23 @@ test('preflight', [PY, '-c',
 # (`bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md`, closed and
 # DELETED with the fix) in one mechanism: the check existed, and the cache in
 # front of it was a hole exactly the shape of the thing the check looks for.
+#
+# BOTH patterns, and that is the same reasoning applied a second time. The walk
+# behind the check counts `test_*.py` AND `*_test.py` (one predicate,
+# `test_suite.py`'s `is_test_file_name`, and four files were outside the
+# inventory entirely before it: two registered `formal/*_test.py` suites the
+# walk never saw, and `formal/x86_64_model_test.py`, the only check on
+# `lib/X86.lean` that EXECUTES a machine model instead of typechecking it, run
+# by nothing). A key that named one spelling would replay a recorded PASS over
+# a change to a file in the other. `test_suite.py`'s
+# `test_the_estate_check_is_in_a_gate_and_can_see_its_subject` asserts both
+# patterns are present and that the glob and the walk agree, so the two cannot
+# drift back apart.
 test('suite-self-test', [PY, 'test_suite.py'], cache=True,
      extra=['test_suite.py', 'tools/suite.py', 'tools/procrun.py',
             'tools/memslot.py', 'tools/memcap.py', 'checked_run.py',
             'test_memslot.py', 'tools/dangling_doc_refs.py'],
-     extraglob=['**/test_*.py'],
+     extraglob=['**/test_*.py', '**/*_test.py'],
      desc='the runner: drivers, deps, exclusivity, fanout, tally, log split')
 
 # The ledger every job above reserves out of, tested on its own. In `smoke`
@@ -2033,6 +2056,39 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
 test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
      deps=['preflight', 'prooflib'],
      desc='every byte the x86-64 emitter can produce is a step the model can step')
+# The check that `lib/X86.lean` is a MODEL of the machine rather than a
+# well-typed program: it builds every `formal/examples/*.mojo` for x86-64, RUNS
+# each image under Rosetta, runs the same bytes through `x86_exec_exit` in the
+# Lean interpreter and compares the value left in RAX. A machine model that has
+# only been typechecked proves nothing — every definition in it is trivially
+# well-typed — so this is the only thing on `lib/X86.lean` that can fail, and
+# it ran by NOTHING: the file is spelled `*_test.py`, and the estate check's
+# walk only counted `test_*.py`, so it was in no spec and in no `UNREGISTERED`
+# (bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md).
+#
+# `tiny` from a MEASUREMENT, not from the shape: one run alone under
+# `tools/memslot.py --gb 8`, 1.4 GB peak across the whole tree (`procrun`'s own
+# RSS poll), ~20 min wall — 45 sequential formal builds, 45 Rosetta runs, then
+# ONE `lean` invocation `#eval!`-ing all 180 runs. `1.5 x 1.4 = 2.1`, so the
+# ratchet picks `tiny` (4 GB) and the floor class covers the peak 2.9x. A class
+# assigned from "it builds 45 images and runs Lean" would have been `stage` (96
+# GB), which is a machine-wide reservation for a job whose measured peak is
+# under a third of the cheapest rung.
+#
+# It is RED, and deliberately `expect=`-marked rather than left unregistered:
+# `udivmod` disagrees with the hardware (real 4, model 7905747460161236410).
+# A model bug on a file that has been running by nobody for as long as it has
+# existed is exactly what an `expect=` marker is for — it says WHAT is red
+# instead of leaving the file invisible. Fix the model and the marker flips
+# loudly.
+test('formal-x86-machine-model', [PY, 'formal/x86_64_model_test.py'],
+     deps=['preflight', 'prooflib'], mem='tiny',
+     extra=['formal/x86_64_model_test.py', 'formal/x86_64.py', 'lib/X86.lean'],
+     expect='1 of 45 WRONG: udivmod — the x86-64 machine model returns '
+            '7905747460161236410 where the hardware returns 4 '
+            '(bugs/CODEGEN_x86_model_udivmod_disagrees_with_hardware.md). '
+            'Found by running this file for the first time, 2026-10-02.',
+     desc='lib/X86.lean EXECUTED against the hardware it models, every example')
 
 # ── the formal host modules: built, EXECUTED, diffed against CPython ────────
 # Eight test files that build a formal image per case and RUN it, comparing the
@@ -2594,6 +2650,7 @@ BUCKETS = {
                'refusal-taxonomy', 'comptime-parity',
                'returned-frame-layout', 'formal-x86',
                'formal-x86-endtoend', 'formal-x86-model',
+               'formal-x86-machine-model',
                # The eight host-module suites registered above. The four in
                # `check` are named here too so `proofs` is the whole formal
                # picture in one bucket, which is what a reader of this list is
@@ -2619,6 +2676,7 @@ BUCKETS = {
                'formal-target-queries', 'formal-value-model',
                'formal-x86-dylib'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
+            'formal-x86-machine-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,
             # which is the same hole as the five in `check`.
