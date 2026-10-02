@@ -1967,14 +1967,34 @@ def alias_multi_kind_locals(gen, key: str, func) -> None:
         tbl.setdefault(_as_str(key), set()).update(got)
 
 
-def _prepass_list_elem(gen, elements) -> str:
-    """Element type of a container literal for the pre-pass. Mirrors
-    _infer_list_elem_type but resolves identifier elements through the
-    local container-element map instead of var_types (empty during Pass
-    2c) — e.g. `return ctype, cval` where cval was unpacked from an
-    earlier char*-tuple call."""
+def _prepass_list_elem(gen, elements) -> str | None:
+    """Element type of a container literal for the pre-pass, or None when the
+    literal carries NO element evidence. Mirrors `_infer_list_elem_type` but
+    resolves identifier elements through the local container-element map
+    instead of var_types (empty during Pass 2c) — e.g. `return ctype, cval`
+    where cval was unpacked from an earlier char*-tuple call.
+
+    An EMPTY literal answers None, not `'int64_t'`, and that is the whole
+    difference between this and `_infer_list_elem_type`. This function is the
+    EVIDENCE half of container-element inference — its only caller is
+    `_quick_container_elem`, whose answer is a claim about what a value
+    holds, and every reader of that claim (`_collect_return_elems` ->
+    `_return_elem_types`, the `TernaryExpr` arm's join) treats a non-None
+    answer as positively known. `_infer_list_elem_type`'s `'int64_t'` is a
+    STORAGE default for a local's declaration, which is the right answer
+    there and a false one here: `def a2(i): if i: return [<a str comprehension>];
+    return []` inferred `'int64_t'` from the empty literal alone (the
+    comprehension's own element contributes nothing — see below), and that
+    positive claim reached the call site as `_return_elem_types['a2']`, so
+    `print(a2(1))` routed to `mojo_repr_list_ints` and printed the two `char *`
+    slots as pointer decimals. Measured in bugs/
+    CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md; the same
+    program WITHOUT the trailing `return []` answers None and prints right,
+    which is what made the branch look like the trigger when the empty literal
+    is what carries the false claim.
+    """
     if not elements:
-        return 'int64_t'
+        return None
     types = []
     for e in elements:
         le = gen._quick_container_elem(e)

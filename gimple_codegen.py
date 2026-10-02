@@ -169,6 +169,11 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_setdefault_str_kw': 'char *',
     'mojo_dict_contains_kw':      'int',
     'mojo_dict_pop_int_kw':       'int64_t',
+    'mojo_dict_pop_str_kw':       'char *',
+    'mojo_dict_pop_double_kw':    'double',
+    'mojo_dict_pop_int':          'int64_t',
+    'mojo_dict_pop_str':          'char *',
+    'mojo_dict_pop_double':       'double',
     'mojo_dict_set_bytes_int':    'void',
     'mojo_dict_set_bytes_str':    'void',
     'mojo_dict_set_bytes_double': 'void',
@@ -3100,7 +3105,15 @@ class GimpleGen:
         'mojo_dict_set_double_kw':  ('void',     ['MojoDict *', 'int64_t', 'double']),
         'mojo_dict_set_str_kw':     ('void',     ['MojoDict *', 'int64_t', 'char *']),
         'mojo_dict_contains_kw':    ('int',      ['MojoDict *', 'int64_t']),
-        'mojo_dict_pop_int_kw':     ('int64_t',  ['MojoDict *', 'int64_t']),
+        'mojo_dict_pop_int_kw':     ('int64_t',  ['MojoDict *', 'int64_t', 'int64_t']),
+        'mojo_dict_pop_str_kw':     ('char *',   ['MojoDict *', 'int64_t', 'char *']),
+        'mojo_dict_pop_double_kw':  ('double',   ['MojoDict *', 'int64_t', 'double']),
+        'mojo_dict_pop_int':        ('int64_t',  ['MojoDict *', 'char *', 'int64_t']),
+        'mojo_dict_pop_str':        ('char *',   ['MojoDict *', 'char *', 'char *']),
+        'mojo_dict_pop_double':     ('double',   ['MojoDict *', 'char *', 'double']),
+        'mojo_dict_pop_bytes_int':  ('int64_t',  ['MojoDict *', 'MojoBytes *', 'int64_t']),
+        'mojo_dict_pop_bytes_str':  ('char *',   ['MojoDict *', 'MojoBytes *', 'char *']),
+        'mojo_dict_pop_bytes_double': ('double', ['MojoDict *', 'MojoBytes *', 'double']),
         'mojo_dict_setdefault_int_kw': ('int64_t', ['MojoDict *', 'int64_t', 'int64_t']),
         'mojo_dict_setdefault_str_kw': ('char *',  ['MojoDict *', 'int64_t', 'char *']),
         'mojo_replace_argv':   ('void',    ['MojoList *']),
@@ -4709,6 +4722,8 @@ class GimpleGen:
         return ginf._elem_of(self, name)
     def _dict_val_of(self, name: str) -> str:
         return ginf._dict_val_of(self, name)
+    def _dict_val_is_known(self, name: str) -> bool:
+        return ginf._dict_val_is_known(self, name)
     def _dict_val_of_expr(self, expr) -> str:
         return ginf._dict_val_of_expr(self, expr)
     def _dict_union_val_type(self, lv, rv) -> str:

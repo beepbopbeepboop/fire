@@ -463,10 +463,13 @@ BUILTIN_PROGRAMS = {
     # all (gcc "non-trivial conversion in 'var_decl'"), which is how it was
     # found; with a `char *` live it compiled and printed string ADDRESSES.
     #
-    # The comprehension is deliberately NOT inside a branch: a comprehension in
-    # an `if` body loses its RESULT list's element type, which is a separate
-    # bug (bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md)
-    # and would mask what this case is about.
+    # The comprehension is deliberately NOT inside a branch, so that this case
+    # measures the target's binding and nothing else; the branch spelling is
+    # its own case below
+    # (`comprehension_result_elem_type_across_a_branch`), which is what the
+    # branch-shaped reproducer for
+    # bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md
+    # turned out to be measuring.
     "comprehension_target_shadows_an_enclosing_local": textwrap.dedent("""\
         class Token:
             def __init__(self, kind):
@@ -494,6 +497,55 @@ BUILTIN_PROGRAMS = {
         def main():
             print(struct_pointer_live())
             print(char_star_live())
+    """),
+    # An EMPTY container literal asserts no element type, and one place
+    # believed otherwise: `_lower_list_literal` /
+    # `_lower_tuple_literal` recorded `_infer_list_elem_type([])`'s
+    # `'int64_t'` no-evidence default as the temp's element type, and
+    # `_gen_ReturnStmt` publishes the returned temp's element type as the
+    # FUNCTION's return element type, last write wins. So a function whose
+    # `return []` came after a container return published `int64_t` for the
+    # whole function and `print(...)` of its result routed to
+    # `mojo_repr_list_ints`, which reads each slot with the integer accessor —
+    # a `char *` slot came back as a heap-address decimal. Measured in
+    # bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md,
+    # whose own diagnosis ("the ReturnStmt walk does not descend into an
+    # `if`") was wrong on both counts: `_collect_return_elems` has always
+    # descended, and the program WITHOUT the trailing `return []` was right.
+    #
+    # Each line is one shape, and the pair (first / second function) is the
+    # measurement: the same comprehension, the same `if`, and the only
+    # difference is whether an empty `return []` follows it. `b4`/`b5` have no
+    # branch at all and are the no-branch control.
+    "comprehension_result_elem_type_across_a_branch": textwrap.dedent("""\
+        def b2(i):
+            if i:
+                return [t for t in ["a", "b"]]
+            return []
+
+        def b7(i):
+            if i:
+                x = [t for t in ["a", "b"]]
+                return x
+            else:
+                return []
+
+        def b4(i):
+            x = [t for t in ["a", "b"]]
+            return x
+
+        def b8():
+            return []
+
+        def b9():
+            return ()
+
+        def main():
+            print(b2(1))
+            print(b7(1))
+            print(b4(1))
+            print(b8())
+            print(b9())
     """),
     # binds only `node.generators[0]` and every `_compr_*_loop` helper takes a
     # single generator, so the extra clauses were silently dropped -- exit 0,
@@ -1068,6 +1120,7 @@ CPYTHON_COMPARABLE = {
     "for_target_one_tuple_vs_paren_name",
     "for_target_one_tuple_dict_and_nested",
     "comprehension_target_shadows_an_enclosing_local",
+    "comprehension_result_elem_type_across_a_branch",
 }
 
 

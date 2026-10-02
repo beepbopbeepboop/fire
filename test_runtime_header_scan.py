@@ -293,13 +293,23 @@ def test_every_declaration_is_seen():
     # not. One fix, one spelling: the runtime function went with the lowering
     # it was written for, and its ledger line with it.
     #
+    # 543 -> 547 (2026-10-02, `bugs4-2`): the `d.pop(k, default)` value
+    # domains on the str-key side — `mojo_dict_pop_str` / `mojo_dict_pop_double`
+    # and their `_kw` twins. `mojo_dict_pop_int` gained the `dflt` parameter
+    # Python's two-argument `pop` needs and did so by CHANGING that one
+    # signature rather than adding a parallel `..._dflt` name; the four new
+    # names are the str and double readers the same family needed, so that a
+    # str-valued dict pops its value as a `char *` instead of a pointer
+    # decimal (bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md,
+    # bugs/CODEGEN_dict_pop_default_ignored_on_a_miss.md). Taken from the call.
+    #
     # Every entry here is read off the CALL, never added up, and the count is
     # read off the merged header rather than being any one branch's total plus
     # its own new names: two branches that each added names did not each add
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula — a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    for header, want in (('fire_runtime.h', 543),
+    for header, want in (('fire_runtime.h', 547),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

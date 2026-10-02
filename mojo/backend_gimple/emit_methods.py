@@ -72,6 +72,48 @@ from mojo.middle.methods_shared import *  # noqa: F401,F403
 from mojo.middle.methods_shared import (
     _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _is_selfhost_source_file, _sms_key
 )
+from mojo.middle.resolve_shared import _is_none_literal
+from fire_compiler import _ptr_slot_in_range
+
+# The value DOMAIN a dict slot's C type lives in, and the runtime helper
+# suffix that reads it back. A `MojoDict` stores every value as one raw
+# int64_t, so "what C type is this slot" is really "which of three readers
+# should read it" — and a dict slot has no room for two answers at once. That
+# is what `d.pop(k, default)` needs: the default and the stored value must be
+# readable by the SAME reader, so both are normalized to one domain name and
+# compared. `_Bool` and every narrower integer spelling share the int domain
+# because that is how `mojo_dict_set_int` / `mojo_dict_pop_int` already store
+# and read them.
+_DICT_VAL_DOMAIN = {'char *': 'char *', 'MojoStr *': 'char *',
+                    'MojoBytes *': 'MojoBytes *',
+                    'double': 'double', 'float': 'double',
+                    'int64_t': 'int64_t', 'int': 'int64_t',
+                    '_Bool': 'int64_t', '': 'int64_t'}
+_DICT_POP_RT = {'char *': ('str', 'char *'), 'double': ('double', 'double'),
+                'int64_t': ('int', 'int64_t')}
+
+
+def _elem_slot_is_set(gen, name):
+    """Whether `gen._elem_types` has a USABLE element-type claim for `name` —
+    i.e. not absent, not an empty string, and not the erased-sentinel word the
+    compiled path can leave behind (see `_ptr_slot_in_range`'s own docstring)."""
+    if name not in gen._elem_types:
+        return False
+    _v = gen._elem_types[name]
+    if _as_str(_v) == '':
+        return False
+    return _ptr_slot_in_range(_v)
+
+
+def _dict_val_domain(ctype):
+    """The `d.pop(k, default)` value DOMAIN of a dict value C type — see
+    `_DICT_VAL_DOMAIN`. A container-valued dict answers its own type (and is
+    handled by the caller's container branch rather than by any runtime
+    reader), and an unrecognised type is its own domain so that a mismatch is
+    a refusal rather than a silent match."""
+    _t = _as_str(ctype)
+    return _DICT_VAL_DOMAIN.get(_t, _t)
+
 # Module-qualified struct identity — the construction-site resolution for the
 # same-bare-name collision fix. See the qualified-constructor case in
 # `_lower_method_call` below and `_struct_cname_by_id` in
@@ -3833,12 +3875,23 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             default_ty, default_val = gen.lower_expr(args[1])
         val_type = gen._dict_val_of(ov)
         # `dict.get(k, <char* default>)` on a dict whose value type is
-        # unknown (int64_t): the default must NOT be coerced through a
-        # list accessor. If the caller supplied a char* default, treat the
-        # result as char* — a plain pointer round-trip, never a
-        # `mojo_list_get_int(default, 0)` (a hard segfault on the
-        # self-hosted `--dump myinterpreter.py`).
-        if val_type == 'int64_t' and default_ty == 'char *':
+        # UNKNOWN: the default must NOT be coerced through a list accessor.
+        # If the caller supplied a char* default, treat the result as char* —
+        # a plain pointer round-trip, never a `mojo_list_get_int(default, 0)`
+        # (a hard segfault on the self-hosted `--dump myinterpreter.py`).
+        #
+        # "Unknown" has to mean unknown, which is what
+        # `_dict_val_is_known` is for. `_dict_val_of` answers `'int64_t'` for a
+        # dict that is KNOWN to hold ints as well as for one nobody has
+        # observed, so the old `val_type == 'int64_t'` test also matched the
+        # first — and a `char *` default then overrode a known int value type:
+        # `d = {"a": 1}; print(d.get("a", "y"))` emitted
+        # `mojo_dict_get_str(d, "a")`, `print` called `strlen(1)` and the
+        # program died. The MISS rows passed because the absent-key path never
+        # reads the slot at all, which is what made this look like a
+        # default-type question rather than an evidence question. See
+        # bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md.
+        if not gen._dict_val_is_known(ov) and default_ty == 'char *':
             val_type = 'char *'
         # The runtime keeps a bytes key in its own domain, so the VALUE
         # accessor has to be the bytes one too — the `_bytes` suffixed
@@ -3873,8 +3926,63 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             # default-application is spelled as branch-and-assign.
             result_type = val_type
             _container_vt = val_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
-            if result_type not in ('char *', 'double', '_Bool') and not _container_vt:
-                result_type = default_ty if default_ty in ('char *', 'double', '_Bool') else 'int64_t'
+            # CPython's `get(k, default)` has a HETEROGENEOUS result: the
+            # stored value on a hit, the default on a miss, and those two can
+            # be different types. One C slot cannot be both, so the result type
+            # is the one that is SAFE to hold either, and the side that is not
+            # in that domain is materialised into it:
+            #
+            # * a `char *` result can hold any domain, because the model
+            #   already has `mojo_cstr_or_int_str` (an int64 word read as
+            #   "itself if it really is a `char *`, else its decimal") — so
+            #   if EITHER side is a string, the result is `char *`;
+            # * otherwise the result is the dict's value domain when that is
+            #   KNOWN, and the default's when it is not (there the default is
+            #   the only thing known about the slot).
+            #
+            # Reading the value type off the DEFAULT instead — which is what the
+            # `int64_t`-means-unknown confusion above used to do — is what made
+            # `d = {"a": 1}; d.get("a", "y")` call `strlen(1)`. Taking the
+            # result type from the value domain and only widening to `char *`
+            # when a side needs it is what makes BOTH disagreeing rows right:
+            # `d.get("a", "y")` prints `1` and `d.get("z", "y")` prints `y`.
+            _dflt_scalar = default_ty in ('char *', 'double', '_Bool') or default_ty in ('int64_t', 'int')
+            if not _container_vt and (val_type == 'char *' or default_ty == 'char *'):
+                result_type = 'char *'
+            elif not _container_vt and result_type not in ('char *', 'double', '_Bool'):
+                result_type = (val_type if gen._dict_val_is_known(ov)
+                               and val_type in ('int64_t', 'int', '_Bool')
+                               else (default_ty if _dflt_scalar and default_ty in ('double', '_Bool')
+                                     else 'int64_t'))
+            # The HIT read, in the RESULT's domain. A `char *` result over a
+            # non-string slot cannot use `mojo_dict_get_str` (that reads the
+            # slot's word as a pointer and `print` then calls `strlen` on the
+            # integer 1), and cannot use `mojo_dict_get_int` either (that hands
+            # the default's string bits back as a word, which prints as a
+            # pointer decimal) — `mojo_cstr_or_int_str` is the model's own
+            # answer to exactly this question.
+            _pres_word = None
+            if (result_type == 'char *' and val_type not in ('char *',)
+                    and not _container_vt):
+                _pres_word = gen._call_expr(
+                    'int64_t', f'mojo_dict_get{_sfx}_int',
+                    [('MojoDict *', ov), (key_type, key_val)])
+                raw = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                     [('int64_t', _pres_word)])
+                val_type = 'char *'
+            if (result_type == 'char *' and default_ty not in ('char *', 'MojoStr *')
+                    and default_ty is not None):
+                # The DEFAULT also has to be in the result's domain, and a
+                # `(char *)<an int>` is a wild pointer. Materialise it the same
+                # way, so `d.get(k, 7)` prints `7` on a str-valued dict.
+                if default_ty in ('double', 'float'):
+                    _dm = gen._call_expr('char *', 'mojo_str_from_double',
+                                         [('double', gen._coerce_to_type(
+                                             default_ty, 'double', default_val))])
+                else:
+                    _dm = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                         [('int64_t', gen._to_int64(default_ty, default_val))])
+                default_val, default_ty = _dm, 'char *'
             if _container_vt:
                 # `d.get(k, {})` on `d: dict[K, <container>]` — keep the
                 # container type (was collapsed to int64_t, losing every
@@ -3902,6 +4010,13 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             # default.
             if _container_vt:
                 cond = gen._ensure_bool_cond('int64_t', raw)
+            elif _pres_word is not None:
+                # The materialised `char *` read is TRUTHY for a miss — the
+                # absent slot is 0, and "0" is a non-empty string — so the
+                # presence test has to stay on the int64 word it came from, not
+                # on the string. Testing the string made every miss take the HIT
+                # branch and print `0` instead of the default.
+                cond = gen._ensure_bool_cond('int64_t', _pres_word)
             else:
                 cond = gen._ensure_bool_cond(result_type, raw_r)
             t = gen._new_temp(result_type)
@@ -3956,33 +4071,94 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._emit(f"  mojo_dict_update ({ov_cast}, {other_val_cast});")
         return 'int', gen._new_val('int', '0')
     if method == 'pop' and args:
-        # A bytes key pops from the bytes key domain, and its runtime
-        # helper is the only one that takes the `dflt` argument Python's
-        # `pop(k, default)` needs — the str-domain mojo_dict_pop_int
-        # answers 0 for an absent key and cannot express a default at all.
+        # `d.pop(k)` / `d.pop(k, default)`. Two things were lost here and both
+        # were silent wrong answers rather than refusals:
+        #
+        # * the DEFAULT. `mojo_dict_pop_int` had no `dflt` parameter, so the
+        #   `-1` the source wrote was never lowered and a MISS answered 0 — a
+        #   real value in this model, so a "remove if present, else report
+        #   absence" idiom got a plausible number with exit 0
+        #   (bugs/CODEGEN_dict_pop_default_ignored_on_a_miss.md);
+        # * the VALUE accessor. Only the int spelling existed, so a str-valued
+        #   dict popped its value as a raw pointer decimal
+        #   (bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md).
+        #
+        # Both are one implementation now: the runtime carries the same three
+        # value domains in both key domains, and this picks the domain and
+        # hands the default to it.
         key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
         val_type = gen._dict_val_of(ov)
-        if key_is_bytes:
-            # The bytes-domain pop helpers take the `dflt` Python's
-            # `pop(k, default)` needs — the str-domain mojo_dict_pop_int
-            # has no such parameter and answers 0 for an absent key, so a
-            # default could not even be expressed there. The str/double
-            # siblings exist because the slot is one int64_t of bits: without
-            # them a bytes-keyed dict holding strings popped its value as a
-            # raw pointer decimal.
-            if val_type == 'char *':
-                return 'char *', gen._call_expr(
-                    'char *', 'mojo_dict_pop_bytes_str',
-                    [('MojoDict *', ov), (key_type, key_val)])
-            if val_type == 'double':
-                return 'double', gen._call_expr(
-                    'double', 'mojo_dict_pop_bytes_double',
-                    [('MojoDict *', ov), (key_type, key_val)])
-            dflt = gen._to_int64(*gen.lower_expr(args[1])) if len(args) > 1 else '0'
-            return 'int64_t', gen._call_expr(
-                'int64_t', 'mojo_dict_pop_bytes_int',
-                [('MojoDict *', ov), (key_type, key_val), ('int64_t', dflt)])
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_dict_pop_int', [('MojoDict *', ov), (key_type, key_val)])
+        val_known = gen._dict_val_is_known(ov)
+        dflt_is_none = False
+        if len(args) > 1:
+            dflt_ty, dflt_val = gen.lower_expr(args[1])
+            dflt_is_none = bool(_is_none_literal(args[1]))
+        else:
+            dflt_ty, dflt_val = None, None
+        if not val_known:
+            # An unobserved dict takes the DEFAULT's type as its result type:
+            # that is the only thing known about what the slot holds, and it is
+            # the `get` lowering's existing rule (the arm above).
+            val_type = dflt_ty if dflt_ty in ('char *', 'double') else 'int64_t'
+        _container_vt = val_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
+        if val_known and not _container_vt and not dflt_is_none \
+                and dflt_val is not None \
+                and _dict_val_domain(val_type) != _dict_val_domain(dflt_ty):
+            # CPython answers the default on a miss and the stored value on a
+            # hit, and one int64_t slot cannot be both. Choosing either side
+            # makes one of them a wrong answer — `(char *)<an int>` is a wild
+            # pointer that `print` then calls `strlen` on — so this is refused
+            # with both types named instead. `None` is in every domain, and an
+            # UNOBSERVED dict is already handled above.
+            raise RuntimeError(
+                f"d.pop(key, default) with a {dflt_ty} default on a dict whose "
+                f"values are {val_type}: one dict slot cannot hold both, so "
+                f"the hit and the miss cannot share a result type (use a "
+                f"default of the dict's own value type, or a dict whose value "
+                f"type is not statically known)")
+        _sfx = '_bytes' if key_is_bytes else ''
+        # The no-default spelling raises KeyError in CPython; this model has no
+        # such error and every mojo_dict_get_* already answers a miss with the
+        # absent box, so it passes the same domain-specific zero.
+        _absent = 'NULL' if val_type == 'char *' else ('0.0' if val_type == 'double' else '0')
+        if dflt_val is None or dflt_is_none:
+            dflt_expr, dflt_ct = _absent, val_type
+        elif val_type == 'char *':
+            dflt_expr, dflt_ct = dflt_val, 'char *'
+        elif val_type == 'double':
+            dflt_expr, dflt_ct = gen._coerce_to_type(dflt_ty, 'double', dflt_val), 'double'
+        elif _container_vt:
+            # The empty-container-literal reifier the `get` arm above uses: an
+            # empty `[]`/`{}`/`set()` default carries no evidence for a
+            # particular container KIND, so build the kind this dict holds.
+            _reified = gimple_ctypes.reify_empty_container_literal(gen, dflt_ty, val_type, args[1])
+            if _reified is None:
+                raise RuntimeError(
+                    f"d.pop(key, default) with a {dflt_ty} default on a dict "
+                    f"whose values are {val_type}: only an EMPTY "
+                    f"{val_type} literal can stand in for an absent "
+                    f"{val_type}, and this one is not")
+            dflt_expr, dflt_ct = gen._to_int64(dflt_ty, _reified), 'int64_t'
+        else:
+            dflt_expr, dflt_ct = gen._to_int64(dflt_ty, dflt_val), 'int64_t'
+        if _container_vt:
+            # A container slot is a boxed pointer, so `pop` reads the word and
+            # the cast restores the type — the same shape the `get` arm and
+            # `d[k]` both use for a container-valued dict.
+            raw = gen._call_expr(
+                'int64_t', f'mojo_dict_pop{_sfx}_int',
+                [('MojoDict *', ov), (key_type, key_val), ('int64_t', dflt_expr)])
+            t = gen._new_val(val_type, f"({val_type}){raw}")
+            _nd = gen._dict_nested_val_types.get(ov)
+            if _nd:
+                if val_type == 'MojoDict *':
+                    gen._dict_val_types[t] = _nd
+                else:
+                    gen._elem_types[t] = _nd
+            return val_type, t
+        return val_type, gen._call_expr(
+            _DICT_POP_RT[val_type][1], f'mojo_dict_pop{_sfx}_{_DICT_POP_RT[val_type][0]}',
+            [('MojoDict *', ov), (key_type, key_val), (dflt_ct, dflt_expr)])
     if method in ('copy',):
         return 'MojoDict *', gen._new_val('MojoDict *', f"mojo_dict_copy ({ov})")
     if method == 'clear':
@@ -4123,6 +4299,21 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                 av = gen._coerce_to_type(at, 'int64_t', av)
                 at = 'int64_t'
             gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
+            if not _elem_slot_is_set(gen, ov):
+                # Appending an INTEGER is the evidence that makes the receiver
+                # an int list, and it used to be recorded nowhere: the
+                # empty-accumulator idiom `out = []` then `out.append(x)` got
+                # its `_elem_types` entry from `_lower_list_literal`'s
+                # `_infer_list_elem_type([])` default. That default is not
+                # evidence — it is what made an empty literal publish its own
+                # function's return element type and route a str-valued
+                # result to `mojo_repr_list_ints`
+                # (bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md)
+                # — so the empty literal no longer claims one, and the append
+                # has to. ESTABLISHES only, never overwrites: `l = ['a'];
+                # l.append(1)` is a heterogeneous list whose `char *` claim is
+                # the correct one to keep.
+                gen._elem_types[ov] = 'int64_t'
             if at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *')):
                 actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem
