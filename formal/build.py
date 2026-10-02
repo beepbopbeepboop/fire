@@ -2761,22 +2761,35 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     returns_frame: dict = {}
     for fn in functions:
         owner = owners.get(fn.name)
-        # `and F.method_receiver_kind(fn)`, and the guard rather than a change
-        # to `struct_receivers` because this asks about ONE method while
-        # `struct_receivers` answers for the whole CLASS. Its unconditional
-        # `{"self"}` seed is right for its other job — deriving the field set,
-        # where `self.n` in ANY method is a field write — and wrong for this
-        # one, which asks "does THIS function take a receiver". A
-        # `@staticmethod` has none, so putting `self` in its holder set made
+        # `and M.method_receiver_name(fn) is not None`, and the guard rather
+        # than a change to `struct_receivers` because this asks about ONE
+        # method while `struct_receivers` answers for the whole CLASS. Its
+        # unconditional `{"self"}` seed is right for its other job — deriving
+        # the field set, where `self.n` in ANY method is a field write — and
+        # wrong for this one, which asks "does THIS function take a receiver".
+        # A `@staticmethod` has none, so putting `self` in its holder set made
         # the call sites hand it a frame: `R__single(self, counter)` is two
         # arguments to a one-parameter function, and the parameter the
-        # definition reads as `counter` was bound to the receiver.
-        # `fire_compiler.method_receiver_kind` is the tree's single rule for
-        # "does this method declare a receiver" (decorator first, first
-        # parameter's name second), and it is read here rather than a second
-        # answer written beside it. See
+        # definition reads as `counter` was bound to the receiver. See
         # bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md.
-        if owner is not None and owner.name in framed and F.method_receiver_kind(fn):
+        #
+        # `model.method_receiver_name`, and not `fire_compiler
+        # .method_receiver_kind`, because that rule asks the same question and
+        # answers it differently: it decides by the first parameter's NAME
+        # (`self`, `cls`) where this path reads a receiver however it is
+        # spelled — `struct_receivers` seeds `{"self"}` and ADDS each method's
+        # own first parameter, which is how `def total(this)` gets `this` in
+        # the set the three lines below copy into the holder table. Asking the
+        # name-based rule here therefore excluded every `this`-receiver method
+        # from its own holder set, and the emitter's field access found no
+        # home: `Pair___init__: 'this.b' is a field access through 'this', and
+        # this path has no way to say what 'this' holds` for a program whose
+        # `self` spelling computes 409. It is the same divergence as
+        # `_receiverless_methods`'s, in the second of the two places it was
+        # asked; one rule, `method_receiver_name`, is what both now read, and it
+        # is the rule the rest of the pipeline derives its fields from.
+        if owner is not None and owner.name in framed \
+                and M.method_receiver_name(fn) is not None:
             for recv in M.struct_receivers(owner):
                 holders[_fn_key(fn)].add(recv)
                 hstruct[_fn_key(fn)][recv] = [owner]
@@ -9084,27 +9097,36 @@ def _receiverless_methods(owners: dict, structs_by_name: dict) -> set:
     `_rewrite_method_calls` already refuses to rewrite it, so there is nothing
     to decide here.
 
-    `or not F.method_receiver_kind(m)`, and that is the other half of
-    `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md`. An empty
-    parameter list recognises `def first():`, which is the shape this was
-    written for, but a `@staticmethod` with PARAMETERS takes no receiver either
-    and was not in the set — so `_rewrite_method_calls` prepended one, and the
-    call passed a receiver to a function whose parameter list has none. The
-    arity check caught it, so it was never a wrong answer, but the refusal it
-    produced compared the RECEIVER against the first declared parameter and
-    every later argument with it: an off-by-one over the whole parameter list,
-    reported against the wrong argument. `def import_module(var module: String)`
-    in `std/python/python.mojo` is the same defect from the other side.
-    `fire_compiler.method_receiver_kind` is the tree's single rule for the
-    question — decorator first, first parameter's name second — so this reads
-    it rather than writing a second answer next to the parameter list."""
+    `model.method_receiver_name` is what answers it, and reading it rather than
+    asking the question a second time is the whole of the fix — the question
+    has TWO answers on this tree and they disagreed. `fire_compiler
+    .method_receiver_kind` recognises a receiver by the FIRST PARAMETER'S NAME
+    (`self`, `cls`) after the decorator, which is right for the three consumers
+    that read it — the coroutine lowering and the two registration paths — and
+    wrong here, because this path spells its receivers `this` as readily as
+    `self` (`model.struct_receivers` says so in as many words, and the rest of
+    the formal pipeline already reads `this.a` as a field of the class). Asking
+    the name-based rule meant every `this`-receiver method was decided
+    receiver-less, so `_rewrite_method_calls` prepended no receiver and the call
+    was checked against a parameter list whose first slot it had not filled:
+    `def total(this)` called as `p.total()` refused with `missing required
+    argument 'this'`, on a program whose `self` spelling builds and computes
+    153. `model.method_receiver_name` asks the question the DECLARATION answers
+    — the decorator first, then the first parameter — which is the same answer
+    `struct_receivers` derives the field set from, so the receiver this decides
+    and the receiver the callee declares cannot drift apart. It also covers the
+    other half of `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method
+    .md`: a `@staticmethod` with PARAMETERS takes no receiver either, and an
+    empty parameter list (`def first():`, the shape this was written for) is
+    already the same case there. `def import_module(var module: String)` in
+    `std/python/python.mojo` is that defect from the other side."""
     out = set()
     for struct_name in (owners or {}).values():
         st = (structs_by_name or {}).get(struct_name)
         if st is None:
             continue
         for m in M.struct_methods(st):
-            if not F.method_receiver_kind(m) or not (getattr(m, "params", None) or []):
+            if M.method_receiver_name(m) is None:
                 out.add(m.name)
     return out
 
