@@ -9363,11 +9363,30 @@ EQ_DISPATCH_CASES = [
      "    return bump()\n",
      "refuse:G is read in bump() at `G + 1`", None),
     # The sibling the filing did not mention: the same name WRITTEN through a
-    # `global` declaration, which the language allows and the value model has
-    # nowhere for.  There is no storage a write could outlive a frame in, so both
-    # emitters treat the declaration as a no-op — CPython answers 6 and 6 where
-    # this path answered 10601485 and 5 on arm64 and 11 and 5 on x86-64.
-    ("a_mutated_module_global_is_refused",
+    # `global` declaration.  It is the one row in this file that used to expect
+    # a refusal, and it is CPython's answer now — the module-global SLOT landed
+    # (`formal-module-globals`), so there is somewhere for a write to outlive
+    # the frame that made it, and `formal/build.py`'s
+    # `_collect_shadowed_global_reads` gates the finding on
+    # `declared_globals & assigned - set(M.module_slots() or ())`, so a name
+    # with a slot is not a finding.
+    #
+    # It was stale rather than newly broken, and `bugs/
+    # TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
+    # recorded it as such on `master` too.  That doc's outcome (1) — "the slot
+    # is the answer, which is what the tree does today: replace the `refuse:`
+    # expectation with the built program's own answer" — is what this row now
+    # asserts, on the shape the doc named: a `return` OF the global rather than
+    # the bare increment `test_formal_globals.py`'s `write_int_through_global`
+    # already pins.  So the two files are the same fact on two shapes, and the
+    # numbers here are measured, not read off the doc: exit 12 on arm64 and on
+    # x86-64, `G` is 6 after one `bump()` and the function returns 6 + 6.
+    #
+    # The refusal message this row used to name, and the 10601485 / 5 / 11
+    # measurements its comment quoted, are in `mutated_module_global_refusal`'s
+    # docstring and are now history: they are what this path answered with no
+    # storage at all.
+    ("a_mutated_module_global_matches_cpython",
      "G = 5\n"
      "def bump():\n"
      "    global G\n"
@@ -9377,7 +9396,7 @@ EQ_DISPATCH_CASES = [
      "    return G\n"
      "def main(n):\n"
      "    return bump() + rd()\n",
-     "refuse:G is declared `global` in bump() and assigned there", None),
+     12, None),
 ]
 
 
