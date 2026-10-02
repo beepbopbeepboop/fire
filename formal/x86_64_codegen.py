@@ -4354,6 +4354,23 @@ class X86_64Codegen:
             self.asm.emit(encode_not_r64(Reg.RAX))
             self._emit_trunc(self._ttype(expr.operand))
             return
+        if M.is_ownership_transfer(expr):
+            # `x^` — see formal/model.py: a compile-time-only marker, so the
+            # value flows straight through on every formal path. This branch is
+            # what made `^` a REFUSAL on x86-64 for an integer: the arm64
+            # `_emit_expr` has had one since wave 5, this file did not, so the
+            # two backends answered `var t = a^` differently (arm64 emitted the
+            # value, x86-64 raised `unsupported unary operator '^' on the formal
+            # x86-64 path`) for a construct with one meaning. It refused correct
+            # stdlib Mojo: `std/builtin/swap.mojo` builds on arm64 and is refused
+            # here, and `bugs/FORMAL_known_limits.md` §6.5 has carried it as
+            # "x86-64-side work of a sitting" since. It is the same shape as the
+            # `~` case above, and for the same reason: the ARM side names both
+            # operators it lowers rather than falling through to a refusal.
+            # `x^` on a STRING is refused above, before this, by the same
+            # `string_unary_refusal` the other operators ask.
+            self._emit_expr(expr.operand)
+            return
         raise CodegenError(
             f"unsupported unary operator {expr.op!r} on the formal x86-64 "
             f"path")
