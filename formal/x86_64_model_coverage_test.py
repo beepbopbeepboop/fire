@@ -232,15 +232,31 @@ class Lemma:
         self.hyp = list(hyp)
 
 
-def _rex_0f_mod3_hyps(addr, rex, modrm, reg, rm, dst, op2):
-    """Hypotheses for a `REX 0F <op2> /r` mod=3 instruction, concretised.
+def _rex_mod3_hyps(addr, rex, modrm, opcode, two_byte_op=False, reg=None,
+                   digit=None, dst=None):
+    """The hypotheses a `REX.W <opcode> /r` mod=3 step lemma shares.
 
-    Shared by every form below that is `REX.W 0F xx /r` with a register
-    operand, because those are the ones whose hypotheses a generator reads out
-    of the encoding rather than computes.  `reg`/`rm`/`dst` are the ModRM and
-    REX fields already resolved to the names the lemmas use, and the caller
-    passes them so this stays a transcription of the lemma's statement rather
-    than a second derivation of it.
+    Every form below is `REX`-prefixed, `REX.W`, and has a register operand, so
+    the first eight of its hypotheses are the same eight bytes read four ways and
+    the rest is whatever the form's own fields are.  Consolidating them here is
+    what makes a form's entry below a transcription of its lemma's statement and
+    not a fourth derivation of where a ModRM byte comes from.
+
+    `reg` and `rm` are resolved by the caller and passed in, so this stays a
+    transcription: two of the forms below carry a destination the caller read out
+    of the REX, and recomputing it here would be a second source of truth for
+    the field sense (`dst` is the DESTINATION, which is the `reg` field, and
+    `rm` is the SOURCE -- the opposite of what the field names suggest).
+
+    `digit` is for the shift forms, where the ModRM `reg` field names the
+    OPERATION rather than a register; pass it instead of `reg` there.
+
+    `two_byte_op` is the `0F` escape, and it is not a detail: with a REX byte at
+    `m` the opcode moves to `m + 1` and the ModRM to `m + 2`, so an escape's
+    `code (m + 2)` is the SECOND OPCODE rather than the ModRM.  That is the same
+    off-by-one that made `imul` read its source register out of `0xaf &&& 7`
+    (B19), and here it is the difference between a check that holds and one that
+    does not.
 
     The `(x : UInt8).toNat` ascription is not decoration, twice over.  Lean
     reads `192.toNat` as a malformed decimal — a PARSE error, and in a check
@@ -250,42 +266,27 @@ def _rex_0f_mod3_hyps(addr, rex, modrm, reg, rm, dst, op2):
     expression the lemma states about a `UInt8` ModRM byte.
     """
     b = "(%d : UInt8).toNat" % modrm
-    return [
-        "s.rip = %d" % addr,
-        "code %d = %d" % (addr, rex),
-        "code %d = %d" % (addr + 1, 0x0f),
-        "code %d = %d" % (addr + 2, op2),
-        "code %d = %d" % (addr + 3, modrm),
+    hyp = ["s.rip = %d" % addr, "code %d = %d" % (addr, rex)]
+    if two_byte_op:
+        hyp += ["code %d = %d" % (addr + 1, 0x0f),
+                "code %d = %d" % (addr + 2, opcode),
+                "code %d = %d" % (addr + 3, modrm)]
+    else:
+        hyp += ["code %d = %d" % (addr + 1, opcode),
+                "code %d = %d" % (addr + 2, modrm)]
+    hyp += [
         "x86_is_rex %d = true" % rex,
         "x86_rex_w %d = true" % rex,
         "%s >>> 6 = 3" % b,
-        "(%s >>> 3) &&& 7 = %d" % (b, reg),
-        "%s &&& 7 = %d" % (b, rm),
-        "%d + x86_rex_r %d = %d" % (reg, rex, dst),
     ]
-
-
-def _alu_rr_hyps(addr, rex, modrm, opcode):
-    """Hypotheses for `REX.W <opcode> /r` mod=3, concretised.
-
-    The `01 /r` family, which is where `add`, `sub`, `cmp`, `test` and the three
-    logic forms all live.  There is no destination argument here — the
-    destination is the rm field extended by REX.B, and `x86_set_reg` on that
-    index appears identically on both sides of these lemmas, so nothing has to
-    be resolved to a literal for them (unlike the 0x-escape forms above).
-    """
-    b = "(%d : UInt8).toNat" % modrm
-    return [
-        "s.rip = %d" % addr,
-        "code %d = %d" % (addr, rex),
-        "code %d = %d" % (addr + 1, opcode),
-        "code %d = %d" % (addr + 2, modrm),
-        "x86_is_rex %d = true" % rex,
-        "x86_rex_w %d = true" % rex,
-        "%s >>> 6 = 3" % b,
-        "(%s >>> 3) &&& 7 = %d" % (b, (modrm >> 3) & 7),
-        "%s &&& 7 = %d" % (b, modrm & 7),
-    ]
+    if digit is not None:
+        hyp.append("(%s >>> 3) &&& 7 = %d" % (b, digit))
+    if reg is not None:
+        hyp.append("(%s >>> 3) &&& 7 = %d" % (b, reg))
+    hyp.append("%s &&& 7 = %d" % (b, modrm & 7))
+    if dst is not None:
+        hyp.append("%d + x86_rex_r %d = %d" % (reg, rex, dst))
+    return hyp
 
 
 def step_lemmas():
@@ -305,8 +306,8 @@ def step_lemmas():
             "x86_step_movsx_r64_r8",
             "movsx %s, %s" % (dst.name, src.name),
             enc,
-            _rex_0f_mod3_hyps(BASE + 16 * len(out), rex, modrm, reg, rm, d,
-                              0xbe)))
+            _rex_mod3_hyps(BASE + 16 * len(out), rex, modrm, 0xbe,
+                           two_byte_op=True, reg=reg, dst=d)))
     # The three logic ALU forms, at register pairs that exercise BOTH REX
     # extension bits and neither.  The corpus only ever emits `4c 2?/0?/3? d8`
     # -- `and rax, rbx` and nothing else -- so a check written from the corpus
@@ -321,7 +322,23 @@ def step_lemmas():
                 "x86_step_%s_rr" % name,
                 "%s %s, %s" % (name, dst.name, src.name),
                 enc,
-                _alu_rr_hyps(BASE + 16 * len(out), enc[0], enc[2], opcode)))
+                _rex_mod3_hyps(BASE + 16 * len(out), enc[0], enc[2], opcode,
+                               reg=(enc[2] >> 3) & 7)))
+    # The immediate shifts.  `sar` is digit 7 and is the model's arithmetic-shift
+    # FALLTHROUGH rather than a third named arm, so it is checked at a count
+    # past 63 as well as inside it: the clamp to 64 is what makes `sar x, 200`
+    # mean `sar x, 64` and a lemma that needed a `n < 64` hypothesis would fail
+    # there, which is the one thing this check can catch that compiling cannot.
+    for name, op, digit in (("shl", "<<", 4), ("shr", ">>", 5),
+                            ("sar", ">>signed", 7)):
+        for reg, n in ((R.RAX, 3), (R.R11, 200)):
+            enc = X.encode_shift_r64_imm8(op, reg, n)
+            out.append(Lemma(
+                "x86_step_%s_imm8" % name,
+                "%s %s, %d" % (name, reg.name, n),
+                enc,
+                _rex_mod3_hyps(BASE + 16 * len(out), enc[0], enc[2], 0xc1,
+                               digit=digit)))
     return out
 
 

@@ -178,6 +178,19 @@ _FORMS = {
                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:xor": ("x86_step_xor_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    # `shl` / `shr` / `sar` by an immediate byte.  The digit is the ModRM `reg`
+    # field, which is NOT the register it is for in any other form here -- it is
+    # the operation -- so `digit` gets its own condition and its own `_resolve`
+    # branch rather than riding along on `reg`.
+    "shift_imm8:shl": ("x86_step_shl_imm8", False,
+                       ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                        "rm"]),
+    "shift_imm8:shr": ("x86_step_shr_imm8", False,
+                       ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                        "rm"]),
+    "shift_imm8:sar": ("x86_step_sar_imm8", False,
+                       ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                        "rm"]),
     "jcc_rel32": ("x86_step_jcc_rel32", False,
                   ["rip", "b0", "b1", "cc", "off", "lo", "hi", "nsetcc_lo",
                    "nzx", "notrex"]),
@@ -290,6 +303,27 @@ _SUCCS = {
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
     "alu_rr:xor":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
+    # The shifts write ZF and SF and leave CF and OF alone, which is the
+    # difference from every row above and the reason this is not the same shape:
+    # the model's `x86_flags_logic` computes all four and the record update
+    # overrides only two, so a successor that also asserted `cf`/`of_` would be
+    # a claim about a field the instruction does not set.
+    #
+    # `$sh` is the count after the model's clamp, kept as one term because the
+    # lemma states it three times and a caller that inlined its own spelling
+    # would have to match all three.
+    "shift_imm8:shl":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
+        "($rm + x86_rex_b $rex)) <<< $sh) with rip := $next, "
+        "zf := ($fl).zf, sf := ($fl).sf }",
+    "shift_imm8:shr":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
+        "($rm + x86_rex_b $rex)) >>> $sh) with rip := $next, "
+        "zf := ($fl).zf, sf := ($fl).sf }",
+    "shift_imm8:sar":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) (x86_sign_extend32 "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)) >>> $sh) with rip := $next, "
+        "zf := ($fl).zf, sf := ($fl).sf }",
     # `= true` explicitly.  The model's `if` is over a `Bool`, and the
     # `by_cases` hypothesis is an equation about a `Prop`; writing the condition
     # the same way on both sides is what lets the hypothesis rewrite it.  It is
@@ -410,8 +444,8 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             # read out of the ModRM/REX bytes, so it is a literal here.
             sc.append(sc_("decide"))
         elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
-                   "lo", "hi", "nsetcc_lo", "njcc", "nzx", "op2",
-                   "notrex"):
+                   "lo", "hi", "nsetcc_lo", "njcc", "nzx", "op2", "notrex",
+                   "digit"):
             # Closed arithmetic on the ModRM/REX literals, or a range test on a
             # concrete opcode byte: nothing here comes from the byte list, so
             # `decide` and not `simp [hb]`.
@@ -446,8 +480,28 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         extra_args = " %d %d %d %d %d" % (rex, modrm, reg, rm, dst)
         extra_succ = {"$rex": str(rex), "$reg": str(reg), "$rm": str(rm),
                       "$dst": str(dst)}
-    elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg", "alu_rr:add",
-                "alu_rr:sub", "alu_rr:cmp", "alu_rr:test", "alu_rr:and",
+    elif form.startswith("shift_imm8:"):
+        # `REX.W C1 /digit ib`, so the ModRM is `raw[2]` as for every other
+        # one-byte opcode, and the `digit` is its REG field -- the operation,
+        # not a register.  The register is the rm field (+REX.B).
+        rex, modrm = raw[0], raw[2]
+        digit, rm = (modrm >> 3) & 7, modrm & 7
+        extra_args = " %d %d %d" % (rex, modrm, rm)
+        # The count is the byte at `m + 3`, read as a byte and clamped, and it
+        # is emitted as the model's own expression rather than as the decoded
+        # number: the clamp is what makes a shift of 64 or more mean 64, so
+        # substituting the number here would state a different thing for any
+        # count outside 0..63.  `rc` is this file's name for what the lemma
+        # calls `code`.
+        sh = "UInt64.ofNat (if (rc %d).toNat ≥ 64 then 64 else (rc %d).toNat)" % (
+            addr + 3, addr + 3)
+        a = "(x86_get_reg $s (%d + x86_rex_b $rex))" % rm
+        res = {"shl": "(%s <<< %s)" % (a, sh), "shr": "(%s >>> %s)" % (a, sh),
+               "sar": "(x86_sign_extend32 %s >>> %s)" % (a, sh)}[
+            form.split(":")[1]]
+        extra_succ = {"$rex": str(rex), "$rm": str(rm), "$sh": sh,
+                      "$fl": "x86_flags_logic $s %s" % res}
+    elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg", "alu_rr:add",                "alu_rr:sub", "alu_rr:cmp", "alu_rr:test", "alu_rr:and",
                 "alu_rr:or", "alu_rr:xor"):
         rex, modrm = raw[0], raw[2]
         extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7, modrm & 7)
