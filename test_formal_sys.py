@@ -552,13 +552,17 @@ def test_the_sweep_calls_a_sys_refusal_a_codegen_finding(tmp, _shared):
           f"a `sys.argv` refusal is classified {cls!r}; with sys.mojo in the "
           f"tree it is a codegen finding, not a fact about the target")
     # And a module with NO source still classifies as the host import it is —
-    # the narrowing must not reach past the case that needed it. `math` is the
-    # example now: `os`, which was this check's example when it was written,
-    # has source in the tree for the same reason `sys` has, so the resolver
-    # finds it and the narrowing applies to it as it must.
+    # the narrowing must not reach past the case that needed it. Each name this
+    # paragraph has used stopped being usable the day its module was written,
+    # which is the same fact the assertion is about: `os` first, then `math` when
+    # `formal/hostmods/math.mojo` landed, and `math`'s place is taken by
+    # `decimal`, which is in `HOST_MODELLED` with no source anywhere in the tree.
+    # A resolver that finds `math.mojo` classifies the refusal as `codegen`, so
+    # using it here made this check report a `codegen` where it wanted a
+    # `not-answerable/host-import`.
     host_cls, _ = S.classify(
-        False, detail.replace("'sys'", "'math'"),
-        source="import math\n", path=os.path.join(HERE, "t_argv.mojo"))
+        False, detail.replace("'sys'", "'decimal'"),
+        source="import decimal\n", path=os.path.join(HERE, "t_argv.mojo"))
     check(host_cls == S.CLASS_HOST,
           f"a module with no source is classified {host_cls!r}; the "
           f"resolver-backed test must narrow only the modules that HAVE one")

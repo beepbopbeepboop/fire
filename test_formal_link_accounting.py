@@ -140,12 +140,14 @@ def test_relative_imports():
               'an absolute sibling name is unchanged')
         # A host module with NO source still resolves to nothing, whatever the
         # relative-import machinery does — this is the property the pass-1-first
-        # ordering exists to protect, and `os` used to be the example for it.
-        # `math` is the example now, because `os` has source: a name with a file
-        # beside the project resolves from ANY directory, since the repository
-        # root is one of the search roots, and that is the behaviour worth
-        # pinning in its place.
-        check(I.resolve_module_path('math', relative_to=leaf,
+        # ordering exists to protect. `os` used to be the example for it, then
+        # `math`, and each stopped being one the day its module was written:
+        # **a name with a `.mojo` file beside the project resolves from ANY
+        # directory**, because the repository root is one of the search roots,
+        # and that is the behaviour worth pinning in its place. `decimal` is the
+        # example now — in `HOST_MODELLED`, not written, and with no source
+        # anywhere in the tree.
+        check(I.resolve_module_path('decimal', relative_to=leaf,
                                     project_root=leaf) is None,
               'a host module still resolves to nothing (pass 2 unaffected)')
         check(I.resolve_module_path('os', relative_to=leaf,
@@ -288,6 +290,31 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "typing": "test_formal_small_hosts.py",
     "platform": "test_formal_platform.py",
     "fnmatch": "test_formal_fnmatch.py",
+    # The four this sweep claim wrote.  `stat` and `math` left HOST_MODELLED by
+    # being written; `shutil` left HOST_UNREACHABLE, which is a REVERSAL of a
+    # permanent-fact claim rather than the usual addition; and `fcntl` was in NEITHER
+    # tier, so its three files were not classified with a reason at all and
+    # there was nothing to remove.
+    "stat": "test_formal_stat.py",
+    "math": "test_formal_math.py",
+    "shutil": "test_formal_shutil.py",
+}
+
+# A module this tree now provides that was NEVER in the host set, so it cannot
+# be part of the account above — that account is a difference between two SETS
+# and `fcntl` is in neither.
+#
+# `fcntl` is the case: the sweep classified `import fcntl` as
+# `not-answerable/host-import` because no `fcntl.mojo` existed for the resolver
+# to find, and `_is_host_module` returns False for it either way, so the
+# refusal a caller got was the resolver's "not a stdlib or sibling module, and
+# no such file exists" — the same message any unresolvable import gets. Nothing
+# left a set, so putting `fcntl` in `IMPLEMENTED_HOST_MODULE_TESTS` would make
+# the `==` above fail with a name that legitimately did not move, and LEAVING it
+# out entirely would stop the two assertions below from running on a module that
+# needs them. Hence its own table.
+PROVIDED_NEVER_A_HOST_MODULE = {
+    "fcntl": "test_formal_fcntl.py",
 }
 
 
@@ -328,15 +355,20 @@ def test_host_tiers():
             check(os.path.isfile(os.path.join(HERE, test_file)),
                   f'{name} left the host set on the strength of {test_file}, '
                   f'and that test exists')
+        for name, test_file in sorted(PROVIDED_NEVER_A_HOST_MODULE.items()):
+            check(os.path.isfile(os.path.join(HERE, test_file)),
+                  f'{name} is provided on the strength of {test_file}, and '
+                  f'that test exists')
     else:
         check(False, 'the pre-split HOST_MODULES list could be read from git',
               'git show HEAD:formal/imports.py did not yield it')
     # The written modules are not in either tier at all, and the resolver
     # reaches them instead — checked in both directions, so neither a leftover
     # entry with a source behind it nor a removal without one can pass.
-    for m in sorted(IMPLEMENTED_HOST_MODULE_TESTS):
+    for m in sorted(set(IMPLEMENTED_HOST_MODULE_TESTS)
+                    | set(PROVIDED_NEVER_A_HOST_MODULE)):
         check(not I._is_host_module(m) and I.host_module_tier(m) == '',
-              f'{m} is no longer a host module: this tree provides it now')
+              f'{m} is not a host module: this tree provides it now')
         check(m not in union,
               f'{m} still classifies as a host module although this tree '
               f'provides it, so the entry is false and the build is reached '
@@ -377,17 +409,24 @@ def test_host_tiers():
     # them "not fixable" was false. A name that has been WRITTEN is not in
     # this list because it is implemented rather than unreachable; see
     # `written_modules()` above for the derived account.
-    # `json` and `re` are both out of this list, and for the same reason: each
-    # left HOST_MODELLED by being WRITTEN, which is the other half of what the
-    # account above checks, and a name with a Mojo source is implemented rather
-    # than "reachable in principle".
-    for m in ('math',):
-        check(I.host_module_tier(m) == 'modelled',
-              f'{m} is modelled (reachable in principle, not implemented)')
-    # `time` and `re` are NOT in that list and their omissions are the point:
-    # they are two of the four names this check originally asserted, and each
-    # stopped being 'modelled' when its source was written
-    # (`formal/hostmods/time.mojo`, `formal/hostmods/re.mojo`). A name
+    # `json`, `re`, `time`, `math` and `stat` are all out of this list, and for
+    # the same reason: each left HOST_MODELLED by being WRITTEN, which is the
+    # other half of what the account above checks, and a name with a Mojo source
+    # is implemented rather than "reachable in principle". `math` and `stat` are
+    # two more of the names this check originally asserted here, and each stopped
+    # being 'modelled' when its source was written
+    # (`formal/hostmods/math.mojo`, `formal/hostmods/stat.mojo`).
+    #
+    # **THE LIST BELOW IS NOW THE ONE THAT CARRIES THE CLAIM**, so an entry in it
+    # is a statement that a module is still genuinely unreachable. `shutil` left
+    # it — which was correct, because `formal/hostmods/os/__init__.mojo` had
+    # `mkdir`, `makedirs`, `remove`, `rmdir`, `rename`, `replace` and `chmod` and
+    # `test_formal_os.py` runs 75 operations against the real filesystem, so the
+    # "a writable filesystem this target does not get" half of that entry was
+    # false. What is left of the sentence is the TERMINAL, and
+    # `formal/hostmods/shutil.mojo`'s `get_terminal_size` is absent for exactly
+    # that reason.
+    # A name
     # reaches this list by being written and leaves it by being named, so
     # adding one here is a separate edit from adding the module — and the
     # account above fails if only one of the two is done. Neither gets a
@@ -396,7 +435,7 @@ def test_host_tiers():
     # written name, and a second copy of it would be the duplicate the pair
     # above exists to prevent.
     for m in ('subprocess', 'ctypes', 'asyncio', 'threading', 'socket',
-              'tempfile', 'shutil', 'concurrent.futures', 'zlib', 'traceback'):
+              'tempfile', 'concurrent.futures', 'zlib', 'traceback'):
         check(I.host_module_tier(m) == 'unreachable',
               f'{m} is unreachable (needs an object the target does not have)')
     for m in ('unittest.mock', 'importlib.util'):
