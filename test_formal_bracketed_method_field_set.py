@@ -83,13 +83,18 @@ FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 180
 RUN_TIMEOUT = 60
 BACKENDS = ("arm64", "x86_64")
-# The architecture whose comptime ABI has `recv.m[T](args)`.  Every differential
-# case below is still pinned on x86-64, separately, in `X86_ABI_REFUSALS` — a
-# case that builds on one machine and is refused on the other is the finding
-# here, not an accident, so the x86-64 answer is asserted rather than left
-# unasserted.  The reason is x86-64's and it is measured in
-# bugs/FORMAL_x86_64_comptime_specialization_abi.md: its caller does not pass the
-# comptime arguments while its callee prologue reserves a register for them.
+# The architecture whose DIFFERENTIAL cases below are run on.  It is a single
+# name because the cases are the ones x86-64 REFUSED rather than answering
+# wrongly, and that set was the finding when it was measured.
+#
+# `work/formal2-x86-parity` (`63c85e37`) then ported the ABI — the caller now
+# passes the comptime arguments its callee prologue reserves a register for — so
+# the x86-64 answer is no longer a refusal and
+# `X86_ABI_PARITY` below is where both machines are run and their stdout
+# compared. The differential cases here are NOT re-pointed at x86-64 on the
+# strength of that one construct: each is a separate program and has to be run
+# before it can be claimed, which is what `test_formal_x86_64_parity.py` is for.
+# The measurement is in bugs/FORMAL_x86_64_comptime_specialization_abi.md.
 COMPTIME_ABI = "arm64"
 
 # ── the differential cases ──────────────────────────────────────────────────
@@ -449,18 +454,26 @@ REFUSALS = [
 
 # ── x86-64's comptime ABI, pinned ───────────────────────────────────────────
 #
-# (name, mojo_source, needle)
+# (name, mojo_source, expected_stdout)
 #
-# arm64 must BUILD a specialized method call and x86-64 must REFUSE the same
-# source, and both halves are the assertion.  The second is not decoration: the
-# refusal is load-bearing because x86-64's callee prologue reserves a register
-# per comptime parameter (`formal/model.py`'s `incoming_args` is shared) while
-# its call site does not pass one, so a change that taught x86-64 the callee's
-# NAME without the ABI would make this pass while producing a silently wrong
-# image.  Measured, with its three-half table, in
-# bugs/FORMAL_x86_64_comptime_specialization_abi.md.
-X86_ABI_REFUSALS = [
-    ("x86_abi_refusal_is_load_bearing_for_the_bracketed_method_call",
+# BOTH machines build this and both PRINT THE SAME THING, and that is the
+# assertion.  It used to be "arm64 builds and x86-64 REFUSE", because x86-64
+# knew the callee's NAME (a bracket is rewritten to `bump`) without the ABI that
+# goes with it — the callee's prologue reserves a register per comptime
+# parameter (`formal/model.py`'s `incoming_args` is shared) and the call site did
+# not pass one.  That is the state `work/formal2-x86-parity` ported
+# (`63c85e37`, "the comptime-specialization ABI, which took three halves"), so
+# this is now a PARITY case and the old refusal is what parity removes.
+#
+# The refusal was load-bearing while it stood, and the reason it was worth
+# pinning is the reason this is worth pinning now: a backend that knows the name
+# and not the ABI produces an image that BUILDS, LINKS and computes something
+# else, and the only thing that distinguishes the two is running both and
+# comparing.  So the comparison is stdout, not an exit status — the answer is
+# small here, and a `printf` channel is the one that also works for the cases in
+# `test_formal_x86_64_parity.py` whose answers are not.
+X86_ABI_PARITY = [
+    ("x86_abi_a_bracketed_specialized_method_call_builds_and_agrees",
      "struct Cell:\n"
      "    var value: Int\n"
      "    var pad: Int\n"
@@ -473,7 +486,7 @@ X86_ABI_REFUSALS = [
      "    c.pad = 0\n"
      '    printf("v=%d", c.bump[7]())\n'
      "    return 0\n",
-     "unsupported call target on the formal x86-64 path (got SubscriptExpr)"),
+     "v=12"),
 ]
 
 
@@ -637,30 +650,32 @@ def run_known_gap_case(case, tmpdir, verbose):
 
 
 def run_x86_abi_case(case, tmpdir, verbose):
-    """arm64 must BUILD it and x86-64 must REFUSE it, for the same source.
+    """BOTH machines build it and both print the same thing.
 
-    Both halves, and the second is not decoration — see `X86_ABI_REFUSALS`.
+    Three assertions and the third is the one that would catch a regression:
+    that each backend BUILDS is a build result, and two build results can agree
+    while the images disagree. `stdout` is compared, and it is the channel rather
+    than the exit status because the answers in this file are read, not counted.
     """
-    name, source, needle = case
+    name, source, want = case
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
         f.write(source)
-    rc, text = build_formal(src, os.path.join(tmpdir, f"{name}.arm64"), "arm64")
-    if rc != 0:
-        return False, (f"--backend=arm64 did not build the construct: "
-                       f"{text.strip()[-300:]}")
-    rc, text = build_formal(src, os.path.join(tmpdir, f"{name}.x86_64"),
-                            "x86_64")
-    if rc == 0:
-        return False, ("--backend=x86_64 BUILT a comptime specialization it "
-                       "cannot pass arguments for; see "
-                       "bugs/FORMAL_x86_64_comptime_specialization_abi.md — "
-                       "the missing half is the call site, not the name")
-    if needle not in text:
-        return False, (f"--backend=x86_64 refused, but not naming the missing "
-                       f"ABI {needle!r}: {text.strip()[-300:]}")
-    if verbose:
-        print("      arm64 built; x86-64 refused naming the missing ABI")
+    for backend in ("arm64", "x86_64"):
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        rc, text = build_formal(src, out, backend)
+        if rc != 0:
+            return False, (f"--backend={backend} did not build the "
+                           f"specialization: {text.strip()[-300:]}")
+        if not os.path.isfile(out):
+            return False, f"--backend={backend} built but wrote no binary"
+        run = subprocess.run([out], capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT)
+        if run.stdout != want:
+            return False, (f"--backend={backend} printed {run.stdout!r}, "
+                           f"the case is about {want!r}")
+        if verbose:
+            print(f"      {backend}: {run.stdout!r}")
     return True, ""
 
 
@@ -676,7 +691,7 @@ def main(argv=None):
     runners = (("differential", DIFF_CASES, run_diff_case),
                ("field set", FIELDSET_CASES, run_fieldset_case),
                ("refusal", REFUSALS, run_refusal_case),
-               ("x86-64 ABI", X86_ABI_REFUSALS, run_x86_abi_case),
+               ("x86-64 ABI", X86_ABI_PARITY, run_x86_abi_case),
                ("known gap", KNOWN_GAPS, run_known_gap_case))
     passed = failed = 0
     failures = []
