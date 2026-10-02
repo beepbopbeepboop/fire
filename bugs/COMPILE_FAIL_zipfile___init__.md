@@ -1,5 +1,67 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-10-01 — the `'open'` ambiguity blocker is FIXED; the build now reaches gcc and reports this file's OWN real errors)
+
+The single named blocker every entry below has been tracking is gone. The
+whole-program build of `Lib/zipfile/__init__.py` no longer refuses with
+`'open' is ambiguous`, and no longer dies before gcc:
+
+```
+python3 tools/memslot.py --gb 8 --label zipfile -- \
+  python3 fire.py build -o .tmp/out/zipfile \
+  /Users/mrs/net/Python-3.14.6/Lib/zipfile/__init__.py
+→ exit 1, 191 `error:` lines, 24 of them in zipfile/__init__.py
+```
+
+**Root cause of the blocker** (which was filed as
+`bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md`,
+now fixed and removed): `gen_module_impl`'s transitive-discovery loop
+registered every inlined sibling's top-level FunctionDef names into
+`_own_imported_func_home` as well as `_imported_func_home`. Tier 2 is
+documented as "THIS exact gen_module call's own FromImportStmt scan …
+never shared across temp_gens", and a sibling's *definition* is neither.
+The collision rule on top turned two such registrations into
+`_AMBIGUOUS_FUNC_HOME`, which `_func_qualifier` refuses for EVERY
+reference to the name program-wide — so six unrelated siblings each
+defining `open` made every bare `open(...)` in the closure uncompilable,
+including zipfile's, which are the builtin. Fixed by dropping the
+duplicated tier-2 registration (the `_imported_func_home.setdefault`
+directly above it already records the same fact, in the tier that is
+*documented* for whole-program observations). Regression:
+`test_link_mode.py::test_builtin_open_is_not_ambiguous_from_transitive_siblings`
+— its siblings' `open` bodies print, so the test asserts by their absence
+that the builtin ran.
+
+**This file's own 24 errors, now visible for the first time** (it
+contributed ZERO before, because the refusal fired first — so every claim
+in the entries below that its compile unit was clean was true only of a
+build that never got to check it). Distinct classes, none of them the
+historical ones:
+
+- **13 × cross-module struct-method / free-function symbols not declared in
+  this TU** — `ArgumentParser___init__`, `_add_argument`, `_parse_args`
+  (from `argparse`), plus `mojo_max`/`mojo_min` reached with 2 args where
+  their 1-arg declaration won. The `mojo_max`/`mojo_min` half is a
+  variadic-builtin arity disagreement (`_lower_builtin_max`'s varargs
+  signature vs the 1-arg stub declaration), the same shape
+  `bugs/COMPILE_FAIL_importlib_resources_readers.md` records for
+  `pathlib_Path___init__`.
+- **11 × a `zipfile/_path`-internal genexp/annotation shape** at
+  `__init__.py:741` and `:752` (`non-trivial conversion in 'component_ref'` /
+  `'var_decl'`, and the `int64_t *` ↔ `int64_t` round-trip that follows):
+  `zipfile._path`'s own `CompleteDirs`/`iterdir` declarations emit invalid
+  C, and zipfile's use of them inherits it.
+
+Downstream, `pathlib/__init__.py` is now the largest single contributor (37
+× `expected expression before '(' token` — a `match`/`case` or slice shape
+zipfile's closure reaches that the interpreter suites do not), then
+`compression/zstd/_zstdfile.py` (23 × pointer↔scalar `char *`/`int64_t`
+coercions) and `shutil.py`. Each is a separate doc's subject; none is
+specific to zipfile's codegen.
+
+Doc kept open. It is no longer blocked on one message — it is now a
+per-error-class list, and the two classes above are the honest remainder.
+
 ## Status (2026-09-30, branch work/compile-fail-stdlib-misc — this file's OWN compile unit is now CLEAN; the whole-program build is refused by one honest, precisely-root-caused ambiguity message)
 
 Re-ran everything on this branch rather than trusting the entries below.
