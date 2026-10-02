@@ -265,6 +265,25 @@ is not in §11.2's five.
    the formal target's containers become genuinely heap-backed, which is what makes
    the documented ABI true on both sides.
 4. **The runtime is written in Mojo.** C is retained only for bootstrapping.
+5. **There is deliberately no logical-shift operator on this target, and `>>`
+   is arithmetic even on a signed value.** `formal/model.py`'s
+   `shift_signedness` reads the LEFT operand alone, because the right operand of
+   a shift is a COUNT and how far to move says nothing about what to move in —
+   `common_type`'s signed-wins rule is right for `/` and `%`, where the operands
+   genuinely combine, and wrong here. A program that wants zeros shifted in says
+   so with an unsigned type. Pinned by `test_formal_run.py`'s
+   `ushift_u64_by_typed_int_amount`, `…_typed_u64_amount`, `…_literal_amount`,
+   `…_variable_amount` and `signed_shift_by_unsigned_amount_stays_arithmetic`.
+
+   **Do not add `>>>`.** It is not a way to spell this, and the reason is
+   measured rather than remembered: `fire_compiler.py`'s `_PREC` has `<<` and
+   `>>` and no `>>>`, and **CPython 3.14.7 rejects it too** — checked through
+   `ast.parse`, through `exec`, and through `eval` of a string built at run time
+   (`op = ">>" + ">"`), so it is the grammar and not the shell. Adding it would
+   make this compiler accept a program its own oracle refuses. The bug doc that
+   worked this out is deleted with its fix; this line is what is left of it,
+   because "add the missing operator" is exactly the fix a future reader will
+   propose.
 
 ---
 
