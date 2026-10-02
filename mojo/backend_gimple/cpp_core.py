@@ -1442,13 +1442,24 @@ def _cpp_expr(gen, e) -> str:
         # preamble declares that struct + `extern` instance (see
         # gen_module's generated_cpp assembly), so a generator body can
         # read a module global like any ordinary compiled function.
+        #
+        # WHICH module's struct is this module's own, never
+        # `_global_to_module.get(e.name)` — the same correction, for the
+        # same reason, as the one in `_lower_IdentExpr`'s bare-name
+        # global-read branch: that map is a shared, whole-transitive-tree,
+        # name-keyed "first module to claim this bare name wins" table,
+        # so a bare name (which in real Python can only ever mean THIS
+        # module's own global — a qualified `othermod.name` is a
+        # MemberExpr, not an IdentExpr) must not be routed by it. Two
+        # modules each declaring their own same-named global made a
+        # generator body read the loser's slot while the write half of
+        # the same name went to this module's own field.
         if (gen._cpp_declared is not None
                 and e.name not in gen._cpp_declared
                 and (e.name in gen._global_var_types
                      or e.name in gen._cpp_early_global_names)):
-            global_module = getattr(gen, '_global_to_module', {}).get(
-                e.name, gen._current_module_ctx or "root")
-            safe_mod = gimple_ctypes._c_field_name(str(global_module)) if global_module else "root"
+            safe_mod = gimple_ctypes._c_field_name(
+                str(gen._current_module_ctx or "root"))
             field = gimple_ctypes._c_field_name(e.name)
             # Same C++-keyword escaping the .cpp globals-struct typedef
             # uses (`operator`/`new`/... are fine in C, not in C++).

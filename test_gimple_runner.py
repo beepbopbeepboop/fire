@@ -5690,6 +5690,82 @@ def main():
 
     test_cross_module_ctor_scalar_field_type()
 
+    def test_same_bare_name_global_reads_own_module_slot():
+        """A BARE module-global name must read THIS module's own globals
+        slot, not whichever module happened to be scanned first under the
+        same bare name.
+
+        Two modules each declaring their own top-level `MARKER` is the
+        whole shape, and the two declarations are deliberately of
+        DIFFERENT types so the two answers cannot coincide: `tables.py`'s
+        is a string (a `char *` field), `main.py`'s is a list (boxed into
+        an `int64_t` field). Real Python resolves the bare name `MARKER`
+        inside `main.py` to `main.py`'s own global — the qualification
+        `tables.MARKER` is what reaches the other one — so a compiled
+        program that printed the same thing for both had silently lost the
+        distinction.
+
+        It did, and only on the READ half. The write already targeted
+        `gen._current_module_ctx` at every one of its sites (that
+        correction is documented in `_gen_stmt_AssignStmt` and
+        `_write_dest`), but `_lower_IdentExpr`'s bare-name global-read
+        branch decided the name WAS ours and then asked the shared,
+        whole-transitive-tree, name-keyed `_global_to_module` map anyway —
+        a "first module to claim this bare name wins" table, so it answered
+        `tables`. Read and write on one name therefore landed on two
+        different storage slots, and when the read's local type came from
+        the winner's field it disagreed with the field it read: 4 x
+        "assignment to 'int64_t' from 'char *' makes integer from pointer
+        without a cast" plus 6 x "non-trivial conversion in
+        'component_ref'" across
+        Tools/c-analyzer/c_analyzer/info.py, whose own `UNKNOWN` is a
+        `_misc.Labeled(...)` and whose `c_common/tables.py` sibling has an
+        unrelated `UNKNOWN = '???'` (bugs/COMPILE_FAIL_Tools_c-analyzer_
+        c_analyzer_info.md).
+
+        Both names are printed side by side, and the expectation is
+        measured against CPython running the SAME files, because a test
+        that printed only one of them could not tell a fix from a swap."""
+        global _PASS, _FAIL, _TIMEOUT
+        name = "same_bare_name_global_reads_own_module_slot"
+        files = {
+            '__init__.py': '',
+            'tables.py': "MARKER = '???'\n",
+            'main.py': ("MARKER = [7, 8, 9]\n"
+                        "from . import tables\n"
+                        "\n"
+                        "def main():\n"
+                        "    print(MARKER)\n"
+                        "    print(tables.MARKER)\n"
+                        "    print(len(MARKER))\n"
+                        "\n"
+                        "main()\n"),
+        }
+        try:
+            got, want = _compile_package_and_run('bargl', files, 'main.py')
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if want != "[7, 8, 9]\n???\n3\n":
+            print(f"FAIL  {name}: CPython baseline is not the two DISTINCT "
+                  f"values (got {want!r}) — fixture is wrong, not the "
+                  f"compiler")
+            _FAIL += 1
+            return
+        if got == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: compiled stdout {got!r} != CPython {want!r}")
+            _FAIL += 1
+
+    test_same_bare_name_global_reads_own_module_slot()
+
     # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
     # §4 ("module.Class(...) construction is unresolved on every path"):
     # `mod_a.Dialog("a")` — a struct constructed through its OWNING MODULE

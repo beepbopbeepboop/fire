@@ -629,9 +629,38 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         c_decl_type = gen._own_overlay_global_ctype(name)
         if c_decl_type is None:
             c_decl_type = gen._global_c_decl_types.get(name, ctype)
-        # Access global from module struct (use which module the global belongs to)
-        global_module = getattr(gen, '_global_to_module', {}).get(name, gen._current_module_ctx or "root")
-        safe_module = gimple_ctypes._c_field_name(global_module) if global_module else "root"
+        # Access global from THIS module's own struct — the same routing the
+        # WRITE side already uses, deliberately, at every one of its sites
+        # (`_gen_stmt_AssignStmt`'s `global x`/module-scope branches,
+        # `_write_dest` in emit_infra.py, and cpp_core's own generator-body
+        # module-global read), all of which carry the same explanation:
+        # `_global_to_module` is a SHARED, whole-transitive-tree, name-keyed
+        # "first module to claim this bare name wins" map, so when two
+        # genuinely different modules each declare their own same-named
+        # top-level global it points at whichever was scanned FIRST — not
+        # necessarily the one whose body is being emitted. A BARE (unqualified)
+        # name in real Python can only ever mean THIS module's own global
+        # (the qualification `othermod.name` is a MemberExpr, lowered
+        # separately above), so consulting that map here could only ever
+        # misroute.
+        #
+        # It did, and the read side was the half that was wrong: the gate
+        # above had ALREADY decided the name is ours (owner is None, or
+        # owner is this module, or `_owned_here` — this instance's own
+        # Phase-1.7 scan concluded it), yet the field reference then went
+        # and asked the shared map anyway. So a bare `UNKNOWN` inside
+        # c_analyzer/info.py (whose own `UNKNOWN` is a `_misc.Labeled(...)`
+        # struct, boxed `int64_t`) loaded `_c_common_tables_globals.UNKNOWN`
+        # — c_common/tables.py's unrelated `UNKNOWN = '???'`, a `char *` —
+        # into an `int64_t` local, while the WRITE for the very same name
+        # correctly landed in `_root_globals.UNKNOWN`. Read and write on one
+        # name, two different storage slots, and the read's type disagreed
+        # with the field it read: 4 x "assignment to 'int64_t' from 'char
+        # *' makes integer from pointer without a cast" plus 6 x "non-trivial
+        # conversion in 'component_ref'" (bugs/COMPILE_FAIL_Tools_c-analyzer_
+        # c_analyzer_info.md). With the write already pinned to this module,
+        # making the read agree is what closes the pair.
+        safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
         field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(name)}"
         if ctype == 'int64_t' and c_decl_type.endswith(' *'):
             # Global is declared as a pointer type at C level but we box it as int64_t.
