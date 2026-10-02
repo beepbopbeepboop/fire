@@ -2208,9 +2208,21 @@ def read_before_store(fn, params: set = None, placed: set = None):
         if kind == "WithStmt":
             for it in (getattr(s, "items", None) or []):
                 walk_expr(getattr(it, "expr", None))
+            # The `as` ALIAS is bound BEFORE the body runs — that is what
+            # `with … as y:` means, and it is what both emitters already do
+            # (`arm64_codegen._emit_with` / `x86_64_codegen._emit_with` store the
+            # alias to the context expression's own value and then emit the
+            # body). Adding the store AFTER the body walked it reported the
+            # body's own read of the alias as a read before anything stored
+            # it, which is not true of the program: measured, `with 7 as y: x =
+            # y` was refused on BOTH architectures with a message about
+            # `UnboundLocalError` for a program CPython does not even run
+            # (`with 7` is a `TypeError: 'int' object does not support the
+            # context manager protocol`), so the diagnostic named neither the
+            # construct nor a language error the reader could reproduce.
+            stored |= stores_of(s)
             for b in (getattr(s, "body", None) or []):
                 walk_stmt(b)
-            stored |= stores_of(s)
             return
         if kind == "TryStmt":
             for b in (getattr(s, "body", None) or []):
@@ -8884,7 +8896,13 @@ def dylib_export_tables(dylib_exports: list):
                 # `StructDef` (`imported_struct_defs`), so there is nothing
                 # here for a CALL to bind and nothing to put in this table.
                 continue
-            known = by_name.get(name)
+            # The declared signature is borrowed from the DEFINING name's own
+            # entry (`defines`, which equals the key for every re-export that is
+            # not an alias), because that is where the definition is: a package
+            # that publishes `g` for `f`'s symbol must classify `g`'s result
+            # exactly as it classifies `f`'s, or a re-exported `char *` prints
+            # as an integer under one spelling and as a string under the other.
+            known = by_name.get(fwd.get("defines") or name)
             entry = {"name": name, "symbol": fwd.get("symbol"),
                      "module": fwd.get("module") or module,
                      "signature": (known.get("signature") or "")
@@ -8967,7 +8985,8 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
     — which is what makes `os.path.join(...)`, the spelling 532 measured call
     sites in this tree are written with, resolve at all."""
     if "." not in name:
-        entry = dylib_aliased_export(by_name, by_module, name, aliases)
+        entry = dylib_aliased_export(by_name, by_module, name, aliases,
+                                     forwarded)
         if entry is not None:
             return entry.get("symbol") or name
         if is_import_alias(name, aliases):
@@ -9168,33 +9187,44 @@ def is_import_alias(callee: str, aliases: dict) -> bool:
 
 
 def dylib_aliased_export(by_name: dict, by_module: dict, callee: str,
-                         aliases: dict):
+                         aliases: dict, forwarded: dict = None):
     """The export a bare callee reaches THROUGH an import alias, or None.
 
     `aliases` is `formal/imports.py`'s `import_bindings` table: `{local name:
     (module as spelled, defining name)}`, so `from os.path import exists as
     pe` is `{"pe": ("os.path", "exists")}`.
 
-    Two questions, and they are asked in this order because the second is the
-    weaker one:
+    Three questions, and they are asked in this order because each is weaker
+    than the one before it — the last one cannot say WHICH module answered:
 
-      1. **Does the module the name was imported FROM export it?** That module's
-         export table, not the flat one: the flat table cannot say which module
-         owns a name, so a local alias that happened to collide with another
-         library's export would bind that other library's function. The alias is
-         a statement about where `pe` came from, so it is resolved against that
-         module and nowhere else.
+      1. **Does the module the name was imported FROM define it?** That module's
+         own export table, not the flat one: the flat table cannot say which
+         module owns a name, so a local alias that happened to collide with
+         another library's export would bind that other library's function. The
+         alias is a statement about where `pe` came from, so it is resolved
+         against that module and nowhere else.
 
-      2. **Does ANY library on the line export the DEFINING name?** This is the
-         re-export case, and it is the same name-based dispatch `from m import
-         f` — with no alias at all — already uses: a package `__init__` is a
-         namespace library with an EMPTY export table (`_namespace_library`),
-         so `from pkg import bump` has to be answered by the submodule's
-         library under `bump`. Asking it by the DEFINING name and not by the
-         local one is what keeps it from being a hole: `bump` is a real export
-         somewhere on the line, where `b` is a name only this file ever used.
+      2. **Does that module FORWARD it?** Same module, and the same reason for
+         the same answer, read off `forwarded` rather than `by_module` — which is
+         what `dylib_export_lookup` does for the DOTTED spelling of this very
+         call, and the omission was the whole of the aliased-re-export bug: a
+         package `__init__` is a namespace library with an EMPTY export table
+         (`_namespace_library`), so its published names are all in `forwarded`,
+         and question 1 above finds nothing for any of them. An `as` on top of
+         that made it unreachable, because the name the consumer writes is the
+         alias and the flat map is keyed by the DEFINING name. Both spellings of
+         one re-export now resolve through the same table.
 
-    `None` means neither can bind it, which is the caller's cue to raise
+      3. **Does ANY library on the line export the DEFINING name?** This is the
+         name-based dispatch `from m import f` — with no alias at all — already
+         uses, and it is the weakest question because it names no module: a
+         package `__init__` with an empty export table means `from pkg import
+         bump` has to be answered by the submodule's library under `bump`.
+         Asking it by the DEFINING name and not by the local one is what keeps
+         it from being a hole: `bump` is a real export somewhere on the line,
+         where `b` is a name only this file ever used.
+
+    `None` means none can bind it, which is the caller's cue to raise
     `dylib_aliased_export_refusal`. Falling back to the LOCAL spelling — what
     the code did before any of this — is what produced a BL against a symbol
     nothing defines.
@@ -9206,6 +9236,10 @@ def dylib_aliased_export(by_name: dict, by_module: dict, callee: str,
     entry = dylib_export_module(by_module, module).get(defined)
     if entry is not None:
         return entry
+    if forwarded:
+        entry = dylib_export_module(forwarded, module).get(defined)
+        if entry is not None:
+            return entry
     if "." in defined:
         return dylib_export_lookup(by_name, by_module, defined)
     return by_name.get(defined)
@@ -14547,8 +14581,20 @@ def struct_returned_frame_sites(fn, structs_by_name, returns_frame) -> dict:
         return {}
     out, offset = {}, 0
     for node in iter_nodes(getattr(fn, "body", None)):
-        if not isinstance(node, F.CallExpr) \
-                or not isinstance(node.func, F.IdentExpr):
+        if not isinstance(node, F.CallExpr):
+            continue
+        # `call_callee_name`, NOT `node.func.name`, and the two spellings are
+        # ONE call: a comptime specialization `f[T](r)` names the same function
+        # `f` does and contributes no call-time argument of its own, so it lands
+        # the frame on `f`'s parameter at exactly the position the bare spelling
+        # would. Reading only the bare one is what made a specialized call
+        # reserve NO block: the callee is the side that COPIES, it copied into
+        # the word it was handed — an ordinary argument register — and the
+        # caller's `f[T](0, r).a` then read eight bytes from wherever that
+        # register pointed. Measured on arm64 beside its bare twin, same source:
+        # the twin answers 7, the specialization built and exited 0.
+        callee = call_callee_name(node.func)
+        if callee is None:
             continue
         # `q = make()`, `var q = make()` and the annotated `q: Point = make()`
         # are the same binding: an annotated target is still an AssignStmt
@@ -14562,7 +14608,7 @@ def struct_returned_frame_sites(fn, structs_by_name, returns_frame) -> dict:
         # exactly the lifetime this block is sound for) and
         # `frame_returning_predicate`'s contract is two arguments.
         name = frame_binding_target(node)
-        st = returns_frame(node.func.name, name)
+        st = returns_frame(callee, name)
         if st is None:
             continue
         block = struct_frame_block_bytes(st, structs_by_name)
@@ -14585,24 +14631,32 @@ def returns_on_every_path(stmts) -> bool:
     the same function and do not agree (x86-64's returns True for a return
     ANYWHERE in the list, arm64's walks to the end); this one is the only one
     consulted for the returned-frame decision, and it is the stricter of the
-    two on purpose."""
-    if not stmts:
-        return False
-    st, rest = stmts[0], stmts[1:]
-    if isinstance(st, F.ReturnStmt):
-        return True
-    if isinstance(st, F.RaiseStmt):
-        return True
-    if isinstance(st, F.IfStmt):
-        if not returns_on_every_path(st.then_body):
-            return False
-        for _cond, body in (st.elifs or []):
-            if not returns_on_every_path(body):
+    two on purpose.
+
+    Iterative over the sibling stream and recursive only into an `if`'s
+    branches, for the reason `formal/arm64_codegen.py`'s `_always_returns`
+    now carries: a walk that recursed once per sibling needed one Python
+    frame per statement, and this one is asked about every function in the
+    module — so a long straight-line body died with a `RecursionError` from
+    the frame-return fixpoint, which is a worse place to be told about it
+    than from the emitter."""
+    cur = stmts or []
+    i, n = 0, len(cur)
+    while i < n:
+        st = cur[i]
+        i += 1
+        if isinstance(st, (F.ReturnStmt, F.RaiseStmt)):
+            return True
+        if isinstance(st, F.IfStmt):
+            if not returns_on_every_path(st.then_body):
                 return False
-        if st.else_body is None:
-            return False
-        return returns_on_every_path(st.else_body)
-    return returns_on_every_path(rest)
+            for _cond, body in (st.elifs or []):
+                if not returns_on_every_path(body):
+                    return False
+            if st.else_body is None:
+                return False
+            return returns_on_every_path(st.else_body)
+    return False
 
 
 def frame_binding_target(node):

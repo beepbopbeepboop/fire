@@ -128,6 +128,25 @@ CASES = [
      "def f(n):\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n    e = 5\n"
      "    g = 6\n    h = 7\n    i = 8\n    j = 9\n    k = 10\n    l = 11\n"
      "    return l + k + j\n", 30, None),
+    # A LONG BODY, which is a different axis from spilling: this walk used to
+    # recurse once per SIBLING statement, so a function of N statements needed
+    # N Python frames and a straight-line body of a little over a thousand
+    # statements died with a bare `RecursionError` — no `build:` prefix, no
+    # source line, no construct named. Nothing about the SOURCE was wrong
+    # (`printf` lowers), and a generated program is exactly this shape, which
+    # is why it is a generated case rather than a written one: no hand-written
+    # function in this file is 2,001 statements long, so only a generator
+    # reaches the limit at all.
+    #
+    # The last statement prints and the function RETURNS, so the case also
+    # pins the walk's answer rather than only its termination: `i >= n` at the
+    # end of the list is the branch the old code reached with `rest`, and a
+    # dropped implicit `return 0` would still exit 0 while printing the wrong
+    # thing.
+    ("a_two_thousand_statement_body_builds_and_runs",
+     "def main(n):\n"
+     + "".join(f'    printf("{i}=%d@@", {i})\n' for i in range(2000))
+     + "    return 42\n", 42, "1999=1999@@"),
     # for-range loops. The exit test is the whole loop: before it, the
     # lowering computed a CSET and never branched on it, so EVERY one of these
     # hung rather than returning a wrong number -- which is why they need to be
@@ -149,6 +168,24 @@ CASES = [
     ("for_range_break", "def f(n):\n    for i in range(0, 100):\n"
                         "        if i > 3:\n            break\n"
                         "    return i\n", 4, None),
+    # A `with … as y:` TARGET is a store, and `y` is bound BEFORE the body
+    # runs — so reading it inside the body is not reading an uninitialised
+    # name. The read-before-store walk added the alias AFTER walking the body,
+    # so it reported exactly that, on BOTH architectures, with a message about
+    # `UnboundLocalError` for a program CPython does not run at all (`with 7` is
+    # a TypeError: 'int' object does not support the context manager protocol)
+    # — a diagnostic naming neither the construct nor an error the reader can
+    # reproduce.
+    #
+    # The expected answer is the two emitters' own documented lowering, not
+    # CPython's: with no `__enter__`/`__exit__` on this path the alias is bound
+    # to the context expression's VALUE and the body runs on the fall-through
+    # (`arm64_codegen._emit_with` and its x86-64 twin say so). 7 is what that is
+    # for `with 7 as y`, and `x = y` inside the body is what proves the alias
+    # was stored before the body rather than after it.
+    ("with_alias_is_bound_before_the_body",
+     "def main():\n    x = 0\n    with 7 as y:\n        x = y\n"
+     "    printf(\"x=%d\", x)\n    return x\n", 7, "x=7"),
     ("seven", "def seven():\n    return 7\n", 7, None),
     ("absval", "def absval(n):\n    if n > 0:\n        return n\n"
                "    else:\n        return 0 - n\n", 10, None),

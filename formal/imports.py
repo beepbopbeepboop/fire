@@ -1310,7 +1310,8 @@ def star_imported_modules(stmts) -> tuple:
 
 
 def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
-    """{name: (module, kind)} for the names this module binds by RE-EXPORT.
+    """{name: (module, kind, defining_name)} for the names this module binds by
+    RE-EXPORT.
 
     `from .sub import addone` binds `addone` in this file without defining
     it. A package `__init__.mojo` is nothing BUT such statements, and that is
@@ -1333,6 +1334,13 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     either refuse every package that re-exports a type (most of them) or wave
     through a genuinely missing function.
 
+    `defining_name` is the name the DEFINING module published the symbol under,
+    and it is what every consumer of this table has to look the symbol up by:
+    the link line's flat `{bare name: symbol}` map is keyed by it, so an
+    ALIAS's own entry has to say whose name it stands for. It equals the key for
+    an unaliased re-export, which is every re-export that existed before the
+    alias was recorded.
+
     `import a.b` binds the MODULE, not a name, so it contributes nothing here;
     only `from ... import ...` does. The loop is `_from_import_bindings`, shared
     with `imported_bound_names`, and the three filters below are what make this
@@ -1345,26 +1353,41 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     consumer asks for), and not this reader's to change while it is rewriting
     the loop underneath.
 
-    KEYED ON THE DEFINITION'S OWN NAME, not on the alias — `from x import f as
-    g` is recorded as `f` — which is what this table has always done and is
-    deliberate in one direction and a known gap in the other. Deliberate: an
-    export is matched against a library's export set by the name the DEFINING
-    module gave it. A gap: the name this file actually binds is `g`, so an
-    aliased re-export is published under a spelling no consumer of this module
-    can ask for. `imported_bound_names` records `g` for exactly that reason, and
-    fixing this table to match would change what every dylib manifest already
-    on disk claims its module exports — a manifest-content change for callers to
-    re-derive, which is not this reader's to make silently."""
+    **BOTH SPELLINGS ARE PUBLISHED, and the value carries the DEFINING name.**
+    `from x import f as g` records `f -> (x, kind, f)` AND `g -> (x, kind, f)`,
+    which is what this table did not do and why an aliased re-export was
+    unlinkable: the manifest published the name no consumer of this module asks
+    for and not the one every consumer does, so `g(21)` reached the bind audit
+    as a symbol nothing provides. Recording `f` alone is right for the
+    re-export's own sake — an export is matched against a library's export set
+    by the name the DEFINING module gave it — and it is what a *non-aliased*
+    re-export still records, so this is ADDITIVE: a consumer of either spelling
+    resolves, and nothing that resolved before stops. The third element is what
+    makes the second key honest: a symbol is found under the DEFINING name (the
+    flat link-line map is keyed by it), so `g`'s entry has to say which name
+    `g` stands for rather than looking `g` up and finding nothing.
+
+    The alias is filtered by the SAME three rules as the original, applied to
+    the alias's own spelling: a name this module defines wins over any import
+    (the precedence `imported_bound_names` and `import_bindings` both state), a
+    private alias is not published, and an inert one is not either. The
+    original name's own filters are unchanged, so a private definition brought
+    in under a public alias stays out of the manifest exactly as before rather
+    than becoming a build refusal over a name the defining module does not
+    export at all."""
     defined = _defined_names(stmts)
     kinds_by_module = kinds_by_module or {}
     out: dict = {}
-    for _bound, name, module in _from_import_bindings(stmts):
+    for bound, name, module in _from_import_bindings(stmts):
         if (name in defined or _is_inert_module(name)
                 or name.startswith("_")):
             continue
-        out.setdefault(name, (module,
-                              kinds_by_module.get(module, {})
-                              .get(name, "unknown")))
+        kind = kinds_by_module.get(module, {}).get(name, "unknown")
+        out.setdefault(name, (module, kind, name))
+        if (bound != name and bound not in defined
+                and not _is_inert_module(bound)
+                and not bound.startswith("_")):
+            out.setdefault(bound, (module, kind, name))
     return out
 
 
@@ -1512,9 +1535,14 @@ def _qualified_reexports(reexports: dict, parent: str) -> dict:
     manifest can tell which module actually defines the forwarded name.
 
     Same function, same parent, so the record and the file name cannot disagree
-    about which module a relative name resolved to."""
-    return {name: (_module_identity(module, parent), kind)
-            for name, (module, kind) in (reexports or {}).items()}
+    about which relative name resolved to.
+
+    The third element is `reexported_names`' `defining_name` and is carried
+    through untouched: qualifying a module must not renumber a name, and
+    dropping the element here would silently turn every ALIAS back into a
+    lookup under its own spelling."""
+    return {name: (_module_identity(module, parent), kind, defines)
+            for name, (module, kind, defines) in (reexports or {}).items()}
 
 
 def _dylib_lock(out: str):

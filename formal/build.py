@@ -4719,11 +4719,29 @@ def _frame_return_status(fn, holders, by_name, returns_by_name):
             if cands:
                 frames.append((cands, value.name))
                 continue
-        if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
-            st = returns_by_name.get(value.func.name)
-            if st is not None:
-                frames.append(([st], f"{value.func.name}()"))
-                continue
+        if isinstance(value, F.CallExpr):
+            # `M.call_callee_name`, and NOT `value.func.name`: a comptime
+            # specialization `f[T](r)` names the same function `f` does,
+            # contributes no call-time argument of its own, and so lands the
+            # frame on `f`'s parameter at exactly the position the bare
+            # spelling would. Reading only the bare one made this `return` fall
+            # through to `words.append(...)` and classified the function
+            # `_RETURN_WORD` — "no path returns a frame address" — and that one
+            # word is load-bearing three ways: `returns_frame[fn.name]` is never
+            # set, so no caller reserves a block
+            # (`model.struct_returned_frame_sites`, the other end of the same
+            # use-after-free); and `fn._image_returns_frame` has no entry for
+            # it, so an ENTRY function that returns a frame gets no
+            # `entry_frame_return_refusal` at all. Measured on arm64 beside its
+            # bare twin, same source: the twin is REFUSED by name, the
+            # specialization built and exited 112 — a stack address read as an
+            # int.
+            callee = M.call_callee_name(value.func)
+            if callee is not None:
+                st = returns_by_name.get(callee)
+                if st is not None:
+                    frames.append(([st], f"{callee}()"))
+                    continue
         words.append(_expr_spelling(value))
     if not frames:
         return _RETURN_WORD, None, None
@@ -10268,7 +10286,14 @@ def _namespace_library(output: str, install_name: str, arch: str,
     dep_constants = M.dylib_module_constants(dylib_export_lists(linked))
     provided = set(dylib_syms) | {name for table in dep_constants.values()
                                   for name in table}
-    missing = sorted(n for n in functions if n not in provided)
+    # A re-exported name is provided under the name the DEFINING module
+    # published it as, which for an ALIAS is not the name this module binds —
+    # `from x import f as g` publishes `g` and the symbol is `f`'s. Asking
+    # `provided` about `g` would report every aliased re-export as a missing
+    # definition, so the question is asked of `defining_name` and the answer
+    # reported under the name the caller actually writes.
+    missing = sorted(n for n, v in functions.items()
+                     if v[2] not in provided)
     if missing:
         listed = ", ".join(missing[:8])
         mods = ", ".join(sorted({functions[n][0] for n in missing})[:4])
@@ -10326,13 +10351,21 @@ def _namespace_constants(reexports: dict, own: dict, linked: list) -> dict:
     constant arrives as `"unknown"` — which is exactly why it must be looked up
     rather than trusted to be a function. A name that is a function re-export
     keeps its own route (the `reexports` forwarding), and a name that is a TYPE
-    has no value of this kind at all."""
+    has no value of this kind at all.
+
+    The lookup is by the entry's `defining_name` and the publication is under
+    the key, which differ only for an ALIAS: a dependency publishes its
+    constant under the name it defined, so `from .x import NAME as N` has to ask
+    for `NAME` and publish `N`. Asking for `N` would find nothing, and
+    publishing `NAME` would be the alias bug this whole table's shape is
+    about — a consumer that writes `pkg.N` is the only spelling that can
+    happen."""
     out = dict(own or {})
     tables = M.dylib_module_constants(dylib_export_lists(linked))
-    for name, (_module, kind) in (reexports or {}).items():
+    for name, (_module, kind, defines) in (reexports or {}).items():
         if kind != "unknown" or name in out:
             continue
-        for value in _constants_named(tables, name):
+        for value in _constants_named(tables, defines):
             out[name] = value
             break
     return out
@@ -10357,11 +10390,23 @@ def _record_namespace(manifest_path: str, reexports: dict,
     reader that wanted to check that every published name binds would look in
     `reexports` and find, for a trait, no symbol to check — which is the true
     fact, but stated in the one field whose contract is "there is a symbol".
+
+    The SYMBOL is looked up under the entry's `defining_name`, not under the
+    key. `dylib_syms` is the flat `{bare export name: symbol}` map assembled
+    from the linked libraries' manifests, and a defining module exports its own
+    name — so for every re-export that existed before aliases were recorded the
+    two are the same string, and for an ALIAS they are not: `from x import f as
+    g` publishes `g`, the symbol is `f`'s, and looking `g` up returns None,
+    which is how an aliased re-export reached the consumer as a name with no
+    symbol behind it. `defines` records the name the symbol was found under, so
+    a reader can tell an alias from a definition and neither has to re-derive
+    the import statement.
     """
     def _mark(payload):
         payload["kind"] = "namespace"
         payload["reexports"] = {
-            n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(n)}
+            n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(v[2]),
+                "defines": v[2]}
             for n, v in sorted(reexports.items())}
         if traits:
             # Absent rather than empty for a pure re-export package: the key

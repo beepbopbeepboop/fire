@@ -31,6 +31,26 @@ dishonest accounting.
 | covered | 86.2% | **92.0%** |
 | genuinely uncovered | 11.5% | **5.7%** |
 
+### Re-measured 2026-10-02, because a survey nobody re-runs is a guess
+
+`python3 tools/arm64_insn_audit.py` still works and its numbers are the tree's:
+
+```
+encoders in formal/arm64.py : 75 (58 base mnemonics)
+disassembled               : 4026231 instructions over 420 distinct mnemonics, 200 binaries
+covered by an encoder      : 3706716 (92.1%)
+excluded by decision       : 91826 (pointer auth, udf, hints — see docstring)
+genuinely uncovered        : 227689 (5.7%)
+```
+
+Six more encoders and a tenth of a percent of coverage since the table above was
+written, with the uncovered share unmoved — which is the useful part: the
+additions went where the audit said they mattered (the ranked uncovered list is
+still dominated by NEON, FP and the cryptographic extensions, none of which this
+backend has a use for on a target that is int-only, `formal/types.py` being the
+authority on that). **Not a bug and no bug doc: this file is the survey, and it
+stays because the answer is not guessable.**
+
 ## What was added, in the order the audit said it mattered
 
 - **`B.cond`, all 14 conditions** — by far the biggest single gap (~154k
