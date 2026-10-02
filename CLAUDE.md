@@ -349,7 +349,6 @@ the tree reads it.
 | `formal-struct` | `expect=` (`bugs/FORMAL_struct_pack_over_eight_arguments.md`) | `struct.pack`/calcsize against CPython | 2 of 148 cases; `proofs` |
 | `formal-toplevel` | `expect=` (`bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md`) | a module body runs, diffed against CPython | 2 of 70 cases; `proofs` |
 
-
 **A declared red and an unrun red are different failures**, and the second is
 worse: a marker on a test no gate runs can never be observed going green, so it
 cannot rot out. That is why the eleven ungated ones above are a coverage hole
