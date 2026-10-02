@@ -5378,6 +5378,69 @@ CONSTRUCTION_CASES = [
      "    if t.get(2) != 4:\n"
      "        return 30 + t.get(2)\n"
      "    return 41\n", 41, None),
+    # (2a-bis) A KEYWORD construction, which used to be refused outright and is
+    # now MATCHED against the field list. Every field is named here, so nothing
+    # is left to a default and this is the whole of the capability: `x` gets 1
+    # and `y` gets 2 whatever order the keywords are written in, which is what
+    # makes the matching the answer rather than a reading of a dict.
+    #
+    # Read back through a METHOD for the same reason the positional case above
+    # is: the answer then goes through the slot table rather than through
+    # whatever a field read happens to do.
+    ("constr_keyword_arguments_name_the_fields",
+     "struct Kw:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "    var z: Int\n"
+     "\n"
+     "    fn get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.x\n"
+     "        if i == 1:\n"
+     "            return self.y\n"
+     "        return self.z\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = Kw(z=4, x=1, y=7)\n"
+     "    if t.get(0) != 1:\n"
+     "        return 10 + t.get(0)\n"
+     "    if t.get(1) != 7:\n"
+     "        return 20 + t.get(1)\n"
+     "    if t.get(2) != 4:\n"
+     "        return 30 + t.get(2)\n"
+     "    return 37\n", 37, None),
+    # (2a-ter) A PARTIAL fill: `Pd(1)` on three fields, the two it leaves out
+    # having class-level defaults. This is CPython's generated `__init__` and the
+    # language's rule for a `@dataclass` field default, and it is the shape
+    # `bugs/FORMAL_dataclass_partial_construction.md` measured.
+    #
+    # The DEFAULT is what makes it a program, and the case says so by reading
+    # the unfilled field back: a `0` there would be a value the source never
+    # wrote, which is the outcome the whole construction family refuses to risk
+    # and the reason `constr_refuse_too_few_arguments` still refuses when the
+    # field has no default.
+    ("constr_partial_fill_uses_the_field_defaults",
+     "struct Pd:\n"
+     "    var a: Int\n"
+     "    var b: Int = 40\n"
+     "    var c: Int = 5\n"
+     "\n"
+     "    fn get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.a\n"
+     "        if i == 1:\n"
+     "            return self.b\n"
+     "        return self.c\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = Pd(3)\n"
+     "    if s.get(0) != 3:\n"
+     "        return 90 + s.get(0)\n"
+     "    if s.get(1) != 40:\n"
+     "        return 80 + s.get(1)\n"
+     "    if s.get(2) != 5:\n"
+     "        return 70 + s.get(2)\n"
+     "    return 48\n", 48, None),
     # (2b) Positional arguments that are EXPRESSIONS, and a mixture of literals,
     # locals and a call result. The store is one per argument at `base + 8k` in
     # order, so an argument that is a call is the case where recomputing the
@@ -6272,7 +6335,13 @@ CONSTRUCTION_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var p = P1(1)\n"
      "    return p.get(0)\n",
-     "refuse:does not match its fields (2 field(s): x, y)", None),
+     # The MESSAGE changed and the VERDICT did not: `P1(1)` used to be an
+     # arity refusal because the count did not match the field count, and it is
+     # still a refusal because `y` has no class-level default to be filled
+     # from — a different reason with a different repair, so it says so.
+     # `constr_partial_fill_needs_a_default` is the case that pins the other
+     # half: with a default on the field, the same count IS a program.
+     "refuse:leaves 'y' unfilled, and 'y' has no default", None),
     # Too MANY, and the mirror image: the count is not a field list, so the
     # message spells both sides. `P2` is a FOUR-field struct, so this also
     # covers a width past the cheapest case.
@@ -6300,19 +6369,31 @@ CONSTRUCTION_REFUSALS = [
      "    r = Resolver2(n, n, n)\n"
      "    return r.resolve(\"a\")\n",
      "refuse:does not match its fields (no fields at all)", None),
-    # ── A KEYWORD construction, which the language does not have ──
-    # `P3(x=1, y=2)` is not a shape a struct construction has. The tempting
-    # wrong answer is to read the keywords as positionals in dict order, which
+    # ── A KEYWORD that names no field, and one field named twice ──
+    # Both are still refusals, and both are now refusals of a SHAPE rather than
+    # of the keyword form: `P3(x=1, y=2)` names every field and is a program
+    # (it is `constr_keyword_arguments_name_the_fields` in
+    # CONSTRUCTION_CASES, asserted by execution), while a name that is not a
+    # field and a field reached twice are the two `TypeError`s that leaves.
+    # The tempting wrong answer for each is the one the old blanket refusal
+    # existed to stop — reading the keywords as positionals in dict order, which
     # makes a program's meaning depend on an iteration order nobody wrote.
-    ("constr_refuse_keyword_arguments",
+    ("constr_refuse_a_keyword_naming_no_field",
      "struct P3:\n"
      "    var x: Int\n"
      "    var y: Int\n\n"
      "def main(n: Int) -> Int:\n"
-     "    var p = P3(x=1, y=2)\n"
+     "    var p = P3(z=1, y=2)\n"
      "    return p.x\n",
-     "refuse:keyword argument(s) 'x', 'y' is not a shape this path lowers",
-     None),
+     "refuse:keyword argument(s) 'z', which name no field of P3", None),
+    ("constr_refuse_one_field_named_twice",
+     "struct P4:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P4(1, x=2)\n"
+     "    return p.x\n",
+     "refuse:supplies 'x' twice", None),
     # ── a COPY of the wrong thing ──
     # A copy of a DIFFERENT struct. A copy here is a slot-for-slot copy, so it
     # is only defined between two objects of the SAME layout, and `B` is a

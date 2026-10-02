@@ -13764,51 +13764,89 @@ def construction_init_body_refusal(name: str, why: str) -> str:
             f"fields, which is the same program with a representation")
 
 
-def construction_arity_refusal(name: str, got: int, summary: str) -> str:
-    """A construction whose argument count is not this struct's field count.
+def construction_arity_refusal(name: str, got: int, summary: str,
+                               missing=()) -> str:
+    """A construction whose arguments do not cover every field of this struct.
 
     Named with both counts and the field list, because "wrong number of
     arguments" without the field list is the reader's next question and the
-    field list is the answer."""
-    return (f"constructing {name} with {got} argument(s) does not match its "
-            f"fields ({summary}), and {name} declares no `__init__` for it to "
-            f"call instead: with no user-defined constructor, a struct's fields "
-            f"are filled in DECLARATION ORDER from positional arguments and "
-            f"there is no other form, so this path can only place a word in a "
-            f"slot it can name. Give the fields explicitly (`{name}()` then "
-            f"`obj.<field> = …`), which is the same program with a "
-            f"representation")
+    field list is the answer.
+
+    `missing` is the fields no argument reached, and it changes what the
+    message says and why.  With none named it is the arity error this has
+    always reported.  With some named, each is a field with NO class-level
+    default to fall back on, which is a different fact with a different
+    repair: a field WITH a declared default is filled from it, so
+    `Config(7)` on `width = 80, height = 24` is a program and this is not
+    that.  `bugs/FORMAL_dataclass_partial_construction.md` records the
+    measurement and why the two cannot share an answer."""
+    if not missing:
+        return (f"constructing {name} with {got} argument(s) does not match "
+                f"its fields ({summary}), and {name} declares no `__init__` "
+                f"for it to call instead: with no user-defined constructor, a "
+                f"struct's fields are filled in DECLARATION ORDER from "
+                f"positional arguments and there is no other form, so this "
+                f"path can only place a word in a slot it can name. Give the "
+                f"fields explicitly (`{name}()` then `obj.<field> = …`), "
+                f"which is the same program with a representation")
+    names = ", ".join(repr(f) for f in missing)
+    return (f"constructing {name} with {got} argument(s) leaves "
+            f"{names} unfilled, and {names} {'has' if len(missing) == 1 else 'have'} "
+            f"no default this path could materialize: a field is filled from "
+            f"its own class-level initializer when the call leaves it out "
+            f"({summary}), so a field without one has nothing to fall back on "
+            f"and this is the same TypeError the language raises. Pass it, or "
+            f"give it a default in the class body")
 
 
-def construction_keyword_refusal(name: str, keys) -> str:
-    """`S(a=1)` — a keyword form of a construction, refused rather than
-    misread.
+def construction_field_keyword_refusal(name: str, keys, summary: str) -> str:
+    """`S(nosuchfield=1)` — a keyword naming no field of this struct.
 
-    Refused rather than read as positional, because reading it as positional
-    would depend on the order the keywords happen to appear in a dict, and a
-    program's meaning must not depend on that.
-
-    It is a REAL limit and not an oversight, and it has a shape worth stating
-    because the stdlib leans on it — `StringSlice(unsafe_from_ptr=p)` is the
-    idiomatic spelling and 1 stdlib file reaches it as its first thing wrong.
-    What would close it is decidable and is named here so the next reader does
-    not have to work it out: match each keyword against
-    `struct_frame_slots`, let the positionals take the remaining slots in
-    declaration order, and require the two together to cover every field
-    EXACTLY once — a keyword naming no field, a field named twice, and a field
-    left uncovered are each a refusal with its own reason.  That is a small
-    extension of what is here and it was left out of a change whose subject is
-    the three positional shapes, not because it is hard.
-    """
+    The keyword form itself is no longer refused: it is MATCHED against the
+    field list, which is what the previous version of this message asked for
+    and the reason it gave ("reading it as positional would make the program's
+    meaning depend on the order the keywords appear in") is answered by the
+    matching.  What is left is a keyword that matches nothing, and that is a
+    `TypeError` in every language this path stands in for — so it is refused by
+    name, with the field list, because a reader who wrote `Config(widht=7)`
+    needs to be told which of the two it was."""
     return (f"constructing {name} with keyword argument(s) "
-            f"{', '.join(repr(k) for k in keys)} is not a shape this path "
-            f"lowers: {name}'s fields are filled in DECLARATION ORDER from "
-            f"positional arguments, and reading a keyword as positional would "
-            f"make the program's meaning depend on the order the keywords "
-            f"appear in. Match the keyword against the field list instead — "
-            f"each keyword naming a field, the positionals taking the rest in "
-            f"declaration order, and the two together covering every field "
-            f"exactly once — or pass the values positionally, or use `{name}()` "
+            f"{', '.join(repr(k) for k in keys)}, which name no field of "
+            f"{name} ({summary}). A keyword argument is matched against the "
+            f"field list, so a field that is not in the list has nothing to "
+            f"bind; the fields are {summary}. Check the spelling")
+
+
+def construction_field_twice_refusal(name: str, field: str) -> str:
+    """`S(7, width=8)` — one field, two arguments."""
+    return (f"constructing {name} supplies {field!r} twice: once by position "
+            f"and once by keyword. A field takes one argument")
+
+
+def construction_init_keyword_refusal(name: str, keys, overloads) -> str:
+    """`S(a=1)` where `S` DOES declare an `__init__`.
+
+    A different construct from the keyword form this path now lowers, and it is
+    refused for a different reason rather than by borrowing the old message:
+    with a declared constructor `S(a=1)` is a CALL to it, this path inlines
+    that call's body as a sequence of `self.<field> = …` stores at the
+    construction site, and it binds the constructor's parameters POSITIONALLY
+    when it does. So the call is not misread here — it is not lowered, and the
+    honest thing is to say which of the two shapes is missing.
+
+    `StringSlice(unsafe_from_ptr=p)` is the site this is measured on, and the
+    direction that closes it is named: bind the call through
+    `bind_call_arguments` against the selected overload's `FunctionDef` — the
+    one implementation of "which argument lands on which parameter" — so the
+    keyword lands on the parameter it names and the body's own
+    parameter-to-field mapping is unchanged."""
+    return (f"constructing {name} with keyword argument(s) "
+            f"{', '.join(repr(k) for k in keys)} is a call to the "
+            f"`__init__` {name} declares, and this path lowers that call by "
+            f"inlining its body as `self.<field> = …` stores at the "
+            f"construction site while binding its parameters POSITIONALLY, so "
+            f"a keyword argument has no parameter to land on. "
+            f"{overloads} Pass the arguments positionally, or use `{name}()` "
             f"and assign the fields")
 
 
@@ -13933,9 +13971,7 @@ def struct_construction_plan(struct_def, call, decls: dict,
     args = list(getattr(call, "args", None) or [])
     kwargs = list(getattr(call, "kwargs", None) or [])
     slots = struct_frame_slots(struct_def)
-    if kwargs:
-        return (None, construction_keyword_refusal(
-            name, [k for k, _v in kwargs]))
+    summary = struct_field_summary(struct_def)
     # A DECLARED `__init__` outranks everything below, and it has to: with one,
     # `S(a, b)` is a call to it, so every message underneath — the arity one
     # included — is describing a construct the source does not contain.
@@ -13970,7 +14006,23 @@ def struct_construction_plan(struct_def, call, decls: dict,
     # says: `Bag4()` against `def __init__(out self, n, m)` is a `TypeError`,
     # and it is refused as one, naming the declared overloads.
     shapes = struct_init_shapes(struct_def)
-    if not args and not shapes:
+    unmatched = [k for k, _v in kwargs if k not in slots]
+    if unmatched:
+        # A keyword that names no field is a `TypeError` in every language this
+        # path stands in for, and it is asked BEFORE the shape refusals below
+        # because it is the more specific fact about the call: a reader who
+        # wrote `Config(widht=7)` needs to be told the name is wrong, not that
+        # the argument count does not match.
+        return (None, construction_field_keyword_refusal(
+            name, unmatched, summary))
+    if not struct_is_framed(struct_def) and len(slots) != 1 and (args or kwargs):
+        # Zero or two-plus fields with no block to fill: a formal value is one
+        # 64-bit word and a multi-field struct has no value form, so there is
+        # nowhere to put an argument at all.  Asked BEFORE the field binding so
+        # the message is about the shape rather than about a keyword that could
+        # not have been matched to a field list this struct does not have.
+        return (None, construction_arity_refusal(name, len(args), summary))
+    if not args and not kwargs and not shapes:
         # The existing shape, for a struct that declares no constructor at all:
         # every field at its own default, and every placed nested frame brought
         # up.  Deliberately NOT re-decided here: `S()`'s refusal for a
@@ -13979,6 +14031,17 @@ def struct_construction_plan(struct_def, call, decls: dict,
         # the decision is a second thing to keep in step with the first.
         return ((CONSTRUCTION_DEFAULT,), None)
     if shapes:
+        if kwargs:
+            # A keyword against a DECLARED constructor is a different construct
+            # from the keyword form the field-filling path now lowers, and it
+            # is refused here rather than left to reach `init_body_stores`,
+            # which binds the constructor's parameters POSITIONALLY and would
+            # therefore drop the keyword and build the call the source did not
+            # write. `construction_init_keyword_refusal` says which shape is
+            # missing and names the way to close it.
+            return (None, construction_init_keyword_refusal(
+                name, [k for k, _v in kwargs],
+                struct_init_overloads(struct_def)))
         shape, why = init_overload_for_arity(shapes, len(args))
         if why is not None:
             return (None, construction_init_arity_refusal(
@@ -13999,28 +14062,12 @@ def struct_construction_plan(struct_def, call, decls: dict,
         # that cannot be materialized is refused by them, by field, as it is
         # for `S()`.
         return ((CONSTRUCTION_INIT, stores), None)
-    if not struct_is_framed(struct_def):
-        # Zero or one field: the whole value is one word.  Zero fields has
-        # nowhere to put an argument at all, which is an arity refusal with
-        # the field list saying so.
-        if len(slots) != 1:
-            return (None, construction_arity_refusal(
-                name, len(args), struct_field_summary(struct_def)))
-        only = slots[0]
-        for arg in args:
-            if _construction_arg_is_dead_blob(arg, rets):
-                return (None, construction_dead_blob_refusal(name, only, arg))
-            src = _frame_source_structs(arg, candidates)
-            if src:
-                return (None, construction_frame_in_value_refusal(
-                    name, only, arg, [s.name for s in src]))
-        return ((CONSTRUCTION_POSITIONAL, [(only, None)]), None)
-
+    framed = struct_is_framed(struct_def)
     # A FRAMED struct.  One argument that is a recognised frame of THIS struct
     # is a copy, and it is checked before the arity rule because arity is what
     # makes it look wrong: `R(r)` on a two-field `R` is not a one-field
     # construction, it is a copy of a two-field object.
-    if len(args) == 1:
+    if framed and len(args) == 1 and not kwargs:
         src = _frame_source_structs(args[0], candidates)
         if src is not None:
             if len(src) != 1 or src[0] is not struct_def:
@@ -14034,21 +14081,158 @@ def struct_construction_plan(struct_def, call, decls: dict,
             # have in mind, so it is named as such rather than left to be
             # inferred from a count.
             return (None, construction_copy_unrecognised_refusal(name, args[0]))
-    if len(args) != len(slots):
-        return (None, construction_arity_refusal(
-            name, len(args), struct_field_summary(struct_def)))
+    # WHICH FIELD each supplied argument fills, and whether the ones no
+    # argument reached have a class-level default to come from.  This is the
+    # whole of "supply some of the fields": a positional argument takes the
+    # slot at its own index, a keyword takes the field it NAMES, and a field
+    # neither reached is filled from its own declared initializer — which is
+    # CPython's generated `__init__` and the language's own rule for a
+    # `@dataclass` field default, and is why `Config(7)` on `width = 80,
+    # height = 24` is a program.
+    #
+    # A field with NO declared default keeps this an arity refusal, and that
+    # is not timidity: `struct_field_default` reports `DEFAULT_NONE` for a field
+    # with no initializer, which is the zeros a fresh word of memory holds, not
+    # a value the language would substitute for an omitted argument. Accepting
+    # it would build `Config(7)` as `width = 7, height = 0`, which runs and
+    # prints a number the source never wrote, where both Mojo and CPython raise
+    # `TypeError`. So the one condition on the partial fill is that the unfilled
+    # field has something real to be filled from.
+    bound, refusal = _construction_field_bindings(
+        struct_def, args, kwargs, slots, summary)
+    if refusal is not None:
+        return (None, refusal)
+    if not framed:
+        # One field: the whole value IS that field, so there is nothing to
+        # store — the argument is the result.  The only question left is
+        # whether an argument reached the field at all, and
+        # `_construction_field_bindings` has already refused a call that named
+        # no field, named one twice, or left a field with no default unfilled.
+        only = slots[0]
+        arg = bound[only]
+        if arg is None:
+            return ((CONSTRUCTION_DEFAULT,), None)
+        if _construction_arg_is_dead_blob(arg, rets):
+            return (None, construction_dead_blob_refusal(name, only, arg))
+        src = _frame_source_structs(arg, candidates)
+        if src:
+            return (None, construction_frame_in_value_refusal(
+                name, only, arg, [s.name for s in src]))
+        return ((CONSTRUCTION_POSITIONAL, [(only, None)]), None)
     placed = {field: child.name
               for field, _slot, child in struct_nested_frame_fields(
                   struct_def, decls)}
-    plan = []
-    for arg, field in zip(args, slots):
+    partial = bool(kwargs) or any(arg is None for arg in bound.values())
+    for field, arg in bound.items():
         if field in placed:
             return (None, construction_nested_slot_refusal(
                 name, field, arg, placed[field]))
         if _construction_arg_is_dead_blob(arg, rets):
             return (None, construction_dead_blob_refusal(name, field, arg))
-        plan.append((field, struct_frame_slot(struct_def, field)))
-    return ((CONSTRUCTION_POSITIONAL, plan), None)
+        if arg is not None:
+            continue
+        # A field filled from its own default and holding a nested FRAME: the
+        # default is a word and the slot is about to hold an address, and the
+        # nested-frame loops overwrite it — so the only thing to check is that
+        # the default itself is materializable, which is `placed` saying this
+        # struct has one there. Nothing more to refuse.
+    if not partial:
+        return ((CONSTRUCTION_POSITIONAL,
+                 [(field, struct_frame_slot(struct_def, field))
+                  for field in slots]), None)
+    # Every slot is brought up at its class-level default first and then these
+    # stores are applied, which is `CONSTRUCTION_INIT`'s shape and its emitter —
+    # the same one a declared `__init__` body's stores go through. Two
+    # producers, one lowering, and no second copy of "bring the block up then
+    # write into it".
+    return ((CONSTRUCTION_INIT,
+             [(field, struct_frame_slot(struct_def, field), arg)
+              for field, arg in bound.items() if arg is not None]), None)
+
+
+def construction_supplied_argument(call):
+    """The argument that reached a ONE-FIELD struct's field, which IS its value.
+
+    Positional first, else the single keyword's value — and reading the keyword
+    here is safe because `struct_construction_plan` has already refused every
+    call for which that is not exactly one argument: a keyword naming no field,
+    a field named twice, and a field no argument reached each return a refusal
+    before an emitter runs. So this is a READ of the decision, not a second
+    opinion about it, which is why it is here rather than each emitter reaching
+    for `e.args[0]` — the one thing a construction of a one-field struct
+    actually evaluates changed shape when keywords stopped being refused, and
+    an emitter that kept indexing `e.args` would raise `IndexError` on
+    `One(x=9)`."""
+    args = list(getattr(call, "args", None) or [])
+    if args:
+        return args[0]
+    return list(getattr(call, "kwargs", None) or [])[0][1]
+
+
+def _field_has_a_declared_default(struct_def, name: str) -> bool:
+    """Does this field carry a class-level initializer this path can read?
+
+    `struct_field_default`'s own distinction, read as a predicate: a LITERAL
+    initializer is a value the language has at every call site, and
+    `DEFAULT_NONE` — a field with no initializer at all — is the zeros a fresh
+    word of memory happens to hold.  Substituting the second for the first is
+    the one thing a partial construction must not do, which is why
+    `_construction_field_bindings` asks this rather than assuming an unfilled
+    slot is free."""
+    return struct_field_default(struct_def, name)[0] != DEFAULT_NONE
+
+
+def _construction_field_bindings(struct_def, args, kwargs, slots, summary: str):
+    """`({field: argument or None}, refusal)` — which field each argument fills.
+
+    THE rule for "supply some of the fields", and one function for it because
+    the positional and keyword spellings have to agree about what is left over:
+    two readers would be two chances to compute a different set of unfilled
+    fields, and a field that is unfilled in one and filled in the other is a
+    word in the wrong slot.
+
+    Three rules, and the third is the load-bearing one:
+
+      * a positional argument takes the slot at its own index, in declaration
+        order — the reading `S(a, b)` has always had, unchanged;
+      * a keyword takes the field it NAMES, so the program's meaning cannot
+        depend on the order the keywords happen to appear in. That was the
+        stated reason for refusing every keyword, and matching them is the
+        answer to it. A keyword naming no field is a `TypeError` and is
+        refused by name; a field reached twice is a `TypeError` and is
+        refused by name;
+      * a field no argument reached is filled from its own class-level
+        initializer, and MAY be — so `None` in the payload is "from the
+        default", which is exactly what `CONSTRUCTION_INIT` leaves in the slot
+        when it is not in the store list. A field with no declared default has
+        nothing to be filled from and the whole construction is an arity
+        refusal naming it.
+
+    The refusal for the last case is the arity one rather than a new message
+    because it IS the arity one — the count does not cover the fields — and
+    `construction_arity_refusal`'s `missing=` clause is what distinguishes the
+    two in the words."""
+    if len(args) > len(slots):
+        return (None, construction_arity_refusal(
+            struct_def.name, len(args), summary))
+    bound = {}
+    for arg, field in zip(args, slots):
+        bound[field] = arg
+    for key, value in kwargs:
+        if key not in slots:
+            return (None, construction_field_keyword_refusal(
+                struct_def.name, [key], summary))
+        if key in bound:
+            return (None, construction_field_twice_refusal(
+                struct_def.name, key))
+        bound[key] = value
+    missing = [f for f in slots
+               if f not in bound and not _field_has_a_declared_default(
+                   struct_def, f)]
+    if missing:
+        return (None, construction_arity_refusal(
+            struct_def.name, len(args), summary, missing=missing))
+    return ({f: bound.get(f) for f in slots}, None)
 
 
 def _construction_arg_is_dead_blob(arg, rets=None) -> bool:

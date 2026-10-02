@@ -402,10 +402,49 @@ def main(n):
     return 0
 """
 
+# THE fourth way CPython's generated `__init__` and this path's field-filling
+# construction differ, and the one the transform is FOR: a generated `__init__`
+# has a signature per field — `def __init__(self, width=80, height=24)` — so a
+# call may supply a PREFIX of the fields and a KEYWORD spelling, and the rest
+# come from their own defaults. `Config(7)` is `width = 7, height = 24`, which
+# CPython says and which this backend used to refuse
+# (`bugs/FORMAL_dataclass_partial_construction.md`, now closed).
+#
+# Every row is here because each of the four spellings has a DIFFERENT answer if
+# one of the rules is wrong, and a program that prints 7 24 7 24 7 3 cannot tell
+# which rule produced which pair: `Config()` catches a default that was zeroed,
+# `Config(7)` catches a prefix that was refused or filled with zeros,
+# `Config(width=7)` catches a keyword read as a positional (which would land 7
+# in whichever field sorted first), `Config(7, 3)` is the control that the
+# ordinary full positional fill still works, and `Config(height=3)` catches a
+# keyword matching the WRONG field.
+PARTIAL_CONSTRUCTION = """
+from dataclasses import dataclass, field
+
+@dataclass
+class Config:
+    width: int = field(default=80)
+    height: int = 24
+
+def main(n):
+    a = Config()
+    b = Config(7)
+    c = Config(width=7)
+    d = Config(7, 3)
+    e = Config(height=3)
+    printf("%d %d|", a.width, a.height)
+    printf("%d %d|", b.width, b.height)
+    printf("%d %d|", c.width, c.height)
+    printf("%d %d|", d.width, d.height)
+    printf("%d %d", e.width, e.height)
+    return 0
+"""
+
 EXEC_CASES = [
     ("bare_decorator_constructs_in_declaration_order", BARE_CONSTRUCT),
     ("dotted_dataclasses_decorator_spelling", DOTTED_DECORATOR),
     ("field_default_is_lowered_to_its_literal", FIELD_DEFAULT),
+    ("a_prefix_of_the_fields_fills_from_their_defaults", PARTIAL_CONSTRUCTION),
     ("dataclass_equality_is_field_wise", EQUALITY),
     ("dataclass_equality_through_a_call_boundary", EQUALITY_ACROSS_CALL),
     ("one_field_dataclass_equality_was_already_right", ONE_FIELD_EQUALITY),

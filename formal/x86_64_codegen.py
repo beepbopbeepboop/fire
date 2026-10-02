@@ -6225,10 +6225,7 @@ class X86_64Codegen:
                 f"image built and then failed to load). The by-reference "
                 f"receiver that gives one is switched off "
                 f"({M.WIDE_RECEIVER_ENV}=0)")
-        if e.kwargs:
-            raise CodegenError(M.construction_keyword_refusal(
-                name, [k for k, _v in e.kwargs]))
-        if e.args:
+        if e.args or e.kwargs:
             # A ONE-FIELD struct with an argument: the receiver IS the field, so
             # the argument is not stored, it is the result.  What is refused is
             # what the shared DECISION refuses, by name — see
@@ -6247,13 +6244,13 @@ class X86_64Codegen:
                 self._return_types)
             if refusal is not None:
                 raise CodegenError(refusal)
-            if plan[0] == M.CONSTRUCTION_INIT:
-                if plan[1]:
-                    self._emit_expr(plan[1][-1][2])
-                    return
+            if plan[0] == M.CONSTRUCTION_INIT and plan[1]:
+                self._emit_expr(plan[1][-1][2])
+                return
+            if plan[0] in (M.CONSTRUCTION_INIT, M.CONSTRUCTION_DEFAULT):
                 self._emit_fresh_one_word(name, st)
                 return
-            self._emit_expr(e.args[0])
+            self._emit_expr(M.construction_supplied_argument(e))
             return
         self._emit_fresh_one_word(name, st)
 

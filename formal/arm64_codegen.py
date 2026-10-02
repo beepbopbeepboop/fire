@@ -5536,10 +5536,7 @@ dylib_exports: list = None, globals_base: int = None,
                 f"image built and then failed to load). The by-reference "
                 f"receiver that gives one is switched off "
                 f"({M.WIDE_RECEIVER_ENV}=0)")
-        if e.kwargs:
-            raise CodegenError(M.construction_keyword_refusal(
-                name, [k for k, _v in e.kwargs]))
-        if e.args:
+        if e.args or e.kwargs:
             # A ONE-FIELD struct with an argument is a positional construction
             # whose store is free: the receiver IS the field, so the argument
             # is not stored anywhere, it is the result.  The old text here —
@@ -5549,6 +5546,14 @@ dylib_exports: list = None, globals_base: int = None,
             # it stopped being the reason at the same moment.  What is still
             # refused is what the DECISION refuses, by name: see
             # `model.struct_construction_plan`.
+            #
+            # Keywords come through the SAME decision rather than being refused
+            # here, and that is the point of asking it: a keyword naming this
+            # struct's one field is the value the field is given, exactly as a
+            # positional argument is, and `S(field=…)` with no positional is
+            # the construction at its class-level default. Which of those three
+            # it is depends on the field's declared default, which is the
+            # DECISION's business and not this loop's.
             #
             # A struct that DECLARES an `__init__` is the one case where the
             # result is not simply the argument: the constructor's body decides
@@ -5561,13 +5566,13 @@ dylib_exports: list = None, globals_base: int = None,
                 self._return_types)
             if refusal is not None:
                 raise CodegenError(refusal)
-            if plan[0] == M.CONSTRUCTION_INIT:
-                if plan[1]:
-                    self._emit_expr(plan[1][-1][2])
-                    return
+            if plan[0] == M.CONSTRUCTION_INIT and plan[1]:
+                self._emit_expr(plan[1][-1][2])
+                return
+            if plan[0] in (M.CONSTRUCTION_INIT, M.CONSTRUCTION_DEFAULT):
                 self._emit_fresh_one_word(name, st)
                 return
-            self._emit_expr(e.args[0])
+            self._emit_expr(M.construction_supplied_argument(e))
             return
         self._emit_fresh_one_word(name, st)
 
