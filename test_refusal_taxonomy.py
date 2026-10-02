@@ -166,6 +166,29 @@ SAMPLES = [
     ("method call on a value",
      "writer.write_string() is a method on a Writer — a multi-field struct, so "
      "on this path the receiver is the ADDRESS of a frame of 8-byte slots"),
+    # A one-field struct's MUTATING method, whose receiver is the struct, so the
+    # callee hands the receiver back and the caller has to store it. Three
+    # wordings, one family, and all three are here because `classify_message`
+    # sees only the message: a marker added for a wording no sample exercised
+    # is the dead-marker failure this file exists for, and these three are the
+    # only three that mechanism refuses.
+    ("one-field mutator has no return convention",
+     "Cell.bump() both changes its receiver and returns a value, and a formal "
+     "value is one 64-bit word: on this path the word a one-field struct's "
+     "mutating method hands back IS the receiver, so there is no second word "
+     "to return anything else in"),
+    ("one-field mutator has no return convention",
+     "Cell.bump() is a one-field struct's mutating method, so the value it "
+     "hands back IS the receiver, and the caller stores that over the "
+     "expression the receiver was read from. It is called here as a VALUE "
+     "rather than as a statement of its own, so there is nowhere to store it"),
+    ("one-field mutator has no return convention",
+     "Cell.bump() is called on items[0], and the receiver of a one-field "
+     "struct's mutating method is the struct itself, so the new value has to "
+     "be stored back through the expression the receiver was read from. "
+     "items[0] is not a name this path can store through: a formal value is "
+     "one 64-bit word with no address behind it"),
+
 ]
 
 # ── the SECOND table: `tools/formal_sweep_causes.py` ────────────────────────
@@ -421,6 +444,17 @@ CAUSE_SAMPLES = [
      "member.strip() is a real method of String, but it returns a SHORTER "
      "string, which on a bare char * means writing a terminator over the "
      "first trailing whitespace byte"),
+    # A one-field struct's mutating method: the receiver IS the struct, so the
+    # one 64-bit word the callee returns is the receiver and the caller has to
+    # store it. One cause with three wordings in the FAMILY table above; this
+    # sample is the one that proves the CAUSE's marker matches, and the marker
+    # is the phrase all three wordings share.
+    ("a one-field struct's mutator has no convention to write its answer back",
+     "Cell.bump() both changes its receiver and returns a value, and a formal "
+     "value is one 64-bit word: on this path the word a one-field struct's "
+     "mutating method hands back IS the receiver, so there is no second word "
+     "to return anything else in, and dropping one of the two silently is how "
+     "a program that builds computes the wrong answer"),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,

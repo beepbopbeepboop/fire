@@ -5809,7 +5809,7 @@ def _sole_field_name(st) -> str:
     return name
 
 
-def _return_the_receiver(fn, owner_struct=None) -> None:
+def _return_the_receiver(fn, wb=None) -> None:
     """Make every exit of a one-field mutator RETURN its receiver.
 
     The callee half of `model.receiver_writeback_name`. Three things, and the
@@ -5835,12 +5835,16 @@ def _return_the_receiver(fn, owner_struct=None) -> None:
     `return self` mean the new value: the rewrite turns `self._value` into
     `self`, so a `return` placed after it reads the word the body just stored.
     """
-    owner_name = getattr(owner_struct, "name", None) or fn.name
     if (getattr(fn, "return_type", None) is not None
             or any(isinstance(n, F.ReturnStmt) and n.value is not None
                    for n in M.iter_nodes(fn.body))):
+        # The MEMBER name, not the lifted one: the reader wrote `c.bump()` and a
+        # diagnostic that says `Cell.Cell_bump()` sends them looking for a
+        # function they never declared. It is carried by the write-back entry
+        # rather than sliced off the symbol for exactly that reason.
         raise CodegenError(M.mutating_receiver_return_refusal(
-            owner_name, fn.name))
+            getattr(wb, "owner", None) or fn.name,
+            getattr(wb, "member", None) or fn.name))
     recv = M.receiver_writeback_name(fn)
     if recv is None:
         return
@@ -8747,7 +8751,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     writebacks = M.one_field_mutating_methods(functions, method_owners)
     for fn in functions:
         if fn.name in writebacks:
-            _return_the_receiver(fn, method_owners.get(fn.name))
+            _return_the_receiver(fn, writebacks[fn.name])
         _rewrite_method_calls(fn.body, owners, wide, receiverless)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above

@@ -519,6 +519,15 @@ CAUSES = (
     # does not write, which is the fix's shape.
     ("a String method that returns a SHORTER string writes the receiver's bytes",
      (("returns a SHORTER string",),)),
+    # A one-field struct's mutating method, where the RECEIVER is the struct, so
+    # the callee hands the receiver back and the caller has to store it. One
+    # value-model fact with three wordings: a formal value is one 64-bit word,
+    # and it is already carrying the receiver. 0 files measured at the time of
+    # writing (the refusal is newer than the last sweep), and the fix for each
+    # wording is named in the message — the row is here so a swept file that
+    # lands on it reads as this construct rather than as `other refusal`.
+    ("a one-field struct's mutator has no convention to write its answer back",
+     (("mutating method",),)),
 )
 
 def _check_cause_shape():

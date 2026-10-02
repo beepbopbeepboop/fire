@@ -11709,10 +11709,10 @@ def mutating_receiver_return_refusal(owner: str, member: str) -> str:
         f"silently is how a program that builds computes the wrong answer. "
         f"Split it into a method that changes the receiver and returns nothing, "
         f"and one that reads it and returns the value — or make it read the "
-        f"receiver instead of writing it, which is the same fix "
-        f"(`formal/model.py`'s `receiver_writeback_name` is the rule, and "
-        f"bugs/FORMAL_one_field_struct_mutating_method_is_a_no_op.md records "
-        f"the measurement).")
+        f"receiver instead of writing it. The rule is "
+        f"`formal/model.py`'s `receiver_writeback_name`, and the shape is pinned "
+        f"by `test_formal_run.py`'s "
+        f"`one_field_mutator_with_a_return_value_is_refused`.")
 
 
     return (
