@@ -8782,6 +8782,48 @@ EQ_DISPATCH_CASES = [
      "    printf(\"same=%d diff=%d cross=%d\\n\", 1 if a == a else 0,\n"
      "           1 if a == b else 0, 1 if a == c else 0)\n"
      "    return 0\n", 0, "same=1 diff=0 cross=0"),
+    # A ONE-FIELD struct, whose value is a plain word rather than a frame
+    # address — so no holder table has anything to say about the name and
+    # `a == b` compared two FIELD VALUES while the method sat there reachable by
+    # name.  Measured before: `eq=0 direct=1` on both architectures, where
+    # CPython prints `eq=1 direct=1`.
+    #
+    # The pair is the same question twice, and both halves are needed: the
+    # local spelling is the doc's own reproducer and the parameter spelling is
+    # what a reader writes when the comparison is in a helper.  The ANNOTATION
+    # on `eq`'s parameters is load-bearing and not tidiness — an untyped
+    # parameter carries no type on this path, which is the pre-existing limit
+    # `declared_param` covers, and this case would then be asserting a rule the
+    # backend does not have.
+    ("eq_operator_reaches_a_one_field_eq",
+     "class One:\n"
+     "    x: int\n"
+     "    def __eq__(self, other):\n"
+     "        return True\n"
+     "def eq(a: One, b: One):\n"
+     "    if a == b:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    var a = One(1)\n"
+     "    var b = One(3)\n"
+     "    printf(\"eq=%d direct=%d\\n\", eq(a, b),\n"
+     "           1 if a.__eq__(b) else 0)\n"
+     "    return 0\n", 0, "eq=1 direct=1"),
+    # The same one-field struct, compared in the scope that BOUND it, so no
+    # annotation is involved at all — the case a helper-function spelling cannot
+    # reach.  `same` is 1 where the pre-change image printed `diff` and exited
+    # 0: the operator had become a compare of 1 against 3.
+    ("eq_operator_reaches_a_one_field_eq_in_the_binding_scope",
+     "class One:\n"
+     "    x: int\n"
+     "    def __eq__(self, other):\n"
+     "        return True\n"
+     "def main(n):\n"
+     "    var a = One(1)\n"
+     "    var b = One(3)\n"
+     "    printf(\"%d\\n\", 1 if a == b else 0)\n"
+     "    return 0\n", 0, "1"),
     # AGREE-OR-REFUSE.  `v` holds an `A` or a `B` depending on the branch, and
     # only `B` declares a dunder, so which call the comparison lowers to depends
     # on the path and this analysis has no path sensitivity.  Pre-change this

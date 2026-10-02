@@ -2582,6 +2582,28 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         for fn in functions:
             fn._frame_param_contract = [None] * len(
                 M.function_param_shape(fn).names)
+        # …and the ONE-WORD comparison path, which is the only thing left to do
+        # in a module with no framed struct and which this early return used to
+        # skip along with everything else.  A struct of one field has no frame
+        # by definition, so a module whose structs are ALL one field lands here
+        # — and `a == b` on two of them was a compare of two field values where
+        # the language sends it to the method.  The seeding and the rewrite are
+        # the same two calls the main path makes, and both are correct with the
+        # frame tables empty: `_eq_dispatch_call` asks the holder table and the
+        # one-word table separately, and only falls back to the second.
+        # Measured: a one-field class whose `__eq__` returns True gave 0 where
+        # CPython gives 1, on both architectures.
+        holders = {_fn_key(fn): set() for fn in functions}
+        hstruct = {_fn_key(fn): {} for fn in functions}
+        one_word = {_fn_key(fn): {} for fn in functions}
+        for fn in functions:
+            _seed_one_word_bindings(fn, structs_by_name, functions,
+                                    holders, one_word)
+        _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word)
+        for fn in functions:
+            fn._frame_holders = set()
+            fn._frame_candidates = {}
+            fn._one_word_candidates = dict(one_word[_fn_key(fn)])
         return
     owners = M.method_owner_names(structs)
     # {BARE method name: [struct, …]}, which is the other direction and is not
@@ -2651,6 +2673,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # over a per-function table, for the reason its docstring gives.
     holders = {_fn_key(fn): set() for fn in functions}
     hstruct = {_fn_key(fn): {} for fn in functions}
+    # `{fn key: {name: [struct]}}` for a name bound from a ONE-FIELD struct's
+    # construction, which is a plain word rather than a frame and so is invisible
+    # to the two tables above.  Seeded in the same loop and carried the same way
+    # because the comparison rewrite runs inside this fixpoint — publishing it on
+    # `fn` like `fn._frame_candidates` would be too LATE, which is exactly what
+    # the first version of this did.
+    one_word = {_fn_key(fn): {} for fn in functions}
     # `{name: [FunctionDef, …]}` — every definition of every name in the image.
     # The by-name readers need it to tell "one function called `f`" from "four
     # functions called `f`", which is the same agree-or-refuse discipline
@@ -2726,6 +2755,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 fn, framed, [f.name for f in functions]).items():
             holders[_fn_key(fn)].add(name)
             hstruct[_fn_key(fn)].setdefault(name, []).extend(sts)
+        _seed_one_word_bindings(fn, structs_by_name, functions, holders,
+                                one_word)
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
         grew = False
         changed = True
@@ -2930,7 +2961,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         moved = (_rewrite_len_on_frame_receivers(functions, holders,
                                           hstruct)
                  + _rewrite_eq_on_frame_receivers(functions, holders,
-                                                 hstruct))
+                                                 hstruct, one_word))
         if not (grew or moved):
             break
     else:
@@ -3406,6 +3437,16 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # it does not.  `model.struct_construction_plan` is the single decision
         # and both backends call it with this table.
         fn._frame_candidates = dict(by_name)
+        # The ONE-WORD mirror of `by_name`, and the same enumeration one filter
+        # wider: a struct of ONE field has no frame, so `P(7)` binds a plain
+        # word that IS the field, `struct_is_framed` is False for `P`, and the
+        # frame tables have nothing to say about the name at all.  That is why
+        # `a == b` on two such names stayed a compare of two FIELD VALUES while
+        # the class's own `__eq__` was reachable by name — measured, a one-field
+        # class whose `__eq__` returns True answering 0 where CPython says 1.
+        # `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` §1.
+        fn._one_word_candidates = dict(
+            one_word.get(_fn_key(fn)) or {})
         # LAST for this function, and after the walk above rather than inside
         # it: the rewrite MUTATES the tree the walk is iterating, and a walk
         # that mutates what it is walking is how a pass ends up seeing a node
@@ -4033,7 +4074,7 @@ def _replace_nodes(root, replacements: dict) -> None:
 
 
 def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
-                      hs) -> object:
+                      hs, one_word=None) -> object:
     """The call that answers `left op right`, or None to leave the operator be.
 
     The decision is `model.struct_dunder_dispatch_candidates` and nothing here
@@ -4055,10 +4096,33 @@ def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
     """
     if not isinstance(left, F.IdentExpr) or not isinstance(right, F.IdentExpr):
         return None
-    if left.name not in hs or right.name not in hs:
-        return None
-    cands = list(by_name.get(left.name) or ()) + list(by_name.get(right.name)
-                                                  or ())
+    if left.name in hs and right.name in hs:
+        # The frame case, and the one this rewrite was written for.
+        cands = list(by_name.get(left.name) or ()) + list(
+            by_name.get(right.name) or ())
+    else:
+        # At least one operand is not a frame HOLDER.  A struct of ONE field has
+        # no frame at all — its construction binds a plain word that IS the
+        # field — so both operands can still be the SAME one-field struct, and
+        # then `==` is a compare of two field values where the language sends
+        # it to the method.  The one-word table is the mirror of `by_name` for
+        # exactly that case (`_one_word_constructor_bindings`), and it is asked
+        # HERE, where the holder test is, rather than by a second rewrite pass:
+        # two passes over the same operators would be two chances to disagree
+        # about which one owns a name.
+        #
+        # A name the holder analysis classified keeps that answer even when the
+        # OTHER operand is not a holder: `struct_frame_slot_candidates`'s
+        # precedence, and the frame tables know more about such a name than this
+        # one does. So the mixed case — one holder, one one-word name — is left
+        # alone, which is the same answer as before this table existed.
+        if one_word is None or left.name in hs or right.name in hs \
+                or left.name not in one_word or right.name not in one_word:
+            return None
+        cands = list(one_word.get(left.name) or ()) + list(
+            one_word.get(right.name) or ())
+        cands_l = one_word.get(left.name) or ()
+        cands_r = one_word.get(right.name) or ()
     if not cands:
         return None
     owner, dunder, negate, (disagree, rows) = \
@@ -4077,7 +4141,8 @@ def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
     return F.UnaryOp(op="not", operand=call)
 
 
-def _rewrite_eq_on_frame_receivers(functions, holders, hstruct) -> int:
+def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
+                                   one_word=None) -> int:
     """`a == b` → `Struct___eq__(a, b)`, for two names that hold the same frame.
 
     The COMPARISON half of what `_rewrite_len_on_frame_receivers` does for
@@ -4134,7 +4199,13 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct) -> int:
     for fn in functions:
         hs = holders.get(_fn_key(fn)) or ()
         by_name = hstruct.get(_fn_key(fn)) or {}
-        if not hs:
+        # NOT `one_word = (one_word or {}).get(...)`: rebinding the parameter
+        # makes the second iteration read the FIRST function's per-name table,
+        # so every function after the first looks empty.  The whole rewrite
+        # silently did nothing for every function but one, which is exactly
+        # what it did until this line was spelled differently.
+        fn_one_word = (one_word or {}).get(_fn_key(fn)) or {}
+        if not hs and not fn_one_word:
             continue
         pending = []
         for node in M.iter_nodes(getattr(fn, "body", None)):
@@ -4144,7 +4215,8 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct) -> int:
                 call = _eq_dispatch_call(
                     node, node.op, node.left, node.right,
                     by_name.get(node.left.name) or (),
-                    by_name.get(node.right.name) or (), by_name, hs)
+                    by_name.get(node.right.name) or (), by_name, hs,
+                    fn_one_word)
                 if call is not None:
                     pending.append((id(node), call))
                 continue
@@ -4159,7 +4231,7 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct) -> int:
                 left, right = node.operands[i], node.operands[i + 1]
                 call = _eq_dispatch_call(
                     node, op, left, right, by_name.get(left.name) or (),
-                    by_name.get(right.name) or (), by_name, hs)
+                    by_name.get(right.name) or (), by_name, hs, fn_one_word)
                 if call is None:
                     lowered = False
                     break
@@ -4957,6 +5029,98 @@ def _constructor_bindings(fn, framed, functions=()) -> dict:
             if st not in got:
                 got.append(st)
     return out
+
+
+def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
+    """`{name: [struct, …]}` for locals bound from a ONE-FIELD struct's
+    construction — the case whose value is a plain word that IS the field.
+
+    `_constructor_bindings` one filter wider, and the filter is the whole
+    content rather than a variation: a struct of one field has no frame, so
+    there is no address to place and no block to reserve, and `model`'s
+    `CONSTRUCTION_POSITIONAL` says so in its own words ("`slot` is `None` in the
+    positional payload exactly when the struct is a one-word VALUE rather than a
+    frame: there the argument is not stored at all, it IS the result").  So this
+    name is invisible to every frame table — `struct_is_framed` is False, so
+    `_frame_receivers` never enters it and no candidate list exists for it — and
+    a comparison of two such names was a compare of two FIELD VALUES.
+
+    Three conditions, and the last is the guard that keeps this table agreeing
+    with the emitters:
+
+      * the name is a struct THIS MODULE declares.  An imported struct has its
+        own compilation's layout and this table is about this image's storage;
+      * it has exactly one field, so its value is one word.  Zero fields has
+        nowhere to put an argument and two-plus has no value form at all, and
+        both are already refused by name;
+      * `model.type_constructor_kind` does not answer for it — a call the
+        emitters route to a type CONVERSION before they reach
+        `_emit_struct_constructor` produces a plain word that is NOT a field of
+        anything, and recording it here would make `x == y` call a method with a
+        value the conversion produced.  That is the same guard
+        `check_construction_shapes` applies, and it is why this is a filter and
+        not "every non-framed struct".
+
+    A LIST per name, for `_constructor_bindings`' reason: two constructions of
+    two different one-field structs leave one name with two layouts, and
+    `model.struct_dunder_dispatch_candidates` — which the `==` rewrite already
+    asks — is what refuses a disagreement between them.
+    """
+    out = {}
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        target = value = None
+        if isinstance(node, F.VarDecl):
+            target, value = node.name, node.value
+        elif isinstance(node, F.AssignStmt) and isinstance(node.target,
+                                                          F.IdentExpr):
+            target, value = node.target.name, node.value
+        if not target or not isinstance(value, F.CallExpr) \
+                or not isinstance(value.func, F.IdentExpr):
+            continue
+        st = (structs_by_name or {}).get(value.func.name)
+        if st is None or M.type_constructor_kind(value.func.name) is not None:
+            continue
+        if M.struct_is_framed(st) or M.struct_field_count(st) != 1:
+            continue
+        got = out.setdefault(target, [])
+        if st not in got:
+            got.append(st)
+    return out
+
+
+def _seed_one_word_bindings(fn, structs_by_name, functions, holders,
+                            one_word) -> None:
+    """Seed `one_word[fn]` for `fn` — a LOCAL construction and a DECLARED
+    parameter, the two ways a name becomes a one-field struct's value.
+
+    One function because there are two arms that need it and a module whose
+    structs are ALL one field takes the early-return arm — which is the case
+    this table exists for, so an answer computed on one path only would be an
+    answer the bug has a shape for.
+
+    `holders` is read so that a name the frame analysis already classified
+    keeps THAT classification: the same precedence the framed seeding above
+    states for its own evidence, because a name in both tables is a name with
+    two layouts and only one of them is the truth.
+    """
+    key = _fn_key(fn)
+    one_word[key].update(_one_word_constructor_bindings(
+        fn, structs_by_name, [f.name for f in functions]))
+    # A PARAMETER declared as a one-field struct is the same fact about the
+    # same word: `def eq(a: Plain, b: Plain)` hands the caller two values that
+    # ARE their fields, so inside `eq` they are that struct and their `==` is
+    # the method's to answer.  `parameter_declared_structs` is the one reader of
+    # a declared parameter type, and its framed half is seeded two arms above —
+    # so this is that same evidence read for the case it used to drop.
+    for pname, pst in M.parameter_declared_structs(
+            fn, structs_by_name, None).items():
+        if pname in holders[key] or pname in one_word[key]:
+            continue
+        if M.struct_is_framed(pst) or not M.struct_is_one_field(pst):
+            continue
+        if M.type_constructor_kind(getattr(pst, "name", "")) is not None:
+            continue
+        one_word[key][pname] = [pst]
 
 
 def _check_method_receiver_types(fn, holders, by_name, owners,

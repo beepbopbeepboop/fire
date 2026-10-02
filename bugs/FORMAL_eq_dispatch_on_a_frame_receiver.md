@@ -1,19 +1,42 @@
 # FORMAL_eq_dispatch_on_a_frame_receiver: `a == b` reaches a declared `__eq__`, and what it still does not reach
 
-**Status: the multi-field-frame case is FIXED and measured before and after on
-both architectures.** The reproducer in
-`bugs/FORMAL_eq_does_not_dispatch_to_a_user_dunder.md` (filed on
-`work/merge2-formal`) is closed; this document records what landed, the part of
-the filing whose stated premise did not survive re-measurement, and the three
-shapes that are still wrong answers — none of which is reachable through the
-table the fix uses, and each of which is named here so the next session does not
-have to rediscover that they are open.
+**Status: shape 1 of "The three shapes still wrong" is FIXED (2026-10-02);
+shapes 2 and 3 are open and are restated at the bottom.** Measured before and
+after on both architectures, in `test_formal_run.py`'s `EQ_DISPATCH_CASES`:
+
+| program | before (arm64, x86-64) | after | CPython |
+|---|---|---|---|
+| one-field class, compared in the scope that bound it | `0` (exit 0) | `1` | `1` |
+| one-field class, compared through a helper's ANNOTATED parameters | `eq=0 direct=1` | `eq=1 direct=1` | `eq=1 direct=1` |
+
+**What landed.** `formal/build.py`'s `_one_word_constructor_bindings` and
+`_seed_one_word_bindings`, a `{name: [struct]}` table for a name that is a
+struct of ONE field's value — the mirror of `fn._frame_candidates` for the case
+where there is no frame, which is what the doc's "next step" named. Two things
+the doc did not foresee and which are worth writing down:
+
+  * **The early return that owns this case.** `_frame_receivers` returns as soon
+    as the module declares no FRAMED struct, publishing an empty contract — and a
+    module whose structs are all one field is exactly that module, so the whole
+    fixpoint, and with it the comparison rewrite, never ran. The arm now runs
+    the one-word seeding and the rewrite and publishes the two tables empty,
+    which is what they are.
+  * **A parameter rebinding its own table's parameter.** `one_word =
+    (one_word or {}).get(_fn_key(fn))` makes the SECOND iteration read the
+    FIRST function's per-NAME table, so every function after the first looks
+    empty and the rewrite silently did nothing for all of them. That is the
+    whole reason the first attempt appeared to work on the reproducer (which is
+    `main`'s own comparison) and did nothing for the helper-function spelling.
+    The local is `fn_one_word`, and the comment says why.
+
+An UNANNOTATED parameter is still not reached, which is the pre-existing
+"a formal value carries no type" limit and not a gap in this: the new case's
+helper annotates its parameters, and the comment says so.
 
 ---
 
-## What landed
-
-`formal/build.py::_rewrite_eq_on_frame_receivers` and
+**What landed before this (the multi-field-frame case), recorded here so the two
+read as one document.** `formal/build.py::_rewrite_eq_on_frame_receivers` and
 `formal/model.py::{dunder_receiver_method, struct_dunder_dispatch_candidates,
 eq_dispatch_candidates_disagree}`.  `a == b` becomes
 `Struct___eq__(a, b)` when both operands are bare names the holder analysis
@@ -80,27 +103,24 @@ two live objects of one struct cannot share an address, so all three of `a == a`
 already.  `eq_no_declared_dunder_stays_identity` exists to hold that in place: a
 rewrite that fired on every comparison would turn the third into 1.
 
-## The three shapes still wrong, and why the table cannot reach them
+## The three shapes, and where each one stands now
 
-All three measured on this tree, both architectures, and all three are
-PRECIOUS wrong answers rather than refusals — which is why they are written down
-rather than left.
+Shape 1 is FIXED (see the Status at the top). Shapes 2 and 3 are below,
+unchanged and still open. All three were measured on this tree, both
+architectures, and all three are PRECIOUS wrong answers rather than refusals —
+which is why they are written down rather than left.
 
-1. **A ONE-FIELD struct's local.**  `class P: var x: Int` with
-   `__eq__` returning True: `a == b` answers the word compare of two field
-   values (0) where CPython says 1.  `struct_is_framed` is False for a one-field
-   struct, `_frame_receivers` is entered over `framed` names only, so `a` is
-   not in `holders` and no candidate list exists for it.  The missing thing is a
-   `{name: struct}` table for a construction whose result is ONE WORD — the
-   mirror of `hstruct`, keyed on what a one-word constructor binds rather than on
-   what a frame constructor binds.  **Next step:** publish it beside
-   `fn._frame_candidates` in `_frame_receivers` (from `_constructor_bindings` over
-   the NON-framed structs, which is the same enumeration one filter wider) and
-   read it in `_eq_dispatch_call` when `hs` has nothing to say.  The safety
-   argument is the one that makes this rewrite safe at all — both operands must
-   be frames of the same struct — and it is stated once, in
-   `_rewrite_eq_on_frame_receivers`'s docstring, so the second reader inherits
-   it.
+1. **A ONE-FIELD struct's local — FIXED.**  Landed as the Status describes:
+   `_one_word_constructor_bindings` is the `{name: struct}` table this asked
+   for, seeded in BOTH arms of `_frame_receivers` and read in
+   `_eq_dispatch_call` where the holder test is.  The safety argument is the one
+   this rewrite has always rested on — both operands must be values of the same
+   single struct — and for a one-word struct it is a STRONGER statement than the
+   frame case needs: there is one word in a one-field object, so two of them
+   cannot be the same object, and a disagreement about which struct a name holds
+   is the only question there is.  A name the holder analysis already
+   classified keeps THAT answer even when the other operand is not a holder, so
+   the mixed case is left exactly as it was.
 
 2. **A comparison against something that is not a frame of the same struct.**
    `s == None`, `s == 5`, `a == b` where `a` is an `A` and `b` a `B`.  Both
