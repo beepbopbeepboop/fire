@@ -3079,6 +3079,26 @@ class Parser:
         self._pos = 0
         self._filename = ""
         self._pending_decs = []  # decorators awaiting next struct/trait
+        # `comptime NAME = <rhs>` the parser could not parse, as
+        # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
+        # two very different fates that used to be INDISTINGUISHABLE: a
+        # function type (`comptime F = def[T](Int) -> None`) is deliberately
+        # not modelled and becomes `IdentExpr('_comptime_expr')`, while a
+        # bracket call that failed to parse became the SAME placeholder —
+        # because `_skip_comptime_rhs`'s bare `except:` turned the ParseError
+        # into a skip-to-newline. So "not implemented" and "misparsed" were
+        # the same value, every consumer read the alias as a placeholder, and
+        # nothing said which. `std/io/file.mojo`'s `O_APPEND` was the visible
+        # damage: a `comptime` integer constant that reached `open(2)`'s flags
+        # as a placeholder (see
+        # bugs/CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md).
+        #
+        # A `ParseError` is now recorded here and re-raised as a SyntaxError
+        # with its own message, so the source line is refused instead of
+        # compiling to a wrong value. The function-type skip is NOT recorded
+        # and NOT raised — it is the deliberate case, and its placeholder is
+        # still what part 3 of that doc has to replace.
+        self._comptime_rhs_failures: list = []
         # `struct Box[T: Movable]:` — a generic TYPE parameter bound by a
         # trait, syntactically identical to `struct SIMD[width: Int]:`'s
         # genuine comptime VALUE parameter (`name: Ident` either way). This
@@ -3999,7 +4019,7 @@ class Parser:
         t = self._peek()
 
         # Check for function type definitions — skip to newline
-        if (t.kind == "KW" and t.value == "def") or self._will_see_arrow():
+        if self._comptime_rhs_is_function_type():
             depth = 0
             while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
                 t = self._peek()
@@ -4016,12 +4036,75 @@ class Parser:
         try:
             expr = self._parse_expr(0)
             return expr
-        except:
-            # Fallback: skip to newline
+        except (SyntaxError, ValueError, TypeError, AttributeError,
+                IndexError, KeyError) as e:
+            # This is a MISPARSE, not the function-type case above, and the
+            # two used to be the same value. Skip to the newline so the rest
+            # of the module still parses, record WHY, and re-raise: a
+            # `comptime` alias whose value was lost is a wrong answer at every
+            # use (the stdlib's `O_CREAT`/`O_APPEND` file-open flags are the
+            # measured instance), and this backend's stated rule is that a
+            # shape it cannot lower is refused rather than answered with
+            # something the source never wrote.
+            #
+            # The exception set is enumerated rather than bare because a bare
+            # `except:` here also swallowed the compiler's own bugs — a
+            # `TypeError` from a malformed AST node read as "unparseable
+            # comptime rhs" and became a placeholder, which is how a real
+            # crash in this function could present as a stdlib constant
+            # silently reading 0. `RecursionError` and `MemoryError` are
+            # deliberately NOT caught either: a runaway parse is a bug to
+            # surface, not a comptime alias to skip.
             self._pos = saved_pos
-            while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
-                self._advance()
-            return IdentExpr("_comptime_expr")
+            text_parts = []
+            while (self._peek().kind not in ("NEWLINE", "DEDENT", "EOF")
+                   and len(text_parts) < 12):
+                text_parts.append(_as_str(self._advance().value))
+            _rhs_text = " ".join(text_parts)
+            _where = self._loc(t)
+            self._comptime_rhs_failures.append((_where, _rhs_text, str(e)))
+            raise SyntaxError(
+                f"{_where}cannot parse the right-hand side of a `comptime` "
+                f"assignment: {_rhs_text!r} ({e}). A function TYPE "
+                f"(`comptime F = def[T](Int) -> None`) is accepted and skipped "
+                f"on purpose; anything else is a source this compiler cannot "
+                f"read, and its alias would otherwise reach every use as a "
+                f"placeholder value.")
+
+    def _comptime_rhs_is_function_type(self) -> bool:
+        """Is the pending `comptime` right-hand side a FUNCTION TYPE — the one
+        shape deliberately not modelled, which becomes the
+        `IdentExpr('_comptime_expr')` placeholder?
+
+        Three ways to spell one, and all three are in this project's own
+        stdlib:
+
+        * `comptime F = def[T](Int) -> None` — the `def` token is first.
+        * `comptime F = (\n    def[...]\n    (...) -> ...\n)` — a
+          parenthesized, MULTI-LINE function type, which is 6 of the 22
+          function-type aliases the new-modular stdlib declares
+          (`std/_plugin/_trait.mojo`'s
+          `_ReduceGeneratorPluginHookFnType` is the smallest). This is why
+          there is a `(` case at all: with only the `def` and `->` tests, the
+          `(`-wrapped form fell through to `_parse_expr`, raised, and — once
+          a misparse is a REFUSAL rather than a silent placeholder (see
+          `_skip_comptime_rhs`) — took a real stdlib module out of the
+          build.
+        * `comptime F = SomeType -> None`-shaped, i.e. the `->` at bracket
+          depth 0: `_will_see_arrow`.
+
+        Deliberately a shape test and not an "any `->` anywhere" scan: `->` at
+        depth 0 is the existing rule and it is narrow on purpose, and looking
+        through arbitrary parens would start claiming an ordinary parenthesized
+        arithmetic expression whose operand happens to be a lambda."""
+        t = self._peek()
+        if t.kind == "KW" and t.value == "def":
+            return True
+        if t.kind == "LPAREN":
+            nxt = self._peek(1)
+            if nxt.kind == "KW" and nxt.value == "def":
+                return True
+        return self._will_see_arrow()
 
     def _will_see_arrow(self):
         """Lookahead to check if we'll see a -> at bracket depth 0 before NEWLINE."""
@@ -4405,9 +4488,44 @@ class Parser:
                         # We keep (name, value) pairs in `attrs` so consumers that
                         # need them survive — notably MLIR op params like
                         # __mlir_op.`index.cmp`[pred=__mlir_attr.`...`](...).
+                        #
+                        # A bracket may MIX the two forms, in EITHER order, and
+                        # both elements have to be kept: `f[T=Int, "x", linux=1]`
+                        # is the ordinary way to call this project's own
+                        # `def platform_map[T: DType, operation, *, linux=..., macos=...]`
+                        # (std/sys/info.mojo), whose signature puts the positional
+                        # `operation` AFTER the keyword `T` and BEFORE the keyword
+                        # `linux`/`macos`. Two defects made that shape
+                        # unparseable, and both are fixed here:
+                        #
+                        #   * a bare element that was not a NAME (a literal, a call,
+                        #     an ellipsis) fell through both arms, so the loop hit
+                        #     its `elif peek != RBRACKET: break`, left the token
+                        #     unconsumed, and `_expect("RBRACKET")` raised — a
+                        #     ParseError that `_skip_comptime_rhs`'s bare `except`
+                        #     turned into the `_comptime_expr` placeholder, so the
+                        #     alias read as a placeholder at every use.
+                        #   * a bare element that WAS a NAME parsed and was then
+                        #     DISCARDED — the old "else positional arg: arg_expr
+                        #     already fully parsed" comment described no code. It
+                        #     is kept now, as a `(None, value)` pair, which is the
+                        #     spelling `emit_calls.py`'s comptime-param threading
+                        #     already reads positionals by (`elems = [val for nm,
+                        #     val in _bracket_attrs if nm is None]`) and which the
+                        #     tuple's own `name: object` field allows for.
+                        #
+                        # `f[1, 2]` (no keyword at all) still takes the
+                        # comma-separated-items branch below and lands in
+                        # `index` as a TupleExpr; that is a different path with
+                        # its own consumers and it is left alone.
                         _attrs = []
                         while self._peek().kind != "RBRACKET" and self._peek().kind != "EOF":
-                            if self._peek().kind in ("NAME", "KW"):
+                            if (self._peek().kind == "DOT" and
+                                    self._peek(1).kind == "DOT" and
+                                    self._peek(2).kind == "DOT"):
+                                # Ellipsis argument (three DOTs) — no value to keep.
+                                self._advance(); self._advance(); self._advance()
+                            else:
                                 # Parse the full expression for the arg (handles dotted names Self.Ts, subscripts, etc.)
                                 arg_expr = self._parse_expr(0)
                                 if self._peek().kind == "ASSIGN":
@@ -4426,12 +4544,20 @@ class Parser:
                                     if isinstance(arg_expr, IdentExpr):
                                         _name = arg_expr.name
                                     _attrs.append((_name, _val))
-                                # else positional arg: arg_expr already fully parsed
-                            # Handle ellipsis (...) as an argument (three DOTs)
-                            elif (self._peek().kind == "DOT" and
-                                  self._peek(1).kind == "DOT" and
-                                  self._peek(2).kind == "DOT"):
-                                self._advance(); self._advance(); self._advance()
+                                elif isinstance(arg_expr, IdentExpr):
+                                    # A bare NAME with no `=`: a positional
+                                    # parameter, kept under its own name (which is
+                                    # what lets a consumer read it either way — the
+                                    # `nm is None` positional list and the
+                                    # `nm is not None` keyword dict then both see
+                                    # it, and `emit_calls.py` prefers the keyword
+                                    # lookup and falls back to the positional one).
+                                    _attrs.append((arg_expr.name, arg_expr))
+                                else:
+                                    # A bare literal / call / subscript: positional,
+                                    # and its position in `_attrs` is its position
+                                    # in the bracket.
+                                    _attrs.append((None, arg_expr))
                             if self._peek().kind == "COMMA": self._advance()
                             elif self._peek().kind != "RBRACKET": break
                         self._expect("RBRACKET")

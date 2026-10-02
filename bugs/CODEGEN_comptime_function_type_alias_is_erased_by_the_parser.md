@@ -2,9 +2,11 @@
 
 **Area:** FIRE_COMPILER (the parser), with FORMAL consequences. Found
 2026-10-01 on `work/formal2-re-and-slice` while measuring the `tile.mojo` row.
-**NOT FIXED — and NOT this branch's to fix.** Two defects, both in the parser,
-both reachable from any consumer; the first is what makes `tile.mojo`
-unanswerable at all, and the second is a silent wrong value.
+**See the Status section at the bottom first: parts 1 and 2 are FIXED on
+`work/bugs3-codegen-2-r2` (2026-10-01) and part 3 is still open.** Two
+defects, both in the parser, both reachable from any consumer; the first is
+what makes `tile.mojo` unanswerable at all, and the second was a silent wrong
+value.
 
 ## Part 1 — a function-type alias is ERASED, so its callee has no signature
 
@@ -127,22 +129,143 @@ is what found it. **`bugs/CODEGEN_stdlib_stat_mode_constants_missing.md` is the
 same family (stdlib constants not reaching their user) and should be read with
 this.**
 
-## The next step
+## Status (2026-10-01, `work/bugs3-codegen-2-r2` — parts 1 and 2 FIXED; part 3 still open, and one NEW gap found)
+
+Measured on this tree, both halves of **part 2** reproduced exactly as the
+census below describes:
+
+```
+comptime A = f[T=Int]()                 -> CallExpr   keeps its value
+comptime A = f[a=1, b=2]()              -> CallExpr   keeps its value
+comptime A = f[1, 2]()                  -> CallExpr   keeps its value
+comptime A = f[T=Int, 1]()              -> IdentExpr  ERASED   <-- keyword then positional
+comptime A = f[T=Int, "x", "y"]()       -> IdentExpr  ERASED
+comptime A = f[T=Int, "x", linux=1]()   -> IdentExpr  ERASED
+```
+
+### Part 2 — FIXED. `f[T=Int, "x", linux=…, macos=…]` parses and keeps every element
+
+Two defects in `_parse_primary`'s keyword-bracket branch, both now fixed:
+
+* a bare element that was not a NAME (a literal, a call) fell through BOTH
+  arms, so the loop hit its `elif peek != RBRACKET: break`, left the token
+  unconsumed, and `_expect("RBRACKET")` raised — which part 1's fix turns into
+  a refusal rather than a placeholder, so both halves had to land together;
+* a bare element that WAS a NAME parsed and was then **discarded** — the old
+  comment "else positional arg: arg_expr already fully parsed" described no
+  code at all. So even a positional that did parse was lost.
+
+Positionals are now kept as `(None, value)` pairs, which is the spelling
+`emit_calls.py`'s comptime-param threading **already read them by**
+(`elems = [val for nm, val in _bracket_attrs if nm is None]`, `emit_calls.py`
+~:1070) and which `SubscriptExpr.attrs`' own `name: object` field allows. A
+bare NAME is kept under its own name, so both readings see it. `f[1, 2]` (no
+keyword at all) still takes the comma-separated-items branch and lands in
+`index` as a `TupleExpr` — a different path with its own consumers, untouched.
+
+### Part 1 — FIXED. A misparse is a refusal, and is no longer indistinguishable from a skipped function type
+
+`_skip_comptime_rhs`'s bare `except:` is gone. It now records the failure on
+the `Parser` (`self._comptime_rhs_failures`) and re-raises a `SyntaxError`
+naming the line, the offending text, and the underlying error, so the module is
+refused at the source line instead of compiling a `comptime` alias to a
+placeholder that reaches every use. Two details that are the point of it:
+
+* the exception set is **enumerated** (`SyntaxError`, `ValueError`,
+  `TypeError`, `AttributeError`, `IndexError`, `KeyError`) rather than bare.
+  A bare `except:` here also swallowed the compiler's own bugs — a
+  `TypeError` from a malformed AST node presented as "unparseable comptime
+  rhs" and became a placeholder, which is how a crash in this function could
+  look like a stdlib constant silently reading 0. `RecursionError` and
+  `MemoryError` are deliberately not caught.
+* the function-type skip stays the deliberate placeholder it is, and its
+  DETECTION had to widen to survive the new refusal: a parenthesized
+  MULTI-LINE function type
+
+      comptime _ReduceGeneratorPluginHookFnType = (
+          def[num_reductions: Int, ...](...) capturing[_] -> None,
+      )
+
+  starts with `(`, so neither the `def`-first test nor `_will_see_arrow`'s
+  depth-0 `->` test matched it, it fell through to `_parse_expr`, raised, and
+  **took a real stdlib module out of the build**. 6 of the 22 function-type
+  aliases are spelled this way. `_comptime_rhs_is_function_type` is the new
+  three-case test (`def` first / `(` then `def` / `->` at depth 0), and the
+  `->` case is kept as narrow as it was rather than generalised through
+  arbitrary parens.
+
+### Measured, on the whole stdlib module list
+
+`build_stdlib_dylib.stdlib_modules()` — 249 source files — each parsed with
+this project's own `Parser(py_tokenize(src)).with_filename(path).parse_module()`:
+
+```
+module entries: 249  source files found: 249
+parsed OK: 249   failed: 0
+```
+
+That is the assertion that matters for a change which turns a silent
+placeholder into a refusal: one real module (`std/_plugin/_trait.mojo`) failed
+it at the intermediate state, which is how the parenthesized-function-type case
+was found, and it passes now. **The integrator should re-run this and
+`compile_stdlib.py` (the `U` count must not rise), because a refusal is a new
+way for a stdlib module to fail** — that is the risk this change carries and
+the reason the measurement is stated rather than assumed.
+
+### Part 3 — STILL OPEN. A function-type alias needs to survive as a signature
+
+Unchanged and unaddressed: `comptime Static1DTileUnitFunc = def[width: Int](Int) -> None`
+still becomes `IdentExpr('_comptime_expr')`, so
+`formal/model.py`'s `specialization_call_refusal` still has no callee to bind
+brackets to, and `tile.mojo` / `unswitch.mojo` stay refused — **correctly**,
+with the signature erased there is genuinely nothing to bind. A `FunctionType`
+AST node carrying `comptime_params` and the runtime parameter/return
+annotations is what unblocks it; `specialization_call_refusal`'s text already
+describes the right lowering and has nothing to read it from. 22 aliases in 11
+files depend on it, not 10 — see the census table below.
+
+### NEW, found while fixing the above, and NOT fixed
+
+`myinterpreter.py` has **no evaluation for a keyword-bracket call at all** —
+`f[T=Int, y=5]()` is treated as a SUBSCRIPT on `f`, so the bracket's contents
+are evaluated in the enclosing scope and `T` raises `NameError`:
+
+```
+$ python3 fire.py run ct4.mojo
+comptime A = f[T=Int, y=5]()
+comptime B = f[T=Int]()
+comptime C = f[T, 9]()
+NameError: 6:15: name 'T' is not defined
+```
+
+This is downstream of the parser and independent of it: it fails for the
+all-keyword spelling that has always parsed, so part 2's fix does not change
+it. It is what `std/io/file.mojo`'s `O_CREAT` / `O_APPEND` / `O_CLOEXEC`
+aliases would hit on the interpreter path next, now that their parser half is
+right. Filed as `bugs/CODEGEN_interpreter_evaluates_a_keyword_bracket_call_as_a_subscript.md`.
+
+## The next step (part 3, and the two filed follow-ons)
 
 Three separable pieces, separable on purpose:
 
-1. **`_parse_comptime_expr`'s bare `except:` is the bug amplifier.** It converts a
+1. ~~**`_parse_comptime_expr`'s bare `except:` is the bug amplifier.**~~ **DONE
+   2026-10-01** — see the Status section; the `except:` is gone, a misparse is
+   a `SyntaxError` naming the line, and the function-type detection widened to
+   keep the 6 parenthesized multi-line aliases parsing (249/249 stdlib
+   modules). It converts a
    `ParseError` into a placeholder that is indistinguishable from a deliberately
    skipped function type. Two callers cannot then tell "not implemented" from
    "misparsed". Making the two distinguishable — a distinct node, or a recorded
    error — is what makes (2) and (3) visible at all, and it is the smallest
    change with the largest diagnostic payoff.
-2. **A bracket mixing keyword and positional must parse.** Whichever subscript
+2. ~~**A bracket mixing keyword and positional must parse.**~~ **DONE
+   2026-10-01** — it parses, and every element is kept; see the Status
+   section for the two defects that were in the way. Whichever subscript
    parser runs under `comptime` (`_parse_expr`'s, not the MLIR bracket path) has
    to accept Mojo's `f[T=Int, "x", linux=…, macos=…]` — the language's own
    `def platform_map[…]` signature requires it, so this is a parser bug against
    the language, not a stdlib quirk. Two cases: `f[T=Int, 1]()` and `f[a=1, 2]()`.
-3. **A function-type alias needs to survive as a signature.** A `FunctionType` AST
+3. **A function-type alias needs to survive as a signature.** *(still open)* A `FunctionType` AST
    node carrying `comptime_params` and the runtime parameter/return annotations
    is what `specialization_call_refusal` needs to become answerable — its text
    already describes the right lowering, it has nothing to read it from.
