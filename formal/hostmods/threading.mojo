@@ -12,13 +12,12 @@ took `os.listdir` out of reach
 WHAT IS DECIDED HERE
 --------------------
 `threading`'s CONSTANTS, which are not all 0 and 1 and are therefore worth
-stating rather than assuming: `TIMEOUT_MAX` is 9223372036854775807 and is a
-platform fact, not a typo, and `TIMEOUT_MAX` is the ONE name in this module a
-file in this tree would read (four of them reach for a timeout default).  The
-lock's own `locked()` state is one bit, and `lock_acquire` / `lock_release` are
-the two transitions on it -- functions of the state alone, which is the same
-"arithmetic over a word" that `formal/hostmods/concurrent/futures.mojo` does for
-`Future`'s five states.
+stating rather than assuming.  `TIMEOUT_MAX` is the one, and its value is a
+PLATFORM fact that this file's first version got wrong -- see
+`TIMEOUT_MAX()` below, which records what the mistake was and what the number
+actually is.  The lock's own `locked()` state is one bit, and `validate_timeout`
+is the two-error check over one word, which is the same "arithmetic over a word"
+that `formal/hostmods/concurrent/futures.mojo` does for `Future`'s five states.
 
 WHAT IS ADMITTED
 ----------------
@@ -55,36 +54,62 @@ from fcntl import flock, LOCK_EX, LOCK_NB, LOCK_UN
 # 64-bit integer, it is what `Lock.acquire`'s signature uses as the default, and
 # a value written as `-1` here would be accepted by every caller and mean
 # "block forever" in a different direction.
-TIMEOUT_MAX_VALUE = 9223372036854775807
+TIMEOUT_MAX_VALUE = 9223372036
 
 ARG_OK = 0
 ARG_BAD_TIMEOUT = 1
+ARG_TIMEOUT_OVERFLOW = 2
 
 def TIMEOUT_MAX() -> int:
-    """`threading.TIMEOUT_MAX`: 9223372036854775807 — block indefinitely.
+    """`threading.TIMEOUT_MAX`: 9223372036 — the largest timeout the clock takes.
 
-    `Lock.acquire(timeout=None)` resolves `None` to this number rather than to a
-    separate "no timeout" case, which is why it is a value and not a flag: a file
-    that passes `TIMEOUT_MAX` and a file that passes no timeout mean the same
-    thing, and on this path "the same thing" has to be one word.
+    THIS FILE GOT IT WRONG FIRST, and the value it had was the interesting part:
+    9223372036854775807, the largest signed 64-bit integer.  That is what the
+    name suggests and it is what the first version of this function returned, and
+    `test_formal_admitted.py`'s `threading` group failed on it immediately:
+    CPython's own answer on this target is `9223372036.0` -- a FLOAT, and a
+    completely different number.
+
+    The reason is that it is not an integer limit at all.  `threading.TIMEOUT_MAX`
+    is `_thread.TIMEOUT_MAX`, which is the largest value the platform's clock can
+    turn into a deadline; on this build that is `time_t`'s range in
+    milliseconds, and 2^63-1 milliseconds is about 292 million years, which is
+    not a number any clock represents.  So a value written from the shape of the
+    NAME is wrong here, which is the whole argument for the differential test and
+    the whole reason this constant is checked against CPython rather than
+    reasoned about.
+
+    The float is not an accident either, and the model keeps the INTEGER: a value
+    on this path is one 64-bit integer word, and `9223372036` and `9223372036.0`
+    are the same deadline.  `test_formal_admitted.py` compares `int(...)` for that
+    reason and says so.
     """
     return TIMEOUT_MAX_VALUE
 
 def validate_timeout(timeout: int) -> int:
-    """`Lock.acquire(timeout=…)`'s own check: `ARG_OK`, or `ARG_BAD_TIMEOUT`.
+    """`Lock.acquire(timeout=…)`'s own check: `ARG_OK`, or which of TWO errors.
 
-    CPython raises `ValueError("timeout value must be a positive number")` for a
-    negative one and `OverflowError` for one above `TIMEOUT_MAX`; both are
-    refusals of a NUMBER and this path has no exception mechanism (FORMAL.md
-    phase 7), so they are values a caller asks for and the acquire below does the
-    taking.  Two errors and one function, because both are decided by comparing
-    one word against `TIMEOUT_MAX` and splitting them would be two functions
-    differing in one comparison.
+    Measured on this tree's CPython 3.14.6, over the values that matter:
+
+        timeout=-1        -> OK            (block forever: the DEFAULT)
+        timeout=0         -> OK            (do not block)
+        timeout=-2        -> ValueError: timeout value must be a non-negative number
+        timeout=9223372036 -> OK           (exactly TIMEOUT_MAX)
+        timeout=9223372037 -> OverflowError: timestamp out of range for C PyTime_t
+
+    Three rules and not two, and the first of them is the one this file got wrong
+    by writing `if timeout < 0`: **-1 IS VALID.**  It is `Lock.acquire`'s own
+    default and it means "block indefinitely", so a check that refuses every
+    negative number refuses the value CPython itself passes when the caller writes
+    `acquire()`.  Two errors and one function because both are decided by
+    comparing one word against a bound; the negative one is decided first because
+    CPython's order is, and a caller that gets `ARG_BAD_TIMEOUT` for
+    `TIMEOUT_MAX + 1` is told the wrong thing.
     """
-    if timeout < 0:
+    if timeout < -1:
         return ARG_BAD_TIMEOUT
     if timeout > TIMEOUT_MAX_VALUE:
-        return ARG_BAD_TIMEOUT
+        return ARG_TIMEOUT_OVERFLOW
     return ARG_OK
 
 def lock_locked(state: int) -> int:
