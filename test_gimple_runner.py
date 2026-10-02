@@ -5690,6 +5690,59 @@ def main():
 
     test_cross_module_ctor_scalar_field_type()
 
+    # bugs/CODEGEN_c_helper_sets_documented_shared_but_are_not.md: the
+    # `sizeof`/`fnaddr` accessor helpers are file-scope `static`s, and every
+    # module's parts land in ONE translation unit, so the sets that decide
+    # whether one has already been DEFINED must be shared into every
+    # `_compile_imported_module` temp_gen. They were not: each temp_gen
+    # started with an empty `_c_helpers_needed` dict AND an empty
+    # `_emitted_c_helpers` set, so `_c_helper_def` returned a second
+    # definition of a helper the root gen had already emitted, and gcc
+    # rejected the closure with `error: redefinition of
+    # '_mojo_sizeof_<X>_env'`.
+    #
+    # Asserted on the GENERATED .ci, not on a built binary: the smallest
+    # honest reproducer (two sibling modules with a same-named lifted
+    # closure) ALSO collides on the lifted FUNCTION's own name, which is a
+    # separate pre-existing defect (see that bug doc's "Related"), so a
+    # "does it compile" assertion here would be satisfied by the wrong one of
+    # the two being fixed. "Exactly one definition of each accessor" is the
+    # property, and it is what sharing buys.
+    def test_c_accessor_helpers_emitted_once_across_modules():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "c_accessor_helpers_emitted_once_across_modules"
+        mod = ("def pick(v):\n"
+               "    f = lambda x: x + v\n"
+               "    return f(1)\n")
+        files = {'xhelp_a.py': mod, 'xhelp_b.py': mod,
+                 'xhelp_main.py': "import xhelp_a\nimport xhelp_b\n"}
+        try:
+            with tempfile.TemporaryDirectory() as wd:
+                for fn, src in files.items():
+                    open(os.path.join(wd, fn), 'w').write(src)
+                ep = os.path.join(wd, 'xhelp_main.py')
+                from gimple_codegen import compile_to_gimple
+                c_code = compile_to_gimple(files['xhelp_main.py'],
+                                           do_imports=True, filename=ep)
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        sz = [ln for ln in c_code.splitlines()
+              if ln.startswith('static int64_t _mojo_sizeof_')]
+        fa = [ln for ln in c_code.splitlines()
+              if ln.startswith('static void * _mojo_fnaddr_')]
+        if len(sz) == 1 and len(fa) == 1:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected exactly one definition of each "
+                  f"sizeof/fnaddr accessor across the closure, got "
+                  f"{len(sz)} sizeof and {len(fa)} fnaddr: {sz + fa}")
+            _FAIL += 1
+
+    test_c_accessor_helpers_emitted_once_across_modules()
+
     # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
     # §4 ("module.Class(...) construction is unresolved on every path"):
     # `mod_a.Dialog("a")` — a struct constructed through its OWNING MODULE

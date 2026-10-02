@@ -2238,6 +2238,27 @@ class GimpleGen:
         # above are, because all modules' generated code is concatenated into
         # ONE translation unit for the self-hosted build and a duplicate
         # top-level `static` would be a redefinition.
+        #
+        # What the sharing makes true, and why no call site has to reason
+        # about it: `_c_helper_def` is called at the POINT OF USE, and every
+        # place it emits to is ordered ahead of that use. Two of the three
+        # destinations are inside the module's own `parts`/`func_parts`, so a
+        # definition precedes its caller by construction; the third,
+        # `_elaborated_externs`, is deliberately NOT shared (see
+        # emit_resolve's sharing block) and is flushed by gen_module_impl
+        # BEFORE `imported_code` is appended to `parts`, so the root module's
+        # externs-borne definitions still land above every imported module's
+        # code, and an imported module that is handed `''` is relying on a
+        # definition higher up the one translation unit rather than on
+        # something it skipped. Imported modules are emitted in
+        # `sorted(modules_to_compile)` order, so the module that needed the
+        # helper first is also the one whose definition comes first.
+        #
+        # Before the sharing, each temp_gen started with its own empty dict AND
+        # its own empty `_emitted_c_helpers` set, so none of the above held
+        # for it and a second module emitted a second definition; correctness
+        # came only from six independent per-call-site guards, none of them
+        # this contract. See bugs/CODEGEN_c_helper_sets_documented_shared_but_are_not.md.
         self._c_helpers_needed: dict[str, str] = {}
         # Which of those have already had their DEFINITION emitted into the
         # final .ci. Definitions are emitted inline, immediately before the
