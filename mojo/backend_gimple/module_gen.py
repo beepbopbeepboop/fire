@@ -4705,6 +4705,25 @@ def gen_module_impl(self, stmts):
     # re-types parameters all over the backend, and a container entry there
     # has effects far past comparison.
     self._container_param_kinds: dict[str, dict[str, str]] = {}
+    # Function name -> the NAMES of its parameters left at the `int64_t`
+    # default whose call sites DISAGREE and include at least one string.
+    # That set is exactly the provably-may-be-string set: a slot is in it
+    # only because a `char *` literal was actually observed at one of its
+    # call sites and an `int64_t` at another. It is the ONLY input the
+    # runtime discriminator `mojo_cstr_or_int_str` may be applied to, because
+    # that discriminator is unsound for an arbitrary int64_t: a value in
+    # `[2^31, 2^47)` is pointer-SHAPED, so `print(2**40)` would hand a bare
+    # integer to `strlen` and trade a SIGSEGV for a worse one. Keyed by
+    # function name for the same reason `_container_param_kinds` is — a
+    # forwarding chain's second hop is a DIFFERENT slot with the same shape.
+    self._int64_may_hold_str: dict[str, set] = {}
+    # Functions whose RETURN VALUE may hold a string, by the same route (a
+    # `return` of a name in `_int64_may_hold_str`, or of another such
+    # function's result). The other half of the same property: the sets above
+    # are per-CALLING-scope names, and this is the whole-program answer for a
+    # call site's own result, which is where most consumers meet the value —
+    # `print(f(x))` never reads a parameter at all.
+    self._ret_may_hold_str: set = set()
     # Function name -> its parameter NAMES in order. Populated here, in the
     # same pass that fills `_inferred_param_types`, because that map is keyed
     # by param NAME while a call site identifies a callee's parameter only by
@@ -5524,6 +5543,33 @@ def gen_module_impl(self, stmts):
                 if _fe is not None:
                     _record_param_elem(callee, pnames[i], _fe, _fne)
                 st = _arg_scalar_type(caller_name, a)
+                if not st:
+                    # An int/bool/None literal contributes NOTHING above, and
+                    # that silence is the bug this records against: `f(1)`
+                    # alongside `f("s")` yielded `_scalar_obs['f']['x'] ==
+                    # {'char *'}` — one OBSERVING call site, vacuously
+                    # unanimous, resolved to `char *`, while the int call site
+                    # contributed absence that counted as agreement. The
+                    # parameter then declared `char * f(char *)`, and
+                    # `mojo_print((char *)1)` strlen'd a small integer:
+                    # SIGSEGV (exit -11) for a program CPython prints
+                    # `1` / `s`. Silence is asymmetric by construction here:
+                    # `g(1.5)` and `g("s")` are typed correctly, and `g(1)`
+                    # lands on `int64_t` only because `{'int64_t'}` fails the
+                    # `_has_dbl or _has_cs` whitelist below — nobody observed
+                    # it as one.
+                    #
+                    # LOCAL to this walk, deliberately NOT in
+                    # `_arg_scalar_type`: its other four consumers (the
+                    # struct-pointer observer, the struct-METHOD contract and
+                    # the two constructor observers) each whitelist its
+                    # answers differently, so widening what it returns changes
+                    # all four. That is a separate decision, deliberately not
+                    # taken here.
+                    if isinstance(a, (gimple_ctypes.IntLiteral,
+                                       gimple_ctypes.BoolLiteral,
+                                       gimple_ctypes.NoneLiteral)):
+                        st = 'int64_t'
                 if st:
                     # Split the chained `_scalar_obs.setdefault(callee, {})
                     # .setdefault(pnames[i], set()).add(st)` into typed
@@ -5668,6 +5714,21 @@ def gen_module_impl(self, stmts):
             _has_dbl = 'double' in types
             _has_cs = 'char *' in types
             if len(types) != 1 or not (_has_dbl or _has_cs):
+                # Disagreeing call sites (or evidence for nothing) → left at
+                # the `int64_t` default. If one of the observers was a `char *`
+                # this slot provably MAY hold a string, and that is the only
+                # fact a consumer is allowed to act on: record it, so
+                # `_gen_print` can route it through `mojo_cstr_or_int_str`
+                # rather than casting the raw bits to `char *`.
+                #
+                # The `continue`s below (annotated parameter, or a
+                # `_infer_param_types` resolution this pass is not entitled
+                # to overturn) are NOT here on purpose — those slots are
+                # already typed by real evidence, not by the int64_t
+                # default, so they never need the discriminator. Only a slot
+                # actually left at `int64_t` is recorded.
+                if _has_cs and ann.get(pname) is None:
+                    self._int64_may_hold_str.setdefault(callee, set()).add(pname)
                 continue                         # not unanimous double / char *
             if ann.get(pname) is not None:
                 continue                         # respect explicit annotation
@@ -5713,6 +5774,111 @@ def gen_module_impl(self, stmts):
     # `gimple_dynamic_attribute_real_storage_and_attributeerror`). A method
     # call, by contrast, has exactly one lowering — the struct's own mangled
     # method — so there is nothing for the name-based fallback to get right.
+# Past 1.3d proper: propagate the may-hold-a-string property out of the
+    # slots recorded above. It is one property of a VALUE, and a value is not
+    # confined to the slot it arrived in -- `y = x` copies it, `return x`
+    # publishes it to every caller, and a caller hands its own property to the
+    # callee it calls. Without this, `print` only learns about a parameter read
+    # DIRECTLY (`print(x)`), so every shape that moves the value first printed
+    # the boxed pointer's decimal and exited 0 -- exactly the
+    # silent-wrong-value shape that recording the slot exists to prevent. That
+    # was measured for a local alias (`y = x`), a direct return (`return x`,
+    # printed at the call site), and a forwarding chain (`def g(x): return
+    # f(x)`), none of which the collection loop alone can reach: a callee like
+    # `f` in the third case has no call site of its own passing a literal, so
+    # it appears in no `_scalar_obs` entry at all.
+    #
+    # So this is an interprocedural fixed point with edges in three directions,
+    # each monotone in one direction only (a name is added, never removed):
+    #
+    #   forward-in-body       `y = x` within one function
+    #   backward-along-call   a caller's argument property becomes the callee's
+    #                         parameter property -- this is what carries `g`'s
+    #                         evidence into `f` in the forwarding chain
+    #   forward-along-call    a returned expression's property becomes the
+    #                         function's own return property
+    #
+    # Termination is by construction rather than by a visit budget: the only
+    # mutation anywhere is adding a name to one of a bounded number of sets,
+    # and a cycle (`def f(x): return f(x)`) simply never adds anything.
+    # Deliberately order-insensitive and conservative elsewhere: an assignment
+    # anywhere in the body adds its target, and a later overwrite is not
+    # subtracted. That is sound for the one consumer there is --
+    # `mojo_cstr_or_int_str` is exact for a small integer (it prints the
+    # integer) and wrong only for one in `[2^31, 2^47)`, and that bound is what
+    # the collection loop above exists to enforce by only ever seeding a slot a
+    # `char *` was really observed at.
+    _int_maybe = self._int64_may_hold_str
+    _ret_maybe: set = set()
+    # Per-function walk results, computed ONCE: the fixed point below re-scans
+    # them every round, and `_walk_ast` over every body of a 60-module closure
+    # is not something to repeat until convergence.
+    _calls: dict = {}        # fname -> [(callee, [arg nodes])]
+    _rets: dict = {}         # fname -> [returned expression nodes]
+    _copies: dict = {}       # fname -> [(target name, source name)]
+    _params: dict = {}       # fname -> [param names in order]
+    for _fname, _fn in _fn_by_name.items():
+        _params[_fname] = [_as_str(_pn) for _pn, _pt in (_fn.params or [])
+                           if not _as_str(_pn).startswith('*')]
+        _calls[_fname] = []
+        _rets[_fname] = []
+        _copies[_fname] = []
+        for _nd in _walk_ast(_fn.body):
+            if (isinstance(_nd, gimple_ctypes.AssignStmt)
+                    and isinstance(_nd.target, IdentExpr)
+                    and isinstance(_nd.value, IdentExpr)):
+                _copies[_fname].append((_as_str(_nd.target.name),
+                                        _as_str(_nd.value.name)))
+            elif isinstance(_nd, gimple_ctypes.ReturnStmt):
+                if _nd.value is not None:
+                    _rets[_fname].append(_nd.value)
+            elif (isinstance(_nd, gimple_ctypes.CallExpr)
+                    and isinstance(_nd.func, gimple_ctypes.IdentExpr)
+                    and _as_str(_nd.func.name) in _fn_by_name):
+                _calls[_fname].append((_as_str(_nd.func.name),
+                                       list(_nd.args or [])))
+
+    def _expr_may(fname, expr) -> bool:
+        """Does `expr`, read in `fname`'s own scope, carry the property?"""
+        if isinstance(expr, gimple_ctypes.IdentExpr):
+            return _as_str(expr.name) in _int_maybe.get(fname, ())
+        if (isinstance(expr, gimple_ctypes.CallExpr)
+                and isinstance(expr.func, gimple_ctypes.IdentExpr)):
+            return _as_str(expr.func.name) in _ret_maybe
+        return False
+
+    _changed = True
+    while _changed:
+        _changed = False
+        for _fname, _pairs in _copies.items():
+            _names = _int_maybe.setdefault(_fname, set())
+            for _t, _v in _pairs:
+                if _v in _names and _t not in _names:
+                    _names.add(_t)
+                    _changed = True
+        for _fname, _sites in _calls.items():
+            for _callee, _args in _sites:
+                _pn = _params.get(_callee)
+                if not _pn:
+                    continue
+                for _i, _a in enumerate(_args):
+                    if _i >= len(_pn):
+                        break
+                    if _expr_may(_fname, _a):
+                        _names = _int_maybe.setdefault(_callee, set())
+                        if _pn[_i] not in _names:
+                            _names.add(_pn[_i])
+                            _changed = True
+        for _fname, _exprs in _rets.items():
+            if _fname in _ret_maybe:
+                continue
+            for _e in _exprs:
+                if _expr_may(_fname, _e):
+                    _ret_maybe.add(_fname)
+                    _changed = True
+                    break
+    self._ret_may_hold_str = _ret_maybe
+
     _STRUCT_FALLBACKS = ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
                          'MojoStr *', 'char *', 'int', 'int64_t')
     for callee in sorted(_struct_obs):
