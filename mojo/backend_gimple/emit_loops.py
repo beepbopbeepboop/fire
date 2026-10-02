@@ -1291,6 +1291,37 @@ def _gen_for_zip_longest(gen, node):
     gen._emit_label(bb_after)
 
 
+def _carry_nested_elem_type(gen, target, it_val, elem) -> None:
+    """One level IN: a loop target over a container OF containers must record
+    on ITSELF what those inner containers hold, so a loop over the target
+    inside the body types its own target from the same table instead of
+    falling to the `int64_t` default.
+
+    Without it the second loop reads its elements through
+    `mojo_list_get_int` whatever they are, so `for row in rows: for cell in
+    row: print(cell)` over `[["a", "b"]]` printed the strings' heap ADDRESSES
+    -- exit 0, no diagnostic, and the integer spelling of the same program
+    (`[[1, 2], [3, 4]]`) was correct, because `int64_t` happens to be what
+    the default already is. `note_list_literal` /
+    `_lower_list_literal` already do this carrying for a list LITERAL bound
+    to a local (`_nested_elem_types[t] = _inner_ct`); what was missing is the
+    same step for a name the ITERATION bound.
+
+    Only `MojoList *` is carried: `_nested_elem_types` records what a list
+    holds, and a struct pointer's fields are already reachable through
+    `_actual_types`, which the callers set for themselves.
+
+    One implementation, called from both loop paths that need it -- the
+    `zip()` slot binding and the ordinary `for x in <list>` -- because they
+    are the same step and a partial copy is exactly how the ordinary loop
+    came to disagree with `zip()` about the same nested shape."""
+    if _as_str(elem) != 'MojoList *':
+        return
+    _inner = gen._nested_elem_types.get(_as_str(it_val))
+    if _inner is not None:
+        gen._elem_types[target] = _inner
+
+
 def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
     """Bind one `zip()` loop target `vn` to `list_ptr[idx_t]`, reading with
     the accessor matching THAT sequence's own element type and coercing to
@@ -1346,8 +1377,7 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
     # instead of falling to the boxed dynamic-dispatch path.
     if elem and elem.endswith(' *'):
         gen._actual_types[vn] = elem
-        if elem == 'MojoList *' and list_ptr in gen._nested_elem_types:
-            gen._elem_types[vn] = gen._nested_elem_types[list_ptr]
+    _carry_nested_elem_type(gen, vn, list_ptr, elem)
 
 
 def _gen_for_zip(gen, node):
@@ -1828,6 +1858,10 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                      or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ()))
                 and gen.var_types.get(var) != 'int64_t'):
             gen._declare_var(var, 'int64_t', force=True)
+        # AFTER every declaration above (each of which can re-type `var`) and
+        # BEFORE the body is generated below, so a loop over `var` INSIDE the
+        # body sees the inner element type. The doc's placement note.
+        _carry_nested_elem_type(gen, var, it_val, _fl_ctype)
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')

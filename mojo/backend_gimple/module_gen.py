@@ -40,10 +40,10 @@ import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as gimple_gen_coro
 import mojo.middle.infra_infer as ginf
-from mojo.middle.exprtypes import _walk_ast
+from mojo.middle.exprtypes import _walk_ast, expr_provably_str as _gmi_expr_provably_str
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
-from mojo.middle.closures import discover_closures
+from mojo.middle.closures import discover_closures, closure_lifted_name
 import mojo.backend_gimple.device_select as _gmi_device_select
 import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
@@ -1320,26 +1320,6 @@ def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
         self._lambda_parts = []
 
 
-
-
-def _gmi_expr_provably_str(e) -> bool:
-    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
-    comptime`'s docstring. Recursive, pure. Is `e` an expression whose
-    Python runtime value is provably a str? Sound transitive closure over
-    the two string-producing binary operators: `%`-format yields str
-    whenever the FORMAT (LHS) is a str literal, and `+` yields str
-    whenever EITHER operand is a str (str.__add__ rejects non-str
-    operands, so a literal str on either side proves both sides are str —
-    disambiguating this from list/tuple concatenation)."""
-    if isinstance(e, (StringLiteral, TstringLiteral)):
-        return True
-    if isinstance(e, BinaryOp):
-        if e.op == '%':
-            return _gmi_expr_provably_str(e.left)
-        if e.op == '+':
-            return (_gmi_expr_provably_str(e.left)
-                    or _gmi_expr_provably_str(e.right))
-    return False
 
 
 # The hardcoded dispatch tables (`_STMT_DISPATCH` etc.) that get a bare
@@ -6448,6 +6428,135 @@ def gen_module_impl(self, stmts):
                 resolved_type = 'double' if _has_dbl else 'char *'
                 self._inferred_param_types.setdefault(callee, {})[pname] = resolved_type
 
+    # The same "this untyped int64_t slot PROVABLY may hold a string"
+    # property, for the callable kind the tables above cannot see at all: a
+    # `def` NESTED in another function's body.
+    #
+    # It is invisible for a structural reason. `all_functions` is the
+    # module's top-level statement list, and `_free_params` / `_fn_by_name` /
+    # `_caller_bodies` are all built from it, so a nested `def` has no entry
+    # in any of the three. Its call sites WERE reachable -- `_calls_in_stmts`
+    # descends into a nested body from the enclosing function's own entry --
+    # so the evidence was collected and then dropped at the
+    # `_free_params.get(callee)` lookup, one line above.
+    #
+    # The consequence was an untyped parameter that a real string was passed
+    # into, printed as its own pointer decimal:
+    #     def outer():
+    #         def inner(s):
+    #             print(s)
+    #         inner("A")
+    # `s` is physically `int64_t` (`_gen_lifted_closure` types a parameter with
+    # no annotation that way whatever it is handed), `_actual_types` has
+    # nothing to say about it inside the lifted body, and `_gen_print` fell
+    # through to the generic `%ld` arm.
+    #
+    # This is the one place in the pipeline that still has the whole module's
+    # AST in hand: when the lifted closure's body is emitted the evidence is
+    # gone, so it is collected here and keyed by the name the C function
+    # ACTUALLY GETS -- `ClosureInfo.lifted_name`, which is also what
+    # `gen.current_func_name` is while that body is lowered, which is what
+    # `_is_may_hold_str_param` asks with. Keying by the source name would
+    # record a fact nobody can look up.
+    #
+    # Deliberately narrow, in three ways, each of which is the difference
+    # between this and a new guess:
+    #   * POSITIVE evidence only -- a call site whose argument type is
+    #     positively `char *`. `_arg_scalar_type` answers that for a string
+    #     literal and (with `deep_str`) for a provably-str expression, and is
+    #     silence for anything it cannot prove, exactly as for a top-level
+    #     callee. The scope it is given is the one the call site is really
+    #     inside, so an `IdentExpr` argument resolves against the right
+    #     function's locals.
+    #   * IT CHANGES NO C SIGNATURE. Nothing here resolves a parameter to
+    #     `char *`; the slot stays `int64_t` and the consumer asks the
+    #     runtime's own discriminator (`mojo_cstr_or_int_str`), whose
+    #     documented bound -- an int64 in `[2^31, 2^47)` reads as a pointer --
+    #     is the bound this whole table already accepts.
+    #   * ANNOTATED parameters are skipped, the same rule the loop above
+    #     applies: a real annotation is real evidence, so the slot never needs
+    #     the discriminator.
+    def _gmi_scope_bodies(body, outer_lifted: str) -> list:
+        """(compiled-under name, body) for `body` and every `def` nested in
+        it, at any depth. The name is what `_arg_scalar_type(caller_name, ...)`
+        has to be given for a call inside that scope: the enclosing function's
+        OWN name for a top-level `def`, its lifted `<outer>_<name>` for a
+        nested one. Getting it wrong is how an `IdentExpr` argument would
+        resolve against an unrelated function's locals."""
+        out = [(outer_lifted, body)]
+        for _n in _walk_ast(body):
+            if not isinstance(_n, FunctionDef):
+                continue
+            _nf = _as_funcdef_node(_n)
+            if (getattr(_nf, 'is_async', False)
+                    and not getattr(_nf, 'is_generator', False)):
+                continue
+            out.extend(_gmi_scope_bodies(_as_list(_nf.body),
+                                         closure_lifted_name(outer_lifted,
+                                                             _as_str(_nf.name))))
+        return out
+
+    _gmi_scopes: list = [(_TOPLEVEL_CALLER, stmts)]
+    for _cs_s in all_functions:
+        if isinstance(_cs_s, FunctionDef):
+            _cs_fn = _as_funcdef_node(_cs_s)
+            _gmi_scopes.extend(_gmi_scope_bodies(_as_list(_cs_fn.body),
+                                                 _as_str(_cs_fn.name)))
+    # (owning scope name, source name, lifted name, unannotated param names)
+    _gmi_nested: list = []
+    for _scope_name, _scope_body in _gmi_scopes:
+        for _lsc in _walk_ast(_scope_body):
+            if not isinstance(_lsc, FunctionDef):
+                continue
+            _lsf = _as_funcdef_node(_lsc)
+            if (getattr(_lsf, 'is_async', False)
+                    and not getattr(_lsf, 'is_generator', False)):
+                continue
+            _lpn: list = []
+            for _lpp, _lpt in (_as_list(_lsf.params) or []):
+                _lp_n = _as_str(_lpp)
+                if _lp_n.startswith('*'):
+                    continue
+                if _lpt is not None:
+                    continue                    # respect explicit annotation
+                _lpn.append(_lp_n)
+            if not _lpn:
+                continue
+            _lname = _as_str(_lsf.name)
+            _gmi_nested.append((_scope_name, _lname,
+                                closure_lifted_name(_scope_name, _lname),
+                                _lpn, _lsf))
+    _gmi_rec: dict = {}
+    for _scope_name, _scope_body in _gmi_scopes:
+        _gmi_calls: list = []
+        self._calls_in_stmts(_scope_body, _gmi_calls)
+        for _gcall in _gmi_calls:
+            if not isinstance(_gcall.func, IdentExpr):
+                continue
+            _gcallee = _as_str(_gcall.func.name)
+            # The def's OWN scope wins over a same-named one elsewhere: two
+            # unrelated functions can each nest a `helper`, and the enclosing
+            # scope is what says which of them this call site means.
+            _gmatch = None
+            for _gown, _gsrc, _glift, _gpn, _gdef in _gmi_nested:
+                if _gsrc != _gcallee:
+                    continue
+                if _gmatch is None:
+                    _gmatch = (_glift, _gpn)
+                if _gown == _scope_name:
+                    _gmatch = (_glift, _gpn)
+                    break
+            if _gmatch is None:
+                continue
+            _glift, _gpn = _gmatch
+            for _gi, _ga in enumerate(_as_list(_gcall.args) or []):
+                if _gi >= len(_gpn):
+                    break
+                if _arg_scalar_type(_scope_name, _ga, deep_str=True) != 'char *':
+                    continue
+                _gmi_rec.setdefault(_glift, set()).add(_gpn[_gi])
+    for _glift in _gmi_rec:
+        self._int64_may_hold_str.setdefault(_glift, set()).update(_gmi_rec[_glift])
     # Pass 1.3d-struct: the same unanimity-over-call-sites contract as the
     # loop above, for a REGISTERED STRUCT pointer.
     #
@@ -6528,12 +6637,26 @@ def gen_module_impl(self, stmts):
     _rets: dict = {}         # fname -> [returned expression nodes]
     _copies: dict = {}       # fname -> [(target name, source name)]
     _params: dict = {}       # fname -> [param names in order]
+    # A nested `def`'s C name, per OWNING scope: source name -> lifted name.
+    # The fixed point below resolves a call site by looking its callee up in
+    # `_params`, so a call to a nested `def` — spelled with the SOURCE name
+    # at the call site, emitted under the LIFTED name — has to be recorded
+    # under the latter, and it has to be the enclosing scope's entry: two
+    # unrelated functions can each nest a `helper`.
+    _nested_lifted: dict = {}
+    for _gown, _gsrc, _glift, _gpn, _gdef in _gmi_nested:
+        _nested_lifted.setdefault(_gown, {})[_gsrc] = _glift
+
+    def _gmi_param_names(params) -> list:
+        return [_as_str(_pn) for _pn, _pt in (_as_list(params) or [])
+                if not _as_str(_pn).startswith('*')]
+
     for _fname, _fn in _fn_by_name.items():
-        _params[_fname] = [_as_str(_pn) for _pn, _pt in (_fn.params or [])
-                           if not _as_str(_pn).startswith('*')]
+        _params[_fname] = _gmi_param_names(_fn.params)
         _calls[_fname] = []
         _rets[_fname] = []
         _copies[_fname] = []
+        _fname_rename = _nested_lifted.get(_fname, {})
         for _nd in _walk_ast(_fn.body):
             if (isinstance(_nd, gimple_ctypes.AssignStmt)
                     and isinstance(_nd.target, IdentExpr)
@@ -6544,9 +6667,37 @@ def gen_module_impl(self, stmts):
                 if _nd.value is not None:
                     _rets[_fname].append(_nd.value)
             elif (isinstance(_nd, gimple_ctypes.CallExpr)
-                    and isinstance(_nd.func, gimple_ctypes.IdentExpr)
-                    and _as_str(_nd.func.name) in _fn_by_name):
-                _calls[_fname].append((_as_str(_nd.func.name),
+                    and isinstance(_nd.func, gimple_ctypes.IdentExpr)):
+                _cname = _as_str(_nd.func.name)
+                if _cname not in _fn_by_name and _cname not in _fname_rename:
+                    continue
+                _calls[_fname].append((_fname_rename.get(_cname, _cname),
+                                       list(_nd.args or [])))
+    # The same four tables for every nested `def`, which the loop above cannot
+    # see: its body IS reached (the walk descends into it) but it is credited
+    # to the enclosing function, and its own name is in neither `_fn_by_name`
+    # nor `_params`. One fixed point, fed both — not a second one.
+    for _gown, _gsrc, _glift, _gpn, _gdef in _gmi_nested:
+        _params[_glift] = list(_gpn)
+        _calls[_glift] = []
+        _rets[_glift] = []
+        _copies[_glift] = []
+        _glift_rename = _nested_lifted.get(_glift, {})
+        for _nd in _walk_ast(_as_list(_gdef.body)):
+            if (isinstance(_nd, gimple_ctypes.AssignStmt)
+                    and isinstance(_nd.target, IdentExpr)
+                    and isinstance(_nd.value, IdentExpr)):
+                _copies[_glift].append((_as_str(_nd.target.name),
+                                        _as_str(_nd.value.name)))
+            elif isinstance(_nd, gimple_ctypes.ReturnStmt):
+                if _nd.value is not None:
+                    _rets[_glift].append(_nd.value)
+            elif (isinstance(_nd, gimple_ctypes.CallExpr)
+                    and isinstance(_nd.func, gimple_ctypes.IdentExpr)):
+                _cname = _as_str(_nd.func.name)
+                if _cname not in _fn_by_name and _cname not in _glift_rename:
+                    continue
+                _calls[_glift].append((_glift_rename.get(_cname, _cname),
                                        list(_nd.args or [])))
 
     def _expr_may(fname, expr) -> bool:

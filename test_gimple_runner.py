@@ -696,6 +696,79 @@ def main():
     print(e(4, 5))
 """, "9\n")
 
+    # `print(...)` inside a LAMBDA body emitted no separator and no newline:
+    # `print` is a statement-level builtin whose separators live only in
+    # `gen._gen_print`, and a lambda's body is an EXPRESSION, so the lifted
+    # function wrapped it in `ReturnStmt` and the generic call path claimed it
+    # instead — `mojo_print(<one value>)`, full stop. Three prints came out as
+    # `ABC` on one line for CPython's `A\nB\nC\n`, exit 0. Compared against
+    # CPython rather than a literal, because the separator and the line ending
+    # are the whole subject.
+    test_gimple_matches_cpython("gimple_print_in_lambda_body_terminates", """\
+def main():
+    a = lambda: print("A")
+    a()
+    b = lambda x: print("B")
+    b(1)
+    c = lambda x: print(x, "|", x)
+    c("C")
+    h = lambda s: print(s + "!")
+    h("hello")
+main()
+""")
+
+    # An untyped LAMBDA parameter is physically `int64_t` whatever it is
+    # handed (`mojo_fnptr_call_N` widens every argument), so a string arrives
+    # with its pointer bits and nothing recorded -- and `print(x)` in the body
+    # fell through to the generic `%ld` arm and printed the ADDRESS. `_lower_
+    # LambdaExpr` now asks the runtime's own discriminator, gated on a call
+    # site of this very lambda that was seen passing a `char *`, which is
+    # positive evidence and not "no evidence" (a bare integer is
+    # pointer-shaped in `[2^31, 2^47)`, so an ungated discriminator would
+    # trade one wrong answer for another). The `a(42)` line is the gate: an
+    # ordinary integer must still print as an integer.
+    test_gimple_matches_cpython("gimple_lambda_param_str_and_int_both", """\
+def main():
+    a = lambda x: print(x)
+    a(42)
+    a("s")
+main()
+""")
+
+    # The same shape through a nested `def`, which the cross-call evidence
+    # collector could not see at all: `all_functions` is the module's
+    # top-level statement list, so a `def` inside a function body has no entry
+    # in the callee table the call sites are matched against. The evidence
+    # was collected and dropped. Both the direct spelling and the FORWARDED
+    # one (`inner(n)` with `n` the enclosing's own untyped parameter), because
+    # the second needs the interprocedural fixed point and the first does not
+    # — a fix that only handled the first would look complete.
+    test_gimple_matches_cpython("gimple_nested_def_param_str_and_int", """\
+def outer(n):
+    def inner(s):
+        print(s)
+    inner(n)
+    inner(7)
+    return 0
+
+def main():
+    outer("A")
+    outer(3)
+main()
+""")
+
+    # Two arguments through a slot that may hold a string: the discriminator
+    # arm used to print its own answer immediately and `continue` WITHOUT
+    # appending to the resolved-argument list, so the pair came out SWAPPED
+    # and the `' '` separator landed on the wrong one (`two1` for `1 two`).
+    test_gimple_matches_cpython("gimple_print_two_args_one_may_hold_str", """\
+def main():
+    b = lambda x, y: print(x, y)
+    b(1, "two")
+    b("one", 2)
+main()
+""")
+
     # A variadic lambda's `*args` really is a sequence: len(), iteration and
     # indexing all read the packed list, and the ZERO-argument call packs an
     # empty one rather than passing a stray scalar.
@@ -6648,6 +6721,43 @@ def show(rows):
 def main():
     show([[1, 2], [3, 4]])
 """, "1\n2\n3\n4\n")
+
+    # The STRING spelling of the line above, which is where the same program
+    # was wrong. The OUTER loop already carried the nested element ctype
+    # across the call boundary (`_param_elem_types` / `_nested_elem_types`
+    # from `note_list_literal`), so `row` was correctly a `MojoList *` — but
+    # the target of a loop never inherited the iterable's OWN nested element
+    # type, so the INNER loop's target fell to the `int64_t` default and read
+    # its elements with `mojo_list_get_int`: `show([["a", "b"]])` printed the
+    # strings' heap addresses. The integer spelling passed only because
+    # `int64_t` is what that default already is, which is why this went
+    # unnoticed. Compared against CPython, and with `len()` and a `print` of
+    # the row itself so the fix has to be a real element type rather than a
+    # shape that happens to print.
+    test_gimple_matches_cpython("gimple_for_over_nested_list_param_of_str", """\
+def show_str(rows):
+    for row in rows:
+        for cell in row:
+            print(cell)
+
+def collect_str(rows):
+    out = []
+    for row in rows:
+        for cell in row:
+            out.append(cell)
+    return out
+
+def show_int(rows):
+    for row in rows:
+        for cell in row:
+            print(cell)
+
+def main():
+    show_str([["a", "bb"], ["c"]])
+    print(collect_str([["x", "y"], ["z"]]))
+    show_int([[1, 2], [3, 4]])
+main()
+""")
 
     # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
     # cross-module constructor call whose only field-type evidence is an

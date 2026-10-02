@@ -4709,6 +4709,15 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # a restored docstring value printed its address, and any Token built
     # from it carried that same wrong value into `.value`.
     resolved_parts = []
+    # `(word, boxed text)` pairs whose release is owed once the WHOLE print
+    # has been emitted, because the argument loop below no longer prints the
+    # discriminator's answer as it goes (see the `_is_may_hold_str_param`
+    # arm). `mojo_cstr_or_int_str` returns a string BORROWED (the very same
+    # address) but hands back an integer as a pooled heap block the caller
+    # now owns -- `mojo_cstr_or_int_release`'s contract, and doc/MEMORY.html
+    # "Transient keys". Holding several at once is fine: `mojo_print` copies
+    # out of each, and the block is still owned by nobody else in between.
+    _cstr_held: list = []
     for _pi, (atype, aval) in enumerate(parts):
         # A DYNAMIC tagged nested-generator-tuple element (see
         # _lower_IdentExpr's _tagged_dyn_src branch): the real kind is only
@@ -4784,15 +4793,19 @@ def _gen_print(gen, args: list, kwargs: list = None):
             if _pi < len(args) and _is_may_hold_str_param(gen, args[_pi]):
                 _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', aval)])
-                gen._emit(f'  {print_fn} ({_rv});')
-                # REQUIRED, not optional: a boxed string comes back borrowed
-                # (the very same address) but an integer comes back as a
-                # pooled heap block this print now owns (see
-                # `mojo_cstr_or_int_release`'s contract and doc/MEMORY.html
-                # "Transient keys"). `mojo_print` copies out of it, so the
-                # release goes straight after the call.
-                gen._emit_call('void', '', 'mojo_cstr_or_int_release',
-                               [('int64_t', aval), ('char *', _rv)])
+                # CONVERT, do not print. This branch used to emit
+                # `print_fn` here and `continue` WITHOUT appending to
+                # `resolved_parts`, so a print with a second argument came
+                # out with the two SWAPPED and the `' '` separator
+                # attached to the wrong one: `print(x, y)` in a lambda
+                # called `b(1, "two")` printed `two1`. Every other arm of
+                # this loop only rewrites the pair and lets the ONE loop
+                # below print it in order; this one has to do the same, and
+                # the release the boxed integer's pooled block needs
+                # becomes a deferred pair (below) instead of a call made
+                # between two arguments.
+                _cstr_held.append((aval, _rv))
+                resolved_parts.append(('char *', _rv))
                 continue
             real = gen._get_actual_type(atype, aval)
             if real == 'char *':
@@ -4908,6 +4921,9 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  free ({t});')
         if i < len(parts) - 1:
             _emit_literal_print(' ', print_fn)
+    for _ch_w, _ch_s in _cstr_held:
+        gen._emit_call('void', '', 'mojo_cstr_or_int_release',
+                       [('int64_t', _ch_w), ('char *', _ch_s)])
     _emit_literal_print('\\n', print_fn)
 
 

@@ -4608,6 +4608,26 @@ def _lower_LambdaExpr(gen, node) -> tuple:
 
     # Build a synthetic FunctionDef whose body is `return <lambda.body>`
     syn_body = [gimple_ctypes.ReturnStmt(value=node.body)]
+    # ...except for `print(...)`, the one STATEMENT-level builtin reachable
+    # from a lambda's expression body. `print`'s separators and its trailing
+    # newline live ONLY in `gen._gen_print`, which the statement dispatcher
+    # (`_gen_stmt_ExprStmt`) is the sole route into; a lambda body wrapped in
+    # `ReturnStmt` is an expression, so the generic call path took it instead
+    # and every lambda print came out with no `' '` between arguments and no
+    # line ending — `lambda: print("A")` three times over printed `ABC` on one
+    # line for CPython's `A\nB\nC\n`, exit 0.
+    #
+    # The value of a `print` call is `None` in Python, and the lambda returns
+    # its body's value, so the honest lowering is "do the statement, then
+    # return None" rather than a `return` of the (never observed) print
+    # result. `_gen_print`'s own per-argument ladder also replaces the
+    # generic path's `mojo_str_from_int` coercion, which is what printed a
+    # lambda's `int64_t` string parameter as a raw pointer decimal.
+    if (isinstance(node.body, gimple_ctypes.CallExpr)
+            and isinstance(node.body.func, gimple_ctypes.IdentExpr)
+            and gen._ident_call_name(node.body.func) == 'print'):
+        syn_body = [gimple_ctypes.ExprStmt(value=node.body),
+                    gimple_ctypes.ReturnStmt(value=gimple_ctypes.NoneLiteral())]
     # Lambda params are (pname, default_value) not (pname, type_ann).
     # Strip defaults so _gen_lifted_closure doesn't try to resolve them as types.
     # Plain unpack loop, NOT `[(p, None) for p, _ in node.params]` — a
@@ -4658,6 +4678,50 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     for pname, default in node.params:
         if isinstance(default, gimple_ctypes.IdentExpr) and default.name in gen.var_types:
             captures.append((pname, gen.var_types[default.name]))
+
+    # A lambda's own parameter is physically `int64_t` whatever it is handed
+    # (`_gen_lifted_closure`'s definition types an unannotated one that way,
+    # and the `mojo_fnptr_call_N` convention widens every argument to
+    # `int64_t` to pass it), so a string handed to one arrives as its pointer
+    # bits with nothing recorded anywhere -- and `print(x)` in the body then
+    # fell through to the generic `%ld` arm and printed the ADDRESS.
+    #
+    # The evidence is collected HERE because this is the only point at which
+    # it exists: the enclosing scope's AST is still in hand
+    # (`gen._cur_func_body`), and the lambda's own body has not been lowered
+    # yet. A module-level pass cannot do it -- a lambda is lifted here, at
+    # emission time, which is AFTER every call site of it was emitted -- and
+    # deferring it to the call site is impossible for the same reason.
+    #
+    # Positive evidence only, the same rule the module pass's equivalent
+    # collector follows (`expr_provably_str`: a str literal, or a `%`/`+`
+    # chain with one). Silence means silence; nothing is inferred from the
+    # body, and NO C SIGNATURE changes -- the slot stays `int64_t` and the
+    # consumer asks the runtime's discriminator
+    # (`_is_may_hold_str_param` -> `mojo_cstr_or_int_str`), whose documented
+    # bound is the bound the whole `_int64_may_hold_str` table already
+    # accepts.
+    _may_str: set = set()
+    _caller = getattr(gen, 'current_func_name', '') or ''
+    _local = _gld.bound_local_name(gen, node)
+    _cbody = getattr(gen, '_cur_func_body', None)
+    if _cbody and _local and _local != '?':
+        for _cn in _gld._walk_body(_cbody):
+            if (not isinstance(_cn, gimple_ctypes.CallExpr)
+                    or not isinstance(_cn.func, gimple_ctypes.IdentExpr)
+                    or _as_str(_cn.func.name) != _local):
+                continue
+            for _cai, _caa in enumerate(_cn.args or []):
+                if _cai >= len(node.params):
+                    break
+                if gimple_exprtypes.expr_provably_str(_caa):
+                    _may_str.add(_gld._param_names(node)[_cai])
+    if _may_str:
+        _mi = getattr(gen, '_int64_may_hold_str', None)
+        if _mi is None:
+            _mi = {}
+            gen._int64_may_hold_str = _mi
+        _mi.setdefault(lifted_name, set()).update(_may_str)
 
     # A lambda that reads an ENCLOSING FUNCTION'S LOCAL cannot be lifted to a
     # top-level C function as-is: there is no env to read it from, and the
@@ -4807,6 +4871,19 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     saved_closure_envs   = dict(gen._closure_envs)
     saved_func_decl_glob = set(gen._func_declared_globals)
     saved_func_decl_nonlocal = set(gen._func_declared_nonlocals)
+    # `_gen_lifted_closure` -> `_reset_func` OVERWRITES these with the lifted
+    # body's own statement list and parameter set, and this function restored
+    # every other piece of per-function state around the lift without them —
+    # so after the first `f = lambda ...` in a function, every LATER
+    # statement in that function was analysed against the LAMBDA's body
+    # instead of the function's. `lambdareduce`'s escape / candidate /
+    # bound-local scans all answer from `gen._cur_func_body`, so a second
+    # lambda in the same function was never recognised as one: its
+    # `_bound_local` stamp was not written, it was not beta-reduced at its
+    # call site, and the enclosing function's own later statements were
+    # judged for escape against the wrong node list.
+    saved_cur_body        = gen._cur_func_body
+    saved_cur_params      = gen._cur_func_params
 
     # Expose outer closure info so the lambda body can resolve calls to parent
     # nested functions (e.g. compile_one_object) via their lifted C names with
@@ -4931,6 +5008,8 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     gen._closure_envs           = saved_closure_envs
     gen._func_declared_globals  = saved_func_decl_glob
     gen._func_declared_nonlocals = saved_func_decl_nonlocal
+    gen._cur_func_body           = saved_cur_body
+    gen._cur_func_params         = saved_cur_params
 
     gen._lambda_parts.append(body_code)
     gen._lambda_parts.append('')

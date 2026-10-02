@@ -3107,8 +3107,12 @@ _CONTAINER_CMP_OPS = ('==', '!=', '<', '<=', '>', '>=')
 
 # The Python type name CPython's TypeError names for each lowering kind, which
 # is not the C one: a tuple is a list at the C level, and its marker is the
-# only thing that tells them apart.
-_ORD_CMP_TYPENAME = {'list': 'list', 'dict': 'dict', 'set': 'set'}
+# only thing that tells them apart. `none` is not a lowering KIND -- no
+# operator routes a `None` operand through the container machinery -- it is
+# the type NAME the `_lower_binary_tail` `None`-ordering refusal reports,
+# which is the only place CPython's text names it.
+_ORD_CMP_TYPENAME = {'list': 'list', 'dict': 'dict', 'set': 'set',
+                     'none': 'NoneType'}
 
 
 def _ord_pair_is_refused(lkind: str | None, rkind: str | None) -> bool:
@@ -3553,6 +3557,39 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         gen._emit(f"  {t} = {eq_t} {cmp};")
         return '_Bool', t
 
+    # `None` on either side of an ORDERING comparison is a TypeError in
+    # CPython -- `None < 1`, `None < None`, `"a" < None` -- and the generic
+    # numeric tail below ANSWERED it: `None` lowers to a NULL `char *`, so
+    # `None < 1` was the C comparison `0 < 1` and printed True, `None > 1`
+    # printed False, `None < None` printed False. Seven plausible, stable,
+    # repeatable and completely meaningless verdicts for a program that
+    # CPython refuses on its first line, exit 0, no diagnostic -- a guard
+    # written as a comparison (`if value < 0:` with `value` None on a lookup
+    # miss) silently took one branch or the other.
+    #
+    # Taken BEFORE the container blocks so `None < [1, 2]` names `NoneType`
+    # and `list` rather than falling through to the one-sided-container
+    # refusal, which can only name the C type it happens to see.
+    #
+    # `==` / `!=` are deliberately NOT here and are unchanged: `None == 1` is
+    # a plain False, `None != 1` a plain True and `None == None` a plain
+    # True, all of which the model already answers correctly -- the NULL
+    # simply comparing unequal to 1 and equal to itself. Only the four
+    # operators that have no ordering over `None` at all are taken.
+    if op in _ORD_CMP_OPS and (gen._is_none_literal(left_node)
+                               or gen._is_none_literal(right_node)):
+        # The other side's KIND goes through `_eq_operand_kind`, not
+        # straight to `_scalar_typename`: a container is a pointer at the C
+        # level, so the scalar fallback reports `int` for it and the
+        # TypeError names `int` where CPython names `list`. Asking the same
+        # question the container block below asks is what keeps the two
+        # refusals' texts agreeing about a shape they both handle.
+        _lk_none = ('none' if gen._is_none_literal(left_node)
+                    else _eq_operand_kind(gen, left_node, lt, lv))
+        _rk_none = ('none' if gen._is_none_literal(right_node)
+                    else _eq_operand_kind(gen, right_node, rt, rv))
+        return _lower_container_ord_refusal(gen, op, _lk_none, _rk_none, lt, rt)
+
     # Container `==` / `!=` and the four ordering operators → Python's VALUE
     # comparison, not the C pointer comparison the generic tail would emit.
     # Placed BEFORE the string equality block below because that block claims
@@ -3617,6 +3654,15 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         _none_left = gen._is_none_literal(left_node)
         _ptr_val = rv if _none_left else lv
         _ptr_ty = rt if _none_left else lt
+        if _none_left and gen._is_none_literal(right_node):
+            # `None == None` is True: identity, and the singleton is itself.
+            # Taken before the scalar arm below, which would otherwise read
+            # two NULL words of the same width as equal by accident rather
+            # than by the rule -- an accident that breaks the moment one side
+            # is spelled as a NULL-typed local instead of the literal.
+            _t = gen._new_temp('_Bool')
+            gen._emit(f'  {_t} = {1 if op == "==" else 0};')
+            return '_Bool', _t
         if _ptr_ty == 'char *':
             # Same shape as the `is`/`is not` pointer-identity case below
             # (`(int64_t) p == (int64_t) 0`), for the same reason: GIMPLE
@@ -3632,6 +3678,30 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             _t = gen._new_temp('_Bool')
             gen._emit(f'  {_t} = {_p} {op} 0;')
             return '_Bool', _t
+        if _ptr_ty in ('int', 'int64_t', '_Bool', 'double', 'float'):
+            # ...and the same comparison when the other side is NOT a
+            # pointer at all. `None == 0` is False in Python because
+            # `NoneType.__eq__` returns NotImplemented and `int.__eq__(0,
+            # None)` does too, so the answer falls through to identity --
+            # and NULL is not 0's identity. Here `None` had lowered to a
+            # NULL word of the same width and the generic numeric tail
+            # compared `0 == 0`: a stable, repeatable, meaningless True for
+            # `None == 0` and a meaningless False for `None != 0`, both exit
+            # 0. It is the guard shape of the ordering half, on the operator
+            # that has an answer.
+            #
+            # GATED on "this side provably cannot BE None": a scalar C type
+            # the codegen actually resolved, with no pointer identity tracked
+            # for it. A scalar-typed slot that really holds a boxed pointer
+            # (a `d.get(k)` result in an unannotated local) has an
+            # `_actual_types` entry, and that case stays on the NULL-pointer
+            # test above -- which is the one that gets the natural
+            # missing-key guard right.
+            _real = gen._get_actual_type(_ptr_ty, _ptr_val)
+            if not (_as_str(_real).endswith(' *')):
+                _t = gen._new_temp('_Bool')
+                gen._emit(f'  {_t} = {1 if op == "!=" else 0};')
+                return '_Bool', _t
 
     # String equality: char*, int64_t-stored-char*, or string literals → strcmp
     rv_is_str_lit = isinstance(right_node, gimple_ctypes.StringLiteral)
