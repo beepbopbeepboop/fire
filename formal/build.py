@@ -2607,20 +2607,21 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     are flattened and lambdas lifted, because a lifted lambda is a function
     with its own locals and its own receivers.
 
-    The method census is BUILT here rather than passed, and that used to be the
-    whole of `bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`:
-    the sixth parameter was documented as `{function name: struct}` and the one
-    call site handed it `owners`, which is `{bare method name: struct NAME}` —
-    a `str`. `refuse_none_comparisons` and the `publish` call read it as a
-    `StructDef` and did `st.name` on a `str`, so `AttributeError` out of the
-    compiler, on any unit where a module-level function shares a bare name with
-    a method of a struct the unit IMPORTS.  The census is a pure function of
-    `structs_by_name`, which is already a parameter, so there is nothing to pass
-    and nothing that can be passed wrong: `method_owners` below is the one
-    table, and it is needed BEFORE the class-constant rewrites as well as after
-    them, because a `comptime` binding read through a receiver is the same read
-    whichever order the two passes run in and `refuse_none_comparisons` runs
-    first.
+    The method census is BUILT here rather than passed, because the two tables
+    in this file are both called "owners" and only one of them is this: there
+    used to be a sixth parameter documented as `{function name: struct}` which
+    the one call site filled with `{bare method name: struct NAME}` — a `str` —
+    so every consumer below read a string as a `StructDef` and did `st.name` on
+    it. That is an `AttributeError` out of the compiler on any unit where a
+    module-level function shares a bare name with a method of a struct the unit
+    imports, and it had also left `_check_method_receiver_types` matching
+    nothing at all, since a lifted name is never a key in the bare-name table.
+    The census is a pure function of `structs_by_name`, which is already a
+    parameter, so there is nothing to pass and nothing that can be passed wrong:
+    `method_owners` below is the one table. It is needed BEFORE the
+    class-constant rewrites as well as after them, because a `comptime` binding
+    read through a receiver is the same read whichever order the two passes run
+    in and `refuse_none_comparisons` runs first.
 
     The fixpoint is over one edge only: a call `f(c, …)` in some function where
     `c` is a holder makes `f`'s FIRST parameter a holder. That is the whole of

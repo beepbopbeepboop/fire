@@ -166,8 +166,8 @@ DIFF_CASES = [
 
     # A module-level function whose name is a BARE METHOD name of a struct in
     # the same unit, in a unit that has a class-level `None` binding — which is
-    # the pair `bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`
-    # measured, and it crashed the compiler rather than refusing the program.
+    # the pair a deleted bug doc measured (commit 95b3d73c), and it crashed the
+    # compiler rather than refusing the program.
     #
     # Two tables in `formal/build.py` are both called "owners":
     # `M.method_owner_names` is keyed by the LIFTED `<Struct>_<method>` a
