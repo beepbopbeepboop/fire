@@ -430,6 +430,95 @@ DIFF_CASES = [
      "    sys.stdout.write(\"%d\" % (a.get() + b + c))\n"
      "main()\n"),
 
+    # A module-level FUNCTION whose name is also a METHOD name in this module,
+    # and which holds a frame struct.  That is the one shape in which
+    # `_frame_receivers` was handed the wrong owner table and read a struct NAME
+    # where it wanted a struct: `owners` is `{`size`: "Pair"}` (bare method name
+    # → name, so dispatch-by-name can decline an ambiguous one) and
+    # `method_owners` is `{`Pair_size`: <Pair>}` (lifted function name → the
+    # struct), and the call passed the first to a function that asks
+    # `method_owners.get(fn.name)`.  It almost always MISSES, which is why it sat
+    # unnoticed — and it HITS for exactly this program, where a bare `size`
+    # matches a bare `size`.
+    #
+    # What it did on a hit was hand the string `"Pair"` to the class-constant
+    # rewrite, which then called `.name` on it: `AttributeError: 'str' object has
+    # no attribute 'name'`, out of `_overridden_comptime_names`.  The sweep files
+    # that as `backend-crash` — a compiler bug rather than a coverage gap, in no
+    # rate, exit 1, never cached — and it took `std/math/math.mojo` (4035 lines)
+    # and `std/random/random.mojo` with it.  A traceback is the worst thing this
+    # pass can produce: it is not a refusal, so nothing downstream can classify
+    # it, and it names neither the construct nor the file.
+    #
+    # `7` is `size(Pair(3, 4))`, which is both the module-level function's answer
+    # and the method's — so the row also says the two spellings of `size` are
+    # still two different functions afterwards, which is what makes the fix a
+    # table swap and not a merge.
+    ("module_function_sharing_a_method_name_keeps_its_own_body",
+     "class Pair:\n"
+     "    def __init__(self, x: Int, y: Int):\n"
+     "        self.x = x\n"
+     "        self.y = y\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return self.x + self.y\n"
+     "\n"
+     "def size(p: Pair) -> Int:\n"
+     "    return p.x + p.y\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var q = Pair(3, 4)\n"
+     "    printf(\"%d\", size(q))\n"
+     "    return 0\n",
+     "class Pair:\n"
+     "    def __init__(self, x, y):\n"
+     "        self.x = x\n"
+     "        self.y = y\n"
+     "\n"
+     "    def size(self):\n"
+     "        return self.x + self.y\n"
+     "\n"
+     "def size(p):\n"
+     "    return p.x + p.y\n"
+     "\n"
+     "import sys\n"
+     "def main():\n"
+     "    q = Pair(3, 4)\n"
+     "    sys.stdout.write(\"%d\" % size(q))\n"
+     "main()\n"),
+
+    # The OTHER half of the same collision, and the reason the row above cannot
+    # be satisfied by merging the two tables: with the method name removed, the
+    # same program must still compute the same thing.  `6` is `fold(Pair(2, 4))`
+    # reading only the FIRST field, so a fix that bound the module-level `fold`
+    # to `Pair.fold` would print `6` here and something else above.
+    ("module_function_alone_reads_the_same_frame",
+     "class Pair:\n"
+     "    def __init__(self, x: Int, y: Int):\n"
+     "        self.x = x\n"
+     "        self.y = y\n"
+     "\n"
+     "def fold(p: Pair) -> Int:\n"
+     "    return p.x + 4\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var q = Pair(2, 4)\n"
+     "    printf(\"%d\", fold(q))\n"
+     "    return 0\n",
+     "class Pair:\n"
+     "    def __init__(self, x, y):\n"
+     "        self.x = x\n"
+     "        self.y = y\n"
+     "\n"
+     "def fold(p):\n"
+     "    return p.x + 4\n"
+     "\n"
+     "import sys\n"
+     "def main():\n"
+     "    q = Pair(2, 4)\n"
+     "    sys.stdout.write(\"%d\" % fold(q))\n"
+     "main()\n"),
+
     # A `@classmethod`'s receiver is `cls`, and the rule has to thread it as one
     # — but there is NO case for it here, and that is a fact about this path
     # rather than about the rule: reaching a `@classmethod` means naming the

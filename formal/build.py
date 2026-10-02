@@ -9176,9 +9176,39 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `stmts` — the pass does not have them.
     from formal.imports import (imported_bound_names,
                                 star_imported_modules)
+    # `method_owners`, and NOT `owners`.  The two tables have the same SUBJECTS
+    # and incompatible SHAPES, and they were interchanged here:
+    #
+    #   `owners`         = `_method_owners(stmts, extra_structs)`
+    #                   → {`size`: "Pair"}    bare method name → struct NAME,
+    #                     and a name two structs declare is absent (that is what
+    #                     makes dispatch-by-name decline an ambiguous one);
+    #   `method_owners`  = `model.method_owner_names(structs)`
+    #                   → {`Pair_size`: <Pair StructDef>}
+    #                     LIFTED function name → the struct itself, and every
+    #                     method is present however many structs declare it.
+    #
+    # `_frame_receivers` asks `method_owners.get(fn.name)` — `fn.name` is the
+    # lifted name — and hands the answer to `_rewrite_class_constants` as the
+    # struct a function's receiver reads a class-level `comptime` through.  Given
+    # `owners`, that lookup almost always MISSES (the keys do not overlap), which
+    # is why this sat unnoticed: a miss means no owner, and no owner means the
+    # receiver case is not offered.  It HITS in exactly one shape — a module-level
+    # FUNCTION whose name is also a method name in this module, and which HOLDS a
+    # frame struct, so the `hstruct` guard below lets it through — and then it
+    # hands a STRING to code that calls `.name` on it.
+    #
+    # Measured: `std/math/math.mojo` and `std/random/random.mojo` both died with
+    # `AttributeError: 'str' object has no attribute 'name'` from
+    # `_overridden_comptime_names`, which the sweep classes `backend-crash` — a
+    # compiler bug, in no rate, exit 1, never cached.  Minimal reproducer, 18
+    # lines, in `test_formal_receiver_spelling.py` — which is where the other
+    # half of this question lives, and has its own reason for existing: a
+    # `Pair` declaring `size`, and a module-level `def size(p: Pair)` that reads
+    # `p.x`.
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
-                     star_imported_modules(stmts), owners)
+                     star_imported_modules(stmts), method_owners)
     # The slot table is RETURNED as well as published, for the reason
     # `symbols` is: building an import compiles the imported module through this
     # same function, and that nested call publishes ITS globals over ours, so
