@@ -1165,8 +1165,33 @@ and checked (above), which is the part of it that was missing.
 * **A nested frame deeper than `MAX_NESTED_FRAME_DEPTH = 4` is dropped from the
   layout, not refused.** The block size truncates with it, so it is safe, but a
   program that needs the fifth level gets a nested frame the emitter did not
-  place and a field-of-a-field refusal on the use. No struct in the corpus is
-  that deep; the bound is a hang-avoider, not a design.
+  place and a field-of-a-field refusal on the use. The bound is a hang-avoider,
+  not a design.
+  **MEASURED 2026-10-01, so the corpus claim above is a number rather than an
+  impression — and the headroom is two levels, not one.** Walking
+  `model.struct_nested_frame_fields` to its own fixed point over every `.mojo`
+  in this repository and in the new-modular stdlib — **505 structs** (5 here,
+  500 in 190 stdlib files) — the histogram of
+  `max(depth(struct_nested_frame_fields(...)))` is:
+
+  ```
+  depth 0: 478      depth 1: 24      depth 2: 3      depth 3: 0   depth >=4: 0
+  ```
+
+  (walked with a cycle guard on `(child.name, id(child))`, and `depth=None` at
+  every level so the walk is not bounded by the constant it is measuring). The
+  three deepest are `std/python/_cpython.mojo`'s `PyModuleDef`,
+  `std/memory/alloc.mojo`'s `ManagedAllocation` and
+  `std/collections/dict.mojo`'s `_DictKeyIterOwned`, all at 2.
+  **What this buys the next worker:** turning the truncation into a refusal is
+  safe for the corpus — nothing is near the bound — so the change is a pure
+  diagnostic improvement and does not need a sweep to price. **And what it does
+  NOT license:** refusing the whole struct is over-strict, because the bound only
+  truncates the *deepest* struct's own nested fields, so a five-deep chain whose
+  innermost fields are plain integers works today and would stop. The honest
+  shape is to report the CUT (`struct_nested_frame_fields` at depth 0 returning
+  `[]` while the struct has a nested field to place) at the construction site
+  that would have placed it, not to refuse the declaration.
 * **`Refine.lean` needed no change and that is worth saying.** A method's callee
   contract is `FrameOk_except st st' base n`, and `n` is a slot count — a block
   is contiguous from `base`, so carving the whole block out is the same
