@@ -39,7 +39,11 @@ the first had not landed:
    anything in this function stores it`, a name stored three lines above the
    read. Fixed by discarding `run`'s return value at `formal/model.py`'s
    `_build_cfg` entry; pinned by five new rows in
-   `test_formal_read_before_store.py`.
+   `test_formal_read_before_store.py` — and, on the merged tree, by the
+   thirteen rows beside them for the OTHER half of the same defect (a trailing
+   control-flow statement), because `work/merge-formal4` had independently fixed
+   the same two lines of `_build_cfg` and pinned that half. One defect, two
+   finds, one file, and the file is the oracle-bearing one.
 
 Measured, `/opt/homebrew/bin/python3 test_struct_formal.py`, after 2 and 3 and
 before arm64's convention landed: **154/154 checks passed, exit 0**, three
