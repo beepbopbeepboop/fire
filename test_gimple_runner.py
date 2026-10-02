@@ -757,6 +757,59 @@ def main():
 main()
 """)
 
+    # A CAPTURING lambda inside a NESTED `def`: the env struct's field types
+    # and the stores that fill them disagreed. The int case was the loud one
+    # -- an `int s;` field filled with `_t4 = (int64_t)s; _env->s = _t4;`,
+    # which `-fgimple` rejects ("non-trivial conversion in 'var_decl'"), so
+    # the whole program FAILED TO BUILD rather than merely printing wrong.
+    #
+    # The lambda is RETURNED, which is what forces the env: a lambda that
+    # never escapes is beta-reduced into its call site instead
+    # (`gimple_capturing_lambda_inlined_at_call`, above).
+    test_gimple_matches_cpython("gimple_capturing_lambda_in_nested_def_env", """\
+def outer():
+    s = 9
+    return (lambda: s)
+
+def use(fn):
+    return fn()
+
+def main():
+    print(use(outer()))
+main()
+""")
+
+    # The OTHER two capture kinds, pinned for BUILDABILITY rather than for
+    # their printed value. Every env-fill arm used to hard-code the scalar
+    # coercion as `(int64_t)`, so `char *` and `MojoList *` fields stored a
+    # raw word against a pointer field -- a second non-trivial conversion, and
+    # one that cost this program its build entirely. The VALUES they still
+    # print wrong (a pointer decimal) are a SEPARATE gap: a callable that
+    # comes back out of a function into an unannotated `int64_t` parameter
+    # loses its return type at the `mojo_fnptr_call_N` boundary, which is not
+    # an env-field question and is recorded in
+    # bugs/CODEGEN_nested_def_capturing_lambda_env_field_types_disagree.md.
+    # `test_gimple_execution` is the honest assertion for that: it fails on a
+    # gcc error, which is what this case is about.
+    test_gimple_execution("gimple_capturing_lambda_nested_def_ptr_kinds_build", """\
+def outer_str():
+    t = 'x'
+    return (lambda: t)
+
+def outer_list():
+    u = [1, 2]
+    return (lambda: u)
+
+def use(fn):
+    return fn()
+
+def main():
+    print(use(outer_str()))
+    print(use(outer_list()))
+    return 0
+main()
+""", expected_return=0)
+
     # Two arguments through a slot that may hold a string: the discriminator
     # arm used to print its own answer immediately and `continue` WITHOUT
     # appending to the resolved-argument list, so the pair came out SWAPPED

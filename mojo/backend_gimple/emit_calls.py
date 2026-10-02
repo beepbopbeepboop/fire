@@ -4547,6 +4547,63 @@ def _lambda_site(node) -> str:
     return f"line {_l}" if _l else "an unknown line"
 
 
+def _env_field_value(gen, name: str, field_ctype: str,
+                     src_text: str = None, src_ctype: str = None) -> str:
+    """The value to STORE into a closure env's `name` field, coerced to the
+    FIELD's declared ctype. One implementation, because the two env-fill
+    loops (the variadic lambda's and the closing lambda's) plus each one's
+    default-argument arm each hand-rolled the coercion, and each got it
+    differently right.
+
+    The bug this replaces: every site hard-coded `(int64_t)` for the scalar
+    case, with `double` the only exception spelled out. So a capture whose
+    field is `int` -- `int s;`, from `s = 9` in the enclosing scope -- was
+    stored as `_t4 = (int64_t)s; _env->s = _t4;`, and `-fgimple` rejects a
+    GIMPLE assignment whose RHS is not already the assigned variable's exact
+    type: a hard `non-trivial conversion in 'var_decl'` BUILD FAILURE for the
+    whole program, out of `def outer(): s = 9; return (lambda: s)`. `char` and
+    `_Bool` fields fail the same way.
+
+    The FIELD's ctype is the destination because the field's declaration is
+    what the struct says, and `ci.captures` (which
+    `gimple_ctypes._env_field_ctype` reads, and which the typedef is built
+    from) is where it comes from. The SOURCE is the local's own declared type,
+    read LIVE here rather than from the list `_lower_LambdaExpr` snapshotted
+    while scanning for captures: this store is emitted after `gen.var_types`
+    has been restored to the enclosing function's, and the typedef before it,
+    so the two can otherwise disagree about the same field.
+
+    A POINTER field on its own says nothing about what belongs in it: a
+    by-VALUE capture of a pointer wants the local's VALUE, and a by-REFERENCE
+    capture wants its ADDRESS. The local's OWN C type is the only thing that
+    tells them apart -- a third behaviour ("always coerce", "always take the
+    address") is wrong in one of the two, and both were real:
+    `sorted(d, key=lambda k: d[k])` (a by-VALUE `MojoDict *` capture stored as
+    `&d`, so the body read the first 8 bytes of the local's own address) and
+    benchmarks/memory/bench_heap_parallel's `{mut checksum}` (a scalar name
+    coerced against an `int64_t *` temp).
+
+    `src_text`/`src_ctype` are for a capture whose value is a default
+    ARGUMENT expression evaluated here (`lambda e, self=self: ...`), where
+    there is no local to read a type from and `lower_expr` has already
+    produced one."""
+    _ft = _as_str(field_ctype)
+    if src_text is not None:
+        return gen._coerce_to_type(_as_str(src_ctype or 'int64_t'), _ft, src_text)
+    if _ft.endswith(' *'):
+        _local_t = _as_str(gen.var_types.get(name, 'int64_t'))
+        if _local_t.endswith(' *'):
+            return gen._coerce_to_type(_local_t, _ft, name)
+        box = gen._new_temp(_ft)
+        gen._emit(f'  {box} = ({_ft}) &{name};')
+        return box
+    _src_t = _as_str(gen.var_types.get(name, 'int64_t'))
+    if _src_t == _ft:
+        return name
+    return gen._coerce_to_type(_src_t, _ft, name)
+
+
+
 def _lower_LambdaExpr(gen, node) -> tuple:
     """Lift a lambda expression to a top-level C function.
 
@@ -5152,14 +5209,9 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                 _src = _default_src.get(_cn)
                 if _src is not None:
                     _st, _sv = gen.lower_expr(_src)
-                    _cv = (gen._coerce_to_type(_st, _ct, _sv) if _ct.endswith(' *')
-                           else gen._new_val('int64_t', f'(int64_t){_sv}'))
-                elif _ct.endswith(' *'):
-                    _cv = gen._coerce_to_type(gen.var_types.get(_cn, 'int64_t'), _ct, _cn)
-                elif _ct == 'double':
-                    _cv = gen._new_val('double', f'(double){_cn}')
+                    _cv = _env_field_value(gen, _cn, _ct, _sv, _st)
                 else:
-                    _cv = gen._new_val('int64_t', f'(int64_t){_cn}')
+                    _cv = _env_field_value(gen, _cn, _ct)
                 gen._emit(f'  {_envp}->{_cn} = {_cv};')
             _env_void = gen._new_val('void *', f'(void *){_envp}')
         _fnv = gen._new_temp('void *')
@@ -5225,43 +5277,15 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # this reference site) rather than from an enclosing local (value = the
     # variable).
     _default_src = {pn: dv for pn, dv in node.params if dv is not None}
+    # `_env_field_value` -- whose docstring carries the pointer branch's
+    # reasoning and the two real programs that pinned it.
     for _cn, _ct in _env_fields:
         _src = _default_src.get(_cn)
         if _src is not None:
             _st, _sv = gen.lower_expr(_src)
-            _cv = (gen._coerce_to_type(_st, _ct, _sv) if _ct.endswith(' *')
-                   else gen._new_val('int64_t', f'(int64_t){_sv}'))
-        elif _ct.endswith(' *'):
-            # The env FIELD is a pointer, which on its own says nothing about
-            # what belongs in it: two different captures both land here, and the
-            # local's OWN C type is the only thing that tells them apart.
-            #
-            #   * local is itself a pointer (`MojoDict * d`) — a by-VALUE
-            #     capture of a pointer. The field is the same pointer type, so
-            #     it wants the local's VALUE. Storing `&d` here instead makes
-            #     the body read `_env->d` as the first 8 bytes of the address
-            #     of the local: stack garbage, so every lookup through it is
-            #     wrong and it segfaults about half the time. Found by
-            #     `sorted(d, key=lambda k: d[k])`, whose lambda captures `d`.
-            #   * local is a scalar (`int64_t checksum`, `{mut checksum}`) — a
-            #     capture taken BY REFERENCE, and the field is a pointer TO the
-            #     local. Coercing the bare name emitted `_t8 = checksum;`
-            #     against an `int64_t *` temp, a non-trivial conversion in
-            #     'var_decl' and a hard error
-            #     (benchmarks/memory/bench_heap_parallel).
-            #
-            # Neither the field's type nor "always coerce" nor "always take the
-            # address" is right; branching on the local's type is.
-            _local_t = gen.var_types.get(_cn, 'int64_t')
-            if _local_t.endswith(' *'):
-                _cv = gen._coerce_to_type(_local_t, _ct, _cn)
-            else:
-                _cv = gen._new_temp(_ct)
-                gen._emit(f'  {_cv} = ({_ct}) &{_cn};')
-        elif _ct == 'double':
-            _cv = gen._new_val('double', f'(double){_cn}')
+            _cv = _env_field_value(gen, _cn, _ct, _sv, _st)
         else:
-            _cv = gen._new_val('int64_t', f'(int64_t){_cn}')
+            _cv = _env_field_value(gen, _cn, _ct)
         gen._emit(f'  {_envp}->{_cn} = {_cv};')
     _fnv = gen._new_temp('void *')
     gen._emit(f'  {_fnv} = {gen._c_fnaddr_helper(lifted_name)} ();')
