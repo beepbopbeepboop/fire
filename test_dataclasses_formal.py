@@ -681,8 +681,19 @@ REFUSE_CASES = [
      ["whatever", "not ignored"]),
     ("kw_only_is_refused_with_its_reason", KW_ONLY,
      ["kw_only", "one construction shape here, not two"]),
+    # The needle MOVED, and the reason it moved is the point: the old one was
+    # "`==` … never dispatches by name", which was true when this case was
+    # written and is false since `==` began dispatching to a declared dunder for
+    # two bare names of the same struct (formal/build.py's
+    # `_rewrite_eq_on_frame_receivers`, and for a one-field struct too since
+    # 2026-10-02).  The refusal is still correct and now rests on this
+    # transform's OWN half — `rewrite_equality` would desugar `==` into a
+    # field-wise chain and silently replace the method the source wrote — which
+    # is what the second needle says.  A refusal whose stated reason has been
+    # fixed is a refusal nobody looks at again, so the case is pinned on the
+    # reason that still holds.
     ("a_user_declared_eq_is_refused_not_silently_ignored", OWN_EQ,
-     ["__eq__", "never dispatches by name"]),
+     ["__eq__", "FIELD-WISE chain"]),
     ("reflection_is_refused_by_name", REFLECTION_CALL,
      ["is_dataclass", "no type tag attached"]),
     ("the_fields_attribute_is_refused_by_name", REFLECTION_ATTRIBUTE,

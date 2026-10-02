@@ -1031,30 +1031,41 @@ def own_eq_refusal(name: str) -> str:
         # arm64:  eq(p, q) == 0        CPython: 1
         # arm64:  p.__eq__(q) == 1     CPython: 1
 
-    `==` on this path is ONE flag-setting compare of two words
-    (formal/arm64_codegen.py's `_emit_binop`) and never dispatches by name, so
-    the user's `__eq__` is reachable only as an explicit `p.__eq__(q)` — which
-    is the second line, and it is right. Accepting the class would therefore
-    produce an image that runs `eq(p, q)` as an address compare and prints 0
-    where the source's own method says 1: a wrong answer, silently, from a
-    program that did nothing unusual. The same is true of a `__repr__`, and
-    `repr` is a worse one because printing a struct receiver SEGFAULTS today
-    (measured) rather than merely answering wrongly.
+    **The reason this was written is no longer true, and the refusal is now
+    conservative rather than necessary** — which is worth stating precisely,
+    because a refusal whose stated reason has been fixed is a refusal nobody
+    will look at again.  The measurement above was true on 2026-09-29 and is
+    false now: `==` DISPATCHES to a declared `__eq__` when both operands are
+    bare names this image can say are values of the same struct
+    (`formal/build.py`'s `_rewrite_eq_on_frame_receivers`, and since
+    2026-10-02 for a one-field struct too, whose value is a word rather than a
+    frame — `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md`).  A two-field
+    `Plain` whose `__eq__` returns True now gives `eq(p, q) == 1` on both
+    architectures, which is what CPython gives.
 
-    So: refused, with the repair named. This is the one place where the
-    transform declines a class CPython accepts, and it declines it because the
-    capability that would make it right — a comparison that dispatches to a
-    method — does not exist here, not because the class is unusual."""
+    So accepting the class is no longer "build an image that runs the
+    comparison as an address compare".  What is left is this transform's own
+    half, and it is a real one: `rewrite_equality` DESUGARS `==` into a
+    field-wise chain for a `@dataclass`, and a class that declares its own
+    `__eq__` must NOT get that chain — CPython keeps the user's method in
+    preference to the generated one.  Skipping the rewrite is the obvious fix
+    and it hands the comparison to the operator dispatch above, so the two
+    halves have to agree about which one owns it, and nothing in this file
+    settles that today.  `bugs/FORMAL_dataclass_own_eq_is_still_refused_though_dispatch_works.md`
+    is the measurement and the next step.
+
+    The `__repr__` half is unaffected and still necessary: printing a struct
+    receiver SEGFAULTS today (measured) rather than merely answering wrongly.
+
+    So: still refused, with the repair named, on a reason that is now narrower
+    than the one this message used to give."""
     return (f"{name} declares its own __eq__, which CPython keeps in "
             f"preference to the generated one (so the class is legal and its "
-            f"meaning is unambiguous). It is refused because `==` on this path "
-            f"is one flag-setting compare of two words and never dispatches by "
-            f"name: measured, a class with a user __eq__ that returns True "
-            f"gives `a == b` as 0 here and 1 under CPython, while an explicit "
-            f"`a.__eq__(b)` gives 1 under both. So accepting {name} would build "
-            f"an image that runs the comparison as an address compare and "
-            f"prints a number the method in the source contradicts — silently, "
-            f"from a program that did nothing unusual. Call the method "
-            f"explicitly (`x == y` becomes `x.__eq__(y)`), or drop the method "
-            f"and let the field-wise comparison this transform generates "
-            f"answer it")
+            f"meaning is unambiguous). It is refused because this transform "
+            f"rewrites a dataclass's `==` into a FIELD-WISE chain, and for a "
+            f"class that brings its own __eq__ that rewrite is the wrong "
+            f"answer — the field-wise compare would silently replace the "
+            f"method the source wrote. Calling the method explicitly "
+            f"(`x == y` becomes `x.__eq__(y)`) is right today, and dropping the "
+            f"method is right today; what is missing is a class this transform "
+            f"leaves to the operator's own dispatch")
