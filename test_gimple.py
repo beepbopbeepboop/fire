@@ -9360,6 +9360,97 @@ def bare(xs, f):
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_unannotated_init_param_evidence_reaches_the_signature():
+        """An unannotated `__init__` param's ctype must be the SAME answer in
+        the emitted signature and in the field's declaration.
+
+        The literal-evidence tables (`_ctor_lit_param_types`,
+        `_xf_own_ctor_params`) were read by the FIELD pass only — through a
+        `pm` map local to that loop — so a field fed from such a param was
+        declared `double` while the parameter stayed `int64_t` in
+        `func_param_types`, which is the table `emit_calls.py`'s constructor
+        path coerces each argument against ("Coerce each argument to its
+        declared `__init__` param C type"). The literal was therefore
+        truncated AT THE CALL: `B(2.5)` passed the integer 2, `self.f = f`
+        stored it into a `double` field, and `b.f` printed `2.0` where CPython
+        prints `2.5` — a wrong value with exit 0
+        (bugs/CODEGEN_literal_evidence_param_field_typed_but_signature_not.md).
+
+        The other four rows are the "do not break these" half, and each is a
+        path that reaches a ctype by a DIFFERENT rule, so the new arm cannot
+        quietly take one of them over: an explicit annotation (`Float64`),
+        a declared default (`s='hi'`, which is inference from the default
+        expression), a `char *` (which was already right — but for the wrong
+        reason: a string literal's ADDRESS round-trips through an `int64_t`
+        parameter unchanged, which is luck, not agreement), and a container
+        (a different evidence table). The last row is two params in one
+        constructor, one with float evidence and one without, so a fix that
+        typed the WHOLE signature from the evidence instead of per slot would
+        show up as the integer parameter arriving as a double.
+
+        CPython's stdout is the expectation, on both pipelines: the failure
+        mode is a plausible number (2.0 for 2.5, 1.0 for 1.5), so only the
+        oracle distinguishes it.
+        """
+        global _PASS, _FAIL
+        name = "unannotated_init_param_evidence_reaches_the_signature"
+        src = '''\
+class F:
+    def __init__(self, f):
+        self.f = f
+
+class S:
+    def __init__(self, s):
+        self.s = s
+        self.n = s
+
+class A:
+    def __init__(self, x: Float64):
+        self.x = x
+
+class C:
+    def __init__(self, xs):
+        self.xs = xs
+
+class D:
+    def __init__(self, s='hi'):
+        self.s = s
+
+class M:
+    def __init__(self, a, b):
+        self.a = a
+        self.b = b
+
+print(F(2.5).f)
+print(S("hi").s)
+print(S("hi").n)
+print(A(2.5).x)
+print(C([1, 2]).xs)
+print(D().s)
+print(D("yo").s)
+print(M(1.5, 2).a)
+print(M(1.5, 2).b)
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_dict_union_right_operand_is_converted_at_runtime():
         """`dict | x` with `x`'s type unresolved must convert, not cast.
 
@@ -9741,6 +9832,7 @@ print(run('x/y.txt'))
     test_dict_union_right_operand_is_converted_at_runtime()
     test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false()
     test_next_over_a_filter_result_still_refuses_without_iter()
+    test_unannotated_init_param_evidence_reaches_the_signature()
     test_next_inside_for_over_same_iterator_is_one_ahead()
     test_a_program_written_inside_the_checkout_is_not_the_compiler()
     test_struct_unpack_computed_format_compiles()

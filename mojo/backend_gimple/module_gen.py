@@ -1247,6 +1247,38 @@ def _own_class_field_index(fields, name) -> int:
     return _pick
 
 
+def _ctor_param_evidence(gen, struct_name, param, xf_own) -> str:
+    """The literal-evidence ctype for `<struct>::<param>` of an UNANNOTATED
+    `__init__` parameter, or `''` when there is none.
+
+    One reader for the two tables that carry it, in the one precedence they
+    agree on — this module's own call sites
+    (`gen._ctor_lit_param_types`) first, an IMPORTING module's literal call
+    sites (`_xf_own_ctor_params`) second — because the two consumers have to
+    reach the SAME answer or the store and the declaration disagree:
+    `gen_module_impl`'s field pass types `self.f = f`'s FIELD from it, and the
+    struct-method signature loop types the PARAM from it. When the param was
+    left at the `int64_t` default in the signature while the field said
+    `double`, `B(2.5)` truncated the argument to 2 at the call and read back
+    as 2.0 (bugs/CODEGEN_literal_evidence_param_field_typed_but_signature_
+    not.md). Both halves must come from one function for that to stay fixed.
+
+    Module-level, not a closure in `gen_module_impl`: a nested closure here
+    emitted NOTHING once the self-hosted binary compiled the compiler (see
+    `_with_emit_exits`'s docstring for the same failure mode).
+    """
+    _key = _as_str(struct_name) + '::' + _as_str(param)
+    _own = getattr(gen, '_ctor_lit_param_types', None) or {}
+    _t = _own.get(_key)
+    if _t:
+        return _as_str(_t)
+    _xf = xf_own or {}
+    _t = _xf.get(_key)
+    if _t:
+        return _as_str(_t)
+    return ''
+
+
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_collect_self_assigns`."""
     for node in _walk_ast(body):
@@ -3709,6 +3741,12 @@ def gen_module_impl(self, stmts):
             _xfpct = self._xmod_ctor_field_hints[_xfk]
             if _xfpct:
                 _xf_own_ctor_params[_xfhs + '::' + _xfhp] = _xfpct
+    # Also on `self`, because the struct-method SIGNATURE loop below reads
+    # the same evidence and this local is out of scope by then. The field
+    # pass in between reads the local; both go through
+    # `_ctor_param_evidence`, which takes the table as an argument, so
+    # neither can quietly diverge from the other.
+    self._xf_own_ctor_params = _xf_own_ctor_params
     for s in all_struct_defs:
         s = _as_structdef_node(s)
         if isinstance(s, StructDef):
@@ -4108,11 +4146,16 @@ def gen_module_impl(self, stmts):
                                 pm[pname] = '_Bool'
                             else:
                                 pm[pname] = 'int64_t'
-                        elif (_as_str(method.name) == '__init__'
-                              and (_as_str(s.name) + '::' + pname) in self._ctor_lit_param_types):
-                            pm[pname] = self._ctor_lit_param_types[_as_str(s.name) + '::' + pname]
-                        elif (_as_str(method.name) == '__init__'
-                              and (_as_str(s.name) + '::' + pname) in _xf_own_ctor_params):
+                        # Literal evidence, from this module's own call
+                        # sites and from an IMPORTING module's (the same two
+                        # tables, one reader — `_ctor_param_evidence`, which
+                        # the struct-method SIGNATURE loop below also calls,
+                        # because a param typed here and left `int64_t` there
+                        # truncates the argument at the call: `B(2.5)` stored
+                        # the int 2 into a field declared `double` and read
+                        # back 2.0).
+                        elif _as_str(method.name) == '__init__' and _ctor_param_evidence(
+                                self, s.name, pname, _xf_own_ctor_params):
                             # The same evidence, one module away: a constructor
                             # called from an IMPORTING module with a literal
                             # argument of this type. It has to be consulted
@@ -4143,7 +4186,8 @@ def gen_module_impl(self, stmts):
                             # a module's own literal evidence still wins over
                             # another module's; and an explicit annotation beats
                             # both (the `if ptype:` arm above).
-                            pm[pname] = _xf_own_ctor_params[_as_str(s.name) + '::' + pname]
+                            pm[pname] = _ctor_param_evidence(
+                                self, s.name, pname, _xf_own_ctor_params)
                         else:
                             pm[pname] = 'int64_t'
                 new_fields = {}
@@ -5990,6 +6034,33 @@ def gen_module_impl(self, stmts):
                             if ptype is None:
                                 _mipt = self._inferred_param_types.get(
                                     method_full_name, {}).get(pname)
+                                if _mipt is None and _as_str(m.name) == '__init__':
+                                    # An unannotated `__init__` param with
+                                    # literal call-site evidence gets that
+                                    # evidence's ctype HERE — the signature —
+                                    # and not only in the field pass below,
+                                    # which reached the FIELD and left this
+                                    # param at `int64_t`. The two then
+                                    # disagreed, and the disagreement was the
+                                    # bug: `B(2.5)` stored the truncated
+                                    # integer 2 into a field declared `double`
+                                    # and printed 2.0 where CPython prints 2.5.
+                                    # `_ctor_param_evidence` is the same reader
+                                    # the field pass uses, in the same
+                                    # precedence, so an explicit annotation
+                                    # still wins over both (the `ptype is None`
+                                    # guard) and the two cannot drift.
+                                    # `emit_calls.py`'s constructor path reads
+                                    # THIS table to coerce each argument
+                                    # ("Coerce each argument to its declared
+                                    # `__init__` param C type"), so the
+                                    # coercion and the field declaration now
+                                    # agree by construction.
+                                    _mipt_ev = _ctor_param_evidence(
+                                        self, s.name, pname,
+                                        getattr(self, '_xf_own_ctor_params', None))
+                                    if _mipt_ev:
+                                        _mipt = _mipt_ev
                             param_ctypes.append(
                                 _mipt if _mipt is not None
                                 else self._param_ctype(pname, ptype, m))
