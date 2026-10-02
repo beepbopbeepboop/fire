@@ -9311,6 +9311,52 @@ REFUSAL_CASES = [
      "def main() -> int:\n"
      "    printf(\"x=%d\", 7)\n    return 0\n",
      "refuse:9 parameters exceeds the", None),
+    # ── THE IMPORT DIAGNOSIS OUTRANKS A FRAME REFUSAL ──────────────────────────
+    #
+    # `_prepare_functions` runs BEFORE `_resolve_imports`, and every frame
+    # refusal is raised from inside it. So a file that both trips a frame clause
+    # AND imports something used to be reported with the frame sentence — a
+    # `codegen` class, a gap in this backend in this file — when the import
+    # says the file is out of reach entirely. The reader is sent after a
+    # construct they could reach.
+    #
+    # The codebase has fixed this twice by hand (`check_frame_field_blob_premises`
+    # for 67 files of this repository, `check_construction_shapes` for 14 more)
+    # and the frame refusals were left inside. What is different now is that
+    # `_resolve_imports` needs nothing `_prepare_functions` produces, so the
+    # refusal is HELD rather than moved: same words, raised at the first point
+    # after the imports have had their say.
+    #
+    # `p.zz` is the frame clause: a member read through a frame receiver naming
+    # a field the struct does not declare, refused by `_frame_receivers` from
+    # inside the pipeline. The needle is the import sentence, so this case is
+    # asserting the ORDER and nothing else — the frame refusal is still there,
+    # it is just asked second.
+    ("an_import_outranks_a_frame_refusal",
+     "from copy import copy\n"
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return p.zz + n\n",
+     "refuse:is a host module (CPython standard library)", None),
+    # The CONTROL, and it is the half that makes the case above mean something:
+    # the SAME program without the import is refused by the frame clause, on
+    # both architectures. Without this row a change that deleted the frame
+    # refusal altogether would leave the row above green.
+    ("the_same_frame_refusal_still_fires_without_an_import",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return p.zz + n\n",
+     "refuse:P has no field 'zz'", None),
     # EIGHT arguments is the boundary and it must still WORK: the fix is a
     # refusal past the limit, not a smaller limit. Without this row a fix
     # that cut the ABI to 6 to match x86-64 would pass the two above.

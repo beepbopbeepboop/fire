@@ -1261,6 +1261,32 @@ def compile_formal(source_path: str, output: str = None,
     # dylib), and the executable's functions are the ones the linker is about to
     # act on.
     M.publish_target(M.target_for(arch, fmt))
+    # A REFUSAL from the function pipeline is PARKED, not raised, and that is
+    # the fix for a whole family rather than a convenience.
+    #
+    # `_prepare_functions` runs BEFORE `_resolve_imports`, and every frame
+    # refusal — the hand-off family, the return family, the container and field
+    # families — is raised from inside it. So a file that both trips a frame
+    # clause AND imports something was reported with the frame sentence, which
+    # is a `codegen` class: a gap in this backend, in this file. The reader is
+    # sent after a construct the file could reach, and the sweep's denominators
+    # count it as answerable-in-principle work. But the file imports a host
+    # module, and a file that does that is out of this backend's reach whatever
+    # its own codegen says.
+    #
+    # The codebase has already fixed this twice, by hand, for the two late
+    # checks now in `_run_late_checks`: `check_frame_field_blob_premises`
+    # (measured at 67 files of this repository) and `check_construction_shapes`
+    # (14 more). The frame refusals were left inside, so they still do it. What
+    # is different here is that `_resolve_imports` needs NOTHING this pipeline
+    # produces — it takes `(source_path, stmts, arch)`, all three already in
+    # hand — so the refusal can simply be held rather than moved.
+    #
+    # The refusal is still raised, with the same words, at the first point
+    # after the imports have had their say. Nothing is let through: a file whose
+    # imports resolve is refused exactly as before, and one whose imports do not
+    # is refused for the import, which is the more fundamental fact.
+    parked_prepare_refusal = None
     try:
         functions, structs, symbols, slots = _prepare_functions(
             stmts, synthetic=True, extra_structs=imported_structs)
@@ -1268,8 +1294,10 @@ def compile_formal(source_path: str, output: str = None,
         # A clean compile error. The function pipeline runs before codegen
         # proper, so a refusal raised there — a method whose receiver is wider
         # than a word, say — used to reach the user as a raw traceback instead
-        # of the one-line diagnostic every other refusal produces.
-        raise FormalBuildError(str(e))
+        # of the one-line diagnostic every other refusal produces. Held as a
+        # `FormalBuildError`'s message rather than raised, for the reason above.
+        parked_prepare_refusal = str(e)
+        functions = structs = symbols = slots = None
     ordered = functions
 
     # `import X` means X is a dependency. Each imported module is compiled in
@@ -1277,6 +1305,10 @@ def compile_formal(source_path: str, output: str = None,
     # link line with everything it itself needs, dependencies first. Without
     # this an import was silently dropped and its calls became BLs against
     # symbols nothing defines.
+    #
+    # …and this is reached even when the function pipeline refused, which is
+    # the whole point: it is the only thing here that can say whether this file
+    # is reachable at all.
     try:
         import_dylibs = _resolve_imports(source_path, stmts, arch)
     except ImportBuildError as e:
@@ -1316,6 +1348,19 @@ def compile_formal(source_path: str, output: str = None,
             f"module's symbols in .dynstr with nothing providing them. The "
             f"code generator does honour arch; the container is the missing "
             f"half. Build for macho, or lower the module into this image.")
+    # THE PARKED REFUSAL, and the ORDER is the whole fix: the import diagnosis
+    # above has had its say, and so has the ELF-container check above this, and
+    # both are facts about whether this file can be built HERE at all — which
+    # outranks a refusal about one construct in its body.  It is raised as a
+    # `FormalBuildError` because that is exactly what the old site converted it
+    # to, so a file whose imports resolve sees byte-identical output and a file
+    # whose imports do not is now told the more fundamental thing.
+    #
+    # …which also means this cannot be reached with `functions` unbound: the
+    # late checks below and the codegen after them both need the pipeline's
+    # output, so a parked refusal has to end the build here.
+    if parked_prepare_refusal is not None:
+        raise FormalBuildError(parked_prepare_refusal)
     # HERE and not inside `_prepare_functions`, which ran before the imports
     # resolved: a file that imports a host module is out of reach whatever its
     # codegen says, and this check fires on a third of the repository, so
