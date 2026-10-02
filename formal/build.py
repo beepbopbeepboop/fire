@@ -2596,8 +2596,7 @@ def _holder_state(holders: dict, hstruct: dict, returns_frame: dict) -> tuple:
 
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
-                     star_imports: tuple = (),
-                     method_owners: dict = None) -> None:
+                     star_imports: tuple = ()) -> None:
     """Annotate every function with its frame-pointer receivers and field slots.
 
     Writes `fn._frame_holders` (the names holding a frame address) and
@@ -2608,12 +2607,24 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     are flattened and lambdas lifted, because a lifted lambda is a function
     with its own locals and its own receivers.
 
-    `method_owners` is `{function name: struct}` and it is needed HERE rather
-    than only at the class-constant rewrites that follow: a `comptime` binding
-    read through a receiver is the same read whichever order the two passes run
-    in, and `refuse_none_comparisons` runs BEFORE the rewrite that would
-    materialize it — so asking it a census that does not know which functions are
-    methods is asking a different question than the substitution asks.
+    WHICH STRUCT A FUNCTION IS A METHOD OF is answered by the local `owners`
+    (`M.method_owner_names(structs)`, i.e. `{<Struct>_<method> function name:
+    StructDef}`) and by nothing else, and that is a load-bearing choice rather
+    than a tidiness one. It is needed HERE as well as at the class-constant
+    rewrites, because a `comptime` binding read through a receiver is the same
+    read whichever order the two passes run in, and `refuse_none_comparisons`
+    runs BEFORE the rewrite that would materialize it — so asking it a census
+    that does not know which functions are methods is asking a different
+    question than the substitution asks. The table is BUILT here rather than
+    passed in, because the two tables a module has are easy to confuse and
+    confusing them is a crash rather than a wrong answer:
+    `_method_owners` is `{BARE method name: struct NAME}` — the dispatch table,
+    for a `MemberExpr`'s `.member` — and this one is `{LIFTED <Struct>_<method>
+    name: StructDef}`. Handed the first, the owner lookup answered with a `str`
+    for any function whose name happened to be a struct's method name, which a
+    module-level `def` colliding with one is; the string reached
+    `_overridden_comptime_names` and was asked for `.name`
+    (bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md).
 
     The fixpoint is over one edge only: a call `f(c, …)` in some function where
     `c` is a holder makes `f`'s FIRST parameter a holder. That is the whole of
@@ -3091,13 +3102,12 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         return _holder_class_constant_bases(hstruct.get(_fn_key(fn)) or {},
                                             structs_by_name)
 
-    refuse_none_comparisons(functions, structs_by_name, _holder_bases,
-                            method_owners)
+    refuse_none_comparisons(functions, structs_by_name, _holder_bases, owners)
     for fn in functions:
         if not hstruct.get(_fn_key(fn)):
             continue
         _rewrite_class_constants(fn, structs_by_name,
-                                 method_owners.get(fn.name),
+                                 owners.get(fn.name),
                                  _holder_bases(fn))
 
     # AFTER the fixpoint and BEFORE the per-function loop below, and both of
@@ -9062,9 +9072,17 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `stmts` — the pass does not have them.
     from formal.imports import (imported_bound_names,
                                 star_imported_modules)
+    # `owners` — `_method_owners`' `{bare method name: struct NAME}` — is the
+    # DISPATCH table and is deliberately NOT passed. `_frame_receivers` builds
+    # the OWNER table it wants (`M.method_owner_names(structs)`, `{lifted
+    # <Struct>_<method> function name: StructDef}`) from `structs_by_name`,
+    # which is this function's own list of the same nodes, so there is nothing
+    # to thread through and no way to hand it the other one — see
+    # bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md for the
+    # crash that argument used to cause.
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
-                     star_imported_modules(stmts), owners)
+                     star_imported_modules(stmts))
     # The slot table is RETURNED as well as published, for the reason
     # `symbols` is: building an import compiles the imported module through this
     # same function, and that nested call publishes ITS globals over ours, so
