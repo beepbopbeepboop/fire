@@ -1,5 +1,82 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
+## Status (2026-10-02, this pass — the VARIADIC shape is now admitted inside a compiled generator body, so occurrence #2 is closed)
+
+### What landed
+
+`mojo/middle/coro.py`'s `_lambdas_ok` refused EVERY generator body containing
+a lambda with a `*args`/`**kwargs` parameter, on the reasoning that the shared
+gimple path "emits a broken forward declaration" for that shape. That stopped
+being true in September, when the fix below landed — `MojoVarargFn` carries
+the callee, the env, the count of ordinary leading parameters and which of the
+three variadic shapes it has, and `mojo_fnptr_call_N` dispatches on it, so the
+packing happens in the runtime; the forward declaration stopped dropping its
+`*`-prefixed parameters in the same pass. **The guard was never revisited, so
+for two months it was the last thing between the shape and the A3 stack-switch
+lowering, for a reason that no longer existed.**
+
+The guard is now `_lambda_shape_ok`, and it refuses only what is measured
+wrong. Every row below was compiled, linked and run against CPython *inside a
+generator body* on 2026-10-02:
+
+| shape | CPython | compiled |
+|---|---|---|
+| `lambda *a: add(a[0], a[1])`, `e(4, 5)` | `9` | `9` |
+| `lambda *a: addall(a)`, `e(1, 2, 3)` | `6` | `6` |
+| `lambda *args, **kwargs: add(n, args[0])` capturing `n` | `13` | `13` |
+| a variadic lambda ESCAPING as a call argument | `13` | `13` |
+| a variadic lambda RETURNED out of the generator, called after | `3` | `3` |
+| a variadic lambda held in a local and called there (the `iter_files` shape) | right | right |
+| 1-4 ordinary leading parameters before the `*args` | right | right |
+| `lambda **k: ...` called with a keyword | `7` | `7` |
+| `lambda x=n: x + 1`, `lambda x, y=n: x + y`, `lambda x, *, k=n:`, `lambda *a, k=n:`, `lambda *, x=n:` | right | right |
+| `lambda x=n, *a: x + a[0]`, `e(0, 5)` | **`5`** | **`8`** — refused |
+| `lambda x, y=n, z=10: x + y + z`, `e(4)` | **`17`** | **`135`** — refused |
+
+Nine regression tests in `test_gimple_generator_runner.py` (six positive, two
+for the refusals, one for `_lower_LambdaExpr`'s own five-leading-parameter
+limit, which is the outermost edge of the admitted set and is now asserted
+rather than assumed).
+
+### What is still refused, and why it is a refusal and not a warning
+
+Both remaining failures exit 0 with a plausible integer, which is why the guard
+refuses rather than lets the module through: `8` for `5` and `135` for `17` are
+indistinguishable from a right answer without CPython alongside. Their cause is
+named in `bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md` — a lambda's
+defaults are stripped from its lifted signature (`_lower_LambdaExpr`'s
+`syn_params`, `(_pname, None)`), so they are substituted on the call side, and
+one substitution works while two do not. Fix that and delete both refusal
+clauses IN THE SAME COMMIT.
+
+**This is the doc's occurrence #2** — `Tools/c-analyzer/c_common/fsutil.py`'s
+`get_files = lambda *a, **k: _walk(*a, walk=_files, **k)` — so the "Still
+deliberately excluded" section below is now wrong about it and is superseded
+here. See `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` for what
+the file's own remaining blockers are.
+
+### The residue table, corrected
+
+The 2026-10-02 entry below lists four residue rows and says three belong to
+another worker. Three of the four docs are now **deleted**, i.e. fixed and
+merged, so that list is stale: what remains is
+
+* a **capturing** lambda inside a **nested `def`** whose env-struct field types
+  disagree with the stores into them — `bugs/CODEGEN_nested_def_capturing_
+  lambda_env_field_types_disagree.md`, still open, re-measured still broken
+  on 2026-10-02 (an `int` capture fails the build with `non-trivial conversion
+  in 'var_decl'`; a `char *` or `double` capture prints a pointer's own bits
+  and exits 0).
+
+So this doc still cannot be deleted — one row of its table is still open, and
+the ~20 live references to it (`mojo/backend_gimple/cpp_core.py`,
+`cpp_async.py`, `emit_calls.py`, `mojo/middle/coro.py`, and five
+`test_*.py` sites) would all become dangling. Per this doc's own disposition
+rule, whoever closes that last row deletes this doc in the same commit that
+repoints every one of those references.
+
+## Older status entries (kept for the mechanism history)
+
 **State: PARTIAL.** The variadic SIGSEGV is FIXED, and so are the two shapes this
 doc's 2026-09-26 entry called "the definition side is done; the call side is
 the whole of what remains" — a variadic lambda now works through EVERY way of
