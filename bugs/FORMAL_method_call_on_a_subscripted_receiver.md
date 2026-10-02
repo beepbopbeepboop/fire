@@ -1,16 +1,35 @@
 # FORMAL_method_call_on_a_subscripted_receiver: the largest remaining group of the receiver-position family, and the element type it needs
 
-**Status: OPEN, not fixed, and deliberately not started.** Filed by the
-`construct:receiver-position-family` worker, which measured the sweep map's row 4
-("a receiver passed at argument position 0", 25 files) and found that after the
-comptime-specialization case was lifted this group is the biggest thing left in
-it: **17 of the 25 files are still refused by `frame_opaque_position_refusal`'s
-method sentence**, and all 17 are the same defect — the receiver's type is not
-established, so `_rewrite_method_calls` cannot lift the call and there is no
-parameter list to read. It is not that worker's claim: the fix is
-receiver-type inference, which is `formal-value-model`'s
-(`construct:formal-value-model-gaps`), and this doc exists so that nobody
-re-derives the measurement.
+**Status: the DIAGNOSTIC half LANDED 2026-10-01; the CAPABILITY is OPEN and is
+the whole of what is left.** A method call on a subscripted receiver
+(`bs[0].get()`) no longer reaches the link audit with a message about where the
+symbol should have come from — it is refused at the construct, naming the
+missing fact (`formal/build.py`'s `_receiver_shape_refusal`, asked from
+`_rewrite_method_calls`, the one recogniser that knows the lift did not happen).
+Two cases in `test_formal_receiver_position.py` pin it on both architectures.
+
+**What is still missing is the receiver-type predicate**, which is a larger piece
+of work and NOT this file's: four sources of a receiver's type, one shared with
+`model.frame_opaque_position_refusal` so the two cannot disagree about when a
+receiver's type is known. The measured narrowing of what the refusal does and
+does not cover is in "`Without a frame anywhere`" below — it was measured twice,
+and both widenings cost working cases, so the shape of the remaining work is
+narrower than the table above suggests: only row 1 and row 4 are unclaimed, and
+row 1's first source (`var bs = [Box(), Box()]`) is statically obvious.
+
+**The construct's owner is also not settled**: the original filing deferred the
+fix to `construct:formal-value-model-gaps`, which is not among the active
+claims; what the deferral got right is the SHAPE (one predicate, four sources,
+shared with the refusal), not the assignment.
+
+**The measurement, kept verbatim (the doc's own census, not re-run here).**
+Filed by the `construct:receiver-position-family` worker, which measured the
+sweep map's row 4 ("a receiver passed at argument position 0", 25 files) and
+found that after the comptime-specialization case was lifted this group was the
+biggest thing left in it: **17 of the 25 files are still refused by
+`frame_opaque_position_refusal`'s method sentence**, and all 17 are the same
+defect — the receiver's type is not established, so `_rewrite_method_calls`
+cannot lift the call and there is no parameter list to read.
 
 **The 17, grouped by what the receiver expression actually is** (measured by
 instrumenting `_check_frame_escapes` and printing the callee object's node kind
@@ -97,7 +116,7 @@ wrong next step, because the receiver here is not a frame at all: `messages` is
 element type either) and `encoder.encode_inline_array` in
 `std/collections/inline_array.mojo`.
 
-### Without a frame anywhere — and this one is worse than it looks
+### Without a frame anywhere — and this one was worse than it looks
 
 ```
 $ cat u1.mojo
@@ -110,16 +129,59 @@ def main(n: Int) -> Int:
     return bs[0].get()
 
 $ python3 fire.py build --formal --no-prove u1.mojo
-build: u1.mojo: the image would bind 1 symbol(s) that nothing provides, so it
-  could not be loaded: get. Nothing on this link line defines them …
+build: u1.mojo: main: `bs[0].get(…)` cannot be lowered: dispatch here is BY NAME,
+  so a method call is lifted to `Box_get(receiver, …)` from the name alone — and
+  `bs[0]` is not a bare name, so there is no name to lift from. What is missing
+  is the receiver's TYPE: this path has no inference that answers "which struct
+  does `bs[0]` hold?", and dispatch is by name rather than by type, so the callee
+  cannot be named. …
 ```
 
-**A LINK-ACCOUNTING diagnosis for a CODEGEN problem**, and it is caught only
-because the link audit refuses to ship an image with an unbound symbol. The
-symbol it names is the bare `get`: the dotted spelling `bs[0].get` is gone, and
-a reader is sent to the link line instead of to the receiver's type. If the
-method name had collided with an extern or a gimple runtime entry point, the
-image would have bound a real symbol and computed a wrong number.
+**PARTLY LANDED (2026-10-01): the LINK-ACCOUNTING half is now a construct
+refusal, and the capability half below is still open.** `formal/build.py`'s
+`_receiver_shape_refusal`, asked from `_rewrite_method_calls` — the one
+recogniser that knows the lift did not happen — now refuses a **subscript**
+receiver with this sentence instead of letting it reach the link audit, and
+`model.receiver_shape_text` spells the receiver as the source spells it (it
+printed `bs[IntLiteral]` before, because `member_chain_text` renders a subscript
+as `…` and has no literal case). Two cases in
+`test_formal_receiver_position.py` pin both, one for the refusal and one for the
+spelling.
+
+The paragraph below is kept because it is what made the change load-bearing, and
+because the reason the audit caught it is still the reason this class of defect
+is worse than a wrong number:
+
+> **A LINK-ACCOUNTING diagnosis for a CODEGEN problem**, and it is caught only
+> because the link audit refuses to ship an image with an unbound symbol. The
+> symbol it names is the bare `get`: the dotted spelling `bs[0].get` is gone,
+> and a reader is sent to the link line instead of to the receiver's type. If
+> the method name had collided with an extern or a gimple runtime entry point,
+> the image would have bound a real symbol and computed a wrong number.
+
+**What did NOT change is the capability, and the narrowing of the refusal is
+measured rather than chosen** — two widenings were tried and each cost working
+cases:
+
+* "any receiver that is not a bare name" refused **24 working cases** in
+  `test_formal_run.py`. A `MemberExpr` receiver (`self.in1.total()`,
+  `h.mojo_value.write_to(…)`) is a **field**, and the field's DECLARED type names
+  the struct, so that case is answerable and is answered — several times over,
+  by `_check_frame_escapes`, `frame_opaque_position_refusal` and the
+  nested-frame refusals. That is row 3 of the table above, and it is NOT this
+  construct.
+* "a subscript or a call result" still pre-empted
+  `frame_opaque_position_refusal`'s own sentence for `mk().take(r)` — the same
+  fact (a receiver whose type is not established) reached through a path that
+  already says so. That is row 2, and it too already has an answer.
+
+So the refusal asks about a **SUBSCRIPT** and nothing else, which is this
+document's title case and row 1. `?.fields` (row 2) is answered and
+`self.mojo_value.write_repr_to` (row 3) is answered; `values._write_to(...)`
+with a `vals: List` parameter and no element type (row 4) is the one shape that
+still has nothing, and it is a `MemberExpr`-free bare name rather than a
+subscript — `values` is a parameter, so `values._write_to` is not lifted and
+reaches `frame_opaque_position_refusal` instead.
 
 ## Why this is not small, and what is needed
 
@@ -151,17 +213,31 @@ is the same two-copies-of-one-decision defect this family keeps finding.
 
 ## Verification when it lands
 
+**The refusal half is DONE and pinned** — the two cases
+`refuse_a_method_call_on_a_subscripted_receiver` and
+`refuse_a_subscripted_receiver_is_spelled_as_written` in
+`test_formal_receiver_position.py`, on both architectures. What is left is the
+capability, and its verification is the list below unchanged:
+
 * the 4 subscript-receiver files: `std/builtin/debug_assert.mojo`,
   `std/io/file.mojo`, `std/logger/logger.mojo`, `std/tempfile/tempfile.mojo`.
   Re-sweep exactly those and report where each lands; the honest expectation is
   "moves to the next blocker", not "passes" (their imports fail too — see
   `FORMAL_sweep_work_map_2026-09-30.md` §3, where rows 2 and 3 both measured a
-  ceiling of 0).
-* `u1.mojo` above must **build and run**, not merely stop mentioning the link
-  line: `bs[0].get()` has to return 3 on both architectures.
+  ceiling of 0). **NOT DONE — a four-file sweep is the integrator's, not a light
+  worker's.**
+* `u1.mojo` above must **build and run**, not merely stop naming the link line:
+  `bs[0].get()` has to return 3 on both architectures. This is the case the
+  whole predicate exists for — `bs` is a list literal of `Box()`, so the element
+  type is the constructor's own declaration and is statically obvious — and it
+  is the FIRST thing to attempt, because if it works the predicate has one
+  source and the other three rows are then a question of attaching it.
 * a differential case next to the others in `test_formal_receiver_position.py`,
   comparing against CPython, plus a case for the undeclared-`List` parameter
-  that must be refused with the new message.
+  that must be refused with the new message. **The refusal half of the second
+  is now covered** (a bare-name parameter reaches
+  `frame_opaque_position_refusal`, which is already what row 4 needs and needs
+  no new message); the differential case is the capability and is not done.
 
 ## Where the measurement lives
 

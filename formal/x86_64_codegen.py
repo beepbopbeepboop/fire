@@ -1891,6 +1891,31 @@ class X86_64Codegen:
             self._expr_str_kind(stmt.value), spelled_op=stmt.op)
         if reason is not None:
             raise CodegenError(reason)
+        # `/` `//` `%` and `**` are neither an ALU table entry nor a shift:
+        # the divide is a ONE-operand instruction whose zero arm is a trap, and
+        # `**` is an unroller or a loop. Both are already lowered by THIS
+        # backend for the binary form — `_emit_binop` routes them to
+        # `_emit_div_mod` and `_emit_pow` — so the augmented form DELEGATES
+        # rather than growing a second copy of either. Delegating is also what
+        # makes `c //= 2` and `c = c // 2` answer the same: the two spellings
+        # were one construct on arm64 (`formal/arm64_codegen.py`'s
+        # `_emit_aug_assign` routes them to `_emit_div_shift_pow` the same way)
+        # and here they were two, so `x /= 2`, `x //= 2`, `x %= 2` and `x **= 2`
+        # were refused by name on this backend and built on that one — a
+        # two-architecture disagreement about ordinary Python, invisible to
+        # every case in the suite that runs one architecture.
+        if op in M.AUG_DIV_OPS or op == "**":
+            node = F.BinaryOp(op=op, left=F.IdentExpr(name=name),
+                              right=stmt.value)
+            if op == "**":
+                self._emit_pow(node)
+            else:
+                self._emit_div_mod(node, op)
+            # Both lowerings truncate to the promoted type themselves, so this
+            # is the store and nothing else — the two steps `_emit_binop` leaves
+            # to its caller.
+            self._store_var(name, Reg.RAX)
+            return
         ttype = self._ttype(stmt.target)
         # The accumulator is R11, not RAX: for `-` and `>>` the variable's
         # OLD value is the left operand and the assigned expression the right
@@ -1915,9 +1940,13 @@ class X86_64Codegen:
             self._emit_shift_reg(op, cmp_signed(
                 M.shift_signedness(self._ttype(F.IdentExpr(name)))))
         else:
+            # The one spelling left is `@=` (matmul), which has no lowering
+            # here or on arm64. The list is `model.AUG_OPS` rather than a
+            # literal so this message and arm64's cannot drift from the table
+            # the two dispatch on — it is the same shared constant arm64 names.
             raise CodegenError(
                 f"unsupported augmented operator {stmt.op!r} on the formal "
-                f"x86-64 path (supports + - * & | ^ << >>)")
+                f"x86-64 path (supports {' '.join(M.AUG_OPS)})")
         self._emit_trunc(common_type(ttype, self._ttype(stmt.value)))
         self._store_var(name, Reg.RAX)
 
@@ -2472,6 +2501,70 @@ class X86_64Codegen:
                     f"print a literal, or bind it to a literal first")
             operands.append(a)
         return frags, operands
+
+    def _refuse_frame_order_operand(self, op: str, operand) -> None:
+        """Raise if `operand` is a bare name this function holds as a FRAME.
+
+        The ORDERING sibling of `_refuse_frame_container_operand`, asked from
+        the same table for the same reason: `x < y` on two multi-field structs
+        reached the flag-setting compare of two ADDRESSES, so which way it
+        branched was decided by where the allocator put the two objects —
+        measured on both architectures, `lt=1 gt=0 le=1 ge=0` for two objects
+        holding EQUAL field values. `model.frame_order_operand_refusal` is the
+        shared text; x86-64 needs it at ONE site where arm64 needs two, because
+        a comparison in a CONDITION goes through `_emit_truthy_word` and so
+        through `_emit_binop` on this backend while arm64 has a flags fast path
+        that bypasses it. The two ask the same question either way.
+        """
+        if (op not in M._FRAME_ORDER_OPS
+                or not isinstance(operand, F.IdentExpr)
+                or operand.name not in self._frame_holders):
+            return
+        cands = self._frame_candidates.get(operand.name) or ()
+        reason = M.frame_order_operand_refusal(op, operand,
+                                              [st.name for st in cands])
+        if reason is not None:
+            raise CodegenError(reason)
+
+    def _printf_arg_is_text(self, arg):
+        """True / False / None: does this `printf` vararg hold text.
+
+        The three-way answer `model.printf_text_conversion_refusal` is written
+        against.  arm64's copy of this method is the authority on why each arm
+        is what it is; what is shared is the EVIDENCE, which is
+        `ValueKinds.own_shape_kind` — the same predicate that answers "is this
+        name a container element", so one test carries two families and the two
+        architectures cannot disagree about which names it fires for.
+
+        `None` — the source does not say — is the permissive direction and
+        covers the unannotated parameter, which is a word this build cannot
+        classify; refusing it would refuse every function that takes a string
+        it was never told about, and those work today.
+        """
+        if isinstance(arg, F.StringLiteral):
+            return True
+        if M.string_operand_is_string(self._expr_str_kind(arg)):
+            return True
+        if (isinstance(arg, F.IdentExpr)
+                and self._vkinds.own_shape_kind(arg.name) == M.INT_KIND):
+            return False
+        return None
+
+    def _refuse_printf_text_conversion(self, name, e) -> None:
+        """Raise when `e` hands a `%s` conversion something that is not text.
+
+        Delegation, and nothing else: the callee set, the conversion scan, the
+        three-way narrowing and the message are all
+        `model.printf_text_conversion_refusal`, so this method cannot come to
+        disagree with arm64's about what a format string means.
+        """
+        args = list(e.args or [])
+        fmt = args[0] if args else None
+        reason = M.printf_text_conversion_refusal(
+            name, fmt.value if isinstance(fmt, F.StringLiteral) else None,
+            args[1:], self._printf_arg_is_text)
+        if reason is not None:
+            raise CodegenError(reason)
 
     def _print_kwargs(self, e):
         """`print`'s `sep=` / `end=` / `file=`, as (sep, end). Only literals.
@@ -3145,10 +3238,17 @@ class X86_64Codegen:
 
         The blob is `[count][elem0]…` in the frame, so there is no room to
         grow one: the capacity is a compile-time number (`_scan_list_caps`) and
-        the store is checked against it, exiting(1) rather than writing past
-        the blob. Appending more times than the scan found — inside a loop —
-        stops the program instead of quietly corrupting the frame, the same
-        bargain every other bounded container operation on this path makes.
+        the store is checked against it, refusing to write past the blob.
+        Appending more times than the scan found — inside a loop — stops the
+        program instead of quietly corrupting the frame, the same bargain every
+        other bounded container operation on this path makes.
+
+        The stop is LOUD. It used to be a bare `exit(1)` with nothing on either
+        stream, which is the worst of the three answers this backend can give:
+        not a wrong number a reader can compare, not a named refusal they can
+        act on, but silence. `model.list_append_overflow_message` (shared with
+        arm64, so the two machines cannot name this limit differently) is
+        written to fd 2 first, through `write(2)`, and then the program stops.
 
         Returns 0, this model's `None`; `list.append` returns None, and
         returning the new count would be a value Python does not have."""
@@ -3186,6 +3286,9 @@ class X86_64Codegen:
         self._emit_jcc_bool(Reg.R8, COND_NE, oob)
         self._emit_jmp(ok)          # in range: skip the exit
         self.asm.label(oob)
+        self._emit_overflow_diagnostic(
+            M.list_append_overflow_message(
+                recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
         self._emit_call_exit(1)
         self.asm.label(ok)
         self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))   # count again
@@ -3197,6 +3300,28 @@ class X86_64Codegen:
         self._pop_slot(Reg.RAX)
         self._pop_slot(Reg.RAX)
         self._emit_mov_imm(Reg.RAX, 0)             # None
+
+    def _emit_overflow_diagnostic(self, text: str) -> None:
+        """`write(2, text, len)` — say WHICH bound was hit before stopping.
+
+        The arm64 twin of this (`ARM64Codegen._emit_overflow_diagnostic`), on
+        the same message from `formal/model.py`, and for the same reasons: the
+        two architectures printing two different sentences for one limit is how
+        a reader ends up looking for a construct one of them invented, and a
+        bare `exit(1)` was the worst answer this backend could give.
+
+        RAX/RCX/RDX/R8/R9/R10/R11 are all caller-saved and dead on this path —
+        the out-of-range branch discards the base and the value — so the whole
+        System V argument triple can be set without saving anything. RSP is
+        already 16-byte aligned (the append's own pushes are a multiple of it)
+        and is left where it was, so the pushed base and value stay readable
+        past the call."""
+        self.asm.emit(encode_lea_r64_rip(Reg.RSI, 0))
+        self.asm.emit_label_rip(self._intern_string(text), here_offset=-4)
+        self._emit_mov_imm(Reg.RDI, 2)                 # fd = stderr
+        self._emit_mov_imm(Reg.RDX, len(text))         # length
+        self._emit_mov_imm(Reg.RAX, 0)                 # AL = 0 (not varargs)
+        self._emit_extern_call("write")
 
     def _emit_file_write(self, e) -> None:
         """`f.write(s)` — `write(fd, s, strlen(s))` through the C library.
@@ -3430,6 +3555,34 @@ class X86_64Codegen:
         raise CodegenError(M.frame_container_operand_refusal(
             op, M.spelled(obj), [st.name for st in cands]))
 
+    def _refuse_non_container_operand(self, op: str, obj) -> None:
+        """Raise if `obj` is a plain WORD this function bound to an integer.
+
+        The same third arm of the container family as arm64's, asked at the
+        same choke point and for the same reason: `a = 5` is neither a FRAME
+        ADDRESS nor a `char *`, so nothing refused it, the blob walk read a
+        count out of the integer and computed an element address of `5 + 8`.
+        Measured on BOTH architectures, `a[0] = 1` builds, links and dies of
+        SIGSEGV at run time with the build green. The shared text is
+        `model.non_container_subscript_refusal`, so the two architectures
+        cannot describe one construct differently — and cannot disagree about
+        WHICH bases qualify, which is the half that is a language question
+        rather than a wording one.
+
+        BARE NAME ONLY, for the reason `_refuse_frame_container_operand` above
+        gives, and the kind is read from `own_shape_kind` rather than from
+        `_expr_str_kind`: `INT_KIND` is the model's DEFAULT for a word, so a
+        parameter, a call result and a loop variable all carry it while being
+        containers, and reading it as a claim refuses `for row in rows: row[0]`.
+        arm64's copy of this docstring has the measured table.
+        """
+        if not isinstance(obj, F.IdentExpr):
+            return
+        if self._vkinds.own_shape_kind(obj.name) != M.INT_KIND:
+            return
+        raise CodegenError(M.non_container_element_refusal(
+            op, M.spelled(obj), self.func_name or "<module>"))
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
 
@@ -3448,6 +3601,7 @@ class X86_64Codegen:
         confidently wrong. `model.multi_index_refusal_for` is the shared text,
         so the two cannot drift again."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        self._refuse_non_container_operand("a subscript", e.obj)
         self._sub_width = 8
         if M.is_external_call_template(e):
             # The twin of arm64's check, and the same reasoning: `M.iter_nodes`
@@ -3769,6 +3923,7 @@ class X86_64Codegen:
         # field as the count — see `model.frame_container_operand_refusal` for
         # the measurement, which is a wrong answer rather than a crash.
         self._refuse_frame_container_operand("a membership test", right)
+        self._refuse_non_container_operand("a membership test", right)
         self._emit_expr(left)
         self._push_slot(Reg.RAX)                   # needle
         self._emit_expr(right)
@@ -3830,6 +3985,7 @@ class X86_64Codegen:
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_non_container_operand("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
             from mojo.middle.boundnames import _lbn_target_names
             tnames = _lbn_target_names(stmt.target) \
@@ -4387,6 +4543,10 @@ class X86_64Codegen:
             raise CodegenError(reason)
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
+            # A FRAME ADDRESS has no order, and the compare below would decide
+            # one by where the allocator put the two objects.
+            self._refuse_frame_order_operand(op, e.left)
+            self._refuse_frame_order_operand(op, e.right)
             if not self._emit_strcmp(e.left, e.right, op):
                 self._emit_cmp(e.left, e.right, unsigned, signed)
             return
@@ -4541,6 +4701,12 @@ class X86_64Codegen:
                 raise CodegenError(
                     f"unsupported compare-chain operator {op!r} on the "
                     f"formal x86-64 path")
+            # The CHAIN is a separate emitter that never went through
+            # `_emit_binop` — the `s += t` lesson again, one loop over.  Each
+            # link compares the same two adjacent operands a plain comparison
+            # would, so each link asks the same frame-ordering question.
+            self._refuse_frame_order_operand(op, operands[i])
+            self._refuse_frame_order_operand(op, operands[i + 1])
             unsigned, signed = _CMP_CONDS[op]
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP,
                                               _SLOT * (n - 1 - i)))
@@ -4775,13 +4941,27 @@ class X86_64Codegen:
             if lit == 2:
                 self.asm.emit(encode_imul_r64_r64(Reg.RAX, Reg.RAX))
             else:
-                self._push_slot(Reg.RAX)
+                # The BASE has to survive every step of the unroll and the
+                # ACCUMULATOR has to change, and this had them as one word: the
+                # loop copied the accumulator into R11 and popped the
+                # accumulator straight back into RAX, so both registers held
+                # the same value and each step computed `acc * acc`. The answer
+                # was `base ** (2 ** (lit - 1))` — measured, `3 ** 3` answered
+                # 81 where the source says 27, `3 ** 4` answered 3**8 and `3 **
+                # 8` answered 3**128, all built and all ran, while arm64
+                # answered 27, 81 and 6561 for the same three sources. It is
+                # the one place in this backend where a wrong answer was
+                # reachable from ordinary Python, and no case caught it because
+                # every `**` case in the suite used exponent 2, the one value
+                # the squaring happened to get right.
+                #
+                # R11 holds the base for the whole unroll. It is caller-saved
+                # and nothing in the loop can clobber it (there is no call and
+                # no `imul` destination is R11), so the stack round trip the old
+                # shape needed is not needed at all.
+                self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
                 for _ in range(lit - 1):
-                    self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
-                    self._pop_slot(Reg.RAX)
                     self.asm.emit(encode_imul_r64_r64(Reg.RAX, Reg.R11))
-                    self._push_slot(Reg.RAX)
-                self._pop_slot(Reg.R11)
             self._emit_trunc(result_t)
             return
         if lit is not None and lit < 0:
@@ -5047,6 +5227,7 @@ class X86_64Codegen:
         (exit 139). `model.string_slice_refusal` holds the message and the
         argument for lowering the suffix case later."""
         self._refuse_frame_container_operand("a slice", obj)
+        self._refuse_non_container_operand("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))
         if sreason is not None:
@@ -5630,10 +5811,10 @@ class X86_64Codegen:
         fn = self._functions.get(name)
         if fn is not None:
             return getattr(fn, "return_type", None) is None
-        entry = M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name)
-        if entry is None and "." not in name:
-            entry = self._aliased_export(name)
+        entry = M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name)
         if entry is None:
             return False
         return M.signature_return_type(
@@ -5650,10 +5831,10 @@ class X86_64Codegen:
             # was unclassified, and `print(mod.name())` formatted a `char *` as
             # an integer — the pointer's own value.
             return M.dylib_export_return_kind(
-                M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name,
-                                      self._dylib_forwarded)
-                or self._aliased_export(name))
+                M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name))
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:
@@ -5881,15 +6062,35 @@ class X86_64Codegen:
             # `[i for i in range(n)]` and `for i in list(range(n))` work.
             self._emit_range_list(list(e.args))
             return
-        if not is_extern_call and name == "len":
-            self._emit_len(e)
-            return
-        if not is_extern_call and name == "print":
-            self._emit_print(e)
-            return
+        # …and the other two, read out of `model.EMITTER_BUILTINS` rather than
+        # spelled here: see arm64's chain for why, and `range` above is already
+        # spelled rather than dispatched because its emitter takes the args
+        # list. `M` is the model import under the same name as on arm64 — the
+        # two files are the same function in two architectures, and a dispatch
+        # that can only be read on one of them is a dispatch that will drift.
+        if not is_extern_call and M.emitter_lowers(name):
+            if name == "len":
+                self._emit_len(e)
+                return
+            if name == "print":
+                self._emit_print(e)
+                return
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
+        # `%s` OF SOMETHING THAT IS NOT TEXT.  Asked here for the same reason
+        # `print` is intercepted two lines above: the format string is the
+        # SOURCE's, and this is the last place both the format and the varargs
+        # are in hand together.  `print` builds its own format and so cannot get
+        # it wrong; `printf` takes one unchecked all the way to C, where `%s`
+        # walks bytes at the address it is handed looking for a NUL.  Measured
+        # with this refusal lifted, on both architectures: `a = 5;
+        # printf("[%s]", a)` builds, runs, prints nothing and dies of SIGSEGV,
+        # exit 139.  The decision and the message are
+        # `model.printf_text_conversion_refusal`, shared with arm64; it gates on
+        # the resolved CALLEE rather than on `is_extern_call`, so
+        # `external_call["printf", Int32](fmt, n)` is asked the same question.
+        self._refuse_printf_text_conversion(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return
@@ -5975,6 +6176,25 @@ class X86_64Codegen:
         args = (list(e.args)
                 if is_extern and self._callee_decl(name) is None
                 else self._bind_call_args(name, e))
+        if is_extern and self._callee_decl(name) is None:
+            # …and the count is checked against what the MANIFEST publishes,
+            # because "no declaration to read" must not mean "no contract to
+            # obey". `extern_call_count_refusal` is the shared rule arm64 asks
+            # here, and returns "" for every case it cannot decide, which is
+            # most of them (the runtime dylib publishes no contract at all).
+            # Before it, a call whose library shipped without its sources
+            # dropped its extra arguments and read its missing ones out of an
+            # uninitialized register — measured, `two(1, 2, 3)` printing 12 and
+            # `two(1)` printing a number no source wrote, where CPython refuses
+            # both.
+            refusal = M.extern_call_count_refusal(
+                name, len(args),
+                M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name))
+            if refusal:
+                raise CodegenError(refusal)
         if is_extern and not is_extern_call \
                 and isinstance(e.func, F.SubscriptExpr):
             # A BRACKETED callee this unit does not compile, refused with the
@@ -6110,18 +6330,28 @@ class X86_64Codegen:
     def _extern_decl_for(self, name: str):
         """The declaration of an IMPORTED callee `name`, or None.
 
-        Keyed by the SYMBOL the call binds, and the entry is found by the same
-        two steps in the same order as `_extern_symbol` — the plain export
-        lookup, then the import alias — so the declaration handed to
-        `bind_call_arguments` is always the one whose parameter list the call
-        is actually being checked against. Asking by bare name instead would be
-        a way to hand a call the signature of a same-named function in a
-        different library.
+        Keyed by the SYMBOL the call binds, and the entry is found by
+        `model.dylib_callee_export` — the one resolution, in the same order as
+        `_extern_symbol` — so the declaration handed to `bind_call_arguments` is
+        always the one whose parameter list the call is actually being checked
+        against. Asking by bare name instead would be a way to hand a call the
+        signature of a same-named function in a different library.
+
+        The `forwarded` table reaches this through that shared resolution, and
+        that is load-bearing rather than tidiness: a re-exported callee
+        (`pkg.f`, where `pkg/__init__` is nothing but `from .sub import f`) is
+        published by the PACKAGE's manifest and nowhere else, so a lookup that
+        left it out found no declaration, and a call with no declaration is a
+        call whose arguments are passed unexamined — `pkg.f(1, 2, 3)` dropped
+        the third and `pkg.f(1)` read the second out of an uninitialized
+        register, printing two different numbers on the two architectures. It
+        is the same defect `test_formal_cross_module.py` pins for the bare
+        spelling, reached by the dotted one.
         """
-        entry = M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name)
-        if entry is None:
-            entry = self._aliased_export(name)
+        entry = M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name)
         if entry is None:
             return None
         return self._extern_decls.get(entry.get("symbol"))
@@ -6306,10 +6536,7 @@ class X86_64Codegen:
                 f"image built and then failed to load). The by-reference "
                 f"receiver that gives one is switched off "
                 f"({M.WIDE_RECEIVER_ENV}=0)")
-        if e.kwargs:
-            raise CodegenError(M.construction_keyword_refusal(
-                name, [k for k, _v in e.kwargs]))
-        if e.args:
+        if e.args or e.kwargs:
             # A ONE-FIELD struct with an argument: the receiver IS the field, so
             # the argument is not stored, it is the result.  What is refused is
             # what the shared DECISION refuses, by name — see
@@ -6328,13 +6555,21 @@ class X86_64Codegen:
                 self._return_types)
             if refusal is not None:
                 raise CodegenError(refusal)
-            if plan[0] == M.CONSTRUCTION_INIT:
+            if plan[0] in (M.CONSTRUCTION_INIT, M.CONSTRUCTION_DEFAULT):
+                # One word, so nothing is stored anywhere: the receiver IS the
+                # field and the LAST value is the whole result.
+                #
+                # `CONSTRUCTION_DEFAULT` is here for the case where every
+                # argument a partial construction carried was one the plan
+                # consumed against a field that already carries its own
+                # declared default, so nothing is left to store and the result
+                # is the class-level one.
                 if plan[1]:
                     self._emit_expr(plan[1][-1][2])
                     return
                 self._emit_fresh_one_word(name, st)
                 return
-            self._emit_expr(e.args[0])
+            self._emit_expr(M.construction_supplied_argument(e))
             return
         self._emit_fresh_one_word(name, st)
 
@@ -6426,8 +6661,8 @@ class X86_64Codegen:
         # …and then the constructor's own stores, for the one shape that has
         # them.  Empty for `S()`, which is why this is the same code as the
         # default constructor's rather than a fourth copy of it.
-        for _field, slot, value in (plan[1] if shape == M.CONSTRUCTION_INIT
-                                    else ()):
+        for _field, slot, value in (plan[1] if shape ==
+                                    M.CONSTRUCTION_INIT else ()):
             self._emit_block_store(base, slot, value)
         # Each nested field's slot then gets the ADDRESS of the frame just
         # brought up.  Same order as the loop above, so the address stored and

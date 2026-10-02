@@ -440,10 +440,49 @@ def main(n):
     return 0
 """
 
+# THE fourth way CPython's generated `__init__` and this path's field-filling
+# construction differ, and the one the transform is FOR: a generated `__init__`
+# has a signature per field — `def __init__(self, width=80, height=24)` — so a
+# call may supply a PREFIX of the fields and a KEYWORD spelling, and the rest
+# come from their own defaults. `Config(7)` is `width = 7, height = 24`, which
+# CPython says and which this backend used to refuse
+# (`bugs/FORMAL_dataclass_partial_construction.md`, now closed).
+#
+# Every row is here because each of the four spellings has a DIFFERENT answer if
+# one of the rules is wrong, and a program that prints 7 24 7 24 7 3 cannot tell
+# which rule produced which pair: `Config()` catches a default that was zeroed,
+# `Config(7)` catches a prefix that was refused or filled with zeros,
+# `Config(width=7)` catches a keyword read as a positional (which would land 7
+# in whichever field sorted first), `Config(7, 3)` is the control that the
+# ordinary full positional fill still works, and `Config(height=3)` catches a
+# keyword matching the WRONG field.
+PARTIAL_CONSTRUCTION = """
+from dataclasses import dataclass, field
+
+@dataclass
+class Config:
+    width: int = field(default=80)
+    height: int = 24
+
+def main(n):
+    a = Config()
+    b = Config(7)
+    c = Config(width=7)
+    d = Config(7, 3)
+    e = Config(height=3)
+    printf("%d %d|", a.width, a.height)
+    printf("%d %d|", b.width, b.height)
+    printf("%d %d|", c.width, c.height)
+    printf("%d %d|", d.width, d.height)
+    printf("%d %d", e.width, e.height)
+    return 0
+"""
+
 EXEC_CASES = [
     ("bare_decorator_constructs_in_declaration_order", BARE_CONSTRUCT),
     ("dotted_dataclasses_decorator_spelling", DOTTED_DECORATOR),
     ("field_default_is_lowered_to_its_literal", FIELD_DEFAULT),
+    ("a_prefix_of_the_fields_fills_from_their_defaults", PARTIAL_CONSTRUCTION),
     ("dataclass_equality_is_field_wise", EQUALITY),
     ("dataclass_equality_through_a_call_boundary", EQUALITY_ACROSS_CALL),
     ("one_field_dataclass_equality_was_already_right", ONE_FIELD_EQUALITY),
@@ -680,8 +719,19 @@ REFUSE_CASES = [
      ["whatever", "not ignored"]),
     ("kw_only_is_refused_with_its_reason", KW_ONLY,
      ["kw_only", "one construction shape here, not two"]),
+    # The needle MOVED, and the reason it moved is the point: the old one was
+    # "`==` … never dispatches by name", which was true when this case was
+    # written and is false since `==` began dispatching to a declared dunder for
+    # two bare names of the same struct (formal/build.py's
+    # `_rewrite_eq_on_frame_receivers`, and for a one-field struct too since
+    # 2026-10-02).  The refusal is still correct and now rests on this
+    # transform's OWN half — `rewrite_equality` would desugar `==` into a
+    # field-wise chain and silently replace the method the source wrote — which
+    # is what the second needle says.  A refusal whose stated reason has been
+    # fixed is a refusal nobody looks at again, so the case is pinned on the
+    # reason that still holds.
     ("a_user_declared_eq_is_refused_not_silently_ignored", OWN_EQ,
-     ["__eq__", "never dispatches by name"]),
+     ["__eq__", "FIELD-WISE chain"]),
     ("reflection_is_refused_by_name", REFLECTION_CALL,
      ["is_dataclass", "no type tag attached"]),
     ("the_fields_attribute_is_refused_by_name", REFLECTION_ATTRIBUTE,

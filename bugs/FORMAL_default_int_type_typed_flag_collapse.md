@@ -1,10 +1,56 @@
 # `formal/`: `DEFAULT_INT_TYPE` became signed `Int`, and the `typed` model flag went vacuous with it
 
-**Status: item 3 of "Next step, in order" is FIXED (`003a4696`, 2026-10-01);
-items 1, 2 and 4 are still open.** Measured on this tree after that commit:
-`test_formal.py` (arm64) **`PASS=39 KNOWN-GAP=6 FAIL=0`** — the 10 FAILs named
-below are gone — and the arm64 `sorry` census is **2**, both in `sum_range`
-(was 7). What the fix was: the bridge's `by_cases` hypothesis and
+**Status: items 2 and 4 of "Next step, in order" are FIXED, and item 1 is
+measured with a negative answer for option (b); item 1 option (a) is open.**
+Measured on this tree: `test_formal.py` arm64 **`PASS=41 KNOWN-GAP=4 FAIL=0`**,
+x86-64 **`PASS=45 KNOWN-GAP=0 FAIL=0`** — both identical before and after the
+item-2 change, which is the point of it. `formal/x86_64_model_test.py` is
+**`agree 45 WRONG 0 NO-RUN 0 build-fail 0`**, where it was `agree 44 WRONG 1`.
+
+* **Item 4 (`udivmod`) was NOT the `DEFAULT_INT_TYPE` flip.** The doc predicted
+  it was, and it is not: the flip is in `formal/types.py` and both backends read
+  it, so the codegen emitted `CQO`/`IDIV` correctly (`formal/x86_64_codegen.py`
+  asks `cmp_signed(common_type(...))`, which is signed for an unannotated
+  `int`). The wrong answer was in the Lean machine model: `lib/X86.lean` decoded
+  `cqo` with `x86_sign_extend32`, which is `movsxd`/`cdq` — it returns `v`
+  itself for every value whose bit 31 is clear — where `cqo` must produce the
+  sign extension of the whole 64-bit RAX. `cqo` is always immediately followed
+  by `idiv`, and `idiv` reads RDX:RAX as the dividend, so the model divided
+  `RAX * 2^64 + RAX`. `formal/examples/udivmod.mojo` at `n = 10` answers 4; the
+  model returned 7905747460161236410, which is exactly
+  `(10·2^64 + 10) / 7` truncated to 64 bits plus `(10·2^64 + 10) % 7`. Fixed by
+  `x86_cqo` in `lib/X86.lean`.
+* **The item-4 fix needed a second fix to be visible at all, and that one is a
+  general defect.** `formal/lean.py`'s `.olean` currency check compared each
+  library module against its OWN source bytes, and `work.lean` imports
+  `X86.lean` — so editing `X86.lean` left `work.olean` in place and every later
+  `lean` run silently recompiled the stale import inside the checker. Measured:
+  `python3 test_formal.py` went from 1.2 GB across 31 processes to a 32 GB kill,
+  with no error anywhere, and the CAS key had the same hole. `_effective_digest`
+  makes the stamp and the key cover the import closure transitively. Filed on
+  its own as `bugs/FORMAL_olean_currency_check_ignores_its_imports.md`.
+* **Item 2 (refuse rather than lie) was mostly already done** — `_no_value_model`
+  (a field read, a subscript) and `_call_go` (a callee with no model) both raise
+  — and what was left was `_expr_go`'s own three fall-throughs: an unbound NAME,
+  an OPERATOR with no Lean meaning, and an unrecognised expression FORM, each
+  answered `(0 : UInt64)`. All three now raise, and are pinned by three
+  behavioural tests plus a control in `test_formal_call_proof_gen.py` (the
+  registered `formal-call-proofgen` job) rather than by a text check, because
+  nothing in `formal/examples/` reaches any of them — which is exactly why they
+  were absorbed silently.
+* **Item 1, option (b) — "drop the flag and always use the typed generator" — is
+  measured and is NOT viable.** Forcing `is_typed = True` for every function took
+  `python3 test_formal.py` from 1.2 GB to a 32 GB kill across 37 processes. The
+  fixed-width model is the expensive one, which is presumably why the flag
+  exists; option (a), computing it from the presence of a type ANNOTATION in the
+  source rather than from the resolved type of a value, remains open and is now
+  the only part of this document left.
+
+Below, the original text: item 3 is FIXED (`003a4696`, 2026-10-01), and the
+`test_formal.py` counts in it are the ones measured on that tree.
+`test_formal.py` (arm64) was **`PASS=39 KNOWN-GAP=6 FAIL=0`** — the 10 FAILs
+named below are gone — and the arm64 `sorry` census was **2**, both in
+`sum_range` (was 7). What the fix was: the bridge's `by_cases` hypothesis and
 `evalExpr`'s own `if` test are two renderings of one signed comparison
 (`(l ^^^ 0x8000…) < (r ^^^ 0x8000…)` versus `sKey l < sKey r`), and
 `eval_eq_mojo`'s simp set did not carry `sKey`, so the two never met and the

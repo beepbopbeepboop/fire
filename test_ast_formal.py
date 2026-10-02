@@ -29,8 +29,10 @@ file states what `f"{x}"` tokenizes to; it asks.
 module accepts, because what it implements is the lexical and block-structure
 half of the grammar and not the expression half. Those are listed in `PINNED`
 with the verdict this module gives, and they are ASSERTED, not skipped: a
-change in either direction is a change worth looking at. The list is the one
-`bugs/FORMAL_ast_module_subset.md` prints, with the same reasons.
+change in either direction is a change worth looking at. What each group of
+them is, and the three corpus files this module accepts and CPython refuses,
+are in `formal/hostmods/ast.mojo`'s own docstring under "WHAT parse(src) DOES
+NOT MEAN".
 
 Groups: `stream`, `verdict`, `windows`, `names`. With no argument, all four.
 """
@@ -198,8 +200,8 @@ _add(
 )
 
 # The PINNED cases: CPython refuses, this module accepts, because what it
-# implements is the lexical half. The reason is the same one each time and the
-# list is the one in `bugs/FORMAL_ast_module_subset.md`.
+# implements is the lexical half. The reason is the same one each time, and
+# what each group of them is is in `formal/hostmods/ast.mojo`'s docstring.
 _pin(
     # the expression grammar, which `tokenize` does not check either
     ("x = 1..2\n", 1), ("x = 1j2\n", 1), ("x <> 1\n", 1), ("x = ,1\n", 1),

@@ -156,6 +156,95 @@ it through `__mlir_op`, which this path refuses. **Keep this doc for the
 measurement that made the derivation question visible; the next step is the
 other one.**
 
+## Status, 2026-10-01 (`formal3-2-r2`): shape 2's own next-step blocker is GONE
+
+The "Why it is not closed here" section names, as the thing standing between
+this doc and shape 2, a gap one step further in: passing a frame-returning call
+(`b.set(mk(41))`) to a parameter declared as a struct was itself refused.
+**That gap was a dead recognition** — `_check_holder_agreements` was handed the
+identity-keyed `returns_frame` and passed it to `model.frame_returning_predicate`,
+whose contract is `(callee_name, bound_name)`, so every lookup missed and
+`_frame_valued_calls`' frame-returning half never fired. One argument, and the
+shape works:
+
+    struct Opt:                       # two fields, so a frame
+        var v: Int
+        var has: Int
+
+    def peek(o: Opt) -> Int:          # declares a frame parameter
+        return o.v * 10 + o.has
+
+    def mk(v: Int) -> Opt:            # RETURNS a frame
+        var o = Opt();  o.v = v;  o.has = 1;  return o
+
+    def main(n):  return peek(mk(4))  # → 41, CPython's answer
+
+Pinned as four cases in `test_formal_run.py`
+(`declared_frame_parameter_given_a_frame_returning_call` and three others,
+including the guard that a WORD beside the returned-frame call still refuses).
+`test_formal_method_param_field.py` went 16 PASS / 2 FAIL → 18 / 0 on it.
+
+**Shape 2 itself is still refused, and the refusal has moved one layer along —
+onto the answer this doc says is the open design question.** With `Box.set` now
+reachable, `b.inner.v` reads through `b.inner`, whose agreed declared type is a
+framed `Opt`, but `Box.set` ASSIGNS that field — so it is `_REASSIGNED` ("the
+word in the slot is a frame belonging to whichever function ran the
+assignment"), which is the lifetime half of the same "what is a struct-typed
+field" question and not a recogniser gap. It takes the answer "the frame
+address, with the write-once discipline the message already names" and is a real
+program; it takes "a copy of the words in the object's own block" and is a
+layout change. Neither is decided here, which is what this doc has consistently
+said.
+
+Shape 1 (initialising the field from a constructor ARGUMENT) is unchanged and
+still says "a word stored over it would leave a value where every read of
+`self.inner.…` computes a frame base from it" — the same question, asked at the
+construction rather than at the store.
+
+So the row's terminal cause is unchanged from the section above it:
+`FORMAL_stdlib_optional_needs_a_representation` (formal3-7's claim), one layer
+below this one. What this session removed is the step between here and the
+question.
+
+## Status, 2026-10-02 (`formal3-2-r2-r2`): the `_REASSIGNED` reading above is
+WRONG, and the wall is one layer UP, in a receiver this doc never named
+
+The paragraph above says shape 2 is refused as `_REASSIGNED` and that the
+question is therefore "what a struct-typed field is". Re-measured on this tree,
+neither half is true, and both are worth recording because the row's terminal
+cause is now named rather than described.
+
+**Shape 2's own method does not even reach the store.** `struct Box` with the
+single field `var inner: Opt` is a ONE-FIELD struct, so `Box`'s receiver IS its
+field and `self` is a word holding the ADDRESS of an `Opt` frame — there is no
+`Box` storage to speak of and no representation decision to make. The store
+`self.inner = o` rewrites to `self = o`, but the refusal comes earlier, on the
+READ in the other method:
+
+    build: Box_get: 'self.v' is a field access through 'self', and this path
+    has no way to say what 'self' holds. …
+
+`'self.v'` is not in the source (`self.inner.v` is), and "this path has no way
+to say" is false: `_frame_receivers` has no case for seeding a method receiver
+whose owner is a one-field struct, which is the only shape in which a receiver
+is a frame and its owner is not.
+
+**The boundary is the holder's OWN field count, measured.** The same `Opt`/`Box`
+body builds and runs correctly — 155 on both architectures, and 155 is `41*10+1`
+— with `var pad: Int; var inner: Opt` (two fields, so `self` is a `Box` frame
+whose slot 1 is the `Opt` address), and is refused with `var inner: Opt`
+(one field). The LOCAL half already works: `b.inner.v` in `main`, with `Box()`
+one field, builds and returns 41 on both.
+
+**So the two halves of this doc are not the same wall.** Shape 1 (the
+construction) is still the question this doc has always said it is. Shape 2 (the
+store) is behind a RECEIVER SEEDING, one layer up, and the fix for that layer
+is not safe to land alone — measured, it turns the store case from a refusal
+into a SIGSEGV. The measurement, the reproducer, and the order the two checks
+have to land in are in
+`bugs/FORMAL_one_field_holder_of_a_frame_is_not_a_holder.md`; read that one for
+shape 2 and this one for shape 1.
+
 ## The next step (as originally written)
 
 Answer that question in `FORMAL_wide_receiver_by_reference.md` — the field

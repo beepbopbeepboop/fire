@@ -219,9 +219,9 @@ A sweep is `jobs` compiler processes at once, and a compiler process recurses
 through a module closure. Nothing about that is bounded, so ONE file could take
 the whole run down with it — and on 2026-10-01 one did: the arm64 sweep died of
 an external SIGKILL and its output file was the 5-line header and nothing else,
-so 623 files produced no classifications at all
-(`bugs/FORMAL_sweep_killed.md`). The fix is the per-file ceiling
-(`-M`, MEMCAP_GB): every build runs under `tools/memcap.py`, a file that exceeds
+so 623 files produced no classifications at all. The fix is the per-file
+ceiling (`-M`, MEMCAP_GB): every build runs under `tools/memcap.py`, a file
+that exceeds
 it is killed and classified `tool`/`memory-killed` WITH its measured peak, and
 the sweep continues. It is not a timeout wearing another name: a timeout says
 raise -t, a memory kill says this file's build is a different shape from every
@@ -281,6 +281,7 @@ import collections
 import concurrent.futures
 import ctypes
 import datetime
+import importlib
 import json
 import os
 import re
@@ -311,6 +312,55 @@ MEMCAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memcap.py")
 # the cache key and the argv below, so the two cannot drift apart.
 def build_flags(arch: str) -> tuple:
     return ("--formal", "--no-prove", f"--backend={arch}")
+
+
+def interpreter_diagnosis() -> str:
+    """Empty when this interpreter can load the backend; the diagnosis if not.
+
+    Every file in a sweep is answered by `fire.py build --formal` in a child of
+    THIS interpreter, so an interpreter that cannot import the backend cannot
+    answer one file, and it fails in the least visible way there is: each child
+    dies on the same exception inside an import, the classifier reads a
+    traceback ending in a build failure as `backend-crash`, and the run comes
+    back as N findings about the compiler's own plumbing and zero about any
+    source. Measured on this machine with the `python3` a shell finds by
+    default — Xcode's 3.9.6, because it is what `python3` resolves to before
+    any Homebrew directory is on PATH:
+
+        $ python3 tools/formal_sweep.py --no-stdlib --arch x86_64 -j2
+        BACKEND-CRASH: abfulltest_driver.mojo  (the backend raised: TypeError:
+          unsupported operand type(s) for |: 'type' and 'NoneType')
+        ... 392 of them, one per file, in about a minute ...
+        backend-crash                 392
+
+    which reads as "this backend is broken in every file at once" and is
+    actually "no file was built at all". The refusal is not in the backend's
+    coverage and must not be counted in it, so the check is here, before any
+    build, and it exits 2 — the documented status for a sweep that did not run.
+
+    It imports the module rather than testing `sys.version_info` against a
+    number, because the number is not written down anywhere in this repository
+    and a hard-coded floor would be a second, wrong one: what the sweep needs is
+    "the backend imports", and that is a fact this interpreter can answer.
+    """
+    try:
+        importlib.import_module("formal.build")
+    except Exception as e:
+        return (
+            f"this python cannot import the formal backend, so no file in this "
+            f"sweep could have been built: {type(e).__name__}: {e}\n"
+            f"  interpreter: {sys.executable} (python "
+            f"{sys.version.split()[0]})\n"
+            f"  the backend needs a python that can evaluate a PEP 604 "
+            f"annotation (`str | None`) at def time — 3.10 or newer. On macOS "
+            f"`python3` is Apple's 3.9 unless a newer one comes first on PATH, "
+            f"so run this with the interpreter the suite uses, e.g.\n"
+            f"    /opt/homebrew/bin/python3 {sys.argv[0]} ...\n"
+            f"  (or put that directory first on PATH). Nothing was swept and "
+            f"nothing was cached; every file would have been classified "
+            f"`backend-crash`, which is a fact about this interpreter and not "
+            f"about any source.")
+    return ""
 
 
 def _criteria_id() -> str:
@@ -428,10 +478,11 @@ CAUSE_TOOL_ERROR = "tool-error"
 # shape from every other one, and re-running it wider will not help.
 #
 # 2026-10-01: the arm64 sweep died of an external SIGKILL with nothing in its
-# output but the 5-line header, so not one file was classified — see
-# bugs/FORMAL_sweep_killed.md. One file's build being able to take the whole run
-# down with it is what that made possible, and the fix is the ceiling that
-# produces this label: the file is killed, classified, and the sweep continues.
+# output but the 5-line header, so not one file was classified. One file's
+# build being able to take the whole run down with it is what that made
+# possible, and the fix is the ceiling that produces this label: the file is
+# killed, classified, and the sweep continues — `TestPerFileMemoryCeiling`
+# in `test_formal_sweep.py`.
 CAUSE_MEMORY = "memory-killed"
 # The image BUILDS, but this host cannot check whether its imports resolve,
 # because they are dylibs of the other architecture and dlopen can only load
@@ -2537,6 +2588,11 @@ def main():
     arch = "x86_64" if args.arch in ("x86-64", "amd64") else args.arch
     flags = build_flags(arch)
 
+    unusable = interpreter_diagnosis()
+    if unusable:
+        print(unusable, file=sys.stderr)
+        sys.exit(2)
+
     # Roots: explicit paths win outright, otherwise repo + stdlib subtrees.
     notes = []
     if args.paths:
@@ -2593,8 +2649,10 @@ def main():
                   f"ledger, and a manifest there is rewritten in place, so a "
                   f"reader in one sweep can see the other's half-written "
                   f"JSON — which is what a `json.decoder.JSONDecodeError` in "
-                  f"the `tool` class is "
-                  f"(bugs/FORMAL_sweep_tool_json_decode_error.md). Two sweeps "
+                  f"the `tool` class is. The manifests are written through "
+                  f"`formal/build.py`'s `_write_json_atomic` now, so this "
+                  f"message is belt to that braces (`test_formal_manifest_atomic.py`). "
+                  f"Two sweeps "
                   f"of DIFFERENT architectures are independent (separate dylib "
                   f"directories, separate cache keys) and are allowed; pass "
                   f"--allow-concurrent to override this one anyway.",

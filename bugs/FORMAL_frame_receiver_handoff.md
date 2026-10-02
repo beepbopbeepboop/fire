@@ -1337,7 +1337,10 @@ family, which is a lifetime question rather than a layout one.
 
 ## 26. A neighbour found on the way, and not closed
 
-`bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md`: a nested
+*(Filed as `bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md`;
+fixed and deleted — the one-field nested field is now one load, and
+`test_formal_run.py`'s `one_word_nested_declared_single_field_read` pins it
+against `one_word_nested_demoted_width_method_call`.)* A nested
 struct whose *every* field is a class-level literal default has two of them
 demoted to constants by `_split_declaration`'s clause 6, so
 `struct_is_framed` flips to `False` and `o.in1.a` is refused with

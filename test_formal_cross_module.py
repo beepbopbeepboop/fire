@@ -533,6 +533,112 @@ def test_too_few_arguments_across_the_boundary_is_refused(tmpdir, _):
     check(rc == 1, f"CPython did not refuse `need_two()`: exit {rc}")
 
 
+# A PACKAGE that is nothing but a re-export. `leaf` is a real module with real
+# functions; `pkg/__init__` publishes them without defining any, which is why
+# the package's own manifest carries an EMPTY export table (`forwarded` in
+# `model.dylib_export_tables`).
+PKG_LEAF = """\
+def leaf_two(a, b):
+    return a * 10 + b
+
+
+def leaf_one(a, b=511):
+    return a + b
+"""
+
+PKG_INIT = """\
+from leaf import leaf_one, leaf_two
+"""
+
+# `import pkg` and a DOTTED call, where `from leaf import leaf_two` is the same
+# function reached by a different spelling. Both spellings have to obey the same
+# contract, and the number below is `leaf_two(1) * 10 + 5` so a `b` read out of
+# the wrong register cannot produce it.
+PKG_DOTTED_PROG = """\
+import pkg
+
+def main(k):
+    printf("two=%d@", pkg.leaf_two(1, 2))
+    printf("one=%d@", pkg.leaf_one(1))
+    printf("two-args=%d@@", pkg.leaf_one(1, 2))
+    return 0
+"""
+
+
+def test_a_re_exported_callee_obeys_the_same_contract_dotted(tmpdir, _):
+    """The control for the two cases below: the dotted spelling still WORKS.
+
+    A package that only re-exports publishes its names through the forwarding
+    table rather than its own export table, so a reader that resolved a callee
+    without it found no entry for `pkg.leaf_two` at all. That is invisible
+    while every call is well formed — the call binds the same symbol either way
+    — and it is exactly what makes the two refusals below reachable, so it has
+    to be pinned in the direction that says nothing regressed.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "pkg_dotted_ok")
+    os.makedirs(root)
+    write_tree(root, {"leaf.mojo": PKG_LEAF, "pkg/__init__.mojo": PKG_INIT,
+                      "prog.mojo": PKG_DOTTED_PROG})
+    text, rc = agrees_with_cpython(tmpdir, "dotted re-export", root,
+                                   "prog.aout", expect_exit=0)
+    check(text == "two=12@one=512@two-args=3@@",
+          f"the dotted re-export did not agree with its own declaration: "
+          f"{text!r}")
+
+
+def test_too_many_arguments_to_a_re_exported_callee_is_refused(tmpdir, _):
+    """`pkg.leaf_two(1, 2, 3)` is a `TypeError`, and it used to be dropped.
+
+    The same defect `test_too_many_arguments_across_the_boundary_is_refused`
+    pins for `from m import f`, reached by `import m` + `m.f`. The callee was
+    resolved through `by_name`/`by_module` only, the package publishes nothing in
+    either, so no declaration was found and the third argument was dropped
+    without a word: the image built, ran and printed 12 — the answer to
+    `leaf_two(1, 2)` for a call that named three arguments.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "pkg_toomany")
+    os.makedirs(root)
+    write_tree(root, {
+        "leaf.mojo": PKG_LEAF,
+        "pkg/__init__.mojo": PKG_INIT,
+        "prog.mojo": "import pkg\n\n\n"
+                     "def main(k):\n    printf(\"%d@@\", pkg.leaf_two(1, 2, 3))\n"
+                     "    return 0\n",
+    })
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    refuses(result, "too many positional arguments (3 for 2 parameter(s)")
+    rc, _text = cpython(root, "prog.aout")
+    check(rc == 1,
+          f"CPython did not refuse `pkg.leaf_two(1, 2, 3)`: exit {rc}")
+
+
+def test_too_few_arguments_to_a_re_exported_callee_is_refused(tmpdir, _):
+    """`pkg.leaf_two(1)` is the one that reads uninitialized memory.
+
+    The worse half, and it is why the two spellings have to agree: the omitted
+    second parameter landed in whatever the caller last left in that register,
+    and the two architectures disagreed about what that was — measured, 80905394
+    on arm64 and a different number on x86-64, both printed as ordinary
+    decimals with nothing in the build to explain them.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "pkg_toofew")
+    os.makedirs(root)
+    write_tree(root, {
+        "leaf.mojo": PKG_LEAF,
+        "pkg/__init__.mojo": PKG_INIT,
+        "prog.mojo": "import pkg\n\n\n"
+                     "def main(k):\n    printf(\"%d@@\", pkg.leaf_two(1))\n"
+                     "    return 0\n",
+    })
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    refuses(result, "missing required argument 'b'")
+    rc, _text = cpython(root, "prog.aout")
+    check(rc == 1, f"CPython did not refuse `pkg.leaf_two(1)`: exit {rc}")
+
+
 VAR_LIB = """\
 def with_defaults(a, b=7, c=9):
     return a * 100 + b * 10 + c
@@ -690,10 +796,17 @@ def test_a_linked_dylib_whose_source_is_gone_is_still_refused(tmpdir, _):
     correct verdict, since emitting a `BL` against a symbol nothing defines, or
     guessing a layout, is the outcome the whole mechanism exists to prevent.
 
-    (The refusal's WORDING still names a constructor this module does not
-    declare; it cannot be fixed where it is raised, which is about the variable
-    rather than the type. Filed as
-    `bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`.)
+    And the refusal's REPAIRS have to be the two that exist for this program.
+    It used to say "`b` is bound here as a parameter" and "bind the base from a
+    constructor THIS MODULE declares", both of which are false about the file in
+    front of the reader: `b` is `var b = Bag()`, and `Bag` is declared in a file
+    this build cannot read, so it is not a constructor this module declares and
+    cannot become one. The two clauses the message carries now are the
+    declaration must be VISIBLE (an import brings one, a `--link-dylib` library
+    brings one while its source is readable) and do NOT re-declare the struct
+    here — which would be a different type with the same name, and the layout
+    the library's methods use would not be it.
+    (`bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`.)
     """
     import json
     fresh_cas()
@@ -714,6 +827,179 @@ def test_a_linked_dylib_whose_source_is_gone_is_still_refused(tmpdir, _):
     result, _out = build(root, "prog.aout", expect_ok=False,
                          extra=["--link-dylib", dylib])
     refuses(result, "is a field access through 'b'")
+    text = result.stderr or result.stdout
+    for gone in ("is bound here as a parameter",
+                 "constructor this module declares (`x = S()`)"):
+        check(gone not in text,
+              f"the refusal still claims {gone!r}, which is false about a "
+              f"library whose source this build cannot read: {text[-400:]}")
+    for want in ("whose declaration THIS IMAGE can see",
+                 "Do not re-declare the struct here"):
+        check(want in text,
+              f"the refusal does not offer {want!r}, so the reader is sent "
+              f"after a repair that does not exist: {text[-400:]}")
+
+
+# ── (3b) the same three arity questions with no DECLARATION to read ─────────
+#
+# The three cases above are answered by `bind_call_arguments`, which reads the
+# callee's FunctionDef out of the library's own source. A library shipped
+# without its sources has none, and "no declaration" used to mean "no
+# contract": the arguments were passed exactly as written and the callee read
+# the rest out of whatever this image last left in those registers. The
+# manifest publishes the contract (`model.export_call_contract`), so these three
+# are refused instead — and the fourth, which is the control, is not.
+
+COUNT_LIB = """\
+def two(a, b):
+    return a * 10 + b
+
+
+def with_default(a, b=7, c=9):
+    return a * 100 + b * 10 + c
+
+
+def variadic(head, *rest):
+    return head * 2
+
+
+def no_args():
+    return 4242
+"""
+
+COUNT_PROG = """\
+def main(k):
+    printf("two=%d@", two(1, 2))
+    printf("three=%d@", with_default(1, 2, 3))
+    printf("var=%d@", variadic(4, 5, 6))
+    printf("none=%d@@", no_args())
+    return 0
+"""
+
+
+def _library_with_no_readable_source(root, dylib):
+    """Point the manifest's `source` at a path that is not there.
+
+    The shape a library shipped without its sources produces, and the one the
+    doc for the linked-struct case names. It is done by editing the manifest
+    rather than by deleting the file because the IMPORTING program has to be
+    able to resolve `from heaplib import …` in the first place, and the point
+    is precisely that this image cannot read the declaration AFTER it has bound
+    the symbol.
+    """
+    import json
+    path = dylib + ".manifest.json"
+    with open(path) as f:
+        payload = json.load(f)
+    check(payload.get("source"),
+          "precondition: the manifest records the module's source, which is "
+          "what this helper makes unreadable")
+    payload["source"] = os.path.join(root, "not", "there", "gone.mojo")
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=1, sort_keys=True)
+        f.write("\n")
+
+
+def test_the_manifests_call_contract_holds_when_there_is_no_declaration(tmpdir,
+                                                                      _):
+    """The control for the three refusals below: every admitted count still runs.
+
+    `variadic(4, 5, 6)` is here because it is the one count a strict reading of
+    "the call supplies more arguments than the callee has parameters" would
+    refuse, and refusing it would be a NEW refusal of a program that is right:
+    the arguments past the fixed ones are `*rest`'s and are dropped by design,
+    which is what `bind_call_arguments` does for a callee whose declaration IS
+    readable. A caller that cannot read it has to reach the same verdict.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "count_ok")
+    os.makedirs(root)
+    write_tree(root, {"countlib.mojo": COUNT_LIB, "prog.mojo": COUNT_PROG})
+    _r, dylib = build_dylib(root, "countlib.dylib", ["countlib.mojo"])
+    _library_with_no_readable_source(root, dylib)
+    result, out = build(root, "prog.aout", extra=["--link-dylib", dylib])
+    rc, text = run(out)
+    check(rc == 0 and text == "two=12@three=123@var=8@none=4242@@",
+          f"an admitted count stopped working with no declaration: exit {rc}, "
+          f"{text!r} (the build said "
+          f"{(result.stderr or result.stdout).strip()[-300:]})")
+
+
+def test_too_many_arguments_with_no_declaration_is_refused(tmpdir, _):
+    """`two(1, 2, 3)` with the library's source gone: the manifest knows.
+
+    The same wrong answer as `test_too_many_arguments_across_the_boundary_is_
+    refused` — the third argument dropped and the answer to `two(1, 2)`
+    returned — reached through the one path `bind_call_arguments` cannot cover.
+    Before the manifest published a call contract, an `arity` field was already
+    there and unused; this is the reader for it.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "count_toomany")
+    os.makedirs(root)
+    write_tree(root, {
+        "countlib.mojo": COUNT_LIB,
+        "prog.mojo": "def main(k):\n    printf(\"%d@@\", two(1, 2, 3))\n"
+                     "    return 0\n",
+    })
+    _r, dylib = build_dylib(root, "countlib.dylib", ["countlib.mojo"])
+    _library_with_no_readable_source(root, dylib)
+    result, _out = build(root, "prog.aout", expect_ok=False,
+                         extra=["--link-dylib", dylib])
+    refuses(result, "too many positional arguments (3 for 2 parameter(s)")
+    check("countlib published" in (result.stderr or result.stdout),
+          "the refusal does not say which module published the count")
+
+
+def test_too_few_arguments_with_no_declaration_is_refused(tmpdir, _):
+    """`two(1)` with the library's source gone: the register is never written.
+
+    Measured before this: 1798665114 on arm64 and a different number on x86-64,
+    both printed as ordinary decimals with nothing in the build to explain them,
+    where CPython refuses the call.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "count_toofew")
+    os.makedirs(root)
+    write_tree(root, {
+        "countlib.mojo": COUNT_LIB,
+        "prog.mojo": "def main(k):\n    printf(\"%d@@\", two(1))\n"
+                     "    return 0\n",
+    })
+    _r, dylib = build_dylib(root, "countlib.dylib", ["countlib.mojo"])
+    _library_with_no_readable_source(root, dylib)
+    result, _out = build(root, "prog.aout", expect_ok=False,
+                         extra=["--link-dylib", dylib])
+    refuses(result, "missing required argument(s) 'b'")
+
+
+def test_a_default_this_image_cannot_materialize_is_refused(tmpdir, _):
+    """`with_default(1)`: a legal count, and still not something to emit.
+
+    The count is right — one argument, one required parameter — so no arity
+    check can object to it. But `b=7` and `c=9` are EXPRESSIONS in the callee's
+    declaration, and this image cannot read them, so it cannot write them into
+    the registers the callee will read: measured, `with_default(1)` returning
+    357586946 where the callee's own defaults say 179. The manifest says which
+    parameters have defaults, which is enough to know that the gap is one this
+    image cannot fill, and that is what the refusal is for.
+
+    The control for this is `test_a_default_argument_crosses_the_boundary`:
+    with the source readable, the same call returns 511 and nothing is refused.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "count_default")
+    os.makedirs(root)
+    write_tree(root, {
+        "countlib.mojo": COUNT_LIB,
+        "prog.mojo": "def main(k):\n    printf(\"%d@@\", with_default(1))\n"
+                     "    return 0\n",
+    })
+    _r, dylib = build_dylib(root, "countlib.dylib", ["countlib.mojo"])
+    _library_with_no_readable_source(root, dylib)
+    result, _out = build(root, "prog.aout", expect_ok=False,
+                         extra=["--link-dylib", dylib])
+    refuses(result, "'b', 'c' have a default that only the callee's DECLARATION")
 
 
 # ── (5) `S()` — the control, with no module involved ────────────────────────
@@ -808,6 +1094,115 @@ def test_a_zero_argument_construction_of_a_constructor_that_needs_arguments(
     refuses(result, "none of them takes that count")
 
 
+# ── (6) a frame address handed across the boundary ──────────────────────────
+#
+# The other kind of thing that crosses: not an ARGUMENT but a frame ADDRESS,
+# and whether it can mean what the caller thinks depends on a contract the
+# DEFINING module has to publish (`formal/build.py`'s `_frame_param_contract`,
+# read by `formal/model.py`'s `resolve_frame_parameter_contract`).  The positive
+# and negative cases of the construct live in `test_formal_run.py`'s
+# `CROSS_MODULE_CASES` as built-and-run programs; what is HERE is the thing those
+# cannot see, which is the CONTRACT ITSELF — the published table, and the layer
+# a refusal names when the table says nothing.
+#
+# These pin a defect that was measured, fixed, and whose filing is deleted: a
+# function holding no frame published NO contract at all rather than a contract
+# of `Nones`, so `[]` was `_export_frame_contract`'s "this compilation could not
+# classify it" and `resolve_frame_parameter_contract` read `position 0 >=
+# len([])` as "not-exported" — a refusal naming a missing EXPORT about a
+# function the manifest lists with an arity. The filing was
+# `bugs/FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function.md`,
+# and it is deleted: fixed, with these cases as the proof.
+#
+# The module is one framed struct plus a function that holds nothing, which is
+# the ordinary shape of a module with a data class and some helpers, and the
+# middle case between the two that were already right: a module with no framed
+# struct at all publishes `[None] * n` for everything, and a function the fixpoint
+# classified publishes its real entries.
+CONTRACT_LIB = """\
+struct P:
+    var a: Int
+    var b: Int
+
+
+def plain(x: Int, by: Int) -> Int:
+    return x + by
+
+
+def takes_frame(p: P) -> Int:
+    return p.a * 10 + p.b
+"""
+
+CONTRACT_PROG = """\
+from conlib import P, plain
+
+def main(k):
+    var p = P()
+    p.a = 3
+    p.b = 4
+    return plain(p, k)
+"""
+
+
+def _contract_for(dylib, name):
+    """`{export name: frame_params}` out of a dylib's own manifest."""
+    import json
+    with open(dylib + ".manifest.json") as f:
+        payload = json.load(f)
+    return {e["name"]: e.get("frame_params") for e in payload.get("exports")}
+
+
+def test_every_exported_function_publishes_a_per_parameter_contract(tmpdir, _):
+    """Both functions in `CONTRACT_LIB` publish one entry per parameter.
+
+    The publication itself rather than the hand-off it enables, because
+    `test_formal_run.py` measures the hand-off and would report the same red for
+    a dozen different reasons: it cannot say WHICH half was wrong.  Two entries
+    in this table and the hand-off cases settle which.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "contract")
+    os.makedirs(root)
+    write_tree(root, {"conlib.mojo": CONTRACT_LIB})
+    _r, dylib = build_dylib(root, "conlib.dylib", ["conlib.mojo"])
+    table = _contract_for(dylib, "conlib")
+    check("plain" in table and "takes_frame" in table,
+          f"precondition: both functions are exported, got {sorted(table)}")
+    check(table["plain"] == [None, None],
+          f"a function holding no frame must publish one `None` per parameter, "
+          f"not {table['plain']!r} — `[]` is read as 'could not classify it' "
+          f"and a missing entry as 'not an export'")
+    check(table["takes_frame"] == [["P"]],
+          f"a parameter declared `p: P` is a holder of P by construction: "
+          f"{table['takes_frame']!r}")
+
+
+def test_a_frame_address_reaching_an_ordinary_word_names_the_contract(tmpdir, _):
+    """`plain(p, k)` is refused as a PLAIN PARAMETER, not as a missing export.
+
+    The diagnostic half of the case above, and it is why the table is worth
+    pinning. Both sentences refuse the program, and only one of them is TRUE
+    about it: `plain` is on the manifest with an arity of 2, so "the manifest
+    does not list it as an export" sends the reader to check an export that is
+    there, while what actually happened is that the callee's own compilation
+    published `plain`'s parameter 0 as a word.
+
+    The refusal's WORDS are the assertion — the verdict (refused) is identical
+    under both mistakes, and a diagnostic that points at the wrong layer is the
+    failure mode this backend's messages are otherwise written against.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "contract_plain")
+    os.makedirs(root)
+    write_tree(root, {"conlib.mojo": CONTRACT_LIB, "prog.mojo": CONTRACT_PROG})
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    text = result.stderr or result.stdout
+    refuses(result, "is an ordinary word, NOT a frame holder")
+    check("does not list it as an export" not in text,
+          f"the refusal blamed a missing EXPORT for a function the manifest "
+          f"lists with an arity of 2:\n{text.strip()[-500:]}")
+
+
 # ── one measurement, not two: the executor's own copy ───────────────────────
 
 def test_the_executors_answer_the_same_questions(tmpdir, _):
@@ -871,6 +1266,12 @@ TESTS = [
      test_too_many_arguments_across_the_boundary_is_refused),
     ("too few arguments across the boundary is refused",
      test_too_few_arguments_across_the_boundary_is_refused),
+    ("a re-exported callee called dotted obeys the same contract",
+     test_a_re_exported_callee_obeys_the_same_contract_dotted),
+    ("too many arguments to a re-exported callee is refused",
+     test_too_many_arguments_to_a_re_exported_callee_is_refused),
+    ("too few arguments to a re-exported callee is refused",
+     test_too_few_arguments_to_a_re_exported_callee_is_refused),
     ("every argument count and a variadic agree with CPython",
      test_every_argument_count_and_a_variadic_agree_with_cpython),
     ("a local default and a cross-module default agree",
@@ -879,11 +1280,24 @@ TESTS = [
      test_a_linked_dylibs_struct_is_usable_with_no_import),
     ("a linked dylib whose source is gone is still refused",
      test_a_linked_dylib_whose_source_is_gone_is_still_refused),
+    ("the manifest's call contract holds with no declaration to read",
+     test_the_manifests_call_contract_holds_when_there_is_no_declaration),
+    ("too many arguments with no declaration is refused",
+     test_too_many_arguments_with_no_declaration_is_refused),
+    ("too few arguments with no declaration is refused",
+     test_too_few_arguments_with_no_declaration_is_refused),
+    ("a default this image cannot materialize is refused",
+     test_a_default_this_image_cannot_materialize_is_refused),
     ("a zero-argument construction runs a zero-required constructor",
      test_a_zero_argument_construction_runs_a_zero_required_constructor),
     ("a zero-argument construction of a constructor that needs arguments is "
      "refused",
      test_a_zero_argument_construction_of_a_constructor_that_needs_arguments),
+    ("every exported function publishes a per-parameter frame contract",
+     test_every_exported_function_publishes_a_per_parameter_contract),
+    ("a frame address reaching an ordinary word names the contract, not the "
+     "export",
+     test_a_frame_address_reaching_an_ordinary_word_names_the_contract),
     ("arm64 and x86-64 return the same verdicts",
      test_the_executors_answer_the_same_questions),
 ]

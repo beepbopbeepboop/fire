@@ -2,7 +2,7 @@
 """A METHOD PARAMETER'S FIELD, established by its DECLARED TYPE and nothing
 else: build the image, run it, and compare with CPython.
 
-`bugs/FORMAL_method_param_field_access.md` is the finding.  A method's other
+A method's other
 parameters were never seeded as frame holders, so `other.start` in
 
     struct Slice(Equatable):
@@ -848,6 +848,80 @@ CASES = [
      "k.n = 41\n"
      "raise SystemExit(k.total())\n",
      42, None, None),
+
+    # ── A FREE FUNCTION WHOSE NAME IS ALSO A METHOD'S ────────────────────────
+    #
+    # `_prepare_functions` builds TWO method→struct maps and hands each of them
+    # to a different pass.  `owners` (build.py:8840) is `{bare method name:
+    # struct NAME}`, because `_rewrite_method_calls` dispatches `recv.m(...)` by
+    # name alone and needs a NAME.  `method_owners` (build.py:8890) is `{lifted
+    # function name: struct}`, because the passes that ask "which struct's
+    # LAYOUT is this body written against" need the StructDef itself.
+    #
+    # `_frame_receivers` is the second kind of consumer — its parameter is
+    # documented as `{function name: struct}` and both its uses read `.name` off
+    # the VALUE — and it was being handed the first map.  The lookup only ever
+    # HIT when a free function shares a name with some visible struct's method,
+    # and then `_overridden_comptime_names` got a `str` where it wanted a
+    # struct:
+    #
+    #   AttributeError: 'str' object has no attribute 'name'
+    #     formal/build.py:6465 in _overridden_comptime_names
+    #       st.name
+    #     formal/build.py:6255 in publish
+    #     formal/build.py:6232 in _constant_read_sites
+    #
+    # Measured on `std/builtin/reversed.mojo`, which the sweep classified
+    # `backend-crash` — the one class that means a bug in the compiler's own
+    # plumbing rather than a finding about the source, and the only one that is
+    # never cached.  `reversed.mojo` declares seven module-level `reversed`
+    # functions and imports a host module whose structs have a `reversed`
+    # method.
+    #
+    # Both halves of the shape are here: `get` must HOLD A FRAME (`p` is a
+    # two-field struct, so its receiver is a frame address and `_frame_receivers`
+    # rewrites the class-constant read sites of exactly the functions the holder
+    # fixpoint found), and the module-level `get` must SHARE ITS NAME with
+    # `Pair.get` — which is what makes the wrong map's bare-name key hit.
+    # Without the name collision the lookup missed and the census was silently
+    # empty, which is the quieter half of the same bug.
+    ("free_function_named_like_a_method_does_not_crash_the_build",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a * 10 + self.b\n"
+     "\n"
+     "def get(n: Int) -> Int:\n"
+     "    var p = Pair()\n"
+     "    p.a = 1\n"
+     "    p.b = 2\n"
+     "    return p.a + p.b + n\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var q = Pair()\n"
+     "    q.a = 3\n"
+     "    q.b = 4\n"
+     '    printf("v=%d", get(5) + q.get())\n'
+     "    return 0\n",
+     "class Pair:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "    def get(self):\n"
+     "        return self.a * 10 + self.b\n"
+     "def get(n):\n"
+     "    p = Pair()\n"
+     "    p.a = 1\n"
+     "    p.b = 2\n"
+     "    return p.a + p.b + n\n"
+     "import sys\n"
+     "q = Pair()\n"
+     "q.a = 3\n"
+     "q.b = 4\n"
+     'sys.stdout.write("v=%d" % (get(5) + q.get()))\n',
+     0, "v=42", None),
 ]
 
 

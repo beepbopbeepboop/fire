@@ -37,37 +37,53 @@ step lemma for that this can state a successor expression for.  A function
 using anything else is reported as uncovered, with the form named, rather than
 skipped silently -- the point is to know what is and is not proved.
 
-  3 examples are proved end to end -- ret42, seven, const2 -- and the rest
-  name the forms that block them, most-blocking first:
+  Measured 2026-10-01 over all 45 examples: **terminates proved with no sorry
+  31, proved with a sorry 2, no finite tree 12 (10 loops and two that leave the
+  function), failing 0**; value 3 proved and 12 open.  It was 10 / 14 / 19 / 0
+  and value 3 / 0 when the twenty-odd forms below were wired.
 
-      28  jcc_rel32        26  setcc          8  imul_r64_r64
-      26  movzx_r64_r8     21  jmp_rel32      7  call_rel32
-      17  alu_rr:add       11  alu_rr:sub      3  movsx_r64_r8
+  The `sorry` count fell from 25 to 2 for a reason that is worth stating on its
+  own, because it is a sentence in `X86.lean` that was wrong: the memory
+  separation's inequality was always closedable, and the emitted proof applied
+  the peel `rw` ONCE against an N-deep `mem_write_bytes` chain.  `repeat` in
+  front of it peels every layer, and each layer's side condition is closed over
+  literals.  `simp only [key]` does not work — a conditional rewrite whose
+  side condition `simp` must discharge made no progress at all — while
+  `repeat rw [key _ _ _ _ (by decide)]` peels all of them.
 
-  `alu_rr:cmp` and `alu_rr:test` came off this list with the two flags-only
-  lemmas, 27 examples each.  The proved count did not move, because every
-  example they blocked was also blocked by something else -- the blockers
-  overlap heavily, so the useful measure of a lemma is what it removes from
-  this list, not the count it adds to the proved line.
+  The twenty that came off this list, and the count of examples each was
+  blocking, is the useful record of what a lemma is worth -- but note that it
+  is NOT the count it adds to the proved line, because the blockers overlap
+  heavily.  `alu_rr:cmp` and `alu_rr:test` removed 27 each and moved the proved
+  count by zero, since every example they blocked was blocked by something else
+  too.
 
-  `mov_r64_rm64` and `mov_rm64_r64` are gone from that list: the five general
-  `mov` lemmas in X86.lean cover every shape the backend emits for them, and
-  taking them out is what took the suite from 1 proved to 3.
+      28 jcc_rel32      26 setcc          8 imul_r64_r64   7 call_rel32
+      26 movzx_r64_r8   21 jmp_rel32      3 movsx_r64_r8   3 shift_imm8:*
+      3 mov_*_nodisp    3 mov_*_disp8    3 lea_r64_rm64   2 alu_ri32:add_reg
+      2 alu_ri32:and    2 alu_ri8:cmp    1 alu_rr:and/or/xor
 
-  `setcc` (26) is the one that does NOT fall out of a generalisation, and it
-  is worth saying why rather than leaving it in the list.  `cmp` and `test`
-  above are flags-only: proving them is proving the operands and the flag
-  function, and the successor names no register.  `setcc` sits behind the
-  decoder's 0x0F dispatch, where reaching the case means excluding the jcc
-  range, 0xaf (imul) and the movzx/movsx opcodes, and where the destination
-  is the r/m field rather than the reg field -- the opposite sense to `mov`,
-  which is where the two existing concrete lemmas (`setne_al`, `setle_al`) got
-  their orientation.  The two concrete lemmas do cover the common conditions;
-  what is missing is the nibble-parameterised version, and the work is pinning
-  down which decoder (there is a 0x0F dispatch in `x86_step_rex` and another in
-  `x86_step_plain`, with different `rip + 3` / `rip + 4` lengths) the
-  no-REX encoding actually reaches, then stating the range and exclusion facts
-  separately so `simp` can use each as a rewrite.
+  What remains is `group3:idiv`, and it is the one that is not a wiring job:
+  `x86_idiv128` returns `none` when the divisor is zero, so the model's step is
+  PARTIAL, and no statement of it can be chained by this generator.  The long
+  version, with why naming the quotient and remainder needs a side condition the
+  generator cannot discharge and keeping the `match` stops the next address
+  from reducing, is in `bugs/FORMAL_x86_64_end_to_end_proof.md`.
+
+  `setcc` (26) was the one that did NOT fall out of a generalisation, and it is
+  worth saying why rather than leaving it in the list.  `cmp` and `test` are
+  flags-only: proving them is proving the operands and the flag function, and
+  the successor names no register.  `setcc` sits behind the decoder's 0x0F
+  dispatch, where reaching the case means excluding the jcc range, 0xaf (imul)
+  and the movzx/movsx opcodes, and where the destination is the r/m field rather
+  than the reg field -- the opposite sense to `mov`, which is where the two
+  existing concrete lemmas (`setne_al`, `setle_al`) got their orientation.  The
+  two concrete lemmas do cover the common conditions; what is missing is the
+  nibble-parameterised version, and the work is pinning down which decoder
+  (there is a 0x0F dispatch in `x86_step_rex` and another in `x86_step_plain`,
+  with different `rip + 3` / `rip + 4` lengths) the no-REX encoding actually
+  reaches, then stating the range and exclusion facts separately so `simp` can
+  use each as a rewrite.
 
   Three limits are worth stating separately, because each is a limit of what
   is proved here rather than a gap in it:
@@ -122,6 +138,21 @@ _FORMS = {
                        ["rip", "b0", "b1", "b2", "imm"]),
     "alu_ri32:add_rsp": ("x86_step_add_rsp_imm32", True,
                      ["rip", "b0", "b1", "b2", "imm"]),
+    # The digit-immediate ALU forms the backend emits outside the rsp pair.
+    # `81` is the 32-bit immediate and `83` the 8-bit one, and they are not the
+    # same length: the model's `endAddr` is `m + 7` for the first and `m + 4`
+    # for the second, so a successor that said one length for both would be a
+    # proof of a different instruction.  `cmp` is the one whose successor names
+    # no register at all -- digit 7 sets the flags and discards the result.
+    "alu_ri32:add_reg": ("x86_step_add_ri32", False,
+                         ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                          "rm"]),
+    "alu_ri32:and": ("x86_step_and_ri32", False,
+                     ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                      "rm"]),
+    "alu_ri8:cmp": ("x86_step_cmp_ri8", False,
+                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                     "rm"]),
     "mov_r64_rm64_reg": ("x86_step_mov_rm64_r64_reg", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod",
                           "reg", "rm"]),
@@ -133,48 +164,117 @@ _FORMS = {
     # `dst` is the CONCRETE destination register, which the lemma needs because
     # `x86_set_reg` is a `match` on its index and `simp` will not reduce one on
     # a non-literal.  See the note on the lemma.
-    "mov_r64_rm64_disp8": ("x86_step_mov_rm64_mem_disp8_rbp", False,
+    #
+    # The store direction is general over both REX bits as well -- the backend
+    # emits `4c` (R set) for an r8 source -- and over the base register rather
+    # than pinned to `rbp`, because the corpus stores through `rbp` for a spill
+    # and through `rbx` for an indexed store.
+    "mov_r64_rm64_disp8": ("x86_step_mov_rm64_mem_disp8", False,
                            ["rip", "b0", "b1", "b2", "disp", "rex", "w",
-                            "mod", "rm", "reg", "dst", "dst_lt"]),
+                            "mod", "rm", "rm_ne", "reg", "dst", "dst_lt"]),
+    "mov_r64_rm64_nodisp": ("x86_step_mov_rm64_mem_nodisp", False,
+                            ["rip", "b0", "b1", "b2", "rex", "w", "mod", "rm",
+                             "rm_ne4", "rm_ne5", "reg", "dst", "dst_lt"]),
+    "mov_rm64_r64_disp8": ("x86_step_mov_mem_disp8", False,
+                           ["rip", "b0", "b1", "b2", "disp", "rex", "w",
+                            "mod", "rm", "rm_ne", "reg"]),
+    "mov_rm64_r64_nodisp": ("x86_step_mov_mem_nodisp", False,
+                            ["rip", "b0", "b1", "b2", "rex", "w", "mod", "rm",
+                             "rm_ne4", "rm_ne5", "reg"]),
+    "mov_rm64_r64_disp32": ("x86_step_mov_mem_disp32", False,
+                            ["rip", "b0", "b1", "b2", "disp32", "rex", "w",
+                             "mod", "rm", "rm_ne", "reg"]),
+    # `lea` computes the address and writes it, so its successor is a register
+    # write of a TRUNCATED value rather than a memory access -- the model's
+    # `UInt64.ofNat (addr % 2^64)` against `mov`'s read at `addr` itself.  Only
+    # the disp32 mode is wired, and `_shapes` names the other two so they are
+    # reported rather than proved against the wrong instruction.
+    "lea_r64_rm64_disp32": ("x86_step_lea_rm64_disp32", False,
+                            ["rip", "b0", "b1", "b2", "disp32", "rex", "w",
+                             "mod", "rm", "rm_ne", "reg", "dst", "dst_lt"]),
     "mov_rm64_r64_reg": ("x86_step_mov_rm64_r64_reg_st", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod",
                           "reg", "rm"]),
-    # No `rb`/`rr` here: the store direction is general over both REX bits,
-    # because the backend emits `4c` (R set) for an r8 source.
-    "mov_rm64_r64_disp8": ("x86_step_mov_mem_disp8_r64", False,
-                           ["rip", "b0", "b1", "b2", "disp", "rex", "w",
-                            "mod", "rm", "reg"]),
     # The only movzx the backend emits is `movzx rax, al` (48 0f b6 c0), all 33
     # of them, so this uses the existing concrete lemma rather than a
     # nibble- and register-parameterised one nothing would use.
     "movzx_r64_r8": ("x86_step_movzx_rax_al", False,
                      ["rip", "b0", "b1", "b2", "b3"]),
+    # `movsx` gets the GENERAL lemma even though `movzx` above does not, because
+    # the corpus emits two register pairs for it — `48 0f be c0` and
+    # `48 0f be db`, three of the second to one of the first — and one shape
+    # would leave the other with no lemma at all.  That is the whole of the
+    # "generalise when more than one shape is emitted" rule, applied in both
+    # directions on adjacent rows of the same table.
+    #
+    # `dst` is the CONCRETE destination, as for the `rbp + disp8` load: the
+    # model's own index is `reg + x86_rex_r rex`, and `h_dst` rewrites it to
+    # `dst` so both sides name the same register.  `rm` is the SOURCE, extended
+    # by REX.B — the opposite sense, which is B7.
+    "movsx_r64_r8": ("x86_step_movsx_r64_r8", False,
+                     ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
+                      "reg", "rm", "dst"]),
     "alu_rr:add": ("x86_step_add_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:sub": ("x86_step_sub_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    # Three theorems rather than one, for the reason `lib/X86.lean` gives: the
+    # model has ONE arm for all three and its result is an `if` chain on the
+    # opcode, so one theorem would hand every caller that chain back.  The
+    # flags are identical across the three (`x86_flags_logic`), which is why
+    # they are siblings rather than three unrelated forms.
+    "alu_rr:and": ("x86_step_and_rr", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    "alu_rr:or": ("x86_step_or_rr", False,
+                  ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    "alu_rr:xor": ("x86_step_xor_rr", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    # `shl` / `shr` / `sar` by an immediate byte.  The digit is the ModRM `reg`
+    # field, which is NOT the register it is for in any other form here -- it is
+    # the operation -- so `digit` gets its own condition and its own `_resolve`
+    # branch rather than riding along on `reg`.
+    "shift_imm8:shl": ("x86_step_shl_imm8", False,
+                       ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                        "rm"]),
+    "shift_imm8:shr": ("x86_step_shr_imm8", False,
+                       ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                        "rm"]),
+    "shift_imm8:sar": ("x86_step_sar_imm8", False,
+                       ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                        "rm"]),
     "jcc_rel32": ("x86_step_jcc_rel32", False,
                   ["rip", "b0", "b1", "cc", "off", "lo", "hi", "nsetcc_lo",
                    "nzx", "notrex"]),
     "jmp_rel32": ("x86_step_jmp_rel32", False,
                   ["rip", "b0", "off"]),
     # `call rel32`. The step lemma is ALREADY PROVED -- `x86_step_call_rel32`
-    # at lib/X86.lean:720 -- so this entry is pure wiring and admits no `sorry`.
+    # at lib/X86.lean:757 -- so this entry is pure wiring and admits no `sorry`.
     # It is the largest single uncovered form: 7 of the x86-64 examples named
     # `call_rel32` as their missing lemma, which is what `bugs/OPEN_WORK.md` A1
-    # is about. Side conditions in the lemma's own order (h_rip, h_b0, h_imm).
+    # is about.
     #
-    # NOT VERIFIED. This was wired without running the suite, so what is
-    # claimed here is the WIRING (the three entries below are transcribed from
-    # the proved lemma's own statement, and the literal-address substitution
-    # copies the `jmp_rel32` case that already works), not that the tree now
-    # closes. The open risk is the continuation AT the target: a call's `rip`
-    # is `m + 5 + off`, a literal supplied here, and whether the path from
-    # there re-enters a block whose certificate is wired is a question only a
-    # run answers. If it does not, the failure moves from "no step lemma wired
-    # for: call_rel32" to whatever the target needs -- a DIFFERENT and more
-    # specific error, which is progress, but it is not a proof.
-    "call_rel32": ("x86_step_call_rel32", True,
+    # `takes_imm` is FALSE, and that was the whole bug.  This entry used to be
+    # `True`, which made `_resolve` append the decoded displacement AFTER the
+    # `off` its own branch had already supplied -- two arguments where the
+    # lemma takes one, because `off` IS the immediate and
+    # `x86_step_call_rel32`'s `h_imm` says `read_i32_le code (m + 1) = off`
+    # rather than taking the bytes separately.  The generated application
+    # therefore had one argument too many, and the failure was the least
+    # informative one available:
+    #
+    #     numerals are data in Lean, but the expected type is a proposition
+    #
+    # on the DISPLACEMENT, because that is the argument that landed where a
+    # hypothesis was expected.  Nothing in it says `call`, and the form it
+    # appears under is the continuation after the call, so it read as a
+    # statement about whatever came next.
+    #
+    # The comment this replaces said "NOT VERIFIED. This was wired without
+    # running the suite" and named the open risk as being at the continuation
+    # past the target.  The risk was real and it was not there: the target's
+    # certificates apply, and the fault was in the argument list of the call
+    # itself, which no amount of reading the tree could have found.
+    "call_rel32": ("x86_step_call_rel32", False,
                    ["rip", "b0", "imm"]),
     # `njcc` is the jcc range's UPPER bound only.  Adding its lower bound as
     # well would be unsatisfiable for every setcc byte -- and a step lemma with
@@ -192,6 +292,12 @@ _FORMS = {
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:test": ("x86_step_test_rr", False,
                     ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    # `cqo`, the `idiv` setup.  No operand, no ModRM, and only one encoding in
+    # the corpus, so it is a concrete lemma on the REX byte alone -- the shape
+    # `x86_step_movzx_rax_al` has.  It is here because `group3:idiv` is not, and
+    # wiring half of a pair is still worth having: `cqo` alone makes udivmod's
+    # tree one form short rather than two, which is a measurement.
+    "cqo": ("x86_step_cqo", False, ["rip", "b0", "b1", "rex", "w"]),
     "leave": ("x86_step_leave", False, ["rip", "b0"]),
     "ret": ("x86_step_ret", False, ["rip", "b0"]),
 }
@@ -209,6 +315,24 @@ _SUCCS = {
     "alu_ri32:add_rsp":
         "{ x86_flags_add $s $s.rsp $imm ($s.rsp + $imm) with "
         "rsp := $s.rsp + $imm, rip := $next }",
+    # The digit-immediate ALU successors.  `$imm` is the MODEL's expression for
+    # the immediate, not the decoded number: `UInt64.ofInt (read_i32_le rc (m+3))`
+    # for the `81` forms and `UInt64.ofInt (read_i8 (rc (m+3)))` for the `83` one,
+    # and substituting a literal would state a different thing for every
+    # sign-extended byte.  `$next` is what carries the length difference.
+    "alu_ri32:add_reg":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
+        "($rm + x86_rex_b $rex)) + $imm) with rip := $next, zf := ($fa).zf, "
+        "sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
+    "alu_ri32:and":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
+        "($rm + x86_rex_b $rex)) &&& $imm) with rip := $next, zf := ($fl).zf, "
+        "sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
+    # No register in this one: digit 7 computes the subtraction, sets the flags
+    # and throws the difference away.
+    "alu_ri8:cmp":
+        "{ $s with rip := $next, zf := ($fs).zf, sf := ($fs).sf, "
+        "cf := ($fs).cf, of_ := ($fs).of_ }",
     "mov_rm64_imm32": "{ $s with rax := $imm, rip := $next }",
     "alu_ri32:add":
         "{ x86_flags_add $s $s.rax $imm ($s.rax + $imm) with "
@@ -221,17 +345,47 @@ _SUCCS = {
     "mov_rm64_r64_sib":
         "{ $s with mem := mem_write_bytes $s.mem $s.rsp.toNat "
         "(x86_get_reg $s ($reg + x86_rex_r 0x48)) 8, rip := $next }",
+    # The three displacement modes, load and store.  The base is the rm field
+    # extended by REX.B, so it is `$rm + x86_rex_b $rex` rather than the `5 +
+    # …` this table used to hard-code for `rbp`.
+    #
+    # `Int.ofNat … + $disp` is the model's own `Int` arithmetic and is not
+    # decoration: the address is `(Int.ofNat base + disp).toNat`, so writing
+    # `base + disp` on a `Nat` would be a different expression that happens to
+    # agree for a non-negative displacement and does not for a negative one --
+    # and every spilled argument is at a negative offset.
     "mov_r64_rm64_disp8":
         "{ x86_set_reg $s $dst (mem_read_bytes $s.mem "
-        "(Int.ofNat (x86_get_reg $s (5 + x86_rex_b $rex)).toNat + $disp).toNat 8) "
+        "(Int.ofNat (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat 8) "
         "with rip := $next }",
+    # No displacement at all: the address is the base register itself, so the
+    # `Int.ofNat … + 0` round trip is gone and the instruction is one byte
+    # shorter.
+    "mov_r64_rm64_nodisp":
+        "{ x86_set_reg $s $dst (mem_read_bytes $s.mem "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)).toNat 8) with rip := $next }",
+    "mov_rm64_r64_disp8":
+        "{ $s with mem := mem_write_bytes $s.mem "
+        "(Int.ofNat (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat "
+        "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
+    "mov_rm64_r64_nodisp":
+        "{ $s with mem := mem_write_bytes $s.mem "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)).toNat "
+        "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
+    "mov_rm64_r64_disp32":
+        "{ $s with mem := mem_write_bytes $s.mem "
+        "(Int.ofNat (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat "
+        "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
+    # `lea`: the address goes into a REGISTER, truncated to 64 bits.  A `mov`
+    # successor would read memory at that address instead, which is the whole
+    # difference between the two instructions.
+    "lea_r64_rm64_disp32":
+        "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat % "
+        "18446744073709551616)) with rip := $next }",
     "mov_rm64_r64_reg":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) with rip := $next }",
-    "mov_rm64_r64_disp8":
-        "{ $s with mem := mem_write_bytes $s.mem "
-        "(Int.ofNat (x86_get_reg $s (5 + x86_rex_b $rex)).toNat + $disp).toNat "
-        "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
     # `&&& 0xFF` is not decoration.  The model used to read the whole register
     # and leave it alone here, so this row said `rax := $s.rax` and matched.
     # The model now narrows the operand to its one byte, which is what
@@ -242,10 +396,50 @@ _SUCCS = {
     # corrected with it or it becomes a second, stale statement of the same
     # fact.
     "movzx_r64_r8": "{ $s with rax := $s.rax &&& 0xFF, rip := $next }",
+    # The `&&& 0xFF` is what the instruction does and not decoration, exactly as
+    # for `movzx` above: `movsx` reads one BYTE and sign-extends bit 7 of it, so
+    # the successor is `x86_sign_extend8 (get &&& 0xFF)` and not the whole
+    # register.  Writing `rax := $s.rax` here — which is what this table said
+    # once — is a statement about a different instruction, and it is a statement
+    # the model does not make, so the mismatch shows up as a `Type mismatch`
+    # that displays the whole successor record and names neither the form nor
+    # the byte.
+    "movsx_r64_r8":
+        "{ x86_set_reg $s $dst (x86_sign_extend8 "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex) &&& 0xFF)) with rip := $next }",
     "alu_rr:add":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fa).zf, sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
     "alu_rr:sub":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fs).zf, sf := ($fs).sf, cf := ($fs).cf, of_ := ($fs).of_ }",
+    # `and`/`or`/`xor` share the shape above and differ only in the operator,
+    # which `$res` supplies; the flags are `x86_flags_logic` on the same value.
+    "alu_rr:and":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
+    "alu_rr:or":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
+    "alu_rr:xor":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
+    # The shifts write ZF and SF and leave CF and OF alone, which is the
+    # difference from every row above and the reason this is not the same shape:
+    # the model's `x86_flags_logic` computes all four and the record update
+    # overrides only two, so a successor that also asserted `cf`/`of_` would be
+    # a claim about a field the instruction does not set.
+    #
+    # `$sh` is the count after the model's clamp, kept as one term because the
+    # lemma states it three times and a caller that inlined its own spelling
+    # would have to match all three.
+    "shift_imm8:shl":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
+        "($rm + x86_rex_b $rex)) <<< $sh) with rip := $next, "
+        "zf := ($fl).zf, sf := ($fl).sf }",
+    "shift_imm8:shr":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
+        "($rm + x86_rex_b $rex)) >>> $sh) with rip := $next, "
+        "zf := ($fl).zf, sf := ($fl).sf }",
+    "shift_imm8:sar":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) (x86_sign_extend32 "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)) >>> $sh) with rip := $next, "
+        "zf := ($fl).zf, sf := ($fl).sf }",
     # `= true` explicitly.  The model's `if` is over a `Bool`, and the
     # `by_cases` hypothesis is an equation about a `Prop`; writing the condition
     # the same way on both sides is what lets the hypothesis rewrite it.  It is
@@ -254,12 +448,31 @@ _SUCCS = {
         "{ $s with rip := if x86_cond $cc $s = true then $tgt else $fall }",
     "jmp_rel32":
         "{ $s with rip := $tgt }",
-    # Transcribed from `x86_step_call_rel32`'s conclusion (lib/X86.lean:720),
-    # with `$tgt`/`$ret` supplied as literals by the decode branch above.
+    # Transcribed from `x86_step_call_rel32`'s conclusion (lib/X86.lean:757),
+    # and quoting the MODEL'S expressions for its two addresses rather than
+    # pre-computing them as literals the way the `jmp`/`jcc` rows above do.
+    #
+    # That difference is the whole reason this row needed changing, and it is
+    # not a style preference.  The lemma's conclusion carries
+    # `(Int.ofNat m + 5 + off).toNat` and `UInt64.ofNat (m + 5)`; a successor
+    # carrying the literals `4294967826` and `4294967984` is the SAME record up
+    # to those two fields, so closing the step is an `isDefEq` that has to
+    # evaluate the arithmetic -- and inside a 22-field structure whose `mem` is
+    # a `Nat -> UInt8` function, the congruence check gives up and reports
+    #
+    #     Type mismatch
+    #
+    # with both sides printed in full and neither of them naming the field that
+    # differs.  Quoting the model's expressions makes the two records
+    # syntactically identical, so the step closes by `rfl` with no arithmetic
+    # to do at all.  The literal would then be recovered where it is actually
+    # needed, by the NEXT step's `rip` side condition, and `simp` does fold
+    # `(Int.ofNat 4294967979 + 5 + (-158)).toNat` to `4294967826` -- checked,
+    # not assumed.
     "call_rel32":
-        "{ $s with rip := $tgt, rsp := $s.rsp - 8, mem := "
-        "mem_write_bytes $s.mem ($s.rsp - 8).toNat "
-        "(UInt64.ofNat $ret) 8 }",
+        "{ $s with rip := (Int.ofNat $m + 5 + $off).toNat, rsp := $s.rsp - 8, "
+        "mem := mem_write_bytes $s.mem ($s.rsp - 8).toNat "
+        "(UInt64.ofNat ($m + 5)) 8 }",
     "setcc":
         "{ x86_set_reg $s $rmv (if x86_cond $cc $s then 1 else 0) with"
         " rip := $next }",
@@ -275,6 +488,7 @@ _SUCCS = {
     "alu_rr:test":
         "{ $s with rip := $next, zf := ($fl).zf, sf := ($fl).sf, "
         "cf := ($fl).cf, of_ := ($fl).of_ }",
+    "cqo": "{ $s with rdx := x86_sign_extend32 $s.rax, rip := $next }",
     "leave":
         "{ $s with rbp := mem_read_bytes $s.mem $s.rbp.toNat 8, "
         "rsp := $s.rbp + 8, rip := $next }",
@@ -359,15 +573,20 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             sc.append(sc_("simp [read_i32_le, read_i8, hb]"))
         elif c == "disp":
             sc.append(sc_("simp [read_i8, hb]"))
+        elif c == "disp32":
+            # `read_i32_le`, and signed: a frame store is at a negative offset
+            # and `read_i8` here would read one byte of a four-byte field.
+            sc.append(sc_("simp [read_i32_le, read_i8, hb]"))
         elif c == "off":
             sc.append(sc_("simp [read_i32_le, read_i8, hb]"))
-        elif c in ("dst", "dst_lt"):
+        elif c in ("dst", "dst_lt", "rm_ne", "rm_ne4", "rm_ne5"):
             # Closed arithmetic on the encoding: the destination register is
-            # read out of the ModRM/REX bytes, so it is a literal here.
+            # read out of the ModRM/REX bytes and the addressing-mode exclusions
+            # are tests on that same rm, so every one is a literal here.
             sc.append(sc_("decide"))
         elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
-                   "lo", "hi", "nsetcc_lo", "njcc", "nzx", "op2",
-                   "notrex"):
+                   "lo", "hi", "nsetcc_lo", "njcc", "nzx", "op2", "notrex",
+                   "digit"):
             # Closed arithmetic on the ModRM/REX literals, or a range test on a
             # concrete opcode byte: nothing here comes from the byte list, so
             # `decide` and not `simp [hb]`.
@@ -392,8 +611,75 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # mismatch" on a 14-field record.
         extra_succ = {"$dst": str(dst), "$rm": str(rm), "$reg": str(reg),
                       "$rex": str(rex)}
-    elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg", "alu_rr:add",
-                "alu_rr:sub", "alu_rr:cmp", "alu_rr:test"):
+    elif form == "movsx_r64_r8":
+        # `REX 0F BE /r`, so the ModRM is `raw[3]` — the same off-by-one as
+        # `imul` and `setcc` above, and for the same reason: an `0F` escape puts
+        # the ModRM one byte further out than a one-byte opcode does.
+        rex, modrm = raw[0], raw[3]
+        reg, rm = (modrm >> 3) & 7, modrm & 7
+        dst = reg + (8 if rex & 4 else 0)
+        extra_args = " %d %d %d %d %d" % (rex, modrm, reg, rm, dst)
+        extra_succ = {"$rex": str(rex), "$reg": str(reg), "$rm": str(rm),
+                      "$dst": str(dst)}
+    elif form in ("alu_ri32:add_reg", "alu_ri32:and", "alu_ri8:cmp"):
+        # `REX.W 81 /digit id` or `83 /digit ib`, so the ModRM is `raw[2]` and the
+        # immediate starts at `raw[3]` -- 4 bytes wide for `81`, one for `83`.
+        # `digit` is the ModRM `reg` field and names the OPERATION; the
+        # register is the rm field (+REX.B).  The decoder has already refused a
+        # memory operand for this family, so mod is always 3.
+        rex, modrm = raw[0], raw[2]
+        digit, rm = (modrm >> 3) & 7, modrm & 7
+        extra_args = " %d %d %d" % (rex, modrm, rm)
+        # `UInt8.toInt` is the sign the instruction propagates, so the model's
+        # own reader is used rather than a decoded Python integer: `83` sign
+        # extends from ONE byte and `81` from four, and a literal would lose
+        # exactly that.
+        #
+        # The outer parentheses are required and not cosmetic.  Lean's
+        # application is left-associative, so `x86_flags_sub s a UInt64.ofInt x y`
+        # is `((x86_flags_sub s a UInt64.ofInt) x) y` and the error is an
+        # `Application type mismatch` that names `UInt64.ofInt` and neither the
+        # form nor the byte -- in a file with one instruction per step, so it
+        # names nothing at all about which instruction failed.
+        if form == "alu_ri8:cmp":
+            imm = "(UInt64.ofInt (read_i8 (rc %d)))" % (addr + 3)
+        else:
+            imm = "(UInt64.ofInt (read_i32_le rc %d))" % (addr + 3)
+        a = "(x86_get_reg $s (%d + x86_rex_b $rex))" % rm
+        if form == "alu_ri32:add_reg":
+            res = "(%s + %s)" % (a, imm)
+            extra_succ["$fa"] = "x86_flags_add $s %s %s %s" % (a, imm, res)
+        elif form == "alu_ri32:and":
+            res = "(%s &&& %s)" % (a, imm)
+            extra_succ["$fl"] = "x86_flags_logic $s %s" % res
+        else:
+            res = "(%s - %s)" % (a, imm)
+            extra_succ["$fs"] = "x86_flags_sub $s %s %s %s" % (a, imm, res)
+        extra_succ.update({"$rex": str(rex), "$rm": str(rm),
+                           "$imm": imm})
+    elif form.startswith("shift_imm8:"):
+        # `REX.W C1 /digit ib`, so the ModRM is `raw[2]` as for every other
+        # one-byte opcode, and the `digit` is its REG field -- the operation,
+        # not a register.  The register is the rm field (+REX.B).
+        rex, modrm = raw[0], raw[2]
+        digit, rm = (modrm >> 3) & 7, modrm & 7
+        extra_args = " %d %d %d" % (rex, modrm, rm)
+        # The count is the byte at `m + 3`, read as a byte and clamped, and it
+        # is emitted as the model's own expression rather than as the decoded
+        # number: the clamp is what makes a shift of 64 or more mean 64, so
+        # substituting the number here would state a different thing for any
+        # count outside 0..63.  `rc` is this file's name for what the lemma
+        # calls `code`.
+        sh = "UInt64.ofNat (if (rc %d).toNat ≥ 64 then 64 else (rc %d).toNat)" % (
+            addr + 3, addr + 3)
+        a = "(x86_get_reg $s (%d + x86_rex_b $rex))" % rm
+        res = {"shl": "(%s <<< %s)" % (a, sh), "shr": "(%s >>> %s)" % (a, sh),
+               "sar": "(x86_sign_extend32 %s >>> %s)" % (a, sh)}[
+            form.split(":")[1]]
+        extra_succ = {"$rex": str(rex), "$rm": str(rm), "$sh": sh,
+                      "$fl": "x86_flags_logic $s %s" % res}
+    elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg", "alu_rr:add",                "alu_rr:sub", "alu_rr:cmp", "alu_rr:test", "alu_rr:and",
+                "alu_rr:or", "alu_rr:xor"):
         rex, modrm = raw[0], raw[2]
         extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7, modrm & 7)
         oa = "(x86_get_reg $s (%d + x86_rex_b $rex))" % (modrm & 7)
@@ -407,6 +693,14 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             extra_succ["$fa" if op == "+" else "$fs"] = (
                 "x86_flags_%s $s %s %s %s"
                 % ("add" if op == "+" else "sub", oa, ob, res))
+        elif form in ("alu_rr:and", "alu_rr:or", "alu_rr:xor"):
+            # `&&&`, `|||` and `^^^` in Lean, not the Python spellings the
+            # encoder uses (`&`, `|`, `^`).  The three share `x86_flags_logic`
+            # on the same value, which is why `$fl` is one name for all of them.
+            sym = {"and": "&&&", "or": "|||", "xor": "^^^"}[form.split(":")[1]]
+            res = "(%s %s %s)" % (oa, sym, ob)
+            extra_succ["$res"] = res
+            extra_succ["$fl"] = "x86_flags_logic $s %s" % res
         elif form == "alu_rr:cmp":
             extra_succ["$fc"] = "x86_flags_sub $s %s %s (%s - %s)" % (
                 oa, ob, oa, ob)
@@ -415,7 +709,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     elif form == "jcc_rel32":
         op2 = raw[1]
         off = int.from_bytes(raw[2:6], "little", signed=True)
-        extra_args = " %d %d %d" % (op2, op2 - 0x80, off)
+        extra_args = " %d %d (%d)" % (op2, op2 - 0x80, off)
         # The two successors as LITERAL addresses.  The model's own form is
         # `(Int.ofNat m + 6 + off).toNat`, and `simp` does not reduce that
         # `Int` arithmetic, so the taken address never becomes a numeral and
@@ -424,16 +718,25 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
                       "$tgt": str(addr + 6 + off), "$fall": str(addr + 6)}
     elif form == "jmp_rel32":
         off = int.from_bytes(raw[1:5], "little", signed=True)
-        extra_args = " %d" % off
+        extra_args = " (%d)" % off
         extra_succ = {"$off": str(off), "$tgt": str(addr + 5 + off)}
     elif form == "call_rel32":
         # Same reason as jmp_rel32 above, plus one more: a call has TWO
         # addresses -- the target it branches to, and the return address it
         # PUSHES. The pushed value is `UInt64.ofNat (m + 5)`, i.e. `$ret`.
         off = int.from_bytes(raw[1:5], "little", signed=True)
-        extra_args = " %d" % off
-        extra_succ = {"$off": str(off), "$tgt": str(addr + 5 + off),
-                      "$ret": str(addr + 5)}
+        extra_args = " (%d)" % off
+        # `$off` parenthesised, and the address literals dropped: the successor
+        # quotes the model's own expression (see `_SUCCS`), and `$tgt`/`$ret`
+        # would only be substituting pre-computed arithmetic for it.
+        extra_succ = {"$off": "(%d)" % off}
+    elif form == "cqo":
+        # REX 99: the only byte after the prefix, so there is no ModRM and
+        # nothing to read out of the encoding but the REX itself.  `b1` is the
+        # hypothesis that pins the opcode, and it comes from the byte list like
+        # every other `b1` here.
+        extra_args = " %d" % raw[0]
+        extra_succ = {"$rex": str(raw[0])}
     elif form == "setcc":
         op2, modrm = raw[1], raw[2]
         extra_args = " %d %d %d %d" % (op2, modrm, op2 - 0x90, modrm & 7)
@@ -442,25 +745,51 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         modrm = raw[2]
         extra_args = " %d %d" % (modrm, (modrm >> 3) & 7)
         extra_succ = {"$reg": str((modrm >> 3) & 7)}
-    elif form in ("mov_r64_rm64_disp8", "mov_rm64_r64_disp8"):
+    elif form in _MEMORY_DISP_FORMS:
+        # Every memory-operand `mov`/`lea` shape except the two SIB ones, and
+        # they all take their arguments in the same order: REX, ModRM, reg (the
+        # source for a store and the destination for a load), rm (the base),
+        # then `dst` for the load direction and the displacement last.
         rex, modrm = raw[0], raw[2]
-        disp = raw[3] - 256 if raw[3] > 127 else raw[3]
-        reg = (modrm >> 3) & 7
+        reg, rm = (modrm >> 3) & 7, modrm & 7
         rex_r = 8 if rex & 4 else 0
-        rex_b = 8 if rex & 1 else 0
+        mode = (modrm >> 6) & 3
         # A negative displacement is parenthesised: `-8 (by ...)` parses as an
-        # application of it.
-        if form == "mov_r64_rm64_disp8":
-            extra_args = " %d %d %d %d (%d)" % (rex, modrm, reg, reg + rex_r,
-                                                disp)
+        # application of it.  A disp32 is SIGNED as well as wide, and `wide_recv`
+        # frames live at about `rbp - 0x410`, so reading it unsigned here would
+        # put every frame store at `rbp + 4294966896`.
+        if mode == 0:
+            disp = None
+            darg = ""
+            disp_succ = {}
+        elif mode == 1:
+            disp = raw[3] - 256 if raw[3] > 127 else raw[3]
+            darg = " (%d)" % disp
+            disp_succ = {"$disp": str(disp)}
         else:
-            extra_args = " %d %d %d (%d)" % (rex, modrm, reg, disp)
-        extra_succ = {"$reg": str(reg), "$disp": str(disp), "$rex": str(rex),
-                      "$dst": str(reg + rex_r),
-                      "$base": str(5 + rex_b)}
+            disp = int.from_bytes(raw[3:7], "little", signed=True)
+            darg = " (%d)" % disp
+            disp_succ = {"$disp": str(disp)}
+        head = " %d %d %d %d" % (rex, modrm, reg, rm)
+        dst_succ = {"$dst": str(reg + rex_r)}
+        if form in ("mov_r64_rm64_disp8", "mov_r64_rm64_nodisp",
+                    "lea_r64_rm64_disp32"):
+            extra_args = head + " %d" % (reg + rex_r) + darg
+        else:
+            extra_args = head + darg
+            dst_succ = {}
+        extra_succ = {"$rex": str(rex), "$reg": str(reg), "$rm": str(rm)}
+        extra_succ.update(dst_succ)
+        extra_succ.update(disp_succ)
     call = "%s %s rc %d%s" % (lemma, prev, addr, extra_args)
     if takes_imm:
-        call += " %d" % imm
+        # Parenthesised, always, not only when negative.  Lean's application is
+        # left-associative, so an unparenthesised negative literal swallows the
+        # first hypothesis that follows it: `x86_step_call_rel32 s rc m -158 (by
+        # …)` is `x86_step_call_rel32 s rc m - (158 (by …))`, and the error is
+        # "Function expected at 158" -- which names neither the form, nor the
+        # instruction, nor the argument, in a file with one instruction per step.
+        call += " (%d)" % imm
     call += " " + " ".join(sc)
     # Every placeholder is substituted in ONE pass, from a single table.  It
     # used to be positional -- `$s` and `$m` first, then the `extra_succ`
@@ -479,7 +808,16 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     # subsequent `rip` comparison unprovable, and the failure reads as a bare
     # `False` from the `simp` that was trying.
     subs["$next"] = str(addr + length)
-    subs["$imm"] = str(imm) if imm is not None else "0"
+    # `setdefault`, not `[...]`: `$imm` is ALSO a placeholder the `_resolve`
+    # branch for the digit-immediate ALU forms fills in, with the MODEL's
+    # expression for the immediate (`UInt64.ofInt (read_i32_le rc (m+3))`) rather
+    # than a literal.  Assigning here instead overwrote that one, and the
+    # generated application said `UInt64.ofInt UInt64.ofInt (…)` — the symptom
+    # being an `Application type mismatch` naming `UInt64.ofInt` and therefore
+    # naming neither the form nor the byte, in a file with one instruction per
+    # step.  Two spellings of `$imm` in one table is the same hazard as B3's
+    # positional substitution: one placeholder, one source.
+    subs.setdefault("$imm", str(imm) if imm is not None else "0")
     if len(raw) > 2:
         modrm = raw[2]
         subs.setdefault("$rex", str(raw[0]))
@@ -501,6 +839,33 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     return call, succ
 
 
+#: The two `mov` directions plus `lea`, which share one addressing-mode split.
+#: `lea` is in the list because its address computation is `x86_mem_addr`'s and
+#: only its RESULT differs (a register write, truncated, rather than a memory
+#: access), so the modes have to be named once for all three.
+_MEMORY_FORMS = ("mov_r64_rm64", "mov_rm64_r64", "lea_r64_rm64")
+
+#: ModRM `mod` -> the suffix that names it.  Three modes, and `mod=0` is the
+#: only one where the meaning depends on the `rm` field as well -- hence `_rip`.
+_MEM_MODE = {0: "nodisp", 1: "disp8", 2: "disp32"}
+
+#: The memory-operand shapes `_resolve` supplies arguments for.  The two SIB
+#: ones are absent deliberately: they have their own `_resolve` branches above,
+#: because a SIB byte puts the displacement one byte further out and its base is
+#: read from the SIB rather than from the ModRM's rm field.
+_MEMORY_DISP_FORMS = ("mov_r64_rm64_disp8", "mov_r64_rm64_nodisp",
+                      "mov_rm64_r64_disp8", "mov_rm64_r64_nodisp",
+                      "mov_rm64_r64_disp32", "lea_r64_rm64_disp32")
+
+
+_BRANCH_FORMS = frozenset(("jcc_rel32", "jcc_rel8", "jmp_rel32", "jmp_rel8",
+                           "call_rel32"))
+"""Forms whose successor is not `the next instruction`, so a straight-line chain
+cannot follow them.  `call_rel32` is here even though it is not a branch on a
+flag: it jumps, and the address it lands on is a literal supplied by the decode
+branch, so the instruction after it is not the one at `m + length`."""
+
+
 def _shapes(code, insns):
     """`[(insn, resolved_form, raw)]`, splitting the two `mov` opcodes into
     their shapes.  A form not in `_FORMS` is left alone, and the caller reports
@@ -516,15 +881,37 @@ def _shapes(code, insns):
             # form to an rax lemma matches zero of them, and the symptom is a
             # proof that does not apply rather than a gap.
             want = 0xc4 if form == "alu_ri32:add" else 0xec
-            form = form + ("_rsp" if raw[2] == want else "_other")
-        if form in ("mov_r64_rm64", "mov_rm64_r64"):
+            form = form + ("_rsp" if raw[2] == want else "_reg")
+            # `_reg`, not `_other`: the decoder REFUSES a memory operand for
+            # this opcode family ("ALU with an immediate and a memory operand is
+            # not emitted", formal/x86_64_decode.py), so every remaining
+            # `alu_ri32:add` really is `add r64, imm32` and the old `_other`
+            # stood for one instruction under a name that said it was a
+            # fallback.  The digit is already in the form name, so the split
+            # that is left to do is rsp versus not-rsp and nothing else.
+        if form in _MEMORY_FORMS:
+            # Every addressing mode gets its OWN name, because a name that does
+            # not say which mode it is is how B2 happened: an unmapped shape used
+            # to be satisfied by whatever lemma happened to share its name, and
+            # `mov [rbp-0x410], rax` (mod=2) was reachable under the name of
+            # `mov [rbp+disp8], rax` (mod=1) because only two of the three modes
+            # were named at all.  An unhandled mode is now REPORTED by name.
+            #
+            # `_rip` is the one that needs naming most: mod=0 with rm=5 has no
+            # base register at all -- the displacement is measured from the end
+            # of the instruction -- so it is a different address computation and
+            # a mod=0 lemma applied to it would claim `mov [rbp]`.
             m, rm = modrm >> 6, modrm & 7
             if m == 3:
                 form += "_reg"
-            elif m == 1 and rm == 5:
-                form += "_disp8"
-            elif m == 0 and rm == 4 and len(raw) >= 4 and raw[3] == 0x24:
-                form += "_sib"
+            elif rm == 4 and len(raw) >= 4:
+                # A SIB byte follows, so the displacement is one byte further
+                # out.  Only the no-displacement SIB is wired.
+                form += "_sib" + ("" if m == 0 else "_" + _MEM_MODE[m])
+            elif m == 0 and rm == 5:
+                form += "_rip"
+            else:
+                form += "_" + _MEM_MODE[m]
         out.append((i, form, raw))
     return out
 
@@ -585,6 +972,27 @@ def _tree(code, info, shapes):
             node = _Node(insn, form, raw, addr, "jmp", state, addr + off)
             node.kids = [build(addr + off, None, depth + 1)]
             return None if node.kids[0] is None else node
+        if form == "call_rel32":
+            # A CALL IS A JUMP, and the tree has to follow the TARGET.  It used
+            # to fall through to `addr + length`, which is the instruction after
+            # the call -- and the model's successor says `rip := (Int.ofNat m + 5
+            # + off).toNat`, so the instruction at `m + 5` is not executed at
+            # all after a call.  The chain went on to step it anyway, and the
+            # step's `rip` side condition is `s.rip = <m + 5>`, which is FALSE;
+            # `simp` turned that into `False`, the guard admitted it, and the
+            # proof carried a `sorry` from the instruction after the call
+            # onwards -- eight examples, silently, with `failing` at 0.
+            #
+            # That is B22's lesson (a form with a lemma conceals the state of
+            # everything after it) with the concealment on the other side: the
+            # lemma was right, the TREE was wrong, and only the sorry count said
+            # so.  `count`, `fact`, `fib`, `pow2`, `sqsum` and `sum` are the
+            # six that recurse, so their target is a back edge and the honest
+            # answer is `loops`; the non-recursive callers get a real proof.
+            off = int.from_bytes(raw[1:5], "little", signed=True)
+            node = _Node(insn, form, raw, addr, "jmp", state, addr + 5 + off)
+            node.kids = [build(addr + 5 + off, None, depth + 1)]
+            return None if node.kids[0] is None else node
         if form == "ret":
             return _Node(insn, form, raw, addr, "ret", state, None)
         node = _Node(insn, form, raw, addr, "seq", state, addr + insn.length)
@@ -596,6 +1004,11 @@ def _tree(code, info, shapes):
         return None
     counter[0] = 0
     return root
+
+
+def _nodes(node):
+    """How many instructions the tree holds, both arms of every fork included."""
+    return 1 + sum(_nodes(k) for k in node.kids)
 
 
 def _paths(node, acc=None):
@@ -618,16 +1031,32 @@ def _byte_list(insns, code, base):
     return out
 
 
-def _header(code, insns, base):
-    """The import, the code function, and every byte as a fact."""
+def _header(code, insns, base, steps):
+    """The import, the code function, and every byte as a fact.
+
+    `steps` is how many step equations the file below will introduce, and it
+    buys the second option below.
+    """
     # A heartbeat budget.  The `hrip` step at the end of each path is one `simp`
     # over every successor equation on that path, and on the longer ones that is
     # a real amount of work: the default budget reports "deterministic timeout"
     # and the theorem is fine.  A timeout is NOT catchable by `try`, so the
     # `try`-guarded block below does not help here and the budget is the only
     # lever -- hence raising it rather than guarding.
+    #
+    # `maxRecDepth` is the other half of the same step, and it is a LIMIT rather
+    # than an allocation, so raising it costs nothing when it is not needed.  The
+    # default is 1000, and it is the closing `simp` that runs out rather than any
+    # single step: its term nests one successor equation per instruction, so the
+    # depth it needs grows with the length of the function and a constant would
+    # be a constant that is wrong again at the next example.  Measured on
+    # `bitops`, 44 steps, the first two words that go through are 1200 and 2000
+    # and 1000 fails -- about 27 per step, so 40 is the factor used here, with
+    # the default as the floor for the short ones that never needed it.
+    depth = max(1000, 40 * max(steps, 1))
     out = ["import X86\n",
            "set_option maxHeartbeats 4000000\n",
+           "set_option maxRecDepth %d\n" % depth,
            "def rc (addr : Nat) : UInt8 :=",
            "  if addr < %d then 0 else" % base,
            "  ([%s].getD (addr - %d) 0)\n"
@@ -671,16 +1100,42 @@ def _plan(path):
     return code, info, insns, shapes
 
 
+#: `emit` cannot state the theorem for a function that branches, and saying so
+#: by name is what keeps a coverage improvement from reading as a failure.  A
+#: `jcc`'s successor carries `rip := if … then … else …`, so the next step's
+#: address is not a literal and the chain stops one instruction later -- with an
+#: error AT THAT STEP, which says nothing about the branch that caused it, and
+#: which only appears once every other form has a lemma.  The path-tree emitter
+#: is the one for those functions; see `emit_terminates`.
+BRANCHING = "branches"
+
+
 def emit(path, expected):
     """The straight-line end-to-end theorem: every input, constant result.
 
-    Only usable when the function's result does not depend on its input, which
-    is 7 of the 43 examples -- see `emit_terminates` for the one that covers
-    the rest.
+    Only usable when the function's result does not depend on its input and its
+    body does not branch -- 3 of the 43 examples -- see `emit_terminates` for
+    the theorem that covers the rest.  A branch is refused here, by name, rather
+    than left to fail: the failure it would produce is at some later step and
+    names neither the form nor the branch.
+
+    Its two closing facts -- the value in `rax` and that `rip` reached the exit
+    -- are `try`-guarded and admitted where they do not go through, and the
+    caller counts the `sorry`s.  That is the same treatment `emit_terminates`
+    gives its `hrip`, and for the same reason: a function that spills its
+    argument cannot have its value resolved from the chain without the memory
+    separation inequalities (B18), and reporting that as a FAILURE says the
+    model disagrees with the source when the truth is that a side condition was
+    not discharged.  B21 is the bug that made that distinction cost the whole
+    run its credibility once; this is the same failure in a new place, and the
+    first thing a wiring change found by reaching a new example.
     """
     code, info, insns, shapes = _plan(path)
+    branching = sorted({f for _, f, _ in shapes} & _BRANCH_FORMS)
+    if branching:
+        raise ValueError("%s: %s" % (BRANCHING, ", ".join(branching)))
     base, entry = info["base_addr"], info["func_offset"]
-    L = _header(code, insns, base)
+    L = _header(code, insns, base, len(shapes))
     a = L.append
     a("/-- For EVERY input: the model runs this image to the exit pc and leaves")
     a("    `%d` in `rax`.  Proved, not asserted. -/" % expected)
@@ -699,9 +1154,9 @@ def emit(path, expected):
         nxt = "s%d" % (k + 1)
         a("  have hstep%d : x86_step %s rc = some %s :=" % (k, prev, succ))
         a("    %s" % call)
-        a("  obtain \u27e8%s, h%d\u27e9 : \u2203 t, x86_step %s rc = some t :="
+        a("  obtain ⟨%s, h%d⟩ : ∃ t, x86_step %s rc = some t :="
           % (nxt, k, prev))
-        a("    \u27e8_, hstep%d\u27e9" % k)
+        a("    ⟨_, hstep%d⟩" % k)
         a("  have hs%d : %s = %s := by" % (k + 1, nxt, succ))
         a("    rw [h%d] at hstep%d" % (k, k))
         a("    exact Option.some.inj hstep%d" % k)
@@ -710,18 +1165,23 @@ def emit(path, expected):
 
     hs = ", ".join("hs%d" % (j + 1) for j, _ in chain)
     a("  have hrax : %s.rax = %d := by" % (prev, expected))
-    a("    simp [%s, i0, x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r," % hs)
-    a("      x86_flags_sub, x86_flags_add]")
+    a("    try (simp [%s, i0, x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r," % hs)
+    a("      x86_flags_sub, x86_flags_add, x86_flags_logic, x86_sign_extend8,")
+    a("      x86_mem_addr, x86_trunc32]) <;>")
+    a("    first | decide | omega")
+    a("    all_goals sorry")
     a("  have hrip : %s.rip = 0 := by" % prev)
-    a("    have key : \u2200 (m : Nat \u2192 UInt8) (a : Nat) (v : UInt64) (b : Nat),")
-    a("        a + 8 \u2264 b \u2192 mem_read_bytes (mem_write_bytes m a v 8) b 8")
+    a("    have key : ∀ (m : Nat → UInt8) (a : Nat) (v : UInt64) (b : Nat),")
+    a("        a + 8 ≤ b → mem_read_bytes (mem_write_bytes m a v 8) b 8")
     a("          = mem_read_bytes m b 8 :=")
     a("      fun m a v b h => mem_read_bytes_write_above m a v 8 8 b h")
     a("    simp [%s, i0, X86State.init, x86_flags_sub, x86_flags_add," % hs)
-    a("      x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r]")
-    a("    rw [key _ _ _ _ (by decide)]")
-    a("    simp only [mem_read_bytes, ite_true]")
-    a("    decide")
+    a("      x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r, x86_flags_logic,")
+    a("      x86_mem_addr, x86_trunc32] <;>")
+    a("    try (repeat rw [key _ _ _ _ (by first | decide | omega)]) <;>")
+    a("    try (simp only [mem_read_bytes, ite_true]) <;>")
+    a("    first | decide | omega")
+    a("    all_goals sorry")
     rules = ["x86_exec_go_exit_step (by decide) "
              "(by simp only [i0, X86State.init] <;> decide) h0"]
     for j, _ in chain[1:]:
@@ -755,7 +1215,11 @@ def emit_terminates(path):
     root = _tree(code, info, shapes)
     if root is None:
         raise ValueError("body loops, or branches out of the function")
-    out = _header(code, insns, base)
+    # Every node in the tree, which is an upper bound on the length of any one
+    # path and so on the depth the closing `simp` at each `ret` will need.  Both
+    # arms of a fork are counted, which over-counts; the option is a limit, so
+    # over-counting only ever costs headroom nobody uses.
+    out = _header(code, insns, base, _nodes(root))
     out.append("/-- For EVERY input, the model runs this image to the exit pc.\n"
                "    No `sorry`: the path tree is walked once per branch outcome. -/")
     out.append("theorem terminates (n : UInt64) :")
@@ -861,7 +1325,7 @@ def emit_terminates(path):
                  % hs)
             emit("    x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r%s] <;>"
                  % case_simp)
-            emit("  try (rw [key _ _ _ _ (by first | decide | omega)]) <;>")
+            emit("  try (repeat rw [key _ _ _ _ (by first | decide | omega)]) <;>")
             emit("  try (simp only [mem_read_bytes, ite_true]) <;>")
             emit("  first | decide | omega")
             emit("  all_goals sorry")
@@ -920,6 +1384,13 @@ def _has_loop(path):
     is out of its reach -- and that is a limit of the method rather than a
     proof that stopped working, so it is reported as uncovered rather than as a
     failure.  A back edge is any branch whose target is at or before itself.
+
+    `call rel32` counts, and it used not to.  That omission is why the six
+    recursive examples read `no tree: body loops, or branches out of the
+    function` -- the tree's own message, which names two very different reasons
+    -- instead of `loops`.  A recursive call's target is a back edge in exactly
+    the sense of the sentence above, so `count`, `fact`, `fib`, `pow2`, `sqsum`
+    and `sum` are loops and say so.
     """
     r = B.compile_formal(path, prove=False, check=False, arch="x86_64")
     code, info = r["code"], r["info"]
@@ -928,7 +1399,7 @@ def _has_loop(path):
         return False
     for i in insns:
         raw = code[i.offset:i.next_offset]
-        if i.form == "jmp_rel32":
+        if i.form in ("jmp_rel32", "call_rel32"):
             if 5 + int.from_bytes(raw[1:5], "little", signed=True) <= 0:
                 return True
         elif i.form == "jcc_rel32":
@@ -963,8 +1434,8 @@ def _run_lean(text):
 
 
 def _check(path, expected):
-    ok, _, msg = _run_lean(emit(path, expected))
-    return ok, msg
+    """`(proved, n_sorries, first_error)` for the value theorem."""
+    return _run_lean(emit(path, expected))
 
 
 def main(argv):
@@ -1014,18 +1485,31 @@ def main(argv):
         if 0 <= expected <= 255:
             uncovered = None
             try:
-                good, msg = _check(t, expected)
+                good, val_sorries, msg = _check(t, expected)
             except ValueError as exc:
                 # No step lemma for some form: the theorem cannot even be
                 # ATTEMPTED, which is missing coverage rather than a proof that
                 # failed.  Reporting it as a failure is how "36 failing" happened
                 # earlier.
                 good, msg, uncovered = None, "", str(exc)
-            if good:
+            if good and not val_sorries:
                 val_ok += 1
                 vs = "  value:     rax = %d, every input" % expected
+            elif good:
+                # The chain is there and the file typechecks, but a closing fact
+                # was admitted -- for a function that spills its argument that is
+                # the memory separation, which is B18 and not a disagreement
+                # between the model and the source.  Reported as its own outcome
+                # for the reason B21 gives: an admitted side condition and a
+                # failed proof are different facts and conflating them is how
+                # this suite once read as 36 failing when 2 were.
+                val_gap += 1
+                vs = "  value:     rax = %d, every input, %d sorry" % (
+                    expected, val_sorries)
             elif uncovered is not None:
-                vs = "  value:     -  (no lemma: %s)" % uncovered.split(": ")[-1]
+                vs = "  value:     -  (%s)" % (
+                    uncovered if uncovered.startswith(BRANCHING)
+                    else "no lemma: %s" % uncovered.split(": ")[-1])
             elif _has_loop(t):
                 vs = "  value:     -  (loops)"
             elif not _probe_input_independent(t):

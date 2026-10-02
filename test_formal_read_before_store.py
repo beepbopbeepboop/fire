@@ -268,6 +268,65 @@ CASES = [
     ("match_wildcard_then_store_ok",
      "    match n:\n        case _:\n            p = 1\n"
      "    p = 2\n    return p\n", "ok"),
+    # A `case` pattern that is a bare name nothing has bound is a CAPTURE in
+    # this compiler (`fire_compiler.py`'s MatchStmt and
+    # `myinterpreter.py`'s `execute_MatchStmt`), and a capture binds the
+    # subject before the arm's body runs — the same shape as a `for` target and
+    # a `with` alias, and the third of the three
+    # `bugs/FORMAL_a_local_read_before_its_first_assignment.md` names. The arm
+    # was refused for reading its own capture.
+    ("match_capture_is_bound_in_its_own_arm_ok",
+     "    match n:\n        case 0:\n            return 1\n        case other:\n"
+     "            sink(other)\n    return 0\n", "ok"),
+    # …and it is bound in THAT arm only. One case's capture is not in scope in
+    # another's, which is why the names are a per-block `seed` and not more of
+    # the match head's definitions: CPython raises here (`a` is not defined
+    # anywhere in the harness, so `NameError`).
+    ("match_capture_is_not_in_scope_in_another_arm_refused",
+     "    match n:\n        case 0:\n            sink(a)\n        case other:\n"
+     "            sink(other)\n    return 0\n", "refuse"),
+    # THE ROW THAT PINS THE PER-ARM `seed`, and the reason it is not "add the
+    # captures to the match head's definitions". Here the SECOND case is the one
+    # that captures, and the first arm reads that name: the capture makes `a` a
+    # local of `probe`, so CPython raises `UnboundLocalError` at `probe(0)`.
+    # Put the captures on the head instead and `a` would be in scope in an arm
+    # that never tried to bind it, which is the worse of the two errors — a
+    # defect this analysis exists to find.
+    ("a_later_case_capture_is_not_in_scope_in_an_earlier_arm_refused",
+     "    match n:\n        case 0:\n            sink(a)\n        case a:\n"
+     "            sink(a)\n    return 0\n", "refuse"),
+    # A GUARD makes the case refutable however its pattern reads, so an EARLIER
+    # case can match and the match then falls through to the code after it on a
+    # path where the capture was never bound. (The guard failing does NOT undo
+    # the binding — measured on CPython 3.11, `return other` after a
+    # `case other if other > 5` returns the subject for every value — so the
+    # path that matters is the one an earlier case takes, which is what this
+    # body writes.) CPython raises `UnboundLocalError` there, because the
+    # capture makes `other` a local of `probe`.
+    ("match_guarded_capture_falls_through_to_a_read_refused",
+     "    match n:\n        case 0:\n            sink(0)\n"
+     "        case other if other > 5:\n            sink(other)\n"
+     "    sink(other)\n    return 0\n", "refuse"),
+    # The mirror of that row and the reason the capture is a per-arm `seed` and
+    # not a match-wide definition: an EARLIER case matching means the capture
+    # case is never tried, so a read after the match is a real defect even
+    # though the match ends in an irrefutable capture. CPython raises
+    # `UnboundLocalError` at `probe(0)` and `probe(1)`; `case other` alone is
+    # not enough to make `other` dominate the join.
+    ("match_capture_after_an_earlier_case_matched_refused",
+     "    match n:\n        case 0:\n            sink(0)\n        case other:\n"
+     "            sink(other)\n    sink(other)\n    return 0\n", "refuse"),
+    # THE PIN that says `_match_case_binds` stops at a bare name on purpose.
+    # `match` here is switch-style equality dispatch, not PEP 634 structural
+    # pattern matching, so `case [a, b]` evaluates the list `[a, b]` and
+    # compares it with `==`: `a` and `b` are READS. CPython binds them, so this
+    # row is a deliberate divergence and not an oracle failure — which is
+    # exactly the sort of row the fourth column exists for.
+    ("match_sequence_pattern_binds_nothing_here_refused",
+     "    match n:\n        case [a, b]:\n            sink(a + b)\n"
+     "        case _:\n            return 0\n    return 0\n", "refuse",
+     "`match` is equality dispatch in this compiler, so a pattern's "
+     "sub-expressions are reads and not bindings — see `_match_case_binds`"),
 
     # ── `del`: removes a name from the definitely-stored set without storing
     #    anything, so a `del` on one path IS a read-before-store on the other.
@@ -298,6 +357,37 @@ CASES = [
     ("code_after_raise_is_unreachable_ok",
      "    raise ValueError()\n    return q\n", "ok"),
 
+    # ── THE ENTRY BLOCK MUST NOT HAVE A SECOND SUCCESSOR ──────────────────
+    #
+    # `_build_cfg` used to end with `entry.succs += run(body, …)`, i.e. an edge
+    # from the function's ENTRY block to whichever block the body's last
+    # statement falls out of. Every one of those blocks is already reachable —
+    # the body was emitted with the entry as its pending predecessor — so the
+    # extra edge was a path from function entry to the final join that passes
+    # through nothing the body stores, and the fixpoint's intersection over
+    # that join's predecessors threw the body's definitions away.
+    #
+    # The refusal it produced named CPython's `UnboundLocalError` for programs
+    # CPython runs, and it fired on 54 functions across 26 files of
+    # `std/{builtin,collections,memory,algorithm,bit}` alone — including
+    # `_heapify_up`/`_heapify_down` in `collections/binary_heap.mojo` and every
+    # one of `builtin/sort.mojo`'s five sort helpers, each of which stores the
+    # name on the only path there is.
+    #
+    # The edge only appeared when the body FALLS OFF THE END — `run` returns
+    # `[]` for a body whose last statement is a `return` or a `raise`, and then
+    # there is nothing to add — so the three rows below all end in an
+    # expression statement rather than a `return`, which is also the shape
+    # every one of the real refusals has. The refusal rows above are what keep
+    # the fix from being a loosening: the entry edge was the only spurious
+    # edge, and the loop HEAD's edge to the join is still there.
+    ("store_before_a_loop_then_read_after_it_ok",
+     "    q = 1\n    while n > 0:\n        n = n - 1\n    sink(q)\n", "ok"),
+    ("store_before_a_branch_then_read_after_it_ok",
+     "    q = 1\n    if n:\n        q = 2\n    sink(q)\n", "ok"),
+    ("for_target_is_stored_for_its_own_body_ok",
+     "    for i in range(n):\n        sink(i)\n", "ok"),
+
     # ── names the check must NOT ask about ───────────────────────────────
     # A comprehension's target is bound inside its own scope, so a read of it
     # is not a read of an unstored local — the row a flat node walk gets
@@ -322,8 +412,20 @@ CASES = [
     ("nested_def_is_another_frame_ok",
      "    def inner():\n        m = 1\n        return m\n"
      "    return inner()\n", "ok"),
+# ── the TWO shapes a trailing statement can take ───────────────────────
+    # One defect, `_build_cfg` adding its `run`'s return value to the ENTRY
+    # block's successors, so the entry pointed at a block at the END of the
+    # body as well as the first — a path the source does not have. The fixpoint
+    # intersects a join's IN over its predecessors and the entry's OUT is only
+    # the parameter names, so every local stored before the trailing statement
+    # dropped out of that statement's own regions and a read there looked
+    # unstored. The check `ENTRY_SHAPES` below pins the graph itself; the two
+    # groups here pin the two shapes a LAST statement can have when the edge had
+    # something to attach to, which is what makes the hole invisible in every
+    # case above (they all end in `return`, and the `ReturnStmt` arm makes `run`
+    # return `[]`).
 
-    # ── a body whose LAST statement is an expression, not a `return` ─────
+    # ── (a) the LAST statement is an expression, not a control-flow statement
     # Every case above ends in `return`, which is why this hole survived: the
     # `ReturnStmt` arm makes `_build_cfg`'s `run` return `[]`, so the entry
     # block's extra edge had nothing to attach to. A function whose last
@@ -351,6 +453,70 @@ CASES = [
     ("tail_expression_after_try_finally_ok",
      "    q = 1\n    try:\n        return 0\n    finally:\n        pass\n"
      "    sink(q)\n", "ok"),
+
+    # ── (b) the LAST statement is itself a control-flow statement ───────────
+    # `_build_cfg` used to add its `run`'s return value to the ENTRY block's
+    # successors, which asserted a path from the function's first instruction
+    # into the tail of the body. The fixpoint pays for that edge, because the
+    # entry's OUT is only the parameter names: any region the trailing control
+    # statement opened had its IN intersected with the parameters, so every
+    # local stored before the statement dropped out of it and a read inside that
+    # statement's own arms looked unstored. Every program in this group is
+    # ordinary and every one of them was REFUSED.
+    #
+    # Measured on the corpus, not only here: it is what `re.mojo`'s `_p_alt`
+    # was reported for, whose `while 1:` is its last statement and which says
+    # `pend = entry` three lines above the read it was reported for. Taking `re`
+    # out of the backend takes out every file that imports it.
+    #
+    # The shape is not "a loop reads a local" — it is TWO conditions together:
+    # the body's LAST statement is a control-flow statement, AND at least one
+    # path FALLS OUT of it. The second half is not a detail: `run` returns []
+    # when every arm of the trailing statement terminates (`return`, `raise`,
+    # `break` all give no fall-through exit), so there is nothing to edge the
+    # entry to and the bug cannot fire. A body whose trailing `if` returns from
+    # both arms builds today and built before the fix, which is measured and is
+    # pinned below — a rule stated only in its coarse form sends the next reader
+    # to a program it does not reproduce on.
+    #
+    # Adding a statement AFTER the loop is the smallest thing that hides it,
+    # which is exactly the accidental difference between this group and the
+    # ones above it — and the same accident makes group (a) invisible to (b).
+    ("trailing_while_ok",
+     "    p = 1\n    while n:\n        q = p\n        n = n - 1\n", "ok"),
+    # `while 1:` is the shape the corpus uses most (a loop whose exit is a
+    # `break` or a `return`), and it is a separate CFG path because the loop
+    # always runs at least once.
+    ("trailing_while_true_ok",
+     "    p = 1\n    while 1:\n        q = p\n        n = n - 1\n        "
+     "if n < 0:\n            break\n", "ok"),
+    ("trailing_for_ok",
+     "    p = 1\n    for i in range(n):\n        q = p\n", "ok"),
+    ("trailing_if_ok",
+     "    p = 1\n    if n:\n        q = p\n", "ok"),
+    ("trailing_if_else_ok",
+     "    p = 1\n    if n:\n        q = p\n    else:\n        r = p\n", "ok"),
+    ("trailing_try_ok",
+     "    p = 1\n    try:\n        q = p\n    except:\n        r = p\n", "ok"),
+    ("trailing_match_ok",
+     "    p = 1\n    match n:\n        case 0:\n            q = p\n", "ok"),
+    ("trailing_with_ok",
+     "    p = 1\n    with sink(n) as s:\n        q = p\n", "ok"),
+    # And the same bodies still REFUSE when the name really is unstored: the
+    # fix removed an edge that asserted a path the source does not have, not
+    # the check itself.
+    ("trailing_control_flow_still_refuses_an_unstored_read",
+     "    while n:\n        q = q\n        n = n - 1\n", "refuse"),
+    ("trailing_control_flow_still_refuses_one_arm_store",
+     "    if n:\n        p = 1\n    else:\n        q = p\n", "refuse"),
+    # The OTHER direction of the rule's second condition: a trailing control
+    # statement whose every arm TERMINATES produced no fall-through exit, so
+    # the entry had nothing spurious to point at and the old code refused
+    # nothing. Pinned so the rule is not restated in its coarse form.
+    ("trailing_if_whose_arms_all_return_is_the_other_shape",
+     "    p = 1\n    if n:\n        return p\n    return 0\n", "ok",
+     "every arm terminates, so `run` returns [] and there is no spurious entry "
+     "edge to remove — this is the case the coarse form of the rule gets wrong"),
 ]
 
 
@@ -390,6 +556,47 @@ def the_function(stmts):
         if isinstance(s, F.FunctionDef) and s.name == "probe":
             return s
     raise AssertionError("the case source has no `probe` function")
+
+
+# (name, body, what the entry block's successor list must be)
+#
+# `entry_shape` pins the GRAPH rather than a verdict, because the defect was in
+# the graph and every verdict above can be satisfied by a rule that happens to
+# give the right answer for the wrong reason. The entry block holds no
+# statements, so its only successor is the block the body's FIRST statement
+# opens — one successor, whatever the body is, and never a block further down.
+#
+# `read_before_store`'s whole argument is "a store dominates a read only when
+# every path from the entry to the read passes one", so an edge that is not a
+# path the program has is not a conservative extra edge: it is a claim that
+# control reaches the end of the function having stored nothing, which is a
+# program CPython does not have.
+ENTRY_SHAPES = [
+    ("entry_reaches_only_the_first_statement",
+     "    q = 1\n    return q\n", [1]),
+    ("entry_does_not_reach_the_join_after_a_loop",
+     "    q = 1\n    while n > 0:\n        n = n - 1\n    sink(q)\n", [1]),
+    ("entry_does_not_reach_the_join_after_a_branch",
+     "    q = 1\n    if n:\n        q = 2\n    sink(q)\n", [1]),
+    ("entry_does_not_reach_the_loop_target_read",
+     "    for i in range(n):\n        sink(i)\n", [1]),
+    ("a_body_of_only_pass_still_has_one_successor",
+     "    pass\n", [1]),
+]
+
+
+def check_entry_shape() -> list:
+    """Every failure in ENTRY_SHAPES, as strings."""
+    bad = []
+    for name, body, want in ENTRY_SHAPES:
+        fn = the_function(parse_module("def probe(n):\n" + body,
+                                       filename=f"{name}.mojo"))
+        blocks, entry = M._build_cfg(fn.body)
+        got = blocks[entry].succs
+        if got != want:
+            bad.append(f"{name}: the entry block's successors are {got}, "
+                       f"not {want}")
+    return bad
 
 
 def main():
@@ -447,7 +654,11 @@ def main():
             if args.verbose:
                 mark = f" [diverges: {diverges}]" if diverges else ""
                 print(f"  PASS  {name} ({expect}){mark}")
-    print(f"read-before-store: PASS={passed} FAIL={failed}")
+    for problem in check_entry_shape():
+        failed += 1
+        print(f"  FAIL  entry-shape: {problem}")
+    print(f"read-before-store: PASS={passed} FAIL={failed} "
+          f"({len(ENTRY_SHAPES)} graph shapes)")
     return 1 if failed else 0
 
 

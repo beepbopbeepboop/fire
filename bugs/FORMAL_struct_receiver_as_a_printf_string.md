@@ -1,109 +1,143 @@
-# FORMAL_struct_receiver_as_a_printf_string: printing a struct SEGVFAULTS, on both architectures
+# FORMAL_struct_receiver_as_a_printf_string: `%s` of a value that is not text
 
-**Status: OPEN, pre-existing, and NOT specific to `@dataclass` — found while
-proving that `@dataclass`'s generated `__repr__` has no representation here.**
-A struct receiver passed to `printf` with a `%s` conversion, or to `str()`, exits
-139. That is a crash, so it is not a wrong answer, but it is the reason
-`@dataclass` cannot be said to work: `repr=True` is the DEFAULT and it
-generates a `__repr__` the source then relies on.
+**Status: the two-field case was already refused; the `INT_KIND` case is FIXED
+and measured before and after on both architectures; ONE case remains open and
+it needs a table another worker has claimed.** This file was filed on
+2026-09-29 from a SIGSEGV; what follows is what that SIGSEGV was, what is now a
+build error, and the one shape of it that still faults.
 
-Found while writing the `dataclasses` transform for the formal backend
-(2026-09-29, the `module:dataclasses` claim). Every measurement is from this
-tree.
+## What was measured, then and now
 
----
+Every row is a real build and a real run on this tree, both architectures.
 
-## What I ran
+| program | at the filing | now |
+|---|---|---|
+| `c = C(1, 2); printf("%s", c)` — a TWO-field class | SIGSEGV 139 | **refused** before this file was read: `frame_receiver_escape_refusal`'s `FRAME_C_VALUE_CALLS` branch |
+| `c = C(1, 2); print(c)` | SIGSEGV 139 | refused, `FRAME_VARIADIC_BUILTIN_CALLS` |
+| `printf("%s", str(c))` on the same | — | refused by the above; `str()` of a one-field receiver is the *value* (see below) |
+| `var a = 5; printf("[%s]", a)` | SIGSEGV 139 | **refused** — `model.printf_text_conversion_refusal` |
+| `var a = 2 + 4; printf("[%s]", a)` | SIGSEGV 139 | **refused** — same, and the shape a real program writes |
+| `printf("[%s]", one_field_int_struct)` | **SIGSEGV 139** | **STILL SIGSEGV 139** — see the open item |
 
-```python
-class C:
-    x: int
-    y: int
+The two-field rows were already fixed when this session read the file; the
+filing's `printf("%s\n", c)` reproducer does not reproduce on this tree. The
+`%s`-of-a-plain-integer rows are new measurements of the same class and are the
+family's real remaining content: `%s` is the one printf conversion that
+**dereferences** its argument — every other one renders the word it is handed —
+so an integer is not a wrong rendering of it, it is a walk off the end of
+whatever the number points into.
 
-def main(n):
-    c = C(1, 2)
-    printf("%s\n", c)      # and, separately: str(c)
-    return 0
+## What landed
+
+`formal/model.py`: `PRINTF_TEXT_CONVERSIONS_CALLEES`,
+`printf_conversion_specifiers` (the format-string scan) and
+`printf_text_conversion_refusal` (the decision and the message). Both emitters
+ask it from `_emit_call`, where the format string and the varargs are last in
+hand together. `print()` needed nothing: it builds its OWN format from each
+operand's kind (`_print_call`) and already refused the case it cannot tell,
+which is why `printf` — the spelling the whole corpus uses, taking a format the
+source wrote — was the only hole.
+
+**The vararg arithmetic is the part that has to be right, and it is a real trap.**
+The position of a `%s` in the OUTPUT is the position of its argument in the
+varargs list, so a scanner that miscounts refuses the WRONG argument — which is
+worse than not looking, because the message would name a name the program never
+misused. Two things read as nothing and are not: `%%` (a literal percent, which
+`print_literal` doubles precisely so the scan can tell it from a conversion) and
+a `*` width or precision (which consumes an argument). `printf_conversion_specifiers`
+counts `*` as its own conversion for that reason, and
+`printf_star_width_and_literal_percent_keep_the_varargs_aligned` in
+`test_formal_run.py` is pinned so that a scanner which drops either one lands a
+`%s` on the integer `7` and fails the build. Its expected bytes were checked
+against the C library on this host, not derived from the image.
+
+## The narrowing, and why it is not `kind == INT_KIND`
+
+`INT_KIND` is this model's **default** for a word, so three shapes that are
+containers all carry it: an unannotated parameter (`def show(s):
+printf("[%s]", s)` — measured working on both architectures, `[abc]`), a call
+result whose callee declares no return type, and a loop variable over a name.
+Reading "not known to be text" as "not text" would refuse every function in the
+corpus that takes a string it was never told about.
+
+So the evidence is positive, and it is the same predicate the container-element
+refusal already uses: `ValueKinds.own_shape_kind` — a statement of THIS
+function bound the name to an integer **on that statement's own shape**. One
+predicate, two families, and two architectures that cannot disagree about which
+names carry it. `None` (the source does not say) is the permissive answer and
+stays that way; the gap it leaves is the one the note above `ValueKinds`
+already records as the remaining one for `print`, and it is a kind-table gap
+rather than a conversion gap.
+
+## A ONE-FIELD struct prints its field, and that is not a bug
+
+The filing says "a one-field struct too, so it is not about the frame:
+`struct_is_framed` is `False` for one field and the receiver IS the field, and
+it still crashes". The second half is still true for `%s`. The first half is not
+a defect at all, and it is worth recording because it looks like one:
+
+```
+class One:  x: int
+var c = One(7)
+print(c)          ->  7
+printf("%d", str(c))  ->  7
 ```
 
-```console
-$ python3 fire.py build --formal --no-prove -o r1 r1.py && ./r1
-Built: r1  [arm64/macho]
-Segmentation fault: 11
-$ echo $?
-139
-```
+Both build, both run, and `7` is what CPython's value model means by a
+one-field record on this path — `model.one_word_receiver_kind` is the statement
+of it, and `str(c)` returning the field is the same convention `len(self.n)`
+relies on. (CPython prints `<__main__.One object at 0x…>`, and that divergence
+is the documented one-word convention, not a bug in either direction.) What is
+wrong is only the `%s`: `7` is a number, so `%s` dereferences it.
 
-Both spellings, and both of them. A one-field struct too, so it is not about
-the frame: `struct_is_framed` is `False` for one field and the receiver IS the
-field, and it still crashes.
+## The open item, and whose it is
 
-## Why it happens, as far as it is diagnosed here
+`printf("[%s]", c)` where `c` is a one-field struct **still faults** (exit 139,
+both architectures, from a green build). The reason is structural: a one-field
+struct has no frame, so there is no frame address for
+`frame_receiver_escape_refusal` to key on, and no statement of this function
+bound `c` to an integer — `c`'s own-shape evidence is `One(7)`, a CALL, which
+`_own_shape_of` deliberately counts as no evidence at all.
 
-A struct of more than one field is lowered as a POINTER to a frame of 8-byte
-slots (`formal/model.py`'s `struct_is_framed`), and a one-field struct's
-receiver is the field's own word. Neither carries anything saying "this is
-text". `printf` with a `%s` conversion reads bytes at the address it is handed
-until it finds a NUL — and the thing at that address is a frame of small
-integers and other frames' addresses, none of which is a NUL-terminated string
-in any predictable place. So it walks off the end of the frame and faults.
+Closing it needs a `{name: struct}` table for a construction whose result is ONE
+WORD — the mirror of `fn._frame_candidates`, keyed on what a one-word
+constructor binds rather than on what a frame constructor binds, filled from
+`_constructor_bindings` over the NON-framed structs. **That table is
+`formal3-3`'s claim**: it is the stated next step of
+`bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` §1 (the same table would fix
+`a == b` on a one-field struct, which has the identical shape and the identical
+cause), and building it here would be two branches answering one question — the
+exact failure `_frame_candidates` exists to prevent.
 
-That is the same reasoning as `formal/model.py`'s `frame_receiver_escape_refusal`
-("a `char *` is a pointer to text and every `%s` DEREFERENCES it"), applied to
-the `printf` builtin rather than to a call. **The refusal exists for a callee
-and does not fire for a C library variadic**, and the reason is visible in the
-corpus: `printf` takes a variable number of arguments, so there is no parameter
-list for the escape check to walk the arguments against.
+So the one-field `%s` waits for that table, and when it lands the site is
+`_printf_arg_is_text` in the two backends: a name in the one-word table is
+`False` for a `%s` conversion, and that is a three-line addition to a hook
+that already exists.
 
-`test_formal_os.py:62` already notes the neighbouring half of this ("`printf`
-… as an integer, which is what a predicate has to be compared as"), so the
-`%d`-of-a-struct case is handled somewhere and the `%s` case is not.
-
-## Why it is filed rather than fixed here
-
-Two reasons, and the first is the claim.
-
-1. **It is not a dataclasses construct.** It is a `printf` conversion on a
-   struct receiver, and it reproduces with no `@dataclass` anywhere in the
-   program. `formal/arm64_codegen.py`'s variadic emission and the conversion
-   dispatch are outside the `module:dataclasses` claim.
-2. **The fix is a refusal, and refusals for this shape live in `formal/model.py`
-   beside the others** — `string_operand_is_string` and
-   `frame_receiver_escape_refusal` — which is also outside the claim.
-
-So `formal/dataclass_transform.py` refuses `@dataclass(repr=…)` with a message
-that NAMES this gap rather than papering over it, and that message is the only
-thing in this tree that points a reader at it.
-
-## What would close it
-
-**Refuse it, in the same place the string-operand refusals already live.** A
-`%s`-or-`%r` conversion whose argument is a struct receiver has no
-representation — the value is a frame address and the conversion wants text —
-and the honest answer is the same one every other string/refusal in
-`formal/model.py` gives. Concretely:
-
-* in `formal/model.py`, a `printf`-family refusal beside
-  `string_operand_is_string`, reading the same kind table, so the message
-  names the conversion and the receiver the way `str + str` names its operands;
-* the arm64 and x86-64 emitters ask it from where they already handle the
-  builtin, and the refusal is arch-free text so one case pins both;
-* `test_formal_run.py` gains a `refuse:` case, and the current behaviour — a
-  clean SIGSEGV at run time, with the build green — becomes a build error.
-
-**Cost: under an hour, and it is a one-word fix at every site that turns a
-139 into a diagnostic.** It is worth doing on its own merits: today this
-failure mode is "the program builds, links, runs, and dies", which is the class
-of defect this backend's whole refusal discipline exists to convert into a
-message.
-
-## The dataclasses consequence, stated so it is not lost
+## The dataclasses consequence, still refused for the same reason
 
 `@dataclass`'s `repr=True` is the DEFAULT and generates `__repr__` as
 `C(x=1)`. That is not the inherited `object.__repr__` a bare class would
 otherwise reach, so it cannot be waved through as "the same as a bare class" —
-even though a bare class has the same crash. So `repr=True` is refused
-(measured message: "`@dataclass(repr=…)` is not lowerable on this path …
-printing a struct receiver SEGFAULTS on both architectures today"), and
-`repr=False` is refused for the same reason rather than offered as a way
-around it. Both are pinned by `test_dataclasses_formal.py`.
+even though a bare class had the same crash. So `repr=True` is refused, and
+`repr=False` is refused for the same reason rather than offered as a way around
+it. Both are pinned by `test_dataclasses_formal.py`, and that refusal is now
+quoting a hole that is two thirds closed: a two-field struct is refused, a
+plain integer is refused, and only a one-field struct still gets through.
+
+## Verification
+
+    python3 test_formal_run.py printf_s_of_an_integer_is_refused \
+        printf_s_of_an_arithmetic_result_is_refused \
+        printf_s_of_a_parameter_a_literal_and_a_bound_string_still_print \
+        printf_star_width_and_literal_percent_keep_the_varargs_aligned
+    # 4 PASS, and `test_formal_run.py` as a whole PASS=520 FAIL=5 with the 5
+    # measured identical at 1d5a25ed.
+
+    python3 test_formal_value_model.py a_percent_s_of_an_integer_is_refused
+    # PASS — `run_refusal` builds BOTH architectures and requires the identical
+    # message from each, which is the assertion that matters for a defect the
+    # two backends SHARE.
+
+    python3 test_formal.py -j 8
+    # PASS=41 KNOWN-GAP=4 FAIL=0, unchanged.

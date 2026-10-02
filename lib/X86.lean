@@ -332,6 +332,24 @@ def x86_sign_extend8 (v : UInt64) : UInt64 :=
 def x86_sign_extend16 (v : UInt64) : UInt64 :=
   if v &&& 0x8000 != 0 then v ||| 0xffffffffffff0000 else v
 
+/-- `cqo`: RDX = the SIGN EXTENSION of the whole 64-bit RAX — all ones if bit
+    63 is set, zero otherwise.  This is NOT `x86_sign_extend32`, which is
+    `movsxd`/`cdq`: it keeps the low 32 bits and extends bit 31, so it returns
+    `v` itself for every value whose bit 31 is clear.
+
+    Reached for a WRONG answer rather than a missing one, because `cqo` is
+    always immediately followed by an `idiv`, and `idiv` reads RDX:RAX as the
+    dividend: a `cdq` leaves RAX there, so the model divides
+    `RAX * 2^64 + RAX` where the hardware divides `RAX`.  Measured on
+    `formal/examples/udivmod.mojo` (`(n / 7) + (n % 7)`, `n = 10`), where the
+    answer is 4 and the model returned 7905747460161236410 — which is
+    `(10 * 2^64 + 10) / 7` truncated into 64 bits, plus `(10 * 2^64 + 10) % 7`.
+    Every value with bit 31 clear was wrong this way and every example that
+    divides went through it, so the agreement count in
+    `formal/x86_64_model_test.py` was carrying one wrong answer per divide. -/
+def x86_cqo (v : UInt64) : UInt64 :=
+  if x86_msb v then 0xffffffffffffffff else 0
+
 
 /-- `v` as a signed 64-bit number. -/
 def x86_signed (v : UInt64) : Int :=
@@ -388,8 +406,10 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
     let v := mem_read_bytes s.mem (s.rsp.toNat) 8
     some { x86_set_reg s r v with rsp := s.rsp + 8, rip := rip + 2 }
   else if op = 0x99 && w then
-    -- cqo: RDX = the sign extension of RAX
-    some { s with rdx := x86_sign_extend32 s.rax, rip := rip + 2 }
+    -- cqo: RDX = the sign extension of the whole 64-bit RAX.  `x86_cqo`, and
+    -- NOT `x86_sign_extend32`: see its own docstring for what the difference
+    -- costs on the very next instruction.
+    some { s with rdx := x86_cqo s.rax, rip := rip + 2 }
   else if 0xb8 ≤ op && op ≤ 0xbf && w then
     -- mov r64, imm64
     let v := mem_read_bytes code (rip + 2) 8
@@ -830,6 +850,83 @@ theorem x86_step_movzx_rax_al (s : X86State) (code : Nat → UInt8) (m : Nat)
     x86_step s code = some { s with rax := s.rax &&& 0xFF, rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb, h_rip, h_b0, h_b1, h_b2, h_b3]
 
+/-! `movsx r64, r8` (REX.W 0F BE /r, mod=3): the SIGNED twin of the lemma above,
+    and the first `movsx` the chain can step at all.  `movsx_r64_r8` was the
+    largest single uncovered form left in the end-to-end theorem -- it named the
+    missing lemma for 3 of the 45 examples, `n8`, `sgt8` and `sle8`, and those
+    three could not have a path tree because of it.
+
+    It is general over both registers, and the corpus is what says so rather
+    than taste: it emits two distinct shapes, `48 0f be c0` (`movsx rax, al`)
+    and `48 0f be db` (`movsx rbx, bl`), three of the second to one of the
+    first.  Two shapes is the point at which a concrete `x86_step_movsx_rax_al`
+    becomes a second copy of `x86_step_movzx_rax_al` with one byte changed.
+
+    The destination is a CONCRETE `dst`, with `reg + x86_rex_r rex = dst`
+    beside it, for the reason `x86_step_mov_rm64_mem_disp8` gives: the model
+    writes `x86_set_reg s (reg + x86_rex_r rex) ...` and `simp` will not reduce
+    a `match` on a non-literal, so the caller reads the destination out of the
+    encoding and supplies it.  The caller is `formal/x86_64_endtoend_test.py`.
+
+    Note what that argument does NOT need, because the first attempt carried it
+    and it was the wrong thing to reach for: no `dst < 16`.  Reducing the
+    `match` was never the goal -- making both sides the SAME unreduced `match`
+    is -- so the bound plays no part, and the proof is one `simp` shorter for
+    dropping it.
+
+    `x86_sign_extend8` is on bit 7, not bit 31, and the model's 0F BE arm is
+    right about that where it used not to be.  The two errors cancelled from
+    outside, which is the part worth keeping: the arm applied the 32-bit
+    extension, and the only examples that emit a byte `movsx` had no step lemma
+    wired for the form, so nothing ever asked the model what it computed.  A
+    gap in the proof chain hid a defect in the thing the chain was proving
+    things about -- see the arm's own comment.
+
+    The arm also does not consult REX.W, so this lemma states the 64-bit form
+    `h_w` pins and the model's no-REX arm (which neither narrows nor extends) is
+    a different statement again.  `encode_movsx_r64_r8` always sets W, so the
+    third reading is unreachable from this backend and is not modelled. -/
+theorem x86_step_movsx_r64_r8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm dst : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x0f)
+    (h_b2 : code (m + 2) = 0xbe) (h_b3 : code (m + 3) = modrm)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_dst : reg + x86_rex_r rex = dst) :
+    x86_step s code = some { x86_set_reg s dst
+        (x86_sign_extend8 (x86_get_reg s (rm + x86_rex_b rex) &&& 0xFF)) with
+        rip := m + 4 } := by
+  -- `x86_set_reg`, `x86_sign_extend8`, `x86_rex_r` and `x86_is_rex` are all
+  -- DELIBERATELY absent from this set, and their absence is most of the proof.
+  -- Every one of them is there to break a rewrite the simplifier needs to do
+  -- first:
+  --
+  --   * `x86_rex_r` unfolds the model's destination index to
+  --     `reg + (if rex.toNat &&& 4 = 0 then 0 else 8)`, so `h_dst` no longer
+  --     matches it, the two sides keep different destinations, and `simp`
+  --     answers by projecting the record update -- a 1100-line goal that is a
+  --     `X86State` literal, naming neither the form nor the field.
+  --   * `x86_set_reg` then unfolds the destination into a 16-arm `match` on a
+  --     symbolic index that cannot reduce, which is the wall B10 is about.  The
+  --     goal survives as two 2000-line structures that differ in a `match`.
+  --   * `x86_sign_extend8` is an `if` on bit 7 of a value that is itself a
+  --     `match` on the source register, so unfolding it splits the goal.
+  --   * `x86_is_rex` turns the `x86_step` dispatch into an `if` on two
+  --     comparisons over a symbolic `rex`, and `simp` splits on that `if`,
+  --     landing in the `x86_step_plain` branch -- which is a different decoder
+  --     with a different length for the 0x0F escape, so the goal becomes about
+  --     an instruction the bytes do not encode.
+  --
+  -- With all four left folded, `h_dst` rewrites the index to `dst` and the two
+  -- sides are the same two applications.  `imul` above needs `x86_set_reg` and
+  -- this does not, because `imul`'s statement puts `x86_get_reg s dst` on both
+  -- sides of the product and the `match` has to come apart for that; this one's
+  -- source index never reaches a `match`.
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_mem_addr, x86_rm_read,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_reg, h_rm, h_dst]
+
 
 /-- `jz rel32` (0F 84 id): taken lands past the displacement. -/
 theorem x86_step_jz_rel32 (s : X86State) (code : Nat → UInt8) (m : Nat) (off : Int)
@@ -1154,10 +1251,266 @@ theorem x86_step_sub_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
         x86_flags_sub,
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
 
+/-! The three LOGIC ALU forms -- `and` (0x21), `or` (0x09), `xor` (0x31) -- as
+    three theorems rather than one.
+
+    One theorem is the obvious thing to reach for and it does not work, which
+    is worth stating because the model's own arm IS one arm for all three:
+    `res` there is `if op = 0x09 then a ||| b else if op = 0x21 then a &&& b
+    else if op = 0x31 then a ^^^ b else a &&& b`, and a single theorem about
+    that chain has to either state the chain (so every caller inherits an `if`
+    it cannot reduce, and has to prove which arm it is in all over again) or
+    take the result as an argument and a hypothesis that it is the right arm
+    (so the caller supplies a fact that is false for two of the three opcodes).
+    Three theorems over a literal opcode byte is the shape `add_rr`/`sub_rr`
+    above already use, and it keeps each successor a plain term.
+
+    What the three have in common is the FLAGS, and that is the reason they are
+    siblings rather than six unrelated lemmas: `and`, `or` and `xor` all compute
+    ZF and SF from the result and clear CF and OF, so the successor is the same
+    four expressions with a different operator on the value.  In the model that
+    is literally `x86_flags_logic`, computed once on the pre-write state and
+    then re-asserted over the written-back one -- `add` above is the same shape
+    and `x86_step_add_rr`'s note says so. -/
+
+/-- `and r64, r64` (REX.W 21 /r, mod=3), general over both registers.
+
+    The DESTINATION is the rm field (+REX.B) and the SOURCE is the reg field
+    (+REX.R), which is the opposite sense to `mov` and the reason the parameter
+    names here are the encoding's. -/
+theorem x86_step_and_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x21)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) &&& (x86_get_reg s (reg + x86_rex_r rex))) with
+        rip := m + 3,
+        zf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& (x86_get_reg s (reg + x86_rex_r rex)))).zf,
+        sf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& (x86_get_reg s (reg + x86_rex_r rex)))).sf,
+        cf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& (x86_get_reg s (reg + x86_rex_r rex)))).cf,
+        of_ := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& (x86_get_reg s (reg + x86_rex_r rex)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+/-- `or r64, r64` (REX.W 09 /r, mod=3). -/
+theorem x86_step_or_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x09)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) ||| (x86_get_reg s (reg + x86_rex_r rex))) with
+        rip := m + 3,
+        zf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ||| (x86_get_reg s (reg + x86_rex_r rex)))).zf,
+        sf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ||| (x86_get_reg s (reg + x86_rex_r rex)))).sf,
+        cf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ||| (x86_get_reg s (reg + x86_rex_r rex)))).cf,
+        of_ := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ||| (x86_get_reg s (reg + x86_rex_r rex)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+/-- `xor r64, r64` (REX.W 31 /r, mod=3). -/
+theorem x86_step_xor_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x31)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) ^^^ (x86_get_reg s (reg + x86_rex_r rex))) with
+        rip := m + 3,
+        zf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ^^^ (x86_get_reg s (reg + x86_rex_r rex)))).zf,
+        sf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ^^^ (x86_get_reg s (reg + x86_rex_r rex)))).sf,
+        cf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ^^^ (x86_get_reg s (reg + x86_rex_r rex)))).cf,
+        of_ := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) ^^^ (x86_get_reg s (reg + x86_rex_r rex)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+/-- `cqo` (REX.W 99): sign-extend RAX across RDX, the setup a signed `idiv`
+    needs.  No operand and no destination, which is why it is concrete where
+    almost everything else here is general -- the corpus emits `48 99` and
+    nothing else, and there is nothing to generalise over.
+
+    `x86_sign_extend32` is the 32-bit extension, which is correct here: `cqo`
+    sign-extends bit 31 of RAX, not bit 7 or bit 15, so the two-byte and
+    one-byte helpers above are the wrong ones and this is the one that applies. -/
+theorem x86_step_cqo (s : X86State) (code : Nat → UInt8) (m : Nat) (rex : UInt8)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x99)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true) :
+    x86_step s code = some { s with rdx := x86_sign_extend32 s.rax, rip := m + 2 } := by
+  -- `x86_rex_w` is NOT in the simp set and `x86_is_rex` is not either, for the
+  -- reason `x86_step_movsx_r64_r8` gives: unfolding either breaks the rewrite
+  -- that has to happen first.  `h_rex` is what routes `x86_step` to the REX
+  -- decoder at all, and there is no symbolic register index here for the two
+  -- to interfere with.
+  simp [x86_step, x86_step_rex, x86_sign_extend32,
+        h_rip, h_b0, h_b1, h_rex, h_w]
+
+/-! `shl` / `shr` / `sar` by an immediate byte (REX.W C1 /digit, mod=3).
+
+    Three theorems for one reason and one only: the model has a single arm for
+    all of C1 and D3 and selects the operation by the ModRM `digit` field with
+    an `if` chain, so a single theorem about it would state the chain and leave
+    every caller to re-derive which arm it is in.  Pinning the digit in the
+    theorem's own hypotheses is what reduces the chain, and the caller supplies
+    it from the encoding for free.
+
+    The shift COUNT stays symbolic.  The model computes it as
+    `UInt64.ofNat (if n ≥ 64 then 64 else n)`, and x86 masks a shift of 64 or
+    more to exactly that, so the clamp is the semantics rather than a bound to
+    discharge -- which is why there is no `n < 64` hypothesis and why this
+    needs no `dst` either: the destination is the rm field (+REX.B) and, as for
+    `add`/`sub`, `x86_set_reg` on that index appears the same on both sides.
+
+    `sar` is the `else` arm, not a third `if`: the chain tests `digit = 4` and
+    `digit = 5` and everything else is arithmetic shift.  Pinning `digit = 7`
+    refutes the middle test by `simp`, so the fallthrough is as provable as
+    either named arm -- but it does mean the statement for `sar` is only about
+    digit 7, and `digit = 6` would be a different instruction the model happens
+    to compute the same way. -/
+
+/-- `shl r64, imm8` (REX.W C1 /4, mod=3). -/
+theorem x86_step_shl_imm8 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0xc1)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 4)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) <<< UInt64.ofNat (if (code (m + 3)).toNat ≥ 64 then 64 else (code (m + 3)).toNat)) with
+        rip := m + 4,
+        zf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) <<< UInt64.ofNat (if (code (m + 3)).toNat ≥ 64 then 64 else (code (m + 3)).toNat))).zf,
+        sf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) <<< UInt64.ofNat (if (code (m + 3)).toNat ≥ 64 then 64 else (code (m + 3)).toNat))).sf } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub, x86_sign_extend32,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+
+/-- `shr r64, imm8` (REX.W C1 /5, mod=3). -/
+theorem x86_step_shr_imm8 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0xc1)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 5)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) >>> UInt64.ofNat (if (code (m + 3)).toNat ≥ 64 then 64 else (code (m + 3)).toNat)) with
+        rip := m + 4,
+        zf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) >>> UInt64.ofNat (if (code (m + 3)).toNat ≥ 64 then 64 else (code (m + 3)).toNat))).zf,
+        sf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) >>> UInt64.ofNat (if (code (m + 3)).toNat ≥ 64 then 64 else (code (m + 3)).toNat))).sf } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub, x86_sign_extend32,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+
+/-- `sar r64, imm8` (REX.W C1 /7, mod=3), the model's arithmetic-shift
+    fallthrough. -/
+theorem x86_step_sar_imm8 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0xc1)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 7)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) (x86_sign_extend32 (x86_get_reg s (rm + x86_rex_b rex)) >>> UInt64.ofNat (if (code (m + 3)).toNat ≥ 64 then 64 else (code (m + 3)).toNat)) with
+        rip := m + 4,
+        zf := (x86_flags_logic s (x86_sign_extend32 (x86_get_reg s (rm + x86_rex_b rex)) >>> UInt64.ofNat (if (code (m + 3)).toNat ≥ 64 then 64 else (code (m + 3)).toNat))).zf,
+        sf := (x86_flags_logic s (x86_sign_extend32 (x86_get_reg s (rm + x86_rex_b rex)) >>> UInt64.ofNat (if (code (m + 3)).toNat ≥ 64 then 64 else (code (m + 3)).toNat))).sf } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub, x86_sign_extend32,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+
+/-! The digit-immediate ALU forms (REX.W 81 /digit id, and 83 /digit ib).
+
+    One model arm covers all seven digits and both widths, selecting on `op` for
+    the width and on `digit` for the operation, so the same argument as the
+    shifts applies: one theorem would state the whole `if` chain and every
+    caller would re-derive which arm it is in.  Three theorems here because
+    three digits are the three the backend emits for these shapes in the corpus
+    -- `add rax, imm32`, `and rbx, imm32` and `cmp rax, imm8`.
+
+    `83` versus `81` is not only the immediate's width, it is the LENGTH: the
+    model's `endAddr` is `rip + 7` for the 32-bit form and `rip + 4` for the
+    8-bit one, so a successor that said `m + 4` for `81` would be a proof of a
+    four-byte instruction.  That is B6's shape, one level down.
+
+    `cmp` is different in kind from the other two: digit 7 takes the branch that
+    computes the subtraction and sets flags WITHOUT writing the result back, so
+    its successor mentions no register at all.  A theorem copied from `add`
+    would claim one. -/
+
+/-- `add r64, imm32` (REX.W 81 /0 id, mod=3). -/
+theorem x86_step_add_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x81)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 0)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) + UInt64.ofInt (read_i32_le code (m + 3))) with
+        rip := m + 7,
+        zf := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) + UInt64.ofInt (read_i32_le code (m + 3)))).zf,
+        sf := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) + UInt64.ofInt (read_i32_le code (m + 3)))).sf,
+        cf := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) + UInt64.ofInt (read_i32_le code (m + 3)))).cf,
+        of_ := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i32_le code (m + 3))) ((x86_get_reg s (rm + x86_rex_b rex)) + UInt64.ofInt (read_i32_le code (m + 3)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+
+/-- `and r64, imm32` (REX.W 81 /4 id, mod=3). -/
+theorem x86_step_and_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x81)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 4)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) &&& UInt64.ofInt (read_i32_le code (m + 3))) with
+        rip := m + 7,
+        zf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& UInt64.ofInt (read_i32_le code (m + 3)))).zf,
+        sf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& UInt64.ofInt (read_i32_le code (m + 3)))).sf,
+        cf := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& UInt64.ofInt (read_i32_le code (m + 3)))).cf,
+        of_ := (x86_flags_logic s ((x86_get_reg s (rm + x86_rex_b rex)) &&& UInt64.ofInt (read_i32_le code (m + 3)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+
+/-- `cmp r64, imm8` (REX.W 83 /7 ib, mod=3): flags only, and the result is NOT
+    written back — the one form in this family whose successor names no
+    register. -/
+theorem x86_step_cmp_ri8 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x83)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 7)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { s with
+        rip := m + 4,
+        zf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i8 (code (m + 3)))) ((x86_get_reg s (rm + x86_rex_b rex)) - UInt64.ofInt (read_i8 (code (m + 3))))).zf,
+        sf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i8 (code (m + 3)))) ((x86_get_reg s (rm + x86_rex_b rex)) - UInt64.ofInt (read_i8 (code (m + 3))))).sf,
+        cf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i8 (code (m + 3)))) ((x86_get_reg s (rm + x86_rex_b rex)) - UInt64.ofInt (read_i8 (code (m + 3))))).cf,
+        of_ := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (UInt64.ofInt (read_i8 (code (m + 3)))) ((x86_get_reg s (rm + x86_rex_b rex)) - UInt64.ofInt (read_i8 (code (m + 3))))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+
 /-! `mov r64, r/m64` in its two shapes.  These two cover every instance the
-backend emits -- 170 across the examples, and `mov_r64_rm64` was the single
-form blocking the most end-to-end proofs, so it is worth having the general
-version rather than the one-register-pair instances above. -/
+    backend emits -- 170 across the examples, and `mov_r64_rm64` was the single
+    form blocking the most end-to-end proofs, so it is worth having the general
+    version rather than the one-register-pair instances above. -/
 
 /-- `mov r64, r64` register to register (REX.W 8B /r, mod=3), general over both
     registers and over the REX bits that extend either of them.
@@ -1181,10 +1534,12 @@ theorem x86_step_mov_rm64_r64_reg (s : X86State) (code : Nat → UInt8)
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
 
-/-! `mov r64, qword [rbp + disp8]` (REX.W 8B /r, mod=1, rm=5), the other
-    half of the two shapes `mov r64, r/m64` has in this corpus: every
-    spilled-argument access is one of these or the `[rsp]` one, and there is no
-    third.
+/-! `mov r64, qword [base + disp8]` (REX.W 8B /r, mod=1, rm != 4), and its
+    store counterpart below.  General over the base register rather than pinned
+    to `rbp`, because pinning it is what made this a third pair of lemmas: the
+    corpus emits `mov [rbp+disp], …` for a spilled argument AND `mov
+    [rbx+disp8], r8` for an indexed store, and a lemma per base register is a
+    lemma per encoding.
 
     The destination register is a CONCRETE argument, with
     `reg + x86_rex_r rex = dst` beside it, and that is what makes this go
@@ -1195,21 +1550,29 @@ theorem x86_step_mov_rm64_r64_reg (s : X86State) (code : Nat → UInt8)
     shows the whole field list and says nothing about what is wrong.  The STORE
     below has the same shape and does normalise, because there the index only
     ever appears inside `x86_get_reg`.  Hence the asymmetry, and hence the extra
-    argument: the caller reads the destination out of the encoding. -/
-theorem x86_step_mov_rm64_mem_disp8_rbp (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg dst : Nat) (disp : Int)
+    argument: the caller reads the destination out of the encoding.
+
+    `rm != 4` is not optional either.  ModRM rm=4 means a SIB byte follows, and
+    then the displacement is not where this statement says it is -- the model's
+    `dispPos` is `atp + 1 + sibExtra` -- so a lemma that omitted the exclusion
+    would be a proof about a displacement read from the wrong byte.  This is the
+    same class of mistake as B2, arriving from the addressing mode instead of
+    from the opcode. -/
+theorem x86_step_mov_rm64_mem_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm dst : Nat) (disp : Int)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
     (h_b2 : code (m + 2) = modrm) (h_disp : read_i8 (code (m + 3)) = disp)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
-    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 5)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
-    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (5 + x86_rex_b rex)).toNat + disp).toNat 8) with
+    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8) with
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_dst,
-        h_dst_lt]
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg,
+        h_dst, h_dst_lt]
 
 /-! The two store-direction `mov` shapes (opcode 89), mirroring the load ones
     above.  These are the STORE direction, and the field sense flips: the
@@ -1234,19 +1597,123 @@ theorem x86_step_mov_rm64_r64_reg_st (s : X86State) (code : Nat → UInt8)
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
 
 /-- `mov qword [rbp + disp8], r64` (REX.W 89 /r, mod=1, rm=5). -/
-theorem x86_step_mov_mem_disp8_r64 (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg : Nat) (disp : Int)
+theorem x86_step_mov_mem_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
     (h_b2 : code (m + 2) = modrm) (h_disp : read_i8 (code (m + 3)) = disp)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
-    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 5)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s (5 + x86_rex_b rex)).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg]
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg]
+
+/-- `mov qword [base], r64` (REX.W 89 /r, mod=0, rm != 4 and rm != 5): a store
+    with NO displacement at all, which is a different instruction from the disp8
+    one above and not a special case of it -- the model's `dispN` is 0, so there
+    is no displacement byte to read and the successor is one byte SHORTER.
+
+    `rm != 5` is the RIP-relative exclusion: with mod=0 and rm=5 the encoding
+    carries a 32-bit displacement measured from the END of the instruction and
+    the base is `endAddr`, not a register.  Leaving that case out of the
+    statement would make this lemma claim `mov [rbp]` for what is a
+    position-independent load, which is B2 again. -/
+theorem x86_step_mov_mem_nodisp (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 0)
+    (h_rm : modrm.toNat &&& 7 = rm) (h_rm_ne4 : rm ≠ 4)
+    (h_rm_ne5 : rm ≠ 5)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem (x86_get_reg s (rm + x86_rex_b rex)).toNat
+            (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        rip := m + 3 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_rm, h_rm_ne4, h_rm_ne5,
+        h_reg]
+
+/-- `mov r64, qword [base]` (REX.W 8B /r, mod=0, rm != 4 and rm != 5) — the load
+    direction of the pair above, and three bytes shorter than the disp8 form. -/
+theorem x86_step_mov_rm64_mem_nodisp (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm dst : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 0)
+    (h_rm : modrm.toNat &&& 7 = rm) (h_rm_ne4 : rm ≠ 4)
+    (h_rm_ne5 : rm ≠ 5)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem
+        (x86_get_reg s (rm + x86_rex_b rex)).toNat 8) with rip := m + 3 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_rm, h_rm_ne4, h_rm_ne5,
+        h_reg, h_dst, h_dst_lt]
+
+/-- `mov qword [base + disp32], r64` (REX.W 89 /r, mod=2, rm != 4): a
+    displacement too wide for the disp8 form, so the instruction is EIGHT bytes
+    and the successor's `rip` is `m + 7`.
+
+    The wide-displacement case is the third addressing mode the corpus uses and
+    the first one where pinning the base would have been visible: `mov
+    [rbp-0x410], rax` and `mov [rbp-0x408], rax` are the frame stores of
+    `wide_recv`, and with `rbp` pinned they would have been a third pair of
+    lemmas differing only in a literal. -/
+theorem x86_step_mov_mem_disp32 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = modrm)
+    (h_disp : read_i32_le code (m + 3) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 2) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        rip := m + 7 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg]
+
+/-- `lea r64, [base + disp32]` (REX.W 8D /r, mod=2, rm != 4).
+
+    `lea` differs from `mov` in one way that matters here and one that does not.
+    The one that matters: the model truncates the computed address to 64 bits
+    (`UInt64.ofNat (addr % 2^64)`) whereas `mov` reads at the address itself, so
+    the successor is a register WRITE of a truncated value and not a memory
+    read.  The one that does not: it still goes through `x86_mem_addr`, so the
+    address is the same expression and the exclusions (`rm != 4`, and here no
+    RIP-relative case because mod=2) are the same.
+
+    `disp32` is the only mode the backend emits for `lea` — `lea rax, [rbx+8]`
+    would be a disp8 `lea` and there is none in the corpus — so this is one
+    theorem rather than three, and `formal/x86_64_endtoend_test.py`'s `_shapes`
+    NAMES the two modes it has no lemma for so they are reported as uncovered
+    rather than proved against the wrong instruction. -/
+theorem x86_step_lea_rm64_disp32 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm dst : Nat) (disp : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8d)
+    (h_b2 : code (m + 2) = modrm)
+    (h_disp : read_i32_le code (m + 3) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 2) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some { x86_set_reg s dst
+        (UInt64.ofNat ((Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat % 18446744073709551616)) with
+        rip := m + 7 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg,
+        h_dst, h_dst_lt]
 
 /-- `mov qword [rsp + 0], r64` (REX.W 89 /r, ModRM 04, SIB 24: scale 0, index
     none, base rsp) -- the store counterpart of `mov rax, [rsp]` below, and

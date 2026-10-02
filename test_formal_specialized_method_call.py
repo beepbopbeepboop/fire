@@ -367,6 +367,114 @@ DIFF_CASES = [
      "    return 0\n"
      "\n"
      "main()\n"),
+
+    # **THE KEYWORD HALF OF THE BRACKET**, `c.show[scale=2](3)`.  This was a
+    # SILENT WRONG ANSWER, and the two cases below are the fix's whole
+    # assertion: the parser keeps a bracket's keyword items in
+    # `SubscriptExpr.attrs` and its positional items in `.index`, and
+    # `comptime_eval.specialization_args` read only `.index` — so `scale` bound
+    # to 0, the same word an unsupplied parameter gets, and the image printed
+    # **403** where CPython prints **423**.  It exited 0 and computed a number
+    # the source never wrote, which is why it survived as long as it did.
+    #
+    # `[*, scale: Int]` is the stdlib's own spelling for a defaulted comptime
+    # parameter (`std/collections/optional.mojo`'s `_write_to[*, is_repr:
+    # Bool]`, `std/collections/list.mojo`'s `_write_self_to[*, is_repr: Bool]`),
+    # so this case is the shape two real files are written in.
+    #
+    # The weights say which binding is wrong: `value` 400, `scale` 20, `n` 3.
+    # A binder that ignored `attrs` gives 403; one that bound by the wrong name
+    # or the wrong position gives a third number.  It cannot fail loudly.
+    ("keyword_comptime_parameter_is_bound_by_name",
+     "struct Cell:\n"
+     "    var value: Int\n"
+     "    var pad: Int\n"
+     "    def show[*, scale: Int](self, n: Int) -> Int:\n"
+     "        return self.value * 100 + scale * 10 + n\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.value = 4\n"
+     "    c.pad = 1\n"
+     '    printf("v=%d", c.show[scale=2](3))\n'
+     "    return 0\n",
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self.value = 4\n"
+     "        self.pad = 1\n\n"
+     "    def show(self, scale, n):\n"
+     "        return self.value * 100 + scale * 10 + n\n"
+     "\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     '    print("v=%d" % c.show(2, 3), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
+
+    # **TWO KEYWORD PARAMETERS, SUPPLIED IN THE OPPOSITE ORDER** —
+    # `c.mix[by=7, T=3]()`.  This is what makes the first case's fix a NAME
+    # binding rather than "the second item of the bracket": a binder that took
+    # the keyword items positionally would give `T=7, by=3` and answer **1073**
+    # instead of **1037**, and one that ignored `attrs` gives 1000.  Neither is
+    # a crash, which is why the split has to be pinned and not assumed.
+    #
+    # Written keyword-FIRST deliberately.  `c.mix[3, by=7]()` — the more natural
+    # reading order — goes through the parser's OTHER bracket arm, which keeps
+    # the keyword's VALUE in `.index` and discards its name, so it happens to
+    # bind correctly by position and cannot tell the two rules apart.  That
+    # parser asymmetry is recorded, not relied on.
+    ("keyword_comptime_parameters_bind_by_name_not_by_bracket_order",
+     "struct Cell:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "    def mix[T: Int, *, by: Int](self) -> Int:\n"
+     "        return self.v * 1000 + T * 10 + by\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.v = 1\n"
+     "    c.w = 2\n"
+     '    printf("v=%d", c.mix[by=7, T=3]())\n'
+     "    return 0\n",
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self.v = 1\n"
+     "        self.w = 2\n\n"
+     "    def mix(self, T, by):\n"
+     "        return self.v * 1000 + T * 10 + by\n"
+     "\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     '    print("v=%d" % c.mix(3, 7), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
+
+    # **GUARD** — the same keyword spelling on a FREE function, with no
+    # receiver anywhere, so the answer does not depend on the method lift at
+    # all.  `mojo/middle/comptime.py` is shared by three compiled paths (the
+    # gimple compiled path, arm64, x86-64), which is why the fix lives in the
+    # ONE reader rather than in a backend; this is the case that says the
+    # reader is the one that changed.  The answer is 110, and a reader that
+    # dropped the keyword gives 7 — the `type` weight is there because a body
+    # that never READS the parameter cannot tell a dropped binding from any
+    # other, which is how the defect stayed invisible for so long.
+    ("GUARD_keyword_comptime_parameter_on_a_free_function",
+     "def widen[*, type: Int](x: Int, y: Int) -> Int:\n"
+     "    return type * 100 + x + y\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     '    printf("v=%d", widen[type=1](3, 7))\n'
+     "    return 0\n",
+     "def widen(type, x, y):\n"
+     "    return type * 100 + x + y\n"
+     "\n"
+     "def main():\n"
+     '    print("v=%d" % widen(1, 3, 7), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
 ]
 
 # ── the refusals, which are the point of the two remaining families ─────────

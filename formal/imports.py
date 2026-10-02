@@ -210,8 +210,9 @@ HOST_MODELLED = frozenset((
     #     positions and counts compared against CPython's own `tokenize` by
     #     `test_ast_formal.py`. What it cannot do is build a tree, because a
     #     value on this path is one 64-bit word and a node is not one: the
-    #     subset, the 21 measured ways `parse` differs from CPython's verdict,
-    #     and the f-string collapsing are in `bugs/FORMAL_ast_module_subset.md`.
+    #     subset, the 38 pinned ways `parse` differs from CPython's verdict and the
+    #     three stream divergences are in `formal/hostmods/ast.mojo`'s own
+    #     docstring, under "WHAT parse(src) DOES NOT MEAN".
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is
@@ -475,9 +476,9 @@ def import_closure_digest(source_path: str, _seen=None) -> str:
     Measured on `tools/formal_sweep.py`: a fix to `formal/hostmods/re.mojo`
     left the next run reporting `cas: 4 hit` and "verdict history: unchanged: 4"
     for four files that now build
-    (`bugs/FORMAL_cas_verdict_key_ignores_the_hostmod_sources_it_compiles.md`,
-    and the import-closure half of
-    `bugs/FORMAL_sweep_cache_ignores_imports.md`).
+    (`cas.formal_build_key`'s `imports` clause is where this digest is folded
+    in, and `test_formal_sweep_cache_key.py` is what pins that it moves the
+    key).
 
     It walks with the SAME two functions the build walks with —
     `imported_modules` for what a statement list imports and
@@ -828,6 +829,14 @@ def module_struct_defs(path: str, project_root: str = None) -> list:
         for st in mod_stmts:
             name = getattr(st, "name", None)
             if isinstance(st, F.StructDef) and name not in seen:
+                # The same attach `imported_struct_defs` does, and for the same
+                # reason — see that function's docstring. It is here as well as
+                # there because a LINKED LIBRARY reaches its declarations
+                # through this function and never through the import walk, so
+                # attaching only in `imported_struct_defs` would leave every
+                # struct behind a `--link-dylib` exactly as unclassified as the
+                # ones behind an import were.
+                _attach_declared_census(st, p)
                 seen.add(name)
                 out.append(st)
         for st in mod_stmts:
@@ -1176,7 +1185,42 @@ def imported_struct_defs(source_path: str, stmts: list,
 
     Transitive, and cycle-safe: a package that re-exports from a sibling that
     re-exports back terminates on the visited set, and a struct is collected
-    once however many paths reach it."""
+    once however many paths reach it.
+
+    **The census is attached to each struct by the module that DECLARES it**,
+    and that is what makes a `comptime` class member of an IMPORTED module a
+    constant here: before, nothing attached it, so `_split_declaration` returned
+    None and every class-level name stayed a field.
+    `module_statements` caches one parse per file per content, so
+    the statements a declaration came from are in hand here; before this,
+    nothing called `formal.model.attach_field_evidence` on an IMPORTED module's
+    structs, so `struct_field_evidence` was None, `_split_declaration` returned
+    None, and every class-level name stayed a field. A `comptime IS_FLAT = True`
+    in an imported module was therefore reported as a field the struct does not
+    have — which is the in-file refusal `formal/build.py`'s
+    `_rewrite_class_constants` exists to prevent, reached through the module
+    boundary instead of around it.
+
+    Attached from the DEFINING module's statements rather than the importer's,
+    and that direction is the whole of the soundness argument: the evidence is
+    "what does this unit write into a field", so the unit that has to answer is
+    the one that declares the struct. Attaching the importer's census instead
+    would let a file that happens to write `x.a` demote `a` in a class it does
+    not declare, which is `attach_field_evidence`'s own docstring's reason for
+    putting the evidence ON the struct rather than passing it down.
+
+    Attached for EVERY struct the walk collects, including ones it reached
+    through a re-export, and before `seen` filters by name — a struct already
+    collected keeps the evidence its own module gave it, so the answer does not
+    depend on which path reached it first.
+
+    **What this does NOT settle**, and the doc is explicit that it cannot be
+    settled here: the census is what decides a struct's WIDTH, so attaching it
+    to imported modules re-measures every imported struct in the tree at once,
+    and a width decides whether a receiver is a value or a frame address. Only
+    a sweep says whether that is a net gain, and a sweep is not a light
+    worker's to run.
+    """
     out, seen = [], set()
     for mod in imported_modules(stmts):
         path = resolve_module_path(mod, relative_to=source_path,
@@ -1184,10 +1228,42 @@ def imported_struct_defs(source_path: str, stmts: list,
         if path is None:
             continue
         for st in module_struct_defs(path, project_root or source_path):
-            if st.name not in seen:
-                seen.add(st.name)
-                out.append(st)
+            if st.name in seen:
+                continue
+            # The DEFINING module's statements, not this file's: `path` is the
+            # module the walk reached, and `module_statements` is the same
+            # cached parse the walk itself read the struct out of, so the
+            # evidence and the declaration cannot come from different versions
+            # of the file. `visited` is the walk's own set, so a struct reached
+            # twice is attached once.
+            _attach_declared_census(st, path)
+            seen.add(st.name)
+            out.append(st)
     return out
+
+
+def _attach_declared_census(struct_def, declaring_path: str) -> None:
+    """`attach_field_evidence` for one struct, from ITS OWN module.
+
+    Split out of `imported_struct_defs` because it has to be callable from
+    `module_struct_defs` too — that is the function a LINKED LIBRARY reaches,
+    and a library's declarations come through it rather than through the
+    import walk. Two call sites attaching the same evidence is one rule with two
+    callers, which is the point; a second implementation here would be a second
+    thing that could disagree about what a class-level name is.
+
+    A struct with evidence already attached is left alone, so an inner
+    `attach_field_evidence` (from `formal/build.py`'s `parse_module`, which runs
+    when the module is compiled as the ENTRY) is not overwritten by an importer's
+    view — and two modules' evidence for one struct is not a thing that can
+    happen anyway, since the walk is keyed by declaring path.
+    """
+    if getattr(struct_def, "_field_evidence", None) is not None:
+        return
+    from formal import model as M
+    M.attach_field_evidence([struct_def],
+                            M.unit_field_evidence(
+                                module_statements(declaring_path)))
 
 
 def declared_kinds(path: str) -> dict:

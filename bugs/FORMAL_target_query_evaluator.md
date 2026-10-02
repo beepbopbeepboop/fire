@@ -161,19 +161,28 @@ the use site
 `_assembly.mojo`'s own body now reports the construct it is written in —
 `inlined_assembly: __mlir_op is an MLIR dialect construct` — because the MLIR
 refusal is asked before the per-name walk now
-(`FORMAL_mlir_refusal_preemption.md`), and `NoneType` at line 94 no longer gets
-there first. The message below is therefore about a construct the reader will
-not see for `_assembly.mojo`, though the defect it describes is unchanged and is
-still reachable elsewhere.
+(`formal/build.py`'s `first_mlir` pre-pass), and `NoneType` at line 94 no longer
+gets there first. The message below is therefore about a construct the reader
+will not see for `_assembly.mojo`, though the defect it describes is unchanged
+and is still reachable elsewhere.
 
-**That message is false about the file, and it is a separate bug worth its own
-doc: `bugs/FORMAL_imported_generic_reported_as_a_module_level_name.md`.**
-`_get_kgen_string` IS a function (`std/collections/string/string_slice.mojo:2564`,
+**That message is false about the file, and the defect it named is FIXED
+(was `bugs/FORMAL_imported_generic_reported_as_a_module_level_name.md`, deleted
+with the fix).** `_get_kgen_string` IS a function
+(`std/collections/string/string_slice.mojo:2564`,
 `def _get_kgen_string[string: StaticString, *extra: StaticString]()`), so the
 advice "give it a function" is already satisfied. The real reason it is not
 available is that it is a **generic**, and `reflect.EXCL_GENERIC` excludes
 generics from a module's export set — which is also `FORMAL_known_limits.md` §1.1's
 verdict for `std/sys/_assembly.mojo` (17 of family 1's 30 files, "true limit").
+
+The fix was not a new message and not a fifth branch of
+`module_global_refusal`: `model.imported_callee_refusal` already existed,
+already named `doc/ABI.md`'s export rule, and already cited `_get_kgen_string` as
+its measured case. It was simply not being ASKED of a BARE callee — only of a
+bracketed one — so `widen(5)` reached the link audit instead. `formal/build.py`
+now asks it before the callee exemption, over a set of bare `IdentExpr` callees
+(`bug:FORMAL_imported_generic_reported_as_a_module_level_name`, 2026-10-01).
 
 So Blocker 2 is two things, and neither is the target-query construct:
 - the cycle itself (`string_slice` → `std.sys` → `_assembly` → `string_slice`),

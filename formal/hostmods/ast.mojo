@@ -91,8 +91,8 @@ ERRORTOKEN 67). Nothing has to be translated to compare a stream with
 THE TWO PLACES THIS STREAM IS NOT IDENTICAL TO `tokenize`'S
 ----------------------------------------------------------
 Both are stated here, in `test_ast_formal.py` (which compares against CPython
-with exactly these two normalisations applied, and nothing else), and in
-`bugs/FORMAL_ast_module_subset.md`:
+with exactly these two normalisations applied, and nothing else), and — for the
+f-string one — under "DIVERGENCES THAT ARE NOT ABOUT THE VERDICT" below:
 
   1. **An f-string or t-string is ONE token, not three or more.**
      `tokenize` splits `f"a{b}c"` into FSTRING_START, FSTRING_MIDDLE, OP `{`,
@@ -128,7 +128,7 @@ statement may not end with `)`) while `x = 1 +* 2` is not. Raising is not
 available here either — a `raise` lowers to a call to a symbol nothing
 defines — so CPython's `SyntaxError` is a RETURN VALUE, the same degradation
 `struct.mojo` documents in its ERRORS section. The full list of what is and is
-not checked is in `bugs/FORMAL_ast_module_subset.md`; the short version is
+not checked is under "WHAT parse(src) DOES NOT MEAN" below; the short version is
 that this is a LEXICAL and BLOCK-STRUCTURE validator, and a file it accepts is
 one whose bytes and block structure are sound.
 
@@ -195,6 +195,89 @@ LIMITS MEASURED, not assumed
     `formal/hostmods/os/__init__.mojo`, which is where the measurement is. A
     host with no x86-64 support at all still skips the x86-64 half of the
     suite, with the reason printed.
+
+WHAT parse(src) DOES NOT MEAN, AND WHERE THE PINNED LIST IS
+-----------------------------------------------------------
+`parse(src) == 1` means "the bytes tokenize and the block structure is sound".
+It does NOT mean the file compiles. What a caller must not conclude is the whole
+of this module's contract, so it is worth saying twice: this is a LEXICAL and
+BLOCK-STRUCTURE validator, and a caller that needs the real answer needs a real
+parser. The point of the module is to let a checker reject the cheap failures —
+a stray quote, an unclosed bracket, a statement that ends in `=` — without one.
+
+**38 pinned cases where CPython's parser refuses and this module accepts.** They
+are in `test_ast_formal.py`'s `VERDICTS` with the verdict ASSERTED rather than
+skipped, so a change in either direction is a change worth looking at, and this
+is what each group of them is:
+
+  * the EXPRESSION grammar, which `tokenize` does not check either:
+    `x = 1..2`, `x = 1j2`, `x <> 1`, `x = ,1`, `x = 1 +* 2`, `x = 1 ** * 2`,
+    `x = a | b ^ c & d ~ e`, `x = 1 2`, `x = a b c`, `x = a.5`, `x = *a`;
+  * a number's VALUE, for the same reason: `x = 1e`, `x = 1.2.3`, and the two
+    that end early and leave a NAME — `x = 1e__0` is the number `1` and the
+    name `e__0`, `x = 1e_5` is `1` and `e_5`. Two expressions with no operator
+    between them is the PARSER's error, not the tokenizer's;
+  * a statement keyword in the wrong place: `for in x:`, an orphan `except:`,
+    `else:`, `elif x:`, `finally:`, a header with no colon (`if x`, `for i
+    in`), a ternary with nothing after `else`, `x = 1 else 2`, `x = not not`,
+    `del`, `x = 1 if 2 else 3 else 4`, and `lambda x: x` used as a statement;
+  * a compound statement's own rules: `return 1` and `yield 1` outside a
+    function, `x = (yield)`, `await x` outside `async def`, `nonlocal x` at
+    module level, and `def f(x, x)` with a duplicate parameter;
+  * an annotation on a tuple target (`x, y: int = 1, 2` — CPython: "only
+    single target (not tuple) can be annotated");
+  * an unexpected INDENT, which needs the block structure a tree would have:
+    `if x:` / `  pass` / `   pass`, and a dedent to a column that is not on any
+    enclosing level inside a block;
+  * one lexer corner: a backslash before a closing brace INSIDE a replacement
+    field (`x = f"a\{b\}c"`), which CPython's own tokenizer refuses with
+    "unexpected character after line continuation character" and this module
+    accepts.
+
+**Three real files in the 2017-file corpus that this module accepts and CPython
+refuses**, all of them the same two things rather than the statement rules. A
+coding DECLARATION (`Lib/test/test_future_stmt/badsyntax_future.py`,
+`Lib/test/tokenizedata/bad_coding2.py`) — a `str` has no encoding, so this is
+not this module's business and never will be. And a non-ASCII character that
+is not `XID_Start` (`Lib/test/tokenizedata/badsyntax_3131.py`, a `€` used as a
+name): the identifier rule after PEP 3131 is "XID_Start, then XID_Continue",
+and on BYTES the part of it this module computes exactly is "any byte at or
+above 0x80 continues an identifier" (`_ident`, `_ident_cont`). The full
+Unicode tables would be a data file this target cannot read.
+
+DIVERGENCES THAT ARE NOT ABOUT THE VERDICT
+------------------------------------------
+Both of these produce a token stream that differs from CPython's on inputs
+CPython ACCEPTS, which is why they are pins on the stream rather than on the
+verdict, and why `test_ast_formal.py`'s `stream` group compares against this
+process's own `tokenize` rather than only checking that a build succeeded.
+
+**A lone CR is a line break here and whitespace to CPython.** `x = 1\ry = 2\r`
+tokenizes to `NAME OP NUMBER NEWLINE ENDMARKER` here and to
+`NAME OP NUMBER OP('\ry') OP NUMBER NEWLINE ENDMARKER` in CPython, which
+absorbs the CR into the next token. A CRLF pair is a line break on both sides
+and is in the corpus; a bare CR is not, because no token stream can match it.
+It is rare enough (old Mac line endings) that changing the rule would cost the
+CRLF case for no gain.
+
+**Columns count CHARACTERS, not bytes** — and that took a fix to get right.
+CPython's tokenizer works on the decoded source and its columns are character
+offsets; this module works on bytes, so `hi - lo` counted a two-byte character
+twice. 259 of the 2017 files in the corpus have a line where the two differ (a
+box-drawing character in a comment, a non-ASCII identifier) and every column
+after it on that line was wrong. `_chars` subtracts the UTF-8 continuation bytes
+in the line prefix, which for valid UTF-8 is exactly the character count, and
+the corpus cases (`# ─── box ───`, `Ω = 1`, `x = 'İ'`) pin it.
+
+**An f-string run is ONE token.** CPython 3.12+ emits a run as
+`FSTRING_START`, then `FSTRING_MIDDLE`/`OP`/`FSTRING_END` for the parts and the
+replacement fields. This module emits the run's FIRST kind code once, at the
+run's start position, and nothing else. A run nested inside another run's
+replacement field belongs to the OUTER one —
+`f'{",".join([f"{o}.{f}" for f in fields])},)'` is one token here and three runs
+in CPython's stream, and the case is in the corpus because `Lib/dataclasses.py`
+has it. What a caller on this target needs is "where does this literal end",
+and one token per literal is the answer to that.
 """
 
 from os._syscalls import str_alloc, str_build, str_len
@@ -1757,12 +1840,13 @@ def parse(src: str) -> int:
       * a comma does not directly follow an opening bracket or another comma
         (`f(,a)`).
 
-    What it does NOT check, and what `bugs/FORMAL_ast_module_subset.md` lists in
-    full: the EXPRESSION grammar, so `x = 1 +* 2` passes here and fails in
+    What it does NOT check, and what the module docstring lists in full under
+    "WHAT parse(src) DOES NOT MEAN": the EXPRESSION grammar, so `x = 1 +* 2`
+    passes here and fails in
     CPython; a keyword used as a name (`def = 5`); `return`/`yield` outside a
     function; `await` outside `async def`; duplicate parameters; a `return` with
     a value in a generator. Each of those is a real gap and none of them is
-    hidden: this is a LEXICAL validator, and the bug doc a reader is sent to
+    hidden: this is a LEXICAL validator, and the section a reader is sent to
     says which half of the grammar is implemented.
 
     CPython raises `SyntaxError` for all of it. Raising is not available here —
