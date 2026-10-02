@@ -345,6 +345,21 @@ def _quick_type(gen, node) -> str:
                 and len(node.args) == 1 and not getattr(node, 'kwargs', None)
                 and gen._quick_type(node.args[0]) == 'char *'):
             return 'char *'
+        # A call through a local bound to a LAMBDA, which is never
+        # materialized when it is created and called in the same statement
+        # list: the body is inlined and its real (ctype, expr) survives to
+        # the use site, so the ESTIMATOR has to say the same thing or the
+        # enclosing function's signature truncates it (`def g(): q = 2.5; fn
+        # = lambda: q * 2; return fn()` inferred `int64_t` and printed 5
+        # where CPython prints 5.0; a `char *` body printed its address).
+        # Populated by `infra_infer._lambda_call_ret_locals` for the body
+        # under inference — the emission-time `_callable_ret_types` is too
+        # late, since the forward declaration has already been written from
+        # this answer. See
+        # bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md.
+        _lrt = (getattr(gen, '_lambda_call_ret_types', None) or {}).get(fname)
+        if _lrt:
+            return _as_str(_lrt)
         return gen.func_return_types.get(fname, 'int64_t')
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.MemberExpr):
         # A receiver this codegen KNOWS is a registered user struct resolves

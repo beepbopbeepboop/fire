@@ -1,6 +1,12 @@
 # CODEGEN: a lambda's own return type is lost — a `double` truncates to an int, a `char *` prints as a decimal
 
-**State: OPEN, found 2026-10-01 while fixing
+**State: PARTIALLY FIXED 2026-10-02 (`work/bugs4-3`).** The `char *` half and
+the control are closed; the `double` half and the nested-`def` row are not, and
+the remaining cause is named below rather than left as "the estimator". Nothing
+here regressed: the suite verdicts are identical before and after, and the rows
+that changed changed from one wrong answer to a less wrong one.
+
+**State before that: OPEN, found 2026-10-01 while fixing
 `CODEGEN_captured_string_local_reads_falsey.md` (since deleted — its bug was
 the capture LIST missing a name, which is fixed).** Independent of that: this
 one is about the value on the way BACK, and it reproduces with a capture list
@@ -84,6 +90,68 @@ already works so the next reader does not re-derive it.
 
 None. `test_gimple_runner.py` (`gimplerunner`, in `check` and `gate`), with
 CPython's exact text as the expectation.
+
+## Status (2026-10-02) — what landed, and what is left
+
+**Landed.** The value the inlined lambda produces is now what the enclosing
+function's SIGNATURE says it is, for every kind the return-type inference can
+already see. `infra_infer._lambda_call_ret_locals` walks the body under
+inference for `name = lambda: ...` bindings and records what calling `name`
+produces; `resolve_shared._quick_type`'s call case consults it (through the
+same save/overlay/restore window `_prebound_local_ctypes` and
+`_dict_value_locals` already use), so `_infer_return_type` — which every
+consumer of a function's return type goes through — sees the lambda's body
+type instead of the `int64_t` an unknown callee gets. Deliberately NOT
+`_callable_ret_types`: that table is keyed by lowered value as well as by name
+and is populated during emission, which is too late for a signature whose
+forward declaration has already been written.
+
+Closed, pinned by `gimple_inlined_lambda_string_return_keeps_its_type`
+against CPython (before: `4295248216` / `4303968256`; after: `ab` / `ab!`,
+with an `int` row as the control that must not move):
+
+| program | CPython | before | after |
+|---|---|---|---|
+| `def o2(): s = 'ab'; fn = lambda: s; return fn()` | `ab` | address | **`ab`** |
+| `def o3(): s = 'ab'; fn = lambda: s + '!'; return fn()` | `ab!` | address | **`ab!`** |
+| `def i1(): n = 7; fn = lambda: n + 1; return fn()` | `8` | `8` | `8` |
+
+**Still open: the `double` half**, and the cause is now specific. The overlay
+asks `_quick_type` about the lambda's BODY, and the body reads a LOCAL scalar
+(`q * 2`), which the inference-time `var_types` does not have:
+`_prebound_local_ctypes` deliberately records only pointer-valued bindings
+("Scalars are NOT included — they are what the int64_t default is for, and
+adding them would change many existing signatures"), so `q` reads as
+`int64_t`, `q * 2` joins to `int64_t`, and nothing is recorded. So:
+
+    def g(): q = 2.5; fn = lambda: q * 2; return fn()   # still 5, want 5.0
+    def h(): q = 2.5; fn = lambda: q; return fn()       # still 2, want 2.5
+
+The next step is therefore a scalar overlay beside the pointer one, scoped to
+the inference window exactly as `_prebound_local_ctypes` is — a local bound to
+a `FloatLiteral` is `double` — and the first thing to measure is how many
+signatures it moves, since that function's own docstring predicts "many
+existing signatures" for exactly this. A second, narrower alternative worth
+weighing first: record the inlined call's REAL (ctype, expr) into
+`gen._actual_types` at `_lower_inlined_lambda_call`, which fixes the `print`
+dispatch for the `o2`-as-a-statement spelling without touching inference at
+all, and cannot help `g`/`h` (a `double` truncated to `5` has lost its type by
+the time any table could be read).
+
+**Also still open: the nested-`def` row** (`def a1(): p = 'mm'; def inner():
+return p; return inner()` prints the pointer's address). That is
+`discover_closures`, not `_lower_LambdaExpr`, and it needs the same overlay to
+answer for a local bound to a nested `FunctionDef` — with a recursion guard,
+because two mutually recursive nested defs would otherwise infer each other.
+
+**Also open, and a different bug (filed separately as
+`bugs/CODEGEN_materialized_lambda_env_double_does_not_survive_the_call.md`):**
+`k(p: float)` and `n()` above are the MATERIALIZED shape (a bound method plus
+an env struct), and there the env's `double` field does not survive the call
+even though the store, the field declaration and the read all agree in the
+emitted C. This change makes the declared type right there, so `k(2.5)` prints
+`2.0` where it used to print `2` — both wrong (CPython: `5.0`), and the value
+was already wrong before it.
 
 ## Also measured alongside it, and NOT this bug
 

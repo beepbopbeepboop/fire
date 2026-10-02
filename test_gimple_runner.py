@@ -1441,6 +1441,41 @@ nested()
     # that never looks at the value: `any("ab")` printed False where CPython
     # prints True. The string rows below are that fix, on both spellings — a
     # statically-typed literal and a value boxed through a parameter.
+    # An inlined lambda's value keeps its type across the enclosing
+    # function's RETURN boundary, for the kinds the return-type inference can
+    # see. The lambda is never materialized here — `_lower_LambdaExpr` records
+    # it and `_lower_inlined_lambda_call` emits its body straight into `o2` —
+    # so the inlined value is a real `char *` and the only thing that could
+    # lose it is `o2`'s own inferred signature, which saw `return fn()` as a
+    # call to an unknown callee and inferred `int64_t`. Both functions
+    # printed their string's own address.
+    #
+    # The int row is the control: `int64_t` is already the answer for an int,
+    # so it must be unchanged by the fix that teaches the estimator to look
+    # through a lambda-bound local. The `double` flavour of the same defect is
+    # still open and is recorded with its cause in
+    # bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md.
+    test_gimple_matches_cpython("gimple_inlined_lambda_string_return_keeps_its_type", """\
+def o2():
+    s = 'ab'
+    fn = lambda: s
+    return fn()
+
+def o3():
+    s = 'ab'
+    fn = lambda: s + '!'
+    return fn()
+
+def i1():
+    n = 7
+    fn = lambda: n + 1
+    return fn()
+
+print(o2())
+print(o3())
+print(i1())
+""")
+
     test_gimple_runtime_error("gimple_iterating_a_non_container_raises", """\
 def ident(x):
     return x
