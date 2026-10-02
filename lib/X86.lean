@@ -1494,10 +1494,12 @@ theorem x86_step_mov_rm64_r64_reg (s : X86State) (code : Nat → UInt8)
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
 
-/-! `mov r64, qword [rbp + disp8]` (REX.W 8B /r, mod=1, rm=5), the other
-    half of the two shapes `mov r64, r/m64` has in this corpus: every
-    spilled-argument access is one of these or the `[rsp]` one, and there is no
-    third.
+/-! `mov r64, qword [base + disp8]` (REX.W 8B /r, mod=1, rm != 4), and its
+    store counterpart below.  General over the base register rather than pinned
+    to `rbp`, because pinning it is what made this a third pair of lemmas: the
+    corpus emits `mov [rbp+disp], …` for a spilled argument AND `mov
+    [rbx+disp8], r8` for an indexed store, and a lemma per base register is a
+    lemma per encoding.
 
     The destination register is a CONCRETE argument, with
     `reg + x86_rex_r rex = dst` beside it, and that is what makes this go
@@ -1508,21 +1510,29 @@ theorem x86_step_mov_rm64_r64_reg (s : X86State) (code : Nat → UInt8)
     shows the whole field list and says nothing about what is wrong.  The STORE
     below has the same shape and does normalise, because there the index only
     ever appears inside `x86_get_reg`.  Hence the asymmetry, and hence the extra
-    argument: the caller reads the destination out of the encoding. -/
-theorem x86_step_mov_rm64_mem_disp8_rbp (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg dst : Nat) (disp : Int)
+    argument: the caller reads the destination out of the encoding.
+
+    `rm != 4` is not optional either.  ModRM rm=4 means a SIB byte follows, and
+    then the displacement is not where this statement says it is -- the model's
+    `dispPos` is `atp + 1 + sibExtra` -- so a lemma that omitted the exclusion
+    would be a proof about a displacement read from the wrong byte.  This is the
+    same class of mistake as B2, arriving from the addressing mode instead of
+    from the opcode. -/
+theorem x86_step_mov_rm64_mem_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm dst : Nat) (disp : Int)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
     (h_b2 : code (m + 2) = modrm) (h_disp : read_i8 (code (m + 3)) = disp)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
-    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 5)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
-    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (5 + x86_rex_b rex)).toNat + disp).toNat 8) with
+    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8) with
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_dst,
-        h_dst_lt]
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg,
+        h_dst, h_dst_lt]
 
 /-! The two store-direction `mov` shapes (opcode 89), mirroring the load ones
     above.  These are the STORE direction, and the field sense flips: the
@@ -1547,19 +1557,123 @@ theorem x86_step_mov_rm64_r64_reg_st (s : X86State) (code : Nat → UInt8)
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
 
 /-- `mov qword [rbp + disp8], r64` (REX.W 89 /r, mod=1, rm=5). -/
-theorem x86_step_mov_mem_disp8_r64 (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg : Nat) (disp : Int)
+theorem x86_step_mov_mem_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
     (h_b2 : code (m + 2) = modrm) (h_disp : read_i8 (code (m + 3)) = disp)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
-    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 5)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s (5 + x86_rex_b rex)).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg]
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg]
+
+/-- `mov qword [base], r64` (REX.W 89 /r, mod=0, rm != 4 and rm != 5): a store
+    with NO displacement at all, which is a different instruction from the disp8
+    one above and not a special case of it -- the model's `dispN` is 0, so there
+    is no displacement byte to read and the successor is one byte SHORTER.
+
+    `rm != 5` is the RIP-relative exclusion: with mod=0 and rm=5 the encoding
+    carries a 32-bit displacement measured from the END of the instruction and
+    the base is `endAddr`, not a register.  Leaving that case out of the
+    statement would make this lemma claim `mov [rbp]` for what is a
+    position-independent load, which is B2 again. -/
+theorem x86_step_mov_mem_nodisp (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 0)
+    (h_rm : modrm.toNat &&& 7 = rm) (h_rm_ne4 : rm ≠ 4)
+    (h_rm_ne5 : rm ≠ 5)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem (x86_get_reg s (rm + x86_rex_b rex)).toNat
+            (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        rip := m + 3 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_rm, h_rm_ne4, h_rm_ne5,
+        h_reg]
+
+/-- `mov r64, qword [base]` (REX.W 8B /r, mod=0, rm != 4 and rm != 5) — the load
+    direction of the pair above, and three bytes shorter than the disp8 form. -/
+theorem x86_step_mov_rm64_mem_nodisp (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm dst : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 0)
+    (h_rm : modrm.toNat &&& 7 = rm) (h_rm_ne4 : rm ≠ 4)
+    (h_rm_ne5 : rm ≠ 5)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem
+        (x86_get_reg s (rm + x86_rex_b rex)).toNat 8) with rip := m + 3 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_rm, h_rm_ne4, h_rm_ne5,
+        h_reg, h_dst, h_dst_lt]
+
+/-- `mov qword [base + disp32], r64` (REX.W 89 /r, mod=2, rm != 4): a
+    displacement too wide for the disp8 form, so the instruction is EIGHT bytes
+    and the successor's `rip` is `m + 7`.
+
+    The wide-displacement case is the third addressing mode the corpus uses and
+    the first one where pinning the base would have been visible: `mov
+    [rbp-0x410], rax` and `mov [rbp-0x408], rax` are the frame stores of
+    `wide_recv`, and with `rbp` pinned they would have been a third pair of
+    lemmas differing only in a literal. -/
+theorem x86_step_mov_mem_disp32 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = modrm)
+    (h_disp : read_i32_le code (m + 3) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 2) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        rip := m + 7 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg]
+
+/-- `lea r64, [base + disp32]` (REX.W 8D /r, mod=2, rm != 4).
+
+    `lea` differs from `mov` in one way that matters here and one that does not.
+    The one that matters: the model truncates the computed address to 64 bits
+    (`UInt64.ofNat (addr % 2^64)`) whereas `mov` reads at the address itself, so
+    the successor is a register WRITE of a truncated value and not a memory
+    read.  The one that does not: it still goes through `x86_mem_addr`, so the
+    address is the same expression and the exclusions (`rm != 4`, and here no
+    RIP-relative case because mod=2) are the same.
+
+    `disp32` is the only mode the backend emits for `lea` — `lea rax, [rbx+8]`
+    would be a disp8 `lea` and there is none in the corpus — so this is one
+    theorem rather than three, and `formal/x86_64_endtoend_test.py`'s `_shapes`
+    NAMES the two modes it has no lemma for so they are reported as uncovered
+    rather than proved against the wrong instruction. -/
+theorem x86_step_lea_rm64_disp32 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm dst : Nat) (disp : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8d)
+    (h_b2 : code (m + 2) = modrm)
+    (h_disp : read_i32_le code (m + 3) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 2) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some { x86_set_reg s dst
+        (UInt64.ofNat ((Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat % 18446744073709551616)) with
+        rip := m + 7 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg,
+        h_dst, h_dst_lt]
 
 /-- `mov qword [rsp + 0], r64` (REX.W 89 /r, ModRM 04, SIB 24: scale 0, index
     none, base rsp) -- the store counterpart of `mov rax, [rsp]` below, and

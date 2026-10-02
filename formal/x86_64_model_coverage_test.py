@@ -233,7 +233,7 @@ class Lemma:
 
 
 def _rex_mod3_hyps(addr, rex, modrm, opcode, two_byte_op=False, reg=None,
-                   digit=None, dst=None):
+                   digit=None, dst=None, mode=3):
     """The hypotheses a `REX.W <opcode> /r` mod=3 step lemma shares.
 
     Every form below is `REX`-prefixed, `REX.W`, and has a register operand, so
@@ -277,7 +277,7 @@ def _rex_mod3_hyps(addr, rex, modrm, opcode, two_byte_op=False, reg=None,
     hyp += [
         "x86_is_rex %d = true" % rex,
         "x86_rex_w %d = true" % rex,
-        "%s >>> 6 = 3" % b,
+        "%s >>> 6 = %d" % (b, mode),
     ]
     if digit is not None:
         hyp.append("(%s >>> 3) &&& 7 = %d" % (b, digit))
@@ -287,6 +287,30 @@ def _rex_mod3_hyps(addr, rex, modrm, opcode, two_byte_op=False, reg=None,
     if dst is not None:
         hyp.append("%d + x86_rex_r %d = %d" % (reg, rex, dst))
     return hyp
+
+
+def _rex_mem_hyps(addr, rex, modrm, opcode, mode, rm_ne):
+    """Hypotheses for a `REX.W <opcode> /r` MEMORY form, concretised.
+
+    The memory forms carry what the register ones do not: the ModRM `mod` is the
+    addressing mode rather than always 3, and the exclusions on the rm field are
+    hypotheses -- `rm ≠ 4` for "no SIB byte follows", and `rm ≠ 5` as well at
+    mod=0, where rm=5 is RIP-relative rather than `[rbp]`.  Leaving either out is
+    a statement about a different instruction: without the first the
+    displacement is read from the wrong byte, without the second a
+    position-independent load is claimed to be `mov [rbp]`.
+
+    `mode` is a PARAMETER rather than something read back out of the encoding,
+    because the check's whole job is to notice when a row's lemma and a row's
+    encoding disagree -- which is exactly what `lea r11, [rbx+64]` did: 64 fits
+    in a signed byte, so the encoder emitted a disp8 and the disp32 lemma's
+    `mod = 2` hypothesis did not hold.
+    """
+    hyps = _rex_mod3_hyps(addr, rex, modrm, opcode,
+                          reg=(modrm >> 3) & 7, mode=mode)
+    for r in rm_ne:
+        hyps.append("%d ≠ %d" % (modrm & 7, r))
+    return hyps
 
 
 def step_lemmas():
@@ -356,6 +380,53 @@ def step_lemmas():
                 enc,
                 _rex_mod3_hyps(BASE + 16 * len(out), enc[0], enc[2], opcode,
                                digit=digit)))
+    # The memory-operand `mov`/`lea` shapes, at every mode the corpus uses and at
+    # both a negative and a positive displacement.  `wide_recv`'s frame lives at
+    # `rbp - 0x410`, so a lemma that read the disp32 UNSIGNED would put every
+    # frame store about 4 GB away -- and satisfy every hypothesis this check
+    # makes, because the exclusion it tests is about the rm field and not about
+    # the sign of the displacement.  The mode is read back out of the encoding
+    # rather than written down here, so a row cannot disagree with the encoder.
+    for lemma, label, enc in _memory_samples():
+        out.append(Lemma(
+            lemma, label, enc,
+            _rex_mem_hyps(BASE + 16 * len(out), enc[0], enc[2], enc[1],
+                          (enc[2] >> 6) & 3, (4,))))
+    return out
+
+
+def _memory_samples():
+    """`(lemma, label, encoding)` for the memory-operand shapes, both directions.
+
+    Read back out of the encoder rather than spelled as byte strings, because a
+    hand-written encoding here is a third place for a typo to live and the only
+    thing the check needs from it is that it is a real one.
+    """
+    R = X.Reg
+    return [
+        ("x86_step_mov_rm64_mem_disp8", "mov rax, [rbp+8]",
+         X.encode_mov_r64_rm64(R.RAX, R.RBP, 8)),
+        ("x86_step_mov_rm64_mem_disp8", "mov r12, [rbp-8]",
+         X.encode_mov_r64_rm64(R.R12, R.RBP, -8)),
+        ("x86_step_mov_rm64_mem_nodisp", "mov r8, [rbx]",
+         X.encode_mov_r64_rm64(R.R8, R.RBX, 0)),
+        ("x86_step_mov_mem_disp8", "mov [rbp+8], rax",
+         X.encode_mov_rm64_r64(R.RBP, 8, R.RAX)),
+        ("x86_step_mov_mem_disp8", "mov [rbx+8], r12",
+         X.encode_mov_rm64_r64(R.RBX, 8, R.R12)),
+        ("x86_step_mov_mem_nodisp", "mov [rdx], r11",
+         X.encode_mov_rm64_r64(R.RDX, 0, R.R11)),
+        ("x86_step_mov_mem_disp32", "mov [rbp-0x410], rax",
+         X.encode_mov_rm64_r64(R.RBP, -0x410, R.RAX)),
+        ("x86_step_mov_mem_disp32", "mov [rbx+4096], r9",
+         X.encode_mov_rm64_r64(R.RBX, 4096, R.R9)),
+        ("x86_step_lea_rm64_disp32", "lea rax, [rbp-0x410]",
+         X.encode_lea_r64_rm64(R.RAX, R.RBP, -0x410)),
+        # 64 would encode as a disp8 -- `_rm_disp` picks the narrowest form --
+        # and this row is here to pin the disp32 one.
+        ("x86_step_lea_rm64_disp32", "lea r11, [rbx+4096]",
+         X.encode_lea_r64_rm64(R.R11, R.RBX, 4096)),
+    ]
     return out
 
 
