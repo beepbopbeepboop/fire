@@ -7950,6 +7950,126 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_walk_ast_dataclass_cache_is_transparent():
+        """`_walk_ast_into`'s per-class "is this class a dataclass" cache
+        must be indistinguishable from asking `dataclasses.is_dataclass` on
+        every visit — which is what it did before, and what the docstring's
+        existing field-name cache already did for `dataclasses.fields`.
+
+        bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md
+        (Phase 9). The failure mode this guards is a walk that silently
+        STOPS descending: the dataclass test runs BEFORE the scalar
+        early-return precisely because on the compiled path every AST node is
+        an int64_t-boxed pointer and so tests as an `int` (see that
+        function's own comment), and a cache that answered "not a dataclass"
+        for a class that is one would drop every field under it — a wrong
+        artifact, not a slow one. So the invariant checked is the NODE LIST,
+        node for node and in order, not the call count.
+
+        Driven over a real parsed module (so the classes are the real AST
+        node types, not stand-ins) and over hand-built shapes that exercise
+        the two arms the cache has to keep apart: a genuine dataclass, a
+        plain non-dataclass object, a `type` object (which returns before
+        the dataclass question is ever asked and so must never be cached),
+        and the scalars."""
+        global _PASS, _FAIL
+        name = "walk_ast_dataclass_cache_is_transparent"
+        import mojo.middle.exprtypes as ET
+        import dataclasses as _dc
+        from fire_compiler import py_tokenize, Parser
+        import ast_rewriter
+
+        def parse_module(toks):
+            return ast_rewriter.rewrite(Parser(toks).parse_module()) or []
+
+        def _ref_into(node, out, depth=0):
+            """Verbatim pre-cache body: `dataclasses.is_dataclass` asked on
+            every visit, nothing remembered between them."""
+            if node is None:
+                return
+            if depth > ET._WALK_AST_MAX_DEPTH:
+                return
+            if isinstance(node, list) or isinstance(node, tuple):
+                for item in node:
+                    _ref_into(item, out, depth + 1)
+                return
+            out.append(node)
+            if isinstance(node, type):
+                return
+            if _dc.is_dataclass(node):
+                for _f in _dc.fields(node):
+                    _fname = _f.name if hasattr(_f, 'type') else _f
+                    _child = getattr(node, _fname, None)
+                    if _child is node:
+                        continue
+                    _ref_into(_child, out, depth + 1)
+                return
+            if isinstance(node, (str, int, float, bool)):
+                return
+            return
+
+        err = None
+        try:
+            src = ("class C:\n"
+                   "    def m(self):\n"
+                   "        return [x for x in range(3)]\n"
+                   "def f(a, b=2, *c, **d):\n"
+                   "    t = (a, b)\n"
+                   "    if a:\n"
+                   "        t = t + (c,)\n"
+                   "    return {'k': t, 'j': [a, b]}\n")
+            stmts = parse_module(py_tokenize(src))
+            for _s in stmts:
+                ref, got = [], []
+                _ref_into(_s, ref)
+                ET._walk_ast_into(_s, got)
+                if len(ref) != len(got):
+                    err = (f'node count {len(ref)} != {len(got)}')
+                    break
+                for _i, (_r, _g) in enumerate(zip(ref, got)):
+                    if type(_r) is not type(_g):
+                        err = f'node {_i}: {type(_r)} != {type(_g)}'
+                        break
+                if err:
+                    break
+            # The arms the cache keeps apart, on values a walk over a parsed
+            # module does not reach: a genuine dataclass (whose whole
+            # subtree must still be descended), a plain non-dataclass
+            # object, a `type` object, and the scalars. Each is compared
+            # node-for-node against the reference body rather than against
+            # a hand-written count, so a cache that stopped descending would
+            # show up as a length difference here.
+            for _probe in (stmts[0], ET, int, dict, "s", 5, 2.5, None, True,
+                           (1, 2), ['a']):
+                _ref, _got = [], []
+                _ref_into(_probe, _ref)
+                ET._walk_ast_into(_probe, _got)
+                if len(_ref) != len(_got):
+                    err = (f'probe {type(_probe)}: {len(_ref)} nodes, '
+                           f'got {len(_got)}')
+                    break
+                for _i, (_r, _g) in enumerate(zip(_ref, _got)):
+                    if type(_r) is not type(_g):
+                        err = f'probe {type(_probe)} node {_i}: {type(_r)} != {type(_g)}'
+                        break
+                if err:
+                    break
+            # A `type` object must never be cached as "not a dataclass":
+            # `ET._WALK_DATACLASS_CACHE` must not gain an entry for it, since
+            # it returns before the question is asked.
+            _t_before = ET._WALK_DATACLASS_CACHE.get(int)
+            ET._walk_ast_into(int, [])
+            if ET._WALK_DATACLASS_CACHE.get(int) is not _t_before:
+                err = 'a `type` object was cached in _WALK_DATACLASS_CACHE'
+        except Exception as _e:
+            err = f'{type(_e).__name__}: {_e}'
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -8384,6 +8504,7 @@ print(resumes_after_next([7, 8, 9]))
     test_cursor_advance_has_no_cast_operand_in_gimple()
     test_next_inside_for_over_same_iterator_advances_once()
     test_paren_name_vs_one_tuple_for_target_differ()
+    test_walk_ast_dataclass_cache_is_transparent()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()

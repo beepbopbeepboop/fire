@@ -201,7 +201,8 @@ def test_every_declaration_is_seen():
     #   `_inherit_kinds`) and the box that carries an element kind out of a
     #   slot whose index is not a compile-time constant (`mojo_list_get_boxed`,
     #   `mojo_is_boxed`, `mojo_box_double`, `mojo_box_int`, `mojo_repr_boxed`)
-    #   -- see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
+    #   -- the mechanism for a heterogeneous element read is documented at
+    #   those definitions in runtime/fire_runtime.c.
     #   465 -> 466 (metal): one more entry point, from the self-host closure
     #   work in d446f5be.
     # Verified by COUNTING the merged header, not by adding the two deltas:

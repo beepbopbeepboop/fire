@@ -844,16 +844,93 @@ def _gmi_find_comptime_one(self, _node_list, _target, _out: dict):
 def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; `_append_hits` (dict) threaded and
-    annotated per the hoist GOTCHA."""
+    annotated per the hoist GOTCHA.
+
+    Records, per CONTAINER, the element C type of every value appended to
+    it anywhere in this module. The consumer
+    (`gen_module_impl`'s `_phase17_append_hits` loop) keys the answer on a
+    module GLOBAL's name, which is what makes the conclusion function-
+    independent: a registry populated by a constructor and read by a
+    different function is exactly the case this exists for, and the two gaps
+    named below are that case failing — with the whole of the observable
+    damage being a downstream method call on an element that read back as
+    `int64_t`.
+
+    Two receivers reach a module-level container, and only one of them was
+    recognised:
+
+    * `REGISTRY.append(x)` — a bare global name. Handled by the
+      `IdentExpr` test below, in every nesting kind this walks.
+    * `T.registry.append(x)` — a CLASS ATTRIBUTE, which reads as
+      `MemberExpr(obj=IdentExpr('T'), member='registry')` and is stored as
+      the synthesized `_classattr_T__registry` global
+      (`_class_attrs[T]['registry']`). The `IdentExpr` test rejected it, so
+      a class-level registry never recorded its element type and
+      `T.registry[0].method()` degraded to an `int64_t` receiver stub —
+      a pointer-sized decimal, exit 0.
+
+    And one NESTING kind reached nothing: the walk below descends into
+    `FunctionDef`, `IfStmt`, `WhileStmt`/`ForStmt`, `TryStmt` and
+    `WithStmt`, but not `StructDef`, so an append inside a constructor —
+    the overwhelmingly common registry shape — was invisible to the whole
+    pass. `self` is seeded as `<Struct> *` so `_quick_type` on the appended
+    argument resolves the same way it does in every other method.
+    """
     for _n in _node_list:
         if (isinstance(_n, ExprStmt)
                 and isinstance(_n.value, CallExpr)
                 and isinstance(_n.value.func, MemberExpr)
                 and _n.value.func.member == 'append'
-                and isinstance(_n.value.func.obj, IdentExpr)
                 and len(_n.value.args) == 1):
-            _append_hits.setdefault(_n.value.func.obj.name, []).append(
-                self._quick_type(_n.value.args[0]))
+            _p17_recv = None
+            if isinstance(_n.value.func.obj, IdentExpr):
+                _p17_recv = _as_str(_n.value.func.obj.name)
+            elif (isinstance(_n.value.func.obj, MemberExpr)
+                    and isinstance(_n.value.func.obj.obj, IdentExpr)):
+                # `Cls.NAME.append(x)` — resolve the class attribute to the
+                # `_classattr_<Cls>__<name>` global the class-attribute
+                # registration pass synthesizes, so the key this records is
+                # the same one that pass's consumer looks up. Plain
+                # `.name` access, NOT a dict lookup with a `None` default:
+                # `_class_attrs` is a `dict[str, dict[str, str]]` and its
+                # own `.get` result is untyped on the self-hosted compiled
+                # path (see `_ctor_lit_param_types`'s FLAT-dict note), so a
+                # nested lookup would compare a boxed int against a string
+                # and never match.
+                _p17_cls = _as_str(_n.value.func.obj.obj.name)
+                _p17_map = getattr(self, '_class_attrs', None)
+                if _p17_map:
+                    _p17_inner = None
+                    for _p17_k in _p17_map:
+                        if _as_str(_p17_k) == _p17_cls:
+                            _p17_inner = _p17_map[_p17_k]
+                            break
+                    if _p17_inner:
+                        for _p17_k2 in _p17_inner:
+                            if _as_str(_p17_k2) == _as_str(_n.value.func.obj.member):
+                                _p17_recv = _as_str(_p17_inner[_p17_k2])
+                                break
+            if _p17_recv is not None:
+                _append_hits.setdefault(_p17_recv, []).append(
+                    self._quick_type(_n.value.args[0]))
+        if isinstance(_n, StructDef):
+            # A constructor or any other method is a call site like any
+            # other; see this function's docstring. `self` is typed so
+            # `_quick_type(self)` below answers the struct pointer, exactly
+            # as the `FunctionDef` arm seeds a function's own parameters.
+            for _p17_m in (_n.methods or []):
+                _p17_saved = self.var_types
+                _p17_mark = self._scan_scratch_top
+                self.var_types = self._scratch_dict_copy(_p17_saved)
+                self.var_types['self'] = _as_str(_n.name) + ' *'
+                for _p17_pn, _p17_pt in (_p17_m.params or []):
+                    if _p17_pt:
+                        self.var_types[_as_str(_p17_pn)] = _mojo_type(_p17_pt)
+                _gmi_phase17_collect_appends(
+                    self, _p17_m.body or [], _append_hits)
+                self.var_types = _p17_saved
+                self._scan_scratch_top = _p17_mark
+            continue
         if isinstance(_n, FunctionDef):
             _saved = self.var_types
             _scratch_mark_17: int = self._scan_scratch_top
