@@ -5768,10 +5768,10 @@ class X86_64Codegen:
         fn = self._functions.get(name)
         if fn is not None:
             return getattr(fn, "return_type", None) is None
-        entry = M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name)
-        if entry is None and "." not in name:
-            entry = self._aliased_export(name)
+        entry = M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name)
         if entry is None:
             return False
         return M.signature_return_type(
@@ -5788,10 +5788,10 @@ class X86_64Codegen:
             # was unclassified, and `print(mod.name())` formatted a `char *` as
             # an integer — the pointer's own value.
             return M.dylib_export_return_kind(
-                M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name,
-                                      self._dylib_forwarded)
-                or self._aliased_export(name))
+                M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name))
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:
@@ -6126,6 +6126,25 @@ class X86_64Codegen:
         args = (list(e.args)
                 if is_extern and self._callee_decl(name) is None
                 else self._bind_call_args(name, e))
+        if is_extern and self._callee_decl(name) is None:
+            # …and the count is checked against what the MANIFEST publishes,
+            # because "no declaration to read" must not mean "no contract to
+            # obey". `extern_call_count_refusal` is the shared rule arm64 asks
+            # here, and returns "" for every case it cannot decide, which is
+            # most of them (the runtime dylib publishes no contract at all).
+            # Before it, a call whose library shipped without its sources
+            # dropped its extra arguments and read its missing ones out of an
+            # uninitialized register — measured, `two(1, 2, 3)` printing 12 and
+            # `two(1)` printing a number no source wrote, where CPython refuses
+            # both.
+            refusal = M.extern_call_count_refusal(
+                name, len(args),
+                M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name))
+            if refusal:
+                raise CodegenError(refusal)
         if is_extern and not is_extern_call \
                 and isinstance(e.func, F.SubscriptExpr):
             # A BRACKETED callee this unit does not compile, refused with the
@@ -6261,18 +6280,28 @@ class X86_64Codegen:
     def _extern_decl_for(self, name: str):
         """The declaration of an IMPORTED callee `name`, or None.
 
-        Keyed by the SYMBOL the call binds, and the entry is found by the same
-        two steps in the same order as `_extern_symbol` — the plain export
-        lookup, then the import alias — so the declaration handed to
-        `bind_call_arguments` is always the one whose parameter list the call
-        is actually being checked against. Asking by bare name instead would be
-        a way to hand a call the signature of a same-named function in a
-        different library.
+        Keyed by the SYMBOL the call binds, and the entry is found by
+        `model.dylib_callee_export` — the one resolution, in the same order as
+        `_extern_symbol` — so the declaration handed to `bind_call_arguments` is
+        always the one whose parameter list the call is actually being checked
+        against. Asking by bare name instead would be a way to hand a call the
+        signature of a same-named function in a different library.
+
+        The `forwarded` table reaches this through that shared resolution, and
+        that is load-bearing rather than tidiness: a re-exported callee
+        (`pkg.f`, where `pkg/__init__` is nothing but `from .sub import f`) is
+        published by the PACKAGE's manifest and nowhere else, so a lookup that
+        left it out found no declaration, and a call with no declaration is a
+        call whose arguments are passed unexamined — `pkg.f(1, 2, 3)` dropped
+        the third and `pkg.f(1)` read the second out of an uninitialized
+        register, printing two different numbers on the two architectures. It
+        is the same defect `test_formal_cross_module.py` pins for the bare
+        spelling, reached by the dotted one.
         """
-        entry = M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name)
-        if entry is None:
-            entry = self._aliased_export(name)
+        entry = M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name)
         if entry is None:
             return None
         return self._extern_decls.get(entry.get("symbol"))
@@ -6457,13 +6486,6 @@ class X86_64Codegen:
                 f"image built and then failed to load). The by-reference "
                 f"receiver that gives one is switched off "
                 f"({M.WIDE_RECEIVER_ENV}=0)")
-        # A KEYWORD construction is decided by the SAME plan as the
-        # positional one — `model.struct_construction_plan` reads each keyword
-        # against the field list and refuses the three ways that can fail — so
-        # there is no guard here of its own.  This branch used to refuse every
-        # keyword before the plan was consulted, which is how `S(a=1)` on a
-        # ONE-field struct stayed a refusal when the receiver IS the field and
-        # the value was the argument all along.
         if e.args or e.kwargs:
             # A ONE-FIELD struct with an argument: the receiver IS the field, so
             # the argument is not stored, it is the result.  What is refused is
@@ -6483,15 +6505,21 @@ class X86_64Codegen:
                 self._return_types)
             if refusal is not None:
                 raise CodegenError(refusal)
-            if plan[0] in (M.CONSTRUCTION_INIT, M.CONSTRUCTION_KEYWORD):
+            if plan[0] in (M.CONSTRUCTION_INIT, M.CONSTRUCTION_DEFAULT):
                 # One word, so nothing is stored anywhere: the receiver IS the
                 # field and the LAST value is the whole result.
+                #
+                # `CONSTRUCTION_DEFAULT` is here for the case where every
+                # argument a partial construction carried was one the plan
+                # consumed against a field that already carries its own
+                # declared default, so nothing is left to store and the result
+                # is the class-level one.
                 if plan[1]:
                     self._emit_expr(plan[1][-1][2])
                     return
                 self._emit_fresh_one_word(name, st)
                 return
-            self._emit_expr(e.args[0])
+            self._emit_expr(M.construction_supplied_argument(e))
             return
         self._emit_fresh_one_word(name, st)
 
@@ -6583,9 +6611,8 @@ class X86_64Codegen:
         # …and then the constructor's own stores, for the one shape that has
         # them.  Empty for `S()`, which is why this is the same code as the
         # default constructor's rather than a fourth copy of it.
-        for _field, slot, value in (plan[1] if shape in
-                                    (M.CONSTRUCTION_INIT,
-                                     M.CONSTRUCTION_KEYWORD) else ()):
+        for _field, slot, value in (plan[1] if shape ==
+                                    M.CONSTRUCTION_INIT else ()):
             self._emit_block_store(base, slot, value)
         # Each nested field's slot then gets the ADDRESS of the frame just
         # brought up.  Same order as the loop above, so the address stored and

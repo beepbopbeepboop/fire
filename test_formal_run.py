@@ -5795,6 +5795,69 @@ CONSTRUCTION_CASES = [
      "    if t.get(2) != 4:\n"
      "        return 30 + t.get(2)\n"
      "    return 41\n", 41, None),
+    # (2a-bis) A KEYWORD construction, which used to be refused outright and is
+    # now MATCHED against the field list. Every field is named here, so nothing
+    # is left to a default and this is the whole of the capability: `x` gets 1
+    # and `y` gets 2 whatever order the keywords are written in, which is what
+    # makes the matching the answer rather than a reading of a dict.
+    #
+    # Read back through a METHOD for the same reason the positional case above
+    # is: the answer then goes through the slot table rather than through
+    # whatever a field read happens to do.
+    ("constr_keyword_arguments_name_the_fields",
+     "struct Kw:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "    var z: Int\n"
+     "\n"
+     "    fn get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.x\n"
+     "        if i == 1:\n"
+     "            return self.y\n"
+     "        return self.z\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = Kw(z=4, x=1, y=7)\n"
+     "    if t.get(0) != 1:\n"
+     "        return 10 + t.get(0)\n"
+     "    if t.get(1) != 7:\n"
+     "        return 20 + t.get(1)\n"
+     "    if t.get(2) != 4:\n"
+     "        return 30 + t.get(2)\n"
+     "    return 37\n", 37, None),
+    # (2a-ter) A PARTIAL fill: `Pd(1)` on three fields, the two it leaves out
+    # having class-level defaults. This is CPython's generated `__init__` and the
+    # language's rule for a `@dataclass` field default, and it is the shape
+    # `bugs/FORMAL_dataclass_partial_construction.md` measured.
+    #
+    # The DEFAULT is what makes it a program, and the case says so by reading
+    # the unfilled field back: a `0` there would be a value the source never
+    # wrote, which is the outcome the whole construction family refuses to risk
+    # and the reason `constr_refuse_too_few_arguments` still refuses when the
+    # field has no default.
+    ("constr_partial_fill_uses_the_field_defaults",
+     "struct Pd:\n"
+     "    var a: Int\n"
+     "    var b: Int = 40\n"
+     "    var c: Int = 5\n"
+     "\n"
+     "    fn get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.a\n"
+     "        if i == 1:\n"
+     "            return self.b\n"
+     "        return self.c\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = Pd(3)\n"
+     "    if s.get(0) != 3:\n"
+     "        return 90 + s.get(0)\n"
+     "    if s.get(1) != 40:\n"
+     "        return 80 + s.get(1)\n"
+     "    if s.get(2) != 5:\n"
+     "        return 70 + s.get(2)\n"
+     "    return 48\n", 48, None),
     # (2b) Positional arguments that are EXPRESSIONS, and a mixture of literals,
     # locals and a call result. The store is one per argument at `base + 8k` in
     # order, so an argument that is a call is the case where recomputing the
@@ -6689,7 +6752,13 @@ CONSTRUCTION_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var p = P1(1)\n"
      "    return p.get(0)\n",
-     "refuse:does not match its fields (2 field(s): x, y)", None),
+     # The MESSAGE changed and the VERDICT did not: `P1(1)` used to be an
+     # arity refusal because the count did not match the field count, and it is
+     # still a refusal because `y` has no class-level default to be filled
+     # from — a different reason with a different repair, so it says so.
+     # `constr_partial_fill_needs_a_default` is the case that pins the other
+     # half: with a default on the field, the same count IS a program.
+     "refuse:leaves 'y' unfilled, and 'y' has no default", None),
     # Too MANY, and the mirror image: the count is not a field list, so the
     # message spells both sides. `P2` is a FOUR-field struct, so this also
     # covers a width past the cheapest case.
@@ -6717,7 +6786,9 @@ CONSTRUCTION_REFUSALS = [
      "    r = Resolver2(n, n, n)\n"
      "    return r.resolve(\"a\")\n",
      "refuse:does not match its fields (no fields at all)", None),
-    # ── A KEYWORD construction ──
+    # ── A KEYWORD construction — the four SPELLINGS and the three
+    # `TypeError`s ───────────────────────────────
+    #
     # This used to be a REFUSAL, with the case named
     # `constr_refuse_keyword_arguments` and the comment "which the language does
     # not have" — which was never true.  It IS a shape, it is the idiomatic
@@ -6727,20 +6798,17 @@ CONSTRUCTION_REFUSALS = [
     # POSITIONALS in dict order would make a program's meaning depend on an
     # iteration order nobody wrote.  Matching each keyword against the FIELD
     # LIST by name is the reading that cannot depend on any order, so that is
-    # what `model.keyword_construction_stores` does.
+    # what `model._construction_field_bindings` does.
     #
-    # Four cases and a refusal, because the construct has five answers and a
-    # rule that got four of them right would be the same defect again: every
-    # field named; a field left at its default; positionals filling the fields a
-    # keyword does not name; a keyword naming no field; a field named twice.
-    ("constr_keyword_construction",
-     "struct P3:\n"
-     "    var x: Int\n"
-     "    var y: Int\n\n"
-     "def main(n: Int) -> Int:\n"
-     "    var p = P3(x=1, y=2)\n"
-     "    printf(\"x=%d y=%d\", p.x, p.y)\n"
-     "    return p.x + p.y\n", 3, "x=1 y=2"),
+    # The construct has seven answers and a rule that got six of them right
+    # would be the same defect again, so there are seven rows here: every field
+    # named (which is `constr_keyword_arguments_name_the_fields` in
+    # CONSTRUCTION_CASES, where the keywords are deliberately written OUT of
+    # declaration order so a positional reading cannot pass it, and where the
+    # answer is read back through a METHOD rather than through a field); a
+    # field left at its default; positionals filling the fields a keyword does
+    # not name; a keyword on a one-field struct; and the three refusals.
+    #
     # A FIELD NO KEYWORD NAMES keeps its class-level default, which is the
     # language's rule (the object is default-initialized before anything is
     # assigned to it).  This is the row that separates the keyword shape from
@@ -7111,6 +7179,24 @@ SUBSCRIPT_CASES = [
      "    v = pick[1, 2]\n"
      "    return 0\n",
      "refuse:is a compile-time explicit-parameter list on a generic", None),
+    # A bracket list NESTED INSIDE another subscript's index, where the outer
+    # one is a runtime index. This is the boundary of `model.type_position_nodes`
+    # and it is here because that function exempts a bracket list from the
+    # runtime question when it sits in a TYPE position, and "nested in a
+    # subscript" is not what makes it one: `a`'s base is a list, so
+    # `b[c, d]` is a two-dimensional index of a value and stays refused. The
+    # other direction — a type application's own arguments, which ARE compile
+    # time by construction — is `external_call["getenv", _CPointer[UInt8,
+    # UntrackedOrigin[mut=False]]]`, pinned by execution in
+    # `test_formal_external_call.py`'s `env_round_trip`.
+    ("sub_multi_index_nested_in_a_runtime_index",
+     "def main(n):\n"
+     "    a = [[1, 2], [3, 4]]\n"
+     "    b = [(0, 1), (0, 2)]\n"
+     "    c = 0\n"
+     "    d = 1\n"
+     "    return a[b[c, d]]\n",
+     "refuse:is a subscript whose index is a tuple", None),
     # The construct that actually blocks 36 stdlib files, named for what it
     # is. `std/sys/info.mojo` has 27 of these and nothing else the backend
     # reaches first; the old text called it a "multi-index subscript", which
@@ -9633,6 +9719,48 @@ EQ_DISPATCH_CASES = [
      "    printf(\"same=%d diff=%d cross=%d\\n\", 1 if a == a else 0,\n"
      "           1 if a == b else 0, 1 if a == c else 0)\n"
      "    return 0\n", 0, "same=1 diff=0 cross=0"),
+    # A ONE-FIELD struct, whose value is a plain word rather than a frame
+    # address — so no holder table has anything to say about the name and
+    # `a == b` compared two FIELD VALUES while the method sat there reachable by
+    # name.  Measured before: `eq=0 direct=1` on both architectures, where
+    # CPython prints `eq=1 direct=1`.
+    #
+    # The pair is the same question twice, and both halves are needed: the
+    # local spelling is the doc's own reproducer and the parameter spelling is
+    # what a reader writes when the comparison is in a helper.  The ANNOTATION
+    # on `eq`'s parameters is load-bearing and not tidiness — an untyped
+    # parameter carries no type on this path, which is the pre-existing limit
+    # `declared_param` covers, and this case would then be asserting a rule the
+    # backend does not have.
+    ("eq_operator_reaches_a_one_field_eq",
+     "class One:\n"
+     "    x: int\n"
+     "    def __eq__(self, other):\n"
+     "        return True\n"
+     "def eq(a: One, b: One):\n"
+     "    if a == b:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    var a = One(1)\n"
+     "    var b = One(3)\n"
+     "    printf(\"eq=%d direct=%d\\n\", eq(a, b),\n"
+     "           1 if a.__eq__(b) else 0)\n"
+     "    return 0\n", 0, "eq=1 direct=1"),
+    # The same one-field struct, compared in the scope that BOUND it, so no
+    # annotation is involved at all — the case a helper-function spelling cannot
+    # reach.  `same` is 1 where the pre-change image printed `diff` and exited
+    # 0: the operator had become a compare of 1 against 3.
+    ("eq_operator_reaches_a_one_field_eq_in_the_binding_scope",
+     "class One:\n"
+     "    x: int\n"
+     "    def __eq__(self, other):\n"
+     "        return True\n"
+     "def main(n):\n"
+     "    var a = One(1)\n"
+     "    var b = One(3)\n"
+     "    printf(\"%d\\n\", 1 if a == b else 0)\n"
+     "    return 0\n", 0, "1"),
     # AGREE-OR-REFUSE.  `v` holds an `A` or a `B` depending on the branch, and
     # only `B` declares a dunder, so which call the comparison lowers to depends
     # on the path and this analysis has no path sensitivity.  Pre-change this
