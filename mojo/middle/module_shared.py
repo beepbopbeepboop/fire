@@ -962,6 +962,20 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                 v = node.value
                 if isinstance(v, IdentExpr):
                     ft = param_types.get(v.name, 'int64_t')
+                    # `self.flag = flag` with `flag: bool`. The field's own
+                    # ctype is a plain `int` -- `_TYPE_MAP` maps `'bool'` to
+                    # `'int'` -- so `ft` above carries no bool-ness at all and
+                    # every `_Bool` arm downstream (print, repr, str, the dict
+                    # store) has nothing to fire on: `print(b.flag)` printed
+                    # `1` where CPython prints `True`, in every spelling,
+                    # while `print(b)` said `flag=True` because the struct's
+                    # generated `__repr__` consults `struct_bool_fields`.
+                    # This assignment is the one place that knows BOTH that
+                    # the parameter is a bool and which field it feeds, which
+                    # is why the annotation has to be spent here rather than
+                    # recovered later.
+                    if v.name in self._gmi_bool_params:
+                        self.struct_bool_fields.setdefault(_sname, set()).add(fn)
                 elif isinstance(v, IntLiteral):
                     ft = 'int64_t'
                 elif isinstance(v, FloatLiteral):

@@ -1,13 +1,106 @@
 # CODEGEN: a `bool`-annotated struct FIELD prints as 1/0 in every spelling
 
-**State: OPEN, found 2026-09-30 while smoke-testing the
-`construct:compiled-silent-wrong-values` batch, mechanism located, not
-fixed.** Not a duplicate of
-`bugs/CODEGEN_repr_of_a_bool_prints_1.md` (fixed 2026-09-30) — that one was
-a `_Bool` value whose C type was already `_Bool` and whose repr chokepoint had
-no arm for it. This is the same *class* one level out: for a struct field the
-bool-ness is gone before anything can look at it, so no chokepoint can recover
-it.
+**State: PARTIALLY FIXED (2026-10-01). Option B landed: every printing
+spelling of a `bool`-annotated field now says `True`/`False`. Option A — the
+real fix — is untouched and still needs the full gate; what is left of it is
+written down at the bottom.**
+
+Not a duplicate of `bugs/CODEGEN_repr_of_a_bool_prints_1.md` (fixed
+2026-09-30) — that one was a `_Bool` value whose C type was already `_Bool`
+and whose repr chokepoint had no arm for it. This is the same *class* one level
+out: for a struct field the bool-ness is gone before anything can look at it, so
+no chokepoint can recover it.
+
+## What was fixed (option B, 2026-10-01)
+
+**The table already existed.** `struct_bool_fields` is populated from a
+`bool`-annotated class-body `VarDecl`, and the struct's own generated
+`__repr__` has consulted it all along — which is exactly how this survived:
+`print(b)` said `flag=True` while `print(b.flag)` said `1`. But for the doc's
+own shape, `def __init__(self, flag: bool): self.flag = flag`, the annotation
+is on the *parameter*, so the table was empty: nothing registered the field,
+because `_gmi_collect_self_assigns` keeps only the field's resolved ctype
+(`_resolve_type('bool')` → `int`) and the bool-ness has nowhere to go.
+
+Three pieces, in the order they had to be written:
+
+1. **`_gmi_collect_self_assigns` records it** (`mojo/middle/module_shared.py`).
+   That walk is the one place that knows BOTH that a parameter is annotated
+   `bool` and which `self.<field>` it feeds, so the annotation is spent there
+   rather than recovered later. The set of bool-annotated parameter names for
+   the method being scanned rides on `gen._gmi_bool_params` (declared in
+   `GimpleGen.__init__` for the same self-hosting reason as `_bool_valued`
+   right above it: a field created lazily behind `hasattr` reads as
+   existing-but-NULL self-hosted). Re-walking the body in `module_gen.py` to
+   recover the parameter→field link instead would be exactly the quadratic
+   rescan `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
+   is about.
+2. **`is_python_bool_expr` gained a `MemberExpr` arm and a `CallExpr` arm**
+   (`mojo/middle/exprtypes.py`), resolving the receiver's struct — `self`
+   inside the struct's own method, otherwise the receiver's own type. This is
+   the ONE shared predicate every bool consumer already uses (`_gen_print`,
+   `_repr_value`, `_stringify_value`, the dict store), so one arm reaches all
+   of them and none of them can disagree about the same value.
+3. **A list literal of bool fields.** `_lower_list_literal` asks the same
+   predicate for its element type, because a list's generic repr both formats a
+   slot as `"1"` AND reads a `False` (0) slot as the `None` sentinel: `[b.flag,
+   c.flag]` printed `[1, None]`, not `[1, 0]`. Only the repr route changes —
+   `list_suffix('_Bool')` is `'int'`, so the append suffix, the slot layout and
+   every per-slot reader are unchanged. This is the list-side twin of
+   `mojo_mark_dict_bool_values`.
+
+Measured on the doc's own program, and on a second one covering the shapes the
+doc's step 2 lists:
+
+| | CPython | before | after |
+|---|---|---|---|
+| `print(b.flag)` | `True` | `1` | `True` |
+| `print(repr(b.flag))` | `True` | `1` | `True` |
+| `print('%r' % (b.flag,))` | `True` | `1` | `True` |
+| `print(f'{b.flag}')` | `True` | `1` | `True` |
+| `print(str(b.flag))` | `True` | `1` | `True` |
+| `print({'k': b.flag})` | `{'k': True}` | `{'k': 1}` | `{'k': True}` |
+| `print(b.get())` (method return) | `True` | `1` | `True` |
+| `print(repr(b.get()))` | `True` | `1` | `True` |
+| `[b.flag]` | `[True]` | `[1]` | `[True]` |
+| `[b.flag, c.flag]` | `[True, False]` | `[1, None]` | `[True, False]` |
+| `print(b.flag)` where `b` is a `self` parameter | `False` | `0` | `False` |
+| `print(b.n)` (an `int` field) | `5` | `5` | `5` — unchanged |
+| `b.flag + 0` | `1` | `1` | `1` — unchanged |
+| `b.flag == True` | `True` | `True` | `True` — unchanged |
+
+Regressions: `gimple_bool_annotated_struct_field` and
+`gimple_bool_field_in_a_list_and_through_a_receiver` in
+`test_gimple_runner.py`. The first pins every printing spelling rather than the
+easiest one to look at, and carries the `int` field and the two arithmetic
+spellings as the controls that a fix did not turn a bool field into something
+else.
+
+## What is NOT fixed, and why
+
+**A bool field still occupies an `int` slot.** Every printing chokepoint now
+answers, and anything that depends on the *width* or on `isinstance` still
+sees an integer. That is option A, and this document's own analysis of it
+stands: `_TYPE_MAP['bool'] = '_Bool'` is the real fix, `__GIMPLE` requires both
+operands of a binary expression to be the IDENTICAL type, so `self.count +=
+self.flag` becomes `int64_t += _Bool` — a GIMPLE operand-type error. That is
+exactly why none of the three fixes above touches a ctype or `_quick_type`, and
+why they cannot be folded into option A later for free.
+
+**One receiver shape is not claimed.** `struct_bool_methods` records a method
+only when every `return` reads a bool field off a receiver this pass can
+*name*: `self`, or a parameter annotated with a struct name. A return of
+`factory().flag`, or of a field off a subscripted or computed receiver, is not
+claimed — answering `True` there would be a guess, and the doc's own rule
+("a program that says nothing is worse than one that says the wrong thing")
+argues against it.
+
+Regressions verified: `test_gimple.py` 348 pass / 1 fail and
+`test_runtime_diff.py` 39 pass / 0 fail, both byte-identical to the pre-change
+baseline; `test_gimple_runner.py` green apart from its two pre-existing
+failures.
+
+## Original report follows
 
 ## What I ran and what I saw
 

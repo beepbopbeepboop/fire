@@ -445,10 +445,103 @@ def is_python_bool_expr(gen, node) -> bool:
         return True
     if isinstance(node, IdentExpr) and node.name in getattr(gen, '_bool_valued', ()):
         return True
+    if isinstance(node, MemberExpr):
+        return _is_python_bool_field(gen, node)
+    if isinstance(node, CallExpr):
+        return _is_python_bool_method(gen, node)
     try:
         return gen._quick_type(node) == '_Bool'
     except Exception:
         return False
+
+
+def _is_python_bool_field(gen, node) -> bool:
+    """Is this `x.f` / `self.f` a struct field whose ANNOTATION says `bool`?
+
+    The fourth source `is_python_bool_expr` consults, and the one that
+    cannot be a ctype test. `_TYPE_MAP` maps `'bool'` to `'int'`, so
+    `_resolve_type('bool')` returns `'int'` and a `bool`-annotated field
+    occupies an ordinary integer slot: the field read lowers to `int`, the
+    struct declares `int flag`, and every `_Bool` arm downstream has
+    nothing to fire on. The bool-ness is destroyed before any chokepoint
+    could look at it, which is why `struct_bool_fields` exists — the
+    annotation is recorded while the StructDef is still readable (the
+    struct's own generated `__repr__` has consulted that table all along,
+    so `print(b)` said `flag=True` while `print(b.flag)` said `1`).
+
+    Resolving the RECEIVER's struct is the whole job, and there are two
+    spellings: `self.f` inside the struct's own method, where the current
+    struct is the answer, and `b.f` at a call site, where the receiver is
+    an ordinary expression whose type has to be asked for. A receiver this
+    cannot type (a call result, a subscript) answers False, which is the
+    pre-existing behaviour of every caller of the shared predicate.
+    """
+    _member = getattr(node, 'member', None)
+    if not _member:
+        return False
+    _bf = getattr(gen, 'struct_bool_fields', None)
+    if not _bf:
+        return False
+    _recv = getattr(node, 'obj', None)
+    if isinstance(_recv, IdentExpr) and _recv.name == 'self':
+        _sn = getattr(gen, '_current_struct_name', None)
+        if _sn and _member in (_bf.get(_sn) or ()):
+            return True
+    try:
+        _rt = gen._quick_type(_recv)
+    except Exception:
+        return False
+    if not _rt or not _rt.endswith(' *'):
+        return False
+    _rsn = _struct_name_of(_rt)
+    return _member in (_bf.get(_rsn) or ())
+
+
+def _is_python_bool_method(gen, node) -> bool:
+    """Is this `x.m(...)` a method of a struct that RETURNS a `bool` field?
+
+    The fifth source `is_python_bool_expr` consults, and the shape most real
+    code uses: `def get(self): return self.flag`. The method's C return type
+    is inferred from its body, the body is a read of an `int` field, so the
+    inference lands on `int64_t` exactly as the direct read does — and
+    `print(b.get())` printed `1` where CPython prints `True`.
+
+    Note that `b.get() == True` was ALREADY right, because the comparison
+    produces a `_Bool`; a test that only checked the equality would pass
+    while every printing spelling was wrong, which is the same trap
+    `CODEGEN_repr_of_a_bool_prints_1.md` documents for print vs repr.
+
+    `struct_bool_methods` records only methods whose EVERY `return` hands
+    back a bool field (see module_gen.py's second per-method loop), so a
+    method that merely reads one is not claimed. As with the field case, the
+    answer is deliberately NOT a `_Bool` return type: that would make
+    `b.get() + 1` a GIMPLE operand-type error, which is the reason the real
+    fix (this document's option A, `_TYPE_MAP['bool'] = '_Bool'`) needs the
+    full gate and its own session.
+    """
+    _f = getattr(node, 'func', None)
+    if not isinstance(_f, MemberExpr):
+        return False
+    _bm = getattr(gen, 'struct_bool_methods', None)
+    if not _bm:
+        return False
+    try:
+        _rt = gen._quick_type(_f.obj)
+    except Exception:
+        return False
+    if not _rt or not _rt.endswith(' *'):
+        return False
+    return _as_str_node(_f.member) in (_bm.get(_struct_name_of(_rt)) or ())
+
+
+def _as_str_node(v) -> str:
+    """`v` as text, for an AST field read that may be boxed.
+
+    The self-hosted backend boxes a struct field read to `int64_t`, so a
+    bare comparison would compare an address; every other consumer in this
+    file goes through `fire_compiler._as_str` for the same reason."""
+    from fire_compiler import _as_str
+    return _as_str(v)
 
 
 def _receiver_key(e) -> str | None:

@@ -4612,6 +4612,26 @@ def _lower_mlir_struct(gen, kind: str, index, arg_pairs: list):
 
 def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     elem = gen._infer_list_elem_type(node.elements)
+    # A literal whose every element is a Python bool VALUE is a list of
+    # bools, and the two answers differ in more than the digits: the generic
+    # path both formats a slot as "1"/"0" (mojo_repr_int, not mojo_repr_bool)
+    # AND treats a False (0) slot as the None sentinel, so `[b.flag, c.flag]`
+    # printed `[1, None]`. `[True, False]` was already right because
+    # `_infer_list_elem_type`'s `_quick_type` says `_Bool` for a BoolLiteral;
+    # a bool-annotated struct FIELD has no such type (see
+    # `is_python_bool_expr`), which is why this asks the shared PREDICATE
+    # rather than looking at the joined ctype.
+    #
+    # Only the repr route changes: `list_suffix('_Bool')` is 'int', so the
+    # append suffix, the slot layout and every per-slot reader are exactly
+    # what the integer answer gave. This is the list-side twin of
+    # `mojo_mark_dict_bool_values`, and it is deliberately NOT a change to
+    # `_quick_type`, which is shared with arithmetic: a `_Bool`-typed
+    # `self.count += self.flag` is a GIMPLE operand-type error.
+    if (elem in ('int', 'int64_t') and node.elements
+            and all(gimple_exprtypes.is_python_bool_expr(gen, _el)
+                    for _el in node.elements)):
+        elem = '_Bool'
     suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
     t    = gen._new_temp('MojoList *')
     # See _literal_elements_include_none's docstring: don't tag an

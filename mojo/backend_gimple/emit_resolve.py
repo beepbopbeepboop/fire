@@ -580,6 +580,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._c_kw_struct_renames = gen._c_kw_struct_renames  # share: C-keyword struct-name renames (auto/enum.auto) must agree across modules
                 temp_gen.struct_boxed_fields = gen.struct_boxed_fields
                 temp_gen.struct_bool_fields = gen.struct_bool_fields
+                temp_gen.struct_bool_methods = gen.struct_bool_methods
                 temp_gen._struct_name_owner = gen._struct_name_owner  # share: cross-module same-name collision guard
                 # The module-qualified struct IDENTITY that guard feeds: which
                 # C name each colliding StructDef is emitted under, and which

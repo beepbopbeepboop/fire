@@ -5460,6 +5460,78 @@ d['a'] = b
 print(d)
 """, "{'k': True}\n{'k': True}\n{'k': False}\n{'k': 1}\n{'a': True}\n")
 
+    # A `bool`-ANNOTATED struct FIELD, which is the same class one level out
+    # from the two tests above: for a field the bool-ness is gone before any
+    # chokepoint can look at it. `_TYPE_MAP` maps `'bool'` to `'int'`, so
+    # `_resolve_type('bool')` returns `int`, the struct declares `int flag`,
+    # and every `_Bool` arm in print/repr/str/the dict store has nothing to
+    # fire on. Nine spellings printed `1` and none said anything about it.
+    # `struct_bool_fields` already existed and the struct's own generated
+    # `__repr__` already consulted it, which is exactly why this survived:
+    # `print(b)` said `flag=True` while `print(b.flag)` said `1`.
+    #
+    # Every consumer is reached through the ONE shared predicate
+    # (`is_python_bool_expr`), which gained a MemberExpr arm, so this test
+    # pins every spelling rather than the one that was easiest to look at.
+    # The `int` field in the same struct and `b.flag + 0` are the controls
+    # that a fix did not turn a bool field into something else.
+    test_gimple_stdout("gimple_bool_annotated_struct_field", """\
+class Box:
+    def __init__(self, flag: bool, n: int):
+        self.flag = flag
+        self.n = n
+    def get(self):
+        return self.flag
+
+def main():
+    b = Box(True, 5)
+    c = Box(False, 5)
+    print(b.flag)
+    print(repr(b.flag))
+    print(b.n)
+    print(c.flag)
+    print('%r' % (b.flag,))
+    print(f'{b.flag}')
+    print(str(c.flag))
+    print({'k': b.flag})
+    print(b.get())
+    print(repr(b.get()))
+    print(b.flag + 0)
+    print(b.flag == True)
+main()
+""", "True\nTrue\n5\nFalse\nTrue\nTrue\nFalse\n{'k': True}\n"
+       "True\nTrue\n1\nTrue\n")
+
+    # The two shapes the field case does NOT reach on its own, and the
+    # controls that keep them honest. A list of bool fields needs the list
+    # LITERAL's element type to be `_Bool`, because the generic list repr
+    # both formats a slot as "1" and reads a False (0) slot as the None
+    # sentinel -- `[1, None]`, not `[1, 0]`. A bool field read through a
+    # BOUND METHOD's receiver (`other.flag` where `other` is a `self`
+    # parameter) resolves the receiver's struct rather than `self`, which is
+    # the second spelling `_is_python_bool_field` has to answer.
+    test_gimple_stdout("gimple_bool_field_in_a_list_and_through_a_receiver", """\
+class Box:
+    def __init__(self, flag: bool):
+        self.flag = flag
+    def echo(self, other: Box):
+        return other.flag
+    def truthy(self):
+        if self.flag:
+            return 1
+        return 0
+
+def main():
+    b = Box(True)
+    c = Box(False)
+    print([b.flag])
+    print([b.flag, c.flag])
+    print(b.echo(c))
+    print(b.truthy())
+    print(c.truthy())
+main()
+""", "[True]\n[True, False]\nFalse\n1\n0\n")
+
     # §4.2b: print({1, 2}) printed the set's own ADDRESS -- print had no
     # MojoSet * dispatch branch at all (len()/iteration on the same value
     # were already correct).
