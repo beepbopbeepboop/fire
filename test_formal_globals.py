@@ -537,15 +537,25 @@ CASES = [
     # safe and would also refuse a program whose answer this build can state,
     # which is the same mistake the `+ - *` row above would hide if `//` were
     # the only operator tested.
+    #
+    # `bump` is a METHOD, and that is half of what this row is for. A gate that
+    # read only the module's top-level statements would not see a `global G`
+    # inside a `class`, and `model.collect_module_symbols` walks with
+    # `iter_nodes` precisely so it does not. The method's `self` receiver has
+    # nothing to do with which NAME is written: the module is the scope either
+    # way.
     ("module_comptime_constant_over_a_locally_shadowed_name",
      "G = 5\n"
      "\n"
-     "def bump():\n"
-     "    G = 100\n"
+     "class C:\n"
+     "    def bump(self):\n"
+     "        G = 100\n"
      "\n"
      "comptime _B = G + 1\n"
      "\n"
      "def main(n):\n"
+     "    c = C()\n"
+     "    c.bump()\n"
      "    v: Int = _B\n"
      "    print(v)\n"
      "    return 0\n", "6\n"),
@@ -692,6 +702,34 @@ REFUSALS = [
      "def bump():\n"
      "    global G\n"
      "    G = 100\n"
+     "\n"
+     "comptime _B = G + 1\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = _B\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "does not fold to a compile-time constant"),
+
+    # THE SAME QUESTION ASKED ABOUT A METHOD, and the reason it is a separate
+    # row rather than a comment on the one above. `global_names_bound_in` and
+    # `collect_global_slots` both read the module's top-level `FunctionDef`
+    # list, and `collect_module_symbols` does not: it walks with `iter_nodes`,
+    # so a `global G` inside a `class` counts. Measured before that walk was in
+    # place — `class C: def bump(self): global G; G = 100` left `G` resolvable
+    # and `comptime _B = G + 1` folded to 6, where a module body that called
+    # `c.bump()` first would make the true value 101.
+    #
+    # The receiver is the point: `self` has no bearing on which NAME is
+    # written, and a reader who assumes the gate is about "functions" will miss
+    # that a method is one.
+    ("module_comptime_constant_over_a_method_written_name_refused",
+     "G = 5\n"
+     "\n"
+     "class C:\n"
+     "    def bump(self):\n"
+     "        global G\n"
+     "        G = 100\n"
      "\n"
      "comptime _B = G + 1\n"
      "\n"

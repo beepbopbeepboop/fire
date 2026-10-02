@@ -18224,8 +18224,17 @@ def collect_module_symbols(stmts: list) -> dict:
     shadows the module's, and such a name really is read-only at module level."""
     table: dict = {}
     known: dict = {}
+    # EVERY FunctionDef at any depth, not the top-level ones. A `global G`
+    # inside a method is a write to the module's `G` exactly as one inside a
+    # free function is — the module is the scope either way, and the method's
+    # `self` receiver has nothing to do with which name is written — so a gate
+    # that read only the top-level list would let `class C: def bump(self):
+    # global G` through and fold a later initializer against a value that
+    # method can change. `iter_nodes` reaches a nested def and a def inside a
+    # `StructDef`'s body, which is the whole of what "any depth" has to mean
+    # here.
     written = set(functions_writing_globals(
-        [s for s in (stmts or []) if isinstance(s, F.FunctionDef)]))
+        [n for n in iter_nodes(stmts or []) if isinstance(n, F.FunctionDef)]))
 
     def remember(name, folded, value) -> None:
         """`known[name] = folded`, unless the name is one of the four cases.
