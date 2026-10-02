@@ -43,9 +43,9 @@ the first had not landed:
 
 Measured, `/opt/homebrew/bin/python3 test_struct_formal.py`, after 2 and 3 and
 before arm64's convention landed: **154/154 checks passed, exit 0**, three
-consecutive runs. On the composed tree it is 154/154 again — see the merge
-commit's report; the denominator moved only because the suite grew by its own
-harness self-test, never because a verdict moved.
+consecutive runs. Re-measured on the composed tree — all three changes at once —
+2026-10-02: **154/154, exit 0**; the denominator moved only because the suite
+grew by its own harness self-test, never because a verdict moved.
 
 The rest of this document is the record of what was found, what the convention
 fixed, and why the remaining refusal is right.
