@@ -97,6 +97,47 @@ source is visibly asking about the module's binding, and the alternative reading
 is the one CPython rejects.  So that is the rule that shipped, and it is the
 filing's program.
 
+### A FOURTH artifact class, found by fixing a different bug on 2026-10-02
+
+The list above is the one the filing measured, and it is missing the class that
+`read_before_store` itself walked into while fixing `with … as y:` — see
+`bugs/FORMAL_arm64_slice_concat_and_with_refusal.md` §1 and commit 07b724f2.
+
+A **`with … as y:` alias** is a binding that happens before the value the body
+sees, exactly like a `for` target, and the read-before-store walk added it to
+`stored` AFTER walking the body. So
+
+```mojo
+def main():
+    x = 0
+    with 7 as y:
+        x = y
+    return x
+```
+
+was REFUSED — on both architectures, not one — with a message naming
+`UnboundLocalError` for a program CPython does not run at all (`with 7` is a
+`TypeError: 'int' object does not support the context manager protocol`).  The
+constructor is `formal/model.py`'s `read_before_store`, so it is a scan of the
+SAME tree this rule is about, and it is the second time one of these shapes has
+been counted wrongly rather than missed: a syntactic rule's whole difficulty is
+the ORDER in which a name comes into existence, and `for` targets got it right
+while `with` aliases did not.
+
+**So the class is not "a callee, a `global`, and a binding that happens before
+the value" — it is every construct that BINDS before the value it exposes, and
+the ones already handled are `for` and `with`.** The next candidates, neither
+measured here: a `match` statement's capture pattern, and a comprehension's
+`async for` target. Both are the same question asked of a shape the scan does
+not yet descend into, and both are cheap to check by extending the scan's
+exclusion list rather than by reasoning about them.
+
+**The re-measurement this implies, and it is not free:** the 233 sites were
+counted with a scan that did not know about the `with` alias, so the number is
+now an OVERCOUNT by however many `with … as y:` bodies read `y`. That direction
+is safe — it means the true figure is lower — and it is one of the three things
+to redo before the 233 means anything.
+
 ## The sibling the filing did not mention: `global` and no storage
 
 ```
