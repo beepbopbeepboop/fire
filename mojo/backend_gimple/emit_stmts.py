@@ -776,6 +776,20 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str) -> None:
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
     if v in gen._actual_types:
         gen._actual_types[tname] = gen._actual_types[v]
+    # …and the container KIND itself, which the two arms above do not cover
+    # because they are about the value's ELEMENT / VALUE type and a `|` result
+    # may have neither: `_dict_union_val_type` propagates only an AGREEMENT
+    # between the two operands' dict-value types, so `e = {}; d = {'PATH':
+    # '/a'}; m = e | d` merges a dict of strings with a dict of NOTHING and
+    # records no value type at all. The kind needs no such agreement — the
+    # RHS's own lowered type IS the answer — and without it the global reads
+    # back with no kind whatsoever, so `print(m)` formatted the boxed
+    # `MojoDict *` with `%s` and printed its address.
+    #
+    # `setdefault`, because an earlier pass's own conclusion for this name (a
+    # parameter usage guess, say) is not something a store site may overturn.
+    if vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+        gen._actual_types.setdefault(tname, vtype)
     ginf.carry_callable_ret_types(gen, v, tname)
     # …and the WHOLE-PROGRAM half of the same fact. `carry_callable_ret_types`
     # writes the per-function tables, which are keyed by the lowered VALUE, and

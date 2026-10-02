@@ -3912,7 +3912,21 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # MojoDict* reinterprets its slot layout as a MojoSet*'s and is exactly
     # the class of container-kind cast DESIGN.html's R3 flags (confirmed via
     # test_dict.mojo's `orig |= new` where both are Dict[String, Int]).
-    if op == '|' and (lt == 'MojoDict *' or rt == 'MojoDict *') and 'MojoSet *' not in (lt, rt):
+    if op == '|' and 'MojoSet *' not in (lt, rt) and (
+            lt == 'MojoDict *' or rt == 'MojoDict *'
+            # ...or BOTH operands are provably dicts by a signal other than
+            # their lowered C type. `lt == 'MojoDict *'` is not reachable for
+            # a module-level global or an unannotated parameter, because both
+            # are stored through the int64_t boxing convention and so lower
+            # to `int64_t` — `a = {'x': 1}; b = {'y': 2}; print(a | b)` then
+            # emitted a raw C `|` between two POINTERS (`_t13 | _t14`) and
+            # printed the result's address. Requiring BOTH is what keeps this
+            # from stealing `int.__or__`: a name is only "provably a dict"
+            # because a table this codegen fills for dicts says so
+            # (`resolve_shared._operand_is_dict`'s own list of signals), and
+            # `{'x': 1} | 3` has no evidence for its right operand.
+            or (gen._operand_is_dict(left_node, lt, lv)
+                and gen._operand_is_dict(right_node, rt, rv))):
         _lu = _as_dict_operand(gen, lt, lv)
         _ru = _as_dict_operand(gen, rt, rv)
         t = gen._call_expr(

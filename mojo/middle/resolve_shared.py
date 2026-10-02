@@ -106,6 +106,68 @@ def _struct_unpack_elem_ctype(gen, call, index):
     return _struct_elem_ctype(codes)
 
 
+def _operand_is_dict(gen, node, t: str, v=None) -> bool:
+    """Is this operand's value a DICT, on more evidence than its C type?
+
+    The C type answers `int64_t` for a boxed pointer as readily as for an
+    integer, so "is it a dict" is a separate question whenever the container
+    was stored through the boxing convention — which is the case for every
+    module-level global and for every parameter. Each signal below is one this
+    codegen populates only for a dict, so any of them is positive evidence and
+    none of them is a guess:
+
+      * `t == 'MojoDict *'` — not boxed at all.
+      * the node is a `{...}` LITERAL — nothing to be uncertain about, and
+        `_quick_type`'s own docstring's reason for not listing `DictExpr`
+        generally (guessing wrong launders a container through a scalar slot)
+        does not apply to a literal whose type is not a guess.
+      * `_actual_types[n] == 'MojoDict *'` — the boxed-pointer tracking has
+        already recovered the real pointer type for this name.
+      * `n` has a `_dict_val_types` entry — that table is keyed by DICTS, and
+        an `int64_t` there means "a dict whose values are integers", not "an
+        integer" (see `_lower_dict_literal`). Its whole-program half is
+        `_global_dict_val_types`, which Phase 1.7 fills only from a global
+        bound to a dict literal / `dict(...)` / a `dict[K, V]` annotation.
+      * `node.name` is a PARAMETER of the function being emitted that every
+        visible call site handed a dict — `_param_dict_val_obs` is populated
+        only from arguments the call-site scan proved were dicts, so an entry
+        for this function's own parameter is that proof. Read here, and only
+        here, for the container KIND; the table's primary meaning stays the
+        dict's VALUE type.
+
+    Two names are consulted when both are available and different: `v`, the
+    already-lowered C expression (a module global lowers to a fresh `_tN`
+    temp, which is the name `_actual_types` is keyed by), and the source-level
+    `node.name` (which is what the whole-program tables are keyed by, and what
+    pre-lowering callers like `_quick_type` have).
+
+    Deliberately a predicate about ONE operand. Deciding whether `a | b` is a
+    `dict.__or__` needs BOTH answers, and that conjunction is the caller's, so
+    this cannot be misread as "this expression is a union"."""
+    if t == 'MojoDict *':
+        return True
+    if isinstance(node, gimple_ctypes.DictExpr):
+        return True
+    names = []
+    if isinstance(v, str):
+        names.append(v)
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        _nm = _as_str(node.name)
+        if _nm not in names:
+            names.append(_nm)
+    for _n in names:
+        if (getattr(gen, '_actual_types', None) or {}).get(_n) == 'MojoDict *':
+            return True
+        if _n in (getattr(gen, '_dict_val_types', None) or {}):
+            return True
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        _cf = _as_str(getattr(gen, 'current_func_name', '') or '')
+        _obs = getattr(gen, '_param_dict_val_obs', None) or {}
+        if _as_str(node.name) in (_obs.get(_cf) or {}):
+            return True
+    return False
+
+
 def _quick_type(gen, node) -> str:
     """Estimate C type of an expression without emitting code."""
     if isinstance(node, gimple_ctypes.IntLiteral):    return 'int64_t'
@@ -187,6 +249,19 @@ def _quick_type(gen, node) -> str:
             lt = gen._quick_type(node.left)
             rt = gen._quick_type(node.right)
             return gimple_ctypes.TypeLattice.join(lt, rt)
+        if node.op == '|':
+            # `a | b` on two dicts is `dict.__or__`, and it MATERIALISES a
+            # new `MojoDict *` — so a function whose whole body is
+            # `return a | b` has a pointer return, and typing it `int64_t`
+            # (what `join` below returns for two boxed operands) hands the
+            # caller an integer: the caller then formats the pointer's own
+            # bits with `%s` and prints an address, exit 0, no diagnostic.
+            # Both operands must be provably dicts, which is also Python's
+            # own rule — `int.__or__` is the only other `|` this codegen
+            # implements, and `join` below is still the answer for it.
+            if (_operand_is_dict(gen, node.left, gen._quick_type(node.left))
+                    and _operand_is_dict(gen, node.right, gen._quick_type(node.right))):
+                return 'MojoDict *'
         if node.op in gimple_ctypes._CMP_OPS or node.op in ('in', 'not in'): return '_Bool'
         lt = gen._quick_type(node.left)
         rt = gen._quick_type(node.right)

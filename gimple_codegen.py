@@ -4717,6 +4717,8 @@ class GimpleGen:
         return ginf._dict_val_of_expr(self, expr)
     def _dict_union_val_type(self, lv, rv) -> str:
         return ginf._dict_union_val_type(self, lv, rv)
+    def _operand_is_dict(self, node, t: str, v=None) -> bool:
+        return grsl._operand_is_dict(self, node, t, v)
     def _prepare_analysis_funcs(self, stmts: list) -> None:
         self._analysis_funcs = ginf._build_analysis_funcs(stmts)
         self._analysis_structs = ginf._build_analysis_structs(stmts)

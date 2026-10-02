@@ -1473,11 +1473,21 @@ def _dict_union_val_type(gen, lv, rv) -> str:
     bugs/BUGFIX_ROADMAP.md item 2 for that remaining gap.
     """
     lvt = _dict_val_of_expr(gen, lv)
-    if lvt is None:
+    rvt = _dict_val_of_expr(gen, rv)
+    # `int64_t` is this table's DEFAULT answer, not a fact about the value, so
+    # an operand carrying it contributes nothing: recording it as evidence
+    # could only ever collide with a real answer from the other side. That is
+    # the same rule the cross-call parameter contract applies to its
+    # observations (`module_gen._informative_elem_ctype`), and it is what makes
+    # `e = {}; m = e | {'PATH': '/a'}` work: `{}` has no value type at all, so
+    # it is not a disagreement with the string operand, it is silence.
+    _infos = [t for t in (lvt, rvt) if t is not None and t != 'int64_t']
+    if not _infos:
         return ''
-    if lvt == _dict_val_of_expr(gen, rv):
-        return lvt
-    return ''
+    for _t in _infos:
+        if _t != _infos[0]:
+            return ''
+    return _as_str(_infos[0])
 
 
 def _scalar_arg_is_addressable_local(gen, aval) -> bool:

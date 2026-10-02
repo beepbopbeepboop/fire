@@ -6755,6 +6755,65 @@ def main():
     f({"x": 1.5})
 """, "1.5\n")
 
+    # `a | b` on two dicts is `dict.__or__`, which MATERIALISES a new dict.
+    # The dict-union lowering has always existed (`mojo_dict_union`) but only
+    # fired when an operand's lowered C type was literally `MojoDict *`, and
+    # that is unreachable for a module-level global or an unannotated
+    # parameter — both are stored through the int64_t boxing convention and
+    # so lower to `int64_t`. The union then became a raw C `|` between two
+    # POINTERS (`_t13 | _t14`) and `print` formatted the result's bits with
+    # `%s`: an address, exit 0, no diagnostic.
+    #
+    # Both operands must be provably dicts, which is also Python's own rule —
+    # the sibling `int |` cases are asserted below so this cannot be a
+    # general "make `|` a union" change.
+    test_gimple_stdout("gimple_dict_union_of_globals_and_through_a_return", """\
+e = {}
+o = {'PATH': '/b'}
+d = {'PATH': '/a', 'X': '1'}
+
+def merged(x, y):
+    return x | y
+
+print(e | o | d)
+print(merged(e, d))
+""", "{'PATH': '/a', 'X': '1'}\n{'PATH': '/a', 'X': '1'}\n")
+
+    # The merged dict's own read-back, which is where the doc's real instance
+    # (`merged = env_defaults | os.environ | updates`, then `merged.get(k)`)
+    # lived: the KIND has to survive the store into the global, and the VALUE
+    # type has to reach the callee parameter when the union is passed
+    # straight in. An EMPTY dict contributes no value type at all, so it is
+    # not a disagreement with a string operand — it is silence, and treating
+    # the `int64_t` default as evidence is what made `{} | {'PATH': '/a'}`
+    # record nothing.
+    test_gimple_stdout("gimple_dict_union_result_reads_and_crosses_a_call", """\
+def show(m):
+    print(m['k'])
+    print(m.get('k'))
+    print(len(m))
+
+e = {}
+d = {'k': 'v'}
+m = e | d
+print(m)
+show(e | d)
+""", "{'k': 'v'}\nv\nv\n1\n")
+
+    # `int.__or__` is untouched, through the same shapes (globals, locals, and
+    # a function's return): the new evidence is a table this codegen fills for
+    # DICTS only, so an integer pair has none of it.
+    test_gimple_stdout("gimple_int_or_is_still_bitwise_or", """\
+A = 6
+B = 3
+def either(x, y):
+    return x | y
+print(A | B)
+print(either(6, 3))
+print(either(4, 1))
+print(6 ^ 3)
+""", "7\n7\n5\n5\n")
+
     # DISAGREEMENT, asserted on the generated C rather than on stdout: the
     # honest answer for `f({'x': '1'}); f({'x': 2})` is the `int64_t` default,
     # and its observable consequence at the string call site is the stored

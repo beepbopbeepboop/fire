@@ -6190,6 +6190,25 @@ def gen_module_impl(self, stmts):
                 _fwd = self._param_dict_val_types.get(_as_str(caller_name), {})
                 if _n in _fwd and _fwd[_n]:
                     return _fwd[_n]
+            return None
+        if isinstance(a, gimple_ctypes.BinaryOp) and a.op == '|':
+            # `f(env_defaults | os.environ | updates)` — the shape the whole
+            # dict-value contract exists for, and the one a merge produces.
+            # The union's value type is an AGREEMENT between its operands'
+            # (ginf._dict_union_val_type's own rule, for the same reason and
+            # with the same `int64_t`-is-the-default caveat); disagreement
+            # yields nothing rather than a guess.
+            _l = _static_arg_dict_val(a.left, dict_val, caller_name)
+            _r = _static_arg_dict_val(a.right, dict_val, caller_name)
+            if _l is None or _r is None:
+                return None
+            if _l == _r:
+                return _l
+            if _l == 'int64_t':
+                return _r
+            if _r == 'int64_t':
+                return _l
+            return None
         return None
 
     def _literal_arg_elems(a):
