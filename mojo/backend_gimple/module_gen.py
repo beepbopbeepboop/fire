@@ -39,7 +39,6 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as gimple_gen_coro
-import mojo.middle.infra_infer as ginf
 from mojo.middle.exprtypes import _walk_ast
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
@@ -5525,7 +5524,20 @@ def gen_module_impl(self, stmts):
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
                 # Same key, for the sibling table the ASSIGNMENT SITE reads
                 # mid-body under `current_func_name` — see
-                # `ginf.alias_multi_kind_locals`.
+                # `ginf.alias_multi_kind_locals`. Imported HERE, not at
+                # module scope: `mojo.middle.infra_infer` does
+                # `import gimple_codegen`, and `gimple_codegen` imports this
+                # file, so a module-scope import makes
+                # `import mojo.backend_gimple.module_gen` — a real first
+                # import — fail with `cannot import name '_FC_SEP' from
+                # partially initialized module 'mojo.middle.infra_infer'`.
+                # Same reasoning, and the same shape, as the three
+                # backend->middle edges `mojo/middle/{funcs_shared,
+                # module_shared, ...}` moved to their use sites in 91db806a
+                # (`test_suite.py`'s
+                # `test_the_compiler_imports_from_every_real_entry_point`
+                # is what says so).
+                import mojo.middle.infra_infer as ginf
                 ginf.alias_multi_kind_locals(self, key, m)
     _reconcile_param_container_kinds()
 
@@ -7556,7 +7568,20 @@ def gen_module_impl(self, stmts):
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
                 # Same key, for the sibling table the ASSIGNMENT SITE reads
                 # mid-body under `current_func_name` — see
-                # `ginf.alias_multi_kind_locals`.
+                # `ginf.alias_multi_kind_locals`. Imported HERE, not at
+                # module scope: `mojo.middle.infra_infer` does
+                # `import gimple_codegen`, and `gimple_codegen` imports this
+                # file, so a module-scope import makes
+                # `import mojo.backend_gimple.module_gen` — a real first
+                # import — fail with `cannot import name '_FC_SEP' from
+                # partially initialized module 'mojo.middle.infra_infer'`.
+                # Same reasoning, and the same shape, as the three
+                # backend->middle edges `mojo/middle/{funcs_shared,
+                # module_shared, ...}` moved to their use sites in 91db806a
+                # (`test_suite.py`'s
+                # `test_the_compiler_imports_from_every_real_entry_point`
+                # is what says so).
+                import mojo.middle.infra_infer as ginf
                 ginf.alias_multi_kind_locals(self, key, m)
     _reconcile_param_container_kinds()
 
