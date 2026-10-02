@@ -68,6 +68,65 @@ def default_format(arch: str) -> str:
     return "macho" if sys.platform == "darwin" else "elf"
 
 
+def _publish_signed_image(output: str, binary: bytes) -> None:
+    """Install `binary` at `output`, signed and complete, in one step.
+
+    ELF images need no signature and `_ad_hoc_sign` returns immediately on a
+    non-Darwin host, so this is the whole publish on Linux too.
+
+    The three-step dance — write, chmod, ad-hoc sign — is not atomic, and on a
+    path other processes LOAD while it runs it does not have to be. Measured on
+    this tree: `~/.gmojo/cas/formal-imports/arm64/` is shared by every checkout
+    on the machine, and a program linking `struct.<digest>.arm64.dylib` died
+    under `dyld` with "missing code signature" for roughly 1 run in 20 while
+    an unrelated worktree was building the same module. The window is the
+    `chmod`/`codesign` gap: for those instants the file on disk is a valid
+    Mach-O with no signature, which is precisely the state dyld refuses. A
+    program that ran fine a moment earlier and a moment later fails in between,
+    which is why it read as a flaky test rather than as a race.
+
+    So: build and sign in a private staging DIRECTORY, then `os.replace` the
+    finished file into place. A staging *directory* rather than a staging
+    *filename* because the library's identity is `"@rpath/" + basename`, and
+    `formal/build.py`'s `compile_formal_dylib` derives the install name from
+    the basename alone — so a file staged beside the target under a different
+    name would bake a different LC_ID_DYLIB, while the same basename one
+    directory down bakes the identical one. `os.replace` is atomic and the
+    staging directory is on the same filesystem by construction (it is a child
+    of the target's own), so a reader sees either the whole old file or the
+    whole new one.
+
+    Signing the staged file rather than the target is what closes the window;
+    `codesign` verifies fine on a renamed file, because an ad-hoc signature
+    carries no path.
+    """
+    stage_dir = os.path.join(
+        os.path.dirname(os.path.abspath(output)),
+        f".stage-{os.getpid()}-{os.urandom(4).hex()}")
+    os.makedirs(stage_dir, exist_ok=True)
+    staged = os.path.join(stage_dir, os.path.basename(output))
+    try:
+        with open(staged, "wb") as f:
+            f.write(binary)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(staged, 0o755)
+        _ad_hoc_sign(staged)
+        os.replace(staged, output)
+    finally:
+        # The staged file is gone after a successful replace; on any failure
+        # the whole directory goes, so a killed build leaves no debris that a
+        # later glob over this directory would mistake for a library.
+        try:
+            os.unlink(staged)
+        except FileNotFoundError:
+            pass
+        try:
+            os.rmdir(stage_dir)
+        except OSError:
+            pass
+
+
 def _ad_hoc_sign(path: str) -> None:
     if sys.platform != "darwin":
         return
@@ -1484,13 +1543,7 @@ def compile_formal(source_path: str, output: str = None,
         ext = ".elf" if fmt == "elf" else ".aout"
         output = os.path.join(os.path.dirname(os.path.abspath(source_path)),
                               stem + ext)
-    with open(output, "wb") as f:
-        f.write(binary)
-    os.chmod(output, 0o755)
-    if fmt == "macho":
-        # Only Mach-O images are ad-hoc signed; the kernel refuses an
-        # unsigned one, and an ELF image carries no such requirement.
-        _ad_hoc_sign(output)
+    _publish_signed_image(output, binary)
 
     result = {
         "path": output,
@@ -10741,10 +10794,7 @@ def _namespace_library(output: str, install_name: str, arch: str,
     binary = build_macho_dylib(b"", TEXT_BASE + dylib_code_offset(
         install_name, False, dep_install), [], install_name, arch=arch,
         deps=dep_install or None)
-    with open(output, "wb") as f:
-        f.write(binary)
-    os.chmod(output, 0o755)
-    _ad_hoc_sign(output)
+    _publish_signed_image(output, binary)
     manifest_path = write_dylib_manifest(output, install_name, [], source=source,
                                          module=module, constants=constants)
     _record_namespace(manifest_path, reexports, dylib_syms, traits=traits)
@@ -11146,10 +11196,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         exports, install_name, arch=arch, external_syms=external_syms,
         deps=dep_install, dep_syms=dep_syms,
         globals_image=globals_image("macho") if has_globals else None)
-    with open(output, "wb") as f:
-        f.write(binary)
-    os.chmod(output, 0o755)
-    _ad_hoc_sign(output)
+    _publish_signed_image(output, binary)
     manifest_path = write_dylib_manifest(
         output, install_name, exports,
         source=source_paths[0],

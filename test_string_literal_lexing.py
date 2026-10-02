@@ -12,9 +12,10 @@ triple-quoted one as much as in a single-quoted one — and a backslash
 immediately before a closing run therefore leaves the literal UNTERMINATED.
 
 That rule has a consequence which used to be silent, and which is the whole
-reason this file exists
-(bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md).
-A source line reading
+reason this file exists: a triple-quoted literal holding a backslash before a
+closing run used to swallow the rest of the file (fixed in `fd10fd92`, which
+made an unterminated literal a REFUSAL — `-1` from `_scan_string_end` — where it
+had been "keep scanning"). A source line reading
 
     s = Q3 + backslash + Q3          # i.e. Q3 \ Q3
 

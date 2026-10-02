@@ -1570,6 +1570,44 @@ def _dylib_lock(out: str):
     return _locked()
 
 
+def module_dylib_path(out_dir: str, module_identity: str, source_path: str,
+                      arch: str) -> str:
+    """Where this module's library for `arch` lives, and why each part is here.
+
+    `<abi-prefix>.<source-digest>.<compiler-digest>.<arch>.dylib`.
+
+    **The compiler digest is the one that was missing.** The CAS is one
+    directory shared by every checkout on the machine, and sibling worktrees are
+    routinely at different commits with BYTE-IDENTICAL module sources —
+    measured on this tree: four sibling worktrees had five distinct
+    `formal/build.py` digests behind a single
+    `formal/hostmods/struct.mojo` digest. The source digest alone therefore
+    named ONE path for five different compilers, and whichever finished last
+    replaced the others' library, so a program could link against a library some
+    other checkout's codegen produced. That is the wrong-artifact class the
+    source digest was added to prevent, one level up: the digest answered "which
+    source" and the question was also "which compiler".
+    `cas.formal_fingerprint()` hashes `formal/**` plus the parser and the middle
+    tier — the set that decides the emitted bytes.
+
+    The other three parts: `abi_module_name` (not a second `re.sub` of the same
+    rule — the manifest keys every export by this prefix and
+    `dylib_export_module` resolves through it, so two copies of the
+    substitution are two chances to disagree, and the disagreement is a link
+    error in the last image built rather than in either function); the source
+    digest (editing the module invalidates the path rather than leaving a stale
+    library reachable under a name that looks current); and the architecture,
+    which is a DIFFERENT artifact rather than a different version of one, so it
+    is in the name as well as in `out_dir`.
+    """
+    prefix = _model.abi_module_name(module_identity)
+    with open(source_path, "rb") as f:
+        src_digest = cas.hash_parts(f.read())[:12]
+    comp_digest = cas.formal_fingerprint()[:12]
+    return os.path.join(out_dir,
+                        f"{prefix}.{src_digest}.{comp_digest}.{arch}.dylib")
+
+
 def build_module_dylib(module_name: str, source_path: str, out_dir: str,
                        arch: str = "arm64", project_root: str = None,
                        _stack=(), _parent: str = None) -> str:
@@ -1677,49 +1715,56 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # name that collides across architectures would reintroduce the same
     # overwrite one level up.
     #
-    # The SOURCE DIGEST is in the name as well, and that closes the last
-    # overwrite. `(arch, module name)` is not an identity: two builds of a
-    # module called `helper` — two checkouts, two temp trees, two concurrent
-    # jobs in one `-j18` bucket — took the same path, so whichever finished
-    # last replaced the other's library, and a program could be linked against
-    # a dylib built from different source. It showed up as an intermittent
-    # failure in test_formal_sweep.py's dyld-probe cases, which read a dylib
-    # back off this shared path while other jobs were writing it.
+    # The SOURCE DIGEST and the COMPILER DIGEST are in the name as well, and
+    # that closes the last overwrite; `module_dylib_path` owns the naming rule
+    # and the reason each part of it is there.
     #
-    # Hashing the source is what makes sharing safe rather than merely rare:
-    # two builds whose sources agree produce byte-identical libraries, so
+    # `(arch, module name)` is not an identity: two builds of a module called
+    # `helper` — two checkouts, two temp trees, two concurrent jobs in one
+    # `-j18` bucket — took the same path, so whichever finished last replaced
+    # the other's library, and a program could be linked against a dylib built
+    # from different source. It showed up as an intermittent failure in
+    # test_formal_sweep.py's dyld-probe cases, which read a dylib back off
+    # this shared path while other jobs were writing it.
+    #
+    # Hashing the inputs is what makes sharing safe rather than merely rare:
+    # two builds whose inputs agree produce byte-identical libraries, so
     # writing the same path is then harmless, and two that disagree get
     # different paths. Nothing has to take a lock, so a concurrent build
     # neither blocks nor blocks on it — the same bargain the CAS makes
-    # everywhere else. The digest is the module's own source, so editing it
-    # invalidates the path rather than leaving a stale library reachable
-    # under a name that looks current.
-    # `model.abi_module_name`, not a second `re.sub` of the same rule: the
-    # prefix here is what the manifest keys every export by, and
-    # `dylib_export_module` is what a caller writing `os.path.join` resolves
-    # the qualifier through. Two copies of the substitution are two chances for
-    # them to disagree, and the disagreement is a link error in the last image
-    # built rather than in either of the two functions.
+    # everywhere else. Each digest invalidates a name that looks current the
+    # moment the thing it names changes.
+    #
+    # `prefix` below is the EXPORT prefix, a different consumer of the same
+    # substitution: it is what the manifest keys every export by, and what
+    # `dylib_export_module` resolves through. `module_dylib_path` computes it
+    # too because it is part of the name, but a name and an export qualifier
+    # are two jobs, so both read the one rule rather than one of them being a
+    # copy of it.
     prefix = _model.abi_module_name(module_identity)
-    with open(source_path, "rb") as f:
-        src_digest = cas.hash_parts(f.read())[:12]
-    out = os.path.join(out_dir, f"{prefix}.{src_digest}.{arch}.dylib")
+    out = module_dylib_path(out_dir, module_identity, source_path, arch)
     # Serialise the write to this exact path.
     #
-    # The digest above already separates two builds whose SOURCES differ, so
-    # the only remaining collision is two builds of the SAME source onto one
-    # path — and that is the common case, not a rare one: `-j18` over a bucket
-    # where several jobs import the same stdlib module, or one
-    # `make check-formal-sweep` beside another. Their content agrees, so
-    # sharing is fine; writing it in place is not, because a reader can
-    # observe the file part written.
+    # The digests above already separate two builds whose source OR compiler
+    # differs, so the only remaining collision is two builds of the same
+    # (source, compiler) onto one path — and that is the common case, not a
+    # rare one: `-j18` over a bucket where several jobs import the same stdlib
+    # module, or one `make check-formal-sweep` beside another. Their content
+    # agrees, so sharing is fine.
     #
-    # A lock, not a staging path with a rename. Renaming looked like the tidier
-    # fix and is wrong here: a dylib's install name is derived from its output
-    # path, and it is baked into the load command of everything that links it,
-    # so a file built as `.../staging/foo.dylib` and moved afterwards no longer
-    # matches the path its dependents were told to load. The lock leaves the
-    # path — and therefore the identity — exactly as it was.
+    # The lock is still here even though the publish is now atomic, and it is
+    # worth being precise about which hazard each covers, because they are
+    # different: `_publish_signed_image` stops a READER from ever seeing a
+    # half-written or unsigned file (`os.replace` is atomic), which is the
+    # hazard that produced the intermittent `dyld` "missing code signature"
+    # deaths. The lock stops two WRITERS from doing the work twice and racing
+    # on the manifest, which `os.replace` does not cover because the manifest
+    # is a separate file. The earlier comment here claimed a staging path plus
+    # a rename was impossible because a dylib's install name is derived from
+    # its output path; that is true of the FULL path and false of what is
+    # actually used — `compile_formal_dylib` builds `"@rpath/" +
+    # os.path.basename(output)`, so the same basename one directory down bakes
+    # an identical LC_ID_DYLIB.
     with _dylib_lock(out):
         try:
             result = compile_formal_dylib(

@@ -3039,6 +3039,128 @@ def main():
     print(tot)
 """, "5017\n46\n5\nTrue\nFalse\n5\n7\n6\n6\n3\nTrue\nFalse\n266666\n")
 
+    # ── A CONTAINER used as a dict key keys by its VALUE
+    # (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). A tuple word reached
+    # the dict as a bare address: `(p, os.path.getmtime(p))` built twice hit
+    # twice as often as it missed never, so every lookup grew the dict and the
+    # self-hosted `mojoc --dump-full fire.py` carried ~16 GB of it.
+    #
+    # What is asserted here is the whole key path, not one spelling: store,
+    # read, `in`, `get(k, default)`, a dict LITERAL key of the same tuple (the
+    # two must agree or one dict is two dicts), a NESTED tuple (whose inner
+    # list must be walked by value rather than addressed), and — the half that
+    # a literal-only test would pass by accident — a key whose string element
+    # is built at RUN time from a runtime value, so the two builds of it are
+    # different strings at different addresses. That last case is why the
+    # string slot is read by the model's own boxed-string discriminator rather
+    # than by a pointer-shape test.
+    test_gimple_stdout("gimple_tuple_dict_key_is_content_keyed", """\
+def main():
+    d = {}
+    k1 = ("a", 1)
+    k2 = ("a", 1)
+    k3 = ("a", 2)
+    d[k1] = "one"
+    d[("b",)] = "tuple1"
+    d[(1, 2)] = "ints"
+    print(d[k2], d.get(k3, "none"), d[k3] if k3 in d else "none")
+    print(d[("b",)], d[(1, 2)], d.get((2, 1), "none"), d.get(("a", 1), "none"))
+    d[k1] = "again"
+    print(d[k2], len(d))
+    lit = {(9, 9): "lit"}
+    lit[(9, 9)] = "lit2"
+    print(lit[(9, 9)], len(lit))
+    n = {}
+    n[(("x",), "y")] = 1
+    print(n[(("x",), "y")], n.get((("x",), "z"), "none"))
+    for name in ["alpha", "beta", "alpha"]:
+        e = {}
+        e[(name, len(name))] = 1
+        print(e[(name, len(name))], len(e))
+main()
+""", "one none none\ntuple1 ints none one\nagain 3\nlit2 1\n1 none\n"
+       "1 1\n1 1\n1 1\n")
+
+    # The other half of that doc, and the expensive one: a MISSING tuple key
+    # grew the dict by one entry per lookup, which is where ~16 GB of the live
+    # set on `mojoc --dump-full fire.py` went (a cache keyed by
+    # `(module, name)` re-inserting what it had just looked up, every call).
+    # stdout alone cannot see it, so this is the bounded-memory shape: the
+    # answer is identical with or without the leak, and only the peak is not.
+    #
+    # The four keys are built ONCE, before the loop, and only INDEXED inside it.
+    # That is deliberate: a tuple LITERAL in the loop allocates a list per
+    # iteration and nothing ever frees one, which measures a different (also
+    # real, also pre-existing) leak — ~180 B per literal, so 1.2 M of them is
+    # ~220 MB on its own — and would swamp the ~78 B per LOOKUP this is here to
+    # pin. What has to stay flat across the loop is the key rendering and the
+    # dict itself, and those are the only things that move when this test fails.
+    test_gimple_bounded_memory("gimple_tuple_dict_key_lookup_does_not_grow", """\
+def main():
+    keys = [("stable", 0), ("stable", 1), ("stable", 2), ("stable", 3)]
+    d = {}
+    for i in range(300000):
+        d[keys[i % 4]] = i
+        d[keys[i % 4]]
+        if keys[i % 4] in d:
+            d[keys[i % 4]] = i
+        d.get(keys[i % 4], 0)
+    print(len(d))
+    print(d[keys[3]])
+main()
+""", "4\n299999\n", 40)
+
+    # ── `with C():` with no `as` target still runs `__exit__`
+    # (bugs/CODEGEN_with_no_as_target_drops_exit.md, deleted with that fix).
+    # The five index-parallel lists `_gen_stmt_WithStmt` accumulates per with
+    # item were appended from inside `if item.alias is not None:`, so the
+    # no-`as` spelling registered nothing: `__enter__` was called, the body ran,
+    # and NO teardown was emitted at all — not a wrong `__exit__` argument, no
+    # teardown. On a lock that wedges every other process for the life of the
+    # tree.
+    #
+    # It has to RUN to be a test: the generated C is well-formed either way and
+    # the body's own output is identical, which is why `test_runtime_diff.py`'s
+    # A/B engine comparison cannot see it. `__exit__` prints, so its absence is
+    # in stdout. Both spellings are in one program because the fix is exactly
+    # "the no-`as` spelling registers like the other one", and the loop is here
+    # because a per-iteration teardown leak is what the bug was FOR.
+    test_gimple_stdout("gimple_with_no_as_target_still_calls_exit", """\
+class Lock:
+    def __init__(self, name):
+        self.name = name
+        self.held = 0
+    def __enter__(self):
+        self.held = self.held + 1
+        print("enter", self.name, self.held)
+        return self.held
+    def __exit__(self, t, v, tb):
+        self.held = self.held - 1
+        print("exit", self.name, self.held)
+
+def work():
+    l = Lock("A")
+    with l:
+        print("body no as")
+    with l as n:
+        print("body as", n)
+    print("held after both", l.held)
+
+def loop():
+    for i in range(3):
+        with Lock("B"):
+            print("loop body", i)
+
+def main():
+    work()
+    loop()
+main()
+""", "enter A 1\nbody no as\nexit A 0\nenter A 1\nbody as 1\nexit A 0\n"
+       "held after both 0\n"
+       "enter B 1\nloop body 0\nexit B 0\n"
+       "enter B 1\nloop body 1\nexit B 0\n"
+       "enter B 1\nloop body 2\nexit B 0\n")
+
     # ── An unannotated integer local is 64-bit (bugs/CODEGEN_unannotated_int_local_is_32_bit.md).
     # `var a = 0` used to be a 32-bit `int`, so the accumulator wrapped at 2^31 while
     # `var b: Int = 0` and CPython both reached 6000000000.
@@ -6183,6 +6305,52 @@ print([1, 2])
 print({"a": 1})
 """, "S<a>\nS<a>\nS<a>\nQ<b>\nQ<b>\nR<a>\nR<a>\nQ<b>\n1\nx\n[1, 2]\n{'a': 1}\n")
 
+    # A container of structs prints its ELEMENTS through the element's own
+    # `__repr__` — the container rows of
+    # bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
+    # container_spellings.md, which printed a raw pointer decimal where CPython
+    # prints the object (and the decimal moves run to run, so no value
+    # comparison could pass).
+    #
+    # The mechanism: the codegen records, ON THE VALUE, how to render one
+    # element (`mojo_list_set_elem_repr(t, _mojo_elem_repr_P)`), because the
+    # element's static type is known where the list is built and is
+    # unrecoverable later — `_mojo_dispatch_repr` needs a runtime type TAG,
+    # which a struct-allocated value does not carry. The shim prefers the
+    # user's `__repr__` and falls back to the generated field dump, so a struct
+    # with no dunder reprs as `P(x='a')`, which is what it already printed on
+    # its own.
+    #
+    # Every spelling here is one where the element's type IS visible at the
+    # literal: a parameter, a local, a slice, a copy, a concatenation. The two
+    # shapes where it is not are filed, because each needs a type recorded
+    # somewhere it currently is not: an unannotated MODULE-LEVEL binding read
+    # at module level (boxed into an int64_t with no type anywhere), and a
+    # struct-typed FIELD inside another struct's field dump (the field's
+    # semantic type is not in `struct_field_types`, so the dump formats the
+    # slot as an integer). See the Status section of the bug doc.
+    test_gimple_stdout("gimple_container_element_repr_uses_the_struct_dunder", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+def containers(p: P):
+    print(repr([p]))
+    print(repr((p,)))
+    print(repr([p, p]))
+    print(repr([[p]]))
+    print(repr([p][0:2]))
+    print(repr(list([p])))
+    print(repr([p] + [p]))
+
+def main():
+    containers(P("a"))
+main()
+""", "[R<a>]\n(R<a>,)\n[R<a>, R<a>]\n[[R<a>]]\n[R<a>]\n[R<a>]\n"
+       "[R<a>, R<a>]\n")
+
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.
@@ -6843,6 +7011,66 @@ def main():
 
     test_cross_module_iterator_struct_protocol_symbols()
 
+    # bugs/CODEGEN_unannotated_init_param_field_type_int64_residue.md (deleted
+    # with that fix): the cross-module constructor evidence above types a PARAM,
+    # but the `_xmod_ctor_field_hints` merge applied it to the FIELD whose name
+    # MATCHES the param. So a constructor that stores one param in two fields —
+    # `self.s = s` and `self.n = s` — typed only `self.s`, and `b.n` read back
+    # as a heap address: the same `char *` stored into an `int64_t` slot,
+    # silently wrong, exit 0, and ASLR-varying so no value comparison could ever
+    # pass. The identical class in ONE module was already right, which is what
+    # says the rule (type the param, then every field assigned from it) rather
+    # than "cross-module is hard".
+    #
+    # Both spellings are in one program because the fix is exactly "the second
+    # field types like the first", and CPython is run on the same source so the
+    # expected text is anchored rather than recorded.
+    def _test_cross_module_ctor_param_types_every_field():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "cross_module_ctor_param_types_every_field"
+        defn = ("class Dialog:\n"
+                "    def __init__(self, s):\n"
+                "        self.s = s\n"
+                "        self.n = s\n"
+                "\n"
+                "class Pair:\n"
+                "    def __init__(self, tag):\n"
+                "        self.first = tag\n"
+                "        self.second = tag\n"
+                "        self.of = [tag]\n")
+        use = ("import xmodctor3_defn\n"
+               "\n"
+               "def main():\n"
+               "    b = xmodctor3_defn.Dialog(\"hi\")\n"
+               "    print(b.s)\n"
+               "    print(b.n)\n"
+               "    p = xmodctor3_defn.Pair(\"t\")\n"
+               "    print(p.first)\n"
+               "    print(p.second)\n"
+               "    print(len(p.of))\n"
+               "\n"
+               "main()\n")
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmodctor3_defn.py', defn, 'xmodctor3_use.py', use)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        # `self.of = [tag]` is a list OF the param, not the param: it must stay
+        # a list, which is why this asserts its length rather than its contents.
+        want = "hi\nhi\nt\nt\n1\n"
+        if out == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected {want!r}, got {out!r}")
+            _FAIL += 1
+    _test_cross_module_ctor_param_types_every_field()
     # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md:
     # two REAL classes sharing a bare name across two modules. The single
     # string this codegen used as a struct's C identity was the bare

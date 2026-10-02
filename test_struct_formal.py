@@ -70,15 +70,34 @@ V_NEG = 0 - 5            # signed: the arithmetic-shift case
 
 RESULTS = []
 
+# "The values were not compared", distinct from `None` ("no differences") and
+# from `[]`. `expect_lines` uses it so a wrong COUNT fails the values check
+# rather than passing it on a comparison it never made.
+_NOT_COMPARED = object()
 
-def check(ok, what, detail=""):
-    # The detail is KEPT, not just printed: a suite that reports "FAIL
-    # <what>" and throws away the only sentence that says why has thrown away
-    # the evidence, and `bugs/CODEGEN_test_struct_formal_is_flaky.md` is the
-    # write-up of a run whose output could not be attributed for exactly that
-    # reason. It is also what the harness self-test below asserts on.
-    RESULTS.append((bool(ok), what, detail))
-    if not ok:
+def check(ok, what, detail="", tally=None, announce=True):
+    """Record one verdict, and print it when it is a failure.
+
+    The detail is KEPT in the record, not just printed: a suite that reports
+    "FAIL <what>" and throws away the only sentence that says why has thrown
+    away the evidence, and `bugs/CODEGEN_test_struct_formal_is_flaky.md` is the
+    write-up of a run whose output could not be attributed for exactly that
+    reason. It is also what the harness self-test below asserts on, so a record
+    that dropped it would make that check pass for the wrong reason.
+
+    `tally` redirects the record somewhere other than `RESULTS`, which is for a
+    caller measuring THIS harness rather than `struct`: the probes in
+    `test_the_check_count_is_fixed_whatever_the_verdicts` are supposed to fail,
+    and a failure that reached the suite's own tally would make it red for a
+    reason that has nothing to do with `struct`. It is the same code path
+    either way, so what the probe measures is real. `announce=False` suppresses
+    the FAIL line, which is the other half of that: a probe's expected failure
+    printed among the suite's real ones is noise. Both halves of a probe's
+    tuple are still there — a probe measuring the COUNT must not be measuring a
+    different record shape than the suite's own.
+    """
+    (RESULTS if tally is None else tally).append((bool(ok), what, detail))
+    if not ok and announce:
         print(f"FAIL  {what}" + (f": {detail}" if detail else ""), flush=True)
     return bool(ok)
 
@@ -161,7 +180,8 @@ def build_and_run(tmpdir, name, source):
             _how_it_died(run))
 
 
-def expect_lines(tmpdir, name, source, expected, what):
+def expect_lines(tmpdir, name, source, expected, what, tally=None,
+                announce=True):
     """The program's printed integers must equal `expected`, element-wise.
 
     **TWO checks are recorded in every outcome, and that is the point.** This
@@ -182,12 +202,13 @@ def expect_lines(tmpdir, name, source, expected, what):
     values_what = f"{what} [each printed value]"
 
     def unreached(why):
-        return check(False, values_what, f"not reached: {why}")
+        return check(False, values_what, f"not reached: {why}",
+                     tally=tally, announce=announce)
 
     try:
         got, died = build_and_run(tmpdir, name, source)
     except AssertionError as e:
-        check(False, what, str(e))
+        check(False, what, str(e), tally=tally, announce=announce)
         unreached("the program did not build")
         return None
     if died is not None:
@@ -198,12 +219,12 @@ def expect_lines(tmpdir, name, source, expected, what):
         # nothing, and "expected 1 numbers, program printed 0: []" is a
         # statement about the struct tables that the process, not the tables,
         # is what makes false.
-        check(False, what, died)
+        check(False, what, died, tally=tally, announce=announce)
         unreached(died)
         return None
     if not check(len(got) == len(expected), what,
                  f"expected {len(expected)} numbers, program printed "
-                 f"{len(got)}: {got}"):
+                 f"{len(got)}: {got}", tally=tally, announce=announce):
         unreached(f"the program printed {len(got)} of {len(expected)} "
                   f"numbers, so there is nothing to compare: {got}")
         return None
@@ -212,7 +233,8 @@ def expect_lines(tmpdir, name, source, expected, what):
     check(not bad, values_what,
           f"{len(bad)} of {len(expected)} differ, first: "
           + ", ".join(f"line {i}: got {g}, CPython says {e}"
-                      for i, g, e in bad[:4]))
+                      for i, g, e in bad[:4]),
+          tally=tally, announce=announce)
     return got
 
 
@@ -722,6 +744,56 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
 
 # ── 5. the module is where the resolver looks, and the corpus imports it ─────
 
+def test_the_check_count_is_fixed_whatever_the_verdicts(tmpdir):
+    """A failing case records the SAME number of checks as a passing one.
+
+    This suite's total used to be a function of how many cases failed —
+    `expect_lines` returned early after the length mismatch, so a red run
+    reported fewer checks than a green one (`144` / `145` / `147` / `148` on an
+    unchanged tree). That is not cosmetic: a moving total means the denominator
+    moves, so a reader cannot tell a check that was not reached from one that
+    was reached and failed, and the total is useless as evidence.
+
+    Both halves are measured here rather than asserted: a case whose program
+    prints the right number of wrong values, and one whose program prints
+    nothing at all. The second is the shape the real flake took.
+
+    `tally=reached`, because two of the three probes are SUPPOSED to fail — a
+    probe recorded in the suite's own tally would be indistinguishable from the
+    bug it exists to detect. The count is read off a second tally the same
+    `expect_lines` populates, so what is measured is the real code path.
+    """
+    cases = [
+        # (name, source, expected, shape, checks reached, checks failed)
+        # `want_failed` is 2 for the count mismatch because a program that
+        # printed the wrong NUMBER of lines cannot have its values compared —
+        # so the second check fails too, on the attribution rather than on a
+        # comparison. That is the whole point of the shape: an early return
+        # used to make it 1.
+        ("checkcount_wrong_values",
+         "from struct import calcsize\n\ndef main():\n    print(0)\n",
+         [struct.calcsize("<I")], "values differ, count matches", 2, 1),
+        ("checkcount_prints_nothing",
+         "from struct import calcsize\n\ndef main():\n    pass\n",
+         [struct.calcsize("<I")], "prints nothing", 2, 2),
+        ("checkcount_correct",
+         "from struct import calcsize\n\ndef main():\n"
+         f'    print(calcsize("<I"))\n',
+         [struct.calcsize("<I")], "everything agrees", 2, 0),
+    ]
+    for name, src, expected, shape, want_checks, want_failed in cases:
+        reached = []
+        expect_lines(tmpdir, name, src, expected, f"count probe: {shape}",
+                     tally=reached, announce=False)
+        check(len(reached) == want_checks,
+              f"a `{shape}` case reaches exactly {want_checks} checks; got "
+              f"{len(reached)}")
+        check(sum(1 for ok, _w, _d in reached if not ok) == want_failed,
+              f"a `{shape}` case fails {want_failed} of its {want_checks} "
+              f"checks; got "
+              f"{sum(1 for ok, _w, _d in reached if not ok)} failures")
+
+
 def test_module_resolves_and_is_exported(tmpdir):
     """`struct` resolves to the module source and exports the four entry points.
 
@@ -855,7 +927,7 @@ def test_the_harness_records_a_case_even_when_it_cannot_pass(tmpdir):
     def probe(fn):
         """Run `fn` with the tally and the printing silenced; return its checks."""
         keep, RESULTS[:] = RESULTS[:], []
-        globals()['check'] = lambda ok, what, detail='': RESULTS.append(
+        globals()['check'] = lambda ok, what, detail='', **_kw: RESULTS.append(
             (bool(ok), what, detail))
         try:
             fn()
@@ -955,6 +1027,7 @@ def main():
         test_the_unservable_list_is_exactly_the_wide_pack_formats,
         test_unservable_formats_are_refused_not_wrong,
         test_the_module_builds_on_both_backends,
+        test_the_check_count_is_fixed_whatever_the_verdicts,
         test_module_resolves_and_is_exported,
         test_struct_is_a_builtin_name_not_a_host_module,
         test_the_seven_importers_no_longer_refuse_on_the_import,

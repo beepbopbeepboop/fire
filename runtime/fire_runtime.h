@@ -628,6 +628,25 @@ void        mojo_list_set_kinds(MojoList *l, const char *kinds);
 const char *mojo_list_get_kinds(MojoList *l);
 char        mojo_list_slot_kind(MojoList *l, int64_t i);
 void        mojo_list_inherit_kinds(MojoList *dst, MojoList *src);
+/* How to REPR one element of a list, recorded on the VALUE for the same
+ * reason the kinds string is: the element's static type is known where the
+ * list is built and is unrecoverable later, because a struct-allocated element
+ * carries no runtime type tag for `_mojo_dispatch_repr` to find. The codegen
+ * emits `mojo_list_set_elem_repr(l, Foo___repr__)` for a literal whose element
+ * type is a registered struct, and every repr walker asks
+ * `mojo_list_repr_elem` per slot — NULL meaning "this list says nothing", so a
+ * list it was never called for reprs exactly as before.
+ *
+ * The signature is `char *(*)(int64_t)` rather than the struct's own
+ * `char *Foo___repr__(Foo *)`: the walkers hold one pointer for a slot they
+ * read as an int64_t, and a struct pointer and that word are the same bits.
+ * Both spellings of a struct's repr are acceptable here — the user's own
+ * `__repr__` when there is one, the generated `_mojo_repr_<Struct>` field dump
+ * otherwise — because both are `char *` of one argument wide, and which one
+ * CPython would have called is decided where the call site is known.
+ * `mojo_list_inherit_kinds` carries it, so `list(t)` / `t[:]` / `t + t` keep it. */
+void  mojo_list_set_elem_repr(MojoList *l, void *fn);
+char *mojo_list_repr_elem(MojoList *l, int64_t v);
 /* The per-slot kind alphabet, as named constants. A MojoList slot is a raw
  * int64_t, so anything that ORDERS a list (mojo_list_sort) or READS one has
  * to be told what a slot holds — comparing the slots as integers orders a

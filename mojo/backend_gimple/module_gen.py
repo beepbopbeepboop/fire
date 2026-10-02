@@ -729,6 +729,12 @@ def _emit_reflection_dispatch(self, parts):
     # that was never generated ("implicit declaration of function
     # '_mojo_getattr_Layout'", the head of fire_compiler.py's error list).
     reflect_emitted = []
+    # Every struct that gets an element-repr shim below. A SET rather than the
+    # list, because the field-dump arm above asks "is there a shim for this
+    # field's type?" once per field of every reflected struct, and a `sn not in
+    # list` test is a linear scan of a list that can hold every struct in the
+    # closure.
+    elem_repr_names = set()
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
         if len(fields) == 0:
@@ -797,6 +803,12 @@ def _emit_reflection_dispatch(self, parts):
         )
     repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);"
                       for sn in reflect_emitted]
+    # Forward decls for the element-repr shims below, which the list-literal
+    # lowering names by name (`mojo_list_set_elem_repr(t, _mojo_elem_repr_X)`)
+    # and the `__repr__` symbols they call, which are emitted with the function
+    # bodies further down the file.
+    elem_repr_fwd_decls = [f"static char * _mojo_elem_repr_{sn} (int64_t v);"
+                           for sn in reflect_emitted]
     # Same list as the getattr/setattr helpers above: this loop had its own
     # copy of the "skip field-less structs" condition, and the forward-decl
     # comprehension above had a third copy inside a comprehension `if` —
@@ -850,7 +862,21 @@ def _emit_reflection_dispatch(self, parts):
                            'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'mojo_repr_int((int64_t){fref})'
             elif ftype.endswith(' *'):
-                val_expr = f'({fref} ? _mojo_dispatch_repr((void *){fref}) : "None")'
+                # A field whose declared type is a struct this compile
+                # reflected is rendered through that struct's ELEMENT REPR
+                # shim, not through the tag-based dispatch: the field's type is
+                # written down right here, so there is nothing to discover at
+                # runtime, and `_mojo_dispatch_repr` cannot use it anyway for a
+                # struct-allocated value (no runtime type tag -- the same gap
+                # that made `[p]` print a pointer decimal). A field of a type
+                # with no shim keeps the dispatch, which is what reaches a
+                # non-reflected struct's own dumper.
+                _fsn = ftype[:-2].strip()
+                if _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
+                    val_expr = (f'({fref} ? _mojo_elem_repr_{_fsn}'
+                                f'((int64_t)(intptr_t){fref}) : "None")')
+                else:
+                    val_expr = f'({fref} ? _mojo_dispatch_repr((void *){fref}) : "None")'
             else:
                 val_expr = f'mojo_repr_int((int64_t){fref})'
             part_exprs.append(f'"{fname}=", {val_expr}')
@@ -869,6 +895,33 @@ def _emit_reflection_dispatch(self, parts):
             f"  return {cat_chain};\n"
             f"}}\n"
         )
+        # The ELEMENT REPR shim for a list/tuple of this struct: the walker
+        # holds one `char *(*)(int64_t)` for a slot it reads as a word, and
+        # this is the typed function behind it. A shim rather than a cast of
+        # the real symbol into that pointer type, because calling
+        # `char *(Foo *)(void)` through a `char *(int64_t)` is undefined
+        # behaviour even where every ABI this targets passes it in the same
+        # register.
+        #
+        # A user's own `__repr__` wins, which is CPython's rule for a
+        # container element (a list reprs its elements with `repr`, not with
+        # `str`, and not with a field dump) and the reason this is a shim and
+        # not just `_mojo_repr_{sn}`: the field dump cannot see the dunder, and
+        # a struct-allocated element has no type tag for
+        # `_mojo_dispatch_repr` to dispatch on.
+        _erep = self._struct_method_csym(sn, '__repr__', '')
+        _erep_ok = self.func_return_types.get(_erep) == 'char *'
+        if _erep_ok:
+            elem_repr_fwd_decls.append(f'extern char *{_erep} ({sn} *);\n')
+        elem_repr_names.add(sn)
+        refl_parts.append(
+            f"static char * _mojo_elem_repr_{sn} (int64_t v) {{\n"
+            f"  {sn} *o = ({sn} *)(intptr_t)v;\n"
+            f"  if (!o) return \"None\";\n"
+            + (f"  return {_erep} (o);\n" if _erep_ok
+               else f"  return _mojo_repr_{sn} (o);\n")
+            + f"}}\n"
+        )
     parts.append("static char * _mojo_dispatch_repr (void *);")
     parts.append("static char * _mojo_repr_list (MojoList *);")
     parts.append("static char * _mojo_repr_dict (MojoDict *);")
@@ -878,6 +931,11 @@ def _emit_reflection_dispatch(self, parts):
         parts.append("/* Forward decls for generic repr() (mutual struct references) */")
         parts.append("\n".join(repr_fwd_decls))
         parts.append('')
+    if elem_repr_fwd_decls:
+        parts.append("/* Forward decls for the per-struct ELEMENT REPR shims "
+                     "(a container of structs) */")
+        parts.append("\n".join(elem_repr_fwd_decls))
+        parts.append("")
     if True:
         parts.append("/* Generic reflection dispatch (getattr/setattr/dataclasses.fields/is_dataclass) */")
         parts.extend(refl_parts)
@@ -984,6 +1042,18 @@ def _emit_reflection_dispatch(self, parts):
                "  for (int64_t _i = 0; _i < _n; _i++) {\n"
                "    if (_i > 0) _buf = mojo_str_cat(_buf, \", \");\n"
                "    int64_t _e = mojo_list_get_int(lst, _i);\n"
+               "    /* The list's own ELEMENT REPR, when the codegen recorded\n"
+               "       one: this list's elements are a registered struct, and the\n"
+               "       generic reader below cannot know that -- a struct-allocated\n"
+               "       value carries no runtime type tag, so _mojo_dispatch_repr\n"
+               "       never finds it and the slot printed as a raw pointer\n"
+               "       decimal (bugs/CODEGEN_user_defined_dunder_repr_not_\n"
+               "       consulted_by_str_and_container_spellings.md). Asked FIRST\n"
+               "       because it is the most specific answer available; NULL\n"
+               "       means this list says nothing and the path below is\n"
+               "       unchanged. */\n"
+               "    char *_re = mojo_list_repr_elem(lst, _e);\n"
+               "    if (_re) { _buf = mojo_str_cat(_buf, _re); free(_re); continue; }\n"
                "    /* A registered 2-element element is a runtime-built PAIR\n"
                "       (zip / dict.items() / enumerate) and prints through the\n"
                "       pair walker, which gets slot 0 right where the generic\n"
@@ -3602,6 +3672,32 @@ def gen_module_impl(self, stmts):
                 continue
             if _cname not in self.struct_field_types:
                 self.struct_field_types[_cname] = {}
+    # This module's OWN structs' constructor-param types, as proven by an
+    # IMPORTING module's literal call sites — the same table shape and the same
+    # key as `self._ctor_lit_param_types` above ("<struct>::<param>"), so the
+    # `pm` chain in the field pass below reads one key from one place and
+    # cannot tell (and does not need to) which module the evidence came from.
+    #
+    # Filtered to hints whose qualifier half is THIS module and which carry no
+    # conflict, mirroring the `_xmod_ctor_field_hints` merge further down: same
+    # `lstrip('.')` canonicalization, same "not unanimous → leave unresolved"
+    # rule. Built here, before the loop below replaces each `s.name` with its
+    # cname, and keyed by the same bare struct name the hint's own middle
+    # segment is (so a genuinely colliding pair — two modules both defining
+    # `Dialog` — resolves as neither does today, rather than as one of them
+    # twice).
+    _xf_own_ctor_params: dict = {}
+    if getattr(self, '_xmod_ctor_field_hints', None) and self.module_name:
+        _xfq = self.module_name.lstrip('.').replace('.', '_').replace('-', '_')
+        for _xfk in self._xmod_ctor_field_hints:
+            if self._xmod_ctor_field_conflict.get(_xfk):
+                continue
+            _xfhq, _xfhs, _xfhp = _xfk.split('::', 2)
+            if _xfhq != _xfq:
+                continue
+            _xfpct = self._xmod_ctor_field_hints[_xfk]
+            if _xfpct:
+                _xf_own_ctor_params[_xfhs + '::' + _xfhp] = _xfpct
     for s in all_struct_defs:
         s = _as_structdef_node(s)
         if isinstance(s, StructDef):
@@ -4006,6 +4102,39 @@ def gen_module_impl(self, stmts):
                         elif (_as_str(method.name) == '__init__'
                               and (_as_str(s.name) + '::' + pname) in self._ctor_lit_param_types):
                             pm[pname] = self._ctor_lit_param_types[_as_str(s.name) + '::' + pname]
+                        elif (_as_str(method.name) == '__init__'
+                              and (_as_str(s.name) + '::' + pname) in _xf_own_ctor_params):
+                            # The same evidence, one module away: a constructor
+                            # called from an IMPORTING module with a literal
+                            # argument of this type. It has to be consulted
+                            # HERE, on the PARAM, rather than only in the
+                            # `_xmod_ctor_field_hints` merge further down,
+                            # because that merge is keyed by param name and
+                            # applied to the FIELD of the same name — so
+                            #
+                            #     class Dialog:
+                            #         def __init__(self, s):   # unannotated
+                            #             self.s = s
+                            #             self.n = s
+                            #
+                            # imported and called as `mb.Dialog("hi")` typed
+                            # `self.s` and left `self.n` at the `int64_t`
+                            # default: `b.s` printed `hi`, `b.n` printed a heap
+                            # address. Same class, ONE module, was already
+                            # right — and the reason is this line: typing the
+                            # PARAM is what lets `_gmi_collect_self_assigns`
+                            # (three lines below) type EVERY field the
+                            # constructor assigns that param to. It also keeps
+                            # the store and the field declaration agreeing: the
+                            # merge alone typed a field `double` while the
+                            # param stayed `int64_t`, and `self.g = f` then
+                            # stored 2.5 as the int 2, which read back as 2.0.
+                            #
+                            # The one-module table above is consulted FIRST, so
+                            # a module's own literal evidence still wins over
+                            # another module's; and an explicit annotation beats
+                            # both (the `if ptype:` arm above).
+                            pm[pname] = _xf_own_ctor_params[_as_str(s.name) + '::' + pname]
                         else:
                             pm[pname] = 'int64_t'
                 new_fields = {}

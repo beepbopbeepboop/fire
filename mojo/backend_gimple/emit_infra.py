@@ -2427,6 +2427,39 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         gen._kw_key_src[marker] = ipw
         return 'char *', marker
     if typ != 'char *':
+        # A CONTAINER (a list, or a tuple, which is the same MojoList with a
+        # marker) or any other pointer used as a DICT KEY -- `d[(a, b)]`, the
+        # shape fire_compiler.py's own `(module, line)` lookups and
+        # `os.path.getmtime` caches use. `word_ok` is the signal that this value
+        # is a dict key: every dict-key site passes it (subscript get/set/
+        # augmented-assign, `in`, `pop`, `setdefault`, a comprehension's key)
+        # and nothing else does.
+        #
+        # The old fall-through below bit-cast the pointer and let the runtime
+        # key on the ADDRESS, so equal tuples never hit and a reused address
+        # could: measured, `k = (p, os.path.getmtime(p)); if k in _C: ...
+        # _C[k] = 2` printed `0 0 0 / 3` where CPython prints `0 1 1 / 1`,
+        # and the misses grew the dict once per lookup (the ~16 GB of
+        # `mojoc --dump-full fire.py` in
+        # bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). Passing the WORD
+        # instead lets `mojo_cstr_or_int_str` ask what it is and render a
+        # container by VALUE, which is what makes the key agree with the tuple's
+        # own `==` (`mojo_list_eq`, a by-value compare) and with the key the
+        # same tuple gets in a dict LITERAL — `_emit_dict_pair_store` has
+        # rendered a non-scalar literal key through `_repr_value` for a while,
+        # and a subscript store that disagreed with it was two spellings of one
+        # dict.
+        #
+        # The key string is the caller's to release (`transient`): registered
+        # with `_cstr_key_src`, whose `mojo_cstr_or_int_release` frees a
+        # content key outright rather than pooling it, because it is a repr
+        # walker's heap string and not a pool block.
+        if word_ok and (typ.endswith(' *') or typ == 'void *'):
+            word = gen._new_val('int64_t', f'(int64_t)(intptr_t){val}')
+            key = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                 [('int64_t', word)])
+            gen._cstr_key_src[key] = word
+            return 'char *', key
         return 'char *', gen._new_val('char *', f'(char *){val}')
     return typ, val
 
