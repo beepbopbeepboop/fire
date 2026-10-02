@@ -1,5 +1,74 @@
 # Compiled `stat` has no mode constants, so any module touching `stat.S_IR*` dies at startup
 
+## Status 2026-10-02 (work/bugs4-5): the "Next step" below is WRONG, and this
+## doc's own conclusion is right for the wrong reason. The constants are NOT
+## missing from the `stat` module — the compiled path cannot read ANY imported
+## module's module-level constant, and `stat` is only where it was noticed.
+
+Measured, with the out-of-tree stdlib that `module_loader.STDLIB_PATH` names:
+
+    $ ls $STDLIB_PATH/std/stat/
+    __init__.mojo  stat.aout  stat.mojo
+    $ grep -nE "S_IR|S_IW|S_IF|S_IS" $STDLIB_PATH/std/stat/stat.mojo | head
+    21: comptime S_IFMT = 0o0170000
+    24: comptime S_IFDIR = 0o040000
+    33: comptime S_IFREG = 0o0100000
+    46: def S_ISLNK[intable: Intable](mode: intable) -> Bool:
+    ...
+    $ grep -c S_IRUSR $STDLIB_PATH/std/stat/stat.mojo
+    0                       # the PERMISSION bits really are absent, as filed
+
+So step 1's question ("confirm they are absent rather than misnamed") is now
+answered: `S_IF*`/`S_IS*` are present, `S_IR*`/`S_IW*` are absent, both in the
+same out-of-tree file. But the compiled path cannot reach the ones that ARE
+there:
+
+    # .tmp/fx/statmod.mojo
+    import stat
+    def main():
+        print(stat.S_IFREG)
+        print(stat.S_ISDIR(0o040755))
+    main()
+
+    compiled: Unhandled exception: AttributeError: S_IFREG      (exit 1)
+
+and the generated C says why — the module's globals struct is EMPTY and the
+read goes through the runtime dispatcher:
+
+    _t1 = _root_globals.stat;      /* the struct field is a bare 0 */
+    _t3 = _mojo_dispatch_getattr (_t2, "S_IFREG");
+
+**Mechanism, measured against a control.** `import os; print(os.sep)` works,
+and `sep` is a `comptime` in the same stdlib — but it is CONSTANT-FOLDED at
+compile time to the literal `"/"`, so it never touches the globals struct:
+
+    static char * _slit_10000 = "/";
+    _t1 = _slit_10000;  mojo_print (_t1);
+
+`sys.platform` is the same story (folded). `os.SEEK_SET`, `stat.S_IFREG` and
+every other module-level constant has no such special case, so
+`<module>.<constant>` lowers to a globals-struct field read plus a runtime
+`_mojo_dispatch_getattr`, and that struct is populated for a hand-listed set of
+modules only. A control in this repository — a two-file `import mymod` whose
+module declares `comptime OCT = 0o17` / `comptime DEC = 15` — lowers the same
+way as `stat`, so this is not about `stat`, octal literals, or the stdlib: it
+is about `mod.NAME` for an arbitrary imported module.
+
+**So the next step is in THIS repository, and it is bigger than the doc's step
+2.** Adding `S_IRUSR` & co. to `stat.mojo` (out of tree, and not permitted from
+a worker worktree) fixes nothing on its own: `stat.S_IFREG` would still raise.
+What is needed is for an imported module's module-level `comptime`/constant
+declarations to be visible to the compiled path — either by folding
+`<module>.<NAME>` the way `os.sep`/`sys.platform` already are (the mechanism is
+`module_gen.py`'s imported-module scan, `_gmi_find_comptime_one`, which today
+runs for `from X import NAME` at line ~1673 and evidently not for `import X`
+followed by `X.NAME`), or by populating `_root_globals.<module>` from the same
+scan. Either way `stat` is the test case and not the subject.
+
+Two things this does NOT change: `bugs/COMPILE_FAIL_Tools_c-analyzer_*`'s
+`c_common/fsutil.py` sites still need the constants to EXIST, and the
+`stdlib-dylib` skip-count comparison still applies.
+
 ## Status (2026-10-01 — NOT FIXABLE FROM THIS REPOSITORY; the fix site is out of tree)
 
 Measured here rather than assumed, and the measurement changes what the next
