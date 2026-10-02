@@ -581,9 +581,11 @@ output quoted in that doc no longer reproduces — the defect it describes is
 unchanged).
 
 What DID have to change for the message to be the right one is
-`FORMAL_mlir_refusal_preemption.md`: `NoneType` at `_assembly.mojo:94` used to
+`formal/build.py`'s MLIR pre-pass: `NoneType` at `_assembly.mojo:94` used to
 pre-empt `__mlir_op` at line 95, so this module was reported as a missing local
-rather than as the construct it is written in.
+rather than as the construct it is written in. `first_mlir` now records the
+first MLIR construct a function reaches and raises it before the per-name walk,
+for the bare dialect name as well as the templates.
 
 ---
 
@@ -1207,7 +1209,7 @@ them:
 | reported instead of the true limit | docs |
 |---|---|
 | `'NoneType' has no home` — a bare TYPE name in a `comptime` type comparison, refused with an enumeration of where a *value* lives (52 stdlib files, up from 35) | `FORMAL_type_name_as_a_value.md` |
-| any unplaced name earlier in the body — the construct-refusal pre-pass is implemented for the bracketed/dotted MLIR spellings and not for the bare `__mlir_op` dialect name, so line order decides the message for 18 of 36 files | `FORMAL_mlir_refusal_preemption.md` — **the pre-emption has landed** (2026-09-30); what is left there is 16 files decided by the order of two FUNCTIONS |
+| any unplaced name earlier in the body — the construct-refusal pre-pass is implemented for the bracketed/dotted MLIR spellings and not for the bare `__mlir_op` dialect name, so line order decides the message for 18 of 36 files | **CLOSED** — the pre-pass records the first MLIR construct a function reaches (`first_mlir`) and raises it before the per-name walk, for the bare dialect name as well as the templates; measured 32→38 of the 88 `__mlir_`-mentioning files naming an MLIR construct, 0 changing verdict class. `formal/build.py`'s `first_mlir` and `test_formal_mlir_precedence.py` (7 cases, both architectures) are where it lives now. The residual — files whose MLIR construct sits in a LATER function than the refusal an earlier one earns — was measured and deliberately NOT hoisted: a per-FILE pre-emption converts 3 files and demotes 9 specific-and-true sentences, and on the current stdlib it converts 0 |
 
 **Both rows above are stale for `std/sys/_assembly.mojo` itself, and that is the
 point of the second one landing.** Re-measured 2026-09-30 on this tree, the

@@ -161,10 +161,10 @@ the use site
 `_assembly.mojo`'s own body now reports the construct it is written in —
 `inlined_assembly: __mlir_op is an MLIR dialect construct` — because the MLIR
 refusal is asked before the per-name walk now
-(`FORMAL_mlir_refusal_preemption.md`), and `NoneType` at line 94 no longer gets
-there first. The message below is therefore about a construct the reader will
-not see for `_assembly.mojo`, though the defect it describes is unchanged and is
-still reachable elsewhere.
+(`formal/build.py`'s `first_mlir` pre-pass), and `NoneType` at line 94 no longer
+gets there first. The message below is therefore about a construct the reader
+will not see for `_assembly.mojo`, though the defect it describes is unchanged
+and is still reachable elsewhere.
 
 **That message is false about the file, and it is a separate bug worth its own
 doc: `bugs/FORMAL_imported_generic_reported_as_a_module_level_name.md`.**
