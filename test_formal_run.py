@@ -3461,6 +3461,57 @@ CROSS_MODULE_CASES = [
     # parameter a frame holder — and both are now read off the link line, so
     # this is a POSITIVE case with the same expected answer as the named import
     # above.
+    # A `comptime` class attribute declared in an IMPORTED module, read through
+    # a receiver here. The in-file half of this is
+    # `comptime_attribute_receiver_reads_match_cpython`; the two halves were
+    # separate because `formal/imports.py` attached no field census to an
+    # imported module's structs, so `_split_declaration` returned None, every
+    # class-level name stayed a field, and the read was reported as a field the
+    # struct does not have. The census is what decides a struct's WIDTH, which
+    # is why attaching it to imported modules was worth measuring rather than
+    # assuming: 0 of 316 structs across the 252-file new-modular stdlib change
+    # width or receiver classification, because `parse_module` already attached
+    # the census for every file it parses and this only extends it to the ones
+    # reached through an import.
+    #
+    # 1 is `IS_FLAT = True`, which CPython also prints.
+    ("byref_cross_module_comptime_attribute_through_a_receiver",
+     {"mod": "struct C:\n"
+             "    comptime IS_FLAT = True\n"
+             "    comptime RANK = 3\n"
+             "    var storage: Int\n"
+             "\n"
+             "    fn width(self) -> Int:\n"
+             "        return self.RANK\n",
+      "main": "from byref_xmod import C\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var c = C()\n"
+              "    printf(\"flat=%d rank=%d\\n\", c.IS_FLAT, c.RANK)\n"
+              "    return 0\n"}, 0, "flat=1 rank=3"),
+    # The RECEIVER spelling of the same read, through a frame holder rather than
+    # a local: the read is a field of `c` here too, and this is the shape the
+    # original filing named (`shape.is_flat`, `res._InjectedValues`). It is a
+    # separate case because a parameter's holder status comes from the holder
+    # fixpoint in THIS image while the constant's classification comes from the
+    # census of the OTHER one, so the two halves of the answer are established
+    # by different passes over different files.
+    ("byref_cross_module_comptime_attribute_through_a_parameter",
+     {"mod": "struct C:\n"
+             "    comptime LIMIT = 10\n"
+             "    var storage: Int\n"
+             "\n"
+             "    fn limit_of(self) -> Int:\n"
+             "        return self.LIMIT\n"
+             "\n"
+             "def limit_of(c: C) -> Int:\n"
+             "    return c.LIMIT\n",
+      "main": "from byref_xmod import C, limit_of\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var c = C()\n"
+              "    printf(\"limit=%d@@\", limit_of(c))\n"
+              "    return 0\n"}, 0, "limit=10@"),
     ("byref_cross_module_star_imported_free_function",
      {"mod": "struct P:\n"
              "    var a: Int\n"
