@@ -368,6 +368,39 @@ class TestDyldProbe(unittest.TestCase):
             dylibs=[{"install_name":
                      S._load_dylib_names(cls.resolvable_img)[1],
                      "symbols": set()}])
+        # A REAL x86-64 dylib with a real export trie, and an x86-64 image that
+        # binds one of its names — the pair an arm64 host cannot dlopen. This is
+        # the whole subject of the foreign-architecture cases below, and it is
+        # built rather than faked because the answer now comes from reading the
+        # trie: a file with a Mach-O header and no trie would be answered "I
+        # cannot find out" again, and those tests would pass for the wrong
+        # reason. `build_macho_dylib` needs the base address its own layout
+        # implies, so the offset comes from the module rather than a constant —
+        # and the entry is non-zero, because an export trie entry whose address
+        # is 0 is not an export at all (see `_export_trie`) and the whole
+        # fixture would be an empty library.
+        from formal.macho_linker import TEXT_BASE
+        cls.x_name = "helper_add_2dbb98"
+        cls.x_dylib_path = os.path.join(d, "x86_helper.dylib")
+        x_install = cls.x_dylib_path
+        x_binary = ML.build_macho_dylib(
+            b"", TEXT_BASE + ML.dylib_code_offset(x_install, False, [], False),
+            [{"symbol": cls.x_name, "entry": TEXT_BASE + 16}], x_install,
+            arch="x86_64")
+        with open(cls.x_dylib_path, "wb") as f:
+            f.write(x_binary)
+        os.chmod(cls.x_dylib_path, 0o755)
+        cls.x_img = ML.build_macho_executable_extern(
+            ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4),
+            [cls.x_name], "x86_64",
+            dylibs=[{"install_name": x_install, "symbols": {cls.x_name}}])
+        # And the same pair with a name the x86-64 dylib does NOT define, bound
+        # FROM that dylib so the static arm is the one that has to catch it.
+        cls.x_bogus_img = ML.build_macho_executable_extern(
+            ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4),
+            ["definitely_not_a_real_symbol_9f3a"], "x86_64",
+            dylibs=[{"install_name": x_install,
+                     "symbols": {"definitely_not_a_real_symbol_9f3a"}}])
 
     @classmethod
     def tearDownClass(cls):
@@ -441,15 +474,34 @@ class TestDyldProbe(unittest.TestCase):
     def test_a_relative_imports_underscored_symbol_resolves_and_the_image_runs(self):
         # The `lstrip("_")` regression, end to end and settled by dyld.
         #
-        # A relative import's ABI prefix begins with an underscore, so this
-        # image's bind names do too — that is the precondition, asserted rather
-        # than assumed, because if it stops holding the test would pass for the
-        # wrong reason and stop covering anything.
+        # The precondition is stated as the INVARIANT rather than as the name
+        # shape it used to have: a bind name is the C name and an export is that
+        # name with dyld's one underscore in front, so the thing this test needs
+        # is that the two are DIFFERENT strings — that is what makes
+        # normalising one into the other wrong. Asserted rather than assumed,
+        # because if the two ever coincided the test would pass for the wrong
+        # reason and stop covering anything.
+        #
+        # It used to assert `name.startswith("_")`, which was true while a
+        # relative import's ABI prefix began with one, and stopped being true
+        # when a relative import began carrying its parent's identity —
+        # `formal/build.py`'s `own_module_identity`, added because without it
+        # the same file built as two different libraries depending on which
+        # module reached it first. `._helper` inside `relpkg` is now the module
+        # `relpkg._helper`, so the bind reads `relpkg__helper_twice_9f63a2` and
+        # the export reads `_relpkg__helper_twice_9f63a2`. The image is
+        # unaffected — it builds, the probe resolves it, and dyld runs it to 42
+        # below, which is what this test is for. See
+        # bugs/FORMAL_sweep_relative_import_bind_name_shape_moved.md for the
+        # consequence: `lstrip("_")` is now a no-op on this fixture, so the
+        # normalisation defect itself is pinned by the probe-level cases rather
+        # than from here.
         names = [name for _ordinal, name in S._binds(self.relative_img)]
         self.assertTrue(names, "precondition: the image binds something")
-        self.assertTrue(all(n.startswith("_") for n in names),
-                        f"precondition: every bind name is underscore-prefixed, "
-                        f"got {names}")
+        for name in names:
+            self.assertNotEqual(name, "_" + name,
+                                f"precondition: {name!r} is already the export "
+                                f"name, so no normalisation could break it")
         self.assertEqual(S._unresolved_imports(self.relative_img), [])
         rc, err = self._runs(self.relative_img, "rel")
         self.assertEqual(err, "", f"dyld refused a resolvable image: {err}")
@@ -544,7 +596,7 @@ class TestDyldProbe(unittest.TestCase):
         self.assertEqual(
             S._resolvable(1, "printf", [], ML.CPU_TYPE_ARM64)[0], "unresolved")
 
-    def test_a_foreign_architecture_dylib_is_unprovable_not_unloadable(self):
+    def test_a_dylib_of_the_other_architecture_is_header_only_not_a_failure(self):
         # The 2026-10-01 false finding. An x86-64 image with correct x86-64
         # dylibs on its link line, probed from an arm64 process: dlopen cannot
         # load an x86-64 dylib into an arm64 process, and that failure says
@@ -556,23 +608,82 @@ class TestDyldProbe(unittest.TestCase):
                          "this case is written for an arm64 host; the sweep "
                          "does run on x86-64 and the other direction is the "
                          "same code path with the roles swapped")
-        other = [os.path.join(S._LIBSYSTEM)]
-        fake = os.path.join(tempfile.gettempdir(), "sweep_foreign_probe.dylib")
+        state, foreign, why = S._loadable_for(self.x_dylib_path,
+                                              ML.CPU_TYPE_X86_64)
+        self.assertEqual(state, "header-only",
+                         "an x86-64 dylib on an x86-64 image is not unloadable, "
+                         "and this host's inability to dlopen it is no longer "
+                         "the end of the answer")
+        self.assertEqual(foreign, "x86_64")
+        self.assertIn("cannot dlopen", why)
+
+    def test_a_foreign_architecture_image_gets_a_verdict_from_an_arm64_host(self):
+        # What the `header-only` state is FOR. Before 2026-10-02 this image was
+        # `tool` with no verdict at all, on the grounds that an arm64 process
+        # cannot dlopen its x86-64 helper — which is true and beside the point,
+        # because dyld resolves the bind against that library's EXPORT TRIE, and
+        # a trie is bytes in a file this process reads perfectly well.
+        from formal import macho_linker as ML
+        self.assertNotIn(ML.CPU_TYPE_ARM64,
+                         S._macho_cputypes(self.x_dylib_path),
+                         "precondition: the helper really is the other arch")
+        (ordinal, name), = S._binds(self.x_img)
+        self.assertEqual((ordinal, name), (2, self.x_name))
+        self.assertEqual(S._unresolved_imports(self.x_img), [],
+                         "a correct x86-64 image must not be reported broken, "
+                         "and must not be left unanswered either")
+        # And the finding still works through the same arm of the probe: a name
+        # the x86-64 dylib does not export is reported, naming that library.
+        missing = S._unresolved_imports(self.x_bogus_img)
+        self.assertEqual([m.name for m in missing],
+                         ["definitely_not_a_real_symbol_9f3a"])
+        self.assertIn("x86_helper.dylib", missing[0].why)
+        self.assertFalse(missing[0].unprovable)
+
+    def test_the_two_arms_of_the_lookup_agree_on_a_library_both_can_read(self):
+        # The safety net for the arm above, and it is the one that makes it safe
+        # to use: for a library this host CAN dlopen, the export trie and dlsym
+        # must return the same answer for every name. Measured over the CAS's own
+        # arm64 dylibs, all 343 formal-module exports agree — and the first
+        # version of the static arm did not. It looked the C name up where the
+        # trie holds the Mach-O name, and called all three binds of
+        # `formal/hostmods/ast.mojo` unexported by a dylib that exports them.
+        from formal.build import macho_dylib_exports
+        self.assertEqual(S._macho_symbol("helper_add"), "_helper_add",
+                         "the mapping is the C name to the Mach-O name: exactly "
+                         "one underscore, prepended and never stripped")
+        path = S._load_dylib_names(self.resolvable_img)[1]
+        exported = macho_dylib_exports(path)
+        self.assertTrue(exported, "precondition: the helper exports something")
+        for macho_name in exported:
+            bind_name = macho_name[1:]     # exactly what the bind stream says
+            self.assertEqual(S._exports(path, bind_name), ("exported", ""),
+                             f"both arms disagree about {macho_name!r}")
+        # The other direction, on a name neither library exports.
+        self.assertEqual(S._exports(path, "definitely_not_a_real_symbol_9f3a"),
+                         S._exports(path, "definitely_not_a_real_symbol_9f3a",
+                                    static=True))
+
+    def test_an_export_trie_that_cannot_be_read_is_still_unprovable(self):
+        # `header-only` must not become a licence to pass. A file of the other
+        # architecture whose trie this host cannot read leaves the name UNKNOWN
+        # — no verdict, and no finding either — because both of those would be
+        # inventions about the image derived from a reader that failed.
+        from formal import macho_linker as ML
+        fake = os.path.join(tempfile.gettempdir(), "sweep_no_trie_probe.dylib")
         with open(fake, "wb") as f:
-            # A real Mach-O header claiming x86_64, with no content: enough for
-            # _macho_cputypes, and nothing else is consulted because the host
-            # check fires before the dlopen.
+            # A real Mach-O header claiming x86_64 and nothing else: enough for
+            # _macho_cputypes, and no export trie for _static_exports to read.
             f.write(b"\xcf\xfa\xed\xfe" + b"\x07\x00\x00\x01" + b"\x00" * 24)
         try:
-            state, foreign, why = S._loadable_for(fake, ML.CPU_TYPE_X86_64)
+            state, foreign, _ = S._loadable_for(fake, ML.CPU_TYPE_X86_64)
+            self.assertEqual(state, "header-only")
+            self.assertEqual(foreign, "x86_64")
+            found, why = S._exports(fake, "helper_add_2dbb98", static=True)
         finally:
             os.unlink(fake)
-        self.assertEqual(state, "unprovable",
-                         "an x86-64 dylib on an x86-64 image is not unloadable; "
-                         "this host simply cannot check it")
-        self.assertEqual(foreign, "x86_64")
-        self.assertIn("HOST cannot dlopen", why)
-        self.assertIn("Not a finding about the image", why)
+        self.assertEqual(found, "unprovable")
+        self.assertIn("export table could not be read", why)
 
     def test_a_dylib_of_the_HOST_architecture_is_still_a_real_answer(self):
         # The conservative direction must not have been taken one step too far:
@@ -584,29 +695,44 @@ class TestDyldProbe(unittest.TestCase):
         # image's arch — that is the documented exception, and it is the case
         # that must not be swept up in the new state.
         self.assertEqual((state, foreign), ("loadable", None))
+        state, foreign, _ = S._loadable_for(S._load_dylib_names(
+            self.resolvable_img)[1], ML.CPU_TYPE_ARM64)
+        self.assertEqual((state, foreign), ("loadable", None),
+                         "a real arm64 dylib on this host is loadable by "
+                         "dlopen, so it is `loadable` and not `header-only` — "
+                         "the two states must not have been merged")
 
     def test_a_file_whose_imports_are_all_unprovable_gets_no_verdict(self):
         # Not a finding, and not a pass: the class is `tool`, the cause is its
         # own, and nothing is cached. A `pass` would be inventing coverage the
         # probe never established; an `unresolved-extern` would be accusing a
         # correct image of a broken link line.
-        from formal import macho_linker as ML
+        #
+        # What is left of this class since the export-trie arm landed: a library
+        # this host cannot dlopen is now READ, so `unprovable` means the trie
+        # could not be read (or the host's own architecture could not be
+        # established) — a much narrower thing. The detail QUOTES that reason
+        # rather than describing it, so this cannot keep asserting a sentence
+        # about an arm64 host's inability to dlopen, which stopped being why
+        # anything goes unprovable.
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "x.mojo")
             with open(path, "w") as f:
                 f.write("def f():\n    return 1\n")
+            why = ("/tmp/x.dylib: its export table could not be read "
+                   "(exports nothing, so a client could bind no name in it)")
             saved = S._unresolved_imports
             S._unresolved_imports = lambda binary: [
-                S.Missing("helper_add", "…is built for x86_64, which this "
-                          "arm64 HOST cannot dlopen…", True, "x86_64")]
+                S.Missing("helper_add", why, True, "x86_64")]
             try:
                 v = S.run_one(path, 30, S.build_flags("x86_64"), mem_gb=0)
             finally:
                 S._unresolved_imports = saved
         self.assertEqual(v.cls, S.CLASS_TOOL)
         self.assertEqual(v.cause, S.CAUSE_FOREIGN_ARCH)
-        self.assertIn("x86_64 host", v.detail)
-        self.assertIn("would load", v.detail)
+        self.assertIn("helper_add", v.detail)
+        self.assertIn("export table could not be read", v.detail)
+        self.assertIn("Re-run on a x86_64 host", v.detail)
         self.assertFalse(v.cached)
 
 
