@@ -1171,6 +1171,64 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # Lib_test_test_support.md's 2026-08-09 root-cause).
         _bound_mod = gen.imported_symbols.get(module_name, {}).get('module') \
             if module_name in gen.imported_symbols else None
+        # THIS module's own field triple is the authoritative answer for what
+        # `_<mod>_globals.NAME` actually holds — it is the exact
+        # (name, c_type, g_mtype) the struct typedef, the initializer and the
+        # `_<mod>_mojo_global_get_<name>` accessor were all generated from, so
+        # consulting it makes the read agree with the field BY CONSTRUCTION.
+        #
+        # It also replaces the shared `_global_var_types`/`_global_c_decl_types`
+        # lookups this branch used for both halves of the answer, because both
+        # of those are whole-transitive-tree, name-keyed "first module to claim
+        # this bare name wins" tables. `_global_to_module` IS one of them, and
+        # it gates this branch — so with two modules each declaring their own
+        # `MARKER`, only whichever was scanned first could be read through the
+        # `submod.` spelling at all, and its TYPE came from the shared dict
+        # regardless of which field was loaded.
+        #
+        # The shape is Tools/c-analyzer: `c_analyzer/info.py`'s own `UNKNOWN`
+        # (a boxed `_misc.Labeled`) versus `c_common/tables.py`'s unrelated
+        # `UNKNOWN = '???'` (`char *`) — a bare `UNKNOWN` and a qualified
+        # `tables.UNKNOWN` reading the SAME name as two different things
+        # (bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md). The bare
+        # half of that pair is `_own_overlay_global_ctype`; this is the
+        # qualified half.
+        _field_types = gen._module_global_field_type(_bound_mod, node.member) \
+            if _bound_mod else None
+        if _field_types is not None:
+            c_decl_type, gtype = _field_types
+            ctype = 'int64_t' if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *') else gtype
+            t = gen._new_temp(ctype)
+            if node.member in gen._actual_types and gen._actual_types[node.member].endswith(' *'):
+                gen._actual_types[t] = gen._actual_types[node.member]
+            else:
+                gen._actual_types[t] = gtype
+            if node.member in gen._dict_val_types:
+                gen._dict_val_types[t] = gen._dict_val_types[node.member]
+            if node.member in gen._elem_types:
+                gen._elem_types[t] = gen._elem_types[node.member]
+            safe_module = gimple_ctypes._c_field_name(_bound_mod) if _bound_mod else "root"
+            field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(node.member)}"
+            if ctype == 'int64_t' and c_decl_type.endswith(' *'):
+                raw_ptr = gen._new_val(c_decl_type, f'{field_ref}')
+                vp = gen._new_val('void *', f'(void *){raw_ptr}')
+                gen._emit(f'  {t} = (int64_t){vp};')
+            elif ctype.endswith(' *') and c_decl_type == 'int64_t':
+                # A pointer-semantic global (`char *` — e.g. a boxed path
+                # string like gimple_codegen._SELFHOST_DIR) stored in a boxed
+                # `int64_t` field: cast the load back to its real type so a
+                # later string op / `==` on `t` isn't a bare integer compare.
+                gen._emit(f'  {t} = ({ctype}){field_ref};')
+            else:
+                gen._emit(f'  {t} = {field_ref};')
+            return ctype, t
+        # FALLBACK for a module whose globals struct was never registered in
+        # `_module_globals` (an un-inlined stdlib marker like `os`/`sys`, where
+        # no field exists to read and the shape below is equally inapplicable).
+        # Both halves of the answer still come from the shared name-keyed dicts
+        # here — there is no per-module field to consult, so there is nothing
+        # for a homonym to disagree with. Reached only when the branch above
+        # found no field triple for `_bound_mod`.
         if (_bound_mod and node.member in gen._global_var_types
                 and getattr(gen, '_global_to_module', {}).get(node.member) == _bound_mod):
             gtype = gen._global_var_types[node.member]

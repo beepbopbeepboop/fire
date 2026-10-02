@@ -5725,7 +5725,39 @@ def main():
 
         Both names are printed side by side, and the expectation is
         measured against CPython running the SAME files, because a test
-        that printed only one of them could not tell a fix from a swap."""
+        that printed only one of them could not tell a fix from a swap.
+
+        There were THREE defects here, one per layer, and the fixture
+        above is the smallest case that reaches all three — which is why
+        it asserts on the built binary's stdout rather than on a compile:
+        fixing only two of them still fails to build.
+
+        1. ROUTING (bare `MARKER`). `_lower_IdentExpr` decided the name was
+           ours and then asked the shared `_global_to_module` anyway, so it
+           read `__tables_globals.MARKER` while the write landed in
+           `_root_globals.MARKER`.
+        2. TYPE (bare `MARKER`). `_own_overlay_global_ctype`'s rule 2
+           narrows "a foreign homonym's pointer cdecl must not re-type
+           this module's own SCALAR conclusion", but a CONTAINER
+           own-conclusion falls past rule 2 into rule 3, which deferred to
+           ANY shared cdecl. `tables.py`'s `'char *'` therefore re-typed
+           `main.py`'s own boxed `MojoList *`, and the assignment site
+           coerced the list RHS to `char *` against an already-frozen
+           `int64_t` field.
+        3. TYPE (qualified `tables.MARKER`). `_lower_MemberExpr`'s
+           `submod.GLOBAL` branch resolved the FIELD module-correctly but
+           took both halves of the TYPE from the shared name-keyed dicts,
+           and `_global_to_module` — itself such a dict — GATED the branch,
+           so only whichever module was scanned first was reachable through
+           the qualified spelling at all. It now reads the owning module's
+           own `_module_globals` field triple, which is what the struct
+           typedef, the initializer and the `_mojo_global_get_` accessor
+           were generated from, so the read agrees with the field by
+           construction.
+
+        Pre-fix this fixture failed to compile with all three families
+        present (`char *` from `int64_t` twice, plus a
+        `-Wint-conversion` on the qualified read)."""
         global _PASS, _FAIL, _TIMEOUT
         name = "same_bare_name_global_reads_own_module_slot"
         files = {
