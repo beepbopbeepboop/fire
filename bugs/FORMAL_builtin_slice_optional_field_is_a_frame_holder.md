@@ -206,6 +206,45 @@ So the row's terminal cause is unchanged from the section above it:
 below this one. What this session removed is the step between here and the
 question.
 
+## Status, 2026-10-02 (`formal3-2-r2-r2`): the `_REASSIGNED` reading above is
+WRONG, and the wall is one layer UP, in a receiver this doc never named
+
+The paragraph above says shape 2 is refused as `_REASSIGNED` and that the
+question is therefore "what a struct-typed field is". Re-measured on this tree,
+neither half is true, and both are worth recording because the row's terminal
+cause is now named rather than described.
+
+**Shape 2's own method does not even reach the store.** `struct Box` with the
+single field `var inner: Opt` is a ONE-FIELD struct, so `Box`'s receiver IS its
+field and `self` is a word holding the ADDRESS of an `Opt` frame — there is no
+`Box` storage to speak of and no representation decision to make. The store
+`self.inner = o` rewrites to `self = o`, but the refusal comes earlier, on the
+READ in the other method:
+
+    build: Box_get: 'self.v' is a field access through 'self', and this path
+    has no way to say what 'self' holds. …
+
+`'self.v'` is not in the source (`self.inner.v` is), and "this path has no way
+to say" is false: `_frame_receivers` has no case for seeding a method receiver
+whose owner is a one-field struct, which is the only shape in which a receiver
+is a frame and its owner is not.
+
+**The boundary is the holder's OWN field count, measured.** The same `Opt`/`Box`
+body builds and runs correctly — 155 on both architectures, and 155 is `41*10+1`
+— with `var pad: Int; var inner: Opt` (two fields, so `self` is a `Box` frame
+whose slot 1 is the `Opt` address), and is refused with `var inner: Opt`
+(one field). The LOCAL half already works: `b.inner.v` in `main`, with `Box()`
+one field, builds and returns 41 on both.
+
+**So the two halves of this doc are not the same wall.** Shape 1 (the
+construction) is still the question this doc has always said it is. Shape 2 (the
+store) is behind a RECEIVER SEEDING, one layer up, and the fix for that layer
+is not safe to land alone — measured, it turns the store case from a refusal
+into a SIGSEGV. The measurement, the reproducer, and the order the two checks
+have to land in are in
+`bugs/FORMAL_one_field_holder_of_a_frame_is_not_a_holder.md`; read that one for
+shape 2 and this one for shape 1.
+
 ## The next step (as originally written)
 
 Answer that question in `FORMAL_wide_receiver_by_reference.md` — the field
