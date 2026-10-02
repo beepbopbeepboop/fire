@@ -156,6 +156,56 @@ it through `__mlir_op`, which this path refuses. **Keep this doc for the
 measurement that made the derivation question visible; the next step is the
 other one.**
 
+## Status, 2026-10-01 (`formal3-2-r2`): shape 2's own next-step blocker is GONE
+
+The "Why it is not closed here" section names, as the thing standing between
+this doc and shape 2, a gap one step further in: passing a frame-returning call
+(`b.set(mk(41))`) to a parameter declared as a struct was itself refused.
+**That gap was a dead recognition** — `_check_holder_agreements` was handed the
+identity-keyed `returns_frame` and passed it to `model.frame_returning_predicate`,
+whose contract is `(callee_name, bound_name)`, so every lookup missed and
+`_frame_valued_calls`' frame-returning half never fired. One argument, and the
+shape works:
+
+    struct Opt:                       # two fields, so a frame
+        var v: Int
+        var has: Int
+
+    def peek(o: Opt) -> Int:          # declares a frame parameter
+        return o.v * 10 + o.has
+
+    def mk(v: Int) -> Opt:            # RETURNS a frame
+        var o = Opt();  o.v = v;  o.has = 1;  return o
+
+    def main(n):  return peek(mk(4))  # → 41, CPython's answer
+
+Pinned as four cases in `test_formal_run.py`
+(`declared_frame_parameter_given_a_frame_returning_call` and three others,
+including the guard that a WORD beside the returned-frame call still refuses).
+`test_formal_method_param_field.py` went 16 PASS / 2 FAIL → 18 / 0 on it.
+
+**Shape 2 itself is still refused, and the refusal has moved one layer along —
+onto the answer this doc says is the open design question.** With `Box.set` now
+reachable, `b.inner.v` reads through `b.inner`, whose agreed declared type is a
+framed `Opt`, but `Box.set` ASSIGNS that field — so it is `_REASSIGNED` ("the
+word in the slot is a frame belonging to whichever function ran the
+assignment"), which is the lifetime half of the same "what is a struct-typed
+field" question and not a recogniser gap. It takes the answer "the frame
+address, with the write-once discipline the message already names" and is a real
+program; it takes "a copy of the words in the object's own block" and is a
+layout change. Neither is decided here, which is what this doc has consistently
+said.
+
+Shape 1 (initialising the field from a constructor ARGUMENT) is unchanged and
+still says "a word stored over it would leave a value where every read of
+`self.inner.…` computes a frame base from it" — the same question, asked at the
+construction rather than at the store.
+
+So the row's terminal cause is unchanged from the section above it:
+`FORMAL_stdlib_optional_needs_a_representation` (formal3-7's claim), one layer
+below this one. What this session removed is the step between here and the
+question.
+
 ## The next step (as originally written)
 
 Answer that question in `FORMAL_wide_receiver_by_reference.md` — the field
