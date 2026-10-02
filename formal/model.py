@@ -5390,6 +5390,14 @@ VALUE_METHOD_RECEIVERS = {
 # `OptionalPointer[UInt8, ImmUntrackedOrigin]` for `char *`, `std/pwd/_linux.mojo:48`
 # `OptionalPointer[_C_Passwd, UntrackedOrigin[mut=True]]` for `struct passwd *`,
 # `std/memory/memory.mojo:477` and `:483` with `mut=True` spelled as a keyword).
+#
+# The three `*OpaquePointer` aliases are the exception to "the pointee is the
+# first positional argument", and the exception is SAFE rather than tidy: they
+# expand to `Pointer[NoneType, origin]`, so their first positional argument is
+# the ORIGIN, and a name that is not a pointee is not in `POINTEE_WIDTHS` — so
+# `opaque.value()` is refused by the width table rather than loaded at a width
+# nothing established. They are here for `external_call_return_kind`, where the
+# question is only "is the whole register the answer", and an opaque pointer is.
 # `OptionalPointer` was measured refusing a real stdlib module:
 # `external_call['getenv', OptionalPointer[UInt8, ImmUntrackedOrigin]]` is an
 # `Optional[Pointer]`, which is one word with 0 meaning None — the same answer
