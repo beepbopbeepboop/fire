@@ -2436,6 +2436,30 @@ class X86_64Codegen:
             operands.append(a)
         return frags, operands
 
+    def _refuse_frame_order_operand(self, op: str, operand) -> None:
+        """Raise if `operand` is a bare name this function holds as a FRAME.
+
+        The ORDERING sibling of `_refuse_frame_container_operand`, asked from
+        the same table for the same reason: `x < y` on two multi-field structs
+        reached the flag-setting compare of two ADDRESSES, so which way it
+        branched was decided by where the allocator put the two objects —
+        measured on both architectures, `lt=1 gt=0 le=1 ge=0` for two objects
+        holding EQUAL field values. `model.frame_order_operand_refusal` is the
+        shared text; x86-64 needs it at ONE site where arm64 needs two, because
+        a comparison in a CONDITION goes through `_emit_truthy_word` and so
+        through `_emit_binop` on this backend while arm64 has a flags fast path
+        that bypasses it. The two ask the same question either way.
+        """
+        if (op not in M._FRAME_ORDER_OPS
+                or not isinstance(operand, F.IdentExpr)
+                or operand.name not in self._frame_holders):
+            return
+        cands = self._frame_candidates.get(operand.name) or ()
+        reason = M.frame_order_operand_refusal(op, operand,
+                                              [st.name for st in cands])
+        if reason is not None:
+            raise CodegenError(reason)
+
     def _printf_arg_is_text(self, arg):
         """True / False / None: does this `printf` vararg hold text.
 
@@ -4393,6 +4417,10 @@ class X86_64Codegen:
             raise CodegenError(reason)
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
+            # A FRAME ADDRESS has no order, and the compare below would decide
+            # one by where the allocator put the two objects.
+            self._refuse_frame_order_operand(op, e.left)
+            self._refuse_frame_order_operand(op, e.right)
             if not self._emit_strcmp(e.left, e.right, op):
                 self._emit_cmp(e.left, e.right, unsigned, signed)
             return
@@ -4547,6 +4575,12 @@ class X86_64Codegen:
                 raise CodegenError(
                     f"unsupported compare-chain operator {op!r} on the "
                     f"formal x86-64 path")
+            # The CHAIN is a separate emitter that never went through
+            # `_emit_binop` — the `s += t` lesson again, one loop over.  Each
+            # link compares the same two adjacent operands a plain comparison
+            # would, so each link asks the same frame-ordering question.
+            self._refuse_frame_order_operand(op, operands[i])
+            self._refuse_frame_order_operand(op, operands[i + 1])
             unsigned, signed = _CMP_CONDS[op]
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP,
                                               _SLOT * (n - 1 - i)))

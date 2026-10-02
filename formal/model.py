@@ -3019,6 +3019,84 @@ def frame_container_operand_refusal(op: str, spelled: str, struct_names):
         f"it is the only reading there is")
 
 
+# The relational operators, and the reason they are named here rather than
+# spelled at the call sites: `==` and `!=` have a CORRECT answer on a frame
+# address (it is CPython's inherited `object.__eq__`, and two live objects of
+# one struct cannot share an address — `eq_no_declared_dunder_stays_identity` in
+# `test_formal_run.py` is the guard), while the four ORDER operators have none
+# at all.  A set rather than a constant for the same reason `_COMPARISON_OPS`
+# is one: `in`/`not in` are in that tuple and are not in this.
+_FRAME_ORDER_OPS = ("<", ">", "<=", ">=")
+
+
+def frame_order_operand_refusal(op: str, operand, struct_names) -> str | None:
+    """Why ORDERING a FRAME ADDRESS by `<`/`>`/`<=`/`>=` is wrong. A refusal.
+
+    The sibling of `frame_container_operand_refusal` and
+    `string_binary_refusal`, and the third arm of the same shape: a struct of
+    more than one field is a POINTER to a frame of 8-byte slots
+    (`struct_is_framed`), and every operator that reaches the flag-setting
+    compare is therefore operating on an ADDRESS.  For `+`, `-`, `&`, `|`, `%`
+    and the shifts the address is a wrong NUMBER; for `<`, `>` and their
+    non-strict forms it is a wrong BRANCH, which is the worse of the two shapes
+    because a correct program takes the wrong path and nothing downstream can
+    tell.
+
+    Measured on BOTH architectures, from a green build, on
+    `struct Pair { var a: Int; var b: Int }` with a field-wise `__eq__` and two
+    objects holding equal field values:
+
+        printf("lt=%d gt=%d le=%d ge=%d", x < y, x > y, x <= y, x >= y)
+        ->  lt=1 gt=0 le=1 ge=0
+
+    Four relations decided, none of them by anything in the program — by which
+    frame the allocator put `x` in relative to `y`.  Reordering two
+    independent statements reverses every one of them.  CPython answers the
+    same program with `TypeError: '<' not supported between instances of
+    'Pair' and 'Pair'`, and the `__eq__` the struct declares says nothing about
+    ordering, so there is no dunder to dispatch to either: a three-way compare
+    over the fields has no lowering here, and a two-word compare of addresses is
+    not an approximation of one — it is an answer about memory.
+
+    **`==` and `!=` are deliberately NOT here**, and the reason is the guard
+    above: an address compare is the right answer for a struct that declares no
+    `__eq__`, and for one whose dunder cannot be lowered across two candidate
+    layouts `formal/build.py` refuses the comparison by name rather than
+    leaving it to this.  `is`/`is not` likewise stay: they ask whether two
+    names hold one OBJECT, which on this path is the pointer.
+
+    `operand` is the NODE, because the emitters' question is "is this a bare
+    name the holder table holds", and `struct_names` is what its frame could be
+    — the same list `frame_container_operand_refusal` prints, because a refusal
+    that does not name the struct is one the reader has to re-derive.
+    """
+    if op not in _FRAME_ORDER_OPS or operand is None:
+        return None
+    who = ", ".join(struct_names) if struct_names else "this struct"
+    return (
+        f"`{op}` orders the ADDRESS of a {who} FRAME, and an address has no "
+        f"order the source asked for: {spelled(operand)} here is not a value, "
+        f"it is where a block of 8-byte slots happens to live. `<`, `>`, `<=` "
+        f"and `>=` therefore compare two words that were never in the program, "
+        f"and which way they come out is decided by where the allocator put "
+        f"the two objects — reordering two independent statements reverses "
+        f"every one of them. Measured on BOTH architectures, on two objects of "
+        f"a two-field struct holding EQUAL field values, with a field-wise "
+        f"`__eq__` declared: `lt=1 gt=0 le=1 ge=0`, four relations decided by "
+        f"nothing in the program. This path has no three-way compare over a "
+        f"struct's fields to lower a declared ordering to, and comparing "
+        f"addresses in the other direction is not an approximation of one. "
+        f"CPython refuses the same program (`'<' not supported between "
+        f"instances`) for the same reason. `==` and `!=` are NOT this refusal: "
+        f"an address compare is the right answer for a struct that declares no "
+        f"comparison dunder, and one that does is dispatched to it. What to "
+        f"write instead: compare a FIELD (`{spelled(operand)}.a < "
+        f"{spelled(operand)}.b`), or declare an ordering method — this path "
+        f"has no dispatch for one yet either, and the same refusal would name "
+        f"that"
+    )
+
+
 def non_container_element_refusal(op: str, spelled: str,
                                   function: str) -> str:
     """Why an ELEMENT of a value that is not a container is refused. A refusal.

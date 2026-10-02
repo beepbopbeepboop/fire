@@ -616,6 +616,31 @@ REFUSALS = [
      "    printf(\"[%s]\", a)\n"
      "    return 0\n",
      "conversion in printf's format string reads"),
+    # ORDERING A FRAME ADDRESS, and the reason a wrong BRANCH belongs in the
+    # oracle's file rather than only in the suite:  `x < y` on two multi-field
+    # structs reached the flag-setting compare of two ADDRESSES, so which way it
+    # went was decided by where the allocator put them.  Measured on both
+    # architectures for two objects holding EQUAL field values: `lt=1 gt=0
+    # le=1 ge=0`.  Both backends agreed, so a two-architecture comparison
+    # cannot see it and only a CPython oracle can — CPython raises
+    # `TypeError: '<' not supported between instances`, which is the answer
+    # this path now gives as a build error.
+    ("ordering_a_frame_address_is_refused",
+     "class Pair:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, a, b):\n"
+     "        self.x = a\n"
+     "        self.y = b\n"
+     "    def __eq__(self, other):\n"
+     "        return self.x == other.x and self.y == other.y\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = Pair(1, 2)\n"
+     "    var q = Pair(1, 2)\n"
+     "    printf(\"lt=%d\", 1 if p < q else 0)\n"
+     "    return 0\n",
+     "orders the ADDRESS of a Pair FRAME"),
 ]
 
 

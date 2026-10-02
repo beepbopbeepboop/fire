@@ -8772,6 +8772,110 @@ WAVE7_G2_CASES = [
      "    return h.at(1) + h.size()\n", 88, None),
 ]
 
+
+# ── ORDERING a frame address: `<`, `>`, `<=`, `>=` ──────────────────────
+#
+# The sibling of the four refusals above and the same mistake one operator
+# further along: a multi-field struct's receiver is the ADDRESS of a frame of
+# 8-byte slots, and every operator that reaches the flag-setting compare is
+# therefore operating on an address.  For `+`, `&`, `%` and the shifts that is a
+# wrong NUMBER; for `<`, `>` and their non-strict forms it is a wrong BRANCH,
+# which is the worse shape because a correct program takes the wrong path and
+# nothing downstream can tell.
+#
+# Measured on BOTH architectures before the refusal, on two objects of a
+# two-field struct holding EQUAL field values with a field-wise `__eq__`
+# declared: `lt=1 gt=0 le=1 ge=0`.  Four relations decided by nothing in the
+# program — by where the allocator put the two frames — and reordering two
+# independent statements reverses every one of them.  CPython answers the same
+# program with `TypeError: '<' not supported between instances`.
+FRAME_ORDER_CASES = [
+    ("frame_address_ordering_is_refused",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __eq__(self, other: Pair) -> Bool:\n"
+     "        return self.a == other.a and self.b == other.b\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Pair()\n"
+     "    var y = Pair()\n"
+     "    x.a = 1\n"
+     "    x.b = 2\n"
+     "    y.a = 1\n"
+     "    y.b = 2\n"
+     "    printf(\"lt=%d gt=%d le=%d ge=%d\",\n"
+     "           1 if x < y else 0, 1 if x > y else 0,\n"
+     "           1 if x <= y else 0, 1 if x >= y else 0)\n"
+     "    return 0\n",
+     "refuse:orders the ADDRESS of a Pair FRAME", None),
+    # The CONDITION form, and it is a separate case because arm64 has a flags
+    # fast path for a comparison in a condition that never reaches
+    # `_emit_binop` — which is exactly how `if s < t:` came to branch on the
+    # interning order of two string literals while `r = s < t` was a build
+    # error.  Two spellings of one question disagreeing is how a wrong BRANCH
+    # gets in, so the choke point has to be asked at both.
+    ("frame_address_ordering_in_a_condition_is_refused",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Pair()\n"
+     "    var y = Pair()\n"
+     "    x.a = 1\n"
+     "    x.b = 2\n"
+     "    y.a = 5\n"
+     "    y.b = 6\n"
+     "    if x < y:\n"
+     "        return 1\n"
+     "    return 0\n",
+     "refuse:orders the ADDRESS of a Pair FRAME", None),
+    # The CHAIN, a THIRD emitter that never went through `_emit_binop` — the
+    # `s += t` lesson one loop over.
+    ("frame_address_ordering_chain_is_refused",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Pair()\n"
+     "    var y = Pair()\n"
+     "    var z = Pair()\n"
+     "    x.a = 1\n"
+     "    y.a = 2\n"
+     "    z.a = 3\n"
+     "    printf(\"chain=%d\", 1 if x < y < z else 0)\n"
+     "    return 0\n",
+     "refuse:orders the ADDRESS of a Pair FRAME", None),
+    # THE GUARD, and it is two guards in one case because the two things a
+    # too-eager version of this rule would break are both here.
+    #
+    #   * `==`, `!=` and `is` on frames are NOT this refusal, and `eq=1` is the
+    #     dispatch working: a declared `__eq__` reached through the operator,
+    #     which the filing for the operator recorded as open and which
+    #     `EQ_DISPATCH_CASES` above owns.  An address compare IS CPython's
+    #     inherited `object.__eq__`, so for a struct declaring no dunder it is
+    #     the right answer — see `eq_no_declared_dunder_stays_identity`.
+    #   * a FIELD comparison is not a frame comparison: `x.a < x.b` reads two
+    #     64-bit words, and it is what the refusal tells the reader to write.
+    ("guard_field_ordering_and_frame_equality_still_work",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __eq__(self, other: Pair) -> Bool:\n"
+     "        return self.a == other.a and self.b == other.b\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Pair()\n"
+     "    var y = Pair()\n"
+     "    x.a = 1\n"
+     "    x.b = 2\n"
+     "    y.a = 1\n"
+     "    y.b = 2\n"
+     "    var f = 1 if x.a < x.b else 0\n"
+     "    var eq = 1 if x == y else 0\n"
+     "    var ne = 1 if x != y else 0\n"
+     "    printf(\"f=%d eq=%d ne=%d\", f, eq, ne)\n"
+     "    return 0\n", 0, "f=1 eq=1 ne=0"),
+]
+
 # `a == b` on two FRAME ADDRESSES, which used to be a flag-setting compare of
 # two words and therefore an answer about ADDRESSES: CPython's INHERITED
 # `__eq__`, correct for a struct that declares none and a silent bypass of the
@@ -10453,7 +10557,7 @@ def main():
                   + TYPE_VALUE_DTYPE_CASES + TYPE_VALUE_REFUSALS \
                   + TYPE_VALUE_TAG_CASES + ORIGIN_OF_CASES \
                   + ORIGIN_OF_REFUSALS
-                  + EQ_DISPATCH_CASES
+                  + EQ_DISPATCH_CASES + FRAME_ORDER_CASES
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + [X86_ONLY_1SLOT_BUG_CASE])

@@ -3514,6 +3514,32 @@ dylib_exports: list = None, globals_base: int = None,
         raise CodegenError(M.frame_container_operand_refusal(
             op, M.spelled(obj), [st.name for st in cands]))
 
+    def _refuse_frame_order_operand(self, op: str, operand) -> None:
+        """Raise if `operand` is a bare name this function holds as a FRAME.
+
+        The ORDERING sibling of `_refuse_frame_container_operand`, and asked
+        from the same table for the same reason: `x < y` on two multi-field
+        structs reached the flag-setting compare of two ADDRESSES, so which way
+        it branched was decided by where the allocator put the two objects —
+        measured on both architectures, `lt=1 gt=0 le=1 ge=0` for two objects
+        holding EQUAL field values. `model.frame_order_operand_refusal` is the
+        shared text, so x86-64 cannot describe the same construct differently,
+        and both backends ask it at BOTH comparison sites (`_emit_binop` for a
+        value and `_emit_branch_unless_cmp` for a condition) — the choke-point
+        argument `bugs/FORMAL_string_value_model.md` makes for `if s < t:`
+        bypassing `_emit_binop`, which is exactly how a string comparison came
+        to be a diagnostic in one context and a branch in the other.
+        """
+        if (op not in M._FRAME_ORDER_OPS
+                or not isinstance(operand, F.IdentExpr)
+                or operand.name not in self._frame_holders):
+            return
+        cands = self._frame_candidates.get(operand.name) or ()
+        reason = M.frame_order_operand_refusal(op, operand,
+                                              [st.name for st in cands])
+        if reason is not None:
+            raise CodegenError(reason)
+
     def _refuse_non_container_operand(self, op: str, obj) -> None:
         """Raise if `obj` is a plain WORD this function bound to an integer.
 
@@ -4915,6 +4941,10 @@ dylib_exports: list = None, globals_base: int = None,
         }
         if op in cmp_conds:
             u, s = cmp_conds[op]
+            # A FRAME ADDRESS has no order, and the flag-setting compare below
+            # would decide one by where the allocator put the two objects.
+            self._refuse_frame_order_operand(op, e.left)
+            self._refuse_frame_order_operand(op, e.right)
             if op in ("==", "!=") and self._emit_strcmp_flags(e.left, e.right):
                 self.asm.emit(encode_cset_xd_cond(
                     0, "ne" if op == "!=" else "eq"))
@@ -5163,6 +5193,13 @@ dylib_exports: list = None, globals_base: int = None,
         # here rather than in `_emit_branch_unless_cmp` because that function is
         # reached from the for-range test too, which builds its own operands and
         # has no operator to decide with.
+        # …and the FRAME ADDRESS row, asked here for the same reason: a
+        # comparison in a condition never reaches `_emit_binop`, so a check
+        # asked only there would leave `if x < y:` branching on two addresses
+        # while `r = x < y` is a build error. Two spellings of one question
+        # disagreeing is how a wrong BRANCH gets in.
+        self._refuse_frame_order_operand(cond.op, cond.left)
+        self._refuse_frame_order_operand(cond.op, cond.right)
         if cond.op in ("==", "!=") \
                 and self._emit_strcmp_flags(cond.left, cond.right):
             self._record_cond_branch()
@@ -6863,6 +6900,13 @@ dylib_exports: list = None, globals_base: int = None,
                 raise CodegenError(
                     f"unsupported compare-chain operator {op!r} on the "
                     f"formal arm64 path")
+        # The CHAIN is a separate emitter that never went through
+        # `_emit_binop` — the `s += t` lesson again, one loop over.  Each link
+        # compares the same two adjacent operands a plain comparison would, so
+        # each link asks the same frame-ordering question.
+        for i, op in enumerate(ops):
+            self._refuse_frame_order_operand(op, operands[i])
+            self._refuse_frame_order_operand(op, operands[i + 1])
 
         self._if_counter += 1
         cid = self._if_counter
