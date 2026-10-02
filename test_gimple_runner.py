@@ -1399,6 +1399,85 @@ d2 = d
 print(d2["k"]())
 """)
 
+    # A function that RETURNS a callable — the hop the tables above cannot
+    # reach at all, because the value is a CALL RESULT rather than a
+    # materialized lambda. `def a(): return lambda: False` boxes its
+    # `void *` into an `int64_t` (`func_return_types` records `a` as
+    # returning `int64_t`), so `e = a()` records nothing, and `print(e())`
+    # printed `0` where CPython prints `False`.
+    #
+    # The carry that fixes it cannot be the shared one: `carry_callable_
+    # ret_types` copies from the lowered VALUE, and a call result is a fresh
+    # temp with no entry. The fact lives on the AST — `node._callable_ret`,
+    # set by `GimpleGen.lower_expr` — and before that in the compile-scoped
+    # `_return_callable_ret_types[callee]` that the callee's own `return`
+    # wrote — so `carry_callable_ret_from_call` reads the callee name straight
+    # off the CallExpr. `print(a())` on the same program is the control: the
+    # direct `mk()(...)` callee spelling already worked, via `node._callable_
+    # ret` directly.
+    test_gimple_matches_cpython("gimple_function_returning_a_callable_keeps_its_return_type", """\
+def a():
+    e = lambda: False
+    return e
+
+def b():
+    e = lambda x: x > 1
+    return e
+
+def c():
+    e = a()
+    print(e())
+    f = b()
+    print(f(5))
+    print(f(0))
+c()
+""")
+
+    # A BOUND METHOD stored in a MODULE GLOBAL — the calling CONVENTION, not
+    # the return type, and the two failed separately. The globals struct field
+    # is `int64_t`, so the call site had nothing to dispatch on and routed
+    # `f()` to `mojo_fnptr_call_N`, which calls the RAW method symbol with no
+    # `self`: a call with the wrong arity. It happened to print `1` rather
+    # than crash, which is luck and not a property. `truthy` returning `k > 4`
+    # is one argument, so a missing receiver is a single garbage register
+    # read; `add(a, b)` is two, and is the shape that shows the arity is
+    # really wrong rather than merely untidy.
+    #
+    # Two fixes, and the second was only reachable after the first: the global
+    # store records `_actual_types[name] = 'MojoBoundMethod *'` (the kind IS
+    # known there — `_bound_method_ret_types` holds a bound method and nothing
+    # else), and `_lower_bound_method_call` then resolved the name the way
+    # `_lower_fnptr_call` and `_lower_maybe_bound_call` already did. Without
+    # that second one the call site emitted a bare `f`, and gcc rejected the
+    # module with "'f' undeclared", because a global is a field of the globals
+    # struct and not a C identifier.
+    #
+    # The `local()` lines are the control: the identical spelling bound to a
+    # local was always right, which is what made this look like a return-type
+    # carry rather than a calling-convention one.
+    test_gimple_matches_cpython("gimple_bound_method_in_a_module_global_keeps_its_convention", """\
+class C:
+    def __init__(self):
+        self.k = 9
+    def truthy(self):
+        return self.k > 4
+    def add(self, a, b):
+        return self.k + a + b
+
+m = C()
+f = m.truthy
+print(f())
+g = m.add
+print(g(1, 2))
+
+def local():
+    lf = m.truthy
+    lg = m.add
+    print(lf())
+    print(lg(3, 4))
+local()
+""")
+
     # ── `with` teardown: the `as` target is optional, and so is running
     # ── __exit__ at all. Fixed, and the doc
     # ── (`CODEGEN_with_no_as_target_drops_exit`) is deleted, so this comment

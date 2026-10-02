@@ -486,8 +486,24 @@ def _lower_bound_method_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr,
     codegen); recover the real pointer through the same int64_t->void*->
     real-type cast dance `_lower_MemberExpr`'s object-lowering path uses
     for the identical situation.
+
+    The NAME is resolved exactly as `_lower_fnptr_call` and
+    `_lower_maybe_bound_call` resolve it, and for the same reason: a
+    module-level global is stored in this module's globals STRUCT, so
+    `gen._c_names.get(fname_raw, fname_raw)` on its own emits a reference
+    to a bare C identifier that does not exist — gcc's "'f' undeclared".
+    `f = m.truthy` at module scope followed by `f()` reached this function
+    (through the `_actual_types` overlay the global store records, which is
+    what makes the callee a bound method at all) and then failed to build
+    for exactly this reason. A captured name goes through `_lower_IdentExpr`
+    too, so it reads `_env->f`.
     """
-    bm_raw = gen._c_names.get(fname_raw, fname_raw)
+    if fname_raw in gen._captures and gen._env_param:
+        _bt, bm_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
+    elif fname_raw not in gen.var_types and fname_raw in gen._global_var_types:
+        _bt, bm_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
+    else:
+        bm_raw = gen._c_names.get(fname_raw, fname_raw)
     if stored_ctype == 'MojoBoundMethod *':
         bm_type, bm = 'MojoBoundMethod *', bm_raw
     else:

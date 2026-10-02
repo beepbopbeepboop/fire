@@ -1269,6 +1269,48 @@ def carry_callable_ret_types(gen, src: str, dst: str) -> None:
             _tbl[dst] = _tbl[src]
 
 
+def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
+    """The `_return_callable_ret_types` hop: a name bound to the RESULT of a
+    call to a function that returns a CALLABLE inherits that callable's return
+    type.
+
+        def a():
+            e = lambda: False
+            return e
+        def c():
+            e = a()
+            print(e())        # CPython False; without this hop, 0
+
+    `carry_callable_ret_types` cannot do this hop, and the reason is its own
+    key: it copies from the lowered VALUE (`v`), and a call result is a fresh
+    temp that carries no entry — the fact lives on the NODE
+    (`node._callable_ret`, set by `GimpleGen.lower_expr`) and, before that, in
+    the compile-scoped `_return_callable_ret_types[callee]` the callee's own
+    `return` wrote. This reads the callee name straight off the CallExpr, which
+    is the one spelling that has it.
+
+    Only `_callable_ret_types`, because that is where a non-capturing closure or
+    a lifted free function lands; a callee returning a `MojoBoundMethod *` is
+    the `_bound_method_ret_types` family and is not claimed here.
+
+    A bound method bound through a call is NOT covered, and deliberately so:
+    `f = m.truthy` is an AssignStmt whose RHS is a MemberExpr, not a call,
+    and `m.truthy()` is not this shape either. What this hop buys is the one
+    that was measured wrong.
+
+    Called from the same four store sites that call `carry_callable_ret_types`,
+    because a copy that is silently forgotten is a wrong value with exit 0.
+    """
+    if not isinstance(value_node, gimple_ctypes.CallExpr):
+        return
+    _f = getattr(value_node, 'func', None)
+    if not isinstance(_f, gimple_ctypes.IdentExpr):
+        return
+    _rt = gen._return_callable_ret_types.get(_as_str(_f.name))
+    if _rt:
+        gen._callable_ret_types[dst] = _rt
+
+
 def note_fresh_result(gen, t: str) -> None:
     """A container-display lowering (`[...]`, `{...}`, a comprehension) calls
     this with the temp it is about to return: the display always builds a new
