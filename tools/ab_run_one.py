@@ -55,6 +55,21 @@ them — and `make mojoc`, whose recipe is itself a `memslot.py` wrapper, would
 deadlock on it. See `memslot.covering`. The hand-run `make -j20 aside` has no
 such parent, which is the case this file is for.
 
+**…except that "covered" is the wrong answer for a fan-out, which is what the
+second half of that sentence is for.** Twenty children each told "already
+accounted for" are twenty processes each permitted its own 24 GB per-file
+ceiling, and the ledger's view of the machine while they ran was a single 55 GB
+holder — an allowance of up to 480 GB accounted for by 55, which is the
+2026-09-29 shape (about thirty processes at 30-43 GB each, every one inside
+its own ceiling) and not a bound. So under a suite job this file draws from the
+POOL that job's reservation opens (`memslot.Slot(..., pool=True)`): a
+sub-ledger capped at the admitting job's own class, which the machine-wide
+ledger does not double-count because the pool's usage is inside that
+reservation. 55 GB of pool and 24 GB per file means two files at a time, which
+is what the hand-run `make -j20 bside` already did by taking its own
+reservations. The per-file CEILING is unchanged either way, so no measurement
+depends on this; only the number of files running at once does.
+
 A file killed by the ceiling is recorded as such in its meta.json
 (`memory_capped`, with the peak memcap saw) instead of being reported as a
 compiler failure with an empty .ci: "this file needed more memory than one
@@ -141,7 +156,7 @@ def _run_locked(args, basename: str, out_dir: str) -> None:
     slot = None
     if limit > 0:
         try:
-            slot = memslot.Slot(limit, label).acquire()
+            slot = memslot.Slot(limit, label, pool=True).acquire()
         except ValueError as exc:
             # A class larger than the whole machine budget can never be
             # admitted. Writing that in the meta is better than waiting for a

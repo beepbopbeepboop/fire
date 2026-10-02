@@ -3108,7 +3108,15 @@ def run_job(job: Job, opts, log: Log) -> Result:
         else:
             # The reservation has to reach the tree it covers, or a wrapper
             # inside that tree queues for a turn its own parent is holding.
-            env.update(memslot.held_env(slot.gb))
+            # The POOL is the other half of the same sentence: this job's
+            # reservation is also the ceiling on everything its own fan-out
+            # runs at once, so `make -j20 bside` — twenty concurrent compiles,
+            # each wanting the per-file `module` class — is bounded by the
+            # `program` class the job was admitted for instead of being twenty
+            # times it. A child opts in (`memslot.Slot(..., pool=True)`); one
+            # that does not is unaffected. See tools/memslot.py.
+            env.update(memslot.held_env(slot.gb,
+                                        pool=f'{job.key}:{os.getpid()}'))
 
     t0 = time.time()
     cwd = os.path.join(REPO, job.cwd) if job.cwd else REPO
