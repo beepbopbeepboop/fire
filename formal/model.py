@@ -2573,8 +2573,34 @@ def _build_cfg(body) -> tuple:
     # predecessor, which is the edge that makes the seed reach anything: a body
     # emitted with an empty pending list opens its own unreachable first block,
     # and every block after it then inherits the universe.
+    #
+    # `run`'s RETURN VALUE IS DELIBERATELY DROPPED, and that is the fix for the
+    # worst false refusal this analysis produced. `run` returns the blocks that
+    # FALL OFF THE END of the run, which is exactly what a caller inside the
+    # body needs (they are the join's predecessors) and exactly what the top
+    # level has no use for: control leaves the function, so those blocks have
+    # no successor at all. Attaching them to `entry.succs` invented an edge
+    # from the entry block — whose OUT set is only `seed`, the parameters the
+    # CALLER stores — to every block the body can end in, and `_definitely_stored`
+    # intersects predecessors, so the entry's empty set threw away everything the
+    # body had stored. Measured, all four of these are programs CPython runs:
+    #
+    #     def f(c):                      def f(rows):
+    #         if c: p = 1               for i in rows:
+    #         else: p = 2                   sink(i)
+    #         sink(p)          # refused 'p'
+    #                                    # refused 'i'
+    #
+    # The `for` half is the one that reached the corpus: the loop's LATCH is a
+    # fall-through whenever the loop is the function's last statement, so every
+    # read of a loop target inside the body of a trailing loop was reported —
+    # `formal/arm64.py`'s `Assembler.resolve_extern` (`for sym_name, ... in
+    # self.extern_refs: if sym_name not in target_addrs:`) among them, which
+    # put the whole of `formal/` behind a codegen gap in one function. The edge
+    # could only ever REMOVE a name from a set, so it could only ever invent a
+    # refusal and never miss one: dropping it is the sound direction.
     entry = new([])
-    entry.succs += run(body, [], [entry.index])
+    run(body, [], [entry.index])
     for b in blocks:
         for d in b.succs:
             if d is not None and 0 <= d < len(blocks):
