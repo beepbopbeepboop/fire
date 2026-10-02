@@ -1,5 +1,107 @@
 # CODEGEN_dynamic_attribute_string_reads_as_pointer: a dynamically-set attribute's string value reads back as a raw int64 pointer in the compiled path
 
+## Status addendum (2026-10-01, `work/bugs3-codegen-2-r2` — residual 2 re-measured and narrowed to a call site; NOT fixed)
+
+Re-measured on this tree, against CPython 3.14.7 on the same text. The
+string-attribute half of the main defect is still fixed, and **residual 2 is
+confirmed and localised further than the entry above says** — it is not the
+runtime's miss path, it is which of the codegen's two 3-arg `getattr` branches
+runs, and one of them drops the default from the answer entirely.
+
+```
+$ cat .tmp/ga2.mojo
+class C:
+    pass
+
+def main():
+    o = C()
+    print(getattr(o, "nope", "dflt"))
+    o.y = "set"
+    print(getattr(o, "y", "dflt"))
+    print(getattr(o, "nope", "dflt"))
+    print(o.y)
+
+$ python3 .tmp/ga2.py            # CPython, main() appended
+dflt
+set
+dflt
+set
+
+$ python3 fire.py --jit .tmp/ga2.mojo
+4335323912                        <-- getattr(o, "nope", "dflt")
+set
+4335323912                        <-- ditto, after a REAL attribute was set
+set
+```
+
+So it is not specific to an object that has dynamic attributes: a brand-new
+`C()` with none reproduces, on a hit-adjacent object too.
+
+### The generated C shows the miss flag and the default are both right — and the answer is dropped anyway
+
+```c
+  _t3 = _slit_10001;                    /* "dflt"            */
+  _t4 = (int64_t)_t3;
+  _mojo_getattr_missed = 0;
+  _mojo_getattr_nothrow = 1;
+  _t5 = _mojo_dispatch_getattr (_t6, _t2);
+  _mojo_getattr_nothrow = 0;
+  _t7 = _mojo_getattr_missed;
+  _t8 = _t7 != 0;
+  _t9 = (char *)_t5;                    <-- the DEFAULT IS GONE
+```
+
+The runtime is exonerated by a direct measurement: linking `fire_runtime.c`
+and calling `mojo_obj_getattr(o, "nope")` under the nothrow flag gives
+`v=0 missed=1`, i.e. `mojo_obj_getattr` sets the flag and the flag is a
+readable global. The emitted `_t8` (the `_Bool` for the miss) is computed and
+**never used**, which is the whole bug: the ternary that selects the default
+was not emitted.
+
+### Why: it is a THIRD `getattr` site, not the two the entry names
+
+`emit_calls.py` has three places that emit the nothrow probe:
+
+* the 2-arg `hasattr` probe (~:2130), and
+* the literal-name 3-arg `getattr` "A5" branch (~:2308-2335), which does
+  build the ternary — `raw = gen._new_val('int64_t', f'{cond} ? {dv} : {raw}')`
+  — and is what makes `getattr(o, "x", "dflt")` correct for a KNOWN field;
+* the fall-through 3-arg branch (~:2337-2355), reached when the receiver's
+  struct does not declare the attribute AND the name-keyed
+  `_known_field_type` lookup found nothing. It emits the probe, computes
+  `cond`, and then returns
+  `gen._new_val('int64_t', f'{cond} ? {dv} : {raw}')` — which is right.
+
+The measured case emits NEITHER ternary, which does not match either site, so
+**one of these three is not the code that ran, and I did not finish
+identifying which.** That is the honest state, and it is why this is an
+addendum and not a fix: I made a plausible edit to the fall-through branch
+(present the result as `char *` when the default lowers to `char *`, which is
+the right SHAPE of answer for a miss), it changed the output from a pointer
+decimal to `None`, and since I could not explain the mechanism I reverted it
+rather than commit a change I could not account for. **The tree at
+`work/bugs3-codegen-2-r2` carries no change for this residual.**
+
+### Exact next step
+
+Read the emitted C against `_gen_stmt`/`lower_expr` for this exact program with
+a debugger rather than by inspection: put a `print` of the three sites'
+`_attr`, `_boxed_ft` and `_nothrow3` in
+`mojo/backend_gimple/emit_calls.py` and find which one emits
+`_t9 = (char *)_t5;` with a computed-but-unused `_t8`. Once that is known the
+fix is a few lines — either restore the ternary, or (if the site turns out to
+be a fourth one) give the 3-arg `getattr` ONE implementation that all four
+spellings go through, which is the shape CLAUDE.md's no-parallel-
+implementations rule asks for anyway and is what made this hard to see.
+
+Verify with a `test_gimple_runner.py` `test_gimple_stdout` case that runs
+through the miss: `getattr(o, "nope", "dflt")` printing `dflt`, alongside the
+hit `getattr(o, "x", "")` (which works today and must keep working) and the
+`o.x` plain read — three spellings of the same question, so a fix to one
+cannot be mistaken for a fix to the shape.
+
+## Earlier status (2026-09-30, first entry — the string-attribute half ISOLATED and FIXED; see the main entry below)
+
 ## Status (2026-09-30 — the string-attribute half is FIXED, and it is a memory-level bug, not a display one; the three residuals below are separate and still open)
 
 Re-measured at `86d862fc` before acting, against CPython on the same text

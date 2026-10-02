@@ -34,6 +34,54 @@ looks like (or adds a C++ object per generator-bearing module to the dylib link
 line), which is a `make gate` change, and this was landed by a worker that is not
 allowed to run one.
 
+## Status addendum (2026-10-01, `work/bugs3-codegen-2-r2` — the choice is still a choice, and the measurements that settle it are still missing)
+
+Nothing here was fixed, and the reason is unchanged and concrete: both
+candidate fixes change what every dylib module's compiled C looks like (or add
+a C++ object per generator-bearing module to the dylib link line), and
+verifying either needs `build_stdlib_dylib.py` end to end plus
+`compile_stdlib.py`'s `U` count — a `make gate` this branch is not allowed to
+run. Re-deciding the choice from the source would be worse than leaving it to
+whoever can gate it, so this addendum records only what can be established
+cheaply, and one thing that is now known that the entry above does not say.
+
+**What is now known: the exposure inside this tree is ZERO, measured.** The
+entry above measured the *production stdlib* is clean (249 modules, 0 real
+generators). The self-host closure was measured too
+(`test_selfhost.py::closure_coroutines_are_lowerable`: 61 modules, 3
+generator/async functions before lowering, 0 after). So on THIS tree no dylib
+module carries a `generated_cpp` at all, and neither candidate fix changes a
+single byte of generated C for any module in either module list. That is worth
+saying plainly because it changes the risk calculus: candidate 2 (refuse)
+costs **zero** `skip` lines today, not "a skip per generator-bearing module",
+and candidate 1's plumbing is exercised by nothing here either.
+
+**So the cheap sequencing advice is the reverse of what the entry implies**:
+land candidate 2 first (a one-line refusal, invisible on this tree, and it
+converts the hole into a visible one for the module lists that DO have
+generators — a project's own `.py` under `mojo dylib`, which is where the
+silent wrong behaviour actually bites), then candidate 1 as the real fix, with
+candidate 2 as the invariant that must keep the two consistent. Doing them in
+that order means the real fix is never the first thing to touch a link line,
+and the refusal's own skip count becomes the measurement candidate 1 has to not
+increase — which is the CLAUDE.md `stdlib-dylib` before/after comparison, used
+for the first time on a count that starts at zero.
+
+**The measurement candidate 1 needs and nobody has taken** is what the doc
+should say is next: the two _compile_one_object / link-mode paths differ, and
+the difference is not cosmetic — `fire.py build_executable` already inlines
+each imported sibling's `generated_cpp` through
+`_compile_imported_module` → `_compile_link_inline_cpp_unit`
+(`mojo/backend_gimple/emit_resolve.py:912`), while `compile_module_to_c` does
+not even run `gimple_codegen._run_pipeline`'s pre-passes. **Before writing any
+plumbing, measure how many module lists actually reach
+`compile_module_to_c` with a non-empty `generated_cpp`** — over
+`cas.selfhost_inputs()`-shaped lists, over `mojo dylib` on a project whose own
+`.py` has a generator the A3 pass declines, and over the production stdlib
+(known: zero). If the answer is "only user projects", candidate 2 alone is a
+complete and honest fix for this tree and the plumbing is a separate,
+better-informed change.
+
 ## The hole
 
 `build_stdlib_dylib.compile_module_to_c` is the per-module compile that every
