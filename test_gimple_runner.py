@@ -5938,6 +5938,76 @@ print(s[0:3] == 'abcd')
 print(s[2:5] == 'cde')
 """, "False\nFalse\nFalse\nFalse\nTrue\nTrue\nTrue\nTrue\nFalse\nTrue\n")
 
+    # A module-ATTRIBUTE read, two ways it used to be unreachable, both fatal
+    # rather than wrong: `sys.platform` read as a VALUE rather than folded in
+    # a condition, and any of the module constants reached through an
+    # `import X as Y` alias. Both fell to the generic dynamic-getattr
+    # dispatch, which receives obj=NULL for a bare module marker, so the
+    # program raised `AttributeError: <attr>` and exited 1. The `sys.platform`
+    # half is what `./mojoc fire.py --dump-full` ended with, since
+    # `mojo/middle/comptime.py`'s own `platform = sys.platform` fallback is
+    # such a read and comptime.py is inside the closure.
+    #
+    # Each case is here twice on purpose — bare and aliased — because they are
+    # two independent defects that happened to be invisible together. An
+    # unaliased `os.sep` always worked, which is exactly why the aliased form
+    # reads as a compiler bug about aliases rather than about modules.
+    #
+    # The condition form is in the same program as the value form because
+    # fixing the value must not stop `sys.platform` folding in an `if`: the
+    # two are the same constant read two ways, and only one of them used to
+    # work.
+    #
+    # Expected output comes from CPython on the SAME text, not from a literal:
+    # `sys.platform` is host-dependent, so any hardcoded platform string would
+    # make this a test of which machine ran it. A literal for the rest would
+    # just be the bug's current wrong answer frozen into the test.
+    _modattr_src = """\
+import sys
+import os
+import signal
+import sys as _s
+import os as _o
+import signal as _g
+
+print(sys.platform)
+print(_s.platform)
+print(os.sep)
+print(_o.sep)
+print(os.linesep == '\\n')
+print(_o.linesep == '\\n')
+print(signal.SIGTERM > 0)
+print(_g.SIGTERM > 0)
+print(sys.argv[0] != '')
+print(_s.argv[0] != '')
+print({sys.platform: 7}[sys.platform])
+if sys.platform == 'win32':
+    print('W')
+else:
+    print('N')
+if _s.platform == 'win32':
+    print('W')
+else:
+    print('N')
+"""
+    _modattr_want = None
+    try:
+        _mr = subprocess.run([sys.executable, '-c', _modattr_src],
+                             capture_output=True, text=True, timeout=60)
+        if _mr.returncode == 0:
+            _modattr_want = _mr.stdout
+        else:
+            print(f"SKIP  gimple_module_attribute_value_and_alias: CPython "
+                  f"exited {_mr.returncode} on the program itself "
+                  f"({_mr.stderr[:300]}) — the test program is wrong, not "
+                  f"the compiler")
+    except Exception as _e:
+        print(f"SKIP  gimple_module_attribute_value_and_alias: "
+              f"{type(_e).__name__} running CPython on the same text")
+    if _modattr_want is not None:
+        test_gimple_stdout("gimple_module_attribute_value_and_alias",
+                           _modattr_src, _modattr_want)
+
 
 def main():
     gcc = find_gcc()
