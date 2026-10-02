@@ -8822,12 +8822,29 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # it because the flat map is keyed by the DEFINING name and so
                 # cannot say which module owns `cname` — see
                 # `_link_line_publishes`.
+                #
+                # And NOT a name bound by an `as` in an import, which is the
+                # fifth condition and the one this gate was missing.
+                # `dylib_extern_symbol` answers that shape with
+                # `dylib_aliased_export_refusal`, which names the DEFINING name
+                # and says no library on the line exports it — strictly more
+                # specific than the export-rule paragraph above, which cannot
+                # say which name it was asked about at all. So asking here first
+                # REPLACED a better message with a worse one for every aliased
+                # callee: measured, `test_formal_cross_module.py`'s
+                # `an alias of a NON-exported name is refused by name` and
+                # `a plain from-import keeps the bind audit's own message` both
+                # went from PASS to FAIL, each wanting the alias refusal and
+                # getting this one. The gate is for the spelling the emitter
+                # answers WORSE, which is the bare one; where the emitter already
+                # has the better answer, the gate stands down.
                 cname = node.name
                 csym = M.module_symbol(cname)
                 if (id(node) in bare_callees and link_line
                         and cname not in structs_by_name
                         and csym is not None
                         and getattr(csym, "site", None) == "imported"
+                        and not M.is_import_alias(cname, import_aliases)
                         and not _link_line_publishes(link_line, cname,
                                                       import_aliases)):
                     raise CodegenError(M.imported_callee_refusal(
