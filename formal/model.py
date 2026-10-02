@@ -2437,6 +2437,43 @@ LIST_PREFIX = "list"
 # decision; the kind is the documentation of it.
 FRAME_KIND = "frame"
 
+# A TYPE, read as a VALUE.  It is a kind for the same reason `FRAME_KIND` is: the
+# construct landed (a type is one 64-bit tag on this path — `type_tag` below, and
+# `TYPE_VALUE_CASES` in `test_formal_run.py` runs the images) and the two places
+# that mistake a tag for a number were both wrong in a way a reader cannot act
+# on.
+#
+#   * `len(bool)` was refused with "the source does not say what this operand
+#     holds … Annotate it (`x: String`)" — false about a program that spells the
+#     operand as a type at the use site, and the advice is to annotate a name
+#     that already has a type.
+#   * `len(t)` where `t = bool` was refused with "an integer has no length" —
+#     false, because `t` holds a TYPE TAG and the difference is the whole
+#     subject of the construct.
+#   * `xs[bool]` on a list BUILT, ran and died at the bounds check with nothing
+#     printed (exit 1, no message, both architectures), because a tag is a
+#     number to the emitter and an enormous one to the count it is checked
+#     against.
+#
+# What a tag is NOT is a number, which is why this is its own kind and not a
+# row of `INT_KIND`: `is_number_kind` is the one place that says "a tag prints
+# as a number" (it is a word), and everything that asks "is this an integer?"
+# — `len`, a string method, a container index — must keep saying no.
+TYPE_KIND = "type"
+
+
+def is_number_kind(kind) -> bool:
+    """Whether a value of this kind is printed as a NUMBER.
+
+    Two kinds, and they are two because they are different claims that happen to
+    be lowered the same way: an integer is a number by definition, and a type TAG
+    is a 64-bit word that `printf("%d")` prints faithfully.  The predicate exists
+    so that the two backends' `print()` format switch has one answer rather than
+    a tuple each — the same lesson `len_operand_lowering` carries, for the same
+    reason (two private copies of a decision disagreed about what a string is).
+    """
+    return kind in (INT_KIND, TYPE_KIND)
+
 
 # ── Calls that are not calls to a symbol ──────────────────────────────────
 #
@@ -2898,6 +2935,12 @@ def len_refusal(kind, spelled: str, slot_ann: str = None,
         gets its own sentence, because it is the one a reader has to act on:
         annotate the name, or bind it to something this path can see the type
         of.
+      * a TYPE is the row that was missing while the type-value construct
+        existed, and it is here because the `None` row is false about it: the
+        source spells the operand as a type at the use site, so "annotate it"
+        is advice about a name that already has one. A tag is a word and a
+        container is a count field or a run of bytes; there is no third reading
+        of it.
 
     `slot_ann` / `slot_kind` are the DECLARED annotation of the operand's field
     and the kind that annotation gives, UNGATED by whether the slot's value is
@@ -2955,6 +2998,26 @@ def len_refusal(kind, spelled: str, slot_ann: str = None,
             f"and the word there is the integer itself. A string's length is a "
             f"strlen over its bytes and a list's is its count field, and an int "
             f"is neither")
+    if kind == TYPE_KIND:
+        # Its own row rather than the `None` one above, and this is the whole of
+        # what the TYPE_KIND kind is for. The source DOES say what the operand
+        # holds — it says `{spelled}`, which is a type — so "annotate it
+        # (`x: String`)" is advice about a name that already has a type, and a
+        # tag is not a container: it is one word, a hash of a type's name, with
+        # no count field and no bytes behind it. Reaching this row needs the
+        # type-value construct; without it a bare type name was UNCLASSIFIED and
+        # landed in the `None` branch, which is why this sentence exists rather
+        # than a reworded one.
+        return (
+            f"len({spelled}) is len() of a TYPE, and on this path a type in a "
+            f"value position is one 64-bit TAG (a hash of the type's name, so it "
+            f"is the same number in every unit of the image, which is what lets "
+            f"`t == Int32` be an ordinary integer comparison). A tag is a word: "
+            f"there is no count at offset 0 and no bytes behind it, so neither of "
+            f"the two things `len()` can answer — a string's `strlen` over its "
+            f"bytes, a blob's count field — applies. To ask how many elements a "
+            f"container has, `len()` the container; to ask which type a value "
+            f"has, compare it with the type, which is what a tag is for")
     return (
         f"len({spelled}) is len() of a value classified as {kind!r}, and this "
         f"path has no length to read for it. A string's length is a strlen "
@@ -4278,6 +4341,49 @@ def string_membership_lowering(left_kind, right_kind) -> str | None:
     if left_kind == INT_KIND:
         return STRING_MEMBERSHIP_BYTE
     return None
+
+
+def type_index_refusal(index_kind, spelled_index: str) -> str | None:
+    """Why a TYPE cannot be a subscript index, or None when it is not one.
+
+    The sibling of `string_index_refusal` one level up: that one declines a
+    string index because `s + i` would add two addresses, and this one declines
+    a TYPE index because a tag is not an offset at all. Asked at the same
+    single choke point — `_emit_subscript_addr`, which a read, a store and an
+    augmented assignment all pass through — so all three are covered by one
+    call, and BEFORE the base's own shape is asked, because the base does not
+    decide the answer: `xs[bool]` and `s[bool]` are the same mistake and the
+    second one segfaults.
+
+    It is not a reworded row of anything. Measured on this tree, both
+    architectures, `xs = [10, 20, 30]; printf("%d", xs[bool])`:
+
+        arm64   exit 1, nothing printed
+        x86-64  exit 1, nothing printed
+
+    A tag is a hash of a type's name — a large positive 63-bit number — so it
+    bounds-checks against a three-element blob and takes the out-of-range exit.
+    That is the bounds check doing its job on a number the source never wrote,
+    which is why this is a REFUSAL and not a cheaper index: there is no
+    reading of a type that is an element position.
+
+    `index_kind` is the classifier's answer rather than the node, so this fires
+    for a local bound to a type as well as for the bare name, which is the
+    second half of the same defect: `t = bool; xs[t]` is the same program with
+    one more line in it.
+    """
+    if index_kind != TYPE_KIND:
+        return None
+    return (
+        f"`{spelled_index}` is a TYPE used as a subscript index, and on this "
+        f"path a type is one 64-bit TAG — a hash of the type's name — so it is "
+        f"a number, and there is no element position a type corresponds to. "
+        f"Measured on both backends: `xs = [10, 20, 30]` with `xs[bool]` built, "
+        f"ran and exited 1 with nothing printed, because the tag bounds-checks "
+        f"against a three-element blob and takes the out-of-range exit — the "
+        f"bounds check doing its job on a number the source never wrote. Index "
+        f"with an integer, or compare the value with the type instead, which "
+        f"is what a tag is for")
 
 
 def string_index_refusal(base_kind, index_kind,
@@ -8478,7 +8584,17 @@ class ValueKinds:
         # the slot's initializer, not a store — `module_body`), and the
         # refusal sent the reader to annotate a name the source had already
         # given a list to.
-        return global_slot_kind(name)
+        gk = global_slot_kind(name)
+        if gk is not None:
+            return gk
+        # A TYPE, read as a value. LAST, and the order is the guard rather than
+        # an afterthought: a local (`Int = 7` — `a_local_named_like_a_type_
+        # still_wins` in test_formal_run.py) and a module global of the same
+        # spelling both answer first, so this cannot reintroduce the bug the
+        # tag's placement was moved to fix. What it replaces is the absence: an
+        # unbound type name classified as nothing, which is what made `len(bool)`
+        # say the source does not say what its operand holds.
+        return (TYPE_KIND if type_tag_for_name(name) is not None else None)
 
     def kind_of(self, e):
         """What `e` evaluates to, or None when the source does not say."""

@@ -3558,6 +3558,16 @@ dylib_exports: list = None, globals_base: int = None,
                                         self._functions, self._structs)
         if why is not None:
             raise CodegenError(why)
+        # A TYPE index, before the base's own shape is asked: the base does not
+        # decide this. `xs[bool]` took the blob's bounds check against a 63-bit
+        # tag and exited 1 with nothing printed, and `s[bool]` added a tag to a
+        # `char *`. One call here covers the read, the store and the augmented
+        # assignment, and it is asked of the KIND rather than of the node so a
+        # local bound to a type is refused as well as the bare name.
+        why = M.type_index_refusal(self._expr_str_kind(e.index),
+                                   M.spelled(e.index))
+        if why is not None:
+            raise CodegenError(why)
         if self._is_dict_key_subscript(e):
             self._emit_dict_lookup_addr(e)
             return
@@ -3908,7 +3918,12 @@ dylib_exports: list = None, globals_base: int = None,
             kind = self._expr_str_kind(a)
             if kind == M.STR_KIND:
                 frags.append("%s")
-            elif kind == M.INT_KIND:
+            elif M.is_number_kind(kind):
+                # `is_number_kind` and not `== INT_KIND`: a type TAG is a word,
+                # so `print(t)` for `t = bool` prints the tag, which is what it
+                # printed before `TYPE_KIND` existed (`t` was then an `int` by
+                # `_value_kind`'s default). Asking `== INT_KIND` here would make
+                # the construct's own positive case a refusal.
                 frags.append("%lld" if cmp_signed(self._ttype(a)) else "%llu")
             else:
                 raise CodegenError(

@@ -10053,18 +10053,65 @@ TYPE_VALUE_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    return Int(DType.float8_e4m3fn)\n",
      "refuse:DType.float8_e4m3fn names a type", None),
-    # `len()` of a type. A GUARD rather than a new refusal: the four production
-    # files reverted in place give byte-identical messages for `len(bool)` and
-    # `len(List)` before this construct existed, so what this case pins is that
-    # making a type a VALUE did not turn `len()` of one into a count. The
-    # wording is the imprecision it has always had — the source does say what the
-    # operand holds, and it says `bool` — and the bug doc has the next step.
+    # `len()` of a type.  This was a GUARD against making a type a VALUE turning
+    # `len()` of one into a count, and the guard held; what it also pinned was the
+    # imprecision: "the source does not say what this operand holds … Annotate it
+    # (`x: String`)" is FALSE about `len(bool)`, because the source says `bool` at
+    # the use site and the advice is to annotate a name that already has a type.
+    # So the row is now `refuse_without:` — the same program, asserting the false
+    # sentence is gone AND that a type-specific one replaced it, which a wholesale
+    # deletion of the message would not satisfy.  The old needle is the FORBIDDEN
+    # half, which is why the two clauses are one case rather than two.
     ("len_of_a_type_is_refused",
      "def main(n: Int) -> Int:\n"
      "    return len(bool)\n",
-     "refuse:len(bool)", None),
+     "refuse_without:len(bool) is len() of a TYPE:"
+     "the source does not say what this operand holds", None),
+    # The same message for a LOCAL BOUND TO A TYPE, which is the half that needed
+    # a kind of its own: `t = bool` bound `t` as an `int` by `_value_kind`'s word
+    # default, so `len(t)` said "an integer has no length" — a sentence about a
+    # value that is a TYPE TAG.  Without this row the kind could go back to
+    # INT_KIND for a local and only the bare-name spelling would notice.
+    ("len_of_a_bound_type_is_refused",
+     "def main(n: Int) -> Int:\n"
+     "    t = bool\n"
+     "    return len(t)\n",
+     "refuse_without:len(t) is len() of a TYPE:"
+     "an integer has no length", None),
+    # A type as a SUBSCRIPT INDEX.  Before the kind existed this BUILT on both
+    # architectures, ran, and exited 1 with nothing printed — the tag bounds-checked
+    # against a three-element blob and took the out-of-range exit, which is the
+    # bounds check doing its job on a number the source never wrote.  A build-time
+    # refusal is the only answer here: a tag is not an element position.
+    ("refuse_a_type_as_a_subscript_index",
+     "def main(n: Int) -> Int:\n"
+     "    var xs = [10, 20, 30]\n"
+     "    printf(\"%d\", xs[bool])\n"
+     "    return 0\n",
+     "refuse:is a TYPE used as a subscript index", None),
+    # …and through a LOCAL, because that is what makes it a kind rather than a
+    # check of the operand's node: `t = bool; xs[t]` is the same program with one
+    # more line in it, and a node-only recogniser would answer the first and refuse
+    # the second.
+    ("refuse_a_bound_type_as_a_subscript_index",
+     "def main(n: Int) -> Int:\n"
+     "    var xs = [10, 20, 30]\n"
+     "    t = bool\n"
+     "    printf(\"%d\", xs[t])\n"
+     "    return 0\n",
+     "refuse:is a TYPE used as a subscript index", None),
+    # On a STRING, where the index is not bounds-checked at all — it is `s + i` on a
+    # bare `char *`.  `s[bool]` SEGFAULTED on both architectures before the kind
+    # existed (measured), so this is the case where the refusal is worth having at
+    # all rather than a nicer message, and it is asked at the same choke point as
+    # the blob case precisely so both are covered by one check.
+    ("refuse_a_type_as_a_string_index",
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"%d\", s[bool])\n"
+     "    return 0\n",
+     "refuse:is a TYPE used as a subscript index", None),
 ]
-
 
 # ── the tag is INJECTIVE over the type names this path admits ──────────────
 #
@@ -10104,6 +10151,38 @@ if _TYPE_VALUE_TAG_COLLISIONS:
     raise AssertionError(
         f"two type names share a tag, so `t == A` would answer for `t == B`: "
         f"{_TYPE_VALUE_TAG_COLLISIONS}")
+
+
+# The other direction, and it is here because a kind nothing reads as a NUMBER
+# would be a refusal rather than an improvement: `print()` picks its conversion
+# from the kind, and a tag is a word, so `print(t)` for `t = bool` must still
+# print the tag.  That is what `model.is_number_kind` is for, and without it
+# these two rows are refusals ("print() cannot tell whether IdentExpr is a
+# string or a number") — a change that made the construct's own value
+# unprintable.
+#
+# The expected answer is `type_tag("bool")`, read from the model rather than
+# written down, so a change to the TAG FUNCTION cannot leave a literal behind
+# that the image no longer produces: the rows would fail with a number mismatch
+# instead of passing on "it built".
+#
+# The local spelling and the BARE spelling are separate rows because they take
+# different paths — the local is bound by `_value_kind` from the same
+# classification, and the bare one arrives at `print` with nothing bound at all,
+# which is the row that was refused outright before `TYPE_KIND` existed.
+TYPE_VALUE_NUMBER_CASES = [
+    ("type_value_a_local_prints_as_a_number",
+     "def main(n):\n"
+     "    t = bool\n"
+     "    print(t)\n"
+     "    return 0\n",
+     0, str(_TYPE_VALUE_MODEL.type_tag("bool"))),
+    ("type_value_a_bare_type_prints_as_a_number",
+     "def main(n):\n"
+     "    print(bool)\n"
+     "    return 0\n",
+     0, str(_TYPE_VALUE_MODEL.type_tag("bool"))),
+]
 
 
 # ── the field census, asked of the model directly ────────────────────────────
@@ -10558,6 +10637,7 @@ def main():
                   + TYPE_APPLICATION_REFUSALS + TYPE_VALUE_CASES \
                   + TYPE_VALUE_DTYPE_CASES + TYPE_VALUE_REFUSALS \
                   + TYPE_VALUE_TAG_CASES + ORIGIN_OF_CASES \
+                  + TYPE_VALUE_NUMBER_CASES \
                   + ORIGIN_OF_REFUSALS
                   + EQ_DISPATCH_CASES
                   + TYPE_ARGUMENT_LIST_CASES
