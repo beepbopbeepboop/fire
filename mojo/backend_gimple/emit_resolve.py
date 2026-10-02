@@ -224,6 +224,25 @@ def _module_candidate_paths(gen, module_name: str) -> list:
                 break
             _anc = _parent
     search_dirs += ['.', '..', script_dir]
+    # A CPython source checkout's `Lib/`, when the IMPORTING FILE is inside one.
+    # Appended LAST on purpose: every directory above it is more specific — the
+    # project's own tree, the CWD, this compiler's installation — so a name both
+    # of those and CPython's `Lib` provide still resolves the way it did before,
+    # and the ONLY thing that changes is a name nothing else provides. That is
+    # the whole gap: `Lib` is a SIBLING of `Tools`, not an ancestor, so the
+    # bounded upward walk above can never reach it from a `Tools/<tool>/x.py`
+    # entry file and `import argparse` used to degrade to a receiver stub with
+    # the source tree sitting right there on disk. Detection itself (and its
+    # memo) lives in `imports.py` because this resolver's own `_find` needs the
+    # same answer — see bugs/COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md.
+    try:
+        import imports as _imp_cpy
+        _cpython_lib = _imp_cpy.cpython_lib_root(importer_dir) if importer_dir else None
+    except Exception as e:
+        _cpython_lib = None
+        gimple_ctypes._debug_note(f'CPython Lib/ detection failed for {importer_dir!r}', e)
+    if _cpython_lib:
+        search_dirs.append(_cpython_lib)
     mojo_paths = []
     _seen_dirs: list = []
     for d in search_dirs:

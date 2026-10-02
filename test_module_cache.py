@@ -274,6 +274,47 @@ def test_resolution_authority(wd):
     finally:
         os.environ.clear(); os.environ.update(old)
 
+    # bugs/COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md: `_find` probed
+    # only the two `.mojo` spellings, so `$PYTHONPATH` — which the search path
+    # DOES honour — was silently useless for pointing at a CPython `Lib/`:
+    # `$PYTHONPATH=<checkout>/Lib` left `resolve_source('argparse')` at None.
+    # Mojo is a superset of Python, so a `.py` file on the search path is a
+    # provider. Asserted through `_find` rather than `resolve()` because
+    # `resolve()` also BUILDS a dylib for whatever it finds, which is a
+    # different mechanism and not what this is about.
+    open(os.path.join(a, 'ridpy.py'), 'w').write("def ridpy_v():\n    return 1\n")
+    found, _sh = imports.Resolver(path=[a])._find('ridpy')
+    check("authority: a .py file on the search path is a provider",
+          found == os.path.join(a, 'ridpy.py'), str(found))
+    # Extension is the INNER priority, LOCATION the outer one — the same rule
+    # `emit_resolve._module_candidate_paths` applies, and the one that makes
+    # `$PYTHONPATH` able to SHADOW rather than merely append.
+    open(os.path.join(b, 'ridboth.mojo'), 'w').write("fn ridboth() -> Int64:\n    return 1\n")
+    open(os.path.join(b, 'ridboth.py'), 'w').write("def ridboth():\n    return 2\n")
+    found, _sh = imports.Resolver(path=[b])._find('ridboth')
+    check("authority: a .mojo sibling wins over a .py in the SAME directory",
+          found == os.path.join(b, 'ridboth.mojo'), str(found))
+    open(os.path.join(a, 'ridboth.py'), 'w').write("def ridboth():\n    return 3\n")
+    found, _sh = imports.Resolver(path=[a, b])._find('ridboth')
+    check("authority: a closer directory's .py still wins over a further .mojo",
+          found == os.path.join(a, 'ridboth.py'), str(found))
+    # And the CPython checkout itself: `$PYTHONPATH=<checkout>/Lib` is the case
+    # the bug doc names, so the detection is exercised on a real layout.
+    cpy = os.path.join(wd, 'cpy')
+    os.makedirs(os.path.join(cpy, 'Lib'), exist_ok=True)
+    open(os.path.join(cpy, 'Lib', 'os.py'), 'w').write("# marker\n")
+    open(os.path.join(cpy, 'Lib', 'ridcargparse.py'), 'w').write("def v():\n    return 1\n")
+    os.makedirs(os.path.join(cpy, 'Tools', 'probe'), exist_ok=True)
+    import imports as _imp
+    detected = _imp.cpython_lib_root(os.path.join(cpy, 'Tools', 'probe'))
+    check("authority: a CPython checkout is detected from an entry file in Tools/",
+          detected == os.path.realpath(os.path.join(cpy, 'Lib')), str(detected))
+    check("authority: the detected Lib is where the resolver then finds its .py",
+          imports.Resolver(path=[detected])._find('ridcargparse')[0]
+          == os.path.join(detected, 'ridcargparse.py'))
+    check("authority: a directory with no checkout above it detects nothing",
+          _imp.cpython_lib_root(a) is None, str(_imp.cpython_lib_root(a)))
+
 
 # ── Elaboration slice 1: generic call → CAS-cached instantiation ──────────
 def test_elaboration_generic_call(wd):

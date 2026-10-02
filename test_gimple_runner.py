@@ -7451,6 +7451,116 @@ def main():
                       "main()\n",
     }, 'rb_main.py')
 
+    # A CPython source checkout's `Lib/` is a SIBLING of `Tools/`, not an
+    # ancestor, so the inline importer's bounded upward walk from a
+    # `Tools/<tool>/x.py` entry file can never arrive there and every CPython
+    # `Lib/` import used to degrade to a receiver stub with the source tree
+    # sitting right there on disk (bugs/
+    # COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md). The layout below is
+    # a real one — `<root>/Lib/os.py` is what marks the root as a checkout, and
+    # `<root>/Tools/probe/entry.py` is the entry — and the expectation is
+    # CPython's own, run with `Lib` on its `PYTHONPATH` (which is how the
+    # interpreter finds it), so a stub or a silently-empty result fails rather
+    # than merely compiling.
+    #
+    # `_compile_n_files_and_run` cannot express this shape: it writes every
+    # fixture flat into one directory and runs CPython with that directory as
+    # cwd, which would make `libmod` a plain sibling and prove nothing. So this
+    # one gets its own helper, and the only difference from the shared one is
+    # the nested layout and the interpreter's `PYTHONPATH`.
+    def _compile_cpython_checkout_and_run(root, entry_relpath, timeout=120):
+        entry = os.path.join(root, entry_relpath)
+        from gimple_codegen import compile_to_gimple
+        c_code = compile_to_gimple(open(entry).read(), do_imports=True,
+                                   filename=entry)
+        cp_env = dict(os.environ)
+        cp_env['PYTHONPATH'] = os.path.join(root, 'Lib')
+        cp = subprocess.run([sys.executable, entry], capture_output=True,
+                            text=True, timeout=timeout, env=cp_env)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.c',
+                                         delete=False) as f:
+            f.write(c_code)
+            c_file = f.name
+        exe_file = c_file.replace('.c', '.exe')
+        try:
+            runtime_dir = os.path.join(HERE, 'runtime')
+            result = subprocess.run(
+                [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
+                 c_file, os.path.join(runtime_dir, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=timeout)
+            if result.returncode != 0:
+                raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:400]}")
+            return run_executable_stdout(exe_file), cp.stdout
+        finally:
+            for p in (c_file, exe_file):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+    def _check_cpython_lib_is_visible(name, lib_mod_src, entry_src):
+        global _PASS, _FAIL, _TIMEOUT
+        try:
+            with tempfile.TemporaryDirectory() as wd:
+                root = os.path.join(wd, 'cpy')
+                os.makedirs(os.path.join(root, 'Lib'))
+                os.makedirs(os.path.join(root, 'Tools', 'probe'))
+                # The marker `cpython_lib_root` recognises. Contents irrelevant:
+                # only its EXISTENCE is the contract, which is why a real
+                # checkout's `os.py` (a top-level module every CPython `Lib/`
+                # has, and not something an ordinary project directory
+                # contains) is a sound thing to test for.
+                open(os.path.join(root, 'Lib', 'os.py'), 'w').write("# marker\n")
+                open(os.path.join(root, 'Lib', 'libmod.py'), 'w').write(lib_mod_src)
+                open(os.path.join(root, 'Tools', 'probe', 'entry.py'),
+                     'w').write(entry_src)
+                got, want = _compile_cpython_checkout_and_run(
+                    root, os.path.join('Tools', 'probe', 'entry.py'))
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if got == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: compiled {got!r} != CPython {want!r}")
+            _FAIL += 1
+
+    _check_cpython_lib_is_visible(
+        "cpython_checkout_lib_is_visible_from_a_tools_entry",
+        "VALUE = 40\n"
+        "\n"
+        "def bump():\n"
+        "    return VALUE + 2\n",
+        "import libmod\n"
+        "\n"
+        "def main():\n"
+        "    print(libmod.bump())\n"
+        "\n"
+        "main()\n")
+
+    # A `from mod import name` binding, not just a module-qualified call: the
+    # two go through different resolution paths in the inline importer
+    # (`_gen_stmt_FromImportStmt` consults `_submodule_source_path`, which
+    # reuses `_module_candidate_paths` rather than re-implementing it), so
+    # fixing only the qualified-call spelling would leave the binding one
+    # unresolved and still stubbed.
+    _check_cpython_lib_is_visible(
+        "cpython_checkout_lib_from_import_binds_the_real_module",
+        "def twice(n):\n"
+        "    return n * 2\n",
+        "from libmod import twice\n"
+        "\n"
+        "def main():\n"
+        "    print(twice(21))\n"
+        "\n"
+        "main()\n")
+
     # A `from mod import Dialog as X` binding must not change which class a
     # module-qualified construction picks, and the two classes must stay
     # independent when BOTH are constructed in one program (the shape where
