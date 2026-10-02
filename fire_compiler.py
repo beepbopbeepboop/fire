@@ -1458,8 +1458,32 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                 # duplicated here — see
                 # bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
                 start = _string_prefix_start(src, i)
-                quote3 = c * 3
-                if src[i:i + 3] == quote3:
+                # A triple-quote opener is three of the quote character `c`
+                # that opened this position, i.e. `src[i:i+3] == c * 3`,
+                # spelled as the two remaining characters instead of a 3-byte
+                # slice compare. `c` is `src[i]` (read a few lines above, so
+                # the first of the three is known), so this is the same test;
+                # the `i + 2 < n` is the same short-slice case the compare
+                # already handled, and it must be its own `if` because this
+                # codegen's `and` evaluates BOTH operands rather than
+                # short-circuiting (see the comment on the prefix scan above).
+                #
+                # It is O(1) per position where the slice compare was O(i):
+                # `src[i:i+3]` lowers to mojo_cstr_region_eq, whose length
+                # scan runs from byte 0 to `stop`, and this loop runs once
+                # per QUOTE character in the file, so the total was the sum
+                # of every quote's offset - measured at 1.0e9 byte reads
+                # self-hosted on this file's own 349KB source, and quadratic
+                # in it (see
+                # bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md,
+                # which is where the runtime side of the same cost is
+                # measured).
+                is_triple = False
+                if i + 2 < n:
+                    if src[i + 1] == c:
+                        if src[i + 2] == c:
+                            is_triple = True
+                if is_triple:
                     end = _scan_string_end(src, i, c, True)
                     if end < 0:
                         loc = _src_loc(src, i, filename)

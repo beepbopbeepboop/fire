@@ -5902,6 +5902,42 @@ d = {'a': 1}
 print(str(d))
 """, "[1, 2, 3]\n[1, 2, 3]\n{1, 2}\n{'a': 1}\n")
 
+    # bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md: `s[a:b] == "lit"`
+    # lowers to mojo_cstr_region_eq, whose length scan used to walk from
+    # byte 0 to `stop` on EVERY call. A loop asking "do the next three
+    # characters match?" once per position is therefore quadratic in the
+    # string's length - which is exactly the shape the compiler's own
+    # tokenizer runs, and why a self-hosted `--dump` of a compiler source
+    # cost minutes.
+    #
+    # The scan is memchr now, and it is still O(stop) per call (a bare
+    # `char *` carries no length, so "is `start` inside this string?"
+    # cannot be answered without a scan from byte 0 -- see the note in
+    # mojo_cstr_region_eq). So this is NOT a linear-time assertion and must
+    # not become one: it pins the ANSWER on a string long enough that the
+    # old scan cost is unmistakable, and the tokenizer's own call site
+    # (fire_compiler.py's `src[i:i+3] == c*3`, now two character
+    # compares) is what removes the quadratic from the hot loop. A test
+    # that timed this and demanded a ratio would be measuring the libc's
+    # memchr, not this compiler.
+    #
+    # The cases are the ones whose answer depends on the scan finding the
+    # terminator: past the end, straddling it, an empty needle against an
+    # empty region, and a needle that is a prefix of what follows.
+    test_gimple_stdout("gimple_region_eq_scan_finds_terminator", """\
+s = 'abcdefghij'
+print(s[8:11] == 'ijk')
+print(s[10:13] == 'ijk')
+print(s[10:13] == 'j')
+print(s[20:23] == 'ijk')
+print(s[10:10] == '')
+print(s[10:11] == '')
+print(s[10:13] == '')
+print(s[0:3] == 'abc')
+print(s[0:3] == 'abcd')
+print(s[2:5] == 'cde')
+""", "False\nFalse\nFalse\nFalse\nTrue\nTrue\nTrue\nTrue\nFalse\nTrue\n")
+
 
 def main():
     gcc = find_gcc()
