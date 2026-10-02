@@ -189,6 +189,47 @@ def main():
 '''
 
 
+@case('comprehension_return_kind_is_not_neighbour_kind')
+def _():
+    # A local bound from a COMPREHENSION — a real container, whose C type
+    # depends on the comprehension's `kind` — returned from a function whose
+    # other branch returns a list.
+    #
+    # The local-type pre-pass (`infra_infer._prebound_local_ctypes`, which
+    # `_infer_return_type` overlays onto `var_types`) knew about
+    # `{a, b}`/`[a, b]`/`{k: v}` DISPLAYS but not about `{x for x in y}`:
+    # a `Comprehension` carries its kind as an attribute, so it does not fit
+    # the `type(...).__name__` table those three share. The local therefore
+    # typed as the int64_t box, the function's return type came out from its
+    # OTHER return statement alone (`MojoList *`), and the body then had to
+    # store a real `MojoSet *` into that `MojoList *` return slot — refused
+    # by `_sce_simple_emit`'s container-kind guard, which is the honest
+    # answer to a mis-typed store but leaves the file unbuildable.
+    #
+    # Real: `Apple/__main__.py`'s `lib_platform_files` (returns `names`, or
+    # a set comprehension of ignored names, or `set()`).
+    #
+    # The join is the point, and it is asserted by the reference stdout: the
+    # function's return type is the BOX (`int64_t`) precisely because its
+    # branches disagree on container kind, so the values must come back
+    # through each branch's own storage, not through one reinterpreted slot.
+    return '''def pick(names, kind):
+    if kind == 1:
+        return names
+    elif kind == 2:
+        ignored = {name for name in names if name.startswith("_sys")}
+    else:
+        ignored = set()
+    return ignored
+
+
+def main():
+    print(pick(["a", "b"], 1))
+    print(pick(["_sysconfigdata_x", "build-details.json"], 2))
+    print(pick(["_sysconfigdata_x"], 3))
+'''
+
+
 @case('container_kind_dict_keys')
 def _():
     # The same class with a dict: `mojo_dict_keys` is the real conversion

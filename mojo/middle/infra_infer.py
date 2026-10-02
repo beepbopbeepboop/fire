@@ -1485,6 +1485,43 @@ _CONTAINER_LITERAL_CTYPES: dict = {
     'TupleExpr': 'MojoList *',   # a tuple lowers to a real MojoList
 }
 
+
+def _container_literal_ctype(value) -> str:
+    """The container C type a LITERAL-constructing expression produces, or
+    None if it is not one.
+
+    `_CONTAINER_LITERAL_CTYPES` cannot hold the comprehension case on its
+    own: a `Comprehension` node carries its kind as an ATTRIBUTE, not as a
+    node type, so all three of `{...}`, `[...]` and `{k: v ...}` share the
+    one class name and the three answers (`MojoDict *` / `MojoList *` /
+    `MojoSet *`) cannot be keyed by `type(...).__name__`. Dispatching on
+    `kind` here is the same decision `_quick_type` /
+    `_lower_comprehension` already make, which is the point: this table
+    exists to OVERLAY what `_quick_type` would say about a local once the
+    table can see the local's bindings, so the two must not disagree about
+    which node shapes are containers.
+
+    Without it, `s = {x for x in y}` bound a local that no pass here could
+    type, so a function returning it inferred its return type from its
+    OTHER return statements alone: `def f(names, kind): if kind == 1: return
+    names; ...; return ignored` inferred `MojoList *` (from `names`) and
+    the body then had to store a real `MojoSet *` into that `MojoList *`
+    return slot — refused honestly by `_sce_simple_emit`'s container-kind
+    guard (`Apple/__main__.py`'s `lib_platform_files`, `Tools/build/
+    umarshal.py`'s `r_object`)."""
+    t = _CONTAINER_LITERAL_CTYPES.get(type(value).__name__)
+    if t:
+        return t
+    if isinstance(value, gimple_ctypes.Comprehension):
+        if value.kind == 'dict':
+            return 'MojoDict *'
+        if value.kind == 'set':
+            return 'MojoSet *'
+        # 'list', and 'generator' — a generator expression lowers to a
+        # materialized list (`_lower_comprehension`'s own table).
+        return 'MojoList *'
+    return None
+
 def _each_binding(body: list) -> list:
     """Every statement in `body` that can BIND a local, as a LIST, recursing
     through control flow and never into a nested `FunctionDef` (which has its
@@ -1608,7 +1645,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # already had an identical fix.
             cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
         else:
-            t = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
+            t = _container_literal_ctype(n.value)
             if t:
                 cand = t
             else:
@@ -1720,7 +1757,7 @@ def _dict_value_locals(gen, body: list) -> dict:
             return                       # first store wins
         vt = gen._quick_type(n.value)
         if vt == 'int64_t':
-            lit = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
+            lit = _container_literal_ctype(n.value)
             if lit is not None:
                 vt = lit
         if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *',
