@@ -1563,6 +1563,65 @@ def main():
 main()
 """, "1\n")
 
+    # A subclass that OVERRIDES a class-level constant read the BASE's value,
+    # silently, at exit 0 — and so did every method of its own, because a
+    # lifted `Child_who` reads `_classattr_Child__tag`, which
+    # `_mojo_classattr_init` had initialised from `Base`'s declaration:
+    #
+    #     _classattr_Base__tag  = 7;
+    #     _classattr_Child__tag = 7;      <- Child says 9
+    #     _classattr_Grand__tag = 7;      <- Grand says 11
+    #
+    # `_merge_struct_inheritance` builds a subclass's `.fields` as BASE
+    # declarations FIRST and the class's OWN last (its own docstring: "own
+    # members override every base"), and the class-attribute emitter broke on
+    # the FIRST match — so it took the base's. The whole chain read the root's
+    # value. `other`, which NO subclass overrides, is the control that the
+    # inherited declaration is still found when there is no own one.
+    test_gimple_stdout("gimple_subclass_overrides_a_class_constant", """\
+class Base:
+    tag = 7
+    other = 1
+
+class Child(Base):
+    tag = 9
+
+class Grand(Child):
+    tag = 11
+
+def main():
+    print(Base.tag, Child.tag, Grand.tag)
+    print(Base.other, Child.other, Grand.other)
+    b = Base()
+    c = Child()
+    print(b.tag, c.tag)
+main()
+""", "7 9 11\n1 1 1\n7 9\n")
+
+    # The `cls`-half of the same inheritance story, on the shape most real
+    # code uses: a `@classmethod` accessor reading `cls.<attr>`. The doc
+    # recorded this as needing a runtime class OBJECT ("feature-sized"), and
+    # it does not: the lifted method is emitted PER SUBCLASS and the fix above
+    # gives each one its own `_classattr_<Cls>__<attr>` initialiser, so the
+    # name-resolved `cls.tag` reads the right one for free. `Base.who()` is in
+    # the same test because a fix that made the subclass read its own value by
+    # also making the base read the subclass's would pass the first line.
+    test_gimple_stdout("gimple_inherited_classmethod_reads_its_own_cls", """\
+class Base:
+    tag = 7
+    @classmethod
+    def who(cls):
+        return cls.tag
+
+class Child(Base):
+    tag = 9
+
+def main():
+    print(Child.who())
+    print(Base.who())
+main()
+""", "9\n7\n")
+
     # A capture DISCOVERY gap, not a truthiness gap, which is what
     # bugs/CODEGEN_captured_string_local_reads_falsey.md reported it as. The
     # lambda-capture scan walked a hand-grown list of AST child fields, and a

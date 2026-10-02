@@ -28,7 +28,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
+    py_tokenize, Parser, _as_str, _as_dict, _as_list, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
     _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal,
 )
 from module_loader import load_module, get_symbol_type
@@ -973,6 +973,44 @@ def _class_field_decl(field):
     if isinstance(field, VarDecl) and field.name and field.value is not None:
         return field.name, field.value
     return None
+
+
+def _own_class_field_index(fields, name) -> int:
+    """Index of `name`'s OWN class-body declaration in `fields`, or -1.
+
+    `_merge_struct_inheritance` (gimple_codegen.py) builds a subclass's
+    `.fields` as BASE declarations FIRST and the class's own LAST — its own
+    docstring: "own members override every base". So after the merge a
+    subclass that OVERRIDES a base member has TWO declarations of that name
+    in `.fields`, and the subclass's own is the LAST one. Every
+    "first declaration of this name wins" scan over `.fields` therefore
+    resolves to the BASE's, which is the opposite of the rule the merge
+    documents.
+
+    Measured, silent wrong value at exit 0:
+
+        class Base:
+            tag = 7
+        class Child(Base):
+            tag = 9
+
+    emitted `_classattr_Child__tag = 7`, so `Child.tag` read 7, every
+    `cls.tag` inside `Child`'s own methods read 7, and
+    `class Grand(Child): tag = 11` read 7 too — the whole inheritance chain
+    took the ROOT's value.
+
+    The comparison is `_cfd[0] == name`, exactly as the scanning loops
+    already spell it, so the self-hosted answer for a boxed field read is
+    unchanged; `range(len(...))` rather than `reversed()` because the
+    self-hosted backend has no lowering for the lazy reverse iterator.
+    """
+    _pick = -1
+    _fl = _as_list(fields)
+    for _i in range(len(_fl)):
+        _cfd = _class_field_decl(_fl[_i])
+        if _cfd is not None and _cfd[0] == name:
+            _pick = _i
+    return _pick
 
 
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
@@ -9204,7 +9242,15 @@ def gen_module_impl(self, stmts):
             for aname in _ca_map:
                 mangled = _as_str(_ca_map[aname])
                 aname = _as_str(aname)
-                for field in s.fields:
+                # Stop at the class's OWN declaration of `aname`, which is the
+                # LAST one in the merged `.fields` (see
+                # `_own_class_field_index`). Scanning to the first match took
+                # the BASE's value for every override. The range is that one
+                # index, not "up to it": a range ending at it still `break`s
+                # on the inherited declaration earlier in the list.
+                _own_idx = _own_class_field_index(s.fields, aname)
+                for _pick in range(_own_idx, _own_idx + 1):
+                    field = _as_list(s.fields)[_pick]
                     _cfd = _class_field_decl(field)
                     if _cfd is not None and _cfd[0] == aname:
                         v = _cfd[1]
