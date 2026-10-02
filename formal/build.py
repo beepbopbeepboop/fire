@@ -1694,6 +1694,11 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # their own call site: a holder rebound from a word, a construction whose
     # shape does not match, and a module global shadowed by a local read.
     check_frame_holder_rebinds(functions)
+    # …and the one that names a value-position METHOD read for what it is. The
+    # field-set derivation already stopped it being a zero, so this is the
+    # diagnosis rather than a second verdict, and it is here rather than in the
+    # frame pass for the reason its docstring gives.
+    check_value_position_method_reads(functions, structs)
     check_construction_mismatches(functions)
     check_shadowed_global_reads(functions)
     check_construction_shapes(functions, by_name)
@@ -3824,6 +3829,73 @@ def check_frame_holder_rebinds(functions) -> None:
             raise CodegenError(M.holder_rebound_from_a_word_refusal(
                 fn.name, name, value_spelling, frame_spelling,
                 cands))
+
+
+def check_value_position_method_reads(functions, structs) -> None:
+    """Raise a `<recv>.<name>` read that is a METHOD of the receiver's own struct.
+
+    `model.struct_receiver_reads` already REMOVES these names from the derived
+    field set, so the wrong answer is gone before this runs; what is left is the
+    diagnosis, and it is a separate check because the frame pass cannot give it:
+    the frame pass only sees reads whose base it has already classified as a
+    FRAME address, and a method reference is most often a read of a receiver that
+    is not one — a struct with a single field has its receiver BE that field. So
+    with the name no longer a field, no frame slot is asked for, and the read
+    reaches the emitter, which answers "this path has no way to say what `self`
+    holds" about a `self` whose struct this file declares two lines above.
+
+    Measured, on `u13c.py`: before the field-set fix the program built, ran and
+    exited 1 where the source's `o.size()` is a bound method and CPython raises
+    `TypeError` on the multiplication; with the field set corrected it is
+    refused, and this check is what makes the refusal name `helper` rather than
+    the base.
+
+    **It is asked of METHODS ONLY, and that is the whole of its soundness
+    argument.** A `<recv>.<name>` read where `recv` is not a receiver of this
+    function has no established struct behind it — a receiver's type is not
+    inferred on this path, which is the premise of every one of these refusals —
+    so asking the struct table the question would be asserting the very thing it
+    cannot know. A method body knows: it was lifted from that struct, and
+    `model.struct_receivers` is the same function that seeds its receiver as a
+    frame holder, so the receiver names here and the ones the frame pass uses
+    cannot drift apart.
+
+    **Python's own shadowing rule decides what fires**, via
+    `model.struct_receiver_stores`: a name the struct both declares as a method
+    and STORES into is an instance attribute and stays a field, so a read of it
+    is a field read and is not this check's — `u13b.py` is that case and it still
+    builds and computes what CPython computes. Only a name nothing stores into is
+    a method here, which is exactly the set `struct_receiver_reads` demoted, so
+    the two cannot disagree about which names are which.
+
+    **The walk is `iter_nodes` and that is a limitation, not a choice.** A
+    `MemberExpr` in a method's body cannot be told apart from one that is the
+    CALLEE of a call without a parent, so this check is asked of every demoted
+    read — and the only demoted names are ones the struct never stores into,
+    which a call cannot store into either. So the over-approximation cannot
+    refuse a program whose `self.helper` is a genuine field access: if it were,
+    something would have to store into it, and the demotion is exactly the
+    absence of that.
+    """
+    owners = M.method_owner_names(list(structs or ()))
+    for fn in functions:
+        owner = owners.get(fn.name)
+        if owner is None:
+            continue
+        receivers = M.struct_receivers(owner)
+        methods = {m.name for m in M.struct_methods(owner)
+                   if getattr(m, "name", None)}
+        demoted = methods - M.struct_receiver_stores(owner, receivers)
+        if not demoted:
+            continue
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.MemberExpr) \
+                    or not isinstance(node.obj, F.IdentExpr) \
+                    or node.obj.name not in receivers \
+                    or node.member not in demoted:
+                continue
+            raise CodegenError(M.value_position_method_refusal(
+                fn.name, node.obj.name, node.member, owner))
 
 
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:

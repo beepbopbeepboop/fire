@@ -10014,6 +10014,94 @@ def _slots_names(value) -> list:
     return out
 
 
+def _assignment_targets(node) -> list:
+    """The targets one assignment statement binds, in source order.
+
+    Three AST shapes and no fourth: `a = b` and `a += b` are an `AssignStmt` /
+    `AugAssignStmt` with a `target`, and a chained `a = b = v` is a
+    `MultiAssignStmt` with `targets` — so a scan reading only `target` misses
+    every target past the first in the chained spelling.
+
+    **`DelStmt` is deliberately NOT here.** `del self.x` is not a store, so it
+    establishes no instance attribute, and the question this feeds asks whether
+    one exists. A `del` over a name this struct also declares as a METHOD
+    therefore leaves the name demotable, which is the right answer: the source
+    says the attribute is not there.
+    """
+    if isinstance(node, (F.AssignStmt, F.AugAssignStmt)):
+        return [node.target]
+    if isinstance(node, F.MultiAssignStmt):
+        return list(node.targets or [])
+    return []
+
+
+def receiver_target_names(target, receivers) -> list:
+    """The field names one assignment target binds, or [] if none does.
+
+    A target is a field access only when its base is a receiver NAME, so
+    `self.x`, `(self.x, self.y)` and `self.x, = v` are fields and `p[i]`, `a.b`
+    and a bare local are not — the last of which is what keeps `self.x = y` from
+    claiming a field named `y`.
+
+    Module-level rather than a closure over one `receivers`, because three
+    separate questions ask it and each had its own copy: what `__init__`
+    assigns (`_init_field_assignments`), and what ANY method of the struct
+    stores (`struct_receiver_stores`, which is what decides whether a name that
+    is also a method name is an instance attribute or a bound method). Three
+    copies of the target shapes is three places for a fourth spelling to be
+    added to one of them.
+    """
+    if isinstance(target, F.MemberExpr):
+        return ([target.member]
+                if isinstance(target.obj, F.IdentExpr)
+                and target.obj.name in receivers else [])
+    if isinstance(target, (F.TupleExpr, F.ListExpr)):
+        return [n for el in getattr(target, "elements", None) or []
+                for n in receiver_target_names(el, receivers)]
+    return []
+
+
+def struct_receiver_stores(struct_def, receivers) -> set:
+    """Every `<receiver>.<name>` ANY method of this struct stores into.
+
+    The write half of Python's own rule that a read of a method name has to
+    answer by, and the reason it is asked over the WHOLE struct rather than
+    over one method: `__init__` writes `self.helper` and `size` reads it back,
+    so the read's own method carries no evidence either way.
+    """
+    out = set()
+    for method in struct_methods(struct_def):
+        for node in iter_nodes(getattr(method, "body", None)):
+            for target in _assignment_targets(node):
+                out.update(receiver_target_names(target, receivers))
+    return out
+
+
+def struct_receiver_reads(struct_def, receivers, method) -> set:
+    """The field names `method` reaches through a receiver, DEMOTED.
+
+    `_receiver_names`, less every name that is a METHOD of this struct and that
+    no method of it stores into. Those are not fields at all: `self.helper` in a
+    value position is the bound method, which is not a word, so counting it
+    invents a slot that nothing ever writes and every read of it returns zero.
+
+    **The rule is Python's own, and both halves of it matter.** An instance
+    attribute SHADOWS the class's method, so a name this struct both declares
+    as a method and stores into IS a field and stays one — that is what
+    `struct_receiver_stores` above establishes. A name it only READS is the
+    method.
+
+    …and a name that is neither is untouched, which is why this is a subtraction
+    of a set this struct's own declarations produce rather than a filter on
+    everything: `self.x = 1` in a class with no method `x` is a field, and the
+    overwhelming majority of fields are exactly that.
+    """
+    reached = _receiver_names(getattr(method, "body", None), receivers)
+    methods = {m.name for m in struct_methods(struct_def)
+               if getattr(m, "name", None)}
+    return reached - (methods - struct_receiver_stores(struct_def, receivers))
+
+
 def _self_field_names(node, out: set, receivers=("self",)) -> None:
     """Add to `out` every name reached as `<receiver>.<name>` under `node`.
 
@@ -10072,8 +10160,27 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
     `@classmethod def is_float(cls, …)`: their `this.n` / `cls._SIGNED` were
     invisible here, so a field written only that way looked unwritten. Missing
     a field is the direction that aliases two real fields into one slot, so the
-    receiver set is a superset of the obvious spelling rather than just it."""
-    if isinstance(node, list):
+    receiver set is a superset of the obvious spelling rather than just it.
+
+    **The sequence clause is `(list, tuple)`, and `list` alone was a blind spot
+    over EVERY keyword argument.** `CallExpr.kwargs` is `list[tuple[str, Expr]]`
+    — a list of PAIRS — so the `list` arm matched it, each `x` was a tuple, and
+    the walk fell through to the generic arm, where a `tuple` has no
+    `__dataclass_fields__` and contributes nothing at all. So
+    `self._untyped_callee` in
+
+        reason = M.string_binary_refusal(op, …, untyped_callee=self._untyped_callee)
+
+    never reached the field set, on the one path this rule exists to get right:
+    a field missed is two real fields aliased into one slot. `iter_nodes`, a few
+    lines below, reads `(list, tuple)`, so the file had two node-walkers that
+    disagreed about what a tuple is — which is what `iter_nodes` is shared for
+    and says so in its own docstring. It is the last of three such spellings
+    this function has had to be taught; the bracketed method call in this
+    docstring is the second, and
+    `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` is the record of
+    all three."""
+    if isinstance(node, (list, tuple)):
         for x in node:
             _self_field_names(x, out, receivers)
         return
@@ -10556,6 +10663,15 @@ def _split_declaration(struct_def):
     receivers = struct_receivers(struct_def)
     # clause 2, over the whole struct: every name any of its own methods
     # reaches through the receiver, whatever the unit-wide write census says.
+    #
+    # `_self_field_names` and NOT `struct_receiver_reads`, and the two ask
+    # DIFFERENT questions on purpose. This one is "does a method spell this name
+    # as `self.NAME`", asked about a name the CLASS BODY also declared, so what
+    # it decides is field-versus-class-constant — and a declared name is storage
+    # the language spells out, so a method that reads it is evidence and the
+    # answer is a field either way. The per-method loop below is where a name
+    # enters the field set with no declaration behind it, and that is the loop
+    # that has to ask whether the name is a method instead.
     reached = set()
     for method in struct_methods(struct_def):
         _self_field_names(getattr(method, "body", None), reached, receivers)
@@ -10645,8 +10761,18 @@ def _split_declaration(struct_def):
     # `self.LIMIT` does not put `LIMIT` back into the field list: the read is a
     # read of the class's value, and the substitution materializes it (or
     # refuses by name) rather than leaving it to a slot nothing writes.
+    #
+    # `struct_receiver_reads` and not `_receiver_names`, and the difference is
+    # the whole of the method-name defect: a name this struct declares as a
+    # METHOD and never stores into is a BOUND METHOD here, not a field, and
+    # counting it invented a slot that nothing writes — so every read of it
+    # returned zero, which is a number the source never wrote.
+    # `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` has the
+    # reproducer and the census; the demotion itself is
+    # `struct_receiver_reads`, and both halves of Python's shadowing rule are in
+    # it.
     for method in struct_methods(struct_def):
-        touched = _receiver_names(getattr(method, "body", None), receivers)
+        touched = struct_receiver_reads(struct_def, receivers, method)
         for name in sorted(touched):
             if name in seen:
                 continue
@@ -10869,8 +10995,13 @@ own function rather than inlined so the two derivations cannot drift apart
             add(struct_field_name(field))
     receivers = struct_receivers(struct_def)
     for method in struct_methods(struct_def):
-        touched = set()
-        _self_field_names(getattr(method, "body", None), touched, receivers)
+        # `struct_receiver_reads` and not the bare walker, for the same reason
+        # `_split_declaration`'s per-method loop uses it: a name this struct
+        # declares as a METHOD and never stores into is a bound method, and
+        # counting it as a field put a slot in the frame that nothing writes.
+        # The DECLARED names above are untouched — a class-level `var x: Int` is
+        # storage the language spells out, whatever else the struct calls `x`.
+        touched = struct_receiver_reads(struct_def, receivers, method)
         for name in sorted(touched):
             add(name)
     return names
@@ -11515,6 +11646,48 @@ def shadowed_module_global_read_refusal(fn_name: str, name: str,
         f"does not also assign it")
 
 
+def value_position_method_refusal(fn_name: str, receiver: str, name: str,
+                                  owner) -> str:
+    """Why `recv.name` in a VALUE position is a bound method and not a field.
+
+    The message for the sibling case `member_read_without_a_field` cannot reach,
+    and the reason it cannot is worth stating because it is what made this a
+    SEPARATE check rather than a branch there. That function is asked by the
+    frame pass, which only sees a read whose base it has already classified as a
+    frame address — and a method reference is most often a read of a receiver
+    that is NOT a frame, because a struct with one field has its receiver BE
+    the field. So the name is not a field, no frame slot was ever asked for, and
+    the read falls through to the emitter, which answers it as a store with no
+    home and blames the base's binding.
+
+    …which is how `self.helper` came to be reported as "this path has no way to
+    say what 'self' holds" when the truth is that `helper` is a method and there
+    is nothing to say. The wrong answer it replaced was worse: the derived field
+    set had a slot for it, nothing ever wrote it, and every read returned zero —
+    a program that built, ran, and returned a number the source never wrote.
+
+    The two halves of Python's own rule are both here, because the message has
+    to tell the reader which one they are looking at. An instance attribute
+    SHADOWS the class's method, so a struct that both declares `name` as a
+    method and STORES `self.name` is a field, and this check does not fire on
+    it — that is `struct_receiver_stores`, the same function the field-set
+    derivation asks. Only a name the struct never stores into is a method here,
+    and that is the only case where the answer is "call it".
+    """
+    who = owner.name if owner is not None else "this struct"
+    return (
+        f"{fn_name}: {receiver}.{name} is not a field of {who} — {name} is one "
+        f"of its METHODS, and nothing in {who} stores into an attribute of that "
+        f"name, so in Python this expression is the bound method. A method is "
+        f"not a word: there is no slot to read it out of and nothing to store it "
+        f"in, and this backend refuses that rather than inventing a slot nothing "
+        f"writes — which is how the read used to answer zero, a number the "
+        f"source never wrote. Call it (`{receiver}.{name}(...)`), which is a "
+        f"receiver and a call and lowers, or write the operation out where it "
+        f"was used"
+    )
+
+
 def holder_rebound_from_a_word_refusal(fn_name: str, name: str,
                                        value_spelling: str,
                                        frame_spelling: str,
@@ -11938,29 +12111,12 @@ def _init_field_assignments(struct_def) -> dict:
         def record(name, value):
             out.setdefault(name, []).append(value)
 
-        def target_names(target):
-            """The field names one assignment target binds, or [] if none does.
-
-            A target is a field access only when its base is a receiver NAME, so
-            `self.x`, `(self.x, self.y)` and `self.x, = v` are fields and
-            `p[i]`, `a.b` and a bare local are not — the last of which is what
-            keeps `self.x = y` from claiming a field named `y`.
-            """
-            if isinstance(target, F.MemberExpr):
-                return ([target.member]
-                        if isinstance(target.obj, F.IdentExpr)
-                        and target.obj.name in receivers else [])
-            if isinstance(target, (F.TupleExpr, F.ListExpr)):
-                return [n for el in getattr(target, "elements", None) or []
-                        for n in target_names(el)]
-            return []
-
         for node in iter_nodes(getattr(m, "body", None)):
             if isinstance(node, (F.AssignStmt, F.MultiAssignStmt)):
                 targets = [node.target] if isinstance(
                     node, F.AssignStmt) else list(node.targets or [])
                 for t in targets:
-                    names = target_names(t)
+                    names = receiver_target_names(t, receivers)
                     if isinstance(t, (F.TupleExpr, F.ListExpr)):
                         values = list(getattr(node.value, "elements", None) or [])
                         if isinstance(node.value, (F.TupleExpr, F.ListExpr)) \
@@ -12569,29 +12725,12 @@ def _init_field_assignments(struct_def) -> dict:
         def record(name, value):
             out.setdefault(name, []).append(value)
 
-        def target_names(target):
-            """The field names one assignment target binds, or [] if none does.
-
-            A target is a field access only when its base is a receiver NAME, so
-            `self.x`, `(self.x, self.y)` and `self.x, = v` are fields and
-            `p[i]`, `a.b` and a bare local are not — the last of which is what
-            keeps `self.x = y` from claiming a field named `y`.
-            """
-            if isinstance(target, F.MemberExpr):
-                return ([target.member]
-                        if isinstance(target.obj, F.IdentExpr)
-                        and target.obj.name in receivers else [])
-            if isinstance(target, (F.TupleExpr, F.ListExpr)):
-                return [n for el in getattr(target, "elements", None) or []
-                        for n in target_names(el)]
-            return []
-
         for node in iter_nodes(getattr(m, "body", None)):
             if isinstance(node, (F.AssignStmt, F.MultiAssignStmt)):
                 targets = [node.target] if isinstance(
                     node, F.AssignStmt) else list(node.targets or [])
                 for t in targets:
-                    names = target_names(t)
+                    names = receiver_target_names(t, receivers)
                     if isinstance(t, (F.TupleExpr, F.ListExpr)):
                         values = list(getattr(node.value, "elements", None) or [])
                         if isinstance(node.value, (F.TupleExpr, F.ListExpr)) \
