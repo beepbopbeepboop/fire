@@ -497,6 +497,55 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             # reference (their referencing text was discarded with it).
             funcptr_needed_before = set(gen._funcptr_builtins_needed)
             funcptr_emitted_before = set(gen._emitted_funcptr_builtins)
+            # Every remaining per-TRANSLATION-UNIT "I already emitted this
+            # definition" registry, for the same reason and with the same
+            # consequence as the two above: the DEFINITION each of these
+            # marks is keyed to lands in the module's OWN `parts`, and this
+            # except handler throws those parts away whole. A mark that
+            # survives its own text leaves every LATER module believing the
+            # definition is already in the unit, so it emits nothing and the
+            # surviving reference sites die on an undeclared name — the
+            # *same* class of failure as `_funcptr_mojo_len` above, in the
+            # four other registries that carry a definition rather than a
+            # type:
+            #
+            #   `_str_pool_declared`        `static char * _slit_N;`
+            #   `_emitted_c_helpers`        `static int64_t _mojo_sizeof_X (void)`
+            #                               `static void * _mojo_fnaddr_f (void)`
+            #   `_regex_progs_defined`      `static const ARRAY[] = {...}`
+            #   `_emitted_list_marshalling` `_mg_pack_*`/`_mg_unpack_*`
+            #   `_emitted_singletons`       `static char * _mojo_type_name (...)`
+            #   `_emitted_unresolved_stub_syms` / `_auto_stubbed`  the
+            #                               `#ifndef`-guarded "unavailable in
+            #                               compiled mode" stub definitions
+            #
+            # Measured on Tools/c-analyzer/c_analyzer/__main__.py before this
+            # fix: 13 distinct `_slit_N` names and `_mojo_elem_repr_*` used
+            # with only their root-preamble definition, thousands of lines
+            # later, because c_parser/info.py, c_parser/parser/_func_body.py,
+            # c_parser/match.py and c_common/scriptutil.py each raise
+            # mid-compile and their marks outlived their text.
+            #
+            # Rolling a mark back can only ever ADD an emission, never
+            # remove one — and every one of these emissions is legal to
+            # repeat (`static char * x;` is a tentative definition, and the
+            # stubs are `#ifndef`-guarded), which is what makes the rollback
+            # unconditionally safe. The registries deliberately NOT listed
+            # here are the ones that hold KNOWLEDGE rather than an emission
+            # mark — `_str_pool` (name identity for a literal must stay
+            # stable across a retry, or the recompiled module would mint a
+            # second `_slit_N` for the same text), `_external_protos`,
+            # `struct_field_types`, `func_param_types`/`func_return_types`,
+            # `_module_globals` — and `_struct_allocs_needed`, whose actual
+            # emission is gated on `_emitted_allocs` (rolled back just above),
+            # so a stale entry there cannot lose a definition.
+            str_pool_declared_before = set(gen._str_pool_declared)
+            emitted_c_helpers_before = set(gen._emitted_c_helpers)
+            regex_progs_defined_before = set(gen._regex_progs_defined)
+            emitted_list_marshalling_before = set(gen._emitted_list_marshalling)
+            emitted_singletons_before = set(gen._emitted_singletons)
+            stub_syms_before = set(gen._emitted_unresolved_stub_syms)
+            auto_stubbed_before = set(gen._auto_stubbed)
             gen._compiling_file_paths.add(_ap_key)
             try:
                 with open(path, 'r') as f:
@@ -985,6 +1034,23 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._funcptr_builtins_needed.discard(_n)
                 for _e in list(gen._emitted_funcptr_builtins - funcptr_emitted_before):
                     gen._emitted_funcptr_builtins.discard(_e)
+                # The other per-TU "already emitted" registries — see the
+                # snapshot block above for why each of these marks is tied to
+                # text this handler is about to discard.
+                for _d in list(gen._str_pool_declared - str_pool_declared_before):
+                    gen._str_pool_declared.discard(_d)
+                for _h in list(gen._emitted_c_helpers - emitted_c_helpers_before):
+                    gen._emitted_c_helpers.discard(_h)
+                for _p in list(gen._regex_progs_defined - regex_progs_defined_before):
+                    gen._regex_progs_defined.discard(_p)
+                for _m in list(gen._emitted_list_marshalling - emitted_list_marshalling_before):
+                    gen._emitted_list_marshalling.discard(_m)
+                for _s in list(gen._emitted_singletons - emitted_singletons_before):
+                    gen._emitted_singletons.discard(_s)
+                for _y in list(gen._emitted_unresolved_stub_syms - stub_syms_before):
+                    gen._emitted_unresolved_stub_syms.discard(_y)
+                for _b in list(gen._auto_stubbed - auto_stubbed_before):
+                    gen._auto_stubbed.discard(_b)
                 # doc/OWNERSHIP_MODEL.md Phase 3's per-function state
                 # (gimple_gen_infra.py's begin_function/_owned_free_
                 # candidates) is NOT tied to modules_before/etc like the

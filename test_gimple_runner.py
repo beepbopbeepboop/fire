@@ -7408,6 +7408,49 @@ def main():
                           "main()\n",
     }, 'colln3_main.py')
 
+    # A submodule that FAILS to compile must not leave its per-translation-unit
+    # "already emitted this" marks behind. `_compile_imported_module` inlines a
+    # module's whole subtree into the ONE generated translation unit, so every
+    # `static char * _slit_N;` forward declaration, `_mojo_sizeof_*`/`_mojo_fnaddr_*`
+    # helper, compiled-regex table, list-marshalling pair, type-name singleton and
+    # "unavailable in compiled mode" stub lives in the FAILING module's own text —
+    # which the except handler throws away whole. The marks used to survive it, so
+    # every LATER module computed "already declared", emitted nothing, and gcc
+    # rejected the surviving reference sites: `error: '_slit_10000' undeclared
+    # (first use in this function)`.
+    #
+    # The nesting is what makes it reachable from a module's OWN code: a module's
+    # own string-pool block is appended near the very END of gen_module_impl, so a
+    # module can only leave a stale mark for a NESTED module that compiled
+    # successfully first. Hence `badmod` -> `innermod` (succeeds, emits the
+    # declaration) -> `badmod` itself raises, and `goodmod` — a sibling that
+    # survives and uses the same literal — is the one that dies.
+    #
+    # `next(it)` on an unannotated parameter is the refusal that makes `badmod`
+    # fail: it has no lowering at all (`emit_calls.py`'s own diagnostic, which
+    # refuses rather than emit a call to a symbol that does not exist), so it
+    # raises even under the `relaxed_imports=True` every imported module is
+    # compiled with, and takes the rollback path this asserts on. CPython runs
+    # the identical text fine (`pick` is never called), which is what makes the
+    # compiled-vs-CPython comparison below a real expectation rather than a
+    # hardcoded string.
+    _check_agrees_with_cpython("failed_submodule_rollback_string_pool_marks", {
+        'rb_inner.py': "def show():\n"
+                       "    print('rb_shared_literal')\n",
+        'rb_bad.py': "import rb_inner\n"
+                     "def pick(it):\n"
+                     "    return next(it)\n"
+                     "def go():\n"
+                     "    return rb_inner.show()\n",
+        'rb_good.py': "def shout():\n"
+                      "    print('rb_shared_literal')\n",
+        'rb_main.py': "import rb_bad\n"
+                      "import rb_good\n"
+                      "def main():\n"
+                      "    rb_good.shout()\n"
+                      "main()\n",
+    }, 'rb_main.py')
+
     # A `from mod import Dialog as X` binding must not change which class a
     # module-qualified construction picks, and the two classes must stay
     # independent when BOTH are constructed in one program (the shape where
