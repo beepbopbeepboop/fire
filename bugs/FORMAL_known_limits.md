@@ -94,14 +94,67 @@ bind*. The evidence column is what was measured, not what the message says.
 
 | terminal module | files | what the file actually declares | verdict |
 |---|---|---|---|
-| `std/sys/_assembly.mojo` | 17 | one public `def inlined_assembly[…]` (generic, variadic over `*types: AnyType`, body is `__mlir_op.\`pop.inline_asm\``) | **true limit** |
+| `std/sys/_assembly.mojo` | 17 | one public `def inlined_assembly[…]` (generic, variadic over `*types: AnyType`, body is `__mlir_op.\`pop.inline_asm\``) | **true limit** — its own body is refused for the MLIR construct, which pre-empts the import |
 | `std/reflection/function.mojo` | 4 | one `struct ReflectedFn[func_type, func]` (generic); a `comptime reflect_fn[…] = ReflectedFn[func]` alias; two `@staticmethod` methods, `display_name()` concrete and `linkage_name[…]` generic | **true limit** |
-| `std/sys/_io.mojo` | 3 | three `comptime` constants (`stdin`/`stdout`/`stderr`), no declaration at all | **true limit** |
+| `std/sys/_io.mojo` | 3 | three `comptime` constants (`stdin`/`stdout`/`stderr`), no declaration at all | **CLOSED — builds** (re-measured 2026-10-01) |
 | `std/algorithm/backend/tile.mojo` | 2 | four overloads of `def tile[…]`, all generic | **true limit** |
-| `std/collections/string/_unicode_lookups.mojo` | 1 | eight `comptime` lookup tables, no declaration at all | **true limit** |
+| `std/collections/string/_unicode_lookups.mojo` | 1 | eight `comptime` lookup tables, no declaration at all | **CLOSED — builds** (re-measured 2026-10-01) |
 | `std/utils/_select.mojo` | 1 | one `def _select_register_value[…]` — private *and* generic | **true limit**; the message names the privacy, which is the operative rule and is now the only rule it needs |
-| `std/gpu/host/nvidia/__init__.mojo` | 1 | a docstring, no declaration at all | **true limit, but it should not be reached** — see 1.3 |
-| `std/stat/stat.mojo` | 1 | seven `def S_ISxxx[intable: Intable]` | **true limit** |
+| `std/gpu/host/nvidia/__init__.mojo` | 1 | a docstring, no declaration at all | **the file is GONE from the current stdlib** — `tools/formal_sweep.py` reports "no .py/.mojo files found" for it (re-measured 2026-10-01), so this row is a historical measurement |
+| `std/stat/stat.mojo` | 1 | seven `def S_ISxxx[intable: Intable]` | **CLOSED — builds** (re-measured 2026-10-01) |
+
+### RE-MEASURED 2026-10-01: three of the eight are no longer limits, and one is gone
+
+Run per-file with `python3 tools/formal_sweep.py --no-stdlib <file>` against
+the stdlib `module_loader.STDLIB_PATH` resolves to, one file at a time (not a
+sweep — eight files), `cas: 0 hit` on every one so these are fresh builds:
+
+| terminal module | then | now |
+|---|---|---|
+| `std/stat/stat.mojo` | `formal dylib has no public functions` — seven public generics | **PASS** |
+| `std/sys/_io.mojo` | same, three `comptime` constants | **PASS** |
+| `std/collections/string/_unicode_lookups.mojo` | same, eight `comptime` tables | **PASS** |
+| `std/gpu/host/nvidia/__init__.mojo` | same, a docstring | **file absent from this stdlib** |
+| `std/sys/_assembly.mojo` | `__mlir_op` dialect construct | `codegen/dependency` — `_assembly.mojo: MLIR construct` |
+| `std/reflection/function.mojo` | generic struct template | `codegen` (unchanged) |
+| `std/algorithm/backend/tile.mojo` | four generic overloads | `codegen` (unchanged) |
+| `std/utils/_select.mojo` | private and generic | `codegen` (unchanged) |
+
+**So family 1's eight terminal modules are five, of which four are still true
+limits and one (`_assembly.mojo`) has moved to a class the census counts
+separately.** The table above is corrected in place rather than left as a
+historical record, because this document's rule is that a refusal's verdict must
+be true of the file it is reported against — a table calling three files "true
+limits" when they build is exactly the false claim the rule exists to catch.
+
+**Why the three closed, briefly, because it is the export-rule work and not
+this document's subject:** a module with no boundary symbol at all is now built
+through `_namespace_library` — a real MH_DYLIB with no code and an EMPTY export
+trie, with its `comptime` constants recorded under the manifest's `constants`
+and its re-exports under `reexports`. That is the same path a re-export-only
+package takes (`FORMAL_module_exports_nothing.md`, since resolved), and it is
+the right answer for a module whose whole API is compile-time values: there is
+nothing to export as a symbol because there is no function, and a consumer
+materializes the folded constant in its own image rather than reading an
+address for it.
+
+**`stat.mojo` is the interesting one of the three**, because its limit was
+supposed to be the one this backend cannot get past: seven public GENERIC
+functions, which `doc/ABI.md` §Generics says are not a single boundary symbol,
+each instantiation being. §1.2 is where that limit is argued, and it is
+**unchanged and still true** — what changed is that `stat.mojo` builds and runs
+for a reason §1.2 had already reached by a different route: the ceiling of the
+largest chunk of the family was measured at ZERO because 34 of the 35 files it
+headed name `BinaryHeap` nowhere. `stat.mojo`'s one dependent evidently does not
+depend on it the way the others did. **The file building is not Stage 5 and must
+not be read as Stage 5**; it is a real limit that one dependent stopped hitting.
+
+**What is NOT re-measured here, and is the integrator's:** the 30-file count for
+family 1. Closing three terminal modules should move it, but by how much depends
+on which of the 30 were behind each, and the per-file instrument this document
+uses deliberately is not `tools/formal_sweep.py` (the sweep resolves imports
+first and reports the chain's terminal). Quoting a new total here would be a
+number nobody measured.
 
 Measured evidence for all eight, run on this tree:
 
@@ -124,8 +177,21 @@ rule, so a symbol cannot be findable in one backend's dylib and absent from
 the other's. The rule excludes, on purpose and by `doc/ABI.md`: a `_`-prefixed
 name; a generic template (`fn name[…]`, `struct S[T]`); an overloaded name;
 and a `_CLIB_SYMS` name. Every one of the eight above falls under one of those
-four, so **the refusal is true in all eight cases**, and no fix to the export
-rule would make any of them build.
+four, so **the refusal was true in all eight cases when it was written, and no
+fix to the export rule would have made any of them build.**
+
+**…and that last clause is what the 2026-10-01 re-measurement above corrected.**
+The export RULE is unchanged and still excludes exactly those four names. What
+changed is that three of the eight no longer need a boundary symbol at all: a
+module whose declarations are all excluded (or absent) is now built through
+`_namespace_library` as a real dylib with an EMPTY export trie, with its folded
+constants and re-exports in the manifest. The rule is the same; the refusal is
+not the only honest answer to it any more. **So "the refusal is true" and "the
+module builds" are not in tension here** — which is worth saying because this
+document has spent a lot of space insisting that a true refusal is the only
+correct answer, and it still is: the point is that "this module has no boundary
+symbol" and "this module cannot be built" are different claims, and only the
+second one was ever a limit.
 
 **§1.1, corrected (2026-09-27, agent [2]): the `_CLIB_SYMS` question is
 settled, and the argument that this section used to make for changing the rule
