@@ -207,6 +207,60 @@ def test_no_hardcoded_tool_name_left_in_source():
     return True, 'no print() literal names the tool as mojo'
 
 
+# A `mojo <command>` in this tree's prose is a command no user can type: the
+# tool is `fire.py`.  Every hit left is one that is NOT the tool's old name —
+# a real compiled artifact (`mojoc`, `stage2/mojo`), upstream Modular's own
+# command quoted as itself, a `.mojo` FILE NAME followed by a flag, or the
+# historical narrative of the rename itself (fire.py's header, and the docstring
+# above).  The counts are a RATCHET, which is the shape that works in a tree
+# with thirty branches in flight: the check fails when a file GAINS one, never
+# when it loses one, so a stale command cannot be introduced, a cleaned-up file
+# stays green until its entry is dropped, and nobody else's branch goes red for
+# a prose edit it did not make.  `bugs/DOCS_mojo_command_name_in_comments.md`
+# is what this ratchets; the sweep that emptied it is `git log -S'fire dylib'`.
+_STALE_COMMAND = re.compile(
+    r'\bmojo (?:build|run|repl|dylib|formalbuild|--formal|--dump|--jit|-h|-v)\b')
+_LEGACY_NAMES_OKAY = {
+    'fire.py': 4,                                  # rename history, stage2/mojo, Real Mojo's own
+    'test_cli_usage_text.py': 2,                   # this file's own "what it used to print"
+    'test_selfhost_memory.py': 1,                  # the self-host binary's own dump flag
+    'mojo/backend_gimple/emit_resolve.py': 1,      # stage2/mojo
+    'mojo/middle/infra_infer.py': 1,               # stage2/mojo
+    'tools/suite.py': 1,                           # stage2/mojo
+    'tools/tu_grind.py': 1,                        # stage2/mojo
+}
+
+
+def test_no_stale_command_name_in_prose():
+    """No file GAINS a `mojo <command>`; see _LEGACY_NAMES_OKAY for the rest."""
+    import checked_run
+    root = HERE
+    grew = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames
+                             if not checked_run.is_derived_dir(d))
+        for name in sorted(filenames):
+            if not name.endswith('.py'):
+                continue
+            path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, root).replace(os.sep, '/')
+            with open(path, encoding='utf-8', errors='replace') as f:
+                lines = f.read().splitlines()
+            hits = [(i, l.strip()) for i, l in enumerate(lines, 1)
+                    if _STALE_COMMAND.search(l)]
+            allowed = _LEGACY_NAMES_OKAY.get(rel, 0)
+            if len(hits) > allowed:
+                grew.append(f'{rel}: {len(hits)} (was allowed {allowed}) — '
+                            + '; '.join(f'{rel}:{i}: {l[:70]}' for i, l in
+                                        hits[allowed:]))
+    if grew:
+        return False, ('a stale `mojo <command>` was added to: '
+                       + ' | '.join(grew))
+    total = sum(_LEGACY_NAMES_OKAY.values())
+    return True, (f'no file gained one; the {total} left are artifacts, '
+                  f'upstream quotes or rename history')
+
+
 def main():
     print('=' * 68)
     print('CLI SELF-NAME — fire.py usage/version/error text')
@@ -219,6 +273,7 @@ def main():
         test_error_messages_name_the_tool,
         test_language_names_are_not_renamed,
         test_no_hardcoded_tool_name_left_in_source,
+        test_no_stale_command_name_in_prose,
     ]
     npass = nfail = 0
     for t in tests:

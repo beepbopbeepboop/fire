@@ -2788,7 +2788,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     finally:
         gen._in_toplevel_gen = False
 
-    # Dependency-init prelude: a `mojo dylib` build compiles every
+    # Dependency-init prelude: a `fire dylib` build compiles every
     # module SEPARATELY (see gen_module's population of
     # `_toplevel_dep_init_modules`) and links them together, each with
     # its own unprioritized `__attribute__((constructor))`. Constructor

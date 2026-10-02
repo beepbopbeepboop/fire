@@ -1062,7 +1062,7 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
     Resolution mirrors gen_module's own "Process imports" sibling
     handling (module_loader.load_module for stdlib/test modules,
     falling back to `_local_sibling_module_exports` for a local project
-    sibling file — the exact shape `mojo dylib`'s per-module-
+    sibling file — the exact shape `fire dylib`'s per-module-
     independent compile needs, since a local sibling like box.3d/
     game's `engine_world.mojo` is never in module_loader's tracked
     stdlib/test set). Safe to call unconditionally (like

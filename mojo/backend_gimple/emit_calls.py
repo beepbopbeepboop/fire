@@ -2690,7 +2690,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         # tagged runtime representation. Was a real, general bug:
         # isinstance(node, AnyStructType) always took the "not this
         # type" branch when compiled, found via find_imports() (used
-        # by `mojo --dump`'s own do_imports resolution) never
+        # by `fire.py --dump`'s own do_imports resolution) never
         # recognizing an import statement nested in a function/if/try
         # block once self-hosted.
         target_id = gimple_exprtypes._struct_type_id(type_name)

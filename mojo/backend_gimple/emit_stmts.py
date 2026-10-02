@@ -569,7 +569,7 @@ def _gen_stmt_VarDecl(gen, node):
         # be sitting in that slot: a deterministic SIGSEGV (bisected
         # via box.3d/game/bugs/DYLIB_string_copy_append_return_segv.md
         # -- despite the bug report's title, this reproduces identically
-        # in `mojo build`'s linked-executable path too, nothing to do
+        # in `fire build`'s linked-executable path too, nothing to do
         # with dylib mode; the report's own p2/global-`list()` repro
         # was simply never re-tested in build mode). Auto-allocate here,
         # mirroring exactly what `var x = list()` (a real initializer)

@@ -2121,7 +2121,7 @@ def _mojo_simd_width_of(t):
 class _MojoCompilationTarget:
     """Stand-in for real Mojo's `sys.info.CompilationTarget` platform-predicate
     namespace. Answers for *this* interpreter host (macOS/arm64), not
-    whatever `mojo build` would actually target — fine for the predicates
+    whatever `fire build` would actually target — fine for the predicates
     stdlib tests branch on, since we're not cross-compiling."""
     def is_macos(self):
         return sys.platform == 'darwin'
@@ -2775,7 +2775,7 @@ class _SysProxy:
     while forwarding everything else to the real `sys` module. Without this,
     interpreted code that reads `sys.argv` sees the *host* process's live
     argv instead of its own — harmless for most scripts, but fatal for
-    self-referential ones: `mojo run fire.py help` would otherwise have the
+    self-referential ones: `fire run fire.py help` would otherwise have the
     nested interpretation of fire.py re-read the unchanged host argv, take
     the same branch, and re-interpret itself forever."""
     def __init__(self, argv):
@@ -3143,7 +3143,7 @@ class Interpreter:
         self.scope.define('StopIteration', StopIteration)
         self.scope.define('Error', MojoError)
         # More standard builtins + exceptions that real stdlib files reference
-        # at module scope (found via fault_tolerance.py comparing `mojo run`
+        # at module scope (found via fault_tolerance.py comparing `fire run`
         # to CPython — e.g. keyword.py's frozenset, _pyrepl/types.py's object,
         # dbm/__init__.py's OSError all raised "name X is not defined").
         # Plain Python builtins, same pattern as set/zip/Exception above.
@@ -3783,7 +3783,7 @@ class Interpreter:
         # `import sys` is special: the program must see its own argv (see
         # _SysProxy), not the real process argv reinstated by a fresh
         # importlib.import_module('sys'). Re-binding the real module here is
-        # what turned `mojo run fire.py help` into unbounded recursion — the
+        # what turned `fire run fire.py help` into unbounded recursion — the
         # nested interpretation of fire.py would re-read the host's live
         # argv instead of the isolated one and take the same branch forever.
         if module == 'sys' or module.split('.')[0] == 'sys':

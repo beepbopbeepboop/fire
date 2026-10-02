@@ -439,7 +439,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # via a real cross-translation-unit call into the DEFINING module's
     # own synthesized accessor, instead of falling through to the
     # "unknown identifier" zero/NULL placeholder further below (which
-    # a per-module-independent `mojo dylib` compile previously always
+    # a per-module-independent `fire dylib` compile previously always
     # hit for this shape, silently reading zero or a stale/garbage
     # pointer). `name not in self.var_types`: an ordinary same-named
     # LOCAL variable always shadows the imported global, exactly like
@@ -1482,7 +1482,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # case used to fall through to a dummy "class attr" stub that
             # always emitted the literal 0 regardless of the alias's real
             # value — e.g. `IfStmt.KIND` printed 0 under --jit/--dump
-            # instead of its declared value under `mojo run`.
+            # instead of its declared value under `fire run`.
             aliases = gen._struct_comptime_aliases.get(module_name)
             if aliases and node.member in aliases:
                 return gen.lower_expr(aliases[node.member])

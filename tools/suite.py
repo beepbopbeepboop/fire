@@ -1266,7 +1266,16 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # 1.1 s and 0.04 GB, which is what the everyday bucket is for.
 test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
      extra=['test_cli_usage_text.py', 'fire.py', 'fire_main.py', 'fire_compiler.py'],
+     extraglob=['**/*.py'],
      desc='the tool prints the name it was invoked as, in usage, -v and every error')
+# `extraglob=['**/*.py']` is the same hole `suite-self-test` documents, one
+# subject over: `test_no_stale_command_name_in_prose` WALKS every `.py` file in
+# the tree (it ratchets `mojo <command>` out of the prose — see
+# `bugs/DOCS_mojo_command_name_in_comments.md`), so its subject is a SET that no
+# entry in `extra` can name. Keyed on the four files above, adding
+# `mojo build` to `module_loader.py` would move no key, the recorded PASS would
+# be replayed, and the check written to catch exactly that would not run. A
+# cached job is a promise that its inputs are its subject.
 # `nonlocal` on both execution paths. Its own test because the feature spans
 # the parser (a new statement node), the interpreter (scope resolution) and
 # the closure-capture pass (by-reference capture), and a regression in any one

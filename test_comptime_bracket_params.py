@@ -33,7 +33,7 @@ def _build_and_run(mojo_src: str, filename: str = 'prog.mojo') -> str:
     and links in the elaborated per-call-site instantiation objects a
     comptime-bracket-parametrized call produces (unlike the plain
     compile_to_gimple_cached + single-.o build build_executable() uses for
-    `mojo build`, which has no notion of extra elaboration objects at all).
+    `fire build`, which has no notion of extra elaboration objects at all).
     Returns real captured stdout from actually running the built binary."""
     wd = tempfile.mkdtemp(prefix='mojo_comptime_bracket_')
     src_path = os.path.join(wd, filename)

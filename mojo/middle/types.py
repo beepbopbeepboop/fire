@@ -1484,7 +1484,7 @@ def _module_init_name(module_name: str) -> str:
     """Public, documented C symbol name for a *library* module's module-scope
     initializer (bugs/DYLIB_module_scope_never_executes.md, box.3d/game repo).
 
-    A `mojo dylib` build (emit_entry_points=False) never emits any `main()` —
+    A `fire dylib` build (emit_entry_points=False) never emits any `main()` —
     there is nothing in the produced .dylib's ABI that calls the module's own
     `_<module>_toplevel()` (see `_module_toplevel_name`), so every module-scope
     `var x = f()` / bare statement silently never ran. Two independent fixes

@@ -456,7 +456,7 @@ def _local_dep_fingerprint(path: str, dep_src_by_key: dict) -> str:
     and it never chases a re-export hop's own transitive imports. So a content
     change to a module imported only *transitively* (import graph
     game_engine -> recipes -> block_registry) left every importer's cached
-    object stale: `mojo dylib` reported a fresh build yet the dylib kept the
+    object stale: `fire dylib` reported a fresh build yet the dylib kept the
     previous `block_registry.NUM_CPP_BLOCKS` (BUG-2026-032, box.3d/game).
 
     `dep_src_by_key` maps every candidate import spelling (full module name,
@@ -776,7 +776,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     `toolchain_fingerprint(gcc, ())` on their own carry NO optimization flag
     (gcc's implicit -O0), appropriate for the STDLIB dylib (compiled once,
     used everywhere, optimized for compile time / cache-friendliness) but not
-    for a `mojo dylib`-built artifact meant to be linked into a real program
+    for a `fire dylib`-built artifact meant to be linked into a real program
     and actually run at speed.
 
     `arch` is the architecture the dylib is FOR (default: the host's) and
@@ -1432,7 +1432,7 @@ def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1,
     # whole stdlib closure is already folded into each one's key via
     # cas.stdlib_fingerprint(). Per-module local-dep tracking would only
     # re-hash that same closure under a new key and force a needless full
-    # cold rebuild. It exists for `mojo dylib` on a PROJECT's own file set
+    # cold rebuild. It exists for `fire dylib` on a PROJECT's own file set
     # (BUG-2026-032), reached via driver.compile_dylib -> build(...).
     return build(stdlib_modules(), out, use_cache=use_cache, extra_exports=rt_exports,
                  jobs=jobs, track_local_deps=False, arch=arch)

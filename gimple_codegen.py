@@ -2597,7 +2597,7 @@ class GimpleGen:
         # IdentExpr` to route a bare read of the imported name through a
         # real cross-translation-unit call into the DEFINING module's own
         # accessor function, instead of the "unknown identifier" zero/NULL
-        # placeholder a per-module-independent `mojo dylib` compile
+        # placeholder a per-module-independent `fire dylib` compile
         # previously fell through to for this shape.
         self._imported_global_accessors: dict = {}
         # Concrete imported structs used as parameter types here: their StructDefs

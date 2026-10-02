@@ -6,7 +6,7 @@ Concept
 -------
 Real CPython is treated as the trusted "oracle" version, and mojo's own
 run path (`fire.py <file>` — compile-and-run, falling back to the
-interpreter on a compile failure, exactly what `mojo -h` documents as the
+interpreter on a compile failure, exactly what `fire -h` documents as the
 default invocation) is the second, independently-implemented version
 computing nominally the same thing. For a given file we run *both*, compare
 their externally observable behavior, and:
