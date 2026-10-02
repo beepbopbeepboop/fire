@@ -1,17 +1,18 @@
-# read-before-store: the three shapes that still decide wrongly, and how the corpus splits now
+# read-before-store: the four shapes that still decide wrongly, and how the corpus splits now
 
 **Area:** FORMAL (`formal/model.py`'s `_build_cfg` / `read_before_store`, and
 `formal/build.py`'s `_unstored_read`).
-**Status: OPEN. Three residuals, one of them a false NEGATIVE (a real defect the
-check does not report) and two false positives that need a decision no
-statement-level reader can make. All three are measured on the whole corpus,
-with the instrument described below — which is the deliverable here, because
-until this week the only way to count them was a whole-closure sweep.**
+**Status: OPEN. Four residuals, one of them a false NEGATIVE (a real defect the
+check does not report) and three false positives that each need a fact no
+statement-level reader currently collects. All four are measured on the whole
+corpus, with the instrument described below — which is the deliverable here,
+because until this week the only way to count them was a whole-closure sweep.**
 
-The three fixes that closed the rest of the class are in
-`6e0bf2fe` (a `try`'s `else` clause, and `_unstored_read`'s candidate set) and
-the commit after it (the `finally`'s "the body may have raised" path). Each of them
-refused, on both architectures, a program CPython runs, with a message that
+The fixes that closed the rest of the class are in `6e0bf2fe` (a `try`'s `else`
+clause, and `_unstored_read`'s candidate set), `d54eeb37` (the build-and-run row
+for the first of them) and `7ba9e6fc` (the `finally`'s "the body may have
+raised" path). Each of them refused, on both architectures, a program CPython
+runs, with a message that
 claimed CPython raises `UnboundLocalError` for it. Their measurements are in
 `bugs/FORMAL_a_local_read_before_its_first_assignment.md`'s territory and are
 repeated here only as the baseline the residuals are counted against.
@@ -111,7 +112,41 @@ question is answerable by reading `formal/{arm64,x86_64}_codegen.py`'s
 `finally` arm, and it should be answered before any predicate is written: it
 decides which of the two the fix is.
 
-## Residual 2 — `with` and a store in the body
+## Residual 2 — two `if`s with the SAME condition
+
+```python
+is_tuple = var.startswith('(') and var.endswith(')')
+if is_tuple:
+    var_names = gen._split_top_level_comma(inner)      # 2201, stores
+    …
+if is_tuple:
+    emit(gen._cname(var_names[0]))                     # 2270, reads
+```
+
+`is_tuple` is assigned once and never reassigned, so every path that reaches the
+second `if` passed the first, and `var_names` is always stored. The CFG does not
+know that: it models each `if` as an independent branch, so the join after the
+first one intersects the `then` path (which stores) with the `else` path (which
+does not) and the name drops out — and the second `if` can be false on a path
+where the first was true, which is precisely why.
+
+Two sites in this repository, both the same function pair in one file:
+`mojo/backend_gimple/emit_loops.py`'s `_gen_for_list:1921` (`slot_elems`) and
+`_gen_for_dict:2270` (`var_names`). The file is the gimple backend's loop
+lowering and is owned by another claim, so nothing here was changed in it.
+
+**The next step is a condition-fact environment in `_build_cfg`, and the shape
+of it is small.** Each branch seeds a fact keyed by the condition's canonical
+form (`ast.dump` of the expression, or `M.expr_key` if one exists); a join
+intersects them and a block that WRITES any name the condition reads kills
+them, so `is_tuple = …` twice does the right thing and `is_tuple = f()` kills
+the first fact at the assignment. This is the same mechanism a constant-
+propagation pass would need, and the `finally` predicate in residual 1 wants the
+same "which names does this statement mention" reader, so the two compose —
+which is why neither should be written as a one-off rule inside `_build_cfg`'s
+statement arms.
+
+## Residual 3 — `with` and a store in the body
 
 ```python
 def probe(n):
@@ -133,7 +168,7 @@ corpus and not true in general — and the price of being wrong in that directio
 is a program that reads a word nobody wrote. `_refuse_variadic_reads` is the
 model for the answer when it can be had: refuse by name, with the reason.
 
-## Residual 3 — what the 25 remaining sites actually are
+## Residual 4 — what the 25 remaining sites actually are
 
 Classified by hand from the census, because "a false positive" and "another
 check's refusal" look identical in the output and are not the same work:
@@ -146,7 +181,8 @@ check's refusal" look identical in the output and are not the same work:
   one arm of an `if` and read in another, which is what CPython raises for. The
   analysis is right about the file; the file is broken. (`tools/mem_slope.py`'s
   `exes` was in this class an hour ago and is not any more.)
-* **the `finally` and `with` shapes above** — residuals 1 and 2.
+* **the `finally`, correlated-condition and `with` shapes above** — residuals
+  1, 2 and 3.
 * **the corpus's own dead branches** (`main: 'status'`, `main: 'gen'`,
   `run_tests: '_RUNTIME_DIR'` at line 0) — code after a `return` or an
   `os._exit`, which the fixpoint already treats as unreachable. These are
@@ -156,9 +192,12 @@ check's refusal" look identical in the output and are not the same work:
 
 ## Why this is filed rather than fixed
 
-Residual 1's predicate is a real piece of work (a `can_raise` reader for
-statements, composed with the loop preheader's constant propagation), and
-residual 3's items are each a decision about a file rather than about the
-analysis. Both are bigger than the budget of one focused change, and both are
+Residual 1's predicate and residual 2's condition facts are each a real piece
+of work (a `can_raise` reader for statements; a fact environment invalidated by
+any write a condition mentions), they want the same "which names does this node
+mention" reader, and they compose with the loop-preheader propagation
+`FORMAL_while_body_store_refused_though_the_loop_runs.md` asks for — so the
+right order is one shared reader and then the three rules. Residual 4's items
+are each a decision about a file rather than about the analysis. Both are bigger than the budget of one focused change, and both are
 now measurable in seconds instead of by a 644-file sweep — which is the thing
 the next session needs and did not have.
