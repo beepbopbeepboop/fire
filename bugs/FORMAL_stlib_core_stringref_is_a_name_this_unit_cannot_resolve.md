@@ -114,6 +114,33 @@ denominator **without making it answerable** — which
 `bugs/FORMAL_frame_receiver_handoff.md` §16 and §25 both name as the drift
 direction this sweep's accounting is arranged to resist. Leave it in `codegen`.
 
+## Re-verified 2026-10-01 (`work/formal3-7`): every claim here still holds
+
+Nothing in this doc is fixed and nothing should be — §3's ceiling of 0 PASSes is
+a fact about a dead stub, not about the backend. Re-measured rather than assumed,
+because a doc that stops being true is worse than no doc:
+
+* **The refusal is still the one this doc quotes**, verbatim and unchanged:
+  `constructing StringRef has no representation on this path: this image has no
+  declaration of StringRef to construct […]`.
+* **`StringRef` still has 0 declarations and 0 construction sites** in the stdlib
+  this sweep builds against (252 files under
+  `../new-modular/Mojo/stdlib/std`), and its only two mentions are still the two
+  inside `#` comments — `sys/arg.mojo:50` and
+  `collections/string/string_span.mojo:131`. So the "ceiling: 0 PASSes, not
+  reachable by any change to `formal/`" conclusion stands.
+* **Nothing imports it.** `stdlib_core.mojo` is 24 lines at the repository root
+  with two `pass` bodies and a comment saying it needs C interop, and
+  `grep -rn stdlib_core` over the tree finds no importer outside `bugs/`.
+* **The sweep-roots question in §5 is still `tools/formal_sweep.py`'s owner's.**
+  `default_roots` is `[REPO]` plus the stdlib subtrees and nothing names
+  `stdlib_core.mojo` anywhere in the sweep, so the file is swept by
+  construction and not by a decision anybody made about it.
+
+So §5's two questions are still the two questions, and neither is a backend
+change. This is the honest state: a doc whose subject is a file that should not
+exist, recording that the backend is right to refuse it.
+
 ## 5. The exact next step
 
 Not a backend change. Two questions, and neither is this file's:
