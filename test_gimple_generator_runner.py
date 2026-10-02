@@ -4401,6 +4401,39 @@ def main():
         print(v)
 """, "k\n0\n")
 
+    # A nested `def` or a nested `class` inside a coroutine body is its OWN
+    # function scope, and the A3 rewrite used to descend into it: every
+    # `_rewrite_*_stmts` in `mojo/middle/coro.py` recurses into a statement's
+    # attributes looking for nested statement lists, and `_STMT_TYPES` counts
+    # both `FunctionDef` and `StructDef`, so the nested body's `return e`
+    # became `__mojo_gen_set_return(__c, e); return` with THIS coroutine's
+    # context variable. `__c` is not in scope there, so it read through the
+    # `ct param or undeclared` fallback as a hard 0 and every `helper(...)`
+    # call in the generator answered 0 at exit 0.
+    #
+    # Both halves are in this test because they are one fix
+    # (`coro._declares_its_own_scope`) and because the class half was
+    # unreachable until `module_gen._gmi_hoist_nested_structs` gave a class
+    # declared inside a function a layout and methods at all.
+    test_generator_stdout("generator_nested_def_and_class_are_their_own_scope", """\
+def gen(n):
+    def helper(x):
+        return x * 2
+    class Box:
+        def __init__(self, v: int):
+            self.v = v
+        def get(self):
+            return self.v + 1
+    b = Box(10)
+    yield helper(3)
+    yield b.get()
+    yield helper(4) + b.get()
+
+def main():
+    for v in gen(2):
+        print(v)
+""", "6\n11\n19\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

@@ -52,6 +52,7 @@ from mojo.middle.calls_shared import (
     _ident_call_name, _isinstance_type_name, _pack_kwargs_dict,
     _resolve_overload, _sms_key
 )
+from fire_compiler import _pair_key
 from mojo.middle.methods_shared import _is_selfhost_source_file
 
 def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
@@ -2433,6 +2434,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # already records the renamed name (see `_note_struct_import_alias`).
     _fname_ctor = (getattr(gen, '_struct_import_aliases', None)
                    or {}).get(_fname_ctor, _fname_ctor)
+    # ...and a class declared INSIDE a function body, which is hoisted to
+    # module scope so the struct pipeline will give it a layout at all. A
+    # hoisted name that collided with an existing struct is renamed, and the
+    # rename is recorded against the function it was written in — which is
+    # what `current_func_name` is here, the same key a closure lookup uses.
+    # A hoisted class whose bare name was free has no entry, so its call site
+    # reads exactly as a module-level class's does. See
+    # `_gmi_hoist_nested_structs`.
+    _fname_ctor = (getattr(gen, '_nested_struct_names', None) or {}).get(
+        _pair_key(_as_str(getattr(gen, 'current_func_name', '') or ''), _fname_ctor),
+        _fname_ctor)
     if _fname_ctor in gen.struct_field_types:
         # `node.kwargs` (a direct CallExpr field read) NOT
         # `getattr(node, 'kwargs', None)` — the 3-arg getattr lowers to a

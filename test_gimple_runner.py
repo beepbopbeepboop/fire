@@ -1200,6 +1200,131 @@ main()
 """, "8\n10\n8\n")
 
 
+    # A class written INSIDE a function body. Every consumer of the module's
+    # struct set reads the MODULE-LEVEL statement list, and a `StructDef`
+    # nested in a `FunctionDef.body` was in none of them, so the class had no
+    # layout and no emitted methods: `_lower_MemberExpr`'s method-call arm
+    # resolves the receiver's struct through `struct_field_types`, found
+    # nothing, and fell into its stub branch, which yields the RECEIVER. So
+    # `i.twice()` returned `21` for `i = Inner(21)` — the right shape for the
+    # zero-argument case by accident, and a plausible number at exit 0 with no
+    # diagnostic for every other one.
+    #
+    # `dd['m'](4)` is the OTHER end of the same root cause and is in this test
+    # for that reason: with no layout the bound method `c.m` never became a
+    # `MojoBoundMethod *` at all (it stayed a plain `int64_t` receiver word, so
+    # `note_dict_callable_ret` had nothing to record), and the subscript callee
+    # lowered to a dict read followed by a generic attribute lookup on a value
+    # that is not a `C` — an `AttributeError`, exit 1.
+    #
+    # The rest of the program is the collision matrix, because a hoisted name
+    # that is already taken has to be disambiguated or two classes would both
+    # claim one struct and the loser would silently borrow the winner's layout:
+    # `mk1`/`mk2` declare `Inner` in two different functions, and `Inner` is
+    # ALSO a module-level class here. All four answer differently (`4 60 200
+    # 45`), so a rename that lost the wrong mapping shows up immediately.
+    test_gimple_stdout("gimple_nested_class_methods", """\
+class Inner:
+    def __init__(self, v: int):
+        self.v = v
+    def twice(self):
+        return self.v * 100
+
+def mk1(n: int):
+    class Inner:
+        def __init__(self, v: int):
+            self.v = v
+        def twice(self):
+            return self.v * 2
+    return Inner(n).twice()
+
+def mk2(n: int):
+    class Inner:
+        def __init__(self, v: int):
+            self.v = v * 10
+        def twice(self):
+            return self.v * 3
+    return Inner(n).twice()
+
+def main():
+    class C:
+        def m(self, x):
+            return x * 2
+    c = C()
+    print(c.m(4))
+    dd = {}
+    dd['m'] = c.m
+    print(dd['m'](4))
+
+main()
+print(mk1(2))
+print(mk2(2))
+print(Inner(2).twice())
+""", "8\n8\n4\n60\n200\n")
+
+    # The same hoisting, in the statement lists a class statement can hide in:
+    # an `if` arm, a loop body (re-created per iteration, so the struct must
+    # not carry per-call state), and a METHOD body — the last one is the case
+    # `module_shared._gmi_collect_self_assigns` folds a nested class's
+    # `self.<f> = ...` onto the ENCLOSING struct for, because a nested class
+    # had no layout of its own. The hoist APPENDS rather than moves for
+    # exactly that reason: moving the statement out of the body would silently
+    # withdraw the folded field.
+    test_gimple_stdout("gimple_nested_class_in_every_body", """\
+class WithAttrs:
+    tag = 7
+    def __init__(self, v: int):
+        self.v = v
+    def get(self):
+        return self.v
+
+class Outer:
+    def build(self, k: int):
+        class Nested:
+            def __init__(self, v: int):
+                self.v = v
+            def get(self):
+                return self.v * 2
+        return Nested(k).get()
+
+def in_if(flag: int):
+    if flag:
+        class K:
+            def __init__(self, v: int):
+                self.v = v
+            def get(self):
+                return self.v + 1
+        return K(10).get()
+    return -1
+
+def in_loop(n: int):
+    total = 0
+    for i in range(n):
+        class L:
+            def __init__(self, v: int):
+                self.v = v
+            def get(self):
+                return self.v
+        total = total + L(i).get()
+    return total
+
+def useattrs(x: int):
+    class WithAttrs2:
+        def __init__(self, v: int):
+            self.v = v
+            self.b = WithAttrs(v)
+        def both(self):
+            return self.v + self.b.get() + WithAttrs.tag
+    return WithAttrs2(x).both()
+
+print(in_if(1))
+print(in_if(0))
+print(in_loop(4))
+print(Outer().build(21))
+print(useattrs(3))
+""", "11\n-1\n6\n42\n13\n")
+
+
     test_gimple_stdout("gimple_callable_value_keeps_its_return_type", """\
 def plain():
     return False

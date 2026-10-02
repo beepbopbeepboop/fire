@@ -2491,6 +2491,12 @@ def _rewrite_async_stmts(stmts: list, cvar: str) -> list:
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
                 h.body = _rewrite_async_stmts(h.body, cvar)
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -2553,6 +2559,12 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
                 h.body = _rewrite_async_gen_stmts(h.body, cvar)
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -2918,6 +2930,12 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
                 out.append(N.ExprStmt(value=_call('__mojo_async_task_schedule',
                                                   [_c_ident(_tname)])))
             continue
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -3108,6 +3126,12 @@ def _rewrite_stmts(stmts: list, cvar: str, kind: str, env=None) -> list:
             for h in (s.handlers or []):
                 h.body = _rewrite_stmts(h.body, cvar, kind, env)
         # recurse into compound-statement bodies
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -3136,6 +3160,38 @@ _STMT_TYPES = tuple(
 
 def _looks_like_stmt_list(v: list) -> bool:
     return all(isinstance(x, _STMT_TYPES) for x in v)
+
+
+def _declares_its_own_scope(s) -> bool:
+    """True for a statement that opens a FUNCTION or CLASS SCOPE of its own,
+    so a coroutine rewrite must pass it through untouched.
+
+    Every `_rewrite_*_stmts` in this file recurses into a statement's
+    attributes looking for nested statement lists, and the test it uses —
+    "is this a list of statements?" — is answered by `_looks_like_stmt_list`,
+    whose `_STMT_TYPES` includes BOTH `FunctionDef` and `StructDef`. So a
+    nested `def`'s body and a nested `class`'s `methods` list were rewritten
+    with the ENCLOSING coroutine's context variable: their `return e` became
+    `__mojo_gen_set_return(__c, e); return`, and their `yield e` /
+    `await e` became this coroutine's yield/await. Both are wrong, and both
+    are silent — `__c` is not in scope in a nested def, so it read through
+    the `ct param or undeclared` fallback as a hard 0:
+
+        def gen(n):
+            def helper(x):
+                return x * 2
+            yield helper(3)
+
+    printed `0` for CPython's `6`.
+
+    The class half only became reachable once a nested `class` had methods to
+    rewrite at all — before that, `module_gen._gmi_hoist_nested_structs`
+    did not exist and a class declared inside a function had no layout and
+    no emitted methods (bugs/CODEGEN_class_defined_inside_a_function_has_no_
+    methods.md). So the two bugs shared one cause and this predicate is the
+    one place that says so.
+    """
+    return isinstance(s, (N.FunctionDef, N.StructDef))
 
 
 # ── lowering ───────────────────────────────────────────────────────────
@@ -4210,6 +4266,12 @@ def _cap_rewrite_stmts(stmts: list, box_names: dict) -> list:
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
                 h.body = _cap_rewrite_stmts(h.body, box_names)
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
