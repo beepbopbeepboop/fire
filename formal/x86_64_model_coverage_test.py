@@ -38,11 +38,33 @@ and compares. Between them: this one says "no form is unmodelled", that one says
 is caught only by this one; a form that is modelled but wrong is caught only by
 the other.
 
+## And the step lemmas, which coverage above cannot see
+
+The samples answer "can the model step this?". They say nothing about whether
+the per-instruction lemmas the proof chain is built from can be APPLIED, and
+that is a separate failure with a separate history: `x86_step_setcc_r8` carried
+`¬ ((0x80 : UInt8) ≤ op2)` when every `setcc` opcode byte is at least 0x90, so
+its hypotheses were contradictory — which still compiles, still typechecks
+against the model, and still proves its goal, and simply cannot be applied to
+anything. 26 examples' worth of `setcc` sat there with a green suite, and
+nothing short of writing the check down would have found it.
+
+So `step_lemmas()` lists each lemma with an encoding the encoder really
+produces, and this test makes Lean check that every one of the lemma's
+hypotheses is satisfiable there, by `native_decide` on each. A failure prints
+the hypothesis that did not close, by line, rather than a file name.
+
+`movsx r64, r8` is checked at all three register shapes the corpus emits,
+because a generalisation that covered only the shape it was written from would
+pass a one-shape check.
+
 Run: python3 formal/x86_64_model_coverage_test.py
-Exit: 0 iff every emittable form steps.
+Exit: 0 iff every emittable form steps and every listed lemma is applicable at
+a real encoding.
 """
 
 import os
+import re
 import subprocess
 import sys
 
@@ -176,6 +198,157 @@ def samples():
     return out
 
 
+class Lemma:
+    """One step lemma, and the encoding the backend really emits for it.
+
+    This is the second half of the coverage question, and it exists because
+    "the file builds" is the wrong signal for a step lemma.  A lemma whose
+    hypotheses are contradictory compiles, typechecks against the model, proves
+    its goal, and can never be applied to anything — `x86_step_setcc_r8` carried
+    `¬ ((0x80 : UInt8) ≤ op2)` when every `setcc` opcode byte is at least 0x90,
+    and 26 examples' worth of `setcc` were in that state with a green suite.  So
+    a lemma is covered only when a real encoding satisfies all of it, and the
+    question worth asking about a new lemma is not "does it compile" but "can it
+    be applied".
+
+    What this does NOT check is the conclusion, and that is a decision rather
+    than an omission.  Lean already checked it: `lib/X86.lean` compiling IS the
+    conclusion being proved, so a `native_decide` of it here would be the same
+    fact asked twice.  What compiling cannot tell you is applicability, which
+    is exactly the half that was wrong.  (`Option X86State` has no `Decidable`
+    instance anyway — `X86State.mem` is a `Nat → UInt8`, so the successor
+    cannot be compared by evaluation at all, which is why the existing lemmas
+    state whole successors and prove them by `simp`.)
+
+    `hyp` is the lemma's own hypothesis list, concretised: each term is over
+    `s` (the initial state) and `code` (the byte function), which the harness
+    binds.
+    """
+
+    __slots__ = ("lemma", "label", "enc", "hyp")
+
+    def __init__(self, lemma, label, enc, hyp):
+        self.lemma, self.label, self.enc = lemma, label, bytes(enc)
+        self.hyp = list(hyp)
+
+
+def _rex_0f_mod3_hyps(addr, rex, modrm, reg, rm, dst, op2):
+    """Hypotheses for a `REX 0F <op2> /r` mod=3 instruction, concretised.
+
+    Shared by every form below that is `REX.W 0F xx /r` with a register
+    operand, because those are the ones whose hypotheses a generator reads out
+    of the encoding rather than computes.  `reg`/`rm`/`dst` are the ModRM and
+    REX fields already resolved to the names the lemmas use, and the caller
+    passes them so this stays a transcription of the lemma's statement rather
+    than a second derivation of it.
+
+    The `(x : UInt8).toNat` ascription is not decoration, twice over.  Lean
+    reads `192.toNat` as a malformed decimal — a PARSE error, and in a check
+    file a parse error is a check that did not run — and `(192).toNat` parses but
+    elaborates `192` as a `Nat`, which has no `toNat` field, so the hypothesis
+    is an elaboration error instead.  The ascription is what makes it the same
+    expression the lemma states about a `UInt8` ModRM byte.
+    """
+    b = "(%d : UInt8).toNat" % modrm
+    return [
+        "s.rip = %d" % addr,
+        "code %d = %d" % (addr, rex),
+        "code %d = %d" % (addr + 1, 0x0f),
+        "code %d = %d" % (addr + 2, op2),
+        "code %d = %d" % (addr + 3, modrm),
+        "x86_is_rex %d = true" % rex,
+        "x86_rex_w %d = true" % rex,
+        "%s >>> 6 = 3" % b,
+        "(%s >>> 3) &&& 7 = %d" % (b, reg),
+        "%s &&& 7 = %d" % (b, rm),
+        "%d + x86_rex_r %d = %d" % (reg, rex, dst),
+    ]
+
+
+def step_lemmas():
+    """Every step lemma this test holds to the applicability check above."""
+    R = X.Reg
+    out = []
+    # `movsx r64, r8`.  All THREE register shapes the corpus emits, because that
+    # is the whole argument for the lemma being general rather than a second
+    # concrete `movsx rax, al`: a generalisation that covered only the shape it
+    # was written from would pass a one-shape check.
+    for dst, src in ((R.RAX, R.RAX), (R.RBX, R.RBX), (R.R10, R.R11)):
+        enc = X.encode_movsx_r64_r8(dst, src)
+        rex, modrm = enc[0], enc[3]
+        reg, rm = (modrm >> 3) & 7, modrm & 7
+        d = reg + (8 if rex & 4 else 0)
+        out.append(Lemma(
+            "x86_step_movsx_r64_r8",
+            "movsx %s, %s" % (dst.name, src.name),
+            enc,
+            _rex_0f_mod3_hyps(BASE + 16 * len(out), rex, modrm, reg, rm, d,
+                              0xbe)))
+    return out
+
+
+def lemma_lean_source(lems):
+    """`(text, checks)` — the applicability file, and where each check landed.
+
+    `checks` is `(first_line, last_line, label, why)` per `example`, and the
+    caller attributes a Lean diagnostic by LINE rather than by matching the
+    emitted text back.  Two things went wrong the other way and both are worth
+    writing down:
+
+      * an `example (s := ls_0) : …` binder does NOT bind.  `s` stays a free
+        variable and `native_decide` rejects the goal ("Expected type must not
+        contain free variables"), so every check errored — and a version that
+        matched the emitted `example` line back found none of them, because an
+        error means Lean printed the line instead.  A check that cannot fail is
+        worse than no check: it is green.  `let` inside the type works, and is
+        what is emitted.
+      * the error lands on the `native_decide` line, one below the statement,
+        and on the statement line when the failure is elaboration.  So each
+        check records a RANGE and the caller attributes by range.
+
+    Every statement is therefore self-contained:
+    `example : (let s := ls_0; let code := lcode_0; <term>) := by native_decide`.
+    """
+    out = ["import X86", ""]
+    checks = []
+    for i, lem in enumerate(lems):
+        m = BASE + i * 16
+        items = ", ".join("0x%02x" % b for b in lem.enc)
+        out.append("def lcode_%d (code : Nat) : UInt8 :=" % i)
+        out.append("  if code < %d then 0 else ([%s].getD (code - %d) 0)"
+                   % (m, items, m))
+        out.append("def ls_%d : X86State := X86State.init 10 %d" % (i, m))
+    for i, lem in enumerate(lems):
+        bind = "example : (let s := ls_%d; let code := lcode_%d; %%s) := by" % (i, i)
+        for j, h in enumerate(lem.hyp):
+            out.append("/-- %s, hypothesis %d: `%s` -/" % (lem.label, j + 1, h))
+            first = len(out) + 1
+            checks.append((first, first + 1, lem.label,
+                           "hypothesis %d `%s` does not hold at %s — the lemma "
+                           "is vacuous there"
+                           % (j + 1, h, lem.enc.hex(" "))))
+            out.append(bind % h)
+            out.append("  native_decide")
+    return "\n".join(out) + "\n", checks
+
+
+_LEAN_LOC = re.compile(r"^(\S+):(\d+):\d+: error: ", re.M)
+
+
+def lemma_check_failures(out, checks, filename):
+    """The `checks` ranges Lean reported an error in, in file order.
+
+    The file name is compared rather than assumed, because Lean prints the path
+    it was given and a caller elsewhere in this file passes an absolute one.
+    """
+    at = set()
+    for m in _LEAN_LOC.finditer(out):
+        if m.group(1) == filename:
+            at.add(int(m.group(2)))
+    return [(label, why, sorted(n for n in at if lo <= n <= hi))
+            for lo, hi, label, why in checks if any(lo <= n <= hi for n in at)]
+
+
 def lean_source(samps):
     out = ["import X86", "",
            "/-- Each sample sits at its own address so a failure names the form. -/",
@@ -249,7 +422,31 @@ def main():
         print("\nThe backend can emit these, so every program using one would "
               "stop mid-run in the model — and a stopped run reads as result 0 "
               "rather than as a failure.")
-    return 1 if unstepped else 0
+    rc = 1 if unstepped else 0
+
+    # The step lemmas, at real encodings.  A lemma the model can never be asked
+    # about is the failure mode coverage above cannot see: `x86_step` answers
+    # for every byte the encoder produces, and a lemma whose hypotheses no such
+    # byte satisfies is a lemma that proves its goal about nothing.
+    lems = step_lemmas()
+    ltext, checks = lemma_lean_source(lems)
+    lname = "StepLemmas.lean"
+    with open(os.path.join(workdir, lname), "w") as f:
+        f.write(ltext)
+    cp = subprocess.run([lean, lname], cwd=workdir, env=env,
+                        capture_output=True, text=True, timeout=3600)
+    bad = lemma_check_failures(cp.stdout + cp.stderr, checks, lname)
+    print("\nstep-lemma applicability: %d lemma(s) at %d real encoding(s), %d "
+          "hypotheses — %s"
+          % (len({l.lemma for l in lems}), len(lems), len(checks),
+             "every hypothesis satisfiable" if not bad
+             else "%d of %d FAILED" % (len(bad), len(checks))))
+    for label, why, where in bad:
+        print("  %-20s %s" % (label, why))
+        print("      Lean reported it on line(s) %s of %s" % (where, lname))
+    if bad:
+        rc = 1
+    return rc
 
 
 if __name__ == "__main__":

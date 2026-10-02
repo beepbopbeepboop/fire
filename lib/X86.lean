@@ -830,34 +830,42 @@ theorem x86_step_movzx_rax_al (s : X86State) (code : Nat → UInt8) (m : Nat)
     x86_step s code = some { s with rax := s.rax &&& 0xFF, rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb, h_rip, h_b0, h_b1, h_b2, h_b3]
 
-/-! `movsx r64, r8` (REX.W 0F BE /r, mod=3), the SIGNED twin of the lemma
-    above, and general over both registers where `movzx_rax_al` is concrete.
+/-! `movsx r64, r8` (REX.W 0F BE /r, mod=3): the SIGNED twin of the lemma above,
+    and the first `movsx` the chain can step at all.  `movsx_r64_r8` was the
+    largest single uncovered form left in the end-to-end theorem -- it named the
+    missing lemma for 3 of the 45 examples, `n8`, `sgt8` and `sle8`, and those
+    three could not have a path tree because of it.
 
-    Two things make it general rather than one more concrete pair.
+    It is general over both registers, and the corpus is what says so rather
+    than taste: it emits two distinct shapes, `48 0f be c0` (`movsx rax, al`)
+    and `48 0f be db` (`movsx rbx, bl`), three of the second to one of the
+    first.  Two shapes is the point at which a concrete `x86_step_movsx_rax_al`
+    becomes a second copy of `x86_step_movzx_rax_al` with one byte changed.
 
-    The first is that the corpus emits two shapes and they are not the same
-    instruction: `48 0f be c0` (`movsx rax, al`) and `48 0f be db`
-    (`movsx rbx, bl`), three of the second to one of the first.  A
-    register-pair-parameterised version of `movzx_rax_al` would therefore have
-    callers, and the doc's own rule -- generalise a form when the backend
-    actually emits more than one shape of it -- points that way.
+    The destination is a CONCRETE `dst`, with `reg + x86_rex_r rex = dst`
+    beside it, for the reason `x86_step_mov_rm64_mem_disp8_rbp` gives: the model
+    writes `x86_set_reg s (reg + x86_rex_r rex) ...` and `simp` will not reduce
+    a `match` on a non-literal, so the caller reads the destination out of the
+    encoding and supplies it.  The caller is `formal/x86_64_endtoend_test.py`.
 
-    The second is `dst`, and it is not optional.  The destination is
-    `x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) ...`, and
-    `x86_set_reg` is a `match` on its index, which `simp` will not reduce on a
-    non-literal -- the same wall `x86_step_mov_rm64_mem_disp8_rbp` documents, and
-    the reason that lemma takes a concrete destination with
-    `reg + x86_rex_r rex = dst` beside it.  So the caller reads the destination
-    out of the encoding and supplies it as a literal, and `h_dst_lt` is what lets
-    the `match` reduce.
+    Note what that argument does NOT need, because the first attempt carried it
+    and it was the wrong thing to reach for: no `dst < 16`.  Reducing the
+    `match` was never the goal -- making both sides the SAME unreduced `match`
+    is -- so the bound plays no part, and the proof is one `simp` shorter for
+    dropping it.
 
-    `x86_sign_extend8` is on bit 7, not bit 31.  The model's 0F BE arm is right
-    about that and used not to be, which is worth recording because the two
-    errors cancelled from outside: the arm applied the 32-bit extension, and the
-    only examples that emit a byte `movsx` (n8, sgt8, sle8) had no step lemma
+    `x86_sign_extend8` is on bit 7, not bit 31, and the model's 0F BE arm is
+    right about that where it used not to be.  The two errors cancelled from
+    outside, which is the part worth keeping: the arm applied the 32-bit
+    extension, and the only examples that emit a byte `movsx` had no step lemma
     wired for the form, so nothing ever asked the model what it computed.  A
     gap in the proof chain hid a defect in the thing the chain was proving
-    things about -- see the arm's own comment. -/
+    things about -- see the arm's own comment.
+
+    The arm also does not consult REX.W, so this lemma states the 64-bit form
+    `h_w` pins and the model's no-REX arm (which neither narrows nor extends) is
+    a different statement again.  `encode_movsx_r64_r8` always sets W, so the
+    third reading is unreachable from this backend and is not modelled. -/
 theorem x86_step_movsx_r64_r8 (s : X86State) (code : Nat → UInt8)
     (m : Nat) (rex modrm : UInt8) (reg rm dst : Nat)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x0f)
@@ -866,14 +874,38 @@ theorem x86_step_movsx_r64_r8 (s : X86State) (code : Nat → UInt8)
     (h_mod : modrm.toNat >>> 6 = 3)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
     (h_rm : modrm.toNat &&& 7 = rm)
-    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    (h_dst : reg + x86_rex_r rex = dst) :
     x86_step s code = some { x86_set_reg s dst
         (x86_sign_extend8 (x86_get_reg s (rm + x86_rex_b rex) &&& 0xFF)) with
         rip := m + 4 } := by
-  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
-        x86_rm_read, x86_rm_write, x86_sign_extend8, x86_rex_b, x86_rex_r,
-        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_reg, h_rm, h_dst,
-        h_dst_lt]
+  -- `x86_set_reg`, `x86_sign_extend8`, `x86_rex_r` and `x86_is_rex` are all
+  -- DELIBERATELY absent from this set, and their absence is most of the proof.
+  -- Every one of them is there to break a rewrite the simplifier needs to do
+  -- first:
+  --
+  --   * `x86_rex_r` unfolds the model's destination index to
+  --     `reg + (if rex.toNat &&& 4 = 0 then 0 else 8)`, so `h_dst` no longer
+  --     matches it, the two sides keep different destinations, and `simp`
+  --     answers by projecting the record update -- a 1100-line goal that is a
+  --     `X86State` literal, naming neither the form nor the field.
+  --   * `x86_set_reg` then unfolds the destination into a 16-arm `match` on a
+  --     symbolic index that cannot reduce, which is the wall B10 is about.  The
+  --     goal survives as two 2000-line structures that differ in a `match`.
+  --   * `x86_sign_extend8` is an `if` on bit 7 of a value that is itself a
+  --     `match` on the source register, so unfolding it splits the goal.
+  --   * `x86_is_rex` turns the `x86_step` dispatch into an `if` on two
+  --     comparisons over a symbolic `rex`, and `simp` splits on that `if`,
+  --     landing in the `x86_step_plain` branch -- which is a different decoder
+  --     with a different length for the 0x0F escape, so the goal becomes about
+  --     an instruction the bytes do not encode.
+  --
+  -- With all four left folded, `h_dst` rewrites the index to `dst` and the two
+  -- sides are the same two applications.  `imul` above needs `x86_set_reg` and
+  -- this does not, because `imul`'s statement puts `x86_get_reg s dst` on both
+  -- sides of the product and the `match` has to come apart for that; this one's
+  -- source index never reaches a `match`.
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_mem_addr, x86_rm_read,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_reg, h_rm, h_dst]
 
 
 /-- `jz rel32` (0F 84 id): taken lands past the displacement. -/

@@ -149,6 +149,20 @@ _FORMS = {
     # nibble- and register-parameterised one nothing would use.
     "movzx_r64_r8": ("x86_step_movzx_rax_al", False,
                      ["rip", "b0", "b1", "b2", "b3"]),
+    # `movsx` gets the GENERAL lemma even though `movzx` above does not, because
+    # the corpus emits two register pairs for it — `48 0f be c0` and
+    # `48 0f be db`, three of the second to one of the first — and one shape
+    # would leave the other with no lemma at all.  That is the whole of the
+    # "generalise when more than one shape is emitted" rule, applied in both
+    # directions on adjacent rows of the same table.
+    #
+    # `dst` is the CONCRETE destination, as for the `rbp + disp8` load: the
+    # model's own index is `reg + x86_rex_r rex`, and `h_dst` rewrites it to
+    # `dst` so both sides name the same register.  `rm` is the SOURCE, extended
+    # by REX.B — the opposite sense, which is B7.
+    "movsx_r64_r8": ("x86_step_movsx_r64_r8", False,
+                     ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
+                      "reg", "rm", "dst"]),
     "alu_rr:add": ("x86_step_add_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:sub": ("x86_step_sub_rr", False,
@@ -242,6 +256,17 @@ _SUCCS = {
     # corrected with it or it becomes a second, stale statement of the same
     # fact.
     "movzx_r64_r8": "{ $s with rax := $s.rax &&& 0xFF, rip := $next }",
+    # The `&&& 0xFF` is what the instruction does and not decoration, exactly as
+    # for `movzx` above: `movsx` reads one BYTE and sign-extends bit 7 of it, so
+    # the successor is `x86_sign_extend8 (get &&& 0xFF)` and not the whole
+    # register.  Writing `rax := $s.rax` here — which is what this table said
+    # once — is a statement about a different instruction, and it is a statement
+    # the model does not make, so the mismatch shows up as a `Type mismatch`
+    # that displays the whole successor record and names neither the form nor
+    # the byte.
+    "movsx_r64_r8":
+        "{ x86_set_reg $s $dst (x86_sign_extend8 "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex) &&& 0xFF)) with rip := $next }",
     "alu_rr:add":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fa).zf, sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
     "alu_rr:sub":
@@ -392,6 +417,16 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # mismatch" on a 14-field record.
         extra_succ = {"$dst": str(dst), "$rm": str(rm), "$reg": str(reg),
                       "$rex": str(rex)}
+    elif form == "movsx_r64_r8":
+        # `REX 0F BE /r`, so the ModRM is `raw[3]` — the same off-by-one as
+        # `imul` and `setcc` above, and for the same reason: an `0F` escape puts
+        # the ModRM one byte further out than a one-byte opcode does.
+        rex, modrm = raw[0], raw[3]
+        reg, rm = (modrm >> 3) & 7, modrm & 7
+        dst = reg + (8 if rex & 4 else 0)
+        extra_args = " %d %d %d %d %d" % (rex, modrm, reg, rm, dst)
+        extra_succ = {"$rex": str(rex), "$reg": str(reg), "$rm": str(rm),
+                      "$dst": str(dst)}
     elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg", "alu_rr:add",
                 "alu_rr:sub", "alu_rr:cmp", "alu_rr:test"):
         rex, modrm = raw[0], raw[2]
