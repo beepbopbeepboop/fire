@@ -6534,7 +6534,36 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         # must be recorded for ANY ret_type — consumers resolve the boxed
         # handle back via _actual_types. Keyed on the callee having a
         # recorded return elem type, which only true container returns get.
-        gen._elem_types[t] = gen._return_elem_types[fname_raw]
+        #
+        # `_return_elem_types` holds ONE answer per function, so it is the
+        # JOIN of every call site's element type, and a function called with
+        # two different ones gives every call site the wrong one. The one
+        # shape that can answer per CALL is the one whose result IS an
+        # argument (`def ident(x): return x`): there the argument's own
+        # recorded element type is not an inference about the callee at all,
+        # it is a fact about the value that came in. Membership in
+        # `_elem_types`, not `_elem_of` — an `int64_t` there means "recorded
+        # as integers" and is as much an answer as `char *`, and only the
+        # membership test distinguishes it from "not recorded" (which is
+        # `_elem_of`'s answer for both).
+        #
+        # Measured on the shape below, both pipelines: `ident` over
+        # `[1, 2, 3]` and over `["a", "b"]` in one program made
+        # `list(ident([1, 2, 3]))` print five garbage bytes out of a
+        # three-element list, and `sorted(ident([3, 1, 2]))` return
+        # `[3, 1, 2]` — the string comparator saw three values below the
+        # pointer window, called them all equal, and left the list alone.
+        _pt_idx = getattr(gen, '_passthrough_param_idx', {}).get(fname_raw)
+        _pt_arg = None
+        if _pt_idx is not None and _pt_idx < len(arg_pairs):
+            _pt_at, _pt_av = arg_pairs[_pt_idx]
+            if _pt_at in ('MojoList *', 'MojoSet *', 'MojoDict *') \
+                    and _pt_av in gen._elem_types:
+                _pt_arg = gen._elem_types[_pt_av]
+        if _pt_arg is not None:
+            gen._elem_types[t] = _pt_arg
+        else:
+            gen._elem_types[t] = gen._return_elem_types[fname_raw]
         if ret_type == 'MojoList *':
             gen._actual_types[t] = ret_type
         elif ret_type in ('int', 'int64_t'):

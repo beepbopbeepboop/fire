@@ -1466,6 +1466,21 @@ class GimpleGen:
         self._global_dict_callable_ret: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
+        # Which PARAMETER each function's result IS, for the functions whose
+        # whole body is `return <param>` (`ident`, `passthrough`). Their
+        # return ELEMENT type is then a property of the CALL, not of the
+        # callee: `_return_elem_types` can hold one answer per function, and
+        # `ident` called with both `[1, 2, 3]` and `["a", "b"]` has one answer
+        # for two different element types — the string one wins, and every
+        # other call site then reads its int slots through
+        # `mojo_list_get_str`. Measured: `list(ident([1, 2, 3]))` printed five
+        # garbage bytes out of a three-element list, and `sorted(ident([3,
+        # 1, 2]))` handed `[3, 1, 2]` to the string comparator, which saw
+        # three values below the pointer window, called them equal, and
+        # returned the list UNSORTED. Keyed by function name, value is the
+        # parameter index. See
+        # bugs/CODEGEN_return_element_type_is_unified_across_call_sites.md.
+        self._passthrough_param_idx: dict[str, int] = {}
         # Functions whose `return` statements produce containers of MORE THAN
         # ONE kind (`if k: return names` / `return {x for x in names}`). Such
         # a function's inferred return type is the int64_t BOX — there is no

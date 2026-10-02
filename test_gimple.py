@@ -9163,6 +9163,117 @@ print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_a_forwarded_string_argument_keeps_its_type():
+        """An unannotated parameter that only FORWARDS its arguments must
+        still be typed from what its own callers pass.
+
+        `bugs/CODEGEN_string_arg_type_lost_across_forwarding_hop.md`'s repro:
+
+            def sink(x, y, z): return '%s and %s' % (x, y)
+            def mid(a, b):     return sink(a, b, None)
+            def go():           return mid('readme', 'b')
+
+        `mid`'s body gives `_infer_param_types` nothing at all (`a` and `b`
+        are only handed to another unannotated callee), and `sink`'s ONE call
+        site passes exactly those names — so the observation of `sink`'s
+        parameters was silence, they kept the `int64_t` default, and
+        `'%s'` formatted the boxed `char *` as a decimal address:
+
+            CPython:  readme and b
+            compiled: 4301506648 and 4301506656      (exit 0)
+
+        A silent wrong answer, not a refusal. The fix is in
+        `_gmi_apply_call_site_param_evidence`: a parameter with NO
+        use-derived evidence (`cur is None` — the pass records an entry only
+        when the body says something) is not contradicted by anything, so
+        unanimous literal call sites are believed, which is what lets the
+        existing cross-call observation see `char *` at `sink`'s call site.
+
+        Every line is CPython-comparable, and both pipelines are run because
+        the inference is whole-program rather than per-function. The
+        `pct(5)` line is in the program on purpose: a parameter whose call
+        sites are a string AND an int must still print both correctly, which
+        is the case a too-eager "every literal wins" fix would break.
+        """
+        global _PASS, _FAIL
+        name = "a_forwarded_string_argument_keeps_its_type"
+        src = '''\
+def sink(x, y, z):
+    return '%s and %s' % (x, y)
+
+def mid(a, b):
+    return sink(a, b, None)
+
+def go():
+    return mid('readme', 'b')
+
+def pct(x):
+    return '%s' % x
+
+def show(x):
+    print(x)
+
+def relay(x):
+    return show(x)
+
+print(go())
+print(pct('s'))
+print(pct(5))
+relay('hi')
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'forwarded.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'fwd_{mode}.c')
+                exe = os.path.join(td, f'fwd_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_list_sort_in_a_method_body_is_gimple_legal():
         """`self.<field>.sort()` inside a METHOD must compile.
 
@@ -9630,6 +9741,7 @@ print(run('x/y.txt'))
     test_paren_name_vs_one_tuple_for_target_differ()
     test_walk_ast_dataclass_cache_is_transparent()
     test_scalar_arity_min_max_params_are_not_containers()
+    test_a_forwarded_string_argument_keeps_its_type()
     test_list_sort_in_a_method_body_is_gimple_legal()
     test_dict_union_right_operand_is_converted_at_runtime()
     test_next_inside_for_over_same_iterator_is_one_ahead()
