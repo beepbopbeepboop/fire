@@ -1,163 +1,149 @@
 # A comptime SPECIALIZATION defeats both frame-escape refusals, and the bare spelling beside it is correct
 
-## Status
+## Status: the MECHANISM is fixed and measured; two of the three reds in the file
+## remain, and each one's ACTUAL cause is now identified and is not a
+## specialization defect any more
 
-OPEN — found 2026-10-01 while registering `test_formal_receiver_position.py` for
-the test estate (it was named by no spec and in no bucket; it is now
-`formal-receiver-position`, in `proofs`, declared red with `expect=`). **2 of 12
-cases fail, on arm64.** The root cause is located and the fix is measured; it is
-NOT applied here because `formal/model.py` and `formal/build.py` are another
-worker's claimed area (`construct:receiver-position-family`,
-`construct:frame-address-as-value`). See "The fix" below — it is two
-`isinstance(..., F.IdentExpr)` guards, and each is a place where the tree
-already says in a comment that the guard is the wrong recogniser.
+The two guards named below are in the tree. What they fixed is real and measured:
+a specialized call and its bare twin are ONE call, and the two frame ends had
+disagreed about that. What they do NOT do is make
+`test_formal_receiver_position.py` green, and the reason is worth writing down
+because the original filing's last paragraph predicted the opposite.
 
-## What is believed
+    $ python3 test_formal_receiver_position.py
+    formal receiver position: PASS=11 FAIL=3
+      FAIL refuse_a_specialized_parameter_returned            (expected)
+      FAIL refuse_a_dotted_specialized_callee_names_it        (not in the filing)
+      FAIL refuse_a_value_only_callee_through_a_specialization (different message)
 
-`f[T](...)` is a comptime specialization, and it names the SAME function `f`
-does while contributing no call-time argument of its own. `formal/model.py`
-`call_callee_name` exists to be the single recogniser for that, and its own
-docstring gives the measurement that makes it safe:
+`formal-receiver-position` in `tools/suite.py` still carries an `expect=` for this
+doc and forgives them; its reason string says "2 of 12" and the file now has 3 of
+14, so the string is stale — **that edit is the integrator's, and this worker did
+not touch `tools/suite.py`.** All three cases assert a refusal; none of the three
+BINDS anything wrong any more.
 
-> `def f[type: Int](x: Int, y: Int)` called as `f[1](3, 7)` returns 307, with
-> `type`=1, `x`=3 and `y`=7, and each of the three read back correctly on its
-> own.
+---
 
-So a specialized call and its bare twin are the same call, and any analysis that
-answers a question about one and not the other has a bug.
+## 1. What landed
 
-**Two places in the frame machinery did exactly that**, and they are the two ends
-of the same use-after-free:
+Two `isinstance(..., F.IdentExpr)` guards replaced with `M.call_callee_name`, in
+the two places the filing named, and each is now the tree's single recogniser for
+"which function does this call name":
 
-1. **`formal/model.py` `struct_returned_frame_sites`** reserved the caller's
-   block with `isinstance(node.func, F.IdentExpr)` and `node.func.name`. A
-   `SubscriptExpr` callee is not an `IdentExpr`, so `stash[1](0, r)` reserved
-   **no block**. The callee is the side that COPIES, and it copies into the
-   word it was handed — which was an ordinary argument register — so the
-   returned address named a register, and `main`'s `stash[1](0, r).a` read
-   eight bytes from wherever that register pointed.
+1. **`formal/model.py::struct_returned_frame_sites`** — the CALLER's half, which
+   reserves the block a returned frame has to land in. It read
+   `node.func.name`, so `stash[1](0, r)` reserved **no block**: the callee is the
+   side that COPIES, it copied into the word it was handed — an ordinary argument
+   register — and `main`'s `stash[1](0, r).a` read eight bytes from wherever that
+   register pointed.
+2. **`formal/build.py::_frame_return_status`** — the CALLEE's half, which
+   classifies what a function gives back. A specialized call missed, so the
+   `return` fell through to `words.append(...)` and the function was classified
+   `_RETURN_WORD` — "no path returns a frame address". That one word is load
+   bearing three ways: `returns_frame[fn.name]` is never set (which is (1) again
+   from the other side), and `fn._image_returns_frame` has no entry for it, so an
+   ENTRY function returning a frame got no `entry_frame_return_refusal` at all.
 
-2. **`formal/build.py` `_frame_return_status`** classified a `return` whose
-   value is a call with `isinstance(value.func, F.IdentExpr)` and
-   `value.func.name`. A specialized call missed, so the `return` fell through
-   to `words.append(...)` and the function was classified `_RETURN_WORD` — the
-   "no path returns a frame address" answer. That one word is load-bearing for
-   three further things: `returns_frame[fn.name]` is never set, so no caller
-   reserves a block (which is (1) again, from the other side); and
-   `fn._image_returns_frame` has no entry for it, so an ENTRY function that
-   returns a frame gets no `entry_frame_return_refusal` at all.
-
-The fixpoint in `formal/build.py` is not implicated and in fact makes the
-inconsistency visible: `_frame_receivers` already reads
-`M.call_callee_name(node.func)` for its own call edges, under the comment
-
-> "One recogniser, four readers (`_check_frame_escapes` and
-> `_check_holder_agreements` as well, and the returned-frame edge above),
-> because the four have to agree about which function a call is."
-
-Four readers were named there and two of the four — the ones above — were not
-using it. The holder fixpoint KNEW `stash` returns a frame while the
-block-reserver did not, and the two answers were the two ends of a
+The fixpoint was never implicated, and it is what made the inconsistency visible:
+`_frame_receivers` already read `M.call_callee_name(node.func)` for its own call
+edges, under a comment naming "one recogniser, four readers" — and two of the
+four were not using it. The holder fixpoint KNEW `stash` returned a frame while
+the block-reserver did not, and the two answers were the two ends of a
 use-after-free.
 
-## What was run, and what it saw
+## 2. The measurement that says the mechanism is fixed
 
-Each case measured on its OWN beside its bare-spelling twin, same source, arm64,
-this tree. The twins are the measurement: they are the same program with the
-brackets removed, so any difference is the specialization and nothing else.
+Each case measured on its OWN beside its bare-spelling twin, same source, arm64:
 
-| program | bare spelling | specialized |
-|---|---|---|
-| `stash` returns its `r` parameter, `main` reads `.a` off the result | **7** (correct) | builds, **exit 0** (source says 7) |
-| `ask` returns `origin_of(r)`, `main` returns that | **refused** by name, correctly | builds, **exit 112** — a stack address read as an int |
+| program | bare spelling | specialized, before | specialized, after |
+|---|---|---|---|
+| `ask` returns `origin_of(r)`, `main` returns that | REFUSED | **built, exit 112** (a stack address read as an int) | REFUSED, **byte-identical message to the twin** |
+| `stash` returns its `r` parameter, `main` reads `.a` | built | built, exit 0 (source says 7) | built — **the twin builds too** |
+| `Box.run[1](0, r)`, `Box` a type name | — | refused (read-before-store, a symptom) | refused (read-before-store, a symptom) |
 
-```
-$ python3 test_formal_receiver_position.py
-  FAIL  refuse_a_specialized_parameter_returned: --backend=arm64 BUILT a
-        construct that has no representation (expected a refusal naming
-        'returned from a function that did not create it')
-  FAIL  refuse_a_value_only_callee_through_a_specialization: --backend=arm64
-        BUILT a construct that has no representation (expected a refusal
-        naming 'which is lowered as an operation on a VALUE')
-formal receiver position: PASS=10 FAIL=2
-```
+The `ask` row is the fix: the two architectures and the two spellings now agree,
+which is the anti-rot the filing wanted. The `stash` row is why that is not the
+whole story — see §3.
 
-Both images EXIT 0 or exit with a stack address. That is the shape these
-refusals exist for: `bugs/FORMAL_frame_receiver_handoff.md` §D4 records the same
-program with the position check lifted answering "10 on arm64 and 0 on x86-64
-where the source says 7 — a use-after-free, and the two architectures
-disagreeing about what the reused bytes held", and it names the fix as exactly
-this: make the recogniser see the specialization.
+## 3. Why two reds remain, and they are not specialization defects
 
-Confirmed from the analysis side, which is what makes the mechanism rather than
-a guess. With `_prepare_functions` run directly on the `origin_of` program:
+**`refuse_a_value_only_callee_through_a_specialization` expects the WRONG
+refusal for this tree, and did before this change too.** Its needle is
+`"which is lowered as an operation on a VALUE"` (the `origin_of` value-only-callee
+refusal). Measured on both spellings of the same source on this tree:
 
 ```
-ov_plain:  main status=frame  returns_frame=R
-ov_spec:   main status=word   returns_frame=None     <-- the misclassification
+build: main returns a frame address, and the returned-frame convention needs a
+caller to reserve a block and pass its address — and main is this image's
+ENTRY, so its caller is the C runtime, which passes no such word. …
 ```
 
-and on the `stash` program, both spellings agree that `stash` returns a frame
-(`status=frame`), so the divergence in (1) is downstream of that and is purely
-the block reservation.
+Identical for `ask(0, r)` and `ask[1](0, r)`. So the entry-return refusal now runs
+BEFORE the value-only-callee one, and it fires first for both spellings. Nothing
+about the specialization is wrong any more; the expectation names a construct the
+order of the checks no longer reaches. The check ORDER inside
+`check_module_symbols` is `bugs/FORMAL_frame_receiver_handoff.md`'s subject and is
+claimed (`bug:FORMAL_frame_receiver_handoff`, formal3-4-r2), so it is not moved
+here. **The needle should not simply be rewritten to the entry-return message:
+that would stop the case exercising the `origin_of` check at all, which is the
+thing the case exists for. Whichever way it is settled, the fix is in the ORDER.**
 
-## Why it matters
+**`refuse_a_specialized_parameter_returned` was never going to be fixed by these
+two guards, and the filing says so.** Its needle is `"returned from a function
+that did not create it"`, and the refusal for a RECEIVED holder that is returned
+is deliberately still parked — `FORMAL_frame_receiver_handoff.md` §D4 records the
+decision and names the two channels that have to become refusals first. Measured
+here: `stash(0, r).a` and `stash[1](0, r).a` BOTH build, on both spellings, so the
+specialization is not what distinguishes them and the case cannot be closed by a
+recogniser. That is a use-after-free still open on this path, and it is the
+handoff doc's, not this one's.
 
-These are the LAST TWO cases in a file whose other ten pass, and they are the
-two that assert a refusal. So the file's own coverage is: this construct is
-checked, and on the specialized spelling the check does not fire and the program
-is wrong.
+**`refuse_a_dotted_specialized_callee_names_it` was red before this change and is
+red for a reason the filing did not name.** `Box.run[1](0, r)`, where `Box` is a
+type name, is lifted by `formal/build.py::_rewrite_method_calls` to
+`Box_run[1](Box, 0, r)` — the TYPE NAME prepended as the receiver argument — and
+the read-before-store analysis then reports `Box`. So the construct the case wants
+refused (a dotted specialization, which `call_callee_name` deliberately answers
+`None` for) never reaches the check that would refuse it: the lift removes the
+dotted spelling first. That is the fifth shape in
+`bugs/FORMAL_method_call_on_a_subscripted_receiver.md` §"The NEXT blocker for
+three of these files", which is filed, measured, and claimed
+(`bug:FORMAL_method_call_on_a_subscripted_receiver`, formal3-5). Not moved here.
 
-The wider shape is that `f[T](...)` is not an exotic spelling on this path. It
-is how a comptime-parameterized generic is CALLED, and `formal-frame-by-value`
-and `formal-comptime-mlir` both landed constructs that produce them. Every
-`isinstance(..., F.IdentExpr)` guard on a call's callee is a candidate, and this
-tree has a list of them — `formal/model.py` lines around 10507, 11138, 11764,
-11801, 12280, 12282, 12452, 12692, 12795 (plus 12907, which is the one fixed
-here) and 11400/11448 in the diagnostic spellers, where the effect is a
-message that names `?` instead of the function. The diagnostic ones are
-cosmetic; the two that decide a REPRESENTATION are not, and those are the pair
-above.
+## 4. The wider list, still true
 
-## The fix
+Every `isinstance(..., F.IdentExpr)` guard on a call's callee is a candidate, and
+this tree has a list of them — `formal/model.py` lines around 10507, 11138,
+11764, 11801, 12280, 12282, 12452, 12692, 12795 (plus 12907, which is the second
+guard above) and 11400/11448 in the diagnostic spellers, where the effect is a
+message that names `?` instead of the function. The diagnostic ones are cosmetic;
+the two that decided a REPRESENTATION are the pair above, and they are fixed.
 
-Two guards, both already measured green on this tree and both reverted from my
-branch because the area is claimed. Applying both makes the four measurements
-above agree: `spec` answers **7** (was 0) and `ov_spec` is **refused with the
-same message as `ov_plain`** (was building with exit 112).
+## 5. Coverage cost of the fix, which is not zero and is not mine to measure
 
-1. `formal/model.py` `struct_returned_frame_sites`, in the `for node in
-   iter_nodes(...)` loop — replace
+Both guards make the analysis strictly MORE refusing, which is the right direction
+and is also the expensive one: a specialized call of a frame-returning function
+now reserves a block it did not, and a specialized `return f[T](r)` is now
+classified as a frame return. No corpus count is claimed here, because measuring
+it is `tools/formal_sweep.py` and that is the integrator's job over this and every
+other branch. The suites that cover the machinery are green:
+`test_formal_returned_frame.py` 35/35, `test_formal_frame_return_overloads.py`
+5/5, `test_formal_recursion_contract.py` OK, `test_formal_value_model.py` 19/19,
+and `test_formal_run.py`'s five `ret_frame_*` rows.
 
-   ```python
-   if not isinstance(node, F.CallExpr) \
-           or not isinstance(node.func, F.IdentExpr):
-       continue
-   st = returns_frame(node.func.name)
-   ```
+## 6. What still has to happen
 
-   with a `M.call_callee_name(node.func)` read (None ⇒ `continue`).
-
-2. `formal/build.py` `_frame_return_status`, in the `return`-value walk —
-   replace `isinstance(value, F.IdentExpr)` + `value.func.name` with
-   `M.call_callee_name(value.func)`.
-
-Both sites want the same comment, and the tree's own wording for it is at
-`formal/build.py:2228` ("`model.call_callee_name`, and NOT `node.func.name`: a
-comptime specialization `f[T](r)` names the same function `f` does, contributes
-no call-time argument of its own, and so lands the frame on `f`'s parameter at
-exactly the position the bare spelling would"). Note that the comment there
-already explains WHY — which is the evidence that the two guards above are
-oversights rather than decisions.
-
-**Then**: with both applied, `refuse_a_specialized_parameter_returned` is still
-red, and for a good reason worth reading before changing it.
-`bugs/FORMAL_frame_receiver_handoff.md` §D4 and the "Lifting the return refusal
-for a received holder is sound, and is not done here" paragraph after it say
-the return refusal for a RECEIVED holder is deliberately still on, and that
-lifting it needs §11's two channels to be refusals first. So that case's
-expectation is correct as written and the fix above is what it is waiting for;
-the second case (`refuse_a_value_only_callee_through_a_specialization`) will
-then be refused with the SAME message as its bare twin and goes green, which is
-the anti-rot working: both `expect=` markers report themselves as FAILURES the
-moment this lands, and `formal-receiver-position` drops them in that commit.
+1. **Move the entry-return refusal after the value-only-callee refusal**, or
+   decide that a frame address reaching `origin_of` is better reported as the
+   entry problem it also is. Either way the needle in
+   `refuse_a_value_only_callee_through_a_specialization` becomes true rather than
+   edited. Handoff doc's write set.
+2. **`_method_call_target` must not lift `Type.m[T](...)` with the type name as
+   the receiver.** Either the dotted specialization is left for
+   `multi_index_refusal_for` (which is what the case expects, and what
+   `call_callee_name`'s `None` already implies), or `_receiverless_methods`
+   learns to answer for a static method. `FORMAL_method_call_on_a_subscripted_receiver.md`'s.
+3. **The received-holder return refusal** stays parked until the two channels it
+   waits on are refusals. `FORMAL_frame_receiver_handoff.md`'s.
+4. **`tools/suite.py`'s `expect=` reason** should be reworded to the 3-of-14 with
+   the three causes. Integrator's file.

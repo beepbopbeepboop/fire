@@ -14538,8 +14538,20 @@ def struct_returned_frame_sites(fn, structs_by_name, returns_frame) -> dict:
         return {}
     out, offset = {}, 0
     for node in iter_nodes(getattr(fn, "body", None)):
-        if not isinstance(node, F.CallExpr) \
-                or not isinstance(node.func, F.IdentExpr):
+        if not isinstance(node, F.CallExpr):
+            continue
+        # `call_callee_name`, NOT `node.func.name`, and the two spellings are
+        # ONE call: a comptime specialization `f[T](r)` names the same function
+        # `f` does and contributes no call-time argument of its own, so it lands
+        # the frame on `f`'s parameter at exactly the position the bare spelling
+        # would. Reading only the bare one is what made a specialized call
+        # reserve NO block: the callee is the side that COPIES, it copied into
+        # the word it was handed — an ordinary argument register — and the
+        # caller's `f[T](0, r).a` then read eight bytes from wherever that
+        # register pointed. Measured on arm64 beside its bare twin, same source:
+        # the twin answers 7, the specialization built and exited 0.
+        callee = call_callee_name(node.func)
+        if callee is None:
             continue
         # `q = make()`, `var q = make()` and the annotated `q: Point = make()`
         # are the same binding: an annotated target is still an AssignStmt
@@ -14553,7 +14565,7 @@ def struct_returned_frame_sites(fn, structs_by_name, returns_frame) -> dict:
         # exactly the lifetime this block is sound for) and
         # `frame_returning_predicate`'s contract is two arguments.
         name = frame_binding_target(node)
-        st = returns_frame(node.func.name, name)
+        st = returns_frame(callee, name)
         if st is None:
             continue
         block = struct_frame_block_bytes(st, structs_by_name)

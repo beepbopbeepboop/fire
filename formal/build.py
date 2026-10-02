@@ -4692,11 +4692,29 @@ def _frame_return_status(fn, holders, by_name, returns_by_name):
             if cands:
                 frames.append((cands, value.name))
                 continue
-        if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
-            st = returns_by_name.get(value.func.name)
-            if st is not None:
-                frames.append(([st], f"{value.func.name}()"))
-                continue
+        if isinstance(value, F.CallExpr):
+            # `M.call_callee_name`, and NOT `value.func.name`: a comptime
+            # specialization `f[T](r)` names the same function `f` does,
+            # contributes no call-time argument of its own, and so lands the
+            # frame on `f`'s parameter at exactly the position the bare
+            # spelling would. Reading only the bare one made this `return` fall
+            # through to `words.append(...)` and classified the function
+            # `_RETURN_WORD` — "no path returns a frame address" — and that one
+            # word is load-bearing three ways: `returns_frame[fn.name]` is never
+            # set, so no caller reserves a block
+            # (`model.struct_returned_frame_sites`, the other end of the same
+            # use-after-free); and `fn._image_returns_frame` has no entry for
+            # it, so an ENTRY function that returns a frame gets no
+            # `entry_frame_return_refusal` at all. Measured on arm64 beside its
+            # bare twin, same source: the twin is REFUSED by name, the
+            # specialization built and exited 112 — a stack address read as an
+            # int.
+            callee = M.call_callee_name(value.func)
+            if callee is not None:
+                st = returns_by_name.get(callee)
+                if st is not None:
+                    frames.append(([st], f"{callee}()"))
+                    continue
         words.append(_expr_spelling(value))
     if not frames:
         return _RETURN_WORD, None, None
