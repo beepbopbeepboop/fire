@@ -5,6 +5,50 @@ Found 2026-09-27 while closing
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
+## Status (2026-10-01 — re-measured, the compiled half is STILL exactly as the entry below describes; not attempted)
+
+Confirmed unchanged on this tree, from the doc's own minimal repro
+(`deco(f) -> 99`, `@deco def step`, then `print(step)` / `print(step(7))`):
+
+| | result |
+|---|---|
+| CPython | `99`, then `TypeError: 'int' object is not callable` |
+| `fire.py run` | `99`, then the same `TypeError` — the interpreter half really is fixed |
+| `fire.py build` + run | the UNDECORATED result — `8` for `step(7)` |
+
+**Not attempted this session, and the entry below's analysis of why still
+stands.** This is feature-sized (a decorated `def` is a module-level
+REBINDING, and every name-keyed table — `_func_csym`'s mangled-key
+mirror, `_effective_param_types`, `_overload_suffix` — is keyed on the
+bare name), and it is a SILENT wrong answer rather than a refusal.
+
+**One thing the entry below's "Next bounded action" does not mention, and
+that its own proposed fix has to contend with.** It proposes lifting
+`_lower_IdentExpr`'s closure-value branch to module scope so a decorated
+function becomes a module-level variable. Measuring the neighbouring
+machinery for other bugs this session turned up a constraint worth
+recording before anyone attempts it:
+
+- The free-function scalar-observation pass runs BEFORE any function's
+  parameters are refined, so a parameter forwarded straight through a hop
+  is recorded as no-evidence and never re-examined — measured, with the
+  evidence, in `CODEGEN_string_arg_type_lost_across_forwarding_hop.md`.
+  A decorated `def` is exactly a module-level rebinding feeding calls that
+  resolve through those same tables, so whatever makes the decoration
+  visible has to survive that ordering.
+- `_func_csym` currently answers only for names it can resolve to a
+  module-level DEFINITION or an import. A name bound to a VARIABLE is not
+  something it can answer for at all — the same "the bare-name tables
+  cannot see it" shape, measured in
+  `CODEGEN_bare_import_module_qualified_call_answers_zero.md`, which is
+  the failure a decorated name runs into.
+
+Neither is part of this bug; both are prerequisites or neighbouring
+hazards for whatever makes the decoration visible.
+
+Doc kept open. The interpreter half remains fixed; the compiled half
+remains the work.
+
 ## Status (2026-09-30 — compiled half still OPEN; re-measured, not attempted)
 
 Re-measured on this tree, so the numbers below are current rather than
