@@ -2566,12 +2566,12 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         # call site reads it as exactly that: it falls through to the plain
         # struct-constructor path and lowers `Struct[Args](...)` against the
         # RAW TEMPLATE, whose type parameters are unbound and so typed
-        # `int64_t`. Measured on the stdlib's own `std/` subtree (252 files,
-        # 2026-10-02): that fall-through is LOAD-BEARING — turning it into a
-        # refusal, which is what this used to be able to do, took six
-        # currently-compiling files to a hard failure (`List[String]` in
-        # std/os/os.mojo, `Array[Int, 3]` in std/python/_cpython.mojo,
-        # `SIMD[...]` in std/simd.mojo, and three more). So the fall-through
+        # `int64_t`. The obvious fix — raise instead of swallowing — was
+        # measured and it is wrong. Over the stdlib's own `std/` subtree (252
+        # files, 2026-10-02) it takes six currently-compiling files to a hard
+        # failure, among them `List[String]` in std/os/os.mojo and
+        # `Array[Int, 3]` in std/python/_cpython.mojo: the elaborator's bound
+        # check rejects types that genuinely conform. So the fall-through
         # stays, and what changed is what happens to the RESULT.
         #
         # The reason is recorded on the generator, which is what makes the
