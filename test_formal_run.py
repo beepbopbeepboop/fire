@@ -10427,11 +10427,13 @@ EQ_DISPATCH_CASES = [
     # and 5 on x86-64.  That sentence stopped being true when
     # `formal-module-globals` gave a written module-level name a `__DATA` slot,
     # and the row was left asserting a refusal the backend no longer owes —
-    # red on `master` as well as on the branch that found it, which is what
-    # `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
-    # recorded before this row was decided.  Option 1 of that doc's two, and the
-    # one the tree's behaviour already implements: the program is RIGHT, so the
-    # row asserts the number.
+    # red on `master` as well as on the branch that found it.  That was recorded
+    # in a `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
+    # doc, now deleted with the row it was about; the decision and its
+    # measurement are in `bugs/FORMAL_module_state_no_storage.md`'s "Re-measured
+    # 2026-10-02" section, which named this doc's owner as the decider.  Option 1
+    # of that doc's two, and the one the tree's behaviour already implements:
+    # the program is RIGHT, so the row asserts the number.
     #
     # 12 is CPython's: `G` goes 5 -> 6 and both reads see 6.  Measured on both
     # backends on this tree, and the same number from `python3`.  The exit
