@@ -18,6 +18,7 @@ broken one differ in load-command details, and this is the test that notices.
 import argparse
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -10331,7 +10332,82 @@ def check_comptime_alias_census(verbose=False):
         passed += 1
         if verbose:
             print(f"  PASS  census: {name}")
-    return passed, failures
+    for detail in check_emitter_builtin_agreement():
+        failures.append(detail)
+    return passed - len([f for f in failures if f.startswith("emitter-builtins")]), \
+        [f for f in failures if not f.startswith("emitter-builtins")]
+
+
+# The names a backend compiles ITSELF, asked of `formal.model` and of nothing
+# else — and asked because three places used to have to agree about them and
+# did not have to.
+#
+# `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 measured the consequence: with
+# the model's set and an emitter's own `if name == …` chain disagreeing, a name
+# the emitter lowers is one the model does not know is a callee, so
+# `print(p)` builds, runs, exits 0 and prints the frame's own ADDRESS as a
+# decimal — 6102330608 on arm64, 13027830976 on x86-64, a different number on
+# every run. `byref_refuse_print_of_a_frame` is the end-to-end half; this is the
+# half that says the table and the dispatch cannot drift, because there is only
+# one table.
+#
+# The emitter sources are READ rather than imported-and-called, because the fact
+# under test is what each dispatch chain spells. A source that names a builtin
+# the table does not have is a name the backend compiles and the model will not
+# recognise; a table entry no emitter dispatches is the reverse, and is a dead
+# entry that would make `emitter_lowers` answer yes for a name that reaches a
+# symbol nothing defines.
+def check_emitter_builtin_agreement():
+    """Failures for `model.EMITTER_BUILTINS` disagreeing with the two emitters."""
+    m = _TYPE_VALUE_MODEL
+    import os
+    failures = []
+    here = os.path.dirname(os.path.abspath(__file__))
+    for backend in ("arm64_codegen.py", "x86_64_codegen.py"):
+        path = os.path.join(here, "formal", backend)
+        with open(path) as f:
+            src = f.read()
+        # Each `if not is_extern_call and name == "<x>":` is a name the dispatch
+        # spells itself; each is required to be in the table. `range` is in the
+        # table and spelled, so the two checks below are the same direction and
+        # the second is what says no table entry is dead.
+        for spelled in re.findall(
+                r'if not is_extern_call and name == "(\w+)":', src):
+            if spelled not in m.EMITTER_BUILTINS:
+                failures.append(
+                    f"emitter-builtins: {backend} dispatches {spelled!r} and "
+                    f"model.EMITTER_BUILTINS does not have it, so a frame "
+                    f"address handed to it would be answered by the "
+                    f"FRAME_VARIADIC path as an unbound name")
+        dispatched = set(re.findall(
+            r'if not is_extern_call and (?:name == "(\w+)"|'
+            r'm\.emitter_lowers\(name\)):', src))
+        if not dispatched:
+            failures.append(
+                f"emitter-builtins: {backend} has no builtin dispatch at all — "
+                f"the chain this reads was renamed or removed")
+        # `M.emitter_lowers(name)` gates the two `_emit_*` calls the table names,
+        # and each named method must be one the file defines, or the table would
+        # be routing a name to a method that is not there.
+        for suffix in set(m.EMITTER_BUILTINS.values()):
+            if suffix == "range_list":
+                continue        # `range` is spelled, not dispatched
+            if f"def _emit_{suffix}(" not in src:
+                failures.append(
+                    f"emitter-builtins: {backend} does not define "
+                    f"_emit_{suffix}, which EMITTER_BUILTINS names")
+    variadic = set(m.FRAME_VARIADIC_BUILTIN_CALLS)
+    if not variadic <= set(m.EMITTER_BUILTINS):
+        failures.append(
+            f"emitter-builtins: FRAME_VARIADIC_BUILTIN_CALLS has "
+            f"{sorted(variadic - set(m.EMITTER_BUILTINS))}, which no emitter "
+            f"lowers, so a frame address handed to one is answered as an "
+            f"unbound name instead of a wrong category")
+    if "print" not in variadic:
+        failures.append(
+            "emitter-builtins: `print` left FRAME_VARIADIC_BUILTIN_CALLS, which "
+            "is the refusal `byref_refuse_print_of_a_frame` measures")
+    return failures
 
 
 # The four rules `model.struct_init_field_types` is, asked of `formal.model` and

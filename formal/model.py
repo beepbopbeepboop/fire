@@ -6085,6 +6085,51 @@ BUILTIN_FUNCTIONS = {
     "debug_assert": "debug_assert",
 }
 
+# The builtins each backend's CALL EMITTER intercepts by bare name and lowers
+# itself, rather than leaving to a module symbol. This is the table
+# `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 says would "retire" the
+# duplication: "a single published `model.EMITTER_BUILTINS` that both emitters'
+# `if name == …` chains and `FRAME_VARIADIC_BUILTIN_CALLS` read would make the
+# three agree by construction".
+#
+# They did not agree by construction before, and the disagreement is not
+# hypothetical — it is a refusal that names a callee wrongly. A name here is
+# lowered by the backend, so handing it a FRAME ADDRESS is a wrong-category
+# argument rather than an unbound name, and `FRAME_VARIADIC_BUILTIN_CALLS` is
+# the set that says so. A name in ONE emitter's `if` chain and not in that set
+# is a callee the emitter compiles and the model does not know about, which is
+# exactly the shape that produced `print(p)` building, running, exiting 0 and
+# printing the frame's own address as a decimal (6102330608 on arm64,
+# 13027830976 on x86-64, a different number on every run).
+#
+# `{name: emitter method suffix}`, because both emitters name the methods
+# identically (`_emit_len`, `_emit_print`, …) and the one that does not is a
+# dispatch this table cannot express. `range` is spelled `_emit_range_list`
+# because that emitter takes the ARGS LIST rather than the CallExpr, which is
+# the same asymmetry `_emit_len` and `_emit_print` do not have; it is a
+# property of the emitter, not of the builtin, so it lives here rather than in
+# a caller that has to know it.
+#
+# `open` is NOT here: it is in `BUILTIN_FUNCTIONS` as `file_open`, because
+# `open` is also a C library entry point and the two spellings are genuinely
+# different facts. A reader asking "does the backend compile this" wants the
+# BUILTIN half, and `BUILTIN_FUNCTIONS` plus this table between them are the
+# whole answer.
+EMITTER_BUILTINS = {
+    "range": "range_list",
+    "len": "len",
+    "print": "print",
+}
+
+
+def emitter_lowers(name: str) -> bool:
+    """True when a backend's call emitter lowers a call to `name` ITSELF.
+
+    The one question `FRAME_VARIADIC_BUILTIN_CALLS` and the two emitters' `if
+    name == …` chains all have to answer the same way, asked here once.
+    """
+    return name in EMITTER_BUILTINS
+
 
 def builtin_function(name: str):
     """How a call to the bare name `name` lowers, or None if it is not one of
@@ -6472,13 +6517,20 @@ FRAME_C_VALUE_CALLS = {
 #
 # ONE name, and deliberately a set rather than a general rule: a builtin the
 # backend does not compile must NOT be answered from here, and the only honest
-# test for "the backend compiles this" today is a name someone wrote down after
-# measuring it.  Every emitter has its own hard-coded branch (`arm64_codegen.py`
-# and `x86_64_codegen.py` each spell `if name == "print"`), so a table here is
-# the second place that fact lives — see
-# `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 for what would retire it.
+# test for "the backend compiles this" is no longer a name someone wrote down
+# after measuring it — it is `EMITTER_BUILTINS` above, which both emitters' own
+# `if name == …` chains read, so the three places that have to agree now do.
+#
+# DERIVED from that table rather than written out, because a set written out
+# beside the table it is a subset of is the second place the fact lives wearing
+# a third name. It is also NARROWER than `EMITTER_BUILTINS` on purpose: `len` and
+# `range` take a container and an integer, so handing one a frame address is a
+# LAYOUT question with its own refusal, while what is left here is the set whose
+# members FORMAT whatever they are handed. `emitter_lowers` is the wider
+# question; this is the variadic-over-conversions half of it.
 FRAME_VARIADIC_BUILTIN_CALLS = {
-    "print",
+    name for name in EMITTER_BUILTINS
+    if name in ("print",)
 }
 
 
