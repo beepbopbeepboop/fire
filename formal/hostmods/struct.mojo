@@ -373,7 +373,7 @@ def unpack_from(fmt: String, buf, off: Int):
     return out
 
 
-def pack(fmt: String, v0, v1, v2, v3, v4):
+def pack(fmt: String, v0=0, v1=0, v2=0, v3=0, v4=0):
     """Bytes for `fmt` and up to five values, as a list of ints.
 
     The buffer is a literal of the format's own size, chosen by a ladder of
@@ -381,7 +381,7 @@ def pack(fmt: String, v0, v1, v2, v3, v4):
     container this path can build, its length is fixed at compile time, and
     `len()` of a returned list is refused (limit 3) — so the size has to be
     spelled as a literal and the right one has to be picked before the fill
-    loop runs. The sizes are exactly the ones the corpus needs, and every one
+    loop runs. The sizes are exactly the ones the corpus need, and every one
     of them is measured to fill correctly.
 
     FIVE value slots: the signature is six arguments wide because six is the
@@ -392,6 +392,18 @@ def pack(fmt: String, v0, v1, v2, v3, v4):
     for the corpus's formats: every `pack_into` call site needs at most three
     values, and it reads its buffer from the CALLER's frame, so the limit that
     bites is the value count and not where the bytes come from.
+
+    THE VALUE SLOTS ARE DEFAULTED, for the reason `pack_into` above gives and
+    for the same reason its own slots are: this ABI has no `*args`, so a
+    five-value signature is the only way to spell "up to five values", and a
+    REQUIRED slot turns the module's own common call into a refusal at the
+    CALL SITE. `struct.pack('<I', insn)` is 2 of 6 arguments and was refused
+    with "missing required argument 'v1'" — so every one-value pack in the
+    corpus (`formal/x86_64.py` alone has fifteen of them, `formal/macho.py` and
+    `formal/arm64.py` more) never reached this body at all, and `formal/` was
+    unbuildable behind one declaration. Zero is the right fill for a slot that
+    is not read: the loop below only touches `v0.._nvalues(fmt)-1`, exactly as
+    `pack_into` only touches its first three.
     """
     total = calcsize(fmt)
     if total == 0:
