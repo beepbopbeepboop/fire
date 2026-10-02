@@ -1593,15 +1593,19 @@ def _gmi_local_binding_names(stmts, out: set) -> None:
             if _lb.name:
                 out.add(_as_str(_lb.name))
         elif isinstance(_lb, FunctionDef):
-            for _lbp in (_lb.params or []):
-                _gmi_target_leaf_names(_lbp[0] if isinstance(_lbp, list) else _lbp, out)
+            # Indexed param slots, never `isinstance(_p, list)`: a param is a
+            # (name, annotation) TUPLE under CPython, so a list test is False
+            # for every one of them and a PARAMETER would never be counted as
+            # a local — which for `_gmi_hoist_nested_structs` means a
+            # parameter shadowing a hoisted struct's typedef goes unnoticed.
+            for _lbp in range(len(_lb.params or [])):
+                _gmi_target_leaf_names(_lb.params[_lbp][0], out)
             _gmi_local_binding_names(_lb.body, out)
         elif isinstance(_lb, StructDef):
             for _lbm in (_lb.methods or []):
                 if isinstance(_lbm, FunctionDef):
-                    for _lbmp in (_lbm.params or []):
-                        _gmi_target_leaf_names(
-                            _lbmp[0] if isinstance(_lbmp, list) else _lbmp, out)
+                    for _lbmp in range(len(_lbm.params or [])):
+                        _gmi_target_leaf_names(_lbm.params[_lbmp][0], out)
                     _gmi_local_binding_names(_lbm.body, out)
         elif isinstance(_lb, (AssignStmt, AugAssignStmt)):
             _gmi_target_leaf_names(_lb.target, out)

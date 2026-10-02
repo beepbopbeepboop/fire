@@ -2370,6 +2370,11 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     gen.current_func_name = node.name
+    # Which of THIS function's parameters are annotated `bool` — see
+    # `gimple_exprtypes.record_bool_params`. Recorded here because this is the
+    # one place the annotation text and the emitted function name are both in
+    # hand, and `is_python_bool_expr` reads it back while the body is lowered.
+    gimple_exprtypes.record_bool_params(gen, node)
 
     # Seed param types into var_types BEFORE return-type inference so
     # _quick_type can resolve param names during the pre-pass. Unannotated
@@ -3634,6 +3639,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # Key by overload so overloaded methods don't share closure state (each
     # overload's lifted closures + capture env are distinct).
     gen.current_func_name = f"{struct_name}_{node.name}{overload_id}"
+    gimple_exprtypes.record_bool_params(gen, node)
     gen._current_struct_name = struct_name  # for Self() constructor call lowering
 
     # Seed param types for pre-pass inference

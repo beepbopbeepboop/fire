@@ -2459,6 +2459,17 @@ class GimpleGen:
         # `_bool_valued` directly above: a field created lazily behind
         # `hasattr` reads as existing-but-NULL self-hosted.
         self._gmi_bool_params: set = set()
+        # current_func_name -> the parameter names whose ANNOTATION says
+        # `bool`, written by `mojo.middle.exprtypes.record_bool_params` at the
+        # two sites that lower a function/method body and read back by
+        # `bool_param_in_scope` from the one shared bool predicate. A
+        # `bool`-annotated parameter's own ctype is a plain `int` (same
+        # `_TYPE_MAP` reason `struct_bool_fields` exists), and it is NOT
+        # distinguishable from a small int LITERAL's lowering, so the
+        # annotation has to be captured rather than re-derived from the type.
+        # Declared here for the same self-hosting reason as `_bool_valued`:
+        # a field created lazily behind `hasattr` reads as existing-but-NULL.
+        self._bool_param_names: dict = {}
         # Struct -> method names whose every `return` hands back a `bool`
         # field of that struct (see module_gen.py's second method loop). The
         # method's own C return type is `int` -- the field's ctype -- so this
@@ -4824,6 +4835,11 @@ class GimpleGen:
     def _note_dict_callable_ret(self, dict_val: str, value_text: str,
                                 value_ctype: str = 'int64_t') -> None:
         return ginf.note_dict_callable_ret(self, dict_val, value_text, value_ctype)
+    def _emit_dict_int_value_store(self, dict_val: str, key_ctype: str,
+                                   key_val: str, val_ctype: str, val: str,
+                                   val_node=None) -> None:
+        return ginf.emit_dict_int_value_store(self, dict_val, key_ctype, key_val,
+                                              val_ctype, val, val_node)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
     def _eval_const_bool(self, node) -> bool | None:

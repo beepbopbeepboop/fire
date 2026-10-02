@@ -6645,6 +6645,54 @@ def main():
 main()
 """, "[True]\n[True, False]\nFalse\n1\n0\n")
 
+    # A `bool`-annotated PARAMETER, which is the third shape the one shared
+    # bool predicate has to answer and the only one that cannot be keyed on a
+    # type. `'bool'` resolves to `'int'` and `'int'` to `'int64_t'`, so a bool
+    # param IS distinguishable from an int param in `func_param_types` — but
+    # NOT from a small integer LITERAL's own lowering, which is also a plain C
+    # `int` (see `_local_literal_ctype`). Keying off the type would have
+    # turned `x = 5; print(x)` into `True`; the annotation is instead
+    # captured where it is still readable, by
+    # `mojo/middle/exprtypes.record_bool_params` at the two sites that set
+    # `current_func_name` with the FunctionDef in hand, and read back per
+    # function by `bool_param_in_scope`.
+    #
+    # `get2() -> bool` and `get()` are the method-return shapes and belong
+    # here too because they share the predicate; `b.report(True)` is the
+    # METHOD's bool parameter, whose key is `<Struct>_<method>` rather than
+    # the bare name — the two spellings of the same table. `v + 1` is the
+    # control: a bool param is still an ordinary int in arithmetic.
+    test_gimple_stdout("gimple_bool_annotated_parameter", """\
+class Box:
+    def __init__(self, flag: bool, n: int):
+        self.flag = flag
+        self.n = n
+    def get(self):
+        return self.flag
+    def get2(self) -> bool:
+        return self.flag
+    def report(self, other: bool):
+        print(other)
+
+def show(v: bool, n: int):
+    print(v)
+    print({'k': v})
+    print(v + 1)
+
+def main():
+    b = Box(True, 5)
+    print(b.get())
+    print(repr(b.get()))
+    print({'g': b.get()})
+    print(b.get2())
+    b.report(True)
+    b.report(False)
+    show(True, 5)
+    show(False, 5)
+main()
+""", "True\nTrue\n{'g': True}\nTrue\nTrue\nFalse\nTrue\n{'k': True}\n2\n"
+       "False\n{'k': False}\n1\n")
+
     # §4.2b: print({1, 2}) printed the set's own ADDRESS -- print had no
     # MojoSet * dispatch branch at all (len()/iteration on the same value
     # were already correct).
