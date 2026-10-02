@@ -3923,6 +3923,36 @@ char *mojo_char_to_str(char c) {
     return s;
 }
 
+/* `s[i]` on a str: the character at i, as a 1-character STRING — which is what
+ * a Python subscript means, and the same value `mojo_char_to_str` builds. It
+ * exists as its OWN entry point rather than as `mojo_char_to_str(s[i])` at the
+ * call site because gimple refuses a `char` argument ("invalid argument to
+ * gimple call": a char is promoted to int64_t non-trivially), so the two-step
+ * spelling is not available to the codegen at all. Two int64_t-scale arguments
+ * are.
+ *
+ * It is the same immortal table, which is the point: the call sites that
+ * already reached `mojo_char_to_str` (a `char` from a struct field, a loop
+ * counter, `chr()`) and the ones that come through here now share ONE string
+ * per byte value instead of a table plus a malloc per character.
+ *
+ * Before this, a subscript reached `mojo_cstr_slice(s, i, i + 1)` — a correct
+ * NUL-terminated 1-char string, allocated per character and owned by nobody.
+ * `for c in s: ...` over a 96-character line leaked 1226 bytes a pass, which
+ * is the residual bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md
+ * measured, and 246.7 MB over the 4.8M characters that suite's tripwire runs.
+ *
+ * The result is NOT the caller's to free, exactly as for `mojo_char_to_str`:
+ * it is deliberately absent from the codegen's `_FRESH_STRING_RETURNS`, which
+ * is what keeps a `free()` of it from being emitted. It is never written to
+ * either — the invariant `mojo_char_to_str` already carries. */
+char *mojo_char_at_str(char *s, int64_t i) {
+    if (!s || i < 0 || i >= (int64_t)strlen(s)) {
+        return mojo_char_to_str('\0');
+    }
+    return mojo_char_to_str(s[i]);
+}
+
 /* Python's ord()/chr() builtins had NO real implementation at all — just a
  * declared-but-never-defined variadic stub (`int64_t ord(...);`), an
  * undefined symbol at link time for any program that actually calls either.
