@@ -7,8 +7,9 @@ names start `g`–`m` — 8 files, 13 692 lines:
 `myinterpreter.py`. **arm64** (the slice does not name an architecture, and
 arm64 is the default). No stdlib root (`--no-stdlib`).
 
-**Status: TWO top causes FIXED and verified; six of eight files classified; two
-still unclassified because the sweep cannot finish them (§4).** The fixes are
+**Status: TWO top causes FIXED and verified; SEVEN of the eight files
+classified; one (`gimple_codegen.py`) is unmeasured because the sweep cannot
+finish it in 90 minutes (§4).** The fixes are
 `7b1f2643` (a backend CRASH, `backend-crash` 1 → 0) and `91db24b9`
 (`codegen/dependency` 2 → 0, and `re.mojo` from "does not build" to 994/1008).
 The first deleted `bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`;
@@ -53,7 +54,8 @@ $ python3 tools/memslot.py --gb 8 --label sweep-post2 -- \
 $ python3 tools/memslot.py --gb 8 --label sweep-big -- \
       python3 tools/formal_sweep.py -j 2 -t 5400 --no-stdlib --allow-concurrent \
       gimple_codegen.py myinterpreter.py
-# the two the others cannot finish.  No verdict; see section 4.
+# the two the others cannot finish.  90 minutes each.  myinterpreter.py:
+# not-answerable/host-import (importlib).  gimple_codegen.py: still no verdict.
 ```
 
 `-t 900`, not the default 30: **the default is wrong for this slice.** Four of
@@ -71,25 +73,35 @@ timeout kills the build before it reaches the census that raises, so a file
 whose cost is "slow *and* crashing" is reported as whichever bound it happened
 to hit first. The crash was only visible because the timeout was raised. A
 `tool` verdict is therefore not evidence of absence on this slice, and the
-causal order is: **raise `-t` before believing a `tool`.**
+causal order is: **raise `-t` before believing a `tool`.** The last run makes the
+point three times over: at `-t 5400`, `myinterpreter.py` turned out to be a
+permanent `importlib` refusal (§4) and `gimple_codegen.py` was still
+unclassified.
 
-## 2. Per-class counts — 6 of 8 classified, before and after each fix
+## 2. Per-class counts — 7 of 8 classified, before and after each fix
 
 | class | before | after `7b1f2643` | after `91db24b9` | files (final) |
 |---|---|---|---|---|
 | `pass` | 1 | 1 | 1 | `generated_dispatch.py` |
 | `codegen` (THE FINDING) | 1 | 1 | **2** | `mlir.py`, **`module_spec_gen.py`** |
 | `codegen/dependency` | 2 | 2 | **0** | — |
-| `not-answerable/host-import` | 1 | 2 | **3** | `module_loader.py`, `imports.py`, **`monomorphize.py`** |
+| `not-answerable/host-import` | 1 | 2 | **4** | `module_loader.py`, `imports.py`, `monomorphize.py`, **`myinterpreter.py`** |
 | **`backend-crash`** | **1** | **0** | 0 | — |
-| `tool` (no verdict) | 2 | 2 | 2 | `gimple_codegen.py`, `myinterpreter.py` |
+| `tool` (no verdict) | 2 | 2 | **1** | `gimple_codegen.py` |
 | **codegen coverage** | 1/4 = 25.0 % | 1/4 = 25.0 % | **1/3 = 33.3 %** | denominator = pass + the two codegen classes |
 
-"before" is each file's verdict at the **largest `-t` it was given**, which took
-three runs to establish (8 files at `-t 30`, then the two that timed out at
-900 s, then the five that had not been re-run since `formal/build.py` changed):
-1 + 1 + 2 + 1 + 1 + 2 = 8. Both end columns are therefore complete over the
-six classified files.
+"before" is each file's verdict at the **largest `-t` it was given**, across the
+five runs in §1; `myinterpreter.py`'s `importlib` refusal only arrived at
+`-t 5400` (§4), and `gimple_codegen.py` is still unmeasured, so **the two end
+columns differ on four of eight files and neither is a like-for-like
+comparison at the same `-t`.** That is stated rather than smoothed over: a
+slice swept at a too-small `-t` produces a *different set of classes*, not a
+noisier version of the same one, which is the reason §4 and
+`bugs/FORMAL_sweep_default_timeout_hides_a_crash_on_the_repos_own_files.md`
+both argue for a per-closure default rather than a bigger number.
+
+**The final tally is 1 + 2 + 0 + 4 + 0 + 1 = 8**, so the classes sum over the
+whole slice, with one file in `tool` and therefore in no rate.
 
 **Two movements, and they are movements of two different kinds.**
 
@@ -237,51 +249,51 @@ was deleted in `1cfa8f80` together with the fix it described. `formal3-1-r2`'s
 and its next step is about making that scan cheap. Stated here because the
 reasoning is the kind an integrator should be able to check rather than trust.
 
-## 4. The two files the sweep cannot classify, and why that is a fact about the files
+## 4. The one file the sweep cannot classify, and the one it needed 90 minutes for
 
-| file | lines | `-t 30` | `-t 900` | `-t 5400` |
+| file | lines | `-t 30` | `-t 900` | `-t 5400` (90 min) |
 |---|---|---|---|---|
-| `gimple_codegen.py` | 5 645 | timeout | timeout | no verdict — 29 min in when this was written |
-| `myinterpreter.py` | 5 572 | timeout | timeout | no verdict — same run |
+| `myinterpreter.py` | 5 572 | timeout | timeout | **`not-answerable/host-import`** — imports `importlib` |
+| `gimple_codegen.py` | 5 645 | timeout | timeout | **still no verdict** |
 
-Both were re-launched at `-t 5400` (90 min, the largest this slice was willing
-to spend on two files) and **had produced no verdict when the map was written**.
-The exact command to finish them is in the `-t 5400` block in §1; it is the last
-thing in this map that is a measurement I did not get, and it is listed under
-NOT DONE in the worker report rather than papered over.
+**`myinterpreter.py` took 90 minutes to be told it was never going to build.**
+Its terminal reason is `importlib`, a host module with no Mojo source on any
+path — the same permanent fact as `ctypes`, `subprocess` and `tempfile` — and
+the sweep could only reach it after 90 minutes of compiling a 5 572-line file and
+its whole import closure. That is the single most useful line in this section:
+**a 90-minute run bought one refusal that is in no rate and has no next step.**
 
-Both are the two largest files in the repo's root, and both are **CPU-bound,
-not memory-bound**: the whole sweep peaked at 0.3 GB, and `tools/memcap.py`'s
-4 GB per-file ceiling was never approached.
+**`gimple_codegen.py` is the slice's one unmeasured file**, and it is
+CPU-bound, not memory-bound: the whole 8-file sweep peaked at **0.3 GB** across
+6 processes, and memcap's 4 GB per-file ceiling was never approached at any `-t`.
+5 645 lines, no verdict in 90 minutes, against a 344-line file (`mlir.py`) that
+classifies in under 600 s.
 
-**Next step for whoever wants these classified — and it is not "raise `-t`".**
-`-t 900` is 15× the default and neither file finished. A sweep over a whole
-directory will hit exactly these two and report them as `tool` forever, so the
-number a planner reads is missing two of eight files for a reason that has
-nothing to do with the backend. Two options, in order of cost:
+**Next step for whoever wants it classified — and it is not "raise `-t`".**
+`-t 5400` is 180× the default and the file still did not finish, so the answer
+is one of:
 
-1. **Split the unit.** The construct coverage of a file is a property of its
-   functions, and the sweep's unit is a file. `myinterpreter.py` at 5 572 lines
-   is a whole compiler front end in one file; nothing about it needs one build.
-   A `--split-by-function` mode (or a corpus that slices the file) would answer
-   the same question for every large file in every slice, and the two
-   `codegen` findings this map does have are both single-function.
-2. **Find the quadratic.** 5 645 lines taking > 900 s against a 344-line file
-   taking under 600 s is not a constant factor. `formal/build.py` walks the
-   module's AST repeatedly per pass and `_frame_receivers` iterates its
-   fixpoint over the whole function list; the AST-walk-per-pass shape is
-   documented in `CLAUDE.md`'s own perf guidance and worth a profile before a
-   third option is invented. **This is a measurement I did not make** — I have
-   the two endpoints and no profile between them, and the profile is the whole
-   of the next step.
+1. **Split the unit.** Construct coverage is a property of a file's
+   *functions*, and the sweep's unit is a file. `gimple_codegen.py` at 5 645
+   lines is a whole codegen backend in one file; nothing about the question
+   needs one build. A `--split-by-function` mode would answer the same question
+   for every large file in every slice, and both `codegen` findings this map
+   does have are single-function.
+2. **Find the quadratic.** 5 645 lines taking > 90 min against a 344-line file
+   taking < 600 s is not a constant factor. `formal/build.py` walks the module's
+   AST repeatedly per pass and `_frame_receivers` iterates its fixpoint over the
+   whole function list; the AST-walk-per-pass shape is the first thing to
+   profile, and `bugs/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
+   is a claim (`bugs3-hard`) for a shape in this neighbourhood — **that doc does
+   not exist on this tree either**, so this may be the second stale claim in the
+   area. **I did not make this measurement**: I have the two endpoints and no
+   profile between them, and the profile is the whole of the next step.
 
-The honest statement of what this slice knows: **6 of 8 files classified, and
-25 % of the slice's files are unclassified for a reason that is about their
-size, not about the backend.** Every percentage in §2 is computed on the 6, and
-neither of the two unclassified files has contributed a finding to anything in
-this map — so nothing here should be read as a statement about
-`gimple_codegen.py` or `myinterpreter.py`, which are two of the three largest
-sources in this repository and are simply **unmeasured**.
+Either way, a directory sweep will hit `gimple_codegen.py` and report it as
+`tool` forever, so **the number a planner reads is missing one of eight files
+for a reason that has nothing to do with the backend.** Every percentage in §2
+is computed on the other seven, and nothing in this map should be read as a
+statement about `gimple_codegen.py`, which is simply **unmeasured**.
 
 ## 5. Remaining causes, ranked, each with its example file and next step
 
@@ -395,16 +407,25 @@ about the closure and not about the file. **No next step for this row** beyond
 the general one: a host module for `tempfile` would need a process or a kernel
 object, so it is permanent, and a reader should not spend effort here.
 
-### 5.4 `module_loader.py`, `imports.py` — host imports, and both are permanent
+### 5.4 The four host imports, as a group — half the slice, and none of it work
 
-`module_loader.py` → `ctypes`; `imports.py` → `cas.py` → `subprocess`. Both are
+(`monomorphize.py`'s own row is §5.3; it is listed here because the group is
+what makes the coverage number legible.)
+
+`module_loader.py` → `ctypes`; `imports.py` → `cas.py` → `subprocess`;
+`monomorphize.py` → `tempfile`; `myinterpreter.py` → `importlib`. All four are
 in the sweep's own "needs a host process, an embedded interpreter or a kernel
-object this image does not have" bucket: 0 of the 3 such files in the slice import
-a module a Mojo-side implementation could in principle provide. `subprocess` needs
-a process, `ctypes` a foreign function interface and `tempfile` a temporary
-directory; none is a compiler gap and none is in any rate. **No next step** —
-recorded so that a reader of the 33.3 % coverage figure knows these three were
-never in the denominator.
+object this image does not have" bucket: **0 of the 4 import a module a
+Mojo-side implementation could in principle provide**, so none of them is one
+inversion away from answerable. `subprocess` needs a process, `ctypes` a foreign
+function interface, `tempfile` a temporary directory and `importlib` an
+interpreter to drive; none is a compiler gap and none is in any rate.
+
+**No next step** — recorded so that a reader of the 33.3 % coverage figure knows
+these four were never in the denominator, which is half the slice. It is also
+the strongest single statement this map makes about where the slice's coverage
+actually goes: **half of it is import closure this target cannot have**, and no
+amount of codegen work moves that number.
 
 `imports.py` was the slice's `backend-crash` before this change and is here
 now; that is the fix, and §3 is the measurement.
@@ -412,12 +433,11 @@ now; that is the fix, and §3 is the measurement.
 ### 5.5 `generated_dispatch.py` — `pass`, and it is the slice's only one
 
 135 lines. Noted because a slice with one `pass` out of eight is a statement
-about the files, not about the backend: **five of the six classified files are
-refused before codegen ever reaches their constructs** (three host imports, one
-four-deep chain of string/container shapes, one constructor this path does not
-inline), so the slice's 33.3 % is mostly a statement about import closure and
-closure depth, and only `mlir.py` and `module_spec_gen.py` are statements about
-what the backend can lower.
+about the files, not about the backend: **five of the seven classified files
+are refused before codegen ever reaches their constructs** (four host imports,
+one four-deep chain of string/container shapes), so the slice's 33.3 % is mostly
+a statement about import closure and closure depth, and only `mlir.py` and
+`module_spec_gen.py` are statements about what the backend can lower.
 
 ## 6. Ownership — nothing here was worked that someone else holds
 
