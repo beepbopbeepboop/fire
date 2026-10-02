@@ -1163,7 +1163,7 @@ main()
 """, "5\n9\nhi\n")
 
     # The SAME subscript callee, reached with a `MojoBoundMethod *` in the
-    # dict instead of a bare function pointer. `note_dict_callable_ret`
+    # dict instead of a bare function pointer. `note_container_callable_ret`
     # consulted only `_callable_ret_types`, which is where a non-capturing
     # closure and a lifted free function land; a struct method bound as a
     # value (`C().m`) lands in `_bound_method_ret_types` instead. With no
@@ -1199,6 +1199,52 @@ def main():
 main()
 """, "8\n10\n8\n")
 
+    # The same subscript callee reached through a LIST rather than a dict, and
+    # through a FUNCTION-RETURNED closure rather than a literal. Both were
+    # still stubbed when this doc's dict half landed, for reasons that are
+    # worth recording because they are the same reason twice:
+    #
+    #   * the gate is a POSITIVE test -- "was a callable recorded being stored
+    #     into THIS container?" -- and a list literal, an `append` and a
+    #     comprehension are three different code paths, so recording the dict
+    #     store recorded none of them. All three now record through the one
+    #     `note_container_callable_ret`, which is why the table is named for
+    #     the CONTAINER and not for the dict (`_container_callable_ret`;
+    #     the rename is the doc's own instruction, and it is why the helper
+    #     reads `container_val`).
+    #   * `e['c'] = mk(100)` stores a CALL RESULT, and the value-keyed tables
+    #     are keyed by a lowered value a call result never has. Its fact is
+    #     under the callee's name in `_return_callable_ret_types` — the same
+    #     compile-scoped record the named-local hop reads.
+    #
+    # `lst3 = [add3, mk(10)]` is the control for the second point: with the
+    # bare function pointer stored first, the dict is already recorded, so a
+    # missing entry for the second element rides in on the first. That
+    # ordering dependence is exactly why the `mk` line is not a comment.
+    test_gimple_matches_cpython("gimple_call_through_a_list_subscript_callee", """\
+def add3(a, b, c):
+    return a + b + c
+
+def mk(n):
+    return lambda x: x + n
+
+def main():
+    lst = [add3]
+    print(lst[0](1, 2, 3))
+    grown = []
+    grown.append(add3)
+    print(grown[0](1, 2, 3))
+    built = [add3 for _ in range(1)]
+    print(built[0](1, 2, 3))
+    tup = (add3,)
+    print(tup[0](1, 2, 3))
+    e = {}
+    e['c'] = mk(100)
+    print(e['c'](1))
+    lst3 = [add3, mk(10)]
+    print(lst3[0](1, 2, 3))
+main()
+""")
 
     # A class written INSIDE a function body. Every consumer of the module's
     # struct set reads the MODULE-LEVEL statement list, and a `StructDef`
@@ -1213,7 +1259,7 @@ main()
     # `dd['m'](4)` is the OTHER end of the same root cause and is in this test
     # for that reason: with no layout the bound method `c.m` never became a
     # `MojoBoundMethod *` at all (it stayed a plain `int64_t` receiver word, so
-    # `note_dict_callable_ret` had nothing to record), and the subscript callee
+    # `note_container_callable_ret` had nothing to record), and the subscript callee
     # lowered to a dict read followed by a generic attribute lookup on a value
     # that is not a `C` — an `AttributeError`, exit 1.
     #
@@ -1352,7 +1398,7 @@ main()
     # target is a field of this module's globals struct, so the store takes a
     # different path from a local assignment AND every read mints a fresh temp
     # — and all three of the "what does this callable really return" tables
-    # (`_callable_ret_types`, `_dict_callable_ret`, `_bound_method_ret_types`)
+    # (`_callable_ret_types`, `_container_callable_ret`, `_bound_method_ret_types`)
     # were dropped at BOTH of those hops, silently. `mojo_fnptr_call_N` is the
     # homogenized `int64_t` convention (right for the box it hands back, wrong
     # for the value inside), so with the type missing every module-level
@@ -1389,7 +1435,7 @@ print(d["k"]())
     # aliased the same way. Each hop re-keys the tables on a new name, so a
     # carry that only handled the first would still print `0` here, and a
     # dict-of-lambdas alias additionally goes through the separate
-    # `_dict_callable_ret` table.
+    # `_container_callable_ret` table.
     test_gimple_matches_cpython("gimple_module_level_callable_alias_keeps_its_return_type", """\
 e = lambda: False
 alias = e

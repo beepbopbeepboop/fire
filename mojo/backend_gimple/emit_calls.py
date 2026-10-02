@@ -1317,7 +1317,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         #
         # What is left of the discriminator is a POSITIVE test, and it has to
         # be one: this container is one a callable was actually recorded
-        # being stored into (see `note_dict_callable_ret`). A negative test
+        # being stored into (see `note_container_callable_ret`). A negative test
         # ("the base looks like a container") is not enough, and finding that
         # out cost a real regression — `re`'s own `_RE.finditer(src)` reaches
         # this branch with a TUPLE index and a base whose actual type is a
@@ -1336,8 +1336,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # read its type from, and guessing is what this bug was.
         if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-                and (node.func.obj.name in gen._dict_callable_ret
-                     or node.func.obj.name in gen._global_dict_callable_ret)):
+                and (node.func.obj.name in gen._container_callable_ret
+                     or node.func.obj.name in gen._global_container_callable_ret)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
                 return gen._lower_bound_method_call_value(_callee_v, node)
@@ -1346,7 +1346,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # callables stored in it were recorded as is usable only when
                 # it is UNANIMOUS, which is the same "unanimity or nothing"
                 # rule every other inference in this file follows — and it is
-                # enforced at the store (see `note_dict_callable_ret`), which
+                # enforced at the store (see `note_container_callable_ret`), which
                 # records '' once a second distinct return type appears. A
                 # dict holding callables of different return types therefore
                 # keeps the int64_t answer, i.e. exactly the behaviour before
@@ -1355,14 +1355,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # `or 'int64_t'` also covers a dict that was never recorded
                 # at all. It used to be `next(iter(_seen))` over a set of
                 # every stored type, and THAT is what the self-host closure
-                # could not compile: `gen._dict_callable_ret` is set by
+                # could not compile: `gen._container_callable_ret` is set by
                 # attribute assignment, so it has no StructDef `type_ann`,
                 # its `.get()` came back `int64_t` rather than `MojoSet *`,
                 # and `next(...)` matched no lowering at all — it emitted a
                 # call to a `next` symbol that does not exist, so
                 # `fire.py --dump-full` compiled clean and then failed at
                 # `ld: undefined _next` out of this very function.
-                _vt = gen._dict_callable_ret.get(node.func.obj.name)
+                _vt = gen._container_callable_ret.get(node.func.obj.name)
                 if _vt is None:
                     # A dict held in a MODULE GLOBAL, read from `_toplevel`.
                     # `_reset_func`'s seed excludes any name this function
@@ -1370,7 +1370,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # name by definition — so only the never-reset
                     # whole-program table can answer here. Same two-table
                     # shape as `_lower_fnptr_call`'s global callee lookup.
-                    _vt = gen._global_dict_callable_ret.get(node.func.obj.name)
+                    _vt = gen._global_container_callable_ret.get(node.func.obj.name)
                 if not _vt:
                     _vt = 'int64_t'
                 return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
@@ -4804,9 +4804,9 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # an EMPTY set and the wrong answer for both. Restored below with the
     # rest of it.
     saved_callable_rets  = gen._callable_ret_types
-    saved_dict_callable  = gen._dict_callable_ret
+    saved_dict_callable  = gen._container_callable_ret
     gen._callable_ret_types = {}
-    gen._dict_callable_ret = {}
+    gen._container_callable_ret = {}
     saved_func_name      = gen.current_func_name
     saved_ret_type       = gen.func_ret_type
     saved_bb             = gen.bb_counter
@@ -4929,7 +4929,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     gen.decls                   = saved_decls
     gen.body_lines              = saved_body
     gen._callable_ret_types     = saved_callable_rets
-    gen._dict_callable_ret      = saved_dict_callable
+    gen._container_callable_ret      = saved_dict_callable
     gen.var_types               = saved_var_types
     gen.current_func_name       = saved_func_name
     gen.func_ret_type           = saved_ret_type

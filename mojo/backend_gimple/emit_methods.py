@@ -38,6 +38,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
+import mojo.backend_gimple.emit_infra as ginf
 
 # Re-export shared helpers from mojo.middle.methods_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -4139,6 +4140,15 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                 av = gen._coerce_to_type(at, 'int64_t', av)
                 at = 'int64_t'
             gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
+            # A CALLABLE appended to a list, so a later `lst[0](...)` can
+            # dispatch. The list literal records through the same helper (see
+            # `_lower_list_literal`), and this is the `append` half: without
+            # it a list built one element at a time -- the shape every
+            # dispatch table assembled in a loop has -- was still stubbed, so
+            # the table's key would depend on whether the list was written
+            # `[f]` or `[]; .append(f)`. A non-callable element is a no-op
+            # inside the helper.
+            ginf.note_container_callable_ret(gen, ov, av, at, args[0])
             if at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *')):
                 actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem

@@ -604,8 +604,8 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unanimity rule is unchanged and is now enforced where the value is
     # stored, where the store site actually knows.
     # Reset per function for the same reason as the maps above.
-    gen._dict_callable_ret = {}
-    # Seeded from self._global_dict_callable_ret (Phase 1.7, never reset)
+    gen._container_callable_ret = {}
+    # Seeded from self._global_container_callable_ret (Phase 1.7, never reset)
     # for the same reason `_elem_types` is seeded from `_global_elem_types`
     # just above: a module-level dict of callables means the same thing in
     # every function, and without the seed a `d['k']()` inside any FUNCTION
@@ -617,10 +617,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     # a new wrong one. Explicit loop + `_as_str`, NOT a dict comprehension
     # over `.items()`: the same self-host boxing gap the `_elem_types` seed
     # above records.
-    for _gck in gen._global_dict_callable_ret:
+    for _gck in gen._global_container_callable_ret:
         _gck_s = _as_str(_gck)
         if _gck_s not in _reset_locally_bound:
-            gen._dict_callable_ret[_gck_s] = _as_str(gen._global_dict_callable_ret[_gck])
+            gen._container_callable_ret[_gck_s] = _as_str(gen._global_container_callable_ret[_gck])
     # Builtin-container method bound as a first-class VALUE (`append =
     # l.append`, the classic accumulator-aliasing idiom) — key: the C
     # name of the temp/var holding the boxed value; value: (receiver
@@ -1263,7 +1263,7 @@ def carry_callable_ret_types(gen, src: str, dst: str) -> None:
     lines — and the two global-store copies omitted all three, which is
     exactly the case that was broken. A copy that is forgotten is silent: the
     program keeps running and prints a plausible wrong value with exit 0."""
-    for _tbl in (gen._callable_ret_types, gen._dict_callable_ret,
+    for _tbl in (gen._callable_ret_types, gen._container_callable_ret,
                  gen._bound_method_ret_types):
         if src in _tbl:
             _tbl[dst] = _tbl[src]
@@ -4481,13 +4481,24 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
 
 
-def note_dict_callable_ret(gen, dict_val: str, value_text: str,
-                           value_ctype: str = 'int64_t') -> None:
-    """A callable stored into a dict keeps its return type for a later
-    `d[k](...)` call, which is the one place a dict subscript can be a
-    CALLEE. Called from every dict store of an int64 slot; a non-callable
-    value matches none of the three sources below and is a no-op, which is
-    what keeps this off the hot path.
+def note_container_callable_ret(gen, container_val: str, value_text: str,
+                                value_ctype: str = 'int64_t',
+                                value_node=None) -> None:
+    """A callable stored into a CONTAINER keeps its return type for a later
+    `d[k](...)` / `lst[0](...)` call, which is the one place a container
+    subscript can be a CALLEE. Called from every store of an int64 slot into
+    any container this codegen tracks; a non-callable value matches none of
+    the three sources below and is a no-op, which is what keeps this off the
+    hot path.
+
+    CONTAINER, not dict: the table is keyed by the container's lowered name
+    and its consumer is the subscript-callee gate in `_lower_call`, which
+    asks "was a callable recorded being stored into THIS container?" without
+    caring which kind it is — so `_lower_list_literal`'s per-element append
+    (a single chokepoint) records through this same function, and the honest
+    name is the container-neutral one. It was `_dict_callable_ret` while only
+    dicts used it, and the doc that asked for the rename is
+    bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
 
     THREE sources, because a first-class callable has more than one
     representation here and every one of them has to reach the same
@@ -4524,19 +4535,30 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str,
     """
     _rt = (gen._callable_ret_types.get(value_text)
            or gen._bound_method_ret_types.get(value_text))
+    # A CALL RESULT (`e['c'] = mk(100)` where `mk` returns a closure). The two
+    # tables above are keyed by a lowered VALUE, and a call result is a fresh
+    # temp no materialization site recorded; the fact is under the CALLEE's
+    # name in the compile-scoped `_return_callable_ret_types`, which the
+    # callee's own `return` wrote. Same source
+    # `carry_callable_ret_from_call` reads for the named-local hop, and it has
+    # to be read again here because this is a different destination.
+    if not _rt and isinstance(value_node, gimple_ctypes.CallExpr):
+        _vf = getattr(value_node, 'func', None)
+        if isinstance(_vf, gimple_ctypes.IdentExpr):
+            _rt = gen._return_callable_ret_types.get(_as_str(_vf.name))
     if not _rt and value_ctype == 'MojoBoundMethod *':
         _rt = 'int64_t'
     if not _rt:
         return
-    _cur = gen._dict_callable_ret.get(dict_val)
+    _cur = gen._container_callable_ret.get(container_val)
     if _cur is None:
-        gen._dict_callable_ret[dict_val] = _rt
+        gen._container_callable_ret[container_val] = _rt
     elif _cur and _cur != _rt:
-        # A second, DIFFERENT return type for the same dict: ambiguous from
-        # here on, and it must STAY ambiguous -- a third store of the first
-        # type must not un-poison it, so the '' is sticky (`_cur and ...`
-        # above never re-enters this branch once poisoned).
-        gen._dict_callable_ret[dict_val] = ''
+        # A second, DIFFERENT return type for the same container: ambiguous
+        # from here on, and it must STAY ambiguous -- a third store of the
+        # first type must not un-poison it, so the '' is sticky (`_cur and
+        # ...` above never re-enters this branch once poisoned).
+        gen._container_callable_ret[container_val] = ''
 
 
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
@@ -4557,7 +4579,7 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     OTHER value in the same dict print as True/False too, so
     `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
 
-    `note_dict_callable_ret` runs first for both branches — a stored callable
+    `note_container_callable_ret` runs first for both branches — a stored callable
     keeps its return type whatever its slot kind is.
 
     The store goes through `_emit_call`, NOT a raw `gen._emit`, because that
@@ -4565,7 +4587,7 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     integer key arrives as a raw machine word and `_apply_kw_keys` rewrites the
     call to the `_kw` twin (`mojo_dict_set_int_kw(d, 3, v)`). A raw emit skips
     that and hands the runtime `(char *)3` as a key to hash, which segfaults."""
-    gen._note_dict_callable_ret(dict_val, val)
+    gen._note_container_callable_ret(dict_val, val, val_ctype, val_node)
     vv64 = gen._to_int64(val_ctype, val)
     _suffix = 'bool' if gimple_exprtypes.is_python_bool_expr(gen, val_node) else 'int'
     _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
@@ -4687,9 +4709,9 @@ def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
     _rt = gen._callable_ret_types.get(value_text)
     if _rt:
         gen._global_callable_ret_types[gname] = _rt
-    _drt = gen._dict_callable_ret.get(value_text)
+    _drt = gen._container_callable_ret.get(value_text)
     if _drt is not None:
-        gen._global_dict_callable_ret[gname] = _drt
+        gen._global_container_callable_ret[gname] = _drt
 
 
 def _gen_print(gen, args: list, kwargs: list = None):

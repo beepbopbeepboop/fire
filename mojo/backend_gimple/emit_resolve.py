@@ -47,6 +47,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
+import mojo.backend_gimple.emit_infra as ginf
 
 # Re-export shared helpers from mojo.middle.resolve_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -3085,6 +3086,13 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         gen._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
         # Track element type so downstream for-loops use the right accessor
         gen._elem_types[res] = et
+        # A CALLABLE comprehension element, so `[f for ...][0](...)` can
+        # dispatch. The literal and the `append` paths record through the
+        # same helper, and a comprehension is the third way to build the list
+        # a dispatch table lives in; without this one the answer would depend
+        # on which of the three spellings assembled it. Keyed on the PRE-cast
+        # `ev`, which is the name the callable tables are keyed on.
+        ginf.note_container_callable_ret(gen, res, ev, et, node.element)
         # A comprehension whose element is a TUPLE or a nested LIST
         # (`[(5, j) for j in range(3)]`, `[[5, y] for y in ys]`) has to
         # record BOTH maps the equivalent list LITERAL records at

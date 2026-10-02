@@ -1453,7 +1453,7 @@ class GimpleGen:
         # runs BEFORE any function body is emitted, since a function that
         # calls `e()` is emitted before `_toplevel` lowers the lambda) and
         # consulted by _reset_func to re-seed the per-function
-        # _callable_ret_types/_dict_callable_ret.
+        # _callable_ret_types/_container_callable_ret.
         #
         # Without this, a lambda bound to a MODULE global lost its return
         # type at the box: `e = lambda: False; print(e())` printed `0`, and
@@ -1463,7 +1463,7 @@ class GimpleGen:
         # the name (see _gen_stmt_AssignStmt). See
         # bugs/CODEGEN_lambda_bool_return_prints_as_int.md.
         self._global_callable_ret_types: dict[str, str] = {}
-        self._global_dict_callable_ret: dict[str, str] = {}
+        self._global_container_callable_ret: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
         # Functions whose `return` statements produce containers of MORE THAN
@@ -2061,8 +2061,8 @@ class GimpleGen:
         # emit_infra._reset_func's `_callable_ret_types` entry.
         self._callable_ret_types: dict = {}
         # dict value -> the single callable return type stored into it ('' when
-        # ambiguous); see emit_infra._reset_func's `_dict_callable_ret` entry.
-        self._dict_callable_ret: dict = {}
+        # ambiguous); see emit_infra._reset_func's `_container_callable_ret` entry.
+        self._container_callable_ret: dict = {}
         self._module_int_consts_cache: dict = {}
         self._seen_generator_base_names: dict = {}
         self._cpp_module_fn_asts: dict = {}
@@ -4832,9 +4832,11 @@ class GimpleGen:
         return ginf._compr_set_loop(self, node, gen0, res, res_type, it_val)
     def _gen_print(self, args: list, kwargs: list=None):
         return ginf._gen_print(self, args, kwargs)
-    def _note_dict_callable_ret(self, dict_val: str, value_text: str,
-                                value_ctype: str = 'int64_t') -> None:
-        return ginf.note_dict_callable_ret(self, dict_val, value_text, value_ctype)
+    def _note_container_callable_ret(self, container_val: str, value_text: str,
+                                     value_ctype: str = 'int64_t',
+                                     value_node=None) -> None:
+        return ginf.note_container_callable_ret(self, container_val, value_text,
+                                                value_ctype, value_node)
     def _emit_dict_int_value_store(self, dict_val: str, key_ctype: str,
                                    key_val: str, val_ctype: str, val: str,
                                    val_node=None) -> None:

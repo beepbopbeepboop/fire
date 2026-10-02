@@ -1405,7 +1405,7 @@ def _lambda_pairs_ret_type(gen, pairs) -> str:
     """The single callable return type stored in a dict LITERAL of lambdas,
     or '' when they disagree (or are not all lambdas).
 
-    The unanimity-or-nothing rule is `note_dict_callable_ret`'s, applied at
+    The unanimity-or-nothing rule is `note_container_callable_ret`'s, applied at
     the one site that knows every element before the dict exists. '' is the
     ambiguous answer, and every consumer reads it with `or 'int64_t'`, so
     this can only preserve the pre-existing behaviour, never invent one."""
@@ -8350,10 +8350,10 @@ def gen_module_impl(self, stmts):
             # A dict literal of LAMBDAS: what a later `d['k'](...)` call site
             # needs is the callee's return type, and the dict's own value
             # type (`void *`) does not carry it. Recorded with the same
-            # unanimity-or-nothing rule `note_dict_callable_ret` applies at a
+            # unanimity-or-nothing rule `note_container_callable_ret` applies at a
             # runtime store (a dict has one value slot, so the answer is only
             # usable when every callable in it agrees).
-            self._global_dict_callable_ret[_gname] = \
+            self._global_container_callable_ret[_gname] = \
                 _lambda_pairs_ret_type(self, _value.pairs)
         elif isinstance(_value, LambdaExpr):
             # `e = lambda: False` at module scope. The lambda's own C return

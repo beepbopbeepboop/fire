@@ -1620,7 +1620,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      ('char *', v)])
                 else:
-                    gen._note_dict_callable_ret(_dsw_dp, v, vtype)
+                    gen._note_container_callable_ret(_dsw_dp, v, vtype)
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      (vtype, v)])
