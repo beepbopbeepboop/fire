@@ -412,6 +412,70 @@ CASES = [
     ("nested_def_is_another_frame_ok",
      "    def inner():\n        m = 1\n        return m\n"
      "    return inner()\n", "ok"),
+
+    # ── the LAST statement being a control-flow statement ──────────────────
+    # `_build_cfg` used to add its `run`'s return value to the ENTRY block's
+    # successors, which asserted a path from the function's first instruction
+    # into the tail of the body. The fixpoint pays for that edge, because the
+    # entry's OUT is only the parameter names: any region the trailing control
+    # statement opened had its IN intersected with the parameters, so every
+    # local stored before the statement dropped out of it and a read inside that
+    # statement's own arms looked unstored. Every program in this group is
+    # ordinary and every one of them was REFUSED.
+    #
+    # Measured on the corpus, not only here: it is what `re.mojo`'s `_p_alt`
+    # was reported for, whose `while 1:` is its last statement and which says
+    # `pend = entry` three lines above the read it was reported for. Taking `re`
+    # out of the backend takes out every file that imports it.
+    #
+    # The shape is not "a loop reads a local" — it is TWO conditions together:
+    # the body's LAST statement is a control-flow statement, AND at least one
+    # path FALLS OUT of it. The second half is not a detail: `run` returns []
+    # when every arm of the trailing statement terminates (`return`, `raise`,
+    # `break` all give no fall-through exit), so there is nothing to edge the
+    # entry to and the bug cannot fire. A body whose trailing `if` returns from
+    # both arms builds today and built before the fix, which is measured and is
+    # pinned below — a rule stated only in its coarse form sends the next reader
+    # to a program it does not reproduce on.
+    #
+    # Adding a statement AFTER the loop is the smallest thing that hides it,
+    # which is exactly the accidental difference between this group and the
+    # ones above it.
+    ("trailing_while_ok",
+     "    p = 1\n    while n:\n        q = p\n        n = n - 1\n", "ok"),
+    # `while 1:` is the shape the corpus uses most (a loop whose exit is a
+    # `break` or a `return`), and it is a separate CFG path because the loop
+    # always runs at least once.
+    ("trailing_while_true_ok",
+     "    p = 1\n    while 1:\n        q = p\n        n = n - 1\n        "
+     "if n < 0:\n            break\n", "ok"),
+    ("trailing_for_ok",
+     "    p = 1\n    for i in range(n):\n        q = p\n", "ok"),
+    ("trailing_if_ok",
+     "    p = 1\n    if n:\n        q = p\n", "ok"),
+    ("trailing_if_else_ok",
+     "    p = 1\n    if n:\n        q = p\n    else:\n        r = p\n", "ok"),
+    ("trailing_try_ok",
+     "    p = 1\n    try:\n        q = p\n    except:\n        r = p\n", "ok"),
+    ("trailing_match_ok",
+     "    p = 1\n    match n:\n        case 0:\n            q = p\n", "ok"),
+    ("trailing_with_ok",
+     "    p = 1\n    with sink(n) as s:\n        q = p\n", "ok"),
+    # And the same bodies still REFUSE when the name really is unstored: the
+    # fix removed an edge that asserted a path the source does not have, not
+    # the check itself.
+    ("trailing_control_flow_still_refuses_an_unstored_read",
+     "    while n:\n        q = q\n        n = n - 1\n", "refuse"),
+    ("trailing_control_flow_still_refuses_one_arm_store",
+     "    if n:\n        p = 1\n    else:\n        q = p\n", "refuse"),
+    # The OTHER direction of the rule's second condition: a trailing control
+    # statement whose every arm TERMINATES produced no fall-through exit, so
+    # the entry had nothing spurious to point at and the old code refused
+    # nothing. Pinned so the rule is not restated in its coarse form.
+    ("trailing_if_whose_arms_all_return_is_the_other_shape",
+     "    p = 1\n    if n:\n        return p\n    return 0\n", "ok",
+     "every arm terminates, so `run` returns [] and there is no spurious entry "
+     "edge to remove — this is the case the coarse form of the rule gets wrong"),
 ]
 
 

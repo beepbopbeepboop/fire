@@ -2717,39 +2717,82 @@ def _build_cfg(body) -> tuple:
     # emitted with an empty pending list opens its own unreachable first block,
     # and every block after it then inherits the universe.
     #
-    # `run`'s RETURN VALUE IS NOT EDGED FROM THE ENTRY, and the reason is that
-    # it is not a path the program has. The return value is the list of blocks
-    # the body's last statement falls out of, and every one of them is already
-    # reachable: `run` was given `[entry.index]` as its pending predecessors,
-    # so `open_block` linked the entry to the body's FIRST block and the
-    # fall-out blocks are downstream of that. Adding the edges as well gave
-    # the entry block a SECOND successor — the block the body's last statement
-    # lives in — which is a path from function entry to the final join that
-    # passes through NOTHING the body stores. `_definitely_stored` intersects
-    # over a join's predecessors, so that one impossible path discarded every
-    # definition the body made.
+    # `run`'s RETURN VALUE IS NOT EDGED FROM THE ENTRY, and that is the whole
+    # reason the `+=` is not here. `run` returns the exits that fall off the
+    # end of the body it was given, and every one of them is already reachable
+    # from its real predecessors: the `open_block` calls inside `run` are what
+    # linked them. Adding an entry edge to them as well asserts a path the
+    # source does not have — from the function's first instruction straight
+    # into the middle of the body — and the fixpoint pays for it, because the
+    # entry's OUT is just the parameter names:
     #
-    # It fired only when the body FALLS OFF THE END, which is why it survived:
-    # `run` returns `[]` for a body whose last statement is a `return` or a
-    # `raise`, and then there was nothing to add.
+    #     def f(n):
+    #         p = 1
+    #         while n:
+    #             q = p
+    #             n = n - 1
     #
-    # Measured, on `std/collections/binary_heap.mojo`'s `_heapify_up`: its
-    # block 0 had `succs == [1, 8]` and its block 8 (`unsafe_write(element^)`,
-    # the read) had `preds == [0, 2, 5, 7]`, so `element` — stored in block 1
-    # on the only path there is — was not in block 8's IN set, and the function
-    # was refused with "read at line 94 before anything in this function stores
-    # it", quoting CPython's `UnboundLocalError` for a program CPython runs.
-    # `_heapify_down` in the same file was refused for `element` at line 124
-    # the same way, and 54 functions across 26 files of
-    # `std/{builtin,collections,memory,algorithm,bit}` were refused with it,
-    # including all five sort helpers in `std/builtin/sort.mojo` and every
-    # method of `std/collections/{dict,list,set,deque,counter,interval,
-    # linked_list,span}.mojo` that ends in an expression statement.
+    # The `while` is the body's LAST statement, so `run` returns the loop's
+    # exit blocks; edgeing the entry to them makes the loop header's IN the
+    # intersection of the preheader's OUT with the PARAMETER set, `p` drops
+    # out of it, and `read_before_store` refuses a program CPython runs.
     #
-    # A lone entry block is the honest graph for a body with no statements, so
-    # the empty-body case is covered by the same removal: `run` returns
-    # `[entry.index]` there, and linking the entry to itself stored nothing
-    # while adding a cycle the fixpoint then had to iterate.
+    # Measured twice, on two corpora, by two sweeps that found it independently
+    # — which is worth recording because a defect this shape has usually
+    # turned out to be one file:
+    #
+    #   * `formal/hostmods/re.mojo`'s `_p_alt`, whose `while 1:` is its last
+    #     statement, and the refusal it produced — "'pend' is read at line
+    #     1401 before anything in this function stores it", against a
+    #     `pend = entry` three lines above — took `re` out of the backend and
+    #     with it every file that imports it (`work/formal4-sweep-repo-a`);
+    #   * `std/collections/binary_heap.mojo`'s `_heapify_up`, whose block 0 had
+    #     `succs == [1, 8]` and whose block 8 (`unsafe_write(element^)`, the
+    #     read) had `preds == [0, 2, 5, 7]`, so `element` — stored in block 1 on
+    #     the only path there is — was not in block 8's IN set. Same shape, and
+    #     54 functions across 26 files of `std/{builtin,collections,memory,
+    #     algorithm,bit}` refused with it, including all five sort helpers in
+    #     `std/builtin/sort.mojo` and every method of
+    #     `std/collections/{dict,list,set,deque,counter,interval,linked_list,
+    #     span}.mojo` that ends in an expression statement
+    #     (`work/formal4-sweep-std-a`).
+    #
+    # `_definitely_stored` intersects over a join's predecessors, so the one
+    # impossible path discarded every definition the body made.
+    #
+    # Removing the edges can only REMOVE refusals, never add one: an entry with
+    # no successor makes `_definitely_stored` top-initialize everything
+    # downstream, which is the safe direction for a name nothing path stores.
+    # For a straight-line body it changes nothing at all — `run` returns the
+    # block the entry already points at, so the `+=` was only ever a duplicate
+    # edge there. And a lone entry block is the honest graph for a body with no
+    # statements at all, so the empty-body case is covered by the same removal:
+    # `run` returns `[entry.index]` there, and linking the entry to itself
+    # stored nothing while adding a cycle the fixpoint then had to iterate.
+    #
+    # WHEN IT FIRED, precisely, because "the last statement is a loop" is too
+    # coarse to be useful to the next reader and the coarse form was measured
+    # to be wrong on a program it very obviously looks like:
+    #
+    #     def main() -> int:
+    #         acc = 0
+    #         i = 0
+    #         while i < 5:
+    #             acc = acc + i
+    #             i = i + 1
+    #         if acc > 5:
+    #             return acc
+    #         return 0
+    #
+    # The `if` IS the last statement and it reads `acc` in both arms, and the
+    # old code refused nothing here — because `run` returns [] when every arm
+    # of the trailing statement TERMINATES (`return`/`raise`/`break` give no
+    # fall-through exit), so there was nothing to edge the entry to. The
+    # condition is therefore TWO things, not one: the body's last statement is a
+    # control-flow statement, AND at least one path falls OUT of it.
+    # `test_formal_read_before_store.py` pins both directions, because a rule
+    # stated in its coarse form and measured only in that form is how the next
+    # person re-derives it.
     entry = new([])
     run(body, [], [entry.index])
     for b in blocks:
