@@ -298,6 +298,37 @@ CASES = [
     ("code_after_raise_is_unreachable_ok",
      "    raise ValueError()\n    return q\n", "ok"),
 
+    # ── THE ENTRY BLOCK MUST NOT HAVE A SECOND SUCCESSOR ──────────────────
+    #
+    # `_build_cfg` used to end with `entry.succs += run(body, …)`, i.e. an edge
+    # from the function's ENTRY block to whichever block the body's last
+    # statement falls out of. Every one of those blocks is already reachable —
+    # the body was emitted with the entry as its pending predecessor — so the
+    # extra edge was a path from function entry to the final join that passes
+    # through nothing the body stores, and the fixpoint's intersection over
+    # that join's predecessors threw the body's definitions away.
+    #
+    # The refusal it produced named CPython's `UnboundLocalError` for programs
+    # CPython runs, and it fired on 54 functions across 26 files of
+    # `std/{builtin,collections,memory,algorithm,bit}` alone — including
+    # `_heapify_up`/`_heapify_down` in `collections/binary_heap.mojo` and every
+    # one of `builtin/sort.mojo`'s five sort helpers, each of which stores the
+    # name on the only path there is.
+    #
+    # The edge only appeared when the body FALLS OFF THE END — `run` returns
+    # `[]` for a body whose last statement is a `return` or a `raise`, and then
+    # there is nothing to add — so the three rows below all end in an
+    # expression statement rather than a `return`, which is also the shape
+    # every one of the real refusals has. The refusal rows above are what keep
+    # the fix from being a loosening: the entry edge was the only spurious
+    # edge, and the loop HEAD's edge to the join is still there.
+    ("store_before_a_loop_then_read_after_it_ok",
+     "    q = 1\n    while n > 0:\n        n = n - 1\n    sink(q)\n", "ok"),
+    ("store_before_a_branch_then_read_after_it_ok",
+     "    q = 1\n    if n:\n        q = 2\n    sink(q)\n", "ok"),
+    ("for_target_is_stored_for_its_own_body_ok",
+     "    for i in range(n):\n        sink(i)\n", "ok"),
+
     # ── names the check must NOT ask about ───────────────────────────────
     # A comprehension's target is bound inside its own scope, so a read of it
     # is not a read of an unstored local — the row a flat node walk gets
@@ -363,6 +394,47 @@ def the_function(stmts):
     raise AssertionError("the case source has no `probe` function")
 
 
+# (name, body, what the entry block's successor list must be)
+#
+# `entry_shape` pins the GRAPH rather than a verdict, because the defect was in
+# the graph and every verdict above can be satisfied by a rule that happens to
+# give the right answer for the wrong reason. The entry block holds no
+# statements, so its only successor is the block the body's FIRST statement
+# opens — one successor, whatever the body is, and never a block further down.
+#
+# `read_before_store`'s whole argument is "a store dominates a read only when
+# every path from the entry to the read passes one", so an edge that is not a
+# path the program has is not a conservative extra edge: it is a claim that
+# control reaches the end of the function having stored nothing, which is a
+# program CPython does not have.
+ENTRY_SHAPES = [
+    ("entry_reaches_only_the_first_statement",
+     "    q = 1\n    return q\n", [1]),
+    ("entry_does_not_reach_the_join_after_a_loop",
+     "    q = 1\n    while n > 0:\n        n = n - 1\n    sink(q)\n", [1]),
+    ("entry_does_not_reach_the_join_after_a_branch",
+     "    q = 1\n    if n:\n        q = 2\n    sink(q)\n", [1]),
+    ("entry_does_not_reach_the_loop_target_read",
+     "    for i in range(n):\n        sink(i)\n", [1]),
+    ("a_body_of_only_pass_still_has_one_successor",
+     "    pass\n", [1]),
+]
+
+
+def check_entry_shape() -> list:
+    """Every failure in ENTRY_SHAPES, as strings."""
+    bad = []
+    for name, body, want in ENTRY_SHAPES:
+        fn = the_function(parse_module("def probe(n):\n" + body,
+                                       filename=f"{name}.mojo"))
+        blocks, entry = M._build_cfg(fn.body)
+        got = blocks[entry].succs
+        if got != want:
+            bad.append(f"{name}: the entry block's successors are {got}, "
+                       f"not {want}")
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -418,7 +490,11 @@ def main():
             if args.verbose:
                 mark = f" [diverges: {diverges}]" if diverges else ""
                 print(f"  PASS  {name} ({expect}){mark}")
-    print(f"read-before-store: PASS={passed} FAIL={failed}")
+    for problem in check_entry_shape():
+        failed += 1
+        print(f"  FAIL  entry-shape: {problem}")
+    print(f"read-before-store: PASS={passed} FAIL={failed} "
+          f"({len(ENTRY_SHAPES)} graph shapes)")
     return 1 if failed else 0
 
 

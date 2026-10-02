@@ -2306,20 +2306,6 @@ def _loop_body_always_runs(s) -> bool:
         return False
     return False
 
-    if kind in ("ForStmt", "ComptimeForStmt"):
-        it = getattr(s, "iterable", None)
-        if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return bool(getattr(it, "elements", None))
-        if isinstance(it, F.StringLiteral):
-            return bool(it.value)
-        if isinstance(it, F.CallExpr):
-            func = getattr(it, "func", None)
-            if (isinstance(func, F.IdentExpr) and func.name == "range"
-                    and not (getattr(it, "kwargs", None) or [])):
-                return bool(_range_is_nonempty(list(it.args or [])))
-        return False
-    return False
-
 
 def _build_cfg(body) -> tuple:
     """`(blocks, entry index)` for a function body.
@@ -2573,8 +2559,42 @@ def _build_cfg(body) -> tuple:
     # predecessor, which is the edge that makes the seed reach anything: a body
     # emitted with an empty pending list opens its own unreachable first block,
     # and every block after it then inherits the universe.
+    #
+    # `run`'s RETURN VALUE IS NOT EDGED FROM THE ENTRY, and the reason is that
+    # it is not a path the program has. The return value is the list of blocks
+    # the body's last statement falls out of, and every one of them is already
+    # reachable: `run` was given `[entry.index]` as its pending predecessors,
+    # so `open_block` linked the entry to the body's FIRST block and the
+    # fall-out blocks are downstream of that. Adding the edges as well gave
+    # the entry block a SECOND successor — the block the body's last statement
+    # lives in — which is a path from function entry to the final join that
+    # passes through NOTHING the body stores. `_definitely_stored` intersects
+    # over a join's predecessors, so that one impossible path discarded every
+    # definition the body made.
+    #
+    # It fired only when the body FALLS OFF THE END, which is why it survived:
+    # `run` returns `[]` for a body whose last statement is a `return` or a
+    # `raise`, and then there was nothing to add.
+    #
+    # Measured, on `std/collections/binary_heap.mojo`'s `_heapify_up`: its
+    # block 0 had `succs == [1, 8]` and its block 8 (`unsafe_write(element^)`,
+    # the read) had `preds == [0, 2, 5, 7]`, so `element` — stored in block 1
+    # on the only path there is — was not in block 8's IN set, and the function
+    # was refused with "read at line 94 before anything in this function stores
+    # it", quoting CPython's `UnboundLocalError` for a program CPython runs.
+    # `_heapify_down` in the same file was refused for `element` at line 124
+    # the same way, and 54 functions across 26 files of
+    # `std/{builtin,collections,memory,algorithm,bit}` were refused with it,
+    # including all five sort helpers in `std/builtin/sort.mojo` and every
+    # method of `std/collections/{dict,list,set,deque,counter,interval,
+    # linked_list,span}.mojo` that ends in an expression statement.
+    #
+    # A lone entry block is the honest graph for a body with no statements, so
+    # the empty-body case is covered by the same removal: `run` returns
+    # `[entry.index]` there, and linking the entry to itself stored nothing
+    # while adding a cycle the fixpoint then had to iterate.
     entry = new([])
-    entry.succs += run(body, [], [entry.index])
+    run(body, [], [entry.index])
     for b in blocks:
         for d in b.succs:
             if d is not None and 0 <= d < len(blocks):
