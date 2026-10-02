@@ -11,7 +11,7 @@ import sys
 import subprocess
 import tempfile
 from build_config import find_gcc
-from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
+from exec_budget import RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -41,9 +41,7 @@ def compile_mojo_to_executable(mojo_src: str) -> str:
              os.path.join(runtime_dir, 'fire_runtime.c')],
             capture_output=True,
             text=True,
-            # A `gcc` over one module: the COMPILE budget, not a literal. See
-            # exec_budget.py for the measurement behind the number.
-            timeout=COMPILE_TIMEOUT_S
+            timeout=30
         )
         if result.returncode != 0:
             raise RuntimeError(f"gcc compilation failed: {result.stderr}")

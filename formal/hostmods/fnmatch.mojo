@@ -70,42 +70,14 @@ WHAT IS NOT HERE, AND WHY
   * `iglob` — a GENERATOR, for the same reason `os.listdir` is a blob and a
     generator is worse: it has to survive between two calls.
   * `translate` — CPython's pattern-to-REGEX function. It is pure and its
-    answer is a string, so it is ANSWERABLE, and it is not written because its
-    CONSUMER is absent. The string CPython produces is
-
-        fnmatch.translate('*[a-c]*')  ->  (?s:(?>.*?[a-c]).*)\z
-        fnmatch.translate('a')        ->  (?s:a)\z
-
-    and `formal/hostmods/re.mojo` supports none of those three constructs: an
-    inline-flag group, an atomic group, and an end-anchor. A `translate` here
-    would be a function whose output nothing on this path can compile, which is
-    a worse thing to ship than an absent name.
-
-    THAT CONSUMER IS NOT GROWING, and the reason is a decision rather than an
-    oversight: `test_re_formal.py`'s `UNSUPPORTED` list carries `(?>a)` ("an
-    atomic group") and `(?i)a` ("an inline flag") and ASSERTS that each is
-    refused with STATUS_UNSUPPORTED and blanked spans — a refusal, not "no
-    match", because a caller that cannot tell those apart has a silent wrong
-    answer. So the position is pinned by a test, which is what makes it a
-    decision: the way to revisit it is a caller needing an atomic group for its
-    own sake, at which point `re` grows the construct and this name follows.
-
-    What is NOT the reason, because it is worth being precise about: the
-    algorithm is settled and was verified before this file existed — CPython's
-    `_translate(pat, '*', '.')` then `_join_translated_parts(parts, stars)`,
-    with the bracket body's chunk-merge done in one `malloc`'d buffer because a
-    list of chunks is not expressible and the merges delete from the middle of
-    the sequence. It was modelled in Python against CPython's own `translate`
-    over 20,053 patterns plus every hand-written corner (`[a-c]`, `[!]]`,
-    `[b-a]`, `[a-z-c]`, an unterminated `[`, …) with zero differences. So the
-    transcription is not the obstacle and "it is hard" is not the reason.
-
-    ONE PIECE OF IT IS WANTED BY A DIFFERENT CALLER, which is why it is recorded
-    here rather than only as an absence: rewriting a pattern needs a
-    `str_replace_all(s, from, to)`, and `formal/hostmods/platform.mojo` needs
-    the same helper for its `--` fold and its trailing-`-` strip. It is ordinary
-    substring replacement — worth writing once, in whichever module lands first,
-    rather than twice.
+    answer is a string, so it is answerable, and it is NOT written because its
+    consumer is absent: the string it produces is full of `(?s:`, `(?>...)` and
+    `\z`, and `formal/hostmods/re.mojo` supports none of those three, so a
+    `translate` here would be a function whose output nothing on this path can
+    compile. That is the honest reason and it is a different one from "it is
+    hard": the algorithm is CPython's `_translate` plus
+    `_join_translated_parts`, and `bugs/FORMAL_fnmatch_translate_absent.md`
+    carries the transcription plan and the verification corpus for it.
 
 THE DEPTH OF THE RECURSION IS THE INPUT'S
 -----------------------------------------

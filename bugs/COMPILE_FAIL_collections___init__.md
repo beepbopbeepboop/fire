@@ -1,55 +1,6 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
-## Status (2026-10-01 — this file is down to ONE own error, and it is the 3-argument `type()` feature gap)
-
-`python3 fire.py build -o .tmp/out/collections/collections
-/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py` under
-`tools/memslot.py --gb 8`: **exit 1, 6 `error:` lines, ONE of them this
-file's** — down from 9 total / 4 own at the start of this session.
-
-Two of the three classes the 2026-09-30 entry below recorded are now
-closed, each with a real fix and a regression:
-
-1. **`UserDict.__ior__`'s `self.data |= other` (line 1192) — FIXED.**
-   `mojo_dict_union` takes two `MojoDict *`, and `other` is an
-   unannotated parameter, so it went straight into the pointer slot:
-   "passing argument 2 of 'mojo_dict_union' makes pointer from integer
-   without a cast". Fixed by converting at RUNTIME via
-   `mojo_is_registered_dict` rather than casting — a scalar slot may hold
-   a real dict or an unrelated value, and a cast hands the union whatever
-   bits were there. Regression:
-   `test_gimple.py::test_dict_union_right_operand_is_converted_at_runtime`.
-2. **`UserList.sort`'s `self.data.sort(*args, **kwds)` (lines 1347-1348)
-   — FIXED.** `l.sort()`'s lowering passed its `keys` argument as the
-   literal text `NULL`, which is a preprocessor macro rather than a gimple
-   expression; a cast expression is rejected inline as a gimple call
-   operand too, so the obvious typed-null substitution fails identically.
-   Both are only fatal in a `__GIMPLE`-tagged body — a METHOD's — while
-   the same call in a function's plain-C body compiles, which is exactly
-   why this never showed up as a function-level case. Reduced to four
-   lines: a method whose body calls `.sort()` on a list field.
-   Regression: `test_gimple.py::test_list_sort_in_a_method_body_is_gimple_legal`.
-
-**The one remaining own error is a genuine feature gap**, as the entry
-below already said: line 515 is `namedtuple`'s `result = type(typename,
-(tuple,), class_namespace)` — dynamic class construction through the
-3-argument `type()` form, which this codegen lowers to a 1-argument
-`mojo_type`. Reduced and confirmed: `type('T', (tuple,), ns)` gives "too
-many arguments to function 'mojo_type'; expected 1, have 3".
-
-**Also fixed this session, found while measuring this file:** `max(a, b)`
-on an unannotated parameter was typing that parameter as `MojoList *`,
-because `max`/`min` sit in `_ITERABLE_CONSUMING_BUILTINS` for their
-*one*-argument reduce form while their multi-argument form is a scalar
-comparison. That was a hard compile error wherever a 2-arg `max`/`min` met
-an unannotated parameter — `Lib/zipfile/__init__.py:1180`'s
-`n = max(n, self.MIN_READ_SIZE)` is the real instance, and it is fixed
-with `_SCALAR_ARITY_BUILTINS`. It does not appear in collections'
-current error set, so this file's own count above does not reflect it.
-
-Doc kept open on one feature gap.
-
-## Status (2026-09-30, branch work/compile-fail-stdlib-misc — 9 `error:` lines, 4 of them this file's)
+## Status (2026-09-30, branch work/compile-fail-stdlib-misc — down to TWO own-file errors, and neither is one of the clusters below)
 
 Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 (17 s, peak 0.1 GB, exit 1). **9 `error:` lines total, 2 of them in
@@ -303,7 +254,7 @@ code change; doc stays open.
 
 This session implemented real loop-as-expression codegen for `list(x)`/
 `set(x)`/comprehension-as-value inside a compiled generator/coroutine
-body (see `“CODEGEN_generator_function: Lib/codecs.py”`'s entry of the
+body (see `bugs/CODEGEN_generator_function_Lib_codecs.md`'s entry of the
 same date for the implementation writeup). This file's three
 `__reversed__` refusals are all `reversed(...)` used as a plain builtin
 CALL (producing a value), not a `list()`/`set()`/comprehension shape —
@@ -555,7 +506,7 @@ This is a plain instance of the already-documented, already-structural
 promise design only supports a single scalar `int64_t`/`double`/`_Bool`
 yield type; `_infer_generator_yield_ctype` deliberately returns `None`
 for a `TupleExpr` yield value). Not narrow, not attempted here — same
-class of gap as `“COMPILE_FAIL: asyncio/futures.py”`'s
+class of gap as `bugs/COMPILE_FAIL_asyncio_futures.md`'s
 value-carrying-`return` refusal (both are "the coroutine promise type
 can't represent this value shape" gaps in the same shared machinery).
 `_OrderedDictKeysView.__reversed__` (`yield from reversed(...)`) and

@@ -235,74 +235,12 @@ class StringLiteral:
     line: int = 0
     col: int = 0
     is_bytes: bool = False
-    # `r"..."` / `R"..."`: the body is RAW SOURCE TEXT that must NOT have its
-    # escapes decoded. Recorded rather than inferred, because
-    # `_strip_string_prefix_and_quotes` strips the `r` and the body is
-    # indistinguishable from a non-raw literal's afterwards — and
-    # `decode_c_escapes`, which every engine now calls, has no other way to
-    # know. CPython keeps `r"a\nb"` at four characters; without this flag the
-    # shared decode would make it three in all three engines at once, which is
-    # a divergence introduced by CONSOLIDATING the decoder rather than one that
-    # consolidation removed. `False` for every literal with no `r`, and for
-    # every literal this parser does not build (a fold, a manifest value, a
-    # synthesized format), all of which are already-decoded text.
-    is_raw: bool = False
-    # `f"..."` / `F"..."` / `t"..."` / `T"..."`: this literal's `value` is the
-    # WHOLE SOURCE TOKEN — `f"n={n}"`, prefix, quotes and braces included —
-    # because the interpolations inside it are still raw TEXT at parse time.
-    # They are not AST nodes and are not parsed here; whichever engine consumes
-    # the value parses the `{...}` fields itself, which is why
-    # `_strip_string_prefix_and_quotes` deliberately leaves an f/t token intact.
-    # That is a real shape, and it is why the answer has to be RECORDED rather
-    # than recovered from the value: an ordinary literal's `value` is its BODY,
-    # and a body may begin with any two characters at all. `s = 'f"n"'` has the
-    # value `f"n"` and is a three-character string, so every reader that used to
-    # decide "is this interpolated?" by asking whether the value started with
-    # `f"` read that one as an f-string — printing `n` on the interpreter and
-    # the compiled path, and REFUSING correct code on the formal path. Same
-    # shape of problem as `is_raw` above, same answer, and the three readers are
-    # `myinterpreter.eval_StringLiteral`,
-    # `mojo/middle/resolve_shared._decode_str_literal_text` (via this flag, so
-    # every compiled-path f-string site inherits it) and
-    # `formal/model.py:is_interpolated_literal`.
-    # `False` for every literal with no f/t prefix, and for every literal this
-    # parser does not build (a fold, a manifest value, a synthesized format),
-    # which are all already-decoded text.
-    is_interpolated: bool = False
 
 @dataclass
 class TstringLiteral:
     value: str
     line: int = 0
     col: int = 0
-
-def is_fstring_literal(node) -> bool:
-    """True iff `node` is a `StringLiteral` this parser built from an
-    f-string (or a t-string, which uses the same `{expr}` syntax and is
-    lowered identically).
-
-    An f-string is NOT a different node class: the parser emits a plain
-    `StringLiteral` whose `value` still carries its `f` prefix AND its
-    surrounding quotes, where a plain literal's quotes are stripped at
-    tokenize time. That asymmetry is what makes the test unambiguous —
-    `'"'` and `"a "` are content that begins with a quote, not a prefix —
-    and it is why the predicate has to be this shape rather than
-    `value.startswith('f')`.
-
-    It lives here, beside the node it asks about, because two engines need
-    the same answer and neither may grow its own: the codegen's f-string
-    interpolation (`mojo/middle/resolve_shared._decode_str_literal_text`,
-    which strips the prefix) and the ownership analysis
-    (`ownership_destruct`, which must know that `s = f"{xs}"` builds a fresh
-    string so the name can own it). Those two disagreed until this existed:
-    the analysis saw a `StringLiteral`, decided it was a constant, and never
-    credited the name — so an interpolated container leaked its repr buffer
-    once per iteration for want of one predicate.
-    """
-    if not isinstance(node, StringLiteral):
-        return False
-    val = _as_str(node.value)
-    return (len(val) > 1 and val[0] in 'fFtT' and val[1] in '"\'\'')
 
 @dataclass
 class BoolLiteral:
@@ -390,7 +328,7 @@ class CompareChain:
     `operands[i] ops[i] operands[i+1]` link fails, without ever feeding a
     comparison's boolean RESULT into the next comparison as an operand
     (that was the original bug this node exists to avoid — see
-    CHAINED_COMPARISON_WRONG_RESULT). `len(operands) ==
+    bugs/CHAINED_COMPARISON_WRONG_RESULT.md). `len(operands) ==
     len(ops) + 1`."""
     operands: list
     ops: list
@@ -518,7 +456,7 @@ class YieldExpr:
     single TupleExpr `value` by the parser, matching how `return a, b` is
     represented). `value` is None for a bare `yield`. Milestone 1: parser +
     static generator-detection only — no interpreter/codegen execution
-    support yet (see INTERP_generator_yield_entirely_unimplemented).
+    support yet (see bugs/INTERP_generator_yield_entirely_unimplemented.md).
     """
     value: object = None
     line: int = 0
@@ -537,7 +475,7 @@ class AwaitExpr:
     """`await expr` — Milestone 3a: parser + AST only, matching how
     Milestone 1 handled YieldExpr/YieldFromExpr (no interpreter/codegen
     execution support yet — see FunctionDef.is_async and
-    INTERP_generator_yield_entirely_unimplemented for the sibling
+    bugs/INTERP_generator_yield_entirely_unimplemented.md for the sibling
     generator precedent this mirrors)."""
     value: object = None
     line: int = 0
@@ -676,7 +614,6 @@ class ForStmt:
     line: int = 0
     col: int = 0
 
-
 @dataclass
 class FunctionDef:
     name: str
@@ -689,23 +626,6 @@ class FunctionDef:
     param_defaults: dict = field(default_factory=dict)  # name -> default value expression AST node
     kwonly: list = field(default_factory=list)  # names appearing after a bare `*,` separator
     comptime_params: list = field(default_factory=list)  # names from `def f[dtype: DType, ...](...)`
-    # Declared defaults of those bracketed parameters (`def f[T, y=0, *, linux=0]()`):
-    # `{name: default_expr_node}` for the ones written `name = expr`. Kept
-    # out of `param_defaults` because that table is the RUNTIME parameter
-    # list's and its LENGTH is the trailing-default offset arithmetic's
-    # input — see Parser._parse_generic_params_capture.
-    comptime_param_defaults: dict = field(default_factory=dict)
-    # Declared ANNOTATIONS of those bracketed parameters (`def f[T: AnyType,
-    # keys: List[T]](...)`): `{name: annotation_text}` for the ones written
-    # `name: Type`.  Additive, and it exists because the bracket parse kept the
-    # names and the defaults and THREW THE TYPE AWAY, so no reader anywhere could
-    # ask what a bracket parameter holds -- and `len(keys)` over `keys: List[T]`
-    # was refused with "the source does not say what this operand holds" on a
-    # declaration that says it in the parameter list, while `keys[0]` in the same
-    # body lowered.  Kept out of `params` for the reason `comptime_param_defaults`
-    # is: that list is the RUNTIME parameter list and its length is the
-    # trailing-default offset arithmetic's input.
-    comptime_param_annotations: dict = field(default_factory=dict)
     is_generator: bool = False  # True if `yield`/`yield from` appears directly in this
         # function's own body (not inside a nested def/lambda/comprehension — a `yield`
         # there belongs to THAT inner scope, matching real Python scoping rules).
@@ -715,7 +635,7 @@ class FunctionDef:
         # Lets a later milestone's generator-execution pass cheaply ask "does this specific
         # node need generator-aware handling" without re-walking the whole tree at runtime.
     is_async: bool = False  # True if declared `async def` — Milestone 3a
-        # (INTERP_generator_yield_entirely_unimplemented's async/await
+        # (bugs/INTERP_generator_yield_entirely_unimplemented.md's async/await
         # sibling). Detection is trivial (just "was `async` seen before this
         # `def`/`fn`"), unlike is_generator's body tree-walk. A function CAN be
         # both is_async AND is_generator (`async def f(): yield x` — a real,
@@ -941,213 +861,6 @@ class ComptimeVarStmt:
     col: int = 0
 
 
-# ── Unpacking-target representation ─────────────────────────────────
-#
-# `ForStmt.target` / `WithItem.target` / `Generator.target` are a comma-joined
-# STRING, not an Expr tree, and this is the ONE place that representation is
-# written and read. It exists because a for-target can be a dotted attribute
-# set (`st.lineno`), a subscript store (`d["k"]`) and a starred name
-# (`*rest`) as well as plain names, all in one comma list, and keeping the
-# original text is the only spelling that survives all three
-# (see Parser._parse_unpack_target).
-#
-# Two consequences made this its own section rather than a helper at each
-# consumer:
-#
-#   * A 1-TUPLE and a PARENTHESISED SINGLE NAME are DIFFERENT targets and used
-#     to be the same string. `for (a,) in b:` unpacks each item; `for (a) in
-#     b:` binds the whole item to `a`. The parser emitted `"(a)"` for both,
-#     and every consumer read the presence of a comma — so the compiled path
-#     and the interpreter both bound the whole item, printing `1` where
-#     CPython prints `(1,)`, exit 0, no diagnostic. `_parse_unpack_target`
-#     now emits `"(a,)"` for the 1-tuple and keeps `"(a)"` for the
-#     parenthesised name, and `for_target_is_tuple` is the only reader of
-#     that difference. (CODEGEN_for_loop_target_one_tuple_vs_paren_single_name)
-#   * A TRAILING comma used to leave an EMPTY name at every site that split
-#     the string independently. `split_top_level_commas` drops empty slots,
-#     so a trailing comma is now expressible and no consumer has to know it.
-#
-# `split_top_level_commas` is deliberately non-recursive and about the TEXT
-# only; `for_target_names` is the recursive flattening of one target, and
-# `for_target_is_tuple` is the one question about a target's shape that every
-# lowering has to ask.
-
-
-def split_top_level_commas(s: str) -> list[str]:
-    """Split `s` on the commas that are not nested inside ([{ }).
-
-    Bracket-aware, because the text it splits appears in two places that both
-    nest brackets: a multi-arg bracket ANNOTATION (`UnsafePointer[X,
-    Tuple[Int, Int]]` — the element segment has to survive the inner tuple's
-    own comma) and an unpacking-target string (`'(a, (b, c))'` — a naive
-    `str.split(',')` tore that into `'(a'`, `'(b'`, `'c))'`, fragments that then
-    leaked into emitted C declarations verbatim). The depth counter tracks all
-    three bracket kinds so the one function serves both.
-
-    The segments are returned VERBATIM (unstripped, empties kept). That is
-    deliberate on both sides: an annotation reader wants `[0]` to be the first
-    element even when the annotation is malformed and that element is empty,
-    and an annotation never carries a trailing comma. A target reader wants
-    empties GONE and is asking a different question — how many SLOTS a pattern
-    has — so it goes through `target_slots` below rather than reading this
-    function's output directly. One splitter, two named readings.
-    """
-    parts, depth, buf = ([], 0, [])
-    for c in s:
-        if c in '([{':
-            depth += 1
-        elif c in ')]}':
-            depth = max(0, depth - 1)
-        if c == ',' and depth == 0:
-            parts.append(''.join(buf))
-            buf = []
-        else:
-            buf.append(c)
-    parts.append(''.join(buf))
-    return parts
-
-
-def target_slots(s: str) -> list[str]:
-    """The comma-separated SLOTS of an unpacking-target string, stripped, with
-    empty slots dropped.
-
-    This is where the trailing comma of a 1-tuple target is paid for once
-    instead of at every reader. `'(a,)'` is the spelling `_parse_unpack_target`
-    gives `for (a,) in b:` — it has to differ from `'(a)'` somehow, and the
-    comma is the only thing Python itself distinguishes them by — so the split
-    leaves one empty slot behind, and dropping it here is what lets the
-    spelling exist without every consumer having to know about it.
-
-    A real name can never be dropped: `for (a, b)` produces two non-empty
-    slots, and a nested `for (a, (b,))` has its inner comma inside brackets, so
-    it is not a top-level slot boundary at all.
-    """
-    return [p.strip() for p in split_top_level_commas(s) if p.strip()]
-
-
-def _target_group_inner(t: str) -> str | None:
-    """The inside of a target's wrapping group — `'(a, b)'` -> `'a, b'`,
-    `'[a,]'` -> `'a,'` — or None if `t` is not wrapped in one.
-
-    Both bracket kinds, because a comprehension's list-pattern target
-    (`for [off] in ...`) is spelled the same way as its tuple-pattern one and
-    is the same question: does this pattern unpack, or bind one name.
-
-    Returns None (rather than the text unchanged) so a caller can tell "not a
-    group" from "a group whose inside happens to equal itself", and does NOT
-    recurse: only one level of group is peeled here, and
-    `for_target_names` is the recursive one.
-    """
-    if len(t) >= 2:
-        if (t[0] == '(' and t[-1] == ')') or (t[0] == '[' and t[-1] == ']'):
-            return t[1:-1].strip()
-    return None
-
-
-def for_target_is_tuple(target: object) -> bool:
-    """Does this for/with target UNPACK each item, rather than binding the
-    whole item to one name?
-
-    True for `for a, b in ...`, `for (a, b) in ...`, the nested
-    `for (a, (b, c)) in ...`, and the 1-tuples `for (a,) in ...` / `for a, in
-    ...` (spelled `'(a,)'`). False for `for a in ...` and for
-    `for (a) in ...` — the parenthesised single NAME, which binds the whole
-    item and is exactly what `for (a,) in` must not be confused with.
-
-    Accepts the string form, the bare comma form a comprehension
-    `Generator.target` carries (`'a, b'`, no surrounding parens), and the
-    Expr forms (`IdentExpr` / nested `TupleExpr` / `ListExpr`) that a
-    hand-built AST or a re-parsed expression can present.
-    """
-    if isinstance(target, str):
-        t = target.strip()
-        inner = _target_group_inner(t)
-        if inner is not None:
-            t = inner
-        if len(target_slots(t)) > 1:
-            return True
-        # `'(a,)'` / `'a,'` — one name, but the trailing comma says "this is a
-        # 1-tuple", and `target_slots` has just dropped the empty slot that
-        # comma left, so it is indistinguishable from `'(a)'` by count. Reading
-        # the comma off the text is the whole distinction between the two
-        # targets, and it is why the parser has to keep it.
-        return t.endswith(',')
-    if isinstance(target, (TupleExpr, ListExpr)):
-        return True
-    if isinstance(target, IdentExpr):
-        return False
-    # Anything else (an int, None, a node kind this compiler has no
-    # unpacking rule for) binds a single value.
-    return False
-
-
-def for_target_single_name(target: object) -> object:
-    """The ONE name a non-tuple target binds, with redundant parens peeled;
-    `target` itself unchanged when there is nothing to peel.
-
-    `'(a)'` -> `'a'`. This is the third of the three questions about a target,
-    and it exists because the first two are not enough: a consumer that has
-    already established `not for_target_is_tuple(target)` still has to emit a
-    C IDENTIFIER, and for `'(a)'` the target text is not one. Without it every
-    lowering would either declare a variable literally named `"(a)"` or keep
-    its own paren test — and its own paren test is the bug
-    (CODEGEN_for_loop_target_one_tuple_vs_paren_single_name), because
-    a paren test cannot see the trailing comma that makes a 1-tuple unpack.
-
-    Returns the input unchanged for a bare name, for a tuple target (the
-    caller is wrong to ask), and for anything that is not text."""
-    if isinstance(target, str):
-        inner = _target_group_inner(target.strip())
-        if inner is not None and not for_target_is_tuple(target):
-            return inner
-    return target
-
-
-def for_target_names(target: object) -> list[str]:
-    """LEAF variable names of a for/with/comprehension target, flattened.
-
-    `'(a, (b, c))'` -> `['a', 'b', 'c']`; `'(a,)'` -> `['a']`; `'a'` -> `['a']`;
-    `'(a)'` -> `['a']` (a parenthesised name is still one name). Nested groups
-    are flattened because every consumer wants leaves — declared-name sets,
-    the interpreter's binder, the codegen's per-slot assignment — while the
-    SHAPE (`for_target_is_tuple`) is what tells a consumer whether to unpack
-    at all.
-
-    A starred leaf keeps its star (`'*rest'`), because the binding rules for
-    it are the consumer's, not this function's; `mojo/middle/boundnames.py`
-    is the one that strips it.
-    """
-    if isinstance(target, str):
-        t = target.strip()
-        inner = _target_group_inner(t)
-        if inner is not None:
-            t = inner
-        if len(target_slots(t)) > 1 or t.endswith(','):
-            names = []
-            for part in target_slots(t):
-                names.extend(for_target_names(part))
-            return names
-        if inner is not None:
-            # A single name in redundant parens — `'(a)'` binds `a`, and so
-            # does a 1-tuple `'(a,)'`; for NAMES they are the same, and only
-            # `for_target_is_tuple` can tell the two apart. Returning the
-            # stripped text rather than recursing also keeps a SUBSCRIPT
-            # target intact: `'d[a, b]'` is one name, and recursing on it
-            # would hand the splitter the inside of a bracket that is not a
-            # group.
-            return [inner] if inner else []
-        return [t] if t else []
-    if isinstance(target, IdentExpr):
-        return [target.name]
-    if isinstance(target, (TupleExpr, ListExpr)):
-        names = []
-        for e in target.elements:
-            names.extend(for_target_names(e))
-        return names
-    name = getattr(target, 'name', None)
-    return [name] if isinstance(name, str) and name else []
-
-
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del', 'nonlocal', 'imm'}
 
@@ -1176,7 +889,7 @@ def _string_prefix_start(source: str, quote_pos: int) -> int:
     opaque unit) and `py_tokenize`'s `replace_multiline_strings` (which
     needs the same prefix boundary for triple-quoted strings). Extracted
     here instead of duplicated per CLAUDE.md's "consolidate duplicates"
-    rule — see PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.
+    rule — see bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
     """
     # Explicit `==` comparisons, not `c in 'fFrRbBuUtT'`: this codegen's
     # compiled `in`-for-char* path is a documented stub (always returns
@@ -1202,105 +915,6 @@ def _string_prefix_start(source: str, quote_pos: int) -> int:
         return quote_pos
     prev = source[k - 1] if k > 0 else ''
     return k if not (prev.isalnum() or prev == '_') else quote_pos
-
-
-def _prefix_is_interpolated(prefix: str) -> bool:
-    """True when `prefix` -- the letters immediately before a quote -- makes the
-    literal it opens an INTERPOLATED one: an f-string or a t-string, whose
-    `{...}` replacement fields are CODE rather than text.
-
-    THE one answer, asked from two places that could otherwise disagree:
-    `_process_nested_tstrings` (which needs to know whether to use the
-    brace-depth-aware closing-quote scan) and `replace_multiline_strings` (which
-    needs to know whether a newline inside the literal is content, and whether
-    the literal has to be collapsed to a placeholder). The second of those was
-    the defect `cca2a17f` fixed: with no shared predicate the scanner asked "is
-    there a line end here?" without ever asking "am I inside code?", and
-    CPython's rule for a replacement field is that it MAY span lines.
-
-    Explicit `==` comparisons, not `c in 'fFtT'`, for the reason
-    `_string_prefix_start` gives in full: this codegen's compiled `in`-for-char*
-    path is a documented stub that always returns False, so an `in`-based check
-    here would silently disable the branch under self-hosting.
-    """
-    for c in prefix:
-        if c == 'f' or c == 'F' or c == 't' or c == 'T':
-            return True
-    return False
-
-
-def _count_line_ends(text: str, unescaped_only: bool) -> int:
-    r"""How many LINE ENDS `text` holds — and with `unescaped_only`, how many
-    of them no backslash consumed.
-
-    Line ends are `_LINE_ENDS`, which is the module's one definition of the
-    question and includes a lone `\r`; `str.count('\n')` is not it, and two
-    places in `replace_multiline_strings` used it. That is why the shape
-    `f"a {q\r  } b"` — a replacement field crossing a bare CR — produced NO
-    STRING token at all on the first version of this: the literal was not
-    collapsed, so the `\r` reached `_source_lines`, which splits on it, and the
-    half-literal became ordinary code.
-
-    The two answers are different questions and both are needed. `unescaped_only`
-    is the COLLAPSE decision: a backslash-continued literal must stay text on
-    its physical line, because the pass that decides whether the pair is deleted
-    or kept (`_unterminated_quote_pos` / `_is_raw_literal_at`) runs after this
-    one and reads the line there. And the plain count is the PAD: every line end
-    occupied a physical line, escaped or not, so both have to be paid back to keep
-    every later line number where the source wrote it.
-
-    Collapsing on the wrong one of those is what regressed
-    `test_string_literal_lexing.py`'s eight continuation rows the first time this
-    was written, and the symptom was the value keeping the pair on every
-    architecture.
-    """
-    n = 0
-    for m in _LINE_TERMINATORS.finditer(text):
-        if unescaped_only:
-            k = m.start()
-            if k == 0:
-                return 1
-            if text[k - 1] != '\\':
-                n += 1
-        else:
-            n += 1
-    return n
-
-
-def _flush_line_pad(out: list, seg: str, pending: int) -> int:
-    """Append `seg` to `out`, inserting the `pending` owed newlines after `seg`'s
-    FIRST line break; return what is still owed.
-
-    The owed newlines stand in for lines a collapsed literal used to occupy, so
-    that every physical line number after one is still the number the source
-    wrote. They go after the first REAL newline rather than being emitted right
-    after the placeholder, because emitting them there pushed any postfix or
-    binary continuation on the literal's own closing line (a `.strip()` or a `%`
-    written straight after the closing quote) onto an artificial blank line of
-    its own, which made the line-based tokenizer end the statement early and
-    left the `.`/`%` to start a new, primary-less statement
-    (`Unexpected DOT('.')`/`Unexpected OP('%')`, found via real stdlib code like
-    a triple-quoted literal followed straight by `.strip()`).
-
-    Module-level rather than a nested closure over `out`/`pending` ON PURPOSE:
-    a closure-based version of this was behaviourally identical and broke
-    `make check-selfhost`, with `gimple_codegen.py` miscompiling unrelated code
-    elsewhere once `replace_multiline_strings` gained a nested closure with
-    mutated captured state at that scope depth. It is also the reason the flush
-    used to be spelled out at each of its two call sites; there is one copy now.
-
-    With nothing owed, or with nothing owed and no line break to anchor them to,
-    this is an append and nothing else -- which is what every single-line
-    literal in every file on this tree takes.
-    """
-    if pending == 0 or '\n' not in seg:
-        out.append(seg)
-        return pending
-    nl_idx = seg.index('\n')
-    out.append(seg[:nl_idx + 1])
-    out.append('\n' * pending)
-    out.append(seg[nl_idx + 1:])
-    return 0
 
 
 def _find_tstring_closing_quote(source: str, quote_pos: int, quote_ch: str) -> int:
@@ -1373,7 +987,7 @@ def _process_nested_tstrings(stmt: str, cache: dict, idx_list: list) -> str:
         # `t` in `r"\t"`'s `\t`), treating the *original* string's own
         # closing quote as the *opening* quote of a brand-new bogus t-string
         # and scanning for the next unrelated quote later in the statement.
-        # See PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.
+        # See bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
         if stmt[i] in ('"', "'"):
             qch = stmt[i]
             pstart = _string_prefix_start(stmt, i)
@@ -1386,10 +1000,9 @@ def _process_nested_tstrings(stmt: str, cache: dict, idx_list: list) -> str:
             # own delimiter (legal since PEP 701 / Python 3.12, e.g.
             # `f'result: {g('a', 'b')}'`) would otherwise be truncated at
             # the first reused quote by the plain simple-scan branch below.
-            # See PARSE_FAIL_fstring_same_quote_reuse. Whether a prefix makes
-            # a literal interpolated is `_prefix_is_interpolated`'s one answer,
-            # the same one `replace_multiline_strings` asks.
-            if _prefix_is_interpolated(prefix):
+            # See bugs/PARSE_FAIL_fstring_same_quote_reuse.md.
+            needs_brace_aware_scan = any(c in ('t', 'T', 'f', 'F') for c in prefix)
+            if needs_brace_aware_scan:
                 # A real t/f-string prefix: use the brace-depth-aware scan
                 # so nested `{}` interpolations are handled correctly.
                 close = _find_tstring_closing_quote(stmt, i, qch)
@@ -1485,7 +1098,7 @@ def _split_on_separators(s: str) -> list[str]:
     (never even reaching the token stream, unlike a real SEMICOLON token —
     see py_tokenize's `kind in ("WS", "UNK", "XFER"): continue`), losing the
     array's size entirely with no way to recover it downstream. See
-    BUG-2026-008 (box.3d/game) for the real-world motivating case."""
+    bugs/BUG-2026-008.md (box.3d/game) for the real-world motivating case."""
     parts, buf, in_str, depth = [], [], None, 0
     i = 0
     while i < len(s):
@@ -1569,24 +1182,16 @@ def _indent_expanded(line: str) -> str:
 
     This is the third pass in this function to need to know where the literals
     are, after the backslash join and the line split; the other two are
-    `_unterminated_quote_pos` and `_strip_inline_comment`, and this one is the
-    only one that still had to be taught.
+    `_ends_inside_string` and `_strip_inline_comment`, and this one is the only
+    one that still had to be taught.
     """
     cut = len(line) - len(line.lstrip())
     return line[:cut].expandtabs(_INDENT_SIZE) + line[cut:]
 
 
-def _scan_string_end(src: str, i: int, quote: str, triple: bool,
-                     interpolated: bool = False) -> int:
+def _scan_string_end(src: str, i: int, quote: str, triple: bool) -> int:
     r"""Index just PAST the closing delimiter of the string literal that OPENS at
     `i`, or -1 when that literal is unterminated.
-
-    `interpolated` says whether the literal opened at `i` is an f-string or a
-    t-string, which is a question about CODE inside a string and not about the
-    string; `_prefix_is_interpolated` is its one answer. It defaults to False so
-    that a caller with no prefix in hand gets this function's ordinary-literal
-    rule, which is the safe direction: the wrong answer is a refusal, never a
-    different literal boundary.
 
     This is the one place in the front end that answers "where does this string
     literal end", shared by `py_tokenize`'s triple-quote collapse and its
@@ -1595,7 +1200,7 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool,
 
     The rule is CPython's, and it is worth stating exactly because getting it
     wrong is the bug this function exists to make impossible
-    (CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file).
+    (bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md).
     (That doc's examples spell quote runs out longhand from here on: a literal
     triple quote inside this docstring would close it.)
 
@@ -1629,122 +1234,17 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool,
     still, because it turns the literal's text into ordinary code
     (`x = "abc` used to parse as `x = abc`, and `x = it's` as `x = it`
     followed by a bare `s`).
-
-    ONE rule above is CPython's for an ordinary literal and NOT its rule for an
-    interpolated one, which is why `interpolated` is a parameter and not a
-    detail of the caller: in `f"..."` a `{` opens a REPLACEMENT FIELD, and the
-    field is code, and code may span lines. CPython 3.12+ accepts
-
-        f"got {[q(n)
-                for n in ys]}"
-
-    and reports "unterminated string literal" for `f"a{b`. So for an
-    interpolated single-quoted literal this tracks field depth and does not end
-    the literal at a line break inside one. Depth 0 is unchanged, which is the
-    property that keeps every genuinely unterminated literal a refusal. `{{` and
-    `}}` are ESCAPED braces -- `f"a{{b"` is the three characters `a{b` and opens
-    no field -- and a line break after one is still the end of the literal,
-    exactly as CPython has it.
-
-    A `#` inside a field needs NO arm here, and that is worth saying because the
-    obvious arm is wrong. This function answers where a literal ENDS, and to
-    that question every character inside a field is equally content: the
-    reported shape `f"{a # note<nl>}"` is scanned correctly by the depth rule
-    alone, the `#` being just a character between `{` and the line break. What
-    an arm for it would actually have to decide is when a `#` starts a COMMENT
-    rather than being a character, and CPython's answer is a property of the
-    expression -- `:#x` is a format spec, `'a#b'` is inside a nested literal,
-    `#b` with no space before it is neither -- so an arm would have to parse the
-    field to get it right, and a plausible-looking one silently breaks a format
-    spec. Written once, measured three ways: it broke `{x:#x}` and
-    `{d['a#b']}` across 10 files on this tree before it was removed, and the
-    comment case passes without it.
-
-    THE DELIMITER INSIDE A FIELD IS A NESTED LITERAL, not the end of this one.
-    Since PEP 701 (3.12) `f"{d["k"]}"` is valid, so the closing quote of a
-    nested literal that reuses the enclosing delimiter must be stepped over
-    rather than read as this literal's own — `PARSE_FAIL_fstring_same_quote_reuse`
-    is the doc for that shape and it worked before this change, so a brace
-    counter that does not understand quoting would have broken it. Which is why
-    the delimiter arm below asks this same function rather than deciding: a
-    nested literal that closes is skipped, and one that does not close means the
-    quote was this literal's own after all — at which point an unclosed field is
-    a refusal (CPython: "'{' was never closed") and depth 0 is the ordinary end.
-    A nested literal of the OTHER quote character needs no arm at all, because
-    it cannot close this one.
-
-    Not done here, and deliberately: nothing about a nested literal this scan
-    cannot finish. A field whose nested literal is itself unterminated is
-    refused rather than guessed at, which is the safe direction and the same one
-    this function has taken since it was written.
     """
     n = len(src)
     delim = quote * 3 if triple else quote
     dlen = len(delim)
     j = i + dlen
-    # Replacement-field depth. Non-zero is only reachable for an interpolated
-    # single-quoted literal, which is the only shape where a line break can be
-    # content; a triple-quoted one crosses lines whatever the depth is, and an
-    # ordinary one's braces are text.
-    fields = interpolated and not triple
-    depth = 0
     while j < n:
         c = src[j]
         if c == '\\' and j + 1 < n:
-            if fields:
-                # A backslash before a BRACE does not consume it, and this is
-                # the raw-string half of the rule the docstring's "Not in scope"
-                # paragraph is about. `rf'...\{{'` is what this codegen's own
-                # `test_gimple_runner.py` writes: a raw f-string whose field is
-                # an escaped brace pair. In a raw literal the backslash is
-                # content and the pair is what escapes, so consuming the brace
-                # here opened a field that never closed and REFUSED the file.
-                # Letting the brace through gives CPython's reading, and for a
-                # COOKED f-string `\{` is a syntax error either way, so the
-                # boundary is still right in the only case that reaches it.
-                if src[j + 1] == '{' or src[j + 1] == '}':
-                    j += 1
-                    continue
             j += 2
             continue
-        if fields:
-            if c == '{':
-                if j + 1 < n:
-                    if src[j + 1] == '{':
-                        j += 2
-                        continue
-                depth += 1
-                j += 1
-                continue
-            if c == '}':
-                if j + 1 < n:
-                    if src[j + 1] == '}':
-                        j += 2
-                        continue
-                if depth > 0:
-                    depth -= 1
-                j += 1
-                continue
         if src.startswith(delim, j):
-            if depth > 0:
-                # A triple run at the nested position opens a triple-quoted
-                # literal, and this literal is single-quoted (that is what
-                # `fields` means), so the run can only belong to the nested one.
-                # Spelled as two comparisons rather than a slice compare for
-                # the reason the opener test in `replace_multiline_strings`
-                # gives in full: this codegen's `and` evaluates both operands.
-                nested_triple = False
-                if j + 2 < n:
-                    if src[j + 1] == quote:
-                        if src[j + 2] == quote:
-                            nested_triple = True
-                nested = _scan_string_end(src, j, quote, nested_triple,
-                                          _prefix_is_interpolated(
-                                              src[_string_prefix_start(src, j):j]))
-                if nested < 0:
-                    return -1
-                j = nested
-                continue
             return j + dlen
         if c in _LINE_ENDS and not triple:
             # A raw line break closes nothing in a single-quoted literal, and
@@ -1754,143 +1254,45 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool,
             # and refuses `compile('s = "a\rb"')` as an unterminated literal.
             # Without this arm the CR stayed invisible here and the front end
             # refused to refuse — see `_source_lines`, which splits on the same
-            # two characters. Inside a replacement field it is content instead.
-            if depth > 0:
-                j += 1
-                continue
+            # two characters.
             return -1
         j += 1
     return -1
 
-def decode_c_escapes(s: str) -> str:
-    r"""Decode C-style backslash escapes in a string literal's BODY.
-
-    THE single decoder for this tree, and every engine calls it (CLAUDE.md:
-    consolidate duplicates rather than maintaining parallel implementations — the
-    interpreter and the compiled path each carried their own copy and the formal
-    backends had none, which is
-    FORMAL_string_literal_escape_is_not_decoded).
-
-    Why a consumer has to call it at all: the parser strips a string literal's
-    outer quotes and hands the body on as RAW SOURCE TEXT, because the compiled
-    path passes that text to a C compiler, which decodes the escapes itself.
-    A consumer that does not hand the text to a C compiler has to do it here.
-
-        The set: the C simple escapes, plus \xHH.
-
-    \n \t \r \\ \" \' \0 \a \b \f \v, then \x followed by two hex digits. An
-    UNKNOWN escape keeps its backslash (`"\d"` is a backslash and a d, which is
-    CPython's own behaviour and what `gimple_codegen._c_escape` passes through),
-    and a trailing lone backslash is kept verbatim. That is deliberately
-    permissive: a recognised escape it gets WRONG is a wrong answer, while an
-    unrecognised one it leaves alone is what the source most likely meant.
-
-    Not in scope, and worth saying so: RAW strings. `_scan_string_end` records
-    that no engine here preserves `r"..."`, so a literal's body arriving here has
-    already lost the distinction and decoding will not make it worse. Deciding
-    what a raw string should do is a question about the tokenizer, not this
-    function.
-    """
-    if '\\' not in s:
-        return s
-    simple = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"',
-              "'": "'", '0': '\0', 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
-    out = []
-    i, n = 0, len(s)
-    while i < n:
-        c = s[i]
-        if c == '\\' and i + 1 < n:
-            nxt = s[i + 1]
-            if nxt in simple:
-                out.append(simple[nxt]); i += 2; continue
-            if nxt == 'x' and i + 3 < n and s[i + 2] in '0123456789abcdefABCDEF' \
-                    and s[i + 3] in '0123456789abcdefABCDEF':
-                out.append(chr(int(s[i + 2:i + 4], 16))); i += 4; continue
-            # Unknown escape — leave the backslash as-is (CPython's own
-            # behaviour for e.g. "\d"), matching gimple_codegen._c_escape's
-            # `\\` passthrough.
-            out.append(c); i += 1; continue
-        out.append(c); i += 1
-    return ''.join(out)
-
-def decoded_literal(lit) -> str:
-    """`lit`'s body with its escapes decoded — or NOT, for a raw literal.
-
-    THE reader every engine uses instead of calling `decode_c_escapes` on a
-    `StringLiteral.value` directly, and the distinction is the whole of it: the
-    `r` prefix is stripped by `_strip_string_prefix_and_quotes` and is
-    otherwise unrecoverable from the body, so `r"a\\nb"` and `"a\\nb"` are the
-    same four characters by the time a consumer sees them. CPython keeps the
-    first at four and makes the second three.
-
-    Consolidating the decoder into one function would otherwise have introduced
-    that divergence in all three engines at once — the formal backends were the
-    only ones decoding, and they decoded raw literals wrongly; making the
-    interpreter and the compiled path join them by way of a shared table is
-    only an improvement if the table is asked about the PREFIX as well as the
-    escapes. `StringLiteral.is_raw` carries the answer from the parser, which
-    is the only place it still exists.
-
-    A plain STRING is returned unchanged rather than decoded. That is the other
-    half of the same rule: a fold, a manifest value, a synthesized format
-    string and `print_format`'s default `sep`/`end` are all already-decoded
-    text, and a synthesized `StringLiteral` carries `is_raw=False` for the same
-    reason — there was no source prefix for it to record. Decoding either would
-    be decoding something twice, which is how `"a\\\\nb"` becomes a newline when
-    the source wrote a backslash."""
-    if isinstance(lit, str):
-        return lit
-    if getattr(lit, "is_raw", False):
-        return lit.value
-    return decode_c_escapes(lit.value)
-
-def _unterminated_quote_pos(line: str) -> int:
-    r"""Index of the opening quote of the string literal `line` ends inside, or
-    -1 when it ends outside one.
+def _ends_inside_string(line: str) -> bool:
+    r"""True when `line` stops part-way through an unterminated string literal.
 
     The companion question to `_scan_string_end` ("where does the literal that
-    OPENS at `i` end") — this one asks "which literal is the line's last
-    character inside", which is what the backslash-continuation join in
-    `py_tokenize` needs to know. Same escape rule, so the two cannot disagree: a
-    backslash consumes the NEXT character, and a backslash at the very end of
-    the line therefore consumes the line break that follows it, leaving the
-    line still inside its string.
-
-    The answer is a position rather than a bool because the join has a second
-    question to ask about that literal — is it RAW? — and that needs the quote,
-    not a yes/no. Both are answered from this one scanner so they cannot
-    disagree; see `_is_raw_literal_at`.
+    OPENS at `i` end") — this one asks "is the line's last character inside one",
+    which is what the backslash-continuation join in `py_tokenize` needs to know.
+    Same escape rule, so the two cannot disagree: a backslash consumes the NEXT
+    character, and a backslash at the very end of the line therefore consumes
+    the line break that follows it, leaving the line still inside its string.
 
     A backtick string is skipped as an opaque unit and is NOT reported as being
     inside: it has no backslash escape, so a trailing backslash in one is not a
     continuation and the join must keep treating it as one (the pre-existing
     behaviour for that spelling, unchanged).
 
-    Only single-quoted literals can reach a position. `py_tokenize` replaces
+    Only single-quoted literals can reach `True`. `py_tokenize` replaces
     triple-quoted spans with placeholder names before this is consulted, and a
     single-quoted literal cannot hold a raw newline, so a line can only end
     inside one by way of the backslash-newline pair this function exists for.
-
-    `_unterminated_string_at` is the scan; this is its boolean, kept because
-    `test_string_literal_lexing.py` and the join's own truthiness check read it
-    as one.
     """
     i = 0
     n = len(line)
     delim = None
-    open_at = -1
     while i < n:
         c = line[i]
         if delim is None:
             if c == '`':
                 j = line.find('`', i + 1)
                 if j < 0:
-                    return -1
+                    return False
                 i = j + 1
                 continue
             if c in ('"', "'"):
                 delim = c * 3 if line.startswith(c * 3, i) else c
-                open_at = i
                 i += len(delim)
                 continue
             i += 1
@@ -1901,87 +1303,9 @@ def _unterminated_quote_pos(line: str) -> int:
         if line.startswith(delim, i):
             i += len(delim)
             delim = None
-            open_at = -1
             continue
         i += 1
-    return open_at if delim is not None else -1
-
-
-def _is_raw_literal_at(line: str, quote_pos: int) -> bool:
-    r"""True when the literal whose opening quote is at `quote_pos` in `line` is
-    raw — i.e. its prefix carries `r`/`R`, so nothing in it is an escape.
-
-    What a backslash-newline pair is worth inside a literal is CPython's rule,
-    measured rather than inferred (see the `CONTINUATIONS` table in
-    test_string_literal_lexing.py): DELETED unless the literal is raw, where the
-    pair is content. So this is the one question that decides whether the join
-    may delete the pair, and the prefix is read with `_string_prefix_start` —
-    the same helper `replace_multiline_strings` and `_process_nested_tstrings`
-    use, which already knows that a prefix letter must not be the tail of a
-    longer identifier (`self.r` before `.format("...")` is not a raw prefix).
-    """
-    if quote_pos < 0:
-        return False
-    prefix = line[_string_prefix_start(line, quote_pos):quote_pos]
-    return 'r' in prefix or 'R' in prefix
-
-# The marker a placeholder carries when it stands for a backslash-newline pair
-# this join KEPT inside a raw literal, as opposed to a triple-quoted span
-# `replace_multiline_strings` collapsed. Deliberately a namespace of its own:
-# these two are substituted from two different caches into two different token
-# shapes, and sharing a marker would make every docstring that NAMES the scheme
-# (`__MOJO_STR_<n>__`, spelled in prose throughout this file) a live collision —
-# measured, not theoretical: with one shared marker, this file's own module
-# docstring was substituted into the middle of another docstring that mentioned
-# the placeholder name, because the two happened to share an index.
-_CONT_PLACEHOLDER = "__MOJO_CONT_"
-
-
-def _substitute_str_placeholders(value: str, cache: dict) -> str:
-    r"""Put back every continuation placeholder that landed INSIDE a STRING
-    token's value, from `cache`.
-
-    The other arm of this — `if kind == "NAME" and val in string_cache` — can
-    only fire for a placeholder that occupies a token by itself, which is all a
-    triple-quoted span ever produced. A raw literal's kept line continuation is
-    the first shape where a placeholder lands in the middle of another token:
-    `r"a\<nl>b"` joins to `r"a__MOJO_CONT_0__b"`, one STRING token, and what
-    stands in for the pair is the line break alone. So the value that reaches
-    the parser is this path's byte-exact content either way, with the pair kept
-    because the literal is raw — which is CPython's answer, and the reason the
-    join cannot simply delete the pair.
-
-    A continuation placeholder is always inside the literal it belongs to (the
-    join writes it where the backslash was, and `_unterminated_quote_pos` has
-    already established that the backslash is inside one), so it can only ever
-    appear inside a STRING token and needs no arm of its own above.
-
-    A name under the marker that is not in `cache` is left exactly as written,
-    so source that spells one in a string keeps that text.
-    """
-    if _CONT_PLACEHOLDER not in value:
-        return value
-    out = []
-    i = 0
-    n = len(value)
-    while i < n:
-        j = value.find(_CONT_PLACEHOLDER, i)
-        if j < 0:
-            out.append(value[i:])
-            break
-        name_end = value.find('__', j + len(_CONT_PLACEHOLDER))
-        if name_end < 0:
-            out.append(value[i:])
-            break
-        name = value[j:name_end + 2]
-        if name in cache:
-            out.append(value[i:j])
-            out.append(cache[name])
-            i = name_end + 2
-        else:
-            out.append(value[i:j + len(_CONT_PLACEHOLDER)])
-            i = j + len(_CONT_PLACEHOLDER)
-    return ''.join(out)
+    return delim is not None
 
 def _src_loc(src: str, pos: int, filename: str = "") -> str:
     """gcc-style `file:line:col: ` prefix for a diagnostic about `src[pos]`.
@@ -2032,10 +1356,6 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
     refusal reads exactly like the parser's own."""
     import re
     string_cache = {}
-    # Kept pairs from the backslash join below, restored into the STRING token
-    # that contains them — a cache of its own, for the reason spelled out at
-    # `_CONT_PLACEHOLDER`.
-    continuation_cache = {}
     string_idx = [0]
     def replace_multiline_strings(src):
         # A single-pass, quote-nesting-aware scan — NOT a blind regex search
@@ -2136,41 +1456,24 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                 # Shared with _process_nested_tstrings via
                 # `_string_prefix_start` (module-level helper) rather than
                 # duplicated here — see
-                # PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.
+                # bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
                 start = _string_prefix_start(src, i)
-                # A triple-quote opener is three of the quote character `c`
-                # that opened this position, i.e. `src[i:i+3] == c * 3`,
-                # spelled as the two remaining characters instead of a 3-byte
-                # slice compare. `c` is `src[i]` (read a few lines above, so
-                # the first of the three is known), so this is the same test;
-                # the `i + 2 < n` is the same short-slice case the compare
-                # already handled, and it must be its own `if` because this
-                # codegen's `and` evaluates BOTH operands rather than
-                # short-circuiting (see the comment on the prefix scan above).
-                #
-                # It is O(1) per position where the slice compare was O(i):
-                # `src[i:i+3]` lowers to mojo_cstr_region_eq, whose length
-                # scan runs from byte 0 to `stop`, and this loop runs once
-                # per QUOTE character in the file, so the total was the sum
-                # of every quote's offset - measured at 1.0e9 byte reads
-                # self-hosted on this file's own 349KB source, and quadratic
-                # in it (see
-                # bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md,
-                # which is where the runtime side of the same cost is
-                # measured).
-                is_triple = False
-                if i + 2 < n:
-                    if src[i + 1] == c:
-                        if src[i + 2] == c:
-                            is_triple = True
-                if is_triple:
+                quote3 = c * 3
+                if src[i:i + 3] == quote3:
                     end = _scan_string_end(src, i, c, True)
                     if end < 0:
                         loc = _src_loc(src, i, filename)
                         raise SyntaxError(
                             f"{loc}unterminated triple-quoted string literal")
                     seg = src[last:start]
-                    pending_pad = _flush_line_pad(out, seg, pending_pad)
+                    if pending_pad and '\n' in seg:
+                        nl_idx = seg.index('\n')
+                        out.append(seg[:nl_idx + 1])
+                        out.append('\n' * pending_pad)
+                        pending_pad = 0
+                        out.append(seg[nl_idx + 1:])
+                    else:
+                        out.append(seg)
                     literal = src[start:end]
                     placeholder = f"__MOJO_STR_{string_idx[0]}__"
                     string_cache[placeholder] = literal
@@ -2187,7 +1490,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # every docstring/multi-line string above it. The pad is
                     # NOT appended here — see `pending_pad`'s comment above.
                     out.append(placeholder)
-                    pending_pad += _count_line_ends(literal, False)
+                    pending_pad += literal.count('\n')
                     i = end
                     last = i
                     continue
@@ -2196,50 +1499,24 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # opaque unit so its contents can never be misread as a
                     # triple-quote delimiter. Left in the output untouched —
                     # only real triple-quoted spans get placeholder-ed.
-                    #
-                    # EXCEPT an interpolated one that CROSSES A LINE. Every pass
-                    # after this one is line-based — `_source_lines` splits the
-                    # source and the lexer then reads it a line at a time — so a
-                    # literal with a newline in it cannot reach the token stream
-                    # as text and has to be collapsed to a placeholder exactly as
-                    # a triple-quoted one is. The condition is the literal
-                    # itself, so every single-line literal on this tree still
-                    # takes the untouched path and this branch is reached once
-                    # per multi-line f-string. What makes such a literal
-                    # possible at all is `_scan_string_end`'s replacement-field
-                    # depth; without that this branch is dead code, which is the
-                    # shape of the bug
-                    # `cca2a17f` fixed — the first of the two halves was missing
-                    # and this is the second.
-                    interpolated = _prefix_is_interpolated(src[start:i])
-                    end = _scan_string_end(src, i, c, False, interpolated)
+                    end = _scan_string_end(src, i, c, False)
                     if end < 0:
                         loc = _src_loc(src, i, filename)
                         raise SyntaxError(f"{loc}unterminated string literal")
-                    literal = src[start:end]
-                    if _count_line_ends(literal, True) > 0:
-                        pending_pad = _flush_line_pad(out, src[last:start],
-                                                     pending_pad)
-                        placeholder = f"__MOJO_STR_{string_idx[0]}__"
-                        string_cache[placeholder] = literal
-                        string_idx[0] += 1
-                        # Owed for the same reason and by the same rule as the
-                        # triple-quoted arm: collapsing physical lines to one
-                        # would move every later line number up. The cached
-                        # value is the literal's own source text, prefix and
-                        # delimiters included, which is this path's byte-exact
-                        # contract for an f-string — the same node a single-line
-                        # f-string produces.
-                        out.append(placeholder)
-                        pending_pad += _count_line_ends(literal, False)
-                        last = end
                     i = end
                     continue
             i += 1
         tail = src[last:i]
-        pending_pad = _flush_line_pad(out, tail, pending_pad)
-        if pending_pad:
+        if pending_pad and '\n' in tail:
+            nl_idx = tail.index('\n')
+            out.append(tail[:nl_idx + 1])
             out.append('\n' * pending_pad)
+            pending_pad = 0
+            out.append(tail[nl_idx + 1:])
+        else:
+            out.append(tail)
+            if pending_pad:
+                out.append('\n' * pending_pad)
         return ''.join(out)
 
     src = replace_multiline_strings(src)
@@ -2261,22 +1538,20 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
     # (the second is `a`, four spaces, `b` — the join put one space in and took
     # the four out). Both were the silent-miscompile class, and both are the
     # same defect shape as the one `_scan_string_end` was written for: a
-    # line-joining pass with no idea where the literals are.
-    # `_unterminated_quote_pos` is the one place that now answers that, and it
-    # is asked about the RSTRIPPED line, which is the text whose last character
-    # the loop has just decided is a backslash.
+    # line-joining pass with no idea where the literals are. `_ends_inside_string`
+    # is the one place that now answers that, and it is asked about the
+    # RSTRIPPED line, which is the text whose last character the loop has just
+    # decided is a backslash.
     #
     # What the pair is worth is CPython's own rule, measured with `tokenize`
     # rather than inferred: the STRING token's TEXT is `'"a\\nb"'` for
     # `"a\<nl>b"` and `'r"a\\\nb"'` for `r"a\<nl>b"` — deleted unless the
-    # literal is raw. So the raw case is NOT a deletion, and it cannot be one
-    # here: a value reaches the token stream with a newline in it only through
-    # the placeholder `replace_multiline_strings` builds, and this pass runs
-    # after it. Hence the placeholder written below, holding the two characters
-    # the source wrote and substituted back out of the STRING token's own value
-    # by `_substitute_str_placeholders`. The triple-quoted shapes are
-    # placeholdered before this pass runs and so are untouched by it either way
-    # — `r"""a\<nl>b"""` already keeps the pair, which is CPython's answer.
+    # literal is raw. This join deletes it unconditionally, which is right for
+    # three of the four shapes and wrong for a raw single-quoted literal, where
+    # CPython keeps the pair as content. That one is pinned with its exact next
+    # step in bugs/CODEGEN_backslash_continuation_in_a_raw_literal.md; the
+    # triple-quoted shapes are placeholdered before this pass runs and so are
+    # untouched by it either way.
     joined = []
     line_nums = []  # track physical line number (1-based) for each logical line
     i = 0
@@ -2285,20 +1560,8 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
         line = raw_lines[i]
         while line.rstrip().endswith('\\'):
             stripped = line.rstrip()
-            quote_pos = _unterminated_quote_pos(stripped)
-            inside = quote_pos >= 0
-            if inside and _is_raw_literal_at(stripped, quote_pos):
-                # The pair is CONTENT in a raw literal, so the backslash stays
-                # where the source wrote it and only the line break has to be
-                # carried across — as a placeholder, because nothing else in
-                # this pass can hand a newline to the token stream. A cache of
-                # its own, restored into the STRING token's own value below.
-                placeholder = f"{_CONT_PLACEHOLDER}{string_idx[0]}__"
-                continuation_cache[placeholder] = "\n"
-                string_idx[0] += 1
-                line = stripped + placeholder
-            else:
-                line = stripped[:-1]  # strip the backslash
+            inside = _ends_inside_string(stripped)
+            line = stripped[:-1]  # strip the backslash
             i += 1
             if i < len(raw_lines):
                 nxt = raw_lines[i] if inside else raw_lines[i].lstrip()
@@ -2348,11 +1611,6 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                 if kind == "NAME" and val in string_cache:
                     val = string_cache[val]
                     kind = "STRING"
-                # …and the placeholders that landed INSIDE one: a raw literal's
-                # line continuation is kept as content, and a content value can
-                # only carry a newline through a placeholder.
-                if kind == "STRING":
-                    val = _substitute_str_placeholders(val, continuation_cache)
                 # Track paren/bracket/brace depth to suppress INDENT/NEWLINE inside
                 if kind in ("LPAREN", "LBRACKET", "LBRACE") or val in ("(", "[", "{"): paren_depth += 1
                 elif kind in ("RPAREN", "RBRACKET", "RBRACE") or val in (")", "]", "}"): paren_depth = max(0, paren_depth - 1)
@@ -2743,15 +2001,15 @@ def genexp_body(expr, outer_iterable) -> list:
 
 def _target_names(target, out: set):
     """Collect the names a binding target introduces. `target` is a plain
-    string for comprehension/`for` targets — possibly a tuple target and
+    string for comprehension/`for` targets — possibly comma-joined and
     possibly starred (`a, *rest`) — or an expression node (an ordinary
-    assignment target). The string form splits through `target_slots`, so
-    a NESTED target's commas do not tear it into fragments bound as bogus
-    names."""
+    assignment target)."""
     if isinstance(target, str):
         name = target.strip()
-        if for_target_is_tuple(name):
-            for part in target_slots(_target_group_inner(name) or name):
+        if name.startswith('(') and name.endswith(')'):
+            name = name[1:-1].strip()
+        if ',' in name:
+            for part in name.split(','):
                 _target_names(part, out)
             return
         if name.startswith('*'):
@@ -3614,26 +2872,6 @@ class Parser:
         self._pos = 0
         self._filename = ""
         self._pending_decs = []  # decorators awaiting next struct/trait
-        # `comptime NAME = <rhs>` the parser could not parse, as
-        # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
-        # two very different fates that used to be INDISTINGUISHABLE: a
-        # function type (`comptime F = def[T](Int) -> None`) is deliberately
-        # not modelled and becomes `IdentExpr('_comptime_expr')`, while a
-        # bracket call that failed to parse became the SAME placeholder —
-        # because `_skip_comptime_rhs`'s bare `except:` turned the ParseError
-        # into a skip-to-newline. So "not implemented" and "misparsed" were
-        # the same value, every consumer read the alias as a placeholder, and
-        # nothing said which. `std/io/file.mojo`'s `O_APPEND` was the visible
-        # damage: a `comptime` integer constant that reached `open(2)`'s flags
-        # as a placeholder (see
-        # bugs/CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md).
-        #
-        # A `ParseError` is now recorded here and re-raised as a SyntaxError
-        # with its own message, so the source line is refused instead of
-        # compiling to a wrong value. The function-type skip is NOT recorded
-        # and NOT raised — it is the deliberate case, and its placeholder is
-        # still what part 3 of that doc has to replace.
-        self._comptime_rhs_failures: list = []
         # `struct Box[T: Movable]:` — a generic TYPE parameter bound by a
         # trait, syntactically identical to `struct SIMD[width: Int]:`'s
         # genuine comptime VALUE parameter (`name: Ident` either way). This
@@ -3671,11 +2909,8 @@ class Parser:
         # names (see _parse_generic_params_capture) so the interpreter can
         # bind `f[Int32]()`'s subscript to them by position.
         comptime_params = []
-        comptime_param_defaults = {}
-        comptime_param_annotations = {}
         if self._peek().kind == "LBRACKET":
-            (comptime_params, comptime_param_defaults,
-             comptime_param_annotations) = self._parse_generic_params_capture()
+            comptime_params = self._parse_generic_params_capture()
         self._expect("LPAREN")
         params = []
         param_convs = {}
@@ -3903,8 +3138,6 @@ class Parser:
                            param_defaults=param_defaults,
                            kwonly=kwonly,
                            comptime_params=comptime_params,
-                           comptime_param_defaults=comptime_param_defaults,
-                           comptime_param_annotations=comptime_param_annotations,
                            is_generator=is_generator,
                            yield_bearing_node_ids=yield_bearing_node_ids,
                            is_async=is_async,
@@ -4044,7 +3277,7 @@ class Parser:
                     # `class _Dialog(commondialog.Dialog):` in
                     # tkinter/filedialog.py, whose Dialog IS a real,
                     # compiled struct from the imported commondialog
-                    # module) — see COMPILE_FAIL_tkinter_filedialog.
+                    # module) — see bugs/COMPILE_FAIL_tkinter_filedialog.md.
                     last_name = t.value
                     self._advance()
                     while self._peek().kind == "DOT" and self._peek(1).kind == "NAME":
@@ -4166,7 +3399,6 @@ class Parser:
                     param_defaults=_sf.param_defaults,
                     kwonly=_sf.kwonly,
                     comptime_params=_sf.comptime_params,
-                    comptime_param_defaults=_sf.comptime_param_defaults,
                     is_generator=_sf.is_generator,
                     yield_bearing_node_ids=_sf.yield_bearing_node_ids,
                     is_async=_sf.is_async,
@@ -4353,15 +3585,6 @@ class Parser:
         return TraitDef(name=name, methods=methods)
 
     def _parse_try(self):
-        # The `try` keyword's own line, recorded because `TryStmt` is the one
-        # statement here whose position nothing downstream could recover: every
-        # other node in a body is reached through a statement whose position a
-        # diagnostic can name, and a `try` is the statement a refusal about
-        # EXCEPTION SCOPES has to name (`formal/build.py::_refuse_try_handlers`,
-        # whose message is useless with line 0). Additive — the field already
-        # existed with this default, so nothing that reads it changes except
-        # from "always 0" to the truth.
-        line = self._peek().line
         self._expect("KW", "try"); self._expect("COLON")
         body = self._parse_block()
         handlers = []
@@ -4439,8 +3662,7 @@ class Parser:
         if self._is_kw("finally"):
             self._advance(); self._expect("COLON"); finally_body = self._parse_block()
         return TryStmt(body=body, handlers=handlers,
-                       else_body=else_body, finally_body=finally_body,
-                       line=line)
+                       else_body=else_body, finally_body=finally_body)
 
     def _parse_with(self):
         self._expect("KW", "with")
@@ -4545,21 +3767,13 @@ class Parser:
                 # The loop variable is `_name`, NOT `t`: `t` is already a
                 # `Token *` local in this function (from the `t = self._peek()`
                 # above), and a comprehension target that shadows an enclosing
-                # local used to reuse that local's C variable, so the `char *`
-                # element came out as an `int64_t` temp assigned into
-                # `struct Token * t` and the self-hosted `make mojoc` died with
-                # "non-trivial conversion in 'var_decl'". Shadowing an int64_t
-                # local happened to work; shadowing a struct pointer did not,
-                # and this function has one.
-                #
-                # The compiled path no longer requires the rename — a
-                # comprehension's target gets its own binding and the enclosing
-                # one is restored afterwards, in `emit_infra.py`'s
-                # `_compr_bind_target` / `_compr_restore_target`, regression
-                # `comprehension_target_shadows_struct_local` in
-                # `test_gimple_runner.py`. The rename stays: it is free, and it
-                # keeps this function's own C output identical to what the
-                # self-host stages were compared byte-for-byte against.
+                # local of a STRUCT-POINTER type reused that local's C variable,
+                # so the `char *` element came out as an `int64_t` temp assigned
+                # into `struct Token * t` and the self-hosted `make mojoc` died
+                # with "non-trivial conversion in 'var_decl'". Shadowing an
+                # int64_t local happens to work; shadowing a struct pointer does
+                # not, and this function has one. See
+                # bugs/CODEGEN_comprehension_target_shadows_struct_local.md.
                 return [ComptimeVarStmt(target=_name, value=rhs) for _name in targets]
             if self._peek().kind == "ASSIGN":
                 self._advance()
@@ -4578,7 +3792,7 @@ class Parser:
         t = self._peek()
 
         # Check for function type definitions — skip to newline
-        if self._comptime_rhs_is_function_type():
+        if (t.kind == "KW" and t.value == "def") or self._will_see_arrow():
             depth = 0
             while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
                 t = self._peek()
@@ -4595,75 +3809,12 @@ class Parser:
         try:
             expr = self._parse_expr(0)
             return expr
-        except (SyntaxError, ValueError, TypeError, AttributeError,
-                IndexError, KeyError) as e:
-            # This is a MISPARSE, not the function-type case above, and the
-            # two used to be the same value. Skip to the newline so the rest
-            # of the module still parses, record WHY, and re-raise: a
-            # `comptime` alias whose value was lost is a wrong answer at every
-            # use (the stdlib's `O_CREAT`/`O_APPEND` file-open flags are the
-            # measured instance), and this backend's stated rule is that a
-            # shape it cannot lower is refused rather than answered with
-            # something the source never wrote.
-            #
-            # The exception set is enumerated rather than bare because a bare
-            # `except:` here also swallowed the compiler's own bugs — a
-            # `TypeError` from a malformed AST node read as "unparseable
-            # comptime rhs" and became a placeholder, which is how a real
-            # crash in this function could present as a stdlib constant
-            # silently reading 0. `RecursionError` and `MemoryError` are
-            # deliberately NOT caught either: a runaway parse is a bug to
-            # surface, not a comptime alias to skip.
+        except:
+            # Fallback: skip to newline
             self._pos = saved_pos
-            text_parts = []
-            while (self._peek().kind not in ("NEWLINE", "DEDENT", "EOF")
-                   and len(text_parts) < 12):
-                text_parts.append(_as_str(self._advance().value))
-            _rhs_text = " ".join(text_parts)
-            _where = self._loc(t)
-            self._comptime_rhs_failures.append((_where, _rhs_text, str(e)))
-            raise SyntaxError(
-                f"{_where}cannot parse the right-hand side of a `comptime` "
-                f"assignment: {_rhs_text!r} ({e}). A function TYPE "
-                f"(`comptime F = def[T](Int) -> None`) is accepted and skipped "
-                f"on purpose; anything else is a source this compiler cannot "
-                f"read, and its alias would otherwise reach every use as a "
-                f"placeholder value.")
-
-    def _comptime_rhs_is_function_type(self) -> bool:
-        """Is the pending `comptime` right-hand side a FUNCTION TYPE — the one
-        shape deliberately not modelled, which becomes the
-        `IdentExpr('_comptime_expr')` placeholder?
-
-        Three ways to spell one, and all three are in this project's own
-        stdlib:
-
-        * `comptime F = def[T](Int) -> None` — the `def` token is first.
-        * `comptime F = (\n    def[...]\n    (...) -> ...\n)` — a
-          parenthesized, MULTI-LINE function type, which is 6 of the 22
-          function-type aliases the new-modular stdlib declares
-          (`std/_plugin/_trait.mojo`'s
-          `_ReduceGeneratorPluginHookFnType` is the smallest). This is why
-          there is a `(` case at all: with only the `def` and `->` tests, the
-          `(`-wrapped form fell through to `_parse_expr`, raised, and — once
-          a misparse is a REFUSAL rather than a silent placeholder (see
-          `_skip_comptime_rhs`) — took a real stdlib module out of the
-          build.
-        * `comptime F = SomeType -> None`-shaped, i.e. the `->` at bracket
-          depth 0: `_will_see_arrow`.
-
-        Deliberately a shape test and not an "any `->` anywhere" scan: `->` at
-        depth 0 is the existing rule and it is narrow on purpose, and looking
-        through arbitrary parens would start claiming an ordinary parenthesized
-        arithmetic expression whose operand happens to be a lambda."""
-        t = self._peek()
-        if t.kind == "KW" and t.value == "def":
-            return True
-        if t.kind == "LPAREN":
-            nxt = self._peek(1)
-            if nxt.kind == "KW" and nxt.value == "def":
-                return True
-        return self._will_see_arrow()
+            while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
+                self._advance()
+            return IdentExpr("_comptime_expr")
 
     def _will_see_arrow(self):
         """Lookahead to check if we'll see a -> at bracket depth 0 before NEWLINE."""
@@ -4704,7 +3855,7 @@ class Parser:
         # is `in`, `:`, or `,`). This site previously had no guard at all —
         # it unconditionally swallowed any _CONV_KWS token, misparsing
         # `comptime for var in ...` and `comptime for var, j in ...`
-        # (PARSE_FAIL_var_as_for_loop_target_comma).
+        # (bugs/PARSE_FAIL_var_as_for_loop_target_comma.md).
         if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
                 and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
                 and self._peek(1).kind != "COLON"
@@ -5047,44 +4198,9 @@ class Parser:
                         # We keep (name, value) pairs in `attrs` so consumers that
                         # need them survive — notably MLIR op params like
                         # __mlir_op.`index.cmp`[pred=__mlir_attr.`...`](...).
-                        #
-                        # A bracket may MIX the two forms, in EITHER order, and
-                        # both elements have to be kept: `f[T=Int, "x", linux=1]`
-                        # is the ordinary way to call this project's own
-                        # `def platform_map[T: DType, operation, *, linux=..., macos=...]`
-                        # (std/sys/info.mojo), whose signature puts the positional
-                        # `operation` AFTER the keyword `T` and BEFORE the keyword
-                        # `linux`/`macos`. Two defects made that shape
-                        # unparseable, and both are fixed here:
-                        #
-                        #   * a bare element that was not a NAME (a literal, a call,
-                        #     an ellipsis) fell through both arms, so the loop hit
-                        #     its `elif peek != RBRACKET: break`, left the token
-                        #     unconsumed, and `_expect("RBRACKET")` raised — a
-                        #     ParseError that `_skip_comptime_rhs`'s bare `except`
-                        #     turned into the `_comptime_expr` placeholder, so the
-                        #     alias read as a placeholder at every use.
-                        #   * a bare element that WAS a NAME parsed and was then
-                        #     DISCARDED — the old "else positional arg: arg_expr
-                        #     already fully parsed" comment described no code. It
-                        #     is kept now, as a `(None, value)` pair, which is the
-                        #     spelling `emit_calls.py`'s comptime-param threading
-                        #     already reads positionals by (`elems = [val for nm,
-                        #     val in _bracket_attrs if nm is None]`) and which the
-                        #     tuple's own `name: object` field allows for.
-                        #
-                        # `f[1, 2]` (no keyword at all) still takes the
-                        # comma-separated-items branch below and lands in
-                        # `index` as a TupleExpr; that is a different path with
-                        # its own consumers and it is left alone.
                         _attrs = []
                         while self._peek().kind != "RBRACKET" and self._peek().kind != "EOF":
-                            if (self._peek().kind == "DOT" and
-                                    self._peek(1).kind == "DOT" and
-                                    self._peek(2).kind == "DOT"):
-                                # Ellipsis argument (three DOTs) — no value to keep.
-                                self._advance(); self._advance(); self._advance()
-                            else:
+                            if self._peek().kind in ("NAME", "KW"):
                                 # Parse the full expression for the arg (handles dotted names Self.Ts, subscripts, etc.)
                                 arg_expr = self._parse_expr(0)
                                 if self._peek().kind == "ASSIGN":
@@ -5103,31 +4219,16 @@ class Parser:
                                     if isinstance(arg_expr, IdentExpr):
                                         _name = arg_expr.name
                                     _attrs.append((_name, _val))
-                                elif isinstance(arg_expr, IdentExpr):
-                                    # A bare NAME with no `=`: a positional
-                                    # parameter, kept under its own name (which is
-                                    # what lets a consumer read it either way — the
-                                    # `nm is None` positional list and the
-                                    # `nm is not None` keyword dict then both see
-                                    # it, and `emit_calls.py` prefers the keyword
-                                    # lookup and falls back to the positional one).
-                                    _attrs.append((arg_expr.name, arg_expr))
-                                else:
-                                    # A bare literal / call / subscript: positional,
-                                    # and its position in `_attrs` is its position
-                                    # in the bracket.
-                                    _attrs.append((None, arg_expr))
+                                # else positional arg: arg_expr already fully parsed
+                            # Handle ellipsis (...) as an argument (three DOTs)
+                            elif (self._peek().kind == "DOT" and
+                                  self._peek(1).kind == "DOT" and
+                                  self._peek(2).kind == "DOT"):
+                                self._advance(); self._advance(); self._advance()
                             if self._peek().kind == "COMMA": self._advance()
                             elif self._peek().kind != "RBRACKET": break
                         self._expect("RBRACKET")
-                        # The node inherits the CALLEE's position, which is
-                        # where a diagnostic about this bracket belongs —
-                        # `SubscriptExpr(...)` built with the dataclass
-                        # defaults reports `0:0`, which is what
-                        # myinterpreter.py's unbindable-comptime-parameter
-                        # TypeError used to print.
-                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0, raw=''), attrs=_attrs,
-                                             line=expr.line, col=expr.col)
+                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0, raw=''), attrs=_attrs)
                     else:
                         # Parse a comma-separated list of subscript items. Each
                         # item is a slice (start:stop:step) or a plain expression,
@@ -5387,39 +4488,6 @@ class Parser:
                 _has_b = True
         return _has_b
 
-    def _raw_string_is_raw(self, raw: str) -> bool:
-        """True when a STRING token carries an `r`/`R` prefix before its quote.
-
-        The sibling of `_raw_string_is_bytes`, and it exists because
-        `decode_c_escapes` is now the ONE decoder every engine calls (see that
-        function), so a raw literal has to be able to say "leave me alone" —
-        `r"a\nb"` is four characters to CPython and must be four here too, and
-        without this the shared decode would turn it into a newline in all
-        three engines at once. The prefix is stripped by
-        `_strip_string_prefix_and_quotes` and otherwise thrown away, so this
-        reads it off the RAW token before that happens.
-        """
-        prefix_len = 0
-        while prefix_len < len(raw) and prefix_len < 2:
-            _c = raw[prefix_len]
-            _is_prefix_char = (_c == 'f' or _c == 'F' or _c == 'r' or _c == 'R'
-                                or _c == 'b' or _c == 'B' or _c == 'u' or _c == 'U'
-                                or _c == 't' or _c == 'T')
-            if not _is_prefix_char:
-                break
-            prefix_len += 1
-        prefix = raw[:prefix_len]
-        rest = raw[prefix_len:]
-        if len(rest) < 1:
-            return False
-        _rc = rest[0]
-        if _rc != '"' and _rc != "'":
-            return False
-        for _pc in prefix:
-            if _pc == 'r' or _pc == 'R':
-                return True
-        return False
-
     def _decode_bytes_literal(self, raw: str) -> str:
         """Strip a `b'...'` token's prefix+quotes and decode its escape
         sequences to a latin-1 string carrying one character per output
@@ -5515,40 +4583,20 @@ class Parser:
             _val = ''
             for _r in raws:
                 _val += self._strip_string_prefix_and_quotes(_r)
-            # `is_raw` is the AND over the run: an implicitly-concatenated
-            # sequence is raw only if every part of it is, because the merged
-            # body is one string and one of its halves must not have been
-            # decoded. `r"a\n" "b"` is a backslash-n followed by a `b` and the
-            # other way round is a newline followed by a `b`, and the second is
-            # not something the caller wrote.
-            _all_raw = True
-            for _r in raws:
-                if not self._raw_string_is_raw(_r):
-                    _all_raw = False
-                    break
-            return StringLiteral(_val, line=line, col=col, is_raw=_all_raw)
+            return StringLiteral(_val, line=line, col=col)
         _merged = ''
         for _r in raws:
             _merged += self._string_literal_inner(_r)
         _dq3 = '"' * 3
         _sq3 = "'" * 3
-        # `is_interpolated=True` on all three returns, and the evidence is the
-        # `_any_ft` this branch is reached under: one of the run's TOKENS
-        # carried an f/t prefix. The re-wrapped value still starts with an `f`
-        # (the consumers strip it), so a reader that sniffed it would agree —
-        # which is exactly why the flag is set here rather than left to be
-        # sniffed, so that a value whose OWN TEXT begins with `f"` cannot be
-        # confused with one.
         if _dq3 not in _merged:
-            return StringLiteral('f' + _dq3 + _merged + _dq3, line=line, col=col,
-                                 is_interpolated=True)
+            return StringLiteral('f' + _dq3 + _merged + _dq3, line=line, col=col)
         if _sq3 not in _merged:
-            return StringLiteral('f' + _sq3 + _merged + _sq3, line=line, col=col,
-                                 is_interpolated=True)
+            return StringLiteral('f' + _sq3 + _merged + _sq3, line=line, col=col)
         # Both triple-quote runs present in the content (extraordinarily
         # rare) — fall back to a double-quoted wrap with `"` escaped.
         return StringLiteral('f"' + _merged.replace('"', '\\"') + '"',
-                             line=line, col=col, is_interpolated=True)
+                             line=line, col=col)
 
     def _parse_primary(self):
         t = self._peek()
@@ -5598,9 +4646,7 @@ class Parser:
                 return StringLiteral(self._decode_bytes_literal(_raw0),
                                      line=line, col=col, is_bytes=True)
             return StringLiteral(self._strip_string_prefix_and_quotes(_raw0),
-                                 line=line, col=col,
-                                 is_raw=self._raw_string_is_raw(_raw0),
-                                 is_interpolated=self._raw_string_is_ftstring(_raw0))
+                                 line=line, col=col)
         if t.kind == "LBRACKET": return self._parse_list_or_compr()
         if t.kind == "LBRACE": return self._parse_dict_or_set()
         if t.kind == "LPAREN":
@@ -5613,7 +4659,7 @@ class Parser:
             # is always exactly `(CONV_KW name)` -- the keyword, one name-like
             # token, then the closing RPAREN -- so also require peek(2) to be
             # RPAREN before committing to the convention-prefix reading.
-            # Without this, `(var not in lst)` (PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in)
+            # Without this, `(var not in lst)` (bugs/PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in.md)
             # wrongly swallowed `var` as a bogus prefix (peek(1)=KW('not')
             # satisfied the old NAME-or-KW check), leaving `not in lst`
             # dangling and eventually failing with "Expected RPAREN got
@@ -5948,7 +4994,7 @@ class Parser:
         # path below — otherwise `{**a, **b}` gets misclassified as a set of
         # two `**`-UnaryOp "elements", which then crashes in eval_UnaryOp
         # instead of building a dict (see
-        # INTERP_dict_double_star_unpack_runtime).
+        # bugs/INTERP_dict_double_star_unpack_runtime.md).
         if isinstance(first, UnaryOp) and first.op == "**":
             pairs = [(first, None)]
             while self._peek().kind == "COMMA":
@@ -5989,140 +5035,26 @@ class Parser:
         self._expect("RBRACE")
         return SetExpr(elements=elems)
 
-    @staticmethod
-    def _rewrap_generator_group(inner: str, saw_comma: bool) -> str:
-        """One level of a target group: `(inner)`, `(inner,)` or `inner`.
-
-        The 1-tuple spelling is `(a,)`, so a group whose slots are exactly ONE
-        needs the comma back when the text lost it, and a group of two or more
-        must not get one. Split out because BOTH joins in
-        `_parse_generator_target` ask it — the parenthesis one and the list
-        one — and they are the same question: a nested `for (i, (j,)) in ...`
-        whose inner comma is dropped here binds the whole inner pair to `j`.
-        """
-        if not saw_comma:
-            return inner
-        return f"({inner},)" if len(target_slots(inner)) == 1 else f"({inner})"
-
     def _parse_generator_target(self):
-        """A comprehension/generator `for` clause's target — the sibling
-        representation to `_parse_unpack_target`'s (see its docstring for
-        the differences: here a bare comma list keeps NO wrapping parens, so
-        `for a, b in ...` is the literal string `"a, b"`).
-
-        Returns `(target, saw_comma)` where `saw_comma` says a comma was
-        consumed AT THIS LEVEL, which is what distinguishes a 1-tuple from
-        a parenthesised single name — the same disambiguation
-        `_parse_unpack_target` makes, for the same reason and with the same
-        spelling: `for (a) in b:` binds the whole item while `for (a,) in
-        b:` unpacks its single element, and both used to reduce to the
-        IDENTICAL string `"(a)"`.
-
-        So a parenthesised group that consumed no comma unwraps to its bare
-        text, exactly as `_parse_unpack_target` does, and a 1-element group
-        that did keeps its parens AND its trailing comma. A trailing comma at
-        the top level (`for a, in ...`) therefore produces `"(a,)"`, not the
-        bare `"a"` it used to — that bare form was the same bug wearing a
-        different spelling.
-
-        The trailing comma is KEPT in the string, and that is a decision this
-        function shares with `_parse_unpack_target`: `'(a,)'` and `'(a)'` are
-        different targets and the comma is the only thing Python itself
-        distinguishes them by, so `for_target_is_tuple` — the ONE reader of
-        that difference — has to be able to see it. Emitting `"(a)"` here for a
-        top-level trailing comma, as an earlier version of this function did,
-        makes it indistinguishable from the parenthesised single name and puts
-        the two parsers at odds with each other for the same source line."""
         t = self._peek()
-        saw_comma = False
         if t.kind == "LPAREN":
             self._advance()
-            sub, sub_comma = self._parse_generator_target()
+            sub = self._parse_generator_target()
             self._expect("RPAREN")
-            # `f"({sub},)"` when the inner group was a 1-TUPLE, `f"({sub})"`
-            # when it was a longer tuple, and the bare text when it consumed no
-            # comma at all (the parenthesised single NAME). `for (a,) in ...`
-            # reaches here with `sub == 'a'` and `sub_comma` True, and
-            # re-wrapping it as `'(a)'` produced a target indistinguishable
-            # from the parenthesised single NAME — so `[y for (y,) in xs]` bound
-            # each whole item to `y` and printed `[(1,), (2,)]` where CPython
-            # prints `[1, 2]`, on the ONE spelling `for_target_is_tuple` exists
-            # to tell apart.
-            #
-            # ONE slot, not merely "does not end in a comma": `for (a, b) in
-            # ...` also has `sub_comma` True, and its `sub` is `a, b`, whose
-            # last element is `b`, so that test alone appended a comma to a
-            # two-slot target and made `for (a, (b, c))` a 1-tuple wrapping its
-            # pair. The trailing comma a 1-tuple needs is the one a
-            # ONE-element slot list cannot carry, and `target_slots` is what
-            # says how many there are.
-            #
-            # Per-slot, not just for the outermost group: the same question is
-            # asked again for every nested group by the recursion, so a nested
-            # 1-tuple's comma has to be re-appended at THIS level too. The
-            # list-form append below is the other half of that — a nested
-            # `(b,)` reached through the `, {inner}` join would otherwise lose
-            # its comma here and come out as the parenthesised name `(b)`.
-            target = self._rewrap_generator_group(sub, sub_comma)
-            saw_comma = sub_comma
+            target = f"({sub})"
         elif t.kind == "LBRACKET":
             # List-pattern unpacking target: `for [off] in ...`
             self._advance()
-            sub, _ = self._parse_generator_target()
+            sub = self._parse_generator_target()
             self._expect("RBRACKET")
             target = f"[{sub}]"
-            saw_comma = True
         elif t.kind in ("NAME", "KW"):
             target = self._advance().value
-        elif t.kind == "OP" and t.value == "*":
-            # Extended unpacking in a comprehension target — `[r for first,
-            # *r in pairs]` is ordinary Python. This parser had no arm for
-            # the `*` and fell to `self._expect("NAME")`, so the whole
-            # comprehension was a SyntaxError ("Expected NAME got OP('*')")
-            # on BOTH the interpreter and the compiled path, while the
-            # statement path's own `_parse_unpack_target` has spelled it
-            # "*name" in the same target string all along.
-            #
-            # The representation is the STATEMENT path's, deliberately: one
-            # spelling for both, read by the same three consumers
-            # (`for_target_names` keeps the star, `boundnames` strips it for
-            # the bound-name set, the loop/comprehension lowerings find it by
-            # position — see `mojo/middle/loops_shared.starred_slot_index`).
-            self._advance()
-            target = "*" + self._expect("NAME").value
         else:
             target = self._expect("NAME").value
-        # A TRAILING comma at this level makes the pattern a 1-tuple, which is
-        # a different target from a parenthesised single name: `for (a,) in
-        # xs` unpacks each item, `for (a) in xs` binds the whole item. Both
-        # used to come out as the same spelling (`'(a)'` for the parenthesised
-        # form, and — dropping the comma entirely — `'a'` for the bare one),
-        # so every consumer read "is there a comma?" as NO for a 1-tuple and
-        # bound the whole item: a wrong answer with no diagnostic. The comma is
-        # kept here and read by `for_target_is_tuple`, which is the only
-        # reader of the difference; see the `_parse_unpack_target` note.
-        #
-        # Two spellings of the same fix were written independently, and this is
-        # the survivor. The other kept a `trailing_comma` flag and appended a
-        # bare `","` to the target string at the end (`for a, in ...` -> `"a,"`);
-        # this one wraps the group in the parens that make it a tuple target
-        # (`-> "(a)"`) and reports the fact as a second return value,
-        # `saw_comma`, so the CALLER decides rather than the string's spelling.
-        # Both feed `for_target_is_tuple` the same answer -- the parenthesised
-        # form is unwrapped and then found to end in a comma -- but only this
-        # one also distinguishes `for (a,) in b:` from `for (a) in b:`, which
-        # the trailing-comma spelling answers identically for a bare `a`, and
-        # that distinction is the whole subject of this function.
         while self._peek().kind == "COMMA":
-            saw_comma = True
             self._advance()
             if self._is_kw("in"):
-                # Trailing comma at the TOP level: `for a, in ...` is a
-                # 1-tuple, so it needs the parens that make the string a
-                # tuple target — AND the comma, which is what
-                # `for_target_is_tuple` reads to tell it from `for (a) in b:`.
-                # No comma in the source and none in the string.
-                target = f"({target})" if "," in target else f"({target},)"
                 break
             # Trailing comma inside a paren/bracket pattern: `(fpath,)` /
             # `[off,]` — leave the closer for the caller's _expect.
@@ -6131,24 +5063,18 @@ class Parser:
             sub_t = self._peek()
             if sub_t.kind == "LPAREN":
                 self._advance()
-                inner, inner_comma = self._parse_generator_target()
+                inner = self._parse_generator_target()
                 self._expect("RPAREN")
-                target += f", {self._rewrap_generator_group(inner, inner_comma)}"
+                target += f", ({inner})"
             elif sub_t.kind in ("NAME", "KW"):
                 target += ", " + self._advance().value
-            elif sub_t.kind == "OP" and sub_t.value == "*":
-                # The same extended-unpacking slot the top-level arm above
-                # takes, in the position AFTER a comma — which is where
-                # `[r for first, *r in pairs]` puts it.
-                self._advance()
-                target += ", *" + self._expect("NAME").value
             else:
                 target += ", " + self._expect("NAME").value
-        return target, saw_comma
+        return target
 
     def _parse_generator(self):
         self._expect("KW", "for")
-        target, _ = self._parse_generator_target()
+        target = self._parse_generator_target()
         self._expect("KW", "in")
         iterable = self._parse_expr(1)
         conditions = []
@@ -6219,9 +5145,9 @@ class Parser:
                     # to the trait), not a comptime VALUE parameter — it must
                     # NOT become a real field, or @fieldwise_init's synthesized
                     # constructor gets an extra phantom parameter (see
-                    # __init__'s _known_traits comment). `_struct_param_is_bound`
-                    # is that test, and it has a second arm this did not.
-                    if not self._struct_param_is_bound(type_ann):
+                    # __init__'s _known_traits comment).
+                    bare_ann = type_ann.lstrip('*')
+                    if bare_ann not in self._known_traits:
                         fields.append(VarDecl(name=name, type_ann=type_ann, value=None))
                 else:
                     # No colon — skip this token (could be a bare type name)
@@ -6229,57 +5155,6 @@ class Parser:
             else:
                 self._advance()  # skip unexpected token
         return fields
-
-    def _struct_param_is_bound(self, type_ann: str) -> bool:
-        """Is this struct-parameter annotation a comptime BOUND, not a field type?
-
-        Two shapes, and the second one is the defect this exists to close.
-
-          * a single bare name this unit knows is a TRAIT (`T: Movable`).
-            Unchanged, including its deliberate conservatism about a trait
-            declared in another module: `origin: Origin` and `level: Level`
-            stay fields, because this compiler cannot tell a stdlib enum from
-            a trait without reading that module.
-          * a CONJUNCTION at bracket depth zero (`T: Copyable & Comparable &
-            Deinitable`). Every conjunct is a bound whatever it is named, and
-            the reason needs no table at all: **`&` cannot occur in a data
-            type.** There is no spelling of a struct's storage whose declared
-            type contains `&` — it is the trait-constraint operator and
-            nothing else — so an annotation carrying one describes a constraint
-            on the type parameter and cannot be describing per-instance
-            storage. Depth zero because a `&` inside a subscript belongs to
-            whatever that subscript spells.
-
-        Why the second arm was needed, measured rather than argued: the first
-        arm compared the WHOLE annotation against a set of trait NAMES, so
-        `Copyable & Comparable` was not in the set and the parameter became a
-        real `VarDecl` field. Fourteen structs in the new-modular stdlib spell
-        a bound that way, and every one of them then measured one field more
-        than it has. `std/collections/binary_heap.mojo`'s `BinaryHeap` is the
-        one this was found on: `BinaryHeap[T: Copyable & Comparable &
-        Deinitable]` has exactly one field, `_data`, and it measured two —
-        `T` and `_data` — so `formal/model.py`'s `struct_is_one_field` said no,
-        the receiver became a FRAME ADDRESS of a two-word block instead of the
-        one word it is, and `len(self._data)` inside `__len__` became a read of
-        a frame slot whose value nothing establishes, refused by name
-        (`frame_slot_value_refusal`: "this slot's DECLARED type is
-        'List[Self.T]' … what is missing is the VALUE"). The phantom field is
-        upstream of that refusal: the value was missing because the slot was
-        read as a frame slot at all.
-
-        So the two arms are ordered cheapest-first and neither is a fallback
-        for the other: the first is a NAME test over a table that can be
-        incomplete, the second is a SYNTAX test that cannot be.
-        """
-        depth = 0
-        for ch in type_ann:
-            if ch in '([{':
-                depth += 1
-            elif ch in ')]}':
-                depth -= 1
-            elif ch == '&' and depth == 0:
-                return True
-        return type_ann.lstrip('*') in self._known_traits
 
     def _skip_bracketed(self):
         """Consume a balanced [...] block."""
@@ -6296,36 +5171,13 @@ class Parser:
     def _parse_generic_params_capture(self):
         """Consume a `def f[dtype: DType, width: SIMDSize, //, ...](...)`
         generic/comptime parameter block like `_skip_bracketed`, but also
-        return the parameter names in declaration order together with the
-        DECLARED DEFAULTS of the ones written `name = expr` — enough for
-        the interpreter to bind a call-site subscript (`f[Int32]()`) to
-        names by position, e.g. so the function body can read `dtype` as a
-        plain value, and to answer `f[T=Int]()` for a parameter the bracket
-        does not supply (`def f[T, y=0, *, linux=0]()`'s `y`).
-
-        Returns `(names, defaults, annotations)`: `defaults` is
-        `{name: expr_node}` for the parameters that declare one, and
-        `annotations` is `{name: annotation_text}` for the ones written
-        `name: Type`. The annotations were the missing third and they are what
-        `formal/model.py::param_annotation` asks about a bracket parameter -- the
-        bracket block used to keep the NAME and throw the TYPE away, so nothing in
-        the tree could say what `keys` held in `def f[T: AnyType, keys: List[T]]`.
-        The defaults are kept apart from
-        `FunctionDef.param_defaults` because that table is the RUNTIME
-        parameter list's, and its LENGTH is the trailing-default offset
-        arithmetic's input (`_trailing_default_at`) — a comptime default in
-        there would shift every runtime default's slot.
-
-        The default's value is read by `_parse_bracket_param_default`, which
-        takes the token span between the `=` and the next top-level COMMA or
-        RBRACKET — so a `=` is only read as a default at bracket depth 1, and
-        the parameter list's own punctuation after the value (notably the
-        comptime/runtime separator `//`) is not fed to the expression parser.
-        """
+        return just the parameter names in declaration order (ignoring
+        types, trait bounds, defaults, and the `//` comptime/runtime
+        separator) — enough for the interpreter to bind a call-site
+        subscript (`f[Int32]()`) to names by position, e.g. so the function
+        body can read `dtype` as a plain value."""
         self._expect("LBRACKET")
         names = []
-        defaults = {}
-        annotations = {}
         depth = 1
         expect_name = True
         while depth > 0:
@@ -6351,124 +5203,12 @@ class Parser:
             if t.kind == "COMMA" and depth == 1:
                 self._advance(); expect_name = True; continue
             if depth == 1 and expect_name and t.kind in ("NAME", "KW"):
-                _nm = t.value
-                names.append(_nm)
+                names.append(t.value)
                 self._advance()
                 expect_name = False
-                if self._peek().kind == "COLON":
-                    self._advance()
-                    annotations[_nm] = self._capture_bracket_param_annotation()
-                    continue
-                if self._peek().kind == "ASSIGN":
-                    self._advance()
-                    defaults[_nm] = self._parse_bracket_param_default()
                 continue
             self._advance()
-        return names, defaults, annotations
-
-    def _capture_bracket_param_annotation(self) -> str:
-        """The DECLARED TYPE of a bracketed parameter, as source text.
-
-        Consumes tokens until the next top-level COMMA or RBRACKET and returns
-        them joined with spaces -- the same span discipline as
-        `_parse_bracket_param_default`, and for the same reason: what FOLLOWS is
-        parameter-list punctuation (`//`, `,`, `]`), not part of the type. Text
-        and not a parsed expression because a type is not an expression here, and
-        the consumers (`model.param_annotation` -> `declared_type_kind`,
-        `model.optional_receiver_types`) reduce it from text.
-
-        The span is consumed whether or not anybody wants it, so the caller's
-        loop resumes at the separator either way; an EMPTY annotation (`f[T: ]`)
-        yields `""` and every reader treats that as absent, which is the same
-        answer the parameter had before this existed.
-        """
-        parts = []
-        depth = 1
-        while True:
-            t = self._peek()
-            if t.kind == "EOF":
-                break
-            if t.kind == "COMMA" and depth == 1:
-                break
-            if t.kind == "RBRACKET" and depth == 1:
-                break
-            if t.kind in ("LBRACKET", "LPAREN", "LBRACE"):
-                depth += 1
-            elif t.kind in ("RBRACKET", "RPAREN", "RBRACE"):
-                depth -= 1
-            parts.append(self._advance().value)
-        # Tokens are joined with a space (the `_capture_bracketed_text` rule: a
-        # token's `.value` is its exact source substring and joining without a
-        # separator would fuse `Self` and `.` into `Self.`), and then the space
-        # is taken back OFF the punctuation a type argument list is written with
-        # -- so `List [ T ]` is stored as `List[T]`, which is the spelling every
-        # reader of an annotation in this tree reduces (`model.
-        # annotation_base_name` strips the arguments and then requires an
-        # IDENTIFIER, and `List ` is not one). Only the brackets and the comma
-        # are tightened; spaces between words are left, because
-        # `borrowed List[T]` and a function type's `def(A, B) thin` both need
-        # them to stay words apart.
-        text = " ".join(parts).strip()
-        for ch in "[],":
-            text = text.replace(" " + ch, ch).replace(ch + " ", ch)
-        return text
-
-    def _parse_bracket_param_default(self):
-        """The declared default of a bracketed (`def f[T, y=0, ...]`)
-        parameter, parsed from the token span that runs from here to the next
-        top-level COMMA or RBRACKET. The span is consumed either way, so the
-        caller's loop resumes at the separator.
-
-        Spanned, not parsed in place, because what FOLLOWS the value is
-        parameter-list punctuation and is not part of it: the
-        comptime/runtime separator `//` (`def f[T: Int //, n: Int]`) lexes as
-        the floor-div OPERATOR, so an in-place `_parse_expr` swallows it
-        looking for a right operand and dies on the `,` — turning a
-        declaration this function used to skip over into a SyntaxError.
-        Parsing the span with a sub-parser is the same shape the rest of the
-        tree uses for a bracket item that has to be a self-contained
-        expression run (`myinterpreter.py`'s subscript re-parse).
-
-        Layout tokens are dropped: a multi-line parameter list carries
-        NEWLINE/INDENT/DEDENT the expression parser must not see.
-        """
-        _start = self._pos
-        _depth = 1
-        _end = _start
-        while _end < len(self._tok):
-            _tk = self._tok[_end]
-            if _tk.kind == "EOF":
-                break
-            if _tk.kind in ("LPAREN", "LBRACE", "LBRACKET"):
-                _depth += 1
-            elif _tk.kind in ("RPAREN", "RBRACE"):
-                _depth -= 1
-            elif _tk.kind == "RBRACKET":
-                if _depth == 1:
-                    break
-                _depth -= 1
-            elif _tk.kind == "COMMA" and _depth == 1:
-                break
-            _end += 1
-        _span = []
-        # A trailing `//` is the comptime/runtime separator, not part of the
-        # value (`def f[T = 1 //, n: Int]`), so it stays in the parameter
-        # list for the caller's loop to step over — as it did before any
-        # default was captured. Only a TRAILING one: `1 // 2` is a floor
-        # division and keeps its operator.
-        if _end > _start and self._tok[_end - 1].kind == "OP" \
-                and self._tok[_end - 1].value == "//":
-            _end -= 1
-        for _i in range(_start, _end):
-            if self._tok[_i].kind in ("NEWLINE", "INDENT", "DEDENT"):
-                continue
-            _span.append(self._tok[_i])
-        self._pos = _end
-        if _end > len(self._tok):
-            self._pos = len(self._tok)
-        if not _span:
-            return None
-        return Parser(_span).with_filename(self._filename)._parse_expr(0)
+        return names
 
     def _skip_fn_quals(self):
         """Skip function-type qualifiers between a parameter list and `->`:
@@ -6525,7 +5265,7 @@ class Parser:
         # branch below, falls through to the shared continuation tail (dotted-
         # name loop / call-parens / subscript loop / trailing-op consumption)
         # instead of returning immediately — see
-        # PARSE_FAIL_annotation_paren_then_dot for why an early return
+        # bugs/PARSE_FAIL_annotation_paren_then_dot.md for why an early return
         # here left a trailing `.attr`/`|`/`&` continuation dangling.
         if self._peek().kind == "LPAREN":
             name = prefix + "("
@@ -6640,7 +5380,7 @@ class Parser:
             # downstream, so the literal string "..." is a safe, sufficient
             # representation. Also route through _finish_type_ann_tail
             # for consistency with every other branch (e.g. `g: ... | None`).
-            # See PARSE_FAIL_annotation_ellipsis.
+            # See bugs/PARSE_FAIL_annotation_ellipsis.md.
             self._advance(); self._advance(); self._advance()
             return self._finish_type_ann_tail(prefix + "...")
         else:
@@ -6651,7 +5391,7 @@ class Parser:
             # the NAME/KW path, consume any trailing operator continuing the
             # expression (e.g. `radd: 1 + a` — a NUMBER-shaped prefix followed
             # by a binary op; see
-            # PARSE_FAIL_annotation_leading_literal_trailing_op).
+            # bugs/PARSE_FAIL_annotation_leading_literal_trailing_op.md).
             return self._finish_type_ann_tail(prefix + self._advance().value)
         return self._finish_type_ann_tail(name)
 
@@ -6671,7 +5411,7 @@ class Parser:
         instead of returning its own opaquely-captured text directly. This
         was added as the fix for the fourth in a chain of annotation-parsing
         gaps found in one session (see
-        PARSE_FAIL_annotation_paren_then_dot): each earlier fix
+        bugs/PARSE_FAIL_annotation_paren_then_dot.md): each earlier fix
         (6ee8291, 6e6020f, bb28e80, c2933a7) patched exactly one branch to
         handle exactly one missing continuation shape (a trailing binary
         op, then specifically `|`/`&`, then LPAREN/LBRACKET/LBRACE routing
@@ -6848,7 +5588,7 @@ class Parser:
     def _capture_opaque_annotation_tail(self) -> str:
         """Consume the remainder of an arbitrary (non-type) expression that
         continues past a type-shaped annotation prefix, e.g. the `obj)` in
-        `gamma: some < obj)` — see PARSE_FAIL_annotation_trailing_binary_op.
+        `gamma: some < obj)` — see bugs/PARSE_FAIL_annotation_trailing_binary_op.md.
         Python's grammar permits any expression in an annotation position
         with zero semantic type-checking, and nothing downstream re-parses
         the annotation string assuming real type syntax (traced in commit
@@ -6895,7 +5635,7 @@ class Parser:
            permits an arbitrary expression in an annotation position (PEP
            649), so the operator and its RHS are captured as opaque text via
            `_capture_opaque_annotation_tail` instead of raising. See
-           PARSE_FAIL_annotation_trailing_binary_op. `?` is
+           bugs/PARSE_FAIL_annotation_trailing_binary_op.md. `?` is
            deliberately excluded here — it's the optional-type suffix
            handled by the caller, `_parse_type_ann`."""
         while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
@@ -6986,43 +5726,12 @@ class Parser:
         if self._peek().kind == "LPAREN":
             self._advance()
             parts = []
-            saw_comma = False
             while self._peek().kind != "RPAREN" and self._peek().kind != "EOF":
                 parts.append(self._parse_unpack_target())
                 if self._peek().kind == "COMMA":
-                    saw_comma = True
                     self._advance()
-                    saw_comma = True
             self._expect("RPAREN")
-            # `for (a) in b:` is a PARENTHESISED NAME, not a 1-tuple: Python
-            # binds the whole item to `a`. `for (a,) in b:` IS a 1-tuple and
-            # unpacks the item's single element. Both used to reduce to the
-            # IDENTICAL string "(a)" (a trailing comma at the top level
-            # reuses this spelling too — see _parse_for), so the compiled
-            # path's `for (a) in ...` unpacked instead of binding and
-            # printed `1` where CPython prints `(1,)`.
-            #
-            # The parens are the whole disambiguation, and keeping them is
-            # not optional: every consumer already reads a parenthesised
-            # target as "this is a tuple target" (that is what makes
-            # `for (a,) in b:` unpack correctly today) and a bare name as
-            # "bind the whole item". So the parenthesised single name
-            # unwraps to its bare text — `a` — which is exactly the
-            # representation `for a in b:` already produces. A 1-element group
-            # that really did have a comma keeps "(a)", and the trailing comma
-            # SURVIVES into that string: it is the only thing that tells
-            # `'(a,)'` from `'(a)'`, and `for_target_is_tuple` is its one reader.
-            # `split_top_level_commas` drops the empty slot the comma leaves,
-            # so no other consumer has to learn a second spelling of a 1-tuple
-            # — which is the failure this branch's version of the fix made, by
-            # appending a bare `"a,"` with no parens for the `for a, in ...`
-            # spelling while this one wraps it.
-            if len(parts) == 1 and not saw_comma:
-                return parts[0]
-            _body = ", ".join(parts)
-            if saw_comma and len(parts) == 1:
-                _body += ","
-            return "(" + _body + ")"
+            return "(" + ", ".join(parts) + ")"
         elif self._peek().kind == "OP" and self._peek().value == "*":
             self._advance()
             tok = self._advance()
@@ -8110,7 +6819,7 @@ class Parser:
         # `peek(1) != COMMA` guards the same collision for a plain
         # tuple-unpack target starting with the identifier `var`/etc.,
         # e.g. `for var, other_var in pairs:`
-        # (PARSE_FAIL_var_as_for_loop_target_comma) — without it,
+        # (bugs/PARSE_FAIL_var_as_for_loop_target_comma.md) — without it,
         # `var` was swallowed as a bogus prefix (peek(1)=COMMA matched
         # neither existing exclusion), leaving `_parse_unpack_target()` to
         # start from the comma itself and misparse everything after.
@@ -8127,7 +6836,6 @@ class Parser:
         target = self._parse_unpack_target()
         if self._peek().kind == "COMMA":
             names = [target]
-            trailing_comma = False
             while self._peek().kind == "COMMA":
                 self._advance()
                 # A TRAILING comma makes the target a 1-tuple, and the `in`
@@ -8140,21 +6848,18 @@ class Parser:
                 # trailing rather than a separator, so it happily consumed
                 # the `in` as a second target name and the parse then died
                 # with "Expected KW got NAME('<iterable>')". Closing the
-                # target here preserves the 1-tuple meaning — and preserves
-                # the COMMA with it, because `for a, in b:` is the same target
-                # as `for (a,) in b:` and must get the same `"(a,)"` spelling
-                # (see the `_parse_unpack_target` note above and
-                # `for_target_is_tuple`). Silently dropping the comma instead
-                # would bind the whole item to the name: a wrong answer with
-                # no error at all.
+                # target here preserves the 1-tuple meaning and reuses the
+                # ONE representation `for (a,) in b:` already produces
+                # (`"(a)"`, see _parse_unpack_target), so every downstream
+                # consumer of a parenthesised for-target — the interpreter's
+                # and both codegen paths' — is unchanged rather than having
+                # a second spelling to learn. Silently dropping the comma
+                # instead would bind the whole item to the name: a wrong
+                # answer with no error at all.
                 if self._is_kw("in"):
-                    trailing_comma = True
                     break
                 names.append(self._parse_unpack_target())
-            if trailing_comma and len(names) == 1:
-                target = "(" + names[0] + ",)"
-            else:
-                target = "(" + ", ".join(names) + ")"
+            target = "(" + ", ".join(names) + ")"
         self._expect("KW", "in")
         iterable = self._parse_expr(0)
         # Implicit (parenthesis-less) tuple iterable: `for x in a, b, c:`

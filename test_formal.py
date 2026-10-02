@@ -44,16 +44,6 @@ DEFAULT_JOBS = max(4, min(os.cpu_count() or 8, 20))
 BUILD_TIMEOUT = 900
 LEAN_TIMEOUT = 600
 
-# Two readers of Lean's own memory ceiling, and they are IMPORTS rather than a
-# copy of the sentence: `formal/lean.py` is the module that SETS `-M`, so it is
-# the only place that can say both that the sentence is a bound firing and that
-# the bound is ours. `tools/formal_proof_census.py` asks the same function for
-# the same reason, and the three of them agreeing is what makes "TOO-LARGE"
-# mean one thing in this file and in the census's baseline.
-sys.path.insert(0, HERE)
-from formal.lean import (lean_refused_on_its_own_memory_ceiling,
-                         LEAN_MEMORY_MB as formal_lean_memory_mb)
-
 # Examples whose proof is a genuine, documented gap rather than a regression.
 #
 # An entry here means "known unproven, for the stated reason" — NOT "passing".
@@ -64,52 +54,6 @@ from formal.lean import (lean_refused_on_its_own_memory_ceiling,
 # check. If a stem here starts passing, it is reported as a STALE entry and
 # the entry must be removed (see the stale check in main), so the list cannot
 # quietly drift from reality.
-#
-# **AND IT IS NOT THE SAME LIST AS `TOO_LARGE`'s, which does not exist and must
-# not.** A proof Lean's own `-M` ceiling refuses is not a proof that was checked
-# and came out wrong, and it is not a proof that is known-unproven either: it is
-# the ABSENCE of a measurement, which `tools/formal_proof_census.py`'s
-# `NOT_A_VERDICT` already says and this runner now says too, in its own output.
-# Marking one of those stems `EXPECTED_FAILURES` would be a lie of a specific
-# kind — "known unproven" is a claim about the proof, and the whole point is
-# that nobody has a claim — and it would also be unreachable in practice: Lean
-# is not run at all for a stem that is expected to fail (that is the point of
-# the list), so a ceiling that fires would never be observed on a marked stem and
-# the marker would sit there describing a failure nobody is measuring.
-# `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
-# §4 is the measurement: `both` and `either` both stop at the same line with
-# `(kernel) excessive memory consumption detected`.
-def classify_stem(stem: str, passed: bool, detail: str,
-                  expected_failures) -> str:
-    """The tag this runner prints for one example's outcome.
-
-    **FOUR, and the fourth is the one this function exists for.** `PASS`,
-    `KNOWN-GAP` (a stem in `EXPECTED_FAILURES`: known unproven, for the stated
-    reason) and `FAIL` (a regression) are all verdicts about a PROOF, and the
-    fourth is not: `TOO-LARGE` is Lean's own `-M` ceiling firing, which means
-    no checker decided the proof at all. Folding it into `FAIL` reports a proof
-    that may be entirely correct as one Lean could not check — and `both` and
-    `either` both stop at exactly that sentence
-    (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_
-    declared.md` §4). Folding it into `KNOWN-GAP` is worse, because
-    "known unproven" is a claim about the proof and the whole content of this
-    class is that nobody has one.
-
-    A pure function of four values, with no I/O and no clock, because the
-    alternative is the decision living inside a `concurrent.futures` result
-    loop where nothing can reach it — which is where it was, and which is why
-    `test_formal_proof_census.py` had to be the only thing that could test the
-    census tool's own version of the same question.
-    """
-    if passed:
-        return "PASS"
-    if stem in expected_failures:
-        return "KNOWN-GAP"
-    if lean_refused_on_its_own_memory_ceiling(detail or ""):
-        return "TOO-LARGE"
-    return "FAIL"
-
-
 EXPECTED_FAILURES = {
     # `fib(n) = fib(n-1) + fib(n-2)` — tree recursion, one goal left.  The
     # caller's FrameOk window read sits over the callee's store stack, whose
@@ -133,10 +77,8 @@ EXPECTED_FAILURES = {
     # itself returns 0 where a negative counter must be returned unchanged.
     # So the obligation is genuinely unprovable, not merely unproved — which is
     # the honest shape for a known gap and why the fix is a model change, not a
-    # tactic.  The SAME unsigned exit-side comparison is what a range loop's
-    # `loop_cond_flag` cannot close: `sum_range` reports it as an admitted hole
-    # whenever its contract is reached, and is refused before then for a
-    # different reason (a conditional back edge, its own entry below).
+    # tactic.  Same root cause as the two new holes `sum_range` reports (its
+    # `loop_cond_flag` has the same unsigned `¬ (i < bound)` on the exit side).
     # See bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md.
     "countdown": "the decrement-while runF model treats the counter as a "
                  "non-negative magnitude; a signed `int` means `n <= 0` exits "
@@ -164,247 +106,6 @@ EXPECTED_FAILURES = {
                      "certificates), the source half is not -- the semantic "
                      "model has no list domain and the list blob's memory "
                      "image is not derived from the source literal",
-
-    # `wide_recv`, and the other pin for it from the other side of the merge:
-    # the shape still BUILDS on both backends with proof generation off, which is what
-    # makes the refusal a model-domain gap and not a lowering one --
-    # `test_formal_call_proof_gen.py::TestStructFieldHasNoValueInTheModel`
-    # asserts that for `p.set_x(4); return p.get_x() + p.get_y()`, and
-    # `bugs/FORMAL_wide_receiver_by_reference.md` quotes the mutator's emitted
-    # `main_Point_set_x_frame_contract` for the machine half.
-
-    # `struct Point: var x: Int; var y: Int` and `return p.get_x() + p.get_y()`.
-    # The SAME gap as the row above, one type further, and it is refused at a
-    # DIFFERENT STAGE: the shared model generator raises
-    # `NotImplementedError: model: a struct field read has no value in the
-    # semantic model` while TRANSLATING, so no proof is generated at all rather
-    # than generated and rejected by Lean.  `p.x` is 4 and `p.y` is 0 whatever
-    # `n` is, and the model's domain is `UInt64 -> UInt64` -- a function of the
-    # ENTRY argument -- so there is no term to emit and answering 0 would be a
-    # false statement about the source.
-    #
-    # x86-64 does NOT refuse this one: `formal/x86_64_proof_gen.py` catches the
-    # generator's exception, emits the model as the IDENTITY with a NOTE, and
-    # suppresses the AST bridge and the run tests with their reasons, so the
-    # end-to-end theorem is `sorry` and nothing false is claimed.  That honesty
-    # is pinned by
-    # `test_formal_call_proof_gen.py::TestAPlaceholderModelClaimsNothing` --
-    # including that the file stops claiming an AST at all, which it used to, and
-    # wrongly for `subscript_var`.  So the two backends DISAGREE about this
-    # shape (arm64 refuses, x86-64 disclaims), which is asserted as a fact
-    # there; `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_
-    # same_function.md` is the family that finding belongs to and that doc is
-    # gone, so the assertion is where the mechanism lives.
-    #
-    # The fix is a value-model change: `mojo` becomes a function of an
-    # ENVIRONMENT rather than of one word, every field read projects out of it,
-    # and `Point()` starts with the class-level defaults the language gives it.
-    # That is the same work `subscript_var` above asks for (a list domain plus a
-    # memory image for the blob) one type further, it is shared by both backends
-    # and by the Lean proof, and it is the tagged-value convergence
-    # `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`
-    # describes.  Not a light worker's row, and not this file's to decide.
-    "wide_recv": "a struct field read has no value in the semantic model, whose "
-                 "domain is UInt64 -> UInt64 -- a function of the ENTRY argument, "
-                 "and p.x is 4 whatever n is; arm64 refuses it at GENERATION "
-                 "time and x86-64 emits a disclaimed placeholder model with a "
-                 "sorry end-to-end theorem. The fix is a struct domain in the "
-                 "value model (an environment rather than one word), shared by "
-                 "both backends and by the Lean proof",
-
-    # `count(n) = count(n-1)` and `pow2(n) = 2 * pow2(n-1)`: TREE RECURSION,
-    # like `fib` above, and both were UNDECLARED reds until 2026-10-04 -- three
-    # of the corpus's heaviest examples with no proving case and no marker,
-    # which is the shape of hole the `expect=`-marker discipline exists to
-    # close.  Measured, arm64, byte-identical on both:
-    #
-    #   count_proof.lean:5330  Tactic `rfl` failed: mem_read_u64
-    #     (mem_write_u64 … (UInt64.ofNat 4294968008 -
-    #       (UInt64.ofNat 4294968008 % 4096 -
-    #         ((if False then UInt64.ofNat 1024 - UInt64.ofNat (2 ^ 21)
-    #           else UInt64.ofNat 1024) * 4096 + UInt64.ofNat 8))).toNat
-    #       (st.sp - UInt64.ofNat 1984))
-    #     (st.sp - UInt64.ofNat 8).toNat is not definitionally equal to st.x30
-    #
-    # which is the return frame's `x30` read, and the ADDRESS is the whole of
-    # it: the slot was written through an ADRP/ADD-materialised pointer (the
-    # `arm64_set_reg 17 s (page(pc) + 1024 * 4096)` successor two hundred lines
-    # above), so the read is at a LITERAL rather than at `sp - K` and the
-    # `mem_read_after_write_u64_slot` peel in the `simp only` set has nothing to
-    # match.  The emitter chose that address because it IS `sp - 1984`; nothing
-    # emitted says so.  (The `if False` in the middle is a dead arm, not the
-    # cause: `simp` normalises it and the tactic that fails is `rfl`.)
-    #
-    # The obligation is a canonicalisation from a materialised address back to
-    # the frame slot, and the frame-address machinery that owns it is claimed
-    # (`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`,
-    # `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`) -- so this entry is
-    # the declaration, not the fix.  `pow2` is the same goal: same address, same
-    # two error sites, and its example is the multiplication rather than the
-    # bare tail call.
-    "count": "tree recursion whose return frame reads x30 back through an "
-             "ADRP/ADD-materialised address, so the read is at a literal rather "
-             "than at sp - K and mem_read_after_write_u64_slot cannot peel it; "
-             "the address is sp - 1984 and nothing emitted says so",
-    "pow2": "the same return-frame read as count, on the multiplication's "
-            "example: the epilogue reads x30 from a slot whose address was "
-            "materialised by adrp/add, so the read is at a literal rather than "
-            "at sp - K and the slot peel cannot match it",
-
-    # ── The 19 examples added on 2026-10-05, by the gap each one hits ────────
-    #
-    # `formal/examples` grew from 52 programs to 96 and every one of these is a
-    # shape the corpus had NO example of, so each entry below is a gap the
-    # census can now see for the first time rather than a new kind of failure.
-    # `tools/formal_proof_census.py` records all of them, and the six FAMILIES
-    # below are six gaps, not nineteen.
-
-    # (1) The loop contract: seven programs, one cause. The model's loop state is
-    # ONE word -- `_stmts_go`'s helper takes a single argument -- so a `while`
-    # whose body changes anything else is a loop the model cannot state.
-    # `_dec_while_pattern` (a counter that IS the parameter: `wdiff`,
-    # `countdown`, `wge`) and `_range_loop_pattern` (a range loop with one
-    # accumulator: `sum_range`) are the only two shapes it can.
-    # `bugs/FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_no_
-    # contract.md` has the measurement and the next step, and it also records
-    # the half that was FIXED in the same commit: this fold used to emit a
-    # `partial def` that DIVERGES for exactly these programs, which on x86-64
-    # reached a proof file as a false `result n = mojo n` obligation.
-    "accum_max": "the model's loop state is one word and this loop keeps a "
-                 "running maximum as well as a counter, so the fold refuses "
-                 "rather than emit a model that is not this program's "
-                 "arithmetic (the loop-contract doc above)",
-    "while_ne_zero": "the same loop contract, for the shape every accumulator "
-                     "loop is written in: `total += i` inside the body",
-    "var_typed_loop": "the same loop contract, on a `var` declared and read "
-                      "inside the body -- which is also how the fold's "
-                      "incomplete binder was found, since the refusal it used "
-                      "to give (\"`step` ... binds it to nothing\") was false "
-                      "about the source",
-    "ret_in_loop": "the same loop contract, with a `return` out of the body: "
-                   "the model's loop state cannot also carry an early exit",
-    "loop_break": "the same loop contract, with a `break` out of the body",
-    "nested_loop": "the same loop contract, with a second loop inside the "
-                   "first: two induction variables and one word",
-    "digits": "the same loop contract, on a divide-and-modify pair per "
-              "iteration",
-
-    # (2) The generic loop contract for a `for` loop, which is a refusal of its
-    # own: `ForStmt needs the generic loop contract`. `sum_range` is the one
-    # range loop in the corpus and it reaches a proof WITH A HOLE (the unsigned
-    # exit-side comparison its own entry above names); `for_two_bounds` is
-    # refused outright.
-    "for_two_bounds": "a `for i in range(1, n)` needs the generic loop "
-                      "contract the model does not have; the one range loop in "
-                      "the corpus (`sum_range`) only reaches a proof with an "
-                      "admitted hole",
-
-    # (3) The model has no domain for a container or a string. The model is
-    # `mojo : UInt64 -> UInt64` -- a function of the entry argument alone -- so
-    # a list literal, a string's length and a struct construction are not terms
-    # in it. This is `subscript_var`'s and `wide_recv`'s gap (their entries
-    # above) at three more spellings, and it is a representation project rather
-    # than a tactic.
-    "list_literal_index": "a list literal has no value in the semantic model "
-                          "(a `UInt64 -> UInt64` function over the source's "
-                          "arithmetic), the same domain gap as `subscript_var`",
-    "list_len": "`len` over a list is the same missing domain, reached through "
-                "the call rather than through a subscript",
-    "str_len": "`len` has no model in this image: a string is a bare "
-               "`char *` and its byte count is not an expression in the model "
-               "(`bugs/FORMAL_string_value_model.md`)",
-    "struct_point": "a struct CONSTRUCTION is a call, and the generator emits "
-                    "no `_go` for it, so `Point()` has no model in this image "
-                    "-- the same missing domain as `wide_recv`, one step before "
-                    "the field read it refuses",
-    "struct_method": "the same, for a struct's constructor, with the method's "
-                     "receiver behind it",
-
-    # (4) Calls. The universal theorem's CFG walk is per-function and cannot
-    # follow a call out of the ENTRY; `bugs/FORMAL_arm64_the_universal_theorem_
-    # cannot_follow_a_call_into_the_same_image.md` owns it. The corpus had NO
-    # program with a call at all, so this is the first measurement of it from
-    # the corpus: `call_helper` (the CALLEE is the entry) proves and
-    # `main_calls_helper` (the same image with the CALLER as the entry) is
-    # refused -- the pair is the sharpest statement of the frontier in the
-    # corpus.
-    "main_calls_helper": "the entry calls a second function in the same image, "
-                         "and the CFG walk cannot follow a call out of the "
-                         "entry; `call_helper` is the same image with the "
-                         "callee as the entry and it proves",
-    "multi_export": "three exports where the entry calls two of them, so two "
-                    "call SITES on one path -- more than the walk can follow, "
-                    "and the model refuses the inner callee first",
-
-    # (5) A division helper is an OPAQUE call, which is the same walk refusal
-    # seen from the other side and is the family `udivmod` and `floordiv` are
-    # already in (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_
-    # seven_are_declared.md` §#10, #11).
-    "augassign_floordiv": "`//=` and `%=` call the division helper, which is an "
-                          "opaque call site, and two of them on one path is "
-                          "more than the CFG walk's single halt address can "
-                          "discharge -- the same refusal as `udivmod`",
-
-    # (6) Two single gates, each its own sentence.
-    "printf_int": "`printf` with TWO arguments has no faithful AST: "
-                  "`MojoExpr.call` carries one `MojoExpr` and `callFunc` is "
-                  "`String -> UInt64 -> UInt64`, so the AST bridge refuses "
-                  "(`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`)",
-    "dead_branch": "a branch on a CONSTANT condition emits no flag for the "
-                   "proof layer to read, so the branch-condition value flow is "
-                   "unavailable -- the generator refuses rather than state a "
-                   "flag value it does not have",
-
-    # (7) Linear recursion in its EARLY-RETURN spelling. `_dec1_pattern`
-    # matches `if n == 0: return 0 else: return f(n - 1) + 1` -- it requires
-    # an `else` arm -- and the corpus's three recursive programs (`count`,
-    # `pow2`, `fact`) all spell it that way. `if n == 0: return 0` followed by
-    # a top-level `return down(n - 1) + 1` is the same function and has no
-    # contract, so `eval_eq_mojo` falls through every arm of its dispatch and
-    # refuses. One `else:` is the whole difference.
-    "recursion_linear": "linear recursion spelled as an early return rather "
-                        "than an `else` arm: `_dec1_pattern` requires the "
-                        "`else`, so `eval_eq_mojo` has no proof for this shape "
-                        "and refuses it -- the same function as `count` with "
-                        "one line moved",
-
-    # ── Five that generate a proof and LEAN REJECTS it ──────────────────────
-    # `refused` is the generator declining; these five emit a file and the
-    # checker says no, which is a different and smaller claim each time. Every
-    # one of them runs correctly on BOTH backends and agrees with CPython
-    # (`test_x86_64_examples.py`), so none of these is a codegen bug.
-    "cmp_le_ge": "two order comparisons (`<=` then `>=`) against a VARIABLE in "
-                "one function: the `by_cases` split over both sign-flipped "
-                "terms leaves `decide` with a counterexample it cannot "
-                "discharge (cmp_le_ge_proof.lean:3217:156). The 64-bit member "
-                "of the family `sgt8`/`sle8`/`ug8` above already sit in",
-    "not_and": "a negation around a two-operand `and`: `not (n > 3 and n < 30)` "
-               "puts a `not` in the model's `if` and the `by_cases` split "
-               "finds a counterexample (not_and_proof.lean:2631:12) after 147 s "
-               "of Lean CPU. The same growth measured on a three-operand chain "
-               "is in the loop-contract doc's `bool_chain` section, where it "
-               "reached 4.2 GB",
-    "precedence": "the one expression with a `//` in it: the model spells the "
-                  "division `(UInt64.ofNat 4) / (UInt64.ofNat 2)` over UInt64, "
-                  "which `simp +decide` does not reduce, so `eval_eq_mojo`'s "
-                  "statement is left open (precedence_proof.lean:25:65). The "
-                  "IMAGE computes it -- both backends and CPython answer 19 -- "
-                  "and `floordiv`/`udivmod` are refused outright for the same "
-                  "division's helper call",
-    "mod_by_var": "`n % d` with a VARIABLE divisor calls the run-time division "
-                  "helper, which is outside the image, so the modelled run "
-                  "stops there and never reaches the exit the generated "
-                  "`mod_by_var_pre_reaches_0` asserts it reaches -- an "
-                  "obligation FALSE about the machine, in the generated file's "
-                  "own words (`bugs/FORMAL_arm64_an_extern_call_makes_the_run_"
-                  "never_reach_the_exit.md`). `floordiv`/`udivmod`, with two "
-                  "such calls, are refused instead",
-    # `unary_ops` was in this table until 2026-10-05 and is not any more: unary
-    # `+` was modelled as a LOGICAL NEGATION (a false model, which the run test
-    # caught), and both the model and the AST bridge now spell it as the
-    # identity. It is the corpus's proof that a false model is caught rather
-    # than banked.
-
 }
 
 
@@ -546,27 +247,13 @@ def run_one(stem, backend="arm64", outdir=None):
         return False, str(e)
 
 
-EXPECTED_FAILURES_X86_64 = {
-    # Not empty any more, and the first entry is the SAME gap arm64 has: the
-    # x86-64 generator shares the source model (`_go_defs_for`), so a model it
-    # cannot reduce fails `eval_eq_mojo` on both backends for one reason.
-    "precedence": "the model's `UInt64` division (`4 // 2`) is not reduced by "
-                  "the AST bridge's `simp`, so `eval_eq_mojo` is left open "
-                  "(precedence_proof.lean:41:65) -- the same goal arm64 leaves "
-                  "at 25:65, and the same reason as its entry in the arm64 "
-                  "table. Every other example's x86-64 proof still builds and "
-                  "typechecks, and its run tests are real `native_decide` "
-                  "evaluations of the model in lib/X86.lean",
-}
+EXPECTED_FAILURES_X86_64 = {}
 """x86-64 gaps, kept separate from arm64's because the two generators prove
-different things (see the module docstring).  It was EMPTY until 2026-10-05,
-when `formal/examples` grew by 42 programs and one of them (`precedence`) turned
-out to be a gap on this backend too: the x86-64 generator falls back to a
-PLACEHOLDER model for a shape it cannot state (`_placeholder_model`), which is
-why the 41 loop and container examples needed no entry here at all — they get
-an honest gap in the file instead of a hole.  An entry here means "known
-unproven, for the stated reason" — and, as with the arm64 table, a stem that
-starts passing is reported as stale."""
+different things (see the module docstring).  Empty today: every example's
+x86-64 proof builds and typechecks, and the run tests in them are real
+`native_decide` evaluations of the model in lib/X86.lean, not `sorry`.  An
+entry here would mean "known unproven, for the stated reason" — and, as with
+the arm64 table, a stem that starts passing is reported as stale."""
 
 
 def main():
@@ -632,30 +319,23 @@ def main():
     # silently ignored, so the list cannot drift from reality.
     expected_failed = [s for s, (passed, _) in zip(stems, results)
                        if not passed and s in expected_failures]
-    tags = [classify_stem(stem, passed, detail, expected_failures)
-            for stem, (passed, detail) in zip(stems, results)]
-    unexpected_failed = [s for s, tag in zip(stems, tags) if tag == "FAIL"]
-    too_large = [s for s, tag in zip(stems, tags) if tag == "TOO-LARGE"]
+    unexpected_failed = [s for s, (passed, _) in zip(stems, results)
+                         if not passed and s not in expected_failures]
     stale_expected = sorted(s for s, (passed, _) in zip(stems, results)
                             if passed and s in expected_failures)
 
-    for i, (stem, (passed, detail), tag) in enumerate(
-            zip(stems, results, tags)):
+    for i, (stem, (passed, detail)) in enumerate(zip(stems, results)):
+        if passed:
+            tag = "PASS"
+        elif stem in expected_failures:
+            tag = "KNOWN-GAP"
+        else:
+            tag = "FAIL"
         suffix = "" if passed or not detail else f"  ({detail})"
         print(f"  [{i+1}/{total}] {tag}  {stem}{suffix}")
 
     print(f"\nResults for {backend} formal proofs: PASS={ok} "
-          f"KNOWN-GAP={len(expected_failed)} FAIL={len(unexpected_failed)} "
-          f"TOO-LARGE={len(too_large)}")
-    if too_large:
-        print("  TOO-LARGE is NOT a verdict on the proof and NOT a known gap: "
-              "Lean's own memory ceiling fired, so no checker decided it. "
-              "Each of these is a statement about `-M "
-              f"{formal_lean_memory_mb()} MB` and about the proof's size.")
-    if set(too_large) & set(expected_failures):
-        print("  ERROR: a stem is both KNOWN-GAP and TOO-LARGE, so the marker "
-              "is claiming to know a fact the run could not measure",
-              file=sys.stderr)
+          f"KNOWN-GAP={len(expected_failed)} FAIL={len(unexpected_failed)}")
     if SORRY_CENSUS:
         total = sum(SORRY_CENSUS.values())
         worst = sorted(SORRY_CENSUS.items(), key=lambda kv: (-kv[1], kv[0]))

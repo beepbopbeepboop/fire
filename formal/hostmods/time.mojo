@@ -29,44 +29,19 @@ rather than of this module, and every function below is shaped by them.
     `time.time()` cannot return CPython's float: there is no fractional value
     in the model, and `0.5` in a source file is the integer 0. What CAN cross
     is the IEEE-754 BIT PATTERN of a double, and `printf("%.6f", bits)` prints
-    it exactly on BOTH architectures — measured, and pinned in
-    `test_formal_time.py`, whose `--backend` flag is what makes the x86-64 half
-    of that claim a thing the suite can run at all (there was no way to ask it
-    before, which is how an arm64-only measurement came to be written down as a
-    property of both). On x86-64 that needs the floating conversion placed in
-    `XMM0` rather than read out of the integer register the word is in;
-    `formal/model.py`'s `printf_argument_classes` is the reader and
-    `formal/x86_64.py`'s `encode_movq_xmm_rm64` is the move. What is still
-    absent, and for a different reason, is every function whose CPython answer
-    is a float VALUE rather than a double rendered by a variadic call: a
-    non-variadic `double` parameter says what it wants in a prototype, and a
-    freestanding image has no header to read it from. So
+    it exactly — measured, and pinned in `test_formal_time.py` — so
     `time_seconds_bits()` below returns that pattern and the module's own
     docstrings say what to do with it. Every function whose CPython answer is
     a float therefore has BOTH a `_bits` form (faithful, this target's
     representation) and an integer `_ns` form (the same clock, in nanoseconds,
     which is the unit a program can actually do arithmetic on here).
 
-  * NO STRUCT CROSSES, and the reason is measured rather than assumed.
-    `localtime`, `gmtime`, `mktime`, `strftime` and `get_clock_info` all answer
-    with a `struct tm` or a named tuple, and a struct is a frame blob (see
-    `os/_syscalls.mojo`'s note on `stat`), so they are absent rather than
-    answered with a plausible number — and each one is named in
-    `bugs/FORMAL_time_struct_shaped_answers.md`.
-
-    What that doc has since MEASURED is worth stating here, because it is what a
-    reader has to check before deciding what the fix is: **reading** a C
-    library's struct field-wise WORKS on this path — a `Pointer[UInt8]` pointee
-    plus `(p + k).value()` gives every byte, four little-endian loads per `int`
-    field — and what is missing is the other half, **writing** through a pointee,
-    which is refused outright ("assignment target must be a plain name"). That is
-    the whole blocker for `localtime`/`gmtime`, whose argument is a
-    `const time_t *` this module cannot fill, and for `mktime`/`strftime`, whose
-    argument is 36 bytes it cannot fill. Passing an integer where the pointer
-    belongs instead passes a null `time_t *` and the image segfaults inside
-    libc, so the honest answer here is the refusal. The capability is filed as
-    `bugs/FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee.md`
-    and the measurement is `test_formal_time.py`'s `structroute` group.
+  * NO STRUCT CROSSES. `localtime`, `gmtime`, `mktime`, `strftime` and
+    `get_clock_info` all answer with a `struct tm` or a named tuple, and a
+    struct is a frame blob (see `os/_syscalls.mojo`'s note on `stat`), so
+    there is no representation for them. They are absent, each named in
+    `bugs/FORMAL_time_struct_shaped_answers.md` with the measurement, rather
+    than answered with a plausible number.
 
   * NO EXCEPTIONS. `time.sleep` on a negative argument raises `ValueError` in
     CPython; here it returns having slept zero seconds, and says so. There is

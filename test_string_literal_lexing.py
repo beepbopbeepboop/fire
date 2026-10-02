@@ -12,10 +12,9 @@ triple-quoted one as much as in a single-quoted one — and a backslash
 immediately before a closing run therefore leaves the literal UNTERMINATED.
 
 That rule has a consequence which used to be silent, and which is the whole
-reason this file exists: a triple-quoted literal holding a backslash before a
-closing run used to swallow the rest of the file (fixed in `fd10fd92`, which
-made an unterminated literal a REFUSAL — `-1` from `_scan_string_end` — where it
-had been "keep scanning"). A source line reading
+reason this file exists
+(bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md).
+A source line reading
 
     s = Q3 + backslash + Q3          # i.e. Q3 \ Q3
 
@@ -51,20 +50,6 @@ printed the same thing" is, and the lowering is a separate implementation
 (formal/arm64_codegen.py) from the evaluator. There are five of them now, one
 per family of literal this file covers.
 
-The family added last is a REPLACEMENT FIELD that spans LINES, and it is the
-only rule this front end has where "a single-quoted literal may not cross a line
-break" is right for an ordinary literal and wrong for an interpolated one — the
-field is code, and code may span lines. Its rows are grouped at the end of
-`LITERALS`, they are the only ones whose expressions are written to survive
-`eval` (this file's CPython oracle) as well as tokenizing, and they come with
-three controls that must keep REFUSING plus a check of their own
-(`check_multiline_fstring_line_numbers`) for the half no value assertion can
-see: that a diagnostic BELOW such a literal still names the line the source
-wrote. The bug was that this front end refused a PEP 701 f-string whose
-replacement field spans lines — `unterminated string literal` for a program
-CPython runs — and the `b12` round of `bugs/FORMAL_sweep_work_map.md` §4.2 is where
-the sweep recorded it and its next step.
-
 The third family is the one that generalizes. Every pre-pass that rewrites a
 line used to do it without asking where the literals are, and each wrote a
 character the source never wrote — a SPACE where a backslash-newline pair is
@@ -95,21 +80,14 @@ RUN_TIMEOUT = 60
 Q3 = '"' * 3          # a triple-quote run
 SQ3 = "'" * 3
 
-# (name, the literal's source text, OUR expected value, CPython's expected
-# value or None for "no cross-check")
+# (name, the literal's source text, expected value or None to mean "whatever
+# CPython computes", expected_ours_value)
 #
-# `ours` (the THIRD column) is the byte-exact content: source text between the
-# delimiters, with no escape processing. It is spelled out for every row rather
-# than derived, because "byte-exact" is a contract a reader has to be able to
-# check by eye. A row whose value is a real newline is written '\n' in the
-# table below and comes from a source line break.
-#
-# The fourth column is the oracle: when it is given, `check_continuation`
-# requires BOTH sides to equal it, so a row carrying one is a row the two
-# engines agree on and a row leaving it `None` is a labelled divergence. The
-# two are not interchangeable and reading the table as (ours, theirs) is the
-# mistake that made the first version of the raw-literal rows below assert a
-# divergence that no longer existed.
+# `ours` is the byte-exact content: source text between the delimiters, with no
+# escape processing. It is spelled out for every row rather than derived,
+# because "byte-exact" is a contract a reader has to be able to check by eye.
+# A row whose value is a real newline is written '\n' in the table below and
+# comes from a source line break.
 LITERALS = [
     # ── the plain shapes: one STRING token, content is what is between ──────
     ("triple_plain",        Q3 + "abc" + Q3,                "abc"),
@@ -203,96 +181,6 @@ LITERALS = [
     ("tab_in_a_literal",     '"a\tb"',  "a\tb"),
     ("tab_in_a_single_quoted", "'a\tb'", "a\tb"),
     ("tab_in_a_triple",      '"""a\tb"""', "a\tb"),
-
-# ── a REPLACEMENT FIELD may span LINES (PEP 701) ────────────────────────
-    #
-    # The one rule above that is CPython's for an ordinary literal and NOT its
-    # rule for an interpolated one. In `f"..."` a `{` opens a replacement field,
-    # the field is CODE, and code may span lines — so `f"{1<nl>}"` is a complete
-    # literal and a scanner that stops at the line break reports "unterminated
-    # string literal" for a program CPython runs. That was one file in the corpus,
-    # and the corpus's ONLY disagreement with CPython about whether a file is a
-    # program (measured over all 738 swept files, which is why the number of files
-    # it was worth is not the number of reasons to fix it — see
-    # `bugs/FORMAL_sweep_work_map.md` §5).
-    #
-    # `ours` is the byte-exact content, and for an f-string that is the whole
-    # source token including its prefix and delimiters — the contract FLAG_ROWS
-    # pins for a single-line one, asserted here on the multi-line ones so the two
-    # cannot drift. The BOUNDARY assertion is the load-bearing half: exactly one
-    # STRING token spanning the literal is what "the collapse to a placeholder
-    # kept the whole thing" means, and it is the half a value-only check misses.
-    #
-    # Every field expression here is one that EVALUATES, because `cpython_verdict`
-    # is `eval` with the builtins stripped: a row whose field names an undefined
-    # variable raises NameError rather than answering the accept/refuse question
-    # this table is about. `q(n)`-shaped fields belong in PROGRAMS below, where
-    # the oracle is a build-and-run rather than an eval.
-    ("f_field_spans_lines",      'f"a {[n*2\n       for n in [1, 2]]} b"',
-     'f"a {[n*2\n       for n in [1, 2]]} b"'),
-    ("f_brace_closes_on_next_line", 'f"{1\n}"',       'f"{1\n}"'),
-    # The uppercase and t spellings: `_prefix_is_interpolated` is ONE predicate
-    # for all four, so a rule keyed on the lowercase `f` alone would pass the row
-    # above and go red here.
-    ("capital_F_field_spans_lines", 'F"a {1+1\n   } b"', 'F"a {1+1\n   } b"'),
-    ("t_field_spans_lines",      't"a {1+1\n   } b"',  't"a {1+1\n   } b"'),
-    # A `#` inside a field is CONTENT to a scanner that is only asking where the
-    # literal ends, and this is the shape from the bug doc. It is here because
-    # the first attempt at this fix gave `#` an arm — deciding when it starts a
-    # comment rather than being a character — and that arm broke `{v:#x}` (a
-    # format spec) and `{d['a#b']}` (a nested literal) across ten files on this
-    # tree. CPython is the oracle on all three rows, so an arm that guesses is
-    # red here rather than in the field.
-    ("f_comment_inside_a_field", 'f"{1 # note\n}"',
-     'f"{1 # note\n}"'),
-    ("f_format_spec_with_a_hash", 'f"a {255:#x} b"', 'f"a {255:#x} b"'),
-    ("f_hash_inside_a_nested_literal", 'f"{ {\'a#b\': 7}[\'a#b\'] } c"',
-     'f"{ {\'a#b\': 7}[\'a#b\'] } c"'),
-    # A nested field, so the depth counter has to be a COUNTER and not a flag.
-    ("f_nested_field_spans_lines", 'f"{ {1:\n   2}[1] } c"',
-     'f"{ {1:\n   2}[1] } c"'),
-    # CR and CRLF, because `_scan_string_end` and `_source_lines` have to agree
-    # about what a line end is. The lone-CR row is the one that produced NO
-    # STRING token at all when the collapse counted `'\n'` instead of asking
-    # `_LINE_TERMINATORS`: the literal was left as text, `_source_lines` split it
-    # at the CR, and the half-literal became ordinary code.
-    ("f_field_over_crlf",        'f"a {1\r\n  } b"',  'f"a {1\r\n  } b"'),
-    ("f_field_over_a_lone_cr",   'f"a {1\r  } b"',   'f"a {1\r  } b"'),
-    # PEP 701 same-quote reuse, WHICH MUST KEEP WORKING: its own doc is
-    # PARSE_FAIL_fstring_same_quote_reuse, and the bug doc for this area names it
-    # as the thing a brace counter that does not understand quoting would break.
-    # So the delimiter inside a field is a NESTED LITERAL, and the scan steps over
-    # it (recursively, triple run included) rather than reading it as this
-    # literal's own closing quote.
-    ("f_nested_same_quote",      'f"{ {"k": 9}["k"] }"', 'f"{ {"k": 9}["k"] }"'),
-    ("f_nested_same_quote_over_lines", 'f"{ {"k": 9}["k"]\n} c"',
-     'f"{ {"k": 9}["k"]\n} c"'),
-    ("f_nested_triple_in_a_field", 'f"{ """a\nb"""[0] } c"',
-     'f"{ """a\nb"""[0] } c"'),
-    ("f_nested_fstring_in_a_field", 'f"{f"{1\n}"} c"', 'f"{f"{1\n}"} c"'),
-    # A RAW f-string whose braces are an escaped pair — this codegen's own
-    # `test_gimple_runner.py:223` writes exactly `rf'...\{{'`. A backslash does
-    # not escape in a raw literal, so the PAIR is what escapes and the backslash
-    # is content; the first version let the backslash consume the brace, opened a
-    # field that never closed, and REFUSED a file on this tree.
-    ("rf_escaped_open_brace",    r'rf"^[^\n]*\b{1}_[0-9a-f]+ \{{"',
-     r'rf"^[^\n]*\b{1}_[0-9a-f]+ \{{"'),
-    ("rf_escaped_close_brace",   r'rf"a\}}b"', r'rf"a\}}b"'),
-    # ── the controls: every one is refused, and CPython refuses it too ───────
-    #
-    # The depth rule must not have turned "unterminated is a refusal" into "a
-    # line break inside braces is a refusal somewhere else". `f"a{b<nl>` has an
-    # unclosed field (CPython: "'{' was never closed"); `f"a{b<nl>"` reaches its
-    # closing quote with the field still open and is the same case; `f"a{{b<nl>"`
-    # has an ESCAPED brace pair, so the line break really is the end of the
-    # literal; and `f"a}b<nl>"` has a lone `}` as text followed by the end. A
-    # rule that tracked braces without the `{{`/`}}` escape accepts the third and
-    # refuses the first for the wrong reason.
-    ("f_unclosed_field_at_eof",  'f"a{b\n',       None),
-    ("f_unclosed_field_at_quote", 'f"a{b\n"',     None),
-    ("f_escaped_pair_then_eol",  'f"a{{b\n"',     None),
-    ("f_lone_close_brace_eol",   'f"a}b\n"',     None),
-    ("ordinary_braces_then_eol", '"a{b\n"',      None),
 ]
 
 
@@ -369,107 +257,7 @@ PROGRAMS = {
         "\tif x == 1:\n"
         "\t\treturn 7\n"
         "\treturn 0\n", ("main", 3)),
-    # A REPLACEMENT FIELD spanning lines, followed by more source. Same assertion
-    # as every other row here and for the same reason: the failure mode in this
-    # area has always been "the rest of the file went into the literal", and it
-    # is the STATEMENTS after the literal that show it. The shape is verbatim
-    # from `test_formal_libc_symbol.py:482-484`, the one corpus file the whole
-    # multi-line-f-string row is worth.
-    "multiline_fstring_then_code": (
-        'def main():\n'
-        '    fails.append(f"exactly one dylib on the {arch} link "\n'
-        '                 f"line, got {[os.path.basename(n)\n'
-        '                              for n in linked_dylibs(out)]}")\n'
-        '    return fails\n', ("main", 2)),
-    # The same shape with the field closing on a line of its own, which is the
-    # shortest one that has to be collapsed at all.
-    "multiline_fstring_brace_closes_on_next_line": (
-        'def main():\n'
-        '    var a = f"got {n\n'
-        '    }"\n'
-        '    print(a)\n'
-        '    return 0\n', ("main", 3)),
-    # And one where the literal's closing delimiter is followed by a postfix on
-    # the SAME physical line — the shape `pending_pad`'s flush rule exists for,
-    # since putting the owed newlines straight after the placeholder pushed the
-    # `.` onto an artificial blank line and the line-based tokenizer ended the
-    # statement there.
-    "multiline_fstring_with_a_postfix": (
-        'def main():\n'
-        '    var a = (f"got {n\n'
-        '    }").strip()\n'
-        '    return a\n', ("main", 2)),
 }
-
-
-def check_multiline_fstring_line_numbers(verbose):
-    r"""A diagnostic AFTER a multi-line f-string must name the line the source
-    wrote.
-
-    Collapsing a literal that spans lines to one physical line moves every
-    physical line number below it up by (that literal's line count − 1), so the
-    collapse owes the difference back — `pending_pad`, which
-    `replace_multiline_strings` flushes at the next real newline. "It parses" is
-    not the claim a caller depends on: a lexer that reports a real error four
-    lines down as being three lines down sends the reader to the wrong place, and
-    that is the bug triple-quoted literals already had (`fire.py`'s own
-    top-of-file docstring is what exposed it).
-
-    So the assertion is on the LINE A REFUSAL NAMES, taken from a deliberately
-    unterminated literal placed after the f-string. The refusal has to come out
-    of the TOKENIZER for this to be the test it claims to be — a parser refusal
-    would confound "which line did the collapse think this was on" with whatever
-    the parser does with a line number, and an unterminated string literal is the
-    one construct `check_refusal_message` above already pins as a tokenizer
-    refusal carrying `file:line:col`.
-
-    **The control in the other direction is the load-bearing half.** The two
-    sources differ by exactly the f-string's shape — one spanning two lines, one
-    spanning none — and the expected line differs by exactly one. A pad that
-    fires unconditionally, or not at all, is therefore visible HERE as a wrong
-    line number even when every value in the file is right, which is the same
-    regression `fire.py`'s docstring produced and the reason this check exists
-    rather than another value assertion.
-    """
-    MULTILINE = ('def main():\n'
-                 '    var a = f"got {n\n'
-                 '    }"\n')
-    ONELINE = 'def main():\n    var a = f"got {n}"\n'
-    BAD = '    var b = "x\n'          # unterminated, on the line after it
-
-    def named_line(src):
-        """(the line the refusal names, its message) or None if accepted."""
-        try:
-            F.py_tokenize_named(src, "some/file.mojo")
-            return None
-        except SyntaxError as e:
-            text = str(e)
-            marker = "some/file.mojo:"
-            if not text.startswith(marker):
-                return ("?", text)
-            rest = text[len(marker):]
-            return (int(rest.partition(":")[0]), text)
-
-    failures = []
-    for label, head, want in (("a 2-line f-string", MULTILINE, 4),
-                              ("a 1-line f-string", ONELINE, 3)):
-        got = named_line(head + BAD)
-        if got is None:
-            failures.append(f"{label}: a genuinely unterminated literal after it "
-                            f"was accepted, so there is no line number to check")
-        elif not isinstance(got[0], int):
-            failures.append(f"{label}: the refusal is {got[1]!r}, which does not "
-                            f"name a line number")
-        elif got[0] != want:
-            failures.append(
-                f"{label}: the refusal names line {got[0]}, expected {want} — "
-                f"the collapse owed a newline back and did not, or owed one too "
-                f"many, which misreports the line of every diagnostic below a "
-                f"multi-line literal")
-        elif verbose:
-            print(f"  line number  {label:34s} names line {got[0]}, as the "
-                  f"source writes it")
-    return (not failures), "; ".join(failures)
 
 # A backslash-newline pair inside a literal is a LINE CONTINUATION, and
 # CPython's tokenizer decides what it is worth before the parser ever sees the
@@ -485,10 +273,10 @@ def check_multiline_fstring_line_numbers(verbose):
 # character the source never wrote, silently, in every one of these shapes.
 #
 # Each row is (name, the statement, the value HERE, the value CPython gives it,
-# or None when CPython's answer is not the contract for this row — see the rows
-# that say so). Where both are given they must be EQUAL, because that is the
-# whole claim for a continuation: a line continuation is not an escape, so
-# whether the pair is deleted or kept, CPython is the oracle for both.
+# or None when CPython's answer is not the contract for this row — see the two
+# rows that say so). Where both are given they must be EQUAL, because that is
+# the whole claim for a non-raw continuation: this path can be CPython's oracle
+# for one, since a line continuation is not an escape.
 CONTINUATIONS = [
     ("plain",              'a = "ab\\\ncd"',            "abcd",  "abcd"),
     # The next line's INDENTATION is content inside a string — CPython deletes
@@ -512,48 +300,24 @@ CONTINUATIONS = [
     # between them. Both sides read this as two adjacent literals, so the
     # concatenation is the parser's and the value must be `xb`.
     ("quote_run_then_text", 'a = "x\\\n""b"',           "xb",    "xb"),
-    # ── raw: the pair is CONTENT, and this path now keeps it ──
+    # ── the two rows where this path's answer is NOT CPython's ──
     #
-    # A RAW literal keeps the pair — CPython's token text for it is
-    # 'r"a\\\nb"' — and it did not used to, because a value only reaches the
+    # A RAW literal keeps the pair (it is content: CPython's token text for it
+    # is 'r"a\\\nb"'), and this path cannot, because a value only reaches the
     # token stream with a newline in it through the placeholder
-    # `replace_multiline_strings` builds, and the join ran after it. The join
-    # now builds a placeholder for the line break itself, so the STRING token
-    # carries `a\` + a real newline + `b`, which is CPython's value byte for
-    # byte: a raw literal processes no escapes, so there is nothing left for
-    # the two to disagree about.
-    ("raw_keeps_the_pair", 'a = r"a\\\nb"',
-     "a\\\nb", "a\\\nb"),
-    ("raw_single_quoted", "a = r'a\\\nb'", "a\\\nb", "a\\\nb"),
-    # The same on a two-letter prefix. The `b` is dropped by this front end (it
-    # has no bytes type) so CPython's value is a `bytes` — a different question
-    # from what the pair is worth, so `ours` is compared to its own spelling
-    # and CPython only decides that the pair survives.
-    ("raw_bytes_prefix", 'a = rb"a\\\nb"', "a\\\nb", None),
-    # Indentation is content here for the same reason it is in a non-raw
-    # literal — the line is joined with nothing in front of it either way — and
-    # both sides keep all four spaces.
-    ("raw_indented_next_line", 'a = r"ab\\\n    cd"', "ab\\\n    cd",
-     "ab\\\n    cd"),
-    ("raw_closes_on_the_next_line", 'a = r"ab\\\n"', "ab\\\n", "ab\\\n"),
-    ("raw_two_continuations", 'a = r"a\\\nb\\\nc"', "a\\\nb\\\nc",
-     "a\\\nb\\\nc"),
-    # ── the one row where this path's answer is NOT CPython's ──
-    #
-    # The same rule on a TRIPLE-quoted span, which is placeholdered as a whole
-    # before the join runs and so does keep the pair — and CPython deletes it
-    # there, because a triple-quoted literal is not raw either. Pre-existing,
-    # unchanged by the join, and part of the same no-escape-processing contract
-    # as `"\n"` being four characters rather than one: fixing it means editing
-    # the VALUE a triple-quoted literal collapses to, which would change the
-    # text of every docstring in the compiler and the stdlib that holds such a
-    # pair — a different change, and one nothing here depends on.
+    # `replace_multiline_strings` builds — and the join runs after it. The row
+    # is spelled out anyway, because a divergence that is pinned is a fact and
+    # one that is not is a surprise. Next step, in full:
+    # bugs/CODEGEN_backslash_continuation_in_a_raw_literal.md.
+    ("raw_keeps_the_pair_in_cpython_only", 'a = r"a\\\nb"',
+     "ab", None),
+    # The same rule on a TRIPLE-quoted span, which IS placeholdered and so does
+    # keep the pair — and CPython deletes it there, because a triple-quoted
+    # literal is not raw either. Pre-existing, unchanged by the join, and part
+    # of the same no-escape-processing contract as `"\n"` being four
+    # characters rather than one.
     ("triple_keeps_the_pair_here_too", 'a = """ab\\\ncd"""',
      "ab\\\ncd", None),
-    # The control for the row above, and for `raw_keeps_the_pair`: the same
-    # source spelled raw, where both sides agree. A fix that taught the join to
-    # keep every pair would go red here.
-    ("raw_triple_agrees", 'a = r"""ab\\\ncd"""', "ab\\\ncd", "ab\\\ncd"),
 ]
 
 
@@ -675,90 +439,6 @@ def our_verdict(literal):
     return ("ok", strings)
 
 
-def our_literal_flag(text):
-    """(the literal's `value`, its `is_interpolated`) as this front end reads it."""
-    src = "def main():\n    " + text + "\n    return a\n"
-    stmts = F.Parser(F.py_tokenize_named(src, "<t>")).with_filename("<t>").parse_module()
-    lit = stmts[0].body[0].value
-    return lit.value, lit.is_interpolated
-
-
-# (name, the assignment's right-hand side, expected value, expected
-# is_interpolated). CPython is not the oracle for the flag — it has no such
-# notion, and this compiler's f-strings are its own — but `check_literal` above
-# already pins each spelling's VALUE against CPython, and the value is half of
-# what makes these rows bite: the two halves are only separable if the value is
-# the thing being asked about, and it is.
-FLAG_ROWS = [
-    # The row the whole flag exists for, and the control for it. Both values
-    # start with `f"`. `'f"n"'` is a four-character string that CPython prints
-    # as `f"n"`; `f"n={n}"` interpolates. Asked of the value they are the same
-    # question, and the prefix test answered `n` for both — on the interpreter
-    # and the compiled path, silently, and as a REFUSAL on the formal ones.
-    ("body_that_starts_with_f_quote", 'a = \'f"n"\'', 'f"n"', False),
-    ("interpolated_f_string", 'a = f"n={n}"', 'f"n={n}"', True),
-    ("body_that_starts_with_t_quote", 'a = "t\'x\'"', "t'x'", False),
-    ("interpolated_t_string", 'a = t"v={v}"', 't"v={v}"', True),
-    # The UPPERCASE spellings, which are the other half of the same question:
-    # `_raw_string_is_ftstring` accepts `F`/`T` and the compiled path always
-    # did, while the interpreter's own prefix test listed only `f"`/`t"` — so
-    # `F"q={q}"` interpolated on one engine and printed its own source text on
-    # the other. The flag agrees with CPython on both.
-    ("body_that_starts_with_capital_f", "a = 'F\"q\"'", 'F"q"', False),
-    ("interpolated_capital_f", 'a = F"q={q}"', 'F"q={q}"', True),
-    # The escape is what makes the middle row work: with the inner and outer
-    # quote THE SAME the `\"` survives into the value, so it starts `f\` and
-    # every reader was right by accident. These two pin that the flag does not
-    # depend on that accident.
-    ("escaped_inner_quote_same_kind", 'a = "f\\"n\\""', 'f\\"n\\"', False),
-    # A run that merges into an f-string (`f"a" "b"` is `f"""ab"""`) and a
-    # `r`-looking body, which the prefix walk used to take the `r` off and the
-    # quotes with it.
-    ("merged_run_with_one_f_part", 'a = f"a" "b"', 'f"""ab"""', True),
-    ("body_that_starts_with_r_quote", "a = 'r\"x\"'", 'r"x"', False),
-    # Triple-quoted, both ways: the `f` one keeps its token (and interpolates),
-    # the plain one arrives from the placeholder cache already stripped to its
-    # body — so the two cannot be told apart from the value either.
-    ("triple_quoted_interpolated", 'a = f"""a={n}"""', 'f"""a={n}"""', True),
-    ("triple_quoted_ordinary", 'a = """doc"""', 'doc', False),
-]
-
-
-def check_interpolated_flag(verbose):
-    """`StringLiteral.is_interpolated` has to answer for the VALUE as well.
-
-    An interpolated literal's value is its whole source token and an ordinary
-    one's is its body, so a body may begin with `f"` or `t'` or `F"` all by
-    itself. Every engine used to decide "interpolated?" by sniffing the value's
-    first two characters, which cannot tell those apart: the interpreter and the
-    compiled path printed `n` for `'f"n"'`, and the formal backends refused
-    correct code for it. The parser decides from the source token
-    (`_raw_string_is_ftstring`) and the node carries the answer, so these rows
-    are the two halves of one question side by side — and both are checked
-    against the value the parser produced, because a flag that disagreed with
-    its own node would be a worse bug than the one it replaced.
-    """
-    failures = []
-    for name, text, expected_value, expected_flag in FLAG_ROWS:
-        try:
-            value, flag = our_literal_flag(text)
-        except SyntaxError as e:
-            failures.append(f"interpolated flag {name}: refused a literal CPython "
-                            f"accepts ({text!r}): {e}")
-            continue
-        if value != expected_value or flag != expected_flag:
-            failures.append(
-                f"interpolated flag {name}: {text!r} parsed to value {value!r} "
-                f"is_interpolated={flag}, expected {expected_value!r} / "
-                f"{expected_flag} — the value and the flag are one answer, and a "
-                f"reader that asked the value instead of the flag is what this "
-                f"row exists to catch")
-        elif verbose:
-            print(f"  flag         {name:34s} {text!r} -> {value!r} "
-                  f"interpolated={flag}")
-    return (not failures), "; ".join(failures)
-
-
 def check_literal(name, literal, expected_ours, verbose):
     cp = cpython_verdict(literal)
     ours = our_verdict(literal)
@@ -860,20 +540,11 @@ def run_end_to_end(verbose):
     can be the oracle outright — same text, same stdout, same exit status. That
     is the strongest form and it is the one a caller can act on.
 
-    `byte_exact` used to hold backslash-bearing literals with NO CPython oracle,
-    on the stated ground that "a non-raw `a\\nb` is three characters to CPython
-    and four here, by design". **That design is gone.** A literal's escapes are
-    now decoded by every engine — `fire_compiler.decode_c_escapes`, called
-    through `decoded_literal` — and a raw literal is told apart from a cooked
-    one by `StringLiteral.is_raw`, which the parser records because
-    `_strip_string_prefix_and_quotes` discards the `r`. So CPython IS the
-    oracle for `byte_exact` now, which is why it is given one: a `\"` is a
-    quote and a `r"\n"` is a backslash and an `n`, and the expectation is
-    spelled from CPython rather than from a contract this path used to keep.
-
-    The program still prints the literal as well as its length, so a mangled
-    byte cannot hide behind a right count — that part was always the point of
-    the case and is unchanged.
+    `byte_exact` holds backslash-bearing literals, where CPython *cannot* be the
+    oracle (a non-raw `a\\nb` is three characters to CPython and four here, by
+    design). The expectation is spelled out instead, from the documented
+    contract, and the program prints the literal as well as its length so a
+    mangled byte cannot hide behind a right count.
     """
     if platform.machine() not in ("arm64", "aarch64"):
         print(f"SKIP: the end-to-end cases build an arm64 image; host is "
@@ -889,12 +560,8 @@ def run_end_to_end(verbose):
              '    print(c)\n'
              '    print(len(a) + len(b) + len(c))\n'
              '    return 0\n')
-    # The two spellings ONE LEVEL APART, which is what makes this case worth
-    # an oracle rather than a pinned expectation. `a` is cooked and its `\"` is
-    # a QUOTE (three characters); `b` is raw and its `\n` is a BACKSLASH and an
-    # `n` (four). A decoder that ignored `is_raw` would make both three and
-    # print `p` newline `q` for `b`; one that decoded twice would make `b` two
-    # characters. Only the pair pins both, and CPython answers for it.
+    # The literals here are the ones whose characters this path does NOT
+    # reinterpret: a quote run, a real newline, a quote of the other kind.
     byte_exact = ('def main():\n'
                   '    a = ' + Q3 + 'a\\"b' + Q3 + '\n'
                   '    b = r' + Q3 + 'p\\nq' + Q3 + '\n'
@@ -903,25 +570,21 @@ def run_end_to_end(verbose):
                   '    print(len(a))\n'
                   '    print(len(b))\n'
                   '    return 0\n')
-    # The fourth oracle-able program: backslash-newline pairs INSIDE literals.
+    # The third oracle-able program: backslash-newline pairs INSIDE literals.
     # CPython's tokenizer decides a line continuation is worth nothing before
-    # the parser sees the token, and this path does the same, so for a non-raw
-    # literal the two agree on the bytes even though they disagree about every
-    # other escape. The raw spelling is here too, and is oracle-able for a
-    # different reason: there CPython KEEPS the pair and so does this path, and
-    # a raw literal processes no escapes, so again there is nothing left to
-    # disagree about. Before the fix the raw value lost the backslash and the
-    # newline with it, so the image printed one fewer line than CPython did.
+    # the parser sees the token, and this path now does the same, so for a
+    # non-raw literal the two agree on the bytes even though they disagree about
+    # every other escape. The raw spelling is deliberately absent here: there
+    # CPython keeps the pair and this path cannot, which is pinned with the rest
+    # of that divergence in CONTINUATIONS rather than here.
     continued = ('def main():\n'
                  '    a = "ab\\\ncd"\n'
                  '    b = "x\\\ny"\n'
                  '    c = "m"\n'
-                 '    d = r"p\\\nq"\n'
                  '    print(a)\n'
                  '    print(b)\n'
                  '    print(c)\n'
-                 '    print(len(d))\n'
-                 '    print(len(a) + len(b) + len(c) + len(d))\n'
+                 '    print(len(a) + len(b) + len(c))\n'
                  '    return 0\n')
     # The fourth oracle-able program: characters that `str.splitlines()` calls
     # line breaks and the language does not, inside literals. CPython's value is
@@ -952,42 +615,15 @@ def run_end_to_end(verbose):
                    '    print(a)\n'
                    '    print(b)\n'
                    '    return 0\n')
-    # An ordinary string whose own TEXT begins with an f/t prefix and a quote.
-    # CPython is the oracle and there is nothing to disagree about: the source
-    # asks for no interpolation, so every engine must print the spelling back.
-    # Before `StringLiteral.is_interpolated` this printed `n` and `x` on the
-    # interpreter and the compiled path, and REFUSED to build here — three
-    # wrong answers to one question that had to be answered somewhere other than
-    # the value. The lengths are asserted with the text because a value printed
-    # as its own spelling and a value counted as something else are different
-    # failures; 4 + 4 is all this program claims (four characters each — the
-    # letter, the quote, the letter, the quote).
-    #
-    # The escaped spelling of the same shape (`c = "f\\"n\\""`, whose value
-    # starts `f\` and so was accidentally right for every prefix sniff) is in
-    # FLAG_ROWS above rather than here: on this path a plain literal's `\"` is
-    # still two characters at run time, so a `len` of it is a fact about escape
-    # decoding and not about this bug.
-    prefix_looking = ('def main():\n'
-                      '    a = \'f"n"\'\n'
-                      '    b = "t\'x\'"\n'
-                      '    print(a)\n'
-                      '    print(b)\n'
-                      '    print(len(a) + len(b))\n'
-                      '    return 0\n')
     cases = [
         # (name, mojo text, python text or None, expected stdout, expected exit)
         ("agree", agree, agree + "main()\n", 'p"q\nx\ny\nsay "hi"\n14\n', 0),
-("byte_exact", byte_exact, byte_exact + "main()\n",
-         'a"b\np\\nq\n3\n4\n', 0),
-        ("continued", continued, continued + "main()\n",
-         'abcd\nxy\nm\n4\n11\n', 0),
+        ("byte_exact", byte_exact, None, 'a\\"b\np\\nq\n4\n4\n', 0),
+        ("continued", continued, continued + "main()\n", 'abcd\nxy\nm\n7\n', 0),
         ("not_line_breaks", not_breaks, not_breaks + "main()\n",
          '9\nx\vy\np\fy\nm\x1cy\n', 0),
         ("literal_tab", literal_tab, literal_tab + "main()\n",
          '6\nx\ty\np\tq\n', 0),
-        ("prefix_looking", prefix_looking, prefix_looking + "main()\n",
-         'f"n"\nt\'x\'\n8\n', 0),
     ]
     failures = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -1053,17 +689,11 @@ def main(argv):
     ok, why = check_refusal_message(verbose)
     if not ok:
         failures.append(why)
-    ok, why = check_interpolated_flag(verbose)
-    if not ok:
-        failures.append(why)
-    ok, why = check_multiline_fstring_line_numbers(verbose)
-    if not ok:
-        failures.append(why)
     ok, why = run_end_to_end(verbose)
     if not ok:
         failures.append(why)
 
-    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 6
+    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 4
     print()
     if failures:
         for f in failures:

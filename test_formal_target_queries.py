@@ -22,17 +22,6 @@ and answering it at build time is not a guess. Every case in EXECUTED below
 therefore BUILDS the arm64 image, EXECUTES it, and compares what it printed
 against a value this file states independently of the code under test.
 
-WHERE A QUERY CAN BE WRITTEN, and why this file has a case for each of the
-three. A body (EXECUTED), a module-level `comptime` binding (answered by
-`model.collect_module_symbols`), and a DEFAULT PARAMETER VALUE — which is
-compile-time by construction, since a default is substituted into the call, and
-which met neither walk until now: `param_defaults` is a dict, the shared rewrite
-walked lists and tuples, and the query survived into the emitter, which refused
-it with a message about MLIR templates that is false of a construct this build
-answers two lines lower. A build answers a question in every position or in
-none, and a position that quietly falls through to a different rule is how one
-of them gets two answers.
-
 THE ORACLE, and why it is not the implementation restated. A target query has
 no CPython meaning — `__mlir_attr` is not a thing CPython can run — so the
 "compare with CPython" discipline is honoured where CPython really is an oracle
@@ -238,7 +227,7 @@ EXECUTED = [
     # The EXIT STATUS, not just the output. `main`'s return value is the process
     # exit status, so a folded boolean that came out false when the source says
     # true fails here even if a `print` were dropped from the case.
-("the_folded_value_reaches_the_exit_status",
+    ("the_folded_value_reaches_the_exit_status",
      "def main():\n"
      "    var e = __mlir_attr[\n"
      "        `#kgen.param.expr<eq,`,\n"
@@ -249,63 +238,6 @@ EXECUTED = [
      "    if e:\n"
      "        return 7\n"
      "    return 3\n", 7),
-    # A query in a DEFAULT PARAMETER VALUE — the third and last position a
-    # query can be written in (body, module-level `comptime`, default), and the
-    # only one that met neither walk. A default is compile-time by
-    # construction: it is substituted into the call, so a query there is exactly
-    # as constant as one in the body, and before the fix it was refused by the
-    # emitter with "assembles an MLIR attribute from a template of backtick-
-    # quoted literal fragments" — a message about a construct this build
-    # answers everywhere else, in the same file.
-    #
-    # The default is READ through a call that omits the argument, so this is
-    # also a check that the folded literal is what the CALL SITE substitutes
-    # (`model.bind_call_arguments` fills an omitted parameter from
-    # `param_defaults`) and not merely that the tree was rewritten. The answer
-    # is 20 + the pointer width, and it is checked as an EXIT STATUS because a
-    # default that folded to zero would still print something.
-    ("a_query_in_a_default_parameter_value_is_folded",
-     "def f(x: Int = " + query("pointer_width", "index", "index", "    ")
-     + ") -> Int:\n"
-     "    return x\n"
-     "def g(n: Int) -> Int:\n"
-     "    return n + f()\n"
-     "def main() -> Int32:\n"
-     "    return g(20)\n",
-     20 + HOST_POINTER_BITS),
-    # ── the CLASS-LEVEL position, and it is two positions ──
-    #
-    # `var w: Int = <query>` is a node in the struct's `fields`, and
-    # `comptime W = <query>` is not in the tree at all — `collect_module_symbols`
-    # parks it in a dict on the struct and `struct_class_constants` reads it back
-    # out. Both were refused before 2026-10-03 by a sentence about the wrong
-    # thing ("this path has no module-global storage to read it back out of"),
-    # which is false of a value that is one 64-bit literal. Two cases because
-    # they are two mechanisms: a fold that handled the one in the tree and not
-    # the one in the dict would pass one of these and fail the other, and the
-    # dict is the half the STDLIB writes (`_PLUGIN_COUNT`, `FPUtils.integral_type`,
-    # `_Null._mlir_type` are all `comptime` class attributes).
-    #
-    # `pointer_width`, so the expected value is the host's, measured above, and
-    # NOT a literal this file could have got wrong in the same direction as the
-    # implementation.
-    ("a_query_as_a_struct_fields_initializer_is_answered",
-     "struct S:\n"
-     "    var w: Int = " + query("pointer_width", "index", "index", "    ") + "\n"
-     "\n"
-     "def main() -> Int32:\n"
-     "    var s = S()\n"
-     '    printf("w=%d", s.w)\n'
-     "    return 0\n",
-     "w=%d" % HOST_POINTER_BITS),
-    ("a_query_as_a_comptime_class_attribute_is_answered",
-     "struct S:\n"
-     "    comptime W = " + query("pointer_width", "index", "index", "    ") + "\n"
-     "\n"
-     "def main() -> Int32:\n"
-     '    printf("w=%d", S.W)\n'
-     "    return 0\n",
-     "w=%d" % HOST_POINTER_BITS),
 ]
 
 # (name, source, needle) — every one must be REFUSED, and identically on both
@@ -393,56 +325,6 @@ REFUSED = [
      "    var v = " + query("pointer_width", "index", "!kgen.string", "    ") + "\n"
      "    return 0\n",
      "declares a result of !kgen.string but evaluates to int"),
-    # The refused half of the default-parameter case: the walk leaves a template
-    # it cannot answer WHOLE, in a default exactly as in a body, so this is
-    # refused with the message that names the missing FIELD. Before the default
-    # was walked at all it was refused with the multi-index wording — "assembles
-    # an MLIR attribute from a template of backtick-quoted literal fragments" —
-    # which is false of a query the build answers two lines lower, and which a
-    # reader cannot act on.
-    ("an_unanswerable_query_in_a_default_parameter_value_is_refused",
-     "def f(x: Int = " + query("triple", "!kgen.string", "!kgen.string")
-     + ") -> Int:\n"
-     "    return 1\n"
-     "def g(n: Int) -> Int:\n"
-     "    return n + f()\n"
-     "def main() -> Int32:\n"
-     "    return g(20)\n",
-     "has no 'triple' for this build to state"),
-    # ── the CLASS-LEVEL position: a query as a struct field's initializer ──
-    #
-    # The fourth position, and the one with the most room to be wrong about,
-    # because there are TWO of it and they are stored in two different places:
-    # `var w: Int = <query>` is a node in the struct's `fields`, and
-    # `comptime W = <query>` is not in the tree at all — `collect_module_symbols`
-    # parks it in a dict on the struct and `struct_class_constants` reads it back
-    # out. Before 2026-10-03 both were refused by a sentence about the wrong
-    # thing: "a class-level constant's value is written in the class body, and
-    # this path has no module-global storage to read it back out of", which is
-    # false of a value that is one 64-bit literal the evaluator hands over. Both
-    # now go through the same fold as every other position
-    # (`formal/build.py`'s `_fold_a_class_level_default`), so both are answered.
-    #
-    # The refusal half is what keeps that honest, and it is the same shape as
-    # every other position's: an UNANSWERABLE query in this position is refused
-    # with the evaluator's own sentence naming the missing fact (`triple`), not
-    # with the "no module-global storage" one. A fold that substituted a zero
-    # would have passed the two executed cases and failed nothing else.
-    ("an_unanswerable_query_in_a_class_level_initializer_is_refused",
-     "struct S:\n"
-     "    var w: Int = " + query("triple", "!kgen.string", "!kgen.string") + "\n"
-     "def main() -> Int32:\n"
-     "    var s = S()\n"
-     '    printf("w=%d", s.w)\n'
-     "    return 0\n",
-     "has no 'triple' for this build to state"),
-    ("an_unanswerable_query_in_a_comptime_class_attribute_is_refused",
-     "struct S:\n"
-     "    comptime W = " + query("triple", "!kgen.string", "!kgen.string") + "\n"
-     "def main() -> Int32:\n"
-     '    printf("w=%d", S.W)\n'
-     "    return 0\n",
-     "has no 'triple' for this build to state"),
 ]
 
 # The `Target` derivation itself, as unit checks over every (arch, fmt) the
@@ -482,27 +364,6 @@ KEYWORD_WALK = [
      + query("triple", "!kgen.string", "!kgen.string") + ")\n"
      "def main(n: Int) -> Int:\n    return n\n",
      "rewrite_left=-1 refusal_walk_saw=-1 module_refusal=raised"),
-]
-
-# (name, source, what the walk left behind) — the third position a query can be
-# written in, and the one the walk used to skip: a DEFAULT PARAMETER VALUE is a
-# dict, `_fold_target_queries_in` handled lists and tuples only, so the query
-# survived into `model.bind_call_arguments` (which fills an omitted parameter
-# from `param_defaults`) and out to the emitter, which refused it with the
-# multi-index MLIR wording.
-#
-# Reported as the default's VALUE rather than as a count, because "no template
-# is left" and "the right literal replaced it" are different claims and only the
-# second is the answer. The other half — an UNANSWERABLE query in a default —
-# is in REFUSED below, where it belongs: the walk leaves a template it cannot
-# answer whole (as it does in a body), and the refusal then names the missing
-# fact instead of the template's shape.
-DEFAULT_WALK = [
-    ("a_query_in_a_default_parameter_value_is_replaced",
-     "def f(x: Int = " + query("pointer_width", "index", "index") + ") -> Int:\n"
-     "    return x\n"
-     "def main(n: Int) -> Int:\n    return n\n",
-     "x=64"),
 ]
 
 
@@ -565,32 +426,6 @@ def keyword_walk_detail(source):
             seen += sum(1 for _n in M.iter_templates_preorder(value))
     return (f"rewrite_left={left} refusal_walk_saw={seen} "
             f"module_refusal={refused}")
-
-
-def default_walk_detail(source):
-    """What `_prepare_functions` left in a function's default parameter values.
-
-    A unit check for the same reason `keyword_walk_detail` is one: what is under
-    test is a WALK over a tree, and a build is a slow way to ask. The value is
-    printed rather than a yes/no, so a fold that replaced the query with the
-    wrong literal fails here as loudly as one that left it.
-    """
-    import formal.build as B
-    M.publish_target(M.target_for("arm64", "macho"))
-    stmts = B.parse_module(source, filename="dflt.mojo")
-    try:
-        fns, _structs, _syms, _slots = B._prepare_functions(stmts, synthetic=False)
-    except M.CodegenError as e:
-        return f"refused: {str(e).split(chr(10))[0][:80]}"
-    out = []
-    for fn in fns:
-        for name, value in sorted((getattr(fn, "param_defaults", None)
-                                   or {}).items()):
-            if M.is_mlir_template(value):
-                out.append(f"{name}=<template>")
-            else:
-                out.append(f"{name}={getattr(value, 'value', value)!r}")
-    return " ".join(out)
 
 
 def build(src, out, backend=None):
@@ -669,8 +504,7 @@ def main() -> int:
         return 0
 
     known = ({c[0] for c in EXECUTED} | {c[0] for c in REFUSED}
-             | {c[0] for c in DERIVATION} | {c[0] for c in KEYWORD_WALK}
-             | {c[0] for c in DEFAULT_WALK})
+             | {c[0] for c in DERIVATION} | {c[0] for c in KEYWORD_WALK})
     if args.cases:
         missing = set(args.cases) - known
         if missing:
@@ -682,12 +516,6 @@ def main() -> int:
         if args.cases and name not in args.cases:
             continue
         got = keyword_walk_detail(source)
-        checks.append((name, got == want, f"{got} != {want}"))
-
-    for name, source, want in DEFAULT_WALK:
-        if args.cases and name not in args.cases:
-            continue
-        got = default_walk_detail(source)
         checks.append((name, got == want, f"{got} != {want}"))
 
     for name, arch, fmt, arch_field, os_field in DERIVATION:

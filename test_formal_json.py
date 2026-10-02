@@ -39,30 +39,27 @@ at the definition.
 
 A NOTE ON THE CORPUS, because it is a real constraint and not a style choice
 --------------------------------------------------------------------------
-A corpus spelled in decoded source bytes would make every awkward byte a thing
-this file has to be right about twice — once in the expected document and once
-in the literal — and a NUL cannot be spelled at all, because a formal string is
-a NUL-terminated `char *`. So every corpus below is written in a MASKED
-alphabet and the program unmasks it at run time:
+A Mojo source string literal is copied byte for byte — a string escape is
+NOT interpreted on this path — so no literal can hold a double quote, a
+backslash, a tab, a newline, a carriage return or any other control byte.
+Every corpus below is therefore written in a MASKED alphabet and the program
+unmasks it at run time:
 
     ~~  ->  ~        ~t -> TAB    ~n -> LF     ~r -> CR
     ~q  ->  "        ~b -> backslash           ~xHH -> byte 0xHH
-    ~a  ->  @         (the record terminator's own character, so that the
+    ~a  ->  @        (the record terminator's own character, so that the
                       code-point sweep in `dumps` can include U+0040)
 
-and `unmask` is the only thing in the generated programs that knows it. Two
-things the mask buys, and both are permanent: the expected document and the
-produced one differ ONLY in the byte under test, and no byte depends on how
-the lexer reads a non-ASCII character in the file. Byte 0 is not in the
-alphabet, and cannot be: a formal string is a NUL-terminated `char *`, so a
-NUL ends it. That is a property of the value model, it is stated in the
-module's own docstring, and it is why the `dumps` corpus has no NUL in it.
+and `unmask` is the only thing in the generated programs that knows it. Byte
+0 is not in the alphabet, and cannot be: a formal string is a NUL-terminated
+`char *`, so a NUL ends it. That is a property of the value model, it is
+stated in the module's own docstring, and it is why the `dumps` corpus has no
+NUL in it.
 
 The record format is `<len>:<value>@@`, with the LENGTH in front
 precisely because a value here can be any byte at all. `@@` and not a
-newline, for the reason every hostmod test in this tree gives
-(`test_formal_dylib.py` states it): a separator this file can read back
-without asking whether the image decoded a literal.
+newline, for the reason every hostmod test in this tree gives: a formal image
+prints the two characters `\\` and `n` for a `\\n` in a format string.
 
 Groups: `resolve`, `primitive`, `valid`, `kinds`, `loads`, `members`,
 `escapes`, `dumps`, `deep`, `absent`. With no argument, all.
@@ -514,7 +511,7 @@ DUMPS_CORPUS = [
 # surrogate-pair arithmetic is checked over the WHOLE range and not at four
 # hand-picked points. These are emitted one program per chunk, each chunk
 # small, because `main` is a few hundred statements per program before
-# `FORMAL_always_returns_recurses_past_the_stack_on_a_large_function`
+# `bugs/FORMAL_always_returns_recurses_past_the_stack_on_a_large_function.md`
 # bites.
 CP_RANGES = [
     (0x01, 0x7F), (0x80, 0xFF), (0x100, 0x2FF), (0x300, 0x4FF),

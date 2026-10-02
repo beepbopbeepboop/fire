@@ -39,19 +39,12 @@ Four constraints shape the replacement, each verified rather than assumed:
     two concurrent runs of this test would otherwise overwrite each other's
     `.ci` in the one directory they cannot avoid. Tagged, they cannot collide.
   * The scratch dir must be under the WORKTREE, not the system temp dir.
-    This one is now a plain hygiene rule rather than a correctness one:
-    the backend's self-host predicate used to decide "is this the
-    compiler's own source?" by walking UP from the file's directory
-    looking for `fire_compiler.py`, so `<repo>/.tmp/...` found one and
-    `/tmp/...` did not, and the corpus was silently compiled through a
-    different code path depending on which side of that boundary the
-    scratch dir sat. That made the A/B comparison meaningless. The
-    predicate is gone (it is the file-level `_is_selfhost_source_file`
-    now, and the 12 AST-struct typedefs it used to inject into a user
-    program are pinned by `test_gimple.py`'s
-    `test_a_program_written_inside_the_checkout_is_not_the_compiler`);
-    keeping the scratch dir inside the worktree keeps that guarantee
-    under this test too, and keeps the run self-contained.
+    `_is_selfhost_source_dir` (mojo/backend_gimple/module_gen.py) decides
+    whether a source is this compiler's own by walking UP from the file's
+    directory looking for `fire_compiler.py`; `<repo>/.tmp/...` still finds it
+    and `/tmp/...` does not. A scratch dir on the wrong side of that boundary
+    silently compiles the test corpus through a different code path, which
+    would make the A/B comparison meaningless.
   * Sibling `--dump-full` resolution is relative to the source file's own
     directory (`_resolve_test_relative_module`), so the driver and its leaf
     modules travel together in the same private dir. That is why the corpus's
@@ -393,28 +386,7 @@ def test_scratch_isolation() -> tuple:
 
     # 6. The invariant the module exists to keep, checked against the whole
     #    directory rather than against what this test happened to write.
-    #
-    #    `SCRATCH_ROOT` is the one name here that is not litter, so it is
-    #    subtracted BY PATH and only when it really is a child of HERE: it is
-    #    this module's declared container — deliberately inside the worktree,
-    #    gitignored, and on a worktree machine also the worktree's `TMPDIR` —
-    #    and the first `scratch_dir()` above created it, so on a checkout
-    #    that had none (the ordinary case: nothing else creates it) the check
-    #    was reporting the container as the self-test's own leak, which is how
-    #    `suite-self-test` failed naming `['.tmp']` for months while every
-    #    scratch property above it was green.
-    #
-    #    Subtracting a name is only as good as what replaces it, so the
-    #    exemption is paid for: the container must be left holding nothing of
-    #    THIS run's. A blanket "ignore `.tmp`" would otherwise be a blind spot
-    #    exactly where this module's transients go.
-    ours = [n for n in os.listdir(SCRATCH_ROOT) if _RUN_TAG in n]
-    want(not ours, "the scratch root is left holding nothing of this run's",
-         f"{sorted(ours)}")
-    exempt = {'abt999999_deadbeef_stale.ci'}
-    if os.path.dirname(os.path.abspath(SCRATCH_ROOT)) == os.path.abspath(HERE):
-        exempt.add(os.path.basename(SCRATCH_ROOT))
-    leaked = set(os.listdir(HERE)) - root_before - exempt
+    leaked = set(os.listdir(HERE)) - root_before - {'abt999999_deadbeef_stale.ci'}
     want(not leaked, "nothing this test wrote is left in the repo root",
          f"{sorted(leaked)}")
 

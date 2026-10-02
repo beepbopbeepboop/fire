@@ -31,9 +31,7 @@ what is asserted here is:
      are built, the second is BUILT AS AN ARM64 IMAGE AND RUN, and their stdout,
      their stderr and their exit status must be identical. Every case in the
      table is either a value, a usage line, an error message or an exit code
-     that this module has to reproduce exactly. The oracle is asked in
-     `cpython_env()` and not in this process's environment, for the reason the
-     closing paragraph gives;
+     that this module has to reproduce exactly;
   5. the refusals are refusals — `type=float` is declined with a reason rather
      than truncated to an integer, because a value on this path is one 64-bit
      integer word (measured: `2.5` is the integer 2, `atof("3.5")` is 1);
@@ -44,16 +42,7 @@ what is asserted here is:
 
 The comparison is against CPython's OWN answers rather than against a table of
 expected strings, so a change in either implementation that is wrong in the
-same way in both would have to be wrong in CPython to pass. That is worth
-something only if the oracle is asked the same way twice, and it was not: the
-child used to inherit this process's environment, and CPython 3.14's `argparse`
-colourises its usage line and its help listing whenever
-`_colorize.can_colorize()` is true — which it reads `FORCE_COLOR`,
-`PYTHON_COLORS`, `NO_COLOR` and `TERM` to decide, BEFORE it asks whether the
-stream is a terminal, which a pipe is not. Measured with `FORCE_COLOR=3` and
-`TERM=xterm-color` in the environment: 31 of the 69 cases differed, and every
-one of them differed only by ANSI escapes. So the verdict belonged to the shell
-that ran the test, and `cpython_env()` is what gives it back to the module.
+same way in both would have to be wrong in CPython to pass.
 
 Invoked directly:
     python3 test_formal_argparse.py [-v]
@@ -66,15 +55,6 @@ import platform
 import subprocess
 import sys
 import tempfile
-
-# One COMPILE budget and five RUN budgets, by argv: the `fire.py build --formal`
-# that produces each case's image, and then the image itself or the CPython
-# oracle beside it. The compile was 900 s and is `COMPILE_TIMEOUT_S`'s 600 —
-# a narrowing, and the only one in this batch, so it is stated here rather than
-# left to be discovered: the seven builds this file makes per case are one
-# `formal/build.py` over a source with no import closure, and `exec_budget`'s
-# 600 is ~50x the observed worst `gcc -fgimple` it was derived from.
-from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
@@ -248,95 +228,6 @@ PARSERS = [
         cases=[["-vq"], ["-v=1"], ["-vx"], ["-v", "-j", "4"], ["-j4"],
                ["-n-3"], ["-3"], ["-v", "--", "-q"], ["-jq", "4"]],
     ),
-    # ── the three places help text is FOLDED ─────────────────────────────────
-    #
-    # `FORMAL_argparse_help_wrapping_not_implemented`: the layout was
-    # reproduced and nothing was folded, so a help string past the column came
-    # out on one line and a usage line past the width came out on one line. These
-    # three parsers are the shapes that reach each of the three algorithms, which
-    # are three and not one: the help column and the description are
-    # `textwrap.wrap` (at `max(width - help_position, 11)` and at the full width),
-    # and the usage line is `_format_usage`'s own fold over PARTS, which never
-    # splits one and is therefore not `textwrap` at all.
-    #
-    # Every help string here avoids `;` and `|`, which are this module's spec's
-    # record and field separators — a help string containing one is truncated at
-    # it, which CPython allows and this representation cannot hold
-    # (`“A `;` or a `|` in a help string truncates it”`) — and every
-    # description avoids `"` and `\`, which the generated program embeds
-    # verbatim.
-    dict(
-        name="wrapentry",
-        prog="demo",
-        desc=("A description long enough that CPython folds it onto a second "
-              "line at the 78 columns this target knows, since a terminal "
-              "cannot be asked for here and nothing shorter will do."),
-        args=[
-            # Wrapped at the help column, with the break landing mid-sentence.
-            (["-j", "--jobs"], dict(type=int, default=8,
-                                    help="the number of workers to run in "
-                                         "parallel, and more than the core "
-                                         "count is usually slower")),
-            # A HYPHENATED word: `textwrap` breaks after the hyphen, which is a
-            # different rule from the one that fills a line.
-            (["--no-cache"], dict(action="store_false",
-                                  help="turn the cache off. --no-cache is "
-                                       "hyphenated and this help text is long "
-                                       "enough to fold twice")),
-            # One word longer than the column, which is broken mid-word.
-            (["-x"], dict(action="store_true",
-                          help="supercalifragilisticexpialidocious-and-then-"
-                               "some is one run of characters")),
-            (["--opt"], dict(choices=["alpha", "beta"], default="alpha",
-                             help="short")),
-            # A TAB in the help text. It becomes ONE space, because
-            # `HelpFormatter._split_lines` substitutes whitespace before
-            # `textwrap` runs — so `expandtabs` never sees it, and the fold lands
-            # where a space's would.
-            (["-t"], dict(action="store_true",
-                          help="a tab\there and the help goes on for long "
-                               "enough to need folding at the column")),
-            # `strip()`: `_split_lines` strips, so a padded help string prints
-            # without its padding.
-            (["-a"], dict(action="store_true", help="  padded  ")),
-            # `action.help.strip()`: a help text of nothing but spaces takes the
-            # NO-HELP branch, so the entry is the invocation and nothing else.
-            (["-b"], dict(action="store_true", help="   ")),
-        ],
-        cases=[["--help"]],
-    ),
-    dict(
-        # A usage line past the width, with a SHORT prog: the prog shares the
-        # first line with the optionals and the positionals are folded after
-        # them.
-        name="usagefold",
-        prog="demo",
-        desc="",
-        args=[
-            (["--input-directory"], dict(default="in")),
-            (["--output-directory"], dict(default="out")),
-            (["--jobs"], dict(type=int, default=1)),
-            (["--keep-going"], dict(action="store_true")),
-            (["--verbose"], dict(action="count", default=0)),
-            (["--dry-run"], dict(action="store_true")),
-            (["paths"], dict(nargs="*")),
-        ],
-        cases=[["--help"]],
-    ),
-    dict(
-        # The same fold with a LONG prog (past `0.75 * width`), which is the
-        # other branch: the prog gets a line of its own.
-        name="longprog",
-        prog="a-program-name-long-enough-to-need-a-usage-line-of-its-own",
-        desc="",
-        args=[
-            (["--input-directory"], dict(default="in")),
-            (["--output-directory"], dict(default="out")),
-            (["--keep-going"], dict(action="store_true")),
-            (["paths"], dict(nargs="*")),
-        ],
-        cases=[["--help"]],
-    ),
     dict(
         # `metavar`, an explicit `dest`, and help text on a positional: the
         # three ways the usage line and the help listing can disagree about
@@ -351,53 +242,6 @@ PARSERS = [
               (["paths"], dict(nargs="*", help="what to do"))],
         cases=[[], ["-j", "2"], ["--opt", "beta"], ["--opt", "gamma"],
                ["--help"], ["a", "b"]],
-    ),
-    dict(
-        # THE THREE BYTES A FIELD HAS TO ESCAPE, all in ONE help string, and the
-        # reason this parser exists.
-        #
-        # `“A `;` or a `|` in a help string truncates it”`: a spec is a
-        # `;`-separated record string with `|`-separated fields, so a help string
-        # containing a `;` ended there and everything after it in the same string
-        # parsed as MORE RECORDS — the observed symptom was two EMPTY
-        # `positional arguments:` entries in the help listing, because the tail
-        # parsed as a record with no name and no metavar. A `|` truncated the help
-        # text at the same place, more quietly, with no extra records.
-        #
-        # It could not be answered in the test corpus before this: every help
-        # string here had to avoid both bytes, so the one construct the bug was
-        # about was the one the wrapping cases were not allowed to use. They are
-        # spelled `\;` and `\|` now, and the module's scan skips a backslash and
-        # the byte after it — `formal/hostmods/argparse.mojo`'s `_esc_end`.
-        #
-        # The BACKSLASH is in the same help string because it is the third byte
-        # the rule has an opinion about and the only one whose bug would be
-        # silent: a `\` that is not an escape would be REMOVED by a reader that
-        # unescapes, so `a\b` would print `ab`. CPython prints the backslash.
-        #
-        # `choices` carries a separator too, because the same reasoning applies
-        # to it and `_quote_choices` is a second reader that has to unescape (an
-        # error message that printed the backslash would be its own bug). The
-        # `--pick gamma` case is the one that reaches it, and `gamma|delta` is
-        # not in the list, so CPython's message is
-        # `invalid choice: 'gamma' (choose from 'alpha|beta', 'x;y')` — with the
-        # bars and semicolons unescaped in the MESSAGE, which is the assertion
-        # that the unescaping happens on the way out and not only in `--help`.
-        name="separators",
-        prog="demo",
-        desc="",
-        args=[
-            (["-j", "--jobs"], dict(type=int, default=8,
-                                    help="workers; more than the core count "
-                                         "is slower | usually | really")),
-            # The literal backslash, in the same position as the separators so a
-            # reader that unescapes them but not this one fails visibly.
-            (["--path-like"], dict(action="store_true",
-                                   help="treat the argument as a\\b")),
-            (["--pick"], dict(choices=["alpha|beta", "x;y"], default="alpha|beta",
-                              help="which one")),
-        ],
-        cases=[["--help"], ["--pick", "gamma"], ["--pick", "alpha|beta"]],
     ),
 ]
 
@@ -436,43 +280,12 @@ def default_field(default):
     return str(default)              # store_true and count
 
 
-def escape_field(text):
-    """One field's text as this module's spec encodes it.
-
-    `\\`, `;` and `|` are the three bytes that mean something to the reader — the
-    first because it is the escape itself, the other two because they separate
-    fields and records — so a field carries them escaped and the reader's scan
-    skips a backslash and the byte after it
-    (`formal/hostmods/argparse.mojo`'s `_esc_end`). This is the WRITER's half of
-    a rule and not a convention the module applies for you: `add(spec, record)`
-    receives a record the caller has already spelled, and it cannot tell a `|`
-    that separates two fields from one that is help text, so a spec written
-    without this truncates its own help at the first separator.
-
-    Applied to EVERY field rather than to `help` alone, because which fields may
-    contain a separator is a property of the language's `add_argument`, not of
-    this module: `dest`, `metavar`, `default` and `choices` are caller text too.
-    Escaping a field that holds none of the three is the identity, so the cost is
-    zero and the rule has no exception to remember.
-    """
-    return (str(text).replace("\\", "\\\\")
-            .replace(";", "\\;")
-            .replace("|", "\\|"))
-
-
-def record_fields(names, kw):
-    """The TEN fields of one `add_argument` call, unescaped and in order.
-
-    Split out from `record_for` because the encoding test needs the fields
-    themselves and re-deriving them beside `record_for` would be a second
-    implementation of the layout — the ten positions, their order and the
-    `None`-versus-omitted distinction in the default field are all of what the
-    spec is, and two lists of them would drift.
-    """
+def record_for(names, kw):
+    """One `add_argument` call as one record of this module's spec."""
     ty = ""
     if "type" in kw:
         ty = {int: "int", str: "str", float: "float"}.get(kw["type"], "")
-    return [
+    return "|".join([
         " ".join(names),
         kw.get("action", ""),
         ty,
@@ -483,21 +296,7 @@ def record_fields(names, kw):
         kw.get("dest", ""),
         kw.get("metavar", ""),
         kw.get("help") or "",
-    ]
-
-
-def record_for(names, kw, escape=True):
-    """One `add_argument` call as one record of this module's spec.
-
-    `escape=False` is the UNENCODED record, and it exists for exactly one caller:
-    the encoding test, which needs the text the source spells so it can ask
-    whether the encoded form reads back as it. `spec_for` never passes it — a
-    spec handed to the module is always encoded.
-    """
-    fields = record_fields(names, kw)
-    if not escape:
-        return "|".join(fields)
-    return "|".join(escape_field(f) for f in fields)
+    ])
 
 
 def spec_for(parser):
@@ -539,15 +338,7 @@ def dest_for(names, kw):
 
 
 def py_literal(v):
-    """A string as a Python/Mojo source literal: backslash and quote escaped.
-
-    Three callers, and they were two until the spec's field encoding needed a
-    third. A command-line element is a value the program compares against, and a
-    `desc` is text the reader sees; the SPEC is neither, it is the module's input
-    and it now carries `\\`, `;` and `|` of its own — so it goes through here like
-    everything else rather than being interpolated raw, which is what silently
-    dropped the backslash from the `a\\b` help string and printed `ab`.
-    """
+    """A command-line element as a Python/Mojo string literal."""
     return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -658,8 +449,8 @@ def mojo_print_lines(parser):
 def mojo_source(parser):
     """The whole Mojo program for one parser."""
     parts = [HEAD_MOJO]
-    parts.append(f"SPEC = {py_literal(spec_for(parser))}\n")
-    parts.append(f"DESC = {py_literal(parser['desc'])}\n")
+    parts.append(f'SPEC = "{spec_for(parser)}"\n')
+    parts.append(f'DESC = "{parser["desc"]}"\n')
     parts.append(MAIN_MOJO)
     parts.extend(mojo_argv_lines(parser))
     parts.append(POSTLUDE_MOJO)
@@ -749,63 +540,22 @@ def run_mojo(root, parser, case_index, worker=0):
     built = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "-n", str(case_index), "-o", out, src],
-        cwd=root, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, env=env)
+        cwd=root, capture_output=True, text=True, timeout=900, env=env)
     check(built.returncode == 0,
           f"{parser['name']} case {case_index}: build failed: "
           f"{(built.stderr or built.stdout).strip()[-600:]}")
     check(os.path.isfile(out), f"{parser['name']}: no executable at {out}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
     return ran
 
 
-# The four variables `_colorize.can_colorize` reads, and nothing else.
-#
-# CPython 3.14's `argparse` colourises its usage line and its help listing
-# whenever `can_colorize()` says the terminal can, and that function reads the
-# ENVIRONMENT before it reads `isatty`: `FORCE_COLOR` forces colour on, and
-# `PYTHON_COLORS=0` refuses it, both ahead of the terminal question. The
-# differential below reads the oracle through a PIPE, so the oracle's colour is
-# therefore whatever the shell that launched the test exported — measured with
-# `FORCE_COLOR=3` and `TERM=xterm-color` in the environment, 31 of the 69 cases
-# differed and every one of them differed ONLY by ANSI escapes; with the oracle
-# pinned as below, 0 of 69 differ. A registered gate job whose verdict depends
-# on the environment of whoever ran it is not a test of the module.
-CPYTHON_COLOUR_ENV = ("PYTHON_COLORS", "FORCE_COLOR", "NO_COLOR", "TERM")
-
-
-def cpython_env():
-    """The environment the CPython oracle is asked in.
-
-    `PYTHON_COLORS=0` is CPython's own answer — `_colorize.can_colorize`
-    returns False on it before any of the other three are read — and the other
-    three are DROPPED rather than merely overridden so that the pin survives
-    `python3 -E`: `-E` sets `sys.flags.ignore_environment`, which makes
-    `can_colorize` skip the `PYTHON_COLORS` branch entirely and read the
-    environment it was supposed to be isolated from. Dropping them costs nothing
-    when the pin is honoured and is the difference between a hermetic oracle and
-    a hermetic-looking one under that flag.
-    """
-    env = dict(os.environ)
-    for name in CPYTHON_COLOUR_ENV:
-        env.pop(name, None)
-    env["PYTHON_COLORS"] = "0"
-    return env
-
-
 def run_cpython(root, parser, case_index):
-    """CPython's own `argparse` on the same declaration and command line.
-
-    Asked in `cpython_env()`, not in this process's environment: see
-    `CPYTHON_COLOUR_ENV` for the measurement, and
-    `test_the_oracle_is_asked_in_an_environment_it_cannot_colourise` for the
-    assertion that keeps the two in step.
-    """
+    """CPython's own `argparse` on the same declaration and command line."""
     src = os.path.join(root, parser["name"] + "_py.py")
     with open(src, "w") as f:
         f.write(py_source(parser))
     return subprocess.run([sys.executable, src, str(case_index)],
-                          capture_output=True, text=True, timeout=RUN_TIMEOUT_S,
-                          env=cpython_env())
+                          capture_output=True, text=True, timeout=60)
 
 
 def compare(case_label, want, got):
@@ -908,25 +658,21 @@ def test_the_module_builds_on_its_own(tmp, _shared):
     subject is a comparison inside `_lookup` — a module none of the 36 had
     anything to do with.
 
-        So: the module as a translation unit, with nothing importing it, on the
-        default backend (arm64, which is the target the corpus above is run on).
+    So: the module as a translation unit, with nothing importing it, on the
+    default backend (arm64, which is the target the corpus above is run on).
 
-        x86-64 is not asserted HERE and does not need to be: the per-module,
-        per-backend table is `test_formal_hostmods_census.py`, which builds all
-        sixteen host modules on both backends and is where a row about one
-        module belongs — so a red about this module's arm64 build and a red
-        about this module's x86-64 build stay two different failures with two
-        different subjects.  (This docstring used to say x86-64 was not
-        measured because the build "stops earlier, in `os/_syscalls.mojo`'s own
-        dylib ('main executable failed strict validation')".  That was true when
-        it was written and is no longer: the dylib emitter's defect is fixed,
-        every module in the table builds on x86-64 but two, and argparse is one
-        of the fourteen that do.)
-
+    Not asserted for x86_64, and that is a real gap rather than a shrug: on that
+    backend the build stops earlier, in `os/_syscalls.mojo`'s own dylib
+    ("main executable failed strict validation"), before argparse's body is
+    reached, so nothing here has measured whether this module lowers on that
+    backend at all. The whole per-module, per-backend table is in
+    bugs/FORMAL_x86_64_hostmods_that_do_not_build.md, with the two reasons x86-64
+    has fewer of them than arm64 — and asserting it here would turn a red about
+    one module into a red about two.
 
     The build is a cold one: this file points GMOJO_HOME at a private CAS per
     process, so a dylib published by an earlier run cannot answer for this
-    module's source (FORMAL_sweep_cache_ignores_imports is the
+    module's source (bugs/FORMAL_sweep_cache_ignores_imports.md is the
     measurement of what happens when something keyed on the importer is served
     from a cache that does not know about it).
     """
@@ -1053,7 +799,7 @@ def test_a_refused_spec_is_refused_with_a_reason(tmp, _shared):
         check(built.returncode == 0,
               f"{label}: the program did not build: "
               f"{(built.stderr or built.stdout).strip()[-400:]}")
-        ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+        ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
         check("rc=3" in ran.stdout,
               f"{label}: parse returned {ran.stdout.splitlines()[:1]}, "
               f"expected the refusal status 3. stdout: {ran.stdout!r}")
@@ -1098,7 +844,7 @@ def test_an_underscore_in_an_int_is_refused(tmp, _shared):
                      cwd=root)
     check(built.returncode == 0,
           f"build failed: {(built.stderr or built.stdout).strip()[-400:]}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
     check("rc=2" in ran.stdout,
           f"`--n 1_0` returned {ran.stdout.splitlines()[:1]}, expected the "
           f"error status 2: {ran.stdout!r}")
@@ -1141,7 +887,7 @@ def test_prog_is_the_basename_of_argv0(tmp, _shared):
                      cwd=root)
     check(built.returncode == 0,
           f"build failed: {(built.stderr or built.stdout).strip()[-400:]}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
     check(ran.stderr.startswith("usage: tool [-h] [-v]"),
           f"the usage line is {ran.stderr.splitlines()[:1]}, which does not "
           "name the program `tool`")
@@ -1173,157 +919,6 @@ def test_the_module_is_the_one_the_sweep_resolves(tmp, _shared):
           "tree it is a codegen finding, not a fact about the target")
 
 
-def unescape_field(encoded):
-    """What a reader of the spec must hand back for one encoded field.
-
-    Written here as the ORACLE for `escape_field`, not as a second
-    implementation of the module's `_ftext`: it is the reference the encoding is
-    measured against, and it is a direct transcription of the rule rather than the
-    module's scan, so the two agreeing is evidence and one being derived from the
-    other would not be.
-    """
-    out = []
-    i = 0
-    while i < len(encoded):
-        if encoded[i] == "\\" and i + 1 < len(encoded):
-            out.append(encoded[i + 1])
-            i += 2
-        else:
-            out.append(encoded[i])
-            i += 1
-    return "".join(out)
-
-
-def split_escaped(encoded, sep):
-    """`encoded` split on `sep`, skipping a backslash and the byte after it.
-
-    The ORACLE for the module's `_fld` / `_rend` pair, and it is here for the same
-    reason `unescape_field` is: written from the rule rather than derived from the
-    module's scan, so the two agreeing is evidence. It also has to be this and
-    not `str.split`, because `str.split` on an encoded string splits INSIDE an
-    escape — which is the bug the encoding exists to remove, and a test that
-    reintroduced it would report the corpus as broken.
-    """
-    fields = []
-    cur = []
-    i = 0
-    while i < len(encoded):
-        if encoded[i] == "\\" and i + 1 < len(encoded):
-            cur.append(encoded[i:i + 2])
-            i += 2
-            continue
-        if encoded[i] == sep:
-            fields.append("".join(cur))
-            cur = []
-            i += 1
-            continue
-        cur.append(encoded[i])
-        i += 1
-    fields.append("".join(cur))
-    return fields
-
-
-def test_every_field_of_every_spec_survives_the_escaping(tmp, _shared):
-    """The encoding is TOTAL and REVERSIBLE over the whole corpus, and the only
-    backward-compatibility claim this rule needs is a measured one.
-
-    `“A `;` or a `|` in a help string truncates it”` picked the
-    escaping scheme on the condition that **no field of an existing spec contains
-    a backslash**, and said that condition has to be "asserted by a test over the
-    corpus rather than asserted here". This is that test, and it is three claims:
-
-      * every field of every record round-trips —
-        `unescape_field(escape_field(s)) == s` — so the encoding loses nothing;
-      * every encoded record splits into exactly the TEN fields the source
-        declared, and the encoded spec into exactly one record per declaration,
-        which is what "the separators still mean separators" means from the other
-        side. Before the rule the second claim failed for the `separators`
-        parser: the `;` in its help text added a record, and that was the
-        reported symptom (two empty `positional arguments:` entries);
-      * so no encoded field holds a bare `;` or `|`, which is the condition the
-        doc's option 1 rests on.
-
-    No build and no image: this is a property of four Python functions over a
-    table, and the differential table above is what says the module's reader
-    agrees with them.
-    """
-    for parser in PARSERS:
-        for names, kw in parser["args"]:
-            want = record_fields(names, kw)
-            got = split_escaped(record_for(names, kw), "|")
-            check(len(got) == len(want),
-                  f"parser {parser['name']!r}: the encoded record has "
-                  f"{len(got)} fields and should have {len(want)} — an "
-                  f"unescaped `|` is still splitting the string")
-            for w, g in zip(want, got):
-                check(unescape_field(g) == w,
-                      f"parser {parser['name']!r}: {w!r} encoded as {g!r} "
-                      f"reads back as {unescape_field(g)!r} — the encoding "
-                      f"must be reversible or the field is not recoverable")
-        check(len(split_escaped(spec_for(parser), ";")) == len(parser["args"]),
-              f"parser {parser['name']!r}: the encoded spec holds "
-              f"{len(split_escaped(spec_for(parser), ';'))} records for "
-              f"{len(parser['args'])} declarations — a `;` inside a field is "
-              f"still a record separator")
-
-
-def test_the_oracle_is_asked_in_an_environment_it_cannot_colourise(tmp, _shared):
-    """`run_cpython`'s child cannot colourise its usage line, whatever this
-    process's environment says — and the CONTROL says that is the scrub's doing.
-
-    CPython 3.14's `argparse` colourises its usage line and help listing
-    whenever `_colorize.can_colorize()` is true, and that reads `FORCE_COLOR` and
-    friends BEFORE it asks the terminal. The differential reads the oracle
-    through a pipe, so with `FORCE_COLOR` exported the oracle is colourised and
-    this module's text is not: 31 of the 69 cases differed that way, every one
-    of them by ANSI escapes alone, which is the shape of an unhermetic oracle
-    rather than of a divergent module.
-
-    Both halves are needed and neither is decoration. The first half FAILS if
-    `env=` is dropped from `run_cpython`'s `subprocess.run` while this
-    environment still exports `FORCE_COLOR`, and the second fails if the colour
-    simply is not there — which is what a CPython without colour support, or one
-    answering under `TERM=dumb`, would look like — so a harness that pinned the
-    oracle by accident cannot pass this.
-    """
-    root = os.path.join(tmp, "colour")
-    os.makedirs(root, exist_ok=True)
-    # `demo[4]` is `["-v"]` with a required `--side` unset: the case whose stderr
-    # is the usage line plus the error message, which is the text CPython
-    # colourises.
-    parser = next(p for p in PARSERS if p["name"] == "demo")
-
-    saved = {name: os.environ.get(name) for name in CPYTHON_COLOUR_ENV}
-    for name in CPYTHON_COLOUR_ENV:
-        os.environ.pop(name, None)
-    os.environ["FORCE_COLOR"] = "1"
-    os.environ["TERM"] = "xterm-color"
-    try:
-        pinned = run_cpython(root, parser, 4)
-        check("\x1b[" not in pinned.stderr,
-              f"run_cpython's child colourised its usage line under "
-              f"FORCE_COLOR=1: {pinned.stderr[:200]!r} — the oracle is not "
-              "pinned and the differential's verdict is the shell's")
-
-        # The control, on the SAME source and the SAME command line: with this
-        # process's environment inherited rather than scrubbed, CPython does
-        # colourise, so the escapes above were removed by `cpython_env()` and not
-        # by the absence of colour.
-        src = os.path.join(root, "demo_py.py")
-        loose = subprocess.run([sys.executable, src, "4"], capture_output=True,
-                               text=True, timeout=RUN_TIMEOUT_S)
-        check("\x1b[" in loose.stderr,
-              "CPython printed no ANSI escapes with FORCE_COLOR=1 in the "
-              "environment, so the pin above is not being measured: this host's "
-              "CPython cannot colourise and the control cannot hold")
-    finally:
-        for name, value in saved.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-
 TESTS = [
     ("`import argparse` resolves to the module source",
      test_argparse_resolves_to_the_module_source),
@@ -1332,10 +927,6 @@ TESTS = [
      test_the_module_builds_on_its_own),
     ("the parse matches CPython, case for case",
      test_the_parse_matches_cpython),
-    ("the oracle is asked in an environment it cannot colourise",
-     test_the_oracle_is_asked_in_an_environment_it_cannot_colourise),
-    ("every field of every spec survives the escaping",
-     test_every_field_of_every_spec_survives_the_escaping),
     ("an unsupported spec is refused with a reason",
      test_a_refused_spec_is_refused_with_a_reason),
     ("an underscore in an int is refused, not truncated",

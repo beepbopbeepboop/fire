@@ -352,17 +352,6 @@ CASES = [
     # word — the caller's block — has no register. Refused by name on both
     # machines rather than dropped, because a dropped word is a copy into
     # whatever the register held.
-    # SIX source arguments is the whole budget, and the reason is the hidden
-    # word rather than the arity: both ABIs put arguments past the register file
-    # in the caller's frame (`_MAX_INCOMING_ARGS` in both backends, 2026-10-02),
-    # so `mk` could take twenty-three and still be given its block — by a
-    # different path, which does not exist.  The hidden word is moved home by
-    # each backend's REGISTER path and nothing else, so what runs out is the
-    # registers and not the frame.  This row is the anti-rot for that decision
-    # (`model.RETURNED_FRAME_MAX_ARGS` and `test_returned_frame_layout.py` carry
-    # the reasoning); it is stated first because it is the one a reader meets
-    # first, and the eight-argument row below is now its sibling rather than the
-    # other half of a machine-dependent budget.
     ("refuse_a_callee_with_no_argument_register_left",
      "struct R:\n"
      "    var a: Int\n"
@@ -455,15 +444,14 @@ CASES = [
      "refuse",
      "is stored through 'xs[1]' in main()"),
 
-    # EIGHT arguments, which is arm64's register count and used to be the
-    # machine-dependent half of this budget.  It is not a second budget now: both
-    # backends pass source arguments in the caller's frame past the register
-    # file, so EIGHT and SIX are refused for the ONE reason above, and this row
-    # exists to say that a change which gave the hidden word a stack slot would
-    # have to move both. `main` deliberately does not CALL `make` here: the
-    # budget is counted from the DECLARED parameter list, so this refuses on both
-    # architectures without depending on which of them is over budget for some
-    # other reason.
+    # The EIGHT-argument half of the budget, and the SIBLING of
+    # `refuse_a_callee_with_no_argument_register_left` above rather than a second
+    # copy of it: that one declares SIX and is the whole budget on x86-64, this
+    # one declares EIGHT and is arm64's. The hidden word is an argument, so a
+    # machine that passes six cannot also pass the block. `main` deliberately
+    # does not CALL `make` here: the budget is counted from the DECLARED
+    # parameter list, so this refuses on both architectures without depending on
+    # which of them is over budget for some other reason.
     ("refuse_a_callee_declaring_eight_arguments",
      "struct Point:\n"
      "    var x: Int\n"
@@ -574,44 +562,6 @@ CASES = [
 # names the architectures a case is about, which the two whose premise is an
 # ABI's ARGUMENT BUDGET need, because that budget differs between the machines.
 DIFF_CASES = [
-    # A RECEIVED frame address handed back, through a COMPTIME-PARAMETERIZED
-    # callee, and it is here rather than in the receiver-position suite because
-    # that suite carried it as a REFUSAL until 2026-10-03 and the refusal was
-    # lifted by decision (`model.struct_returned_frame_sites`: the creator is
-    # an ancestor of the CALLER, so handing the address back is safe, and every
-    # channel that would let it outlive the creator is still refused). What is
-    # new here and was never covered is that a comptime parameter SHIFTS the
-    # argument positions — `incoming_args` puts it first — and the hidden
-    # trailing word the convention adds has to land after the LAST of them. A
-    # callee that read its `r` from the wrong slot would either refuse with a
-    # holder disagreement or return the block's address where the frame was
-    # meant.
-    ("received_frame_handed_back_through_a_specialized_parameter",
-     "struct R:\n"
-     "    var a: Int\n"
-     "    var b: Int\n\n"
-     "def stash[type: Int](x: Int, r: R) -> Int:\n"
-     "    return r\n\n"
-     "def main(n):\n"
-     "    var r = R()\n"
-     "    r.a = 7\n"
-     "    r.b = 8\n"
-     '    printf("a=%d,b=%d", stash[1](0, r).a, stash[1](0, r).b)\n'
-     "    return 0\n",
-     "class R:\n"
-     "    def __init__(self):\n"
-     "        self.a = 0\n"
-     "        self.b = 0\n\n"
-     "def stash(x, r):\n"
-     "    return r\n\n"
-     "def main():\n"
-     "    r = R()\n"
-     "    r.a = 7\n"
-     "    r.b = 8\n"
-     '    print("a=%d,b=%d" % (stash(0, r).a, stash(0, r).b), end="")\n'
-     "    return 0\n\n"
-     "main()\n"),
-
     # THE CONSTRUCT, in miniature: a factory that builds an object and returns
     # it.  `q.x * 10 + q.y` rather than a field read of `q` alone, so a block
     # that is the RIGHT SIZE and the right layout is the only thing that
@@ -1125,341 +1075,6 @@ DIFF_CASES = [
      '    print("r=%d q=%d,%d" % (build(3, 4), q.x, q.y), end="")\n'
      "    return 0\n\n"
      "main()\n"),
-
-    # THE HIDDEN WORD REACHES THE CALLEE, and it is here as a case rather than
-    # folded into the ones above because those four facts were each correct on
-    # their own: the block's storage was right (a returned struct never read
-    # exited 0), the field READ was right (`return q.x + q.y` gave 3), a struct
-    # built in `main` had its fields passed to `printf` correctly, and a
-    # returned struct's field handed to a plain callee SEGFAULTED. Only the
-    # composition failed, and nothing above isolates WHICH register.
-    #
-    # `twice` is a plain typed Mojo callee, so nothing in this program is
-    # `printf` and nothing is variadic: it is the case that says the defect was
-    # the CALL SITE's argument register rather than the C runtime's. It reads
-    # the field of a returned frame directly in the call (`twice(make(1, 2).x)`)
-    # AND through a named holder (`q.x`), because the two reach the block base
-    # differently — the first re-derives it from the call site, the second from
-    # the call's result register — and both have to work.
-    ("a_returned_frames_field_reaches_a_plain_callee",
-     "struct Point:\n"
-     "    var x: Int\n"
-     "    var y: Int\n\n"
-     "def make(a, b):\n"
-     "    var p = Point()\n"
-     "    p.x = a\n"
-     "    p.y = b\n"
-     "    return p\n\n"
-     "def twice(v: Int) -> Int:\n"
-     "    return v * 2\n\n"
-     "def main(n):\n"
-     "    var q = make(1, 2)\n"
-     '    printf("a=%d b=%d", twice(make(3, 4).x), twice(q.y) + q.x)\n'
-     "    return 0\n",
-     "class Point:\n"
-     "    def __init__(self):\n"
-     "        self.x = 0\n"
-     "        self.y = 0\n\n"
-     "def make(a, b):\n"
-     "    p = Point()\n"
-     "    p.x = a\n"
-     "    p.y = b\n"
-     "    return p\n\n"
-     "def twice(v):\n"
-     "    return v * 2\n\n"
-     "def main():\n"
-     "    q = make(1, 2)\n"
-     '    print("a=%d b=%d" % (twice(make(3, 4).x), twice(q.y) + q.x), end="")\n'
-     "    return 0\n\n"
-     "main()\n"),
-    # ── TWO live returned frames, in the four arrangements the ONE defect this
-    # suite was missing a guard for produced ────────────────────────────────
-    #
-    # `two_returned_frames_in_one_function_are_two_blocks` above pins two
-    # returned frames in SEQUENCE. These four pin the arrangements around it,
-    # and they are here because that case could pass with the defect in place:
-    # the x86-64 call site DROPPED the hidden trailing word (the block's address)
-    # from its argument pop loop, so the callee wrote its result through whatever
-    # the previous call had left in the callee-saved register the callee reads it
-    # from.  With two sequential calls to the SAME factory that happens to be one
-    # block used twice, so the sequential case reads the second object's values
-    # under both names and DOES fail -- but the three arrangements below reached
-    # it differently, and none of them had a case:
-    #
-    #   * an ORDINARY CALL between the two, which is not involved at all (its
-    #     own result stayed correct while both frames went wrong) and so says the
-    #     clobber is not "any call";
-    #   * both results live at once as ARGUMENTS of one call, which is the
-    #     cheapest confirmation of the whole thing -- no holder names at all, so
-    #     a "fix" that repaired the binding and not the block would pass every
-    #     other row here and fail this one;
-    #   * a comparison, where a field-wise `__eq__` over two operands that are
-    #     really ONE block reports two DISTINCT values as equal. This is the
-    #     silent-wrong-answer shape: the image exits 0 and prints a plausible
-    #     integer.
-    #
-    # All four were measured against the tree with `6cae9e4b`'s `continue` put
-    # back: arm64 right on every row, x86-64 wrong on every row.
-    ("two_returned_frames_around_an_ordinary_call",
-     "struct Point:\n"
-     "    var x: Int\n"
-     "    var y: Int\n\n"
-     "def make(a, b):\n"
-     "    var p = Point()\n"
-     "    p.x = a\n"
-     "    p.y = b\n"
-     "    return p\n\n"
-     "def plain(v):\n"
-     "    return v\n\n"
-     "def main(n):\n"
-     "    var t = make(1, 2)\n"
-     "    var k = plain(9)\n"
-     "    var u = make(10, 20)\n"
-     '    printf("t=%d,%d k=%d u=%d,%d", t.x, t.y, k, u.x, u.y)\n'
-     "    return 0\n",
-     "class Point:\n"
-     "    def __init__(self):\n"
-     "        self.x = 0\n"
-     "        self.y = 0\n\n"
-     "def make(a, b):\n"
-     "    p = Point()\n"
-     "    p.x = a\n"
-     "    p.y = b\n"
-     "    return p\n\n"
-     "def plain(v):\n"
-     "    return v\n\n"
-     "def main():\n"
-     "    t = make(1, 2)\n"
-     "    k = plain(9)\n"
-     "    u = make(10, 20)\n"
-     '    print("t=%d,%d k=%d u=%d,%d" % (t.x, t.y, k, u.x, u.y), end="")\n'
-     "    return 0\n\n"
-     "main()\n"),
-    # The SECOND row is printed FIRST on purpose.  With one block shared, "the
-    # last block wins" and "the second name wins" are the same answer here and
-    # different answers in the sequential case above, and this is the row that
-    # separates "both names name one block" from anything name-shaped.
-    ("two_returned_frames_printed_in_the_other_order",
-     "struct Point:\n"
-     "    var x: Int\n"
-     "    var y: Int\n\n"
-     "def make(a, b):\n"
-     "    var p = Point()\n"
-     "    p.x = a\n"
-     "    p.y = b\n"
-     "    return p\n\n"
-     "def main(n):\n"
-     "    var t = make(1, 2)\n"
-     "    var u = make(10, 20)\n"
-     '    printf("u=%d,%d t=%d,%d", u.x, u.y, t.x, t.y)\n'
-     "    return 0\n",
-     "class Point:\n"
-     "    def __init__(self):\n"
-     "        self.x = 0\n"
-     "        self.y = 0\n\n"
-     "def make(a, b):\n"
-     "    p = Point()\n"
-     "    p.x = a\n"
-     "    p.y = b\n"
-     "    return p\n\n"
-     "def main():\n"
-     "    t = make(1, 2)\n"
-     "    u = make(10, 20)\n"
-     '    print("u=%d,%d t=%d,%d" % (u.x, u.y, t.x, t.y), end="")\n'
-     "    return 0\n\n"
-     "main()\n"),
-    # No holder names anywhere: both blocks are live at the moment of the outer
-    # call, and `two` reads a field out of each.  A frame-returning call in an
-    # ARGUMENT position is the shape the convention's per-CALL-SITE block was
-    # chosen for, so it is the row that says the reservation is per site.
-    ("two_returned_frames_live_at_once_as_arguments",
-     "struct Point:\n"
-     "    var x: Int\n"
-     "    var y: Int\n\n"
-     "def make(a, b):\n"
-     "    var p = Point()\n"
-     "    p.x = a\n"
-     "    p.y = b\n"
-     "    return p\n\n"
-     "def total(p: Point, q: Point) -> Int:\n"
-     "    return p.x * 100 + q.x\n\n"
-     "def main(n):\n"
-     '    printf("v=%d", total(make(1, 2), make(10, 20)))\n'
-     "    return 0\n",
-     "class Point:\n"
-     "    def __init__(self):\n"
-     "        self.x = 0\n"
-     "        self.y = 0\n\n"
-     "def make(a, b):\n"
-     "    p = Point()\n"
-     "    p.x = a\n"
-     "    p.y = b\n"
-     "    return p\n\n"
-     "def total(p, q):\n"
-     "    return p.x * 100 + q.x\n\n"
-     "def main():\n"
-     '    print("v=%d" % total(make(1, 2), make(10, 20)), end="")\n'
-     "    return 0\n\n"
-     "main()\n"),
-    # The SILENT one: two DISTINCT values, one field-wise comparison, `eq=0`.
-    # There is no crash and no wrong exit status anywhere in this row, which is
-    # why it is the one worth having: every other arrangement here fails loudly
-    # enough to be noticed by a status comparison.
-    #
-    # `make` carries a DECLARED return type and that is not decoration: without
-    # it the comparison is refused, because a call whose result kind nothing
-    # states cannot be classified as a frame (`model`'s frame-vs-value refusal,
-    # which is right and is not this row's subject).  The Mojo column may be
-    # annotated because it is not the column CPython runs -- that is the whole
-    # point of carrying the program twice.
-    ("a_returned_frame_compared_with_a_returned_frame_call",
-     "struct Point:\n"
-     "    var x: Int\n"
-     "    var y: Int\n\n"
-     "    def __eq__(self, other: Point) -> Bool:\n"
-     "        return self.x == other.x and self.y == other.y\n\n"
-     "def make(a: Int, b: Int) -> Point:\n"
-     "    var p = Point()\n"
-     "    p.x = a\n"
-     "    p.y = b\n"
-     "    return p\n\n"
-     "def main(n):\n"
-     "    var t = make(1, 2)\n"
-     '    printf("eq=%d", 1 if t == make(10, 20) else 0)\n'
-     "    return 0\n",
-     "class Point:\n"
-     "    def __init__(self):\n"
-     "        self.x = 0\n"
-     "        self.y = 0\n\n"
-     "    def __eq__(self, other):\n"
-     "        return self.x == other.x and self.y == other.y\n\n"
-     "def make(a, b):\n"
-     "    p = Point()\n"
-     "    p.x = a\n"
-     "    p.y = b\n"
-     "    return p\n\n"
-     "def main():\n"
-     "    t = make(1, 2)\n"
-     '    print("eq=%d" % (1 if t == make(10, 20) else 0), end="")\n'
-     "    return 0\n\n"
-     "main()\n"),
-
-    # A FUNCTION WHOSE RETURN VALUE IS A CONSTRUCTION — `return A(v, v + 1)`,
-    # with no name in the callee for the frame to live in.  This is the shape
-    # every other factory here avoids, and it is the only spelling most of real
-    # code uses: without it, `def mk(v: Int) -> A` was classified a word-returning
-    # function, so `var t = mk(1)` bound a name nothing had a block for and
-    # `t.x` was REFUSED by name — a refusal about a NAME for a decision made
-    # about the FUNCTION.  Lifting it is only half the work; these four
-    # arrangements are the other half, because the answer is an address of a
-    # frame in an activation that has already been reclaimed, and a case that
-    # happened to read the dead block before anything reused it would be RIGHT
-    # for no reason.
-    #
-    # `two_of_them` is the one that decides the case: two names bound to
-    # returned frames, read in the order they were built, is the use-after-free
-    # this convention exists to prevent, and it is silent when it goes wrong.
-    ("a_construction_returned_as_a_frame_reaches_the_caller",
-     "struct A:\n"
-     "    var x: Int\n"
-     "    var y: Int\n\n"
-     "def mk(v: Int) -> A:\n"
-     "    return A(v, v + 1)\n\n"
-     "def main(n) -> Int:\n"
-     "    var t = mk(1)\n"
-     '    printf("x=%d y=%d", t.x, t.y)\n'
-     "    return 0\n",
-     "class A:\n"
-     "    def __init__(self, x, y):\n"
-     "        self.x = x\n"
-     "        self.y = y\n\n"
-     "def mk(v):\n"
-     "    return A(v, v + 1)\n\n"
-     "def main():\n"
-     "    t = mk(1)\n"
-     '    print("x=%d y=%d" % (t.x, t.y), end="")\n'
-     "    return 0\n\n"
-     "main()\n"),
-
-    ("a_returned_construction_is_compared_by_its_eq_method",
-     "struct A:\n"
-     "    var x: Int\n"
-     "    var y: Int\n\n"
-     "    def __eq__(self, other: A) -> Bool:\n"
-     "        if other.y != self.y:\n"
-     "            return False\n"
-     "        return self.x == other.x\n\n"
-     "def mk(v: Int) -> A:\n"
-     "    return A(v, v + 1)\n\n"
-     "def main(n) -> Int:\n"
-     "    var t = mk(1)\n"
-     '    printf("same=%d diff=%d", 1 if t == mk(1) else 0,'
-     " 1 if t == mk(2) else 0)\n"
-     "    return 0\n",
-     "class A:\n"
-     "    def __init__(self, x, y):\n"
-     "        self.x = x\n"
-     "        self.y = y\n\n"
-     "    def __eq__(self, other):\n"
-     "        if other.y != self.y:\n"
-     "            return False\n"
-     "        return self.x == other.x\n\n"
-     "def mk(v):\n"
-     "    return A(v, v + 1)\n\n"
-     "def main():\n"
-     "    t = mk(1)\n"
-     '    print("same=%d diff=%d" % (1 if t == mk(1) else 0,'
-     " 1 if t == mk(2) else 0), end=\"\")\n"
-     "    return 0\n\n"
-     "main()\n"),
-
-    ("two_returned_constructions_are_two_blocks",
-     "struct A:\n"
-     "    var x: Int\n"
-     "    var y: Int\n\n"
-     "def mk(v: Int) -> A:\n"
-     "    return A(v, v + 1)\n\n"
-     "def main(n) -> Int:\n"
-     "    var t = mk(1)\n"
-     "    var u = mk(20)\n"
-     '    printf("%d %d", t.x, u.x)\n'
-     "    return 0\n",
-     "class A:\n"
-     "    def __init__(self, x, y):\n"
-     "        self.x = x\n"
-     "        self.y = y\n\n"
-     "def mk(v):\n"
-     "    return A(v, v + 1)\n\n"
-     "def main():\n"
-     "    t = mk(1)\n"
-     "    u = mk(20)\n"
-     '    print("%d %d" % (t.x, u.x), end="")\n'
-     "    return 0\n\n"
-     "main()\n"),
-
-    # A field read straight off the CALL, with no name bound at all: the block
-    # is reserved per call SITE (`model.struct_returned_frame_sites`) so this
-    # needs no holder, and it is the arrangement a reader is most likely to
-    # write.
-    ("a_returned_construction_read_through_the_call",
-     "struct A:\n"
-     "    var x: Int\n"
-     "    var y: Int\n\n"
-     "def mk(v: Int) -> A:\n"
-     "    return A(v, v + 1)\n\n"
-     "def main(n) -> Int:\n"
-     '    printf("%d %d", mk(1).x, mk(2).x)\n'
-     "    return 0\n",
-     "class A:\n"
-     "    def __init__(self, x, y):\n"
-     "        self.x = x\n"
-     "        self.y = y\n\n"
-     "def mk(v):\n"
-     "    return A(v, v + 1)\n\n"
-     "def main():\n"
-     '    print("%d %d" % (mk(1).x, mk(2).x), end="")\n'
-     "    return 0\n\n"
-     "main()\n"),
 ]
 
 
@@ -1499,91 +1114,11 @@ def check_predicate_is_two_argument():
         print("  PASS  neither_backend_passes_dict_get_as_the_predicate")
     return ok
 
-
-def check_sret_word_reaches_the_callee():
-    """Every backend that passes the hidden word must also MOVE it.
-
-    The convention has two ends and they can drift apart without either end
-    looking wrong: the callee reads the block address out of an argument
-    register (`ARG_REGS[len(params)]` on x86-64, X-`len(incoming)` on arm64),
-    and the call site stages the address and then has to put it in that same
-    register. x86-64 dropped it — the staged word was skipped, on the reasoning
-    that being first off the stack meant it was already in RAX, which is true
-    of arm64's X0 and of no register on this ABI.
-
-    It is a SIGSEGV rather than a wrong value because the hidden word lands in
-    a callee-SAVED register, so the callee's prologue keeps whatever the
-    previous call left there and dereferences it as a block address. Every
-    case that does not read a returned frame's field PASSED with that in place:
-    the block's storage was right, the field read was right, a struct built
-    locally was right. So the differential cases cannot be the only guard, and
-    neither can a source-shaped check on `"sret"` — the dropped entry carried
-    the class name and only lacked the move.
-
-    What is checked is therefore the strongest thing available without
-    building: the staged word has a use. `continue` inside the load loop is
-    refused outright, and the load loop is located by the plan it walks rather
-    than by a line number.
-
-    Two load shapes are accepted because the two backends stage differently:
-    arm64 pops a 16-byte spill slot and moves it across (`encode_mov_zr_xn`),
-    while x86-64 stages every argument into the reserved outgoing area — in
-    SOURCE ORDER, which is what makes source-order evaluation affordable — and
-    loads each one straight out of its slot into `ARG_REGS` with no scratch
-    register at all. Both are a move of the staged word into the register the
-    callee reads it from, which is the property; the instruction that performs
-    it is not.
-    """
-    ok = True
-    for backend in ("formal/arm64_codegen.py", "formal/x86_64_codegen.py"):
-        path = os.path.join(HERE, backend)
-        with open(path) as fh:
-            src = fh.read()
-        # The load loop: it loads each staged argument and moves it into the
-        # argument register the plan names. Find it as the loop over the plan.
-        pop_loop = None
-        lines = src.splitlines()
-        for i, line in enumerate(lines):
-            # `line.strip().startswith("for ")` and not `"{" in line` are what
-            # keep a DICT COMPREHENSION over the same plan (`{j: i for i, (j,
-            # …) in enumerate(reg_plan)}`, which x86-64 builds to index an
-            # argument's staging slot) from being taken for the load loop: it
-            # iterates the plan and its next line is not the loop body.
-            if (line.strip().startswith("for ") and "{" not in line
-                    and ("reg_plan" in line
-                         or "range(min(nargs" in line
-                         or "range(nargs" in line)):
-                pop_loop = lines[i:i + 14]
-                break
-        if pop_loop is None:
-            ok = False
-            print(f"FAIL  {backend}: no argument load loop found, so the "
-                  f"hidden word's move cannot be checked")
-            continue
-        body = "\n".join(pop_loop)
-        if "continue" in body:
-            ok = False
-            print(f"FAIL  {backend}: the argument load loop skips a staged "
-                  f"word with `continue`; the returned-frame hidden word was "
-                  f"dropped exactly that way, and the callee then read "
-                  f"whatever the previous call left in its argument register")
-        if not any(m in body for m in ("encode_mov_r64_r64(ARG_REGS",
-                                       "encode_mov_r64_rm64(ARG_REGS",
-                                       "encode_mov_zr_xn",
-                                       "_load_home_from_reg",
-                                       "encode_mov_zr_xn")):
-            ok = False
-            print(f"FAIL  {backend}: the argument load loop moves no staged "
-                  f"word into an argument register")
-    if ok:
-        print("  PASS  every_staged_argument_word_reaches_its_register")
-    return ok
-
 def run_cpython(source):
     """The oracle: the same program under CPython, whose exit status and stdout
     the formal image has to match.
 
-    Not `fire.py run` and not the interpreter in this repository.  The point of a
+    Not `mojo run` and not the interpreter in this repository.  The point of a
     differential case is that the two answers come from two independent
     implementations of the language, and `myinterpreter.py` is not one of them —
     it shares the AST, so a mistake in the AST cannot be caught by comparing
@@ -1737,16 +1272,6 @@ def main():
     # private one.
     if not args.cases:
         if check_predicate_is_two_argument():
-            passed += 1
-        else:
-            failed += 1
-
-    # …and the second shape check, for the same reason: the convention's two
-    # ends are in two functions in the same file, a SIGSEGV-only-when-composed
-    # defect survives every differential case, and this one does not need a
-    # build to see.
-    if not args.cases:
-        if check_sret_word_reaches_the_callee():
             passed += 1
         else:
             failed += 1

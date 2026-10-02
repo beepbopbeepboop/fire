@@ -17,9 +17,6 @@ import mlir
 import regex_compile
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.types import _BUILTIN_RET_CTYPES  # underscore name: `import *` won't carry it
-# `_BOXED_CONTAINER_CTYPES` for `bare_global_read_plan`'s `_imp_pending` gate,
-# same reason as the line above — and same reason it is not spelled out here.
-from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
 # `_resolved_export_entry` — `from X import *` skips underscore names, and
@@ -53,33 +50,25 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 # (gcc rejects a prototype against a later full one). Removing the import
 # removes the declaration instead, which is the fix.
 #
-# **There is no `gimple_codegen` import at module scope here, and there was
-# one until 2026-10-04.** This file and `funcs_shared` each did
-# `import gimple_codegen`, which reaches the gimple backend, which reaches both
-# of them again — so whichever the process happened to reach first died with
-# `ImportError: cannot import name ... from partially initialized module`, and
-# `mojo.middle.module_shared` could not be a process's FIRST `mojo.*` import at
-# all. The measured victim was the formal build path, which enters through
-# `reflect` -> `gimple_codegen` and has no other way in:
-# `formal/model.py` `runtime_abi` -> ... -> `mojo/backend_gimple/emit_funcs.py`
-# -> here. The rule that replaces it is the one the gimple tier already follows
-# downwards — `gimple_codegen.py:738` reaches the whole `mojo/backend_gimple/*`
-# tier at module scope and `emit_funcs.py` reads `_selfhost_impl_py_files` out
-# of THIS module there, so the edge the other way is at its use site
-# (`_selfhost_parsed_modules`, below). `mojo/backend_gimple/module_gen.py` does
-# the same for `infra_infer`, for the same reason. See
-# `funcs_shared._struct_method_qualifier._sanitize_qualifier` for the rule on
-# the qualifier side.
-# Closure-scan leaf helpers live in mojo.middle.closures (formal + gimple
+# `funcs_shared` reaches `gimple_codegen`, which reaches the gimple backend,
+# which reaches `funcs_shared` again, so a top-level import in BOTH middle
+# modules closes a cycle. Whichever of the two the process happened to
+# reach first then died with `ImportError: cannot import name ... from
+# partially initialized module`, and the measured victim was the formal
+# build path, which enters through `reflect` -> `gimple_codegen` and has no
+# other way in: `formal/model.py` `runtime_abi` -> ... ->
+# `mojo/backend_gimple/emit_funcs.py` -> here. The direction that stays
+# top-level is `funcs_shared` -> `gimple_codegen`; every edge back down
+# into the middle tier is at its use site, so importing EITHER middle module
+# first works. See `funcs_shared._struct_method_qualifier._sanitize_qualifier`
+# for the same rule on the other side.
+# Closure-scan leaf helpers live in mojo/middle.closures (formal + gimple
 # share one copy; closures must not import this module — it pulls gimple_codegen).
 from mojo.middle.closures import (
     _gmi_all_stmts_nonfunc, _selfhost_fn_reassigns_method,
 )
-# NO module-level `import gimple_codegen` here: `_selfhost_parsed_modules`
-# below is this module's only reader of `gimple_codegen._selfhost_impl_py_files`
-# and it imports inside the function instead. The edge middle-tier ->
-# `gimple_codegen` -> the gimple backend -> middle-tier is an import CYCLE — see
-# `mojo/middle/methods_shared.py`'s header comment for the whole rule.
+import gimple_codegen  # constants used by some extracted helpers
+from gimple_codegen import _selfhost_impl_py_files
 from mojo.middle.funcs_shared import _selfhost_parsed_source
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
@@ -158,12 +147,7 @@ def _selfhost_parsed_modules(sd: str) -> list:
     extra-field scans). A file that fails to parse is cached as a FAILURE and
     contributes an empty statement list.
     """
-    # FUNCTION-LOCAL (per the note at the top of this file) and QUALIFIED, for
-    # the reason `funcs_shared._selfhost_extracted_fn_index` states in full: a
-    # function-level `from gimple_codegen import name` binds an int64_t on the
-    # self-hosted path, and this name is a FUNCTION value.
-    import gimple_codegen
-    _files = sorted(gimple_codegen._selfhost_impl_py_files(sd)
+    _files = sorted(_selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in
                        ('fire_compiler.py', 'module_loader.py', 'monomorphize.py',
                         'ast_rewriter.py', 'imports.py', 'generated_dispatch.py',
@@ -197,22 +181,8 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
     # UNLESS it is one of gen_module_impl's hardcoded dispatch tables (which
     # get a bare `MojoDict *` / `MojoSet *` field). Skip those names so the
     # pre-seed can never disagree with the home's field/accessor type.
-    # Derived from the module that DEFINES them rather than written out here.
-    # This list used to name the globals of `gimple_codegen.py`, which is where
-    # they lived before the split into `mojo/middle/` + `mojo/backend_gimple/`;
-    # `_TYPE_MAP` moved to `types.py` and several others with it, so a
-    # hand-kept list silently stopped covering them and every consumer of a
-    # moved dispatch table then found no cdecl entry -- "struct
-    # _mojo_middle_types_toplev has no member named '_TYPE_MAP'".
-    #
-    # `dispatch_table_global_ctype` in `mojo.middle.types` is the ONE table,
-    # and both this skip and `gen_module_impl`'s declaration sites read it.
-    # `... is not None`, not `set(<the table>)`: `set()` over a module-level
-    # container is a shape the self-hosted compiled path gets wrong (a
-    # module-level `set(<tuple literal>)` lowers to a value `len()` cannot
-    # take, "passing argument 1 of 'mojo_list_len' makes pointer from integer
-    # without a cast"), and membership is all this skip ever wanted from it.
-    _dispatch_only = gimple_ctypes.dispatch_table_global_ctype
+    _dispatch_only = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_TYPE_MAP',
+                      '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS'}
     _out: dict = {}
     for _f, _stmts in _selfhost_parsed_modules(sd):
         _mod = _selfhost_module_name_for_path(sd, _f)
@@ -220,7 +190,7 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
             if not (isinstance(_s, AssignStmt) and isinstance(_s.target, IdentExpr)):
                 continue
             _n, _v = _s.target.name, _s.value
-            if _n in _out or _dispatch_only(_n) is not None:
+            if _n in _out or _n in _dispatch_only:
                 continue
             if isinstance(_v, IntLiteral):
                 _out[_n] = (_mod, 'int', 'int64_t')
@@ -344,84 +314,6 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
                     if _e is not None:
                         _out.setdefault(f"{_s.name}_{_m.name}", _e)
     return _out
-
-# Constants a MODULE MARKER exports that this compiler knows BY VALUE rather
-# than by compiled module body. `os` and `signal` are markers, never inlined
-# into the translation unit (their bodies are not part of any program's
-# closure the way a `from . import sibling` sibling's is), so there is no
-# `_module_globals['os']` field to read and no emitted struct to name — the
-# per-module field lookup that every other `mod.CONST` read answers through
-# (see `GimpleGen._module_global_field_type`) legitimately has nothing to say
-# about these two. These values are fixed by the OS ABI and by os.py's own
-# literals, so emitting them directly is not a guess.
-#
-# One table, because two backends read the same `os.linesep`: the ordinary
-# GIMPLE path's `_lower_MemberExpr` and the coroutine C++20 emitter's
-# module-constant read. Kept as two near-identical literal dicts, the
-# disagreement was invisible until the second reader existed and then produced
-# a SILENT wrong answer rather than an error — the coroutine emitter stubbed
-# `os.linesep` to `0` (an empty string) while the ordinary path in the same
-# program read `'\n'`, and the only thing that kept the coroutine body off
-# the compiled path was the mixed-yield refusal that difference caused
-# (bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md).
-#
-# The POSIX-only half of `signal` is deliberate: only the numbers identical
-# across every POSIX platform this runtime targets are listed, so a
-# BSD/Linux-only member (`SIGUSR1`, `SIGCHLD`, ...) keeps the honest
-# unresolved-attribute answer rather than risking a wrong number.
-_BUILTIN_MODULE_CONSTANTS = {
-    'os': {
-        'sep': ('char *', '/'),
-        'pathsep': ('char *', ':'),
-        'curdir': ('char *', '.'),
-        'pardir': ('char *', '..'),
-        'linesep': ('char *', '\n'),
-    },
-    'signal': {
-        'SIGHUP': ('int64_t', 1),
-        'SIGINT': ('int64_t', 2),
-        'SIGQUIT': ('int64_t', 3),
-        'SIGILL': ('int64_t', 4),
-        'SIGABRT': ('int64_t', 6),
-        'SIGFPE': ('int64_t', 8),
-        'SIGKILL': ('int64_t', 9),
-        'SIGSEGV': ('int64_t', 11),
-        'SIGPIPE': ('int64_t', 13),
-        'SIGALRM': ('int64_t', 14),
-        'SIGTERM': ('int64_t', 15),
-    },
-}
-
-
-def builtin_module_constant(module: str, name: str) -> tuple[str, object] | None:
-    """`(ctype, value)` for a constant `module` exports that this compiler
-    knows by value — `os.linesep` is `('char *', '\\n')`, `signal.SIGTERM` is
-    `('int64_t', 15)` — or None when it knows of no such constant.
-
-    `module` is the CANONICAL (import-resolved) module name, so an
-    `import os as _os` alias resolves the same as a bare `os`.
-
-    Both readers are in this file's `bugs/` and neither can be a second
-    implementation: see `_BUILTIN_MODULE_CONSTANTS`'s own comment for the
-    silent-wrong-answer failure the duplication produced. The VALUE is
-    returned unconverted so each backend can put it through its own literal
-    spelling (`_intern_string`/`_c_escape` for the GIMPLE path's string pool,
-    a C++ literal for the coroutine path's text) and neither has to reach
-    through the other.
-    """
-    return _BUILTIN_MODULE_CONSTANTS.get(module, {}).get(name)
-
-
-def builtin_module_constant_names(module: str) -> tuple:
-    """The `name`s `builtin_module_constant` knows for `module` — for the
-    callers that need the whole set rather than one lookup (the coroutine
-    emitter builds its per-unit `"<marker>.<name>" -> ctype` map by walking
-    markers, so it must be able to ask which names exist without holding a
-    second copy of the keys)."""
-    return tuple(_BUILTIN_MODULE_CONSTANTS.get(module, {}).keys())
-
-
-import re as _re
 
 def module_qualifier(q) -> str:
     """The ONE module-string -> C-qualifier sanitization every cross-module
@@ -677,27 +569,26 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             self._unresolved_import_aliases.add(_sk)
         return
     if isinstance(sym_info, str):
-        # One writer for the three tables, shared with the bare-`import`
-        # module-qualified call site (see
-        # `funcs_shared.register_imported_symbol`), which has the same three
-        # writes to do and used to have no writer to call. The
-        # `original_name` rule lives there too: only a genuine
-        # `import X as Y` alias records it, because storing it for an
-        # unaliased import makes `_func_csym` read it back (MojoDict get ->
-        # int64_t, then a POINTER `!=` against `bare_name` that is always
-        # true on the self-hosted path) take its alias branch ->
-        # `_safe_name(<erased ptr>)` -> a decimal-address guard name
-        # (`#ifndef _Users_..._<addr>`), different every run. This str branch
-        # used to record it unconditionally, which is that bug.
-        self._register_imported_symbol(
-            _sk,
-            {'module': _eff_mod, 'original_name': orig_name,
-             'return_type': sym_info, 'parameters': [],
-             'signature': f"{sym_info} {_sk} (void)"},
-            orig_name)
+        _reg_isym[_sk] = {
+            'module': _eff_mod, 'original_name': orig_name,
+            'return_type': sym_info, 'parameters': [],
+            'signature': f"{sym_info} {_sk} (void)"
+        }
+        self.func_return_types[_sk] = sym_info
     elif isinstance(sym_info, dict):
         sym_info = _as_dict(dict(sym_info))
         sym_info['module'] = _eff_mod
+        # Only record `original_name` for a genuine `import X as Y` alias.
+        # For an unaliased import it equals `_sk`, and storing it makes
+        # `_func_csym` read it back (MojoDict get -> int64_t, then a POINTER
+        # `!=` against `bare_name` that is always true on the self-hosted
+        # path) take its alias branch -> `_safe_name(<erased ptr>)` -> a
+        # decimal-address guard name (`#ifndef _Users_..._<addr>`), different
+        # every run. `orig_name`/`_sk` here are real str params (module-level
+        # fn, not a lifted closure), so this compare is a true string compare.
+        if orig_name != _sk:
+            sym_info['original_name'] = orig_name
+        _reg_isym[_sk] = sym_info
         _ret_changed = False
         if orig_name.startswith('_'):
             pass
@@ -707,6 +598,8 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             if _resolved_ret:
                 sym_info['c_return_type'] = _resolved_ret
                 _ret_changed = True
+        if 'c_return_type' in sym_info:
+            self.func_return_types[_sk] = sym_info['c_return_type']
         if sym_info.get('variadic'):
             if _ret_changed:
                 sym_info['signature'] = (
@@ -735,12 +628,11 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
                 _c_ret = _as_str(sym_info.get('c_return_type', 'int64_t'))
                 _param_str = ', '.join(_new_c_params) if _new_c_params else 'void'
                 sym_info['signature'] = f"{_c_ret} {orig_name} ({_param_str})"
-        # `_sib_qualifier` decides the param types and nothing else: when
-        # THIS compile will emit the definition, the definition's own
-        # signature is authoritative and a second entry here is what a stale
-        # cross-module hint would read instead.
-        self._register_imported_symbol(_sk, sym_info, orig_name,
-                                       write_param_types=bool(_sib_qualifier))
+        if _sib_qualifier and 'c_parameters' in sym_info:
+            self.func_param_types[_sk] = [
+                ' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
+                for cp in (sym_info.get('c_parameters') or [])
+            ]
     if _sib_qualifier and sym_info:
         # The condition is "will THIS compile emit that module's own
         # definition into this translation unit?", NOT `do_imports`. Two
@@ -952,93 +844,16 @@ def _gmi_find_comptime_one(self, _node_list, _target, _out: dict):
 def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; `_append_hits` (dict) threaded and
-    annotated per the hoist GOTCHA.
-
-    Records, per CONTAINER, the element C type of every value appended to
-    it anywhere in this module. The consumer
-    (`gen_module_impl`'s `_phase17_append_hits` loop) keys the answer on a
-    module GLOBAL's name, which is what makes the conclusion function-
-    independent: a registry populated by a constructor and read by a
-    different function is exactly the case this exists for, and the two gaps
-    named below are that case failing — with the whole of the observable
-    damage being a downstream method call on an element that read back as
-    `int64_t`.
-
-    Two receivers reach a module-level container, and only one of them was
-    recognised:
-
-    * `REGISTRY.append(x)` — a bare global name. Handled by the
-      `IdentExpr` test below, in every nesting kind this walks.
-    * `T.registry.append(x)` — a CLASS ATTRIBUTE, which reads as
-      `MemberExpr(obj=IdentExpr('T'), member='registry')` and is stored as
-      the synthesized `_classattr_T__registry` global
-      (`_class_attrs[T]['registry']`). The `IdentExpr` test rejected it, so
-      a class-level registry never recorded its element type and
-      `T.registry[0].method()` degraded to an `int64_t` receiver stub —
-      a pointer-sized decimal, exit 0.
-
-    And one NESTING kind reached nothing: the walk below descends into
-    `FunctionDef`, `IfStmt`, `WhileStmt`/`ForStmt`, `TryStmt` and
-    `WithStmt`, but not `StructDef`, so an append inside a constructor —
-    the overwhelmingly common registry shape — was invisible to the whole
-    pass. `self` is seeded as `<Struct> *` so `_quick_type` on the appended
-    argument resolves the same way it does in every other method.
-    """
+    annotated per the hoist GOTCHA."""
     for _n in _node_list:
         if (isinstance(_n, ExprStmt)
                 and isinstance(_n.value, CallExpr)
                 and isinstance(_n.value.func, MemberExpr)
                 and _n.value.func.member == 'append'
+                and isinstance(_n.value.func.obj, IdentExpr)
                 and len(_n.value.args) == 1):
-            _p17_recv = None
-            if isinstance(_n.value.func.obj, IdentExpr):
-                _p17_recv = _as_str(_n.value.func.obj.name)
-            elif (isinstance(_n.value.func.obj, MemberExpr)
-                    and isinstance(_n.value.func.obj.obj, IdentExpr)):
-                # `Cls.NAME.append(x)` — resolve the class attribute to the
-                # `_classattr_<Cls>__<name>` global the class-attribute
-                # registration pass synthesizes, so the key this records is
-                # the same one that pass's consumer looks up. Plain
-                # `.name` access, NOT a dict lookup with a `None` default:
-                # `_class_attrs` is a `dict[str, dict[str, str]]` and its
-                # own `.get` result is untyped on the self-hosted compiled
-                # path (see `_ctor_lit_param_types`'s FLAT-dict note), so a
-                # nested lookup would compare a boxed int against a string
-                # and never match.
-                _p17_cls = _as_str(_n.value.func.obj.obj.name)
-                _p17_map = getattr(self, '_class_attrs', None)
-                if _p17_map:
-                    _p17_inner = None
-                    for _p17_k in _p17_map:
-                        if _as_str(_p17_k) == _p17_cls:
-                            _p17_inner = _p17_map[_p17_k]
-                            break
-                    if _p17_inner:
-                        for _p17_k2 in _p17_inner:
-                            if _as_str(_p17_k2) == _as_str(_n.value.func.obj.member):
-                                _p17_recv = _as_str(_p17_inner[_p17_k2])
-                                break
-            if _p17_recv is not None:
-                _append_hits.setdefault(_p17_recv, []).append(
-                    self._quick_type(_n.value.args[0]))
-        if isinstance(_n, StructDef):
-            # A constructor or any other method is a call site like any
-            # other; see this function's docstring. `self` is typed so
-            # `_quick_type(self)` below answers the struct pointer, exactly
-            # as the `FunctionDef` arm seeds a function's own parameters.
-            for _p17_m in (_n.methods or []):
-                _p17_saved = self.var_types
-                _p17_mark = self._scan_scratch_top
-                self.var_types = self._scratch_dict_copy(_p17_saved)
-                self.var_types['self'] = _as_str(_n.name) + ' *'
-                for _p17_pn, _p17_pt in (_p17_m.params or []):
-                    if _p17_pt:
-                        self.var_types[_as_str(_p17_pn)] = _mojo_type(_p17_pt)
-                _gmi_phase17_collect_appends(
-                    self, _p17_m.body or [], _append_hits)
-                self.var_types = _p17_saved
-                self._scan_scratch_top = _p17_mark
-            continue
+            _append_hits.setdefault(_n.value.func.obj.name, []).append(
+                self._quick_type(_n.value.args[0]))
         if isinstance(_n, FunctionDef):
             _saved = self.var_types
             _scratch_mark_17: int = self._scan_scratch_top
@@ -1122,34 +937,12 @@ def _gmi_container_ctype(v):
     return None
 
 
-def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
-                              found: dict) -> None:
+def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Not recursive (walks via _walk_ast), but a
     lifted closure all the same; `param_types`/`found` (dicts) threaded
     and annotated per the hoist GOTCHA, and the captured struct name is
-    passed as `_sname` instead of the whole StructDef.
-
-    The bool evidence is read from `self._gmi_bool_params`, the per-method set
-    of parameter names whose DECLARED annotation is `bool`, which
-    `param_types` cannot express: `_TYPE_MAP` maps `'bool'` to `'int'` on
-    purpose, so a `def __init__(self, flag: bool)` parameter and an `int` one
-    are the same string in that dict. The annotation is the only place the
-    difference exists, and it is what `gen.struct_bool_fields` records — the
-    table `is_python_bool_expr` reads to decide whether `self.<f>` is a Python
-    bool worth printing as True/False rather than 1/0, and that the struct's
-    own generated `_mojo_repr_<Sn>` already reads. Without it the canonical
-    Python shape (`self.flag = flag` from a `flag: bool` parameter) had no
-    bool evidence anywhere and every spelling of `b.flag` printed `1`/`0`.
-
-    On `self`, not a threaded argument, and that is deliberate on both counts.
-    Threading it would mean one more parameter through all seventeen
-    recursive calls below, every one of which is a place to forget it; and the
-    set has a lifetime narrower than the recursion — `gen_module_impl` REBUILDS
-    it per method, so one method's answer cannot leak into the next one's
-    fields. The descent below walks into `if`/`else`/`try`/`match`/nested-
-    `def` bodies, so this is read at every level of that descent rather than
-    captured once."""
+    passed as `_sname` instead of the whole StructDef."""
     for node in _walk_ast(body):
         if isinstance(node, AssignStmt):
             fn = _gmi_self_member(node.target)
@@ -1169,20 +962,6 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                 v = node.value
                 if isinstance(v, IdentExpr):
                     ft = param_types.get(v.name, 'int64_t')
-                    # `self.flag = flag` with `flag: bool`. The field's own
-                    # ctype is a plain `int` -- `_TYPE_MAP` maps `'bool'` to
-                    # `'int'` -- so `ft` above carries no bool-ness at all and
-                    # every `_Bool` arm downstream (print, repr, str, the dict
-                    # store) has nothing to fire on: `print(b.flag)` printed
-                    # `1` where CPython prints `True`, in every spelling,
-                    # while `print(b)` said `flag=True` because the struct's
-                    # generated `__repr__` consults `struct_bool_fields`.
-                    # This assignment is the one place that knows BOTH that
-                    # the parameter is a bool and which field it feeds, which
-                    # is why the annotation has to be spent here rather than
-                    # recovered later.
-                    if v.name in self._gmi_bool_params:
-                        self.struct_bool_fields.setdefault(_sname, set()).add(fn)
                 elif isinstance(v, IntLiteral):
                     ft = 'int64_t'
                 elif isinstance(v, FloatLiteral):
@@ -1586,289 +1365,6 @@ def _gmi_scan_try_imports(self, _phase17_mod, stmt_list):
             _gmi_scan_try_imports(self, _phase17_mod, _s.then_body or [])
             if isinstance(_s.else_body, list):
                 _gmi_scan_try_imports(self, _phase17_mod, _s.else_body)
-
-def bare_global_read_plan(self, name):
-    """Decide whether a BARE read of module-level `name` lowers to a load
-    from some module's `_<mod>_globals` struct, and hand back the facts that
-    load needs. Returns `(wins, imp_home, imp_field, imp_fields, imp_pending,
-    global_owner_mod)`; `wins` is the whole gate and every other element is
-    the evidence it was decided from.
-
-    Extracted verbatim (comments included) from `emit_exprs._lower_IdentExpr`,
-    which was its only reader for as long as it lived there. It is here, in the
-    shared middle tier, because there is a SECOND reader now and it must not
-    be a weaker question: `emit_infra._compr_target_is_shadowed` has to know
-    whether declaring a comprehension's `for` target under its own source name
-    would shadow a module-scope binding. `_declare_var` writes
-    `var_types[name]`/`_c_names[name]`, and the gate at the bottom of this
-    function is `(name in _func_declared_globals or name not in
-    var_types)` -- so a comprehension target named like a module constant
-    *rebound* that global for the rest of the enclosing function: `G = 5` /
-    `[G for G in rows]` / `return G + out[0]` answered 3, where CPython
-    answers 6, and `_lower_IdentExpr` never saw the read again because
-    `var_types['G']` was set. One question, one function: that is what keeps
-    the write side and the read side from answering it differently.
-    """
-    # Also catches `global x` declarations inside functions (_func_declared_globals).
-    #
-    # A BARE (unqualified) identifier can only legitimately refer to a
-    # global belonging to THIS module — real Python scoping never lets
-    # a plain name resolve to some OTHER module's global (that needs
-    # `othermodule.name` qualification, handled entirely separately by
-    # MemberExpr lowering). `_global_var_types`/`_global_to_module` are
-    # shared, whole-transitive-tree-scoped dicts (populated once per
-    # name, first writer wins, across every module ever compiled in
-    # the closure — see gen_module's "Phase 1.7 pre-scan" and "Module-
-    # level globals" passes) — deliberately a superset for cross-
-    # module `mod.attr` MEMBER access to work regardless of which
-    # level first discovers a given module. Using that same superset
-    # to decide whether a BARE name is a global at all is wrong: if
-    # some OTHER module (anywhere in the whole closure) happens to
-    # ALSO declare a same-named top-level global, `_global_to_module`
-    # already recorded which module actually owns it — skip this
-    # branch (fall through to the ordinary "unknown identifier"
-    # placeholder below) unless it's OUR OWN module's global. Found
-    # via `fire.py`'s self-host build: a lambda inside gimple_codegen.
-    # py's own `compile_to_gimple_cached` closing over its enclosing
-    # function's `filename` PARAMETER (an ordinary, if imperfectly-
-    # supported, closure capture — see the sibling `mojo_src`/
-    # `do_imports` captures right next to it, which already correctly
-    # fall through to the same placeholder) got misresolved as
-    # `_gimple_codegen_globals.filename` — a field gimple_codegen.py
-    # never declares — because `fire_compiler.py`'s OWN unrelated
-    # top-level `filename = sys.argv[1] if ... else "<stdin>"` (inside
-    # its `if __name__ == "__main__":` block) is also named `filename`
-    # and is reachable via the whole-tree scan. See bugs/CODEGEN_
-    # generator_function_Lib_weakref.md.
-    # Direct attribute access (not `getattr(self, '_global_to_module', {})`):
-    # the field carries an annotation-seeded `char *` value type, so `.get`
-    # returns a real string here instead of a boxed int64_t that compares
-    # unequal to every module name.
-    _g2m = self._global_to_module
-    _global_owner_mod = _g2m.get(name) if name in _g2m else None
-    # Explicit `len(...) > 0`, not `X or "root"`: the self-hosted `or` keeps
-    # an empty-but-non-null `char *` rather than falling through to "root",
-    # so `_this_mod` was "" and disagreed with the "root"-keyed owner map —
-    # a bare `global counter` read then fell to the `(int64_t)0` placeholder.
-    _this_mod = self.module_name if len(self.module_name) > 0 else "root"
-    # `name in self._own_global_var_types`: THIS compile's own Phase-1.7 scan
-    # concluded a type for `name` as a module global. Unambiguous "it's ours"
-    # even when the shared, name-keyed `_global_to_module` superset reads
-    # back a boxed/garbage owner under self-compile (`_global_owner_mod ==
-    # _this_mod` then spuriously fails and a bare `global counter` read fell
-    # through to `(int64_t)0`). `_flatten_resolved_conditionals` already
-    # drops an imported module's `if __name__ == '__main__':`-guarded
-    # top-level globals from this scan, so it stays this-module-scoped.
-    _owned_here = name in self._own_global_var_types
-    # `_as_str(_global_owner_mod)`: the shared `_global_to_module` dict's
-    # VALUE erases to a boxed pointer on the self-hosted compiled path, so
-    # a bare `_global_owner_mod == _this_mod` compared a stale heap address
-    # to a fresh "root" string and always failed — the bare-name global
-    # read then fell to `(int64_t)0` (`import sys` receivers in
-    # t1.mojo/t_argv.mojo/mojo_main.py, stage1-vs-stage2 parity break).
-    # `_imp_home`: the module this one IMPORTED the bare `name` from with a
-    # top-level `from b import K`, or '' when there is no such import. This is
-    # the ONE case in which a bare name is legitimately not this module's own
-    # field and still has to load a globals struct: real Python binds b's
-    # object into this module's namespace, so `K` here IS `_b_globals.K`. It
-    # is deliberately NOT derived from `_global_to_module` -- that map is
-    # whole-tree and name-keyed, so it would also answer for a sibling's
-    # same-named global this module never imported, which is precisely the
-    # mis-resolution the `_owned_here` gate above exists to refuse (the
-    # `filename` case in its own comment). The recorded home is additionally
-    # required by `_gmi_scan_imported_global_homes` to be a module whose
-    # struct provably DECLARES the field, so this cannot route a read to a
-    # field that does not exist.
-    #
-    # `_as_str` on both halves for the same reason as everywhere else in this
-    # file: a boxed `char *` read back out of a dict compares unequal to every
-    # real name on the self-hosted compiled path.
-    _imp_home = _as_str(getattr(self, '_own_imported_global_home', {}).get(name) or '')
-    _imp_field = _as_str(getattr(self, '_own_imported_global_field', {}).get(name) or '')
-    # The owner's own `(c_decl, mojo_type)` triple -- the exact pair its struct
-    # typedef, its initializer and its `_<mod>_mojo_global_get_<name>`
-    # accessor were generated from, so the load agrees with the field BY
-    # CONSTRUCTION. Same source, and the same argument, as the `submod.GLOBAL`
-    # branch of `_lower_MemberExpr` further down; this is the bare-name half
-    # of that pair. `None` when the name is not an imported value, and then
-    # everything below behaves exactly as it did before.
-    _imp_fields = self._module_global_field_type(_imp_home, _imp_field) \
-        if (_imp_home and _imp_field) else None
-    # The owner's struct is registered at the END of the owner's own
-    # `gen_module_impl`, so in a closure with an import CYCLE the importer
-    # can be compiled while the owner is still an ancestor on the compile
-    # stack and `_module_global_field_type` has no entry to answer from.
-    # `_gmi_scan_imported_global_homes` records the (home, field) pair
-    # provisionally in exactly that case; this is the flag that lets the
-    # read act on it, and it is deliberately narrow — ALL of:
-    #
-    #   * the owner is still unregistered, so "no field" cannot mean "the
-    #     owner provably declares none" (the gate's load-bearing case, which
-    #     must keep refusing);
-    #   * the owner's own answer still does not exist (if it does, `_imp_fields`
-    #     is the strictly better source and this never applies);
-    #   * the name is one `_gmi_scan_imported_global_homes` recorded, so this
-    #     module really did `from <owner> import <field>` and did not
-    #     redeclare it;
-    #   * the shared `_global_var_types` conclusion — Phase 1.7's own reading
-    #     of the OWNER's top-level assignment — is a CONTAINER type, whose C
-    #     storage is the boxed `int64_t` every container global is declared
-    #     with (see the `gtype in _BOXED_CONTAINER_CTYPES` rule below). That
-    #     restriction is what makes this safe without the owner's triple: a
-    #     scalar's field C type (`char *`, `int`, `_Bool`, a struct pointer)
-    #     is NOT derivable from the Mojo type alone, so those keep the
-    #     placeholder rather than guess.
-    #
-    # Measured on the self-host closure without this: `gimple_codegen.py`'s
-    # `_run_pipeline` reads `DESUGARED_GENEXP_NAMES` (a `list` global in
-    # `fire_compiler.py`, populated by `desugar_genexps` two statements
-    # earlier) and got the unknown-identifier `(int64_t)0`, so the compiled
-    # binary's `--dump-full` of a TWO-LINE program died in
-    # `mojo_iter_boxed_list` with `TypeError: object is not iterable`.
-    # `len(...) > 0` on both halves, NOT bare truthiness: this file's own
-    # rule (see `_this_mod` above) is that on the self-hosted compiled path a
-    # boxed `char *` is truthy even when it is the empty string, and an empty
-    # `_imp_home` reaching the route below would emit `__globals.NAME`.
-    _imp_pending = (len(_imp_home) > 0 and len(_imp_field) > 0
-                    and _imp_home not in self._module_globals
-                    and _imp_fields is None
-                    and self._global_var_types.get(name) in _BOXED_CONTAINER_CTYPES)
-    _wins = ((_global_owner_mod is None
-          or _as_str(_global_owner_mod) == _this_mod
-          or _owned_here or _imp_fields is not None or _imp_pending)
-         and (name in self._func_declared_globals or name not in self.var_types)
-         and (name in self._global_var_types or _imp_fields is not None))
-    return (_wins, _imp_home, _imp_field, _imp_fields, _imp_pending,
-        _global_owner_mod)
-
-
-def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
-    """Record every bare name THIS module's own top-level `from b import K`
-    binds, together with the module whose `_<mod>_globals` struct declares
-    the field, so a later BARE read of that name loads the OWNER's field
-    instead of this module's.
-
-    Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_comptime`'s
-    docstring — and runs after Phase 1.7 (which is what populates
-    `_global_to_module`/`_global_var_types`) but BEFORE any function body is
-    emitted, because the reads it fixes happen inside those bodies.
-
-    What was wrong without it: the bare-name global read in
-    `_lower_IdentExpr` loads `_<current module>_globals.NAME`, and for a
-    `from b import K` that struct has no such member — gcc's "'struct
-    _root_toplev' has no member named 'K'", one error per read site. The
-    self-host closure had 26 distinct such names in 15 modules. The qualified
-    `b.K` spelling of the same value never had the problem, because
-    `_lower_MemberExpr` resolves the field through the owning module's own
-    `_module_global_field_type(bound_module, member)` triple; this is the
-    bare-name half of that pair.
-
-    Two gates, and both are load-bearing rather than defensive:
-
-    * **The owner must be a DIFFERENT module.** `from <self> import K` (a
-      module importing a name out of itself) is this module's own global
-      and must keep loading its own field.
-    * **This module must not declare a global of that name ITSELF.** `from b
-      import N` followed by a module-level `N = 'a-side'` rebinds the name in
-      THIS module's namespace (Python semantics), so the bare `N` afterwards
-      is this module's field, not `b`'s. `_own_global_var_types` is the
-      right test for "this module declares it", and it is only a sound test
-      because `_phase17_set_gtype`'s own-scope split keeps imported
-      modules' names out of it — the two changes are one fix, not two.
-    * **`_module_global_field_type(owner, name)` must answer.** That is the
-      exact member list the owner's struct typedef, its initializer and its
-      `_<mod>_mojo_global_get_<name>` accessor are all generated from, so a
-      hit is proof the field EXISTS rather than a claim that it should. A
-      from-import of a name no inline-compiled module declares as a global
-      (a function — this is the value half, see
-      `_own_imported_global_home`'s own comment — a submodule, an unresolvable
-      stdlib) fails this and is left entirely alone, which is what keeps
-      every already-working from-import spelling byte-identical.
-      ONE exception, and it is the cyclic-closure case: a module's own
-      globals are registered at the END of its `gen_module_impl`, so a
-      from-import whose owner is an ANCESTOR still in progress on the
-      compile stack has no `_module_globals` entry to ask about yet. The
-      owner's registration is not optional and cannot be run early (it
-      needs the type facts the passes between here and there conclude), so
-      a provisional record is taken instead — see the gate below and
-      `_lower_IdentExpr`'s `_imp_pending`, which is the only reader and
-      re-checks the owner's own answer before it routes anything.
-
-    An ambiguous binding (two `from` statements in this module binding one
-    bare name to two different owners' fields) is DROPPED rather than
-    resolved by scan order, mirroring `_note_own_func_home`'s
-    `_AMBIGUOUS_FUNC_HOME` policy: there is no right answer to pick, and
-    leaving the read un-routed reproduces today's behaviour rather than a
-    coin flip.
-    """
-    homes = self._own_imported_global_home
-    fields = self._own_imported_global_field
-    this_mod = self.module_name if len(self.module_name) > 0 else "root"
-    for _ig in stmt_list:
-        if not isinstance(_ig, FromImportStmt):
-            continue
-        # `from b import *` binds names this scan never sees, so there is
-        # nothing per-name to record; the qualified `b.K` path is what
-        # handles it.
-        if getattr(_ig, 'wildcard', False):
-            continue
-        for _nm2 in (getattr(_ig, 'name_alias_strs', None) or []):
-            _iname = _as_str(gimple_ctypes._fi_name(_nm2))
-            _ialias = _as_str(gimple_ctypes._fi_alias(_nm2))
-            _local = _ialias if _ialias else _iname
-            if not _local:
-                continue
-            _iowner = getattr(self, '_global_to_module', {}).get(_iname)
-            if _iowner is None:
-                continue
-            _iowner_s = _as_str(_iowner)
-            if (not _iowner_s) or _iowner_s == this_mod:
-                continue
-            if _iname in self._own_global_var_types:
-                continue
-            if _local in homes:
-                # Two owners for one bare name: ambiguous, so record
-                # nothing (see the docstring).
-                if homes[_local] != _iowner_s:
-                    del homes[_local]
-                    if _local in fields:
-                        del fields[_local]
-                continue
-            if self._module_global_field_type(_iowner_s, _iname) is None:
-                # Not answered. Two different reasons, and they must not be
-                # confused: the owner is REGISTERED and declares no such
-                # field (a function, a submodule, an unresolvable stdlib) —
-                # refuse, exactly as before; or the owner is still being
-                # compiled further up this same call stack, so it has no
-                # entry to ask about yet. A module's own globals are
-                # registered at the END of its own `gen_module_impl`
-                # (gen_module_impl's `_declared_globals` freeze), and
-                # `_collect_import_modules` collects imports from nested
-                # function bodies too, so a closure with an import CYCLE
-                # reaches this scan while the owner is mid-compile: measured
-                # on the self-host closure, `gimple_codegen.py` (compiled
-                # nested inside `fire_compiler.py`, which reaches it through
-                # the `from gimple_codegen import compile_to_gimple` inside a
-                # `__main__` self-test at fire_compiler.py:8040) asked about
-                # `DESUGARED_GENEXP_NAMES` while `_module_globals` held 1
-                # module and no `fire_compiler` at all.
-                #
-                # So record it PROVISIONALLY when the owner is unregistered
-                # AND Phase 1.7 independently concluded the name is a
-                # module-level global OF THAT OWNER (`_global_to_module`
-                # said so above, and it is in `_global_var_types`) — that is
-                # the same evidence the owner's own freeze will act on, so
-                # the field is coming. `_lower_IdentExpr`'s `_imp_pending`
-                # is the only reader, and it re-asks the owner before using
-                # the record, so a provisional entry that the owner's own
-                # registration contradicts cannot route a read.
-                if _iowner_s in self._module_globals:
-                    continue
-                if _iname not in self._global_var_types:
-                    continue
-            homes[_local] = _iowner_s
-            fields[_local] = _iname
-
 
 def _gmi_scan_cpp_nested_imports(self, stmt_list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_

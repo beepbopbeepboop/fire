@@ -17,7 +17,6 @@ x86-64). Each is a parameter here rather than a second copy of the builder,
 so the two architectures cannot drift apart on the parts that must match.
 """
 
-import hashlib
 import struct
 
 
@@ -43,54 +42,6 @@ CPU_TYPE_X86_64 = 0x01000007
 CPU_SUBTYPE_X86_64_ALL = 0x00000003
 MH_EXECUTE = 2
 
-# The section TYPE dyld reads a load-time initializer list from, and it is NOT
-# the pointer-array type (`S_MOD_INIT_FUNC_POINTERS`, 0x9) that the name
-# `__mod_init_func` suggests. Measured on this platform (macOS 26.6.2, dyld as
-# shipped): a `__DATA,__mod_init_func` section carrying a correct 8-byte pointer
-# to a module body is parsed, loads, links and is NEVER CALLED — the importing
-# program ran and printed only its own output — while `clang -dynamiclib`'s own
-# initializer, in a `__TEXT,__init_offsets` section of type 0x16, runs. So this
-# writer emits the form the toolchain emits and the loader honours:
-#
-#   * `S_INIT_FUNC_OFFSETS` (0x16) as the section TYPE. `clang` uses it for every
-#     `__attribute__((constructor))`, which is what makes it present in every
-#     image the platform's own build system produces.
-#   * 32-bit values, and they are OFFSETS FROM THE START OF THE IMAGE (its
-#     mach_header), not addresses and not offsets from the section. Measured both
-#     ways: `clang -dynamiclib` at `__TEXT` `0x0` stores the initializer's
-#     address verbatim, and the same file linked at `__TEXT 0x100000000` stores
-#     `address - 0x100000000`. A 32-bit field cannot hold an address in an image
-#     whose `__TEXT` is at `TEXT_BASE`, so this is also the only form that works
-#     for an image linked where this one is.
-#
-# The name is a convention; the type is the mechanism, and `_write_text_segment`
-# is told the type.
-S_INIT_FUNC_OFFSETS = 0x16
-
-
-def _init_offsets_blob(addrs) -> bytes:
-    """The `__init_offsets` payload: one 32-bit image-relative offset per address.
-
-    `TEXT_BASE` is subtracted because it is this file's mach_header address for
-    every image it writes (`__TEXT` is the lowest segment of both an executable
-    and a dylib, and the mach_header lives at its start), and because that is
-    what the offset is measured from — see `S_INIT_FUNC_OFFSETS`.
-
-    Refused rather than truncated, for a value that will not fit: `struct.pack`
-    raises on an address 4 GB or more past `TEXT_BASE`, and a silently dropped
-    initializer is the exact failure this mechanism exists to prevent.
-    """
-    out = bytearray()
-    for addr in (addrs or []):
-        try:
-            out += struct.pack("<I", int(addr) - TEXT_BASE)
-        except (struct.error, TypeError, ValueError) as e:
-            raise ValueError(
-                f"a load-time initializer at {addr!r} is not an address in an "
-                f"image whose mach_header is at {TEXT_BASE:#x}: the offset form "
-                f"this platform's dyld reads is 32 bits wide ({e})") from None
-    return bytes(out)
-
 # Per-architecture Mach-O identity and stub geometry.
 ARCHES = {
     "arm64": {
@@ -104,40 +55,6 @@ ARCHES = {
         "stub_size": 6,
     },
 }
-
-
-def macho_export_name(c_name: str) -> str:
-    """The Mach-O EXPORT NAME dyld forms from the C identifier `c_name`.
-
-    **Exactly one leading underscore, always, and dyld's.** This is the whole
-    relationship between the two spellings, and it is what the assembler does
-    to every C identifier it is given — including one that already begins with an
-    underscore, which becomes two. It is here, as a function, because three
-    places in this tree once stated it independently and two of them stated it
-    CONDITIONALLY, so a name that already began with `_` was written out and read
-    back one character apart from each other:
-
-      * `_export_trie` wrote the name unchanged when the ABI symbol already began
-        with `_`, and
-      * `_bind_info` wrote the bind-stream name with one leading `_` removed.
-
-    Those are the same error from opposite ends, and the shape that shows it is a
-    module whose own NAME begins with an underscore: `abi_module_name` flattens
-    dots to `_` (`a.b` → `a_b`) and nothing else, so a module `__pkg` exports
-    `__pkg__helper_twice_9f63a2`. Its trie then held `__pkg__helper_twice_…`
-    while a consumer's bind stream said `pkg__helper_twice_…`, so dyld asked for
-    `_pkg__helper_twice_9f63a2`, found nothing, and died at load — and the
-    library's own audit, which re-derived the export name with the SAME
-    unconditional prepend `tools/formal_sweep.py::_macho_symbol` uses, refused
-    the build first, with a message blaming a name the image did not lack.
-
-    It is exported because the reader side is a question too, not just the
-    writer: `formal/build.py::_advertised_but_absent` verifies a library against
-    the trie with it, so the audit asks the writer's rule instead of a third
-    spelling of it. The inverse direction — a Mach-O name back to the C
-    identifier dyld's underscore was on — is `formal/build.py::_c_export_name`.
-    """
-    return "_" + c_name
 
 
 def arch_spec(arch: str) -> dict:
@@ -449,7 +366,6 @@ def build_macho_executable(code: bytes, arch: str = "arm64",
     file[o : o + DYLINKER_CMDSIZE] = _dylinker_cmd()
     o += DYLINKER_CMDSIZE
 
-    uuid_at = o + 8
     patch(o + 0, "<I", UUID_CMD)
     patch(o + 4, "<I", 24)
     o += 24
@@ -472,7 +388,6 @@ def build_macho_executable(code: bytes, arch: str = "arm64",
     file[entryoff : entryoff + len(code)] = code
     if has_globals:
         file[g_file : g_file + len(gblob)] = gblob
-    _stamp_content_uuid(file, uuid_at)
     _assert_no_unclaimed_bytes(file, [(0, text_size)]
                                + ([(g_file, g_size)] if has_globals else [])
                                + [(linkedit_file, linkedit_size)])
@@ -544,41 +459,13 @@ def _bind_info(external_syms: list[str], dylib_of: dict = None,
         # what made dyld (and `codesign`, which runs the same validator) reject
         # the image outright.
         out += bytes((BIND_SYMBOL_FLAGS_FUNCTION,))
-# The stream carries the name the SOURCE spelled; dyld prepends the
-        # Mach-O underscore when it forms the symbol it looks up —
-        # `macho_export_name` is that relationship, and it is one function so a
-        # second spelling of the rule cannot appear here. Both spellings were
+        # The stream carries the bare C name; dyld prepends the Mach-O
+        # underscore when it forms the symbol it looks up. Both spellings were
         # measured against a real dyld: "printf" binds and calls through, while
         # "_printf" gets "Symbol not found: __printf" — the underscore in the
         # message is dyld's own, on top of ours. The codegen hands us the name
-        # as the source spelled it, so it is written out unchanged.
-        #
-        # **It used to drop one leading underscore here**, on the reading that
-        # the name arriving is the assembler's spelling — and that is false of
-        # every name this link line produces, which are source spellings
-        # (measured: a program calling a hostmod function binds
-        # `['os_path_join_2dbb98', 'printf']`, and neither begins with `_`). Two
-        # kinds of name were silently renamed by that one character, measured
-        # from both ends and neither visible in the other's argument:
-        #
-        #   * a C FUNCTION that legitimately begins with one. An external call
-        #     to `_exit` bound `exit`, which flushes stdio, where `_exit` does
-        #     not (C99 7.20.4.4 / POSIX — `_exit` terminates without flushing
-        #     open streams). Measured on both architectures, before this line
-        #     changed: the image printed what `exit` flushes and one that calls
-        #     the real `_exit` prints nothing.
-        #   * an ABI EXPORT SYMBOL that legitimately begins with one.
-        #     `abi_module_name` flattens dots to `_` and nothing else, so a
-        #     module called `__pkg` exports `__pkg__helper_twice_9f63a2`; the
-        #     trie held that name while the consumer's bind stream asked dyld
-        #     for `pkg__helper_twice_9f63a2`, and the library died at load for
-        #     a function that was right there.
-        #
-        # Which convention a name is spelled in is not decidable from the name,
-        # so the answer cannot be a guess made here: the caller hands over
-        # source spellings, and `macho_export_name`/`_c_export_name` are the two
-        # ends of the one rule they are all read against.
-        out += sym.encode()
+        # as the source spelled it, so normalise to the C spelling here.
+        out += (sym[1:] if sym.startswith("_") else sym).encode()
         out += b"\0"
         out += bytes((BIND_SET_TYPE_IMM | BIND_TYPE_POINTER,))
         out += bytes((BIND_SET_SEGMENT_AND_OFFSET_ULEB | got_segment,))
@@ -607,45 +494,6 @@ def _assert_no_unclaimed_bytes(image: bytes, segments: list) -> None:
             f"a byte was inserted past the end of the last segment")
 
 
-def _stamp_content_uuid(image: bytearray, uuid_at: int) -> None:
-    """Put a CONTENT-DERIVED value in the LC_UUID payload at `uuid_at`.
-
-    LC_UUID is the image's identity as far as dyld's caches are concerned
-    (dyld4 keys its closure cache on the path AND the uuid AND the inode's
-    mtime/size), so an all-zero uuid says "every image this compiler has ever
-    produced is the same image". That was literally true of this backend: all
-    three builders emitted the load command and then left its 16 payload bytes
-    zero, because nothing here read them back. A real linker derives them from
-    the link — `ld64` hashes the output — so two rebuilds of one input agree and
-    a rebuild after any change does not, and that is the property a loader's
-    cache actually needs.
-
-    **The digest is over the image with this field ZEROED**, and the zeroing is
-    explicit rather than an assumption that `image` is still zero there, so the
-    function is idempotent and cannot be its own fixed point: a hash that
-    included the previous run's answer would be a second, different value on
-    every call. One pass, no iteration — the field is 16 bytes inside the input
-    and 16 bytes of output, so there is nothing to solve for.
-
-    It is placed by the CALLER, at the end of each builder, because only then is
-    the image complete: hashing earlier would digest a file whose code, stubs,
-    GOT and __LINKEDIT were still zero, and every builder would then publish a
-    uuid for an image that does not exist. The signature is not part of the
-    input and cannot be: `codesign` runs afterwards, on the published file, and
-    `formal/build.py::_signature_identity` derives the ad-hoc identifier from
-    the same unsigned bytes.
-
-    Determinism is the property this exists for, so it is worth being explicit
-    about what it is a function of: the bytes of THIS image, and nothing else.
-    Not the clock (there is no timestamp field left to fill), not the output
-    path (which the ad-hoc identifier used to leak), not a dict's iteration
-    order (the builders sort), not the machine.
-    """
-    image[uuid_at : uuid_at + 16] = bytes(16)
-    digest = hashlib.sha256(bytes(image)).digest()
-    image[uuid_at : uuid_at + 16] = digest[:16]
-
-
 def _uleb_bytes(value: int) -> bytes:
     out = bytearray()
     _uleb(out, value)
@@ -671,10 +519,6 @@ def _write_data_segment(file: bytearray, o: int, data_vm: int, data_file: int,
     and string bytes the address-valued slots point at. `initprot` is rw- (3)
     because a `global NAME` store WRITES here — a read-only data segment would
     fault on the first write, which is the one operation the segment exists for.
-
-    The load-time initializer is NOT here: it is a `__TEXT,__init_offsets`
-    section, beside the code it points at and in the form this platform's
-    `clang` emits (`_init_offsets_blob` and `build_macho_dylib`).
 
     Returns the offset just past the command."""
     def patch(off, fmt, *vals):
@@ -983,7 +827,6 @@ def build_macho_executable_extern(
     o += DYLINKER_CMDSIZE
 
     # LC_UUID
-    uuid_at = o + 8
     patch(o + 0, "<I", UUID_CMD)
     patch(o + 4, "<I", 24)
     o += 24
@@ -1058,7 +901,6 @@ def build_macho_executable_extern(
     file[bind_file : bind_file + bind_len] = bind
     if has_globals:
         file[g_file : g_file + len(gblob)] = gblob
-    _stamp_content_uuid(file, uuid_at)
     _assert_no_unclaimed_bytes(file, [(0, text_size), (data_file, data_size)]
                                + ([(g_file, g_size)] if has_globals else [])
                                + [(bind_file, bind_len)])
@@ -1233,12 +1075,12 @@ def _export_trie(exports: list) -> bytes:
     for export in sorted(exports, key=lambda e: e["symbol"]):
         # The export table holds Mach-O names; `symbol` is the C identifier
         # the ABI spells (what an importer's bind stream carries, and what
-        # dyld prepends its underscore to). `macho_export_name` is that
-        # relationship, and asking it rather than spelling it keeps the two
+        # dyld prepends its underscore to). Prepending it here keeps the two
         # conventions from drifting: a trie written with the bare C name
         # exports a symbol nothing can bind, and the program dies in dyld with
         # "Symbol not found" for a function that is right there.
-        raw = macho_export_name(export["symbol"]).encode("utf-8")
+        raw = (export["symbol"] if export["symbol"].startswith("_")
+               else "_" + export["symbol"]).encode("utf-8")
         addr = bytearray()
         _uleb(addr, export["entry"] - TEXT_BASE)
         flags = bytearray()
@@ -1273,8 +1115,7 @@ def _export_trie(exports: list) -> bytes:
 
 
 def dylib_load_commands(install_name: str, has_externs: bool,
-                        deps: list = None, has_globals: bool = False,
-                        has_mod_init: bool = False) -> tuple:
+                        deps: list = None, has_globals: bool = False) -> tuple:
     """(sizeofcmds, ncmds) of a dylib's load-command list.
 
     One function, because the code offset is DERIVED from this and the two
@@ -1290,23 +1131,15 @@ def dylib_load_commands(install_name: str, has_externs: bool,
     ordinal space (1 = libSystem when present, then deps), so it is passed in
     rather than sorted here: reordering it would silently rebind every symbol.
 
-    `has_globals` adds the module-global `__DATA` segment, and `has_mod_init`
-    a THIRD SECTION in `__TEXT` (the `__init_offsets` list a library with a
-    module body runs at load, beside the code it points at — `S_INIT_FUNC_OFFSETS`
-    for the form). Either is 80 more bytes of load command and so pushes the
-    code down by as much as the segment or section it describes. Both effects
-    have to be visible here, where the code offset is decided, rather than
-    discovered later by the builder — and the builder's own check that the base
-    it was handed matches this layout is what turns a caller that forgot to pass
-    the flag into a refusal instead of a mis-mapped image."""
+    `has_globals` adds the module-global `__DATA` segment, which pushes the code
+    down by the same amount — so both effects have to be visible here, where
+    the code offset is decided, rather than discovered later by the builder."""
     deps = list(deps or [])
     name = install_name.encode("utf-8") + b"\0"
     id_cmdsize = (24 + len(name) + 7) & ~7
-    # __TEXT carries __text, plus __stubs when the library calls out, plus
-    # __init_offsets when it has a module body, so its command is 72 + 80 per
-    # section.
-    text_sections = (2 if has_externs else 1) + (1 if has_mod_init else 0)
-    text_cmdsize = 72 + 80 * text_sections
+    # __TEXT carries __text, plus __stubs when the library calls out, so its
+    # command is 72 + 80 per section.
+    text_cmdsize = 72 + 80 * (2 if has_externs else 1)
     dep_cmds = sum(dylib_command_size(d) for d in deps)
     sizeofcmds = (text_cmdsize + 72 + id_cmdsize + 24 + 24 + 48 + 16 + dep_cmds
                   + (dylib_command_size(LIBSYSTEM_PATH.decode()) + 152
@@ -1317,16 +1150,15 @@ def dylib_load_commands(install_name: str, has_externs: bool,
 
 
 def dylib_code_offset(install_name: str, has_externs: bool = False,
-                      deps: list = None, has_globals: bool = False,
-                      has_mod_init: bool = False) -> int:
+                      deps: list = None, has_globals: bool = False) -> int:
     """File offset of a dylib's code.
 
-    `has_externs`, `deps`, `has_globals` and `has_mod_init` must match what the
-    library is actually built with — the caller needs them BEFORE compiling,
-    because they decide the base address the code is emitted for.
+    `has_externs`, `deps` and `has_globals` must match what the library is
+    actually built with — the caller needs them BEFORE compiling, because they
+    decide the base address the code is emitted for.
     """
     sizeofcmds, _n = dylib_load_commands(install_name, has_externs, deps,
-                                         has_globals, has_mod_init)
+                                         has_globals)
     return ((32 + sizeofcmds + 31) & ~15)
 
 
@@ -1348,8 +1180,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
                       install_name: str, arch: str = "arm64",
                       external_syms: list = None,
                       entryoff: int = None, deps: list = None,
-                      dep_syms: dict = None, globals_image=None,
-                      mod_init_addrs: list = None) -> bytes:
+                      dep_syms: dict = None, globals_image=None) -> bytes:
     """MH_DYLIB with an export trie, and — when `external_syms` is given —
     the same extern machinery an executable has: __TEXT,__stubs, a
     __DATA_CONST,__got, an LC_LOAD_DYLIB for libSystem, and a bind stream.
@@ -1381,29 +1212,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     why a cross-module global is a separate capability and not this one: an
     exporting module's slot would need the importing module's GOT to carry a
     POINTER-TO-DATA symbol, and this backend's export/bind machinery is
-    function-shaped.
-
-    `mod_init_addrs` are the ADDRESSES of the functions the LOADER must run when
-    it loads this image — the module body's wrapper, one per source file that
-    had one, in that order — and they become the `__TEXT,__init_offsets` list
-    dyld calls (`_init_offsets_blob` for the form, which is offsets rather than
-    pointers and is the reason the section is in `__TEXT`). Addresses in,
-    because `Assembler.label` already records `org + len(text)`: a label is the
-    address the image maps.
-
-    This is the library's entry point, and the reason a module with top-level
-    statements can be a library at all: an initializer runs after the image's
-    dependencies are loaded and before the program's `main`, which is the
-    position CPython gives a module body's statements at import. A library with a
-    body and no initializer compiles the body to a function nothing runs, which
-    is the silent no-op the list removes — and which cost 16 files of this
-    repository before it existed (`tools/formal_sweep.py`'s
-    CODEGEN/DEPENDENCY rows, all sixteen of which were this one message).
-
-    Empty — the ordinary case, every module whose top level is declarations and
-    constants — writes no section and does not move the code, so every image the
-    tree built before this argument existed is byte-for-byte the image it builds
-    now."""
+    function-shaped."""
     spec = arch_spec(arch)
     trie = _export_trie(exports)
     name = install_name.encode("utf-8") + b"\0"
@@ -1417,31 +1226,16 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     deps = list(deps or [])
     gblob = _globals_blob(globals_image)
     has_globals = bool(gblob)
-    # One entry per load-time initializer, in the order the addresses were
-    # given, as the 32-bit IMAGE-RELATIVE OFFSETS this platform's dyld reads —
-    # `_init_offsets_blob` for why that is the form and not a pointer array.
-    init_blob = _init_offsets_blob(mod_init_addrs)
-    has_mod_init = bool(init_blob)
     sizeofcmds, ncmds = dylib_load_commands(install_name, bool(n), deps,
-                                             has_globals, has_mod_init)
-    code_file = dylib_code_offset(install_name, bool(n), deps, has_globals,
-                                  has_mod_init)
+                                             has_globals)
+    code_file = dylib_code_offset(install_name, bool(n), deps, has_globals)
     if base_addr != TEXT_BASE + code_file:
         raise ValueError("dylib base address does not match Mach-O layout")
     # Stubs follow the code exactly as in the executable, so a call site's
     # patched target and the stub the image emits cannot drift apart.
     stub_file = (code_file + len(code) + 3) & ~3 if n else 0
     stub_base_vm = base_addr + (stub_file - code_file)
-    # The initializer list follows the stubs (or the code, in a library that
-    # calls nothing out) and is INSIDE __TEXT, at a 4-byte-aligned file offset
-    # because its entries are 4 bytes. Beside the code rather than in `__DATA`
-    # for the reason the offsets are relative: the values are offsets from the
-    # mach_header, and `__TEXT` is the segment the mach_header lives in.
-    init_file = _align_up((stub_file + ssize * n) if n else code_file + len(code), 4) \
-        if has_mod_init else 0
-    text_size = _text_filesize(init_file + len(init_blob) if has_mod_init
-                               else (stub_file + ssize * n) if n
-                               else code_file + len(code))
+    text_size = _text_filesize((stub_file + ssize * n) if n else code_file + len(code))
     data_file = text_size if n else 0
     data_size = _align_up(8 * n, PAGE_SIZE) if n else 0
     got_base_vm = TEXT_BASE + data_file if n else 0
@@ -1474,40 +1268,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     # dylib there is — one with externs and no globals — and produced an image
     # whose load commands ran off the end of a 31-byte file.
     linkedit_file = text_size + (data_size if n else 0) + g_size
-    # The export trie is a byte stream of arbitrary length, so the bind stream
-    # that follows it lands on whatever offset the trie's length happens to
-    # leave — and Apple's linker REFUSES the whole library when that is not
-    # eight-byte aligned:
-    #
-    #   ld: mis-aligned LINKEDIT content 'bind opcodes',
-    #       fileOffset=0x0000C22A in 'libinterop.arm64.dylib'
-    #
-    # so `clang foo.c lib.dylib` — the one thing anyone does with a formal
-    # dylib — failed to link, with no diagnostic naming anything a person could
-    # act on. It is size-dependent and therefore invisible on the small corpora
-    # the tree tests with: this corpus's trie is 554 bytes and 554 % 4 == 2,
-    # while a three-function library's is a multiple of four. The EXECUTABLE
-    # path could never hit it, because its `bind_file` is a sum of page-sized
-    # segments and so is aligned by construction; only the dylib builder had a
-    # byte-length blob in front of the bind data.
-    #
-    # The padding is inside __LINKEDIT and inside its declared filesize, so
-    # `_assert_no_unclaimed_bytes` still sees every byte claimed, and the code
-    # signature `codesign` appends after this lands where it always did.
-    #
-    # With no externs there IS no bind stream, so the trie is the whole of
-    # __LINKEDIT's content and `bind_off` is 0 as it was: a `linkedit_len`
-    # computed from the (empty) bind stream would be negative and every byte of
-    # the trie past `linkedit_file` would be unclaimed, which is the invariant
-    # `_assert_no_unclaimed_bytes` exists to catch — as it did, here, in the four
-    # x86-64 dylib cases that build a library with no externs.
-    if n:
-        bind_file = _align_up(linkedit_file + len(trie), 8)
-        linkedit_len = bind_file + len(bind) - linkedit_file
-    else:
-        bind_file = 0
-        linkedit_len = len(trie)
-    file = bytearray(linkedit_file + linkedit_len)
+    file = bytearray(linkedit_file + len(trie) + len(bind))
 
     def patch(off, fmt, *vals):
         struct.pack_into(fmt, file, off, *vals)
@@ -1521,20 +1282,12 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(24, "<I", 0x800005)
     o = 32
 
-    text_sections = [(b"__text", base_addr, len(code), code_file, 0x80000400, 0)]
     if n:
-        text_sections.append(
-            (b"__stubs", stub_base_vm, ssize * n, stub_file, 0x80000408, ssize))
-    if has_mod_init:
-        # `S_INIT_FUNC_OFFSETS`, and `__TEXT` — the two things `_init_offsets_blob`
-        # says dyld reads and where. An initializer this image declares but dyld
-        # does not call is the module body compiled and never run: the file
-        # builds, links, and does nothing at load time.
-        text_sections.append(
-            (b"__init_offsets", TEXT_BASE + init_file, len(init_blob),
-             init_file, S_INIT_FUNC_OFFSETS, 0))
-    o = _write_text_segment(file, o, text_size, text_sections)
-    if n:
+        o = _write_text_segment(file, o, text_size, [
+            (b"__text", base_addr, len(code), code_file, 0x80000400, 0),
+            (b"__stubs", stub_base_vm, ssize * n, stub_file, 0x80000408, ssize),
+        ])
+
         # __DATA_CONST,__got — rw- because dyld writes the resolved pointer.
         patch(o, "<I", SEGMENT_64_CMD)
         patch(o + 4, "<I", 152)
@@ -1560,6 +1313,10 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
         patch(s2 + 68, "<I", 0)
         patch(s2 + 72, "<I", 0)
         o += 152
+    else:
+        o = _write_text_segment(file, o, text_size, [
+            (b"__text", base_addr, len(code), code_file, 0x80000400, 0),
+        ])
 
     if has_globals:
         o = _write_data_segment(file, o, g_vm, g_file, g_size, gblob)
@@ -1568,10 +1325,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
     patch(o + 24, "<Q", TEXT_BASE + linkedit_file)
-    # `linkedit_len` was computed where the bind stream's ALIGNED offset was
-    # decided, and is not recomputed here: recomputing it from `len(trie)` is
-    # exactly the drift that put the bind data at an offset the linker rejects
-    # (see the `bind_file` comment above).
+    linkedit_len = len(trie) + len(bind)
     patch(o + 32, "<Q", ((linkedit_len + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE)
     patch(o + 40, "<Q", linkedit_file)
     patch(o + 48, "<Q", linkedit_len)
@@ -1605,7 +1359,6 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(o + 20, "<I", 0)
     o += 24
 
-    uuid_at = o + 8
     patch(o, "<I", UUID_CMD)
     patch(o + 4, "<I", 24)
     o += 24
@@ -1616,7 +1369,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     # rebase_off/rebase_size stay zero (see the noextern builder).
     patch(o + 8, "<I", 0)
     patch(o + 12, "<I", 0)
-    patch(o + 16, "<I", bind_file)
+    patch(o + 16, "<I", linkedit_file + len(trie) if n else 0)
     patch(o + 20, "<I", len(bind))
     o += 48
 
@@ -1637,11 +1390,8 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
                                                arch)
     if has_globals:
         file[g_file : g_file + len(gblob)] = gblob
-    if init_blob:
-        file[init_file : init_file + len(init_blob)] = init_blob
     file[linkedit_file : linkedit_file + len(trie)] = trie
-    file[bind_file : bind_file + len(bind)] = bind
-    _stamp_content_uuid(file, uuid_at)
+    file[linkedit_file + len(trie) : linkedit_file + linkedit_len] = bind
     _assert_no_unclaimed_bytes(
         file,
         [(0, text_size)]

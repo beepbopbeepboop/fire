@@ -369,16 +369,7 @@ def stdlib_modules() -> list:
 _OBJ_FLAGS = ('-fgimple', '-fPIC', '-D__MOJO_STDLIB_MODE__', f'-I{RUNTIME}')
 
 
-class _DylibGeneratedCppError(RuntimeError):
-    """`compile_module_to_c` produced a C++20 coroutine translation unit it has
-    no way to hand to the dylib link. Named so a caller that DOES know how to
-    link one (`compile_module_to_c_given_gen`, used by the executable path) can
-    tell it apart from a genuine compile failure. See
-    bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md."""
-
-
-def compile_module_to_c(src: str, path: str, module_name: str,
-                        linkable: bool = True) -> str:
+def compile_module_to_c(src: str, path: str, module_name: str) -> str:
     """Transpile one library module to GIMPLE C with no main/entry points.
 
     Deep-but-finite generic-instantiation chains (a module pulling in nested
@@ -386,13 +377,7 @@ def compile_module_to_c(src: str, path: str, module_name: str,
     the CAS shortcuts them. Run codegen in a thread with a large stack and a high
     recursion limit so legitimate deep cascades complete instead of crashing the
     module into a source-fallback skip. (True non-convergence — instantiating with
-    symbolic type args — is prevented at the call site, not papered over here.)
-
-    Records the generic-struct elaborations that FAILED, in
-    `_LAST_DEGRADED` — cleared on entry, so it describes this call and only
-    this call. `compile_module_to_c_cached` reads it to decide whether the
-    result may be published; see there for why a module built that way must
-    not be."""
+    symbolic type args — is prevented at the call site, not papered over here.)"""
     import threading
     import monomorphize
     # Fresh elaborator state per module so a prior module's crash can't pollute
@@ -407,72 +392,6 @@ def compile_module_to_c(src: str, path: str, module_name: str,
             gen = GimpleGen(emit_entry_points=False, module_name=module_name)
             gen._current_filename = path
             box['c'] = gen.gen_module(Parser(py_tokenize(src)).parse_module())
-            box['degraded'] = list(gen._generic_struct_elaboration_failures)
-            box['cpp'] = getattr(gen, 'generated_cpp', '')
-            # A generator / `async def` the C++20 emitter accepted leaves its
-            # DEFINITIONS in a second artifact, `gen.generated_cpp`, and this
-            # function can only return `box['c']`. Nothing downstream reads it:
-            # not the return value, not the CAS key, not `_compile_one_object`'s
-            # object bytes. The module's `.c` still carries the `extern`
-            # declarations and the calls, so the object references
-            # `_mojogen_<module>_<fn>_start/_resume/_value/_destroy` with nothing
-            # defining them anywhere on the link line.
-            #
-            # It is silent in a dylib and FATAL in an executable, which is why
-            # it went unnoticed: `build()` links a production dylib with
-            # `undefined=True` (`-undefined dynamic_lookup`), so a module with
-            # dangling coroutine symbols still loads, and both of CLAUDE.md's
-            # silent-verdict steps are blind to it by construction — the
-            # `stdlib-dylib` skip count does not move and `stdlib-syntax` only
-            # checks that the `.c` parses. `fire.py build fire.py` links
-            # `mojoc` against that dylib with every symbol resolved, and the
-            # undefined entry points land in the program's undefined set
-            # straight away.
-            #
-            # So this REFUSES instead: `build()`'s existing per-module error
-            # path prints `skip <module>: ...` and the client falls back to
-            # source, which is the same honest degradation the dylib already
-            # uses for a module it cannot compile. It does not compile the
-            # generator — that is candidate 1 in the doc, and it changes what
-            # every dylib module's link line looks like — but it converts a
-            # silent hole into a visible one, and the skip count it adds is
-            # exactly the measurement candidate 1 has to not increase.
-            #
-            # Measured exposure on this tree is ZERO for both module lists
-            # that ship (249 production stdlib modules and the 61-module
-            # self-host closure: 0 real generator/async defs before lowering,
-            # 0 after — `test_selfhost.py::closure_coroutines_are_lowerable`
-            # pins the second), so this costs no `skip` line today. It is
-            # `fire.py dylib` over a project's own Python-family modules where
-            # it bites, which is a tree whose `.py` files are in neither list.
-            # See bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md.
-            #
-            # `linkable=False` for a caller that has NO link line — which is
-            # `compile_stdlib.py`'s syntax sweep, the one instrument that reads
-            # this function's return value and checks that the emitted C PARSES.
-            # Every word of the argument above is about the link: a dangling
-            # `_mojogen_*` reference is a link-line fact, and a sweep that never
-            # links cannot observe it. Refusing there turned three REAL modules
-            # into `stdlib-syntax` failures for a property they do not have:
-            #
-            #   test/runtime/test_asyncrt.mojo
-            #   test/runtime/test_locks.mojo
-            #   test/runtime/test_raising_asyncrt.mojo
-            #
-            # `FAILED: 18 (18 expected, 0 unexpected)` on master became
-            # `21 (18 expected, 3 unexpected)` — three UNEXPECTED, which is the
-            # direction CLAUDE.md's `stdlib-syntax` rule names as a regression.
-            # bugs4-2's own measurement missed it because it looked at the two
-            # module lists that SHIP and this sweep walks `test/runtime/` too.
-            # So the switch is the honest shape: the emitter reports what it
-            # produced, and the LINKER decides whether it can use it.
-            if box.get('cpp') and linkable:
-                raise _DylibGeneratedCppError(
-                    f"{module_name}: {len(box['cpp'])} bytes of C++20 coroutine "
-                    f"definitions (gen.generated_cpp) that this path cannot "
-                    f"link; a dylib module's generator would ship as a dangling "
-                    f"_mojogen_* reference. Compile this module as an executable "
-                    f"(fire.py build), or fall back to source.")
         except BaseException as e:   # propagate to the caller's thread
             box['err'] = e
 
@@ -487,84 +406,22 @@ def compile_module_to_c(src: str, path: str, module_name: str,
     t.join()
     if 'err' in box:
         raise box['err']
-    _LAST_DEGRADED[:] = box.get('degraded') or []
     return box['c']
-
-
-# Why the LAST `compile_module_to_c` produced a different program from the one
-# its source says: one entry per generic struct that could not be elaborated,
-# as `Struct[Args] from <source>: <exception>`. Empty means the compile was
-# clean. Module-level because the codegen runs in a thread
-# (`compile_module_to_c`) and because the consumer
-# (`compile_module_to_c_cached`) is a different function from the producer;
-# it is written and read under one call, never accumulated.
-_LAST_DEGRADED: list = []
-
-
-def last_degradations() -> list:
-    """The `_LAST_DEGRADED` list, as a copy. Read this, do not clear it."""
-    return list(_LAST_DEGRADED)
 
 
 _stdlib_compile_cache: dict = {}  # in-process L1 for compile_module_to_c_cached
 
 
-def compile_module_to_c_cached(src: str, path: str, module_name: str,
-                              linkable: bool = True) -> str:
+def compile_module_to_c_cached(src: str, path: str, module_name: str) -> str:
     """Like compile_module_to_c but CAS-cached under stdlib-compile/<hash>.
 
     The key folds in the compiler fingerprint (a codegen change invalidates
     every cached .ci) and the stdlib fingerprint (a module's C depends on its
-    stdlib imports' signatures/layouts, so any stdlib edit invalidates too).
-
-    **A module built through a FAILED generic-struct elaboration is not
-    published.** That compile is not this module: the struct was lowered
-    against its un-elaborated template, so every one of its type parameters is
-    typed `int64_t` where the source says otherwise. Publishing it puts a
-    wrong artifact in a content-addressed store under the CURRENT compiler
-    fingerprint, which means every later run — a `make gate` on another
-    machine's checkout of the same commit, an hour later — replays the wrong
-    artifact instead of recompiling and getting it right. That is how
-    `test/iter/test_ref_iteration.mojo` reached a gate as an UNEXPECTED
-    `stdlib-syntax` failure (`request for member 'value' in something not a
-    structure or union`, at a line about iterators) an hour after the
-    transient that caused it was gone: the condition had ended and the
-    artifact had not.
-
-    So the miss path is spelled out here rather than delegated to
-    `cas.get_or_build_text`, whose contract is "build, then publish" with no
-    room for a build that must not be published. It is those six lines
-    duplicated, not a second cache: the same key, the same L1, the same
-    `cas.stats` accounting, in the same order.
-    """
-    # The `‘linkable’ half is part of the KEY, not of the cache: a `.ci`
-    # published by a `linkable=False` call has had no link-line check made on
-    # it, and handing it to `build()` would republish the very hole the refusal
-    # exists to refuse. One extra character in the key, and the two artifacts
-    # can never be confused for each other.
-    key = cas.stdlib_compile_key(src, path, module_name,
-                                 extra='' if linkable else '|nolink')
-    if key in _stdlib_compile_cache:
-        return _stdlib_compile_cache[key]
-    cached = cas.lookup(key, '.ci')
-    if cached is not None:
-        cas.stats['hits'] += 1
-        with open(cached) as f:
-            text = f.read()
-    else:
-        cas.stats['misses'] += 1
-        text = compile_module_to_c(src, path, module_name, linkable=linkable)
-        degraded = last_degradations()
-        if degraded:
-            sys.stderr.write(
-                f"[compile_module_to_c_cached] {path}: {len(degraded)} generic "
-                f"struct elaboration(s) failed, so this module's C is NOT the "
-                f"program its source describes and it is NOT being cached:\n"
-                + ''.join(f'    {d}\n' for d in degraded))
-        else:
-            cas.publish(key, '.ci', text.encode('utf-8'))
-    _stdlib_compile_cache[key] = text
-    return text
+    stdlib imports' signatures/layouts, so any stdlib edit invalidates too)."""
+    key = cas.stdlib_compile_key(src, path, module_name)
+    return cas.get_or_build_text(
+        key, '.ci', lambda: compile_module_to_c(src, path, module_name),
+        _stdlib_compile_cache)
 
 
 def _imported_sigs(src: str) -> list:
@@ -599,7 +456,7 @@ def _local_dep_fingerprint(path: str, dep_src_by_key: dict) -> str:
     and it never chases a re-export hop's own transitive imports. So a content
     change to a module imported only *transitively* (import graph
     game_engine -> recipes -> block_registry) left every importer's cached
-    object stale: `fire dylib` reported a fresh build yet the dylib kept the
+    object stale: `mojo dylib` reported a fresh build yet the dylib kept the
     previous `block_registry.NUM_CPP_BLOCKS` (BUG-2026-032, box.3d/game).
 
     `dep_src_by_key` maps every candidate import spelling (full module name,
@@ -826,9 +683,9 @@ class _OutputLock:
     same shape and the same reasoning as `formal/imports.py::_dylib_lock` (and
     the reason this helper is LOCAL to this module rather than shared with it:
     this file is in `mojoc`'s own compile closure — `cas.selfhost_inputs()`
-    lists it — and BLOW.md's root-cause record for the ~15.8 GB fixed
-    # compile-time blowup measured a self-host failure for exactly the
-    # cross-module function reference sharing one would mean).
+    lists it — and `_is_selfhost_source_dir`'s docstring in
+    `mojo/backend_gimple/module_gen.py` records a measured self-host failure
+    for exactly the cross-module function reference sharing one would mean).
 
     **Why a CLASS and not a `@contextlib.contextmanager` generator.** This was
     one, and it broke the self-host build at LINK time, so the shape is load-
@@ -868,7 +725,7 @@ class _OutputLock:
     Python's sake: in the compiled path a `with` item with NO `as` target
     contributes nothing to the teardown list, so `__exit__` is never called at
     all (measured; filed as
-    that bug's doc, deleted with its fix)."""
+    `bugs/CODEGEN_with_no_as_target_drops_exit.md`)."""
 
     fd: int
 
@@ -919,7 +776,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     `toolchain_fingerprint(gcc, ())` on their own carry NO optimization flag
     (gcc's implicit -O0), appropriate for the STDLIB dylib (compiled once,
     used everywhere, optimized for compile time / cache-friendliness) but not
-    for a `fire dylib`-built artifact meant to be linked into a real program
+    for a `mojo dylib`-built artifact meant to be linked into a real program
     and actually run at speed.
 
     `arch` is the architecture the dylib is FOR (default: the host's) and
@@ -1144,12 +1001,9 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         elif ('_' + e['name']) in all_defs:
             # The entry names a symbol the dylib really defines, but the
             # export-csym rule resolved it to a different one — see
-            # runtime_export_entries' report on why almost all of
-            # fire_runtime.h's 565 entry points are measured as misresolved on
-            # this tree, and why the fix is in reflect.export_csym rather than
-            # here. The exact figure is not written down here on purpose: it is
-            # printed by the report below on every build, so this comment cannot
-            # carry a second copy of a number the build measures for itself. A separate class from the
+            # runtime_export_entries' report on why that is measured at 433 of
+            # fire_runtime.h's 459 entry points today, and why the fix is in
+            # reflect.export_csym rather than here. A separate class from the
             # genuinely-orphaned entry below because nothing is missing here:
             # the definition is present and the table just is not naming it.
             _misresolved.append(f"{e['name']} -> {sym}")
@@ -1193,7 +1047,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     #
     # `as _lock_fd` is not decoration: it is what makes the compiled path emit
     # the `__exit__` call at all (see `_OutputLock`'s own note, and
-    # the doc for that, deleted with its fix).
+    # bugs/CODEGEN_with_no_as_target_drops_exit.md).
     with _OutputLock(out) as _lock_fd:
         if use_cache:
             # Re-checked under the lock: a caller that queued behind another
@@ -1460,20 +1314,15 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: of `fire_runtime.h`'s 580
-        entry points, only a handful survive `build_stdlib()`'s `nm`
-        cross-check, and the rest are dropped for exactly this reason. So the
-        stdlib dylib has never advertised most of the runtime entry points it
-        defines — including all of `mojo_str_*` and every function whose
-        parameters are not word-shaped. The figure is deliberately NOT written
-        down here: `format_export_report` prints the kept / misresolved /
-        undefined split on every build, so the number to read is the one the
-        build reports and this paragraph cannot go stale against it. (It did,
-        once: it said "only 26 of 459" for months after both counts had
-        moved.) The fix belongs in `reflect.export_csym` (agent [3]'s file;
-        see the INTERFACE REQUEST), and nothing here has to change when it
-        lands: an entry that resolves correctly passes this same check and is
-        advertised.
+        currently-live defect measured on this tree: with
+        `fire_runtime.h`'s 459 entry points, only 26 survive
+        `build_stdlib()`'s `nm` cross-check, and 433 are dropped for exactly
+        this reason. So the stdlib dylib has never advertised 433 runtime
+        entry points it defines — including all of `mojo_str_*` and every
+        function whose parameters are not word-shaped. The fix belongs in
+        `reflect.export_csym` (agent [3]'s file; see the INTERFACE REQUEST),
+        and nothing here has to change when it lands: an entry that resolves
+        correctly passes this same check and is advertised.
       * UNDEFINED — the header declares it and no object in the dylib defines
         it. Either a dead declaration (fire_runtime.h has six) or a prototype
         satisfied by whoever links against the dylib (`py_tokenize` is
@@ -1583,7 +1432,7 @@ def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1,
     # whole stdlib closure is already folded into each one's key via
     # cas.stdlib_fingerprint(). Per-module local-dep tracking would only
     # re-hash that same closure under a new key and force a needless full
-    # cold rebuild. It exists for `fire dylib` on a PROJECT's own file set
+    # cold rebuild. It exists for `mojo dylib` on a PROJECT's own file set
     # (BUG-2026-032), reached via driver.compile_dylib -> build(...).
     return build(stdlib_modules(), out, use_cache=use_cache, extra_exports=rt_exports,
                  jobs=jobs, track_local_deps=False, arch=arch)

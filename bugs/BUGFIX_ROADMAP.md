@@ -136,23 +136,16 @@ the number it was assigned when it was filed.
   heterogeneous list read with no kinds hands a double's IEEE-754 bit
   pattern to `strlen`), and the bound-method registry, which had no free
   at all until the closure-env work needed one.
-- the `struct` module and the `bytes` value type — both landed, and every
-  hard-bug report covering them has since been REMOVED per the
-  fully-fixed-is-deleted rule. The last of them,
-  `hard/CODEGEN_struct_kwargs_and_inline_unpack.md`, was deleted 2026-10-02:
-  both its items closed 2026-09-27 (keyword arguments bound per CPython
-  3.14's measured signature table — `_STRUCT_CALL_SIGS` in
-  `mojo/backend_gimple/emit_methods.py`; mixed int/float formats correct
-  through every statically-indexed read), and the residue it kept — a read
-  with no compile-time slot index has no single right C type in a
-  `MojoList`, and a `Struct` reached through a class attribute has no
-  recoverable format — **also closed 2026-09-29** by moving the per-slot
-  kinds onto the VALUE (a side table on the live `MojoList` address) and
-  boxing a read with no compile-time index (`mojo_list_set_kinds` /
-  `mojo_list_get_boxed` / `mojo_repr_boxed` in runtime/fire_runtime.c). The
-  mechanisms live in those definitions and in `_STRUCT_CALL_SIGS`. The
-  `f"{list}"`/`str(list)` gap found on the way was its own doc,
-  `CODEGEN_fstring_and_str_of_a_list_are_garbage.md`, also since deleted.
+- the `struct` module and the `bytes` value type — both landed, and their
+  hard-bug reports have since been removed per the fully-fixed-is-deleted
+  rule. `hard/CODEGEN_struct_kwargs_and_inline_unpack.md` had both its items
+  **closed 2026-09-27** (keyword arguments bound per CPython 3.14's measured
+  signature table; mixed int/float formats correct through every
+  statically-indexed read), and keeps only the residue it names: a read with
+  no compile-time slot index has no single right C type in a `MojoList`, and a
+  `Struct` reached through a class attribute has no recoverable format. The
+  `f"{list}"`/`str(list)` gap found on the way is its own doc,
+  `CODEGEN_fstring_and_str_of_a_list_are_garbage.md`.
   `hard/CODEGEN_bytes_silent_wrong_values.md` had **items 1-5 and 6b closed
   2026-09-27** (plus three more wrong values found on the way:
   `partition`'s swapped no-match arms, its empty-separator case, and four
@@ -181,72 +174,9 @@ the number it was assigned when it was filed.
   `dict | dict` has no static value type; and a cross-module symbol-name
   mismatch (`__itertools_only_<hash>` emitted where `_itertools_only_<hash>`
   is defined) that blocks a whole module. Each is ordered there by how likely
-  it is to bite real code. **#1 is closed in full and #2/#4 were already
-  fixed; only #3 remains, and it remains open BY CONSTRUCTION rather than by
-  decision** — its next action is "measure the blast radius
-  (`compile_stdlib.py`'s `U` count) before refusing a heterogeneous union",
-  and a whole-stdlib compile is not affordable in a light-worker session, so
-  taking it would mean refusing ~dozens of modules on no measurement at all.
-  That is the one thing CLAUDE.md's type-resolution warning is about, so the
-  honest state is "not started", not "half done".
-- **`work/bugs4-1`, 2026-10-02 — six compiled-path claims closed, one doc
-  deleted, three filed.** In claim order: a class defined inside a function had
-  no methods at all (`CODEGEN_class_defined_inside_a_function_has_no_methods.md`
-  **DELETED**, its residue becoming
-  `CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`, which is
-  still open and is the honest remainder); a `bool`-annotated struct field and
-  parameter (doc kept — `isinstance`/`type` still answer int, and that is
-  Option A, a `_TYPE_MAP` change with its own blast radius); a callable's
-  return type at two more hops; calling a function value held in a subscript;
-  a bare `import <sibling>` + `<sibling>.<free_fn>(...)` answering 0 on the
-  link/build path; and a callable-valued parameter called in an ordinary
-  generator. Two docs were filed rather than fixed from what those turned up:
-  `CODEGEN_generator_iterating_a_string_parameter_yields_nothing.md` and
-  `CODEGEN_calling_a_nested_def_fetched_from_a_container_answers_zero.md`.
-  A merge in the same batch left `gimple_codegen.GimpleGen` carrying the
-  `emit_dict_int_value_store` delegation TWICE — the merge was resolved file by
-  file, and `gimple_codegen.py` is the aggregator both copies of the shared
-  file fed. Python keeps the last, both bodies were identical, and no test could
-  see it, which is why another branch's doc read the same name as DROPPED and
-  filed four `bytes`-dict tests against `'GimpleGen' object has no attribute
-  '_emit_dict_int_value_store'` — an `AttributeError` during codegen that no
-  exit code anywhere reports. Deduplicated (so the doc's subject was never real
-  on this tree) and both halves closed: `test_gimple.py`'s `ast`-based
-  `no_name_is_defined_twice_in_a_codegen_class` reads the SOURCE rather than
-  the class object, which is exactly where the evidence is gone, and
-  `test_suite.py`'s "the backend never calls a gen method GimpleGen does not
-  have" now checks the whole delegation family rather than the one name. The
-  doc is deleted with the dedup.
-- **The nested-`def` closure environment is freed**
-  (`CODEGEN_closure_env_and_boxed_local_never_freed.md`, doc kept — its
-  OPEN 2, the `{mut}` capture box, is still open and is now the only thing in
-  it). This also found and fixed a **stale-read class of bug the ownership
-  analysis had everywhere**: the body a "how is this local USED?" question was
-  asked about was a second field that only `begin_function` assigned, so during
-  a lifted closure every such question was answered about some top-level
-  function's body instead of the closure's. It is one field now. Worth
-  knowing before trusting any ownership decision reached through a closure.
+  it is to bite real code.
 - `CODEGEN_noshim_dumpfull_preexisting_divergence.md` — already-active investigation, not a new queue item.
 - `hard/CODEGEN_generator_lambda_expr_unsupported.md` — deliberately guarded miscompile; only revisit with a new supported-shape design.
-
-## Claims triaged 2026-10-02 and left UNSTARTED, with the reason and the cost
-
-Three of `work/bugs4-1`'s claims are not waiting on understanding. Each is
-blocked on a budget this worker did not have, and each was checked against its
-own doc and the registry rather than re-derived — so a next session does not
-repeat the triage. **Nothing here is "half done": no code was written and no
-result is claimed.**
-
-| claim | state | what unblocks it, and what it costs |
-|---|---|---|
-| `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` (row 0) | the CODEGEN half landed 2026-09-26 and is verified; "still open 3" is **entirely inside `formal/`** (the `dec`-while and `range` models assume a non-negative counter, plus two named `sum_range` holes) | a session with `formal/` budget. `test_formal_run.py` is 91/91 today; the gap is model-level, and the shared piece is a reusable `Nat`-to-two's-complement signed-order lemma in ProofLib. |
-| `CODEGEN_bootstrap_resource_blowup.md` (row 1) | both cheap wins landed (`33f4b72d`); the remaining lever is per-module AST lifetime, untried, with the starting question written down (`_SELFHOST_PARSE_CACHE` and its three readers at three different pipeline points, so a bounded release scheme rather than a clear) | one `./mojoc` build plus the ~30-58 GB dump. `--dump-full` is already CAS-cached by real inputs, so `make native` is cheap to re-enter; the DUMP is not. |
-| `CODEGEN_ab_native_fails.md` | registered `disabled=` on purpose, and correctly: 20.5 GB measured, exclusive, every gate — which is `CLAUDE.md`'s own rule (a known failure too expensive to run gets `disabled=`, not `expect=`) | nothing until the python-vs-native codegen divergence it measures is worth 20.5 GB of an exclusive reservation. The doc is the switch, so a fix cannot land without re-enabling it. |
-
-The pattern worth carrying forward: all three are **known-shape, budget-blocked**
-work, and in each the doc already says what the next step is. The only thing
-that was missing was the statement "this was looked at and deliberately not
-started", which is what this table is.
 
 ## Working rules
 

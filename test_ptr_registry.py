@@ -353,12 +353,12 @@ static void test_dict_int_keys(void) {
      * never checked before 2026-09-30 because the whole harness's asserts were
      * compiled out by python3-config's -DNDEBUG (see _flags), so a stale
      * constant sat here unnoticed. */
-    assert(mojo_dict_pop_int_kw(d, 5, 0) == 51 && !mojo_dict_contains(d, "5") && !mojo_dict_contains_kw(d, 5));
-    assert(mojo_dict_pop_int(d, "7", 0) == 70 && !mojo_dict_contains_kw(d, 7));
-    assert(mojo_dict_pop_int_kw(d, 12345, -1) == -1);       /* absent: the DEFAULT, not 0 */
+    assert(mojo_dict_pop_int_kw(d, 5) == 51 && !mojo_dict_contains(d, "5") && !mojo_dict_contains_kw(d, 5));
+    assert(mojo_dict_pop_int(d, "7") == 70 && !mojo_dict_contains_kw(d, 7));
+    assert(mojo_dict_pop_int_kw(d, 12345) == 0);           /* absent */
     assert(mojo_dict_get_int(d, "007") == 1 && mojo_dict_get_bytes_int(d, b5) == 555 && d->used == 5);
-    assert(mojo_dict_pop_int(d, "007", 0) == 1 && d->used == 4);
-    assert(mojo_dict_pop_int(d, "+7", 0) == 2 && mojo_dict_pop_int(d, "-0", 0) == 3 && d->used == 2);
+    assert(mojo_dict_pop_int(d, "007") == 1 && d->used == 4);
+    assert(mojo_dict_pop_int(d, "+7") == 2 && mojo_dict_pop_int(d, "-0") == 3 && d->used == 2);
     assert(mojo_dict_get_int(d, "abc") == 99 && mojo_dict_get_bytes_int(d, b5) == 555);
     mojo_dict_free(d);
 
@@ -397,7 +397,7 @@ static void test_dict_int_keys(void) {
     for (int round = 0; round < 400000; round++) {
         int i = rand() % M; int op = rand() % 5;
         if (op == 0) { mojo_dict_set_int_kw(m, keyv[i], round); val[i] = round; present[i] = 1; }
-        else if (op == 1) { int64_t r = mojo_dict_pop_int_kw(m, keyv[i], 0); assert(r == (present[i] ? val[i] : 0)); present[i] = 0; }
+        else if (op == 1) { int64_t r = mojo_dict_pop_int_kw(m, keyv[i]); assert(r == (present[i] ? val[i] : 0)); present[i] = 0; }
         else if (op == 2) { assert(mojo_dict_contains_kw(m, keyv[i]) == present[i]); }
         else if (op == 3) { int64_t r = mojo_dict_setdefault_int_kw(m, keyv[i], 42);
                             if (!present[i]) { val[i] = 42; present[i] = 1; assert(r == 42); } else assert(r == val[i]); }
@@ -423,7 +423,7 @@ static void test_dict_set_inline(void) {
     mojo_list_free(ks);
     char *k0 = mojo_dict_slot_key(&d, 0); (void)k0;
     /* pop inside the inline table keeps the survivors and their order, and stays inline */
-    assert(mojo_dict_pop_int_kw(&d, 101, 0) == 1 && d.used == 3 && d.slots == d.inl);
+    assert(mojo_dict_pop_int_kw(&d, 101) == 1 && d.used == 3 && d.slots == d.inl);
     assert(mojo_dict_get_int_kw(&d, 100) == 0 && mojo_dict_get_int_kw(&d, 102) == 2 && mojo_dict_get_int_kw(&d, 103) == 3);
     /* a copy and an update read integer slots without text */
     MojoDict *cp = mojo_dict_copy(&d);
@@ -449,7 +449,7 @@ static void test_dict_set_inline(void) {
         MojoDict e; mojo_dict_init(&e);
         mojo_dict_set_int(&e, "a", 1); mojo_dict_set_int(&e, "b", 2); mojo_dict_set_int(&e, "7", 3);
         assert(e.slots == e.inl && mojo_dict_get_int(&e, "b") == 2 && mojo_dict_get_int_kw(&e, 7) == 3);
-        assert(mojo_dict_pop_int(&e, "a", 0) == 1 && mojo_dict_pop_int(&e, "7", 0) == 3 && mojo_dict_get_int(&e, "b") == 2);
+        assert(mojo_dict_pop_int(&e, "a") == 1 && mojo_dict_pop_int(&e, "7") == 3 && mojo_dict_get_int(&e, "b") == 2);
         mojo_dict_clear(&e); assert(e.used == 0 && !mojo_dict_contains(&e, "b"));
         mojo_dict_set_int(&e, "c", 4); assert(mojo_dict_get_int(&e, "c") == 4);
         mojo_dict_destroy(&e);
@@ -612,207 +612,6 @@ static void test_boxed_str_discrimination(void) {
     }
 }
 
-/* A CONTAINER used as a dict key keys by its VALUE
- * (CODEGEN_tuple_dict_key_hashed_by_address). This is the runtime
- * half of that fix and it is here rather than only in the gimple runner
- * because two of its properties are invisible to a stdout comparison: the
- * key string must be RELEASABLE (`mojo_cstr_or_int_release` has to tell a
- * content key apart from a pool block, and pooling one would hand it out
- * later as some integer's scratch), and a lookup must not leak. The ASan
- * variant is what would catch either mistake -- a double free, a use of a
- * pooled block, or the +78 B/lookup the walker had before its intermediate
- * buffers were released. */
-static void test_dict_container_keys(void) {
-    /* two separately-built equal tuples, with the string slot in DIFFERENT
-     * buffers -- the whole point: an address-keyed dict misses here, and a
-     * key that merely happened to share one string literal would not */
-    MojoList *a = mojo_list_new();
-    char *sa1 = strdup("alpha");
-    mojo_list_append_str(a, sa1);
-    mojo_list_append_int(a, 1);
-    mojo_mark_as_tuple(a);
-    MojoList *b = mojo_list_new();
-    char *sb1 = strdup("alpha");
-    mojo_list_append_str(b, sb1);
-    mojo_list_append_int(b, 1);
-    mojo_mark_as_tuple(b);
-    assert(a != b);
-    int64_t wa = (int64_t)(intptr_t)a, wb = (int64_t)(intptr_t)b;
-
-    char *ka = mojo_cstr_or_int_str(wa);
-    char *kb = mojo_cstr_or_int_str(wb);
-    /* Python's own spelling, because the key IS that text now */
-    assert(strcmp(ka, "('alpha', 1)") == 0);
-    assert(strcmp(ka, kb) == 0);
-
-    MojoDict *d = mojo_dict_new();
-    mojo_dict_set_int(d, ka, 42);
-    assert(mojo_dict_get_int(d, kb) == 42);
-    assert(mojo_dict_contains(d, kb));
-    /* a MISS must not create an entry -- the growth this bug caused */
-    MojoList *m = mojo_list_new();
-    char *sm1 = strdup("absent");
-    mojo_list_append_str(m, sm1);
-    mojo_list_append_int(m, 1);
-    mojo_mark_as_tuple(m);
-    char *km = mojo_cstr_or_int_str((int64_t)(intptr_t)m);
-    assert(!mojo_dict_contains(d, km));
-    assert(d->used == 1);
-    /* ...and must not leak either: the same key string, rendered and dropped,
-     * many times over. */
-    for (int i = 0; i < 20000; i++) {
-        char *k = mojo_cstr_or_int_str((int64_t)(intptr_t)m);
-        mojo_cstr_or_int_release((int64_t)(intptr_t)m, k);
-    }
-    /* releasing a content key must not put it in the transient pool: the next
-     * integer key still gets a block of its own, and the dict is unharmed */
-    char *ik = mojo_cstr_or_int_str(5);
-    assert(strcmp(ik, "5") == 0);
-    mojo_cstr_or_int_release(5, ik);
-    assert(mojo_dict_get_int(d, kb) == 42);
-    mojo_cstr_or_int_release(wa, ka);
-    mojo_cstr_or_int_release(wb, kb);
-    mojo_cstr_or_int_release((int64_t)(intptr_t)m, km);
-
-    /* a nested tuple: the inner list must be walked, not addressed, or the two
-     * builds below key differently */
-    MojoList *inner1 = mojo_list_new();
-    char *si1 = strdup("x");
-    mojo_list_append_str(inner1, si1);
-    mojo_list_append_int(inner1, 0);
-    mojo_mark_as_tuple(inner1);
-    MojoList *inner2 = mojo_list_new();
-    char *si2 = strdup("x");
-    mojo_list_append_str(inner2, si2);
-    mojo_list_append_int(inner2, 0);
-    mojo_mark_as_tuple(inner2);
-    MojoList *outer1 = mojo_list_new(), *outer2 = mojo_list_new();
-    mojo_list_append_int(outer1, (int64_t)(intptr_t)inner1);
-    char *so1 = strdup("y");
-    mojo_list_append_str(outer1, so1);
-    mojo_mark_as_tuple(outer1);
-    mojo_list_append_int(outer2, (int64_t)(intptr_t)inner2);
-    char *so2 = strdup("y");
-    mojo_list_append_str(outer2, so2);
-    mojo_mark_as_tuple(outer2);
-    char *o1 = mojo_cstr_or_int_str((int64_t)(intptr_t)outer1);
-    char *o2 = mojo_cstr_or_int_str((int64_t)(intptr_t)outer2);
-    assert(strcmp(o1, "(('x', 0), 'y')") == 0);
-    assert(strcmp(o1, o2) == 0);
-    mojo_cstr_or_int_release((int64_t)(intptr_t)outer1, o1);
-    mojo_cstr_or_int_release((int64_t)(intptr_t)outer2, o2);
-
-    /* a list with recorded kinds is read through the kinds-aware walker, so a
-     * float slot is a float and not its IEEE-754 bit pattern */
-    MojoList *mixed = mojo_list_new();
-    char *smf = strdup("f");
-    mojo_list_append_str(mixed, smf);
-    mojo_list_append_double(mixed, 2.5);
-    mojo_mark_as_tuple(mixed);
-    mojo_list_set_kinds(mixed, "pd");
-    char *mk = mojo_cstr_or_int_str((int64_t)(intptr_t)mixed);
-    assert(strcmp(mk, "('f', 2.5)") == 0);
-    mojo_cstr_or_int_release((int64_t)(intptr_t)mixed, mk);
-
-    /* the empty tuple, and a tuple whose only slot is a string, because both
-     * are shapes a slot loop can get wrong at the boundary */
-    MojoList *empty = mojo_list_new();
-    mojo_mark_as_tuple(empty);
-    char *ek = mojo_cstr_or_int_str((int64_t)(intptr_t)empty);
-    assert(strcmp(ek, "()") == 0);
-    mojo_cstr_or_int_release((int64_t)(intptr_t)empty, ek);
-    MojoList *one = mojo_list_new();
-    char *sso = strdup("solo");
-    mojo_list_append_str(one, sso);
-    mojo_mark_as_tuple(one);
-    char *ok = mojo_cstr_or_int_str((int64_t)(intptr_t)one);
-    assert(strcmp(ok, "('solo',)") == 0);   /* the single-element trailing comma */
-    mojo_cstr_or_int_release((int64_t)(intptr_t)one, ok);
-
-    /* The harness runs under ASan, whose leak check runs at exit, so every
-     * allocation this group makes is released here: the strdup'd slot strings
-     * (mojo_list_append_str stores the pointer it is given and never copies
-     * it) and the lists, whose `_reg_list`/`_reg_tuple` entries are removed by
-     * mojo_list_destroy -- a stale registration would let a LATER allocation
-     * alias a live key, which is the failure this whole doc is about. */
-    MojoList *all[] = {a, b, m, inner1, inner2, outer1, outer2, mixed, empty, one};
-    for (unsigned i = 0; i < sizeof all / sizeof *all; i++) mojo_list_free(all[i]);
-    char *owned[] = {sa1, sb1, sm1, si1, si2, so1, so2, smf, sso};
-    for (unsigned i = 0; i < sizeof owned / sizeof *owned; i++) free(owned[i]);
-    mojo_dict_free(d);
-}
-
-/* `mojo_read_type_tag`/`_safe` read eight bytes at an address and used to
- * return them UNVALIDATED. A `char *` is a valid 8-aligned allocation of at
- * least 8 bytes, so a heap string passed the address guard and its first
- * eight CHARACTERS came back as an "identity" -- and an identity in
- * [2^31, 2^47) is a value every pointer predicate in the runtime accepts, so
- * the dict keyed by it dereferenced an address that was never mapped.
- * Measured on the self-hosted compiler's own AST walk: `type(node)` over a
- * plain `str` field of a node returned the bytes of "print"
- * (0x746e697270) and `_WALK_DATACLASS_CACHE.get(...)` SIGSEGVed
- * (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
- *
- * A tag is 31 bits by construction (`_struct_type_id` is
- * `h * 31 + c & 2147483647`), so this group pins the shape directly: a real
- * struct's tag comes back, and a string's characters do not. */
-typedef struct { int64_t __mojo_type_id; int payload; } TagProbe;
-
-static TagProbe *tag_probe(int64_t tag)
-{
-    /* malloc'd, deliberately: `_mojo_tagged_addr_ok` requires the address to
-     * be a real allocation (`MOJO_MALLOC_USABLE_SIZE >= sizeof(int64_t)`), so
-     * a STACK copy of the same struct is refused and answers 0. That is the
-     * reader's existing contract, not something this group changes. */
-    TagProbe *p = (TagProbe *)malloc(sizeof *p);
-    p->__mojo_type_id = tag;
-    p->payload = 1;
-    return p;
-}
-
-static void test_type_tag_read(void) {
-    /* a real struct: the tag is the caller's own, unchanged */
-    TagProbe *probe = tag_probe(0x2A5B3C71LL);
-    assert(mojo_read_type_tag((int64_t)(intptr_t)probe) == 0x2A5B3C71LL);
-    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)probe) == 0x2A5B3C71LL);
-    free(probe);
-
-    /* the same struct through a `calloc`, which is how a probe harness spells
-     * one and which zeroes the tag -- 0 is "no tag", which stays 0 */
-    TagProbe *zeroed = (TagProbe *)calloc(1, sizeof *zeroed);
-    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)zeroed) == 0);
-    free(zeroed);
-
-    /* NOT a struct: a heap string whose first eight bytes are a value no tag
-     * can be. Before the check this came back as that value, and a caller
-     * using it as a key dereferenced it. */
-    char *s = (char *)malloc(16);
-    memcpy(s, "print\0\0\0", 8);
-    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)s) == 0);
-    assert(mojo_read_type_tag((int64_t)(intptr_t)s) == 0);
-    free(s);
-
-    /* the widest and narrowest tags are both still tags: 1 and 2^31-1 */
-    TagProbe *lo = tag_probe(1);
-    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)lo) == 1);
-    free(lo);
-    TagProbe *hi = tag_probe(0x7fffffffLL);
-    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)hi) == 0x7fffffffLL);
-    free(hi);
-    /* and one bit past the range is not a tag: this is the boundary the fix
-     * draws, and `2^31` is the value a four-character string can produce */
-    TagProbe *over = tag_probe(0x80000000LL);
-    assert(mojo_read_type_tag_safe((int64_t)(intptr_t)over) == 0);
-    free(over);
-
-    /* the values that were never tags stay 0 -- small scalars, None, and the
-     * 31-bit range itself (a tag used as an ADDRESS) */
-    assert(mojo_read_type_tag_safe(0) == 0);
-    assert(mojo_read_type_tag_safe(1) == 0);
-    assert(mojo_read_type_tag_safe(65536) == 0);
-    assert(mojo_read_type_tag_safe(0x7fffffffLL) == 0);
-}
-
 int main(int argc, char **argv) {
     const char *only = (argc > 1) ? argv[1] : NULL;
     int ran = 0;
@@ -824,8 +623,6 @@ int main(int argc, char **argv) {
     GROUP("dict_int_keys", test_dict_int_keys)
     GROUP("dict_set_inline", test_dict_set_inline)
     GROUP("dict_float_keys", test_dict_float_keys)
-    GROUP("dict_container_keys", test_dict_container_keys)
-    GROUP("type_tag", test_type_tag_read)
     GROUP("boxedstr", test_boxed_str_discrimination)
 #undef GROUP
     if (!ran) { fprintf(stderr, "no such group: %s\n", only); return 2; }
@@ -931,8 +728,7 @@ def _build_and_run(tmp, cc, opt, extra=(), group=None):
 # carrying an `expect=` with a reason and a bug-doc link, so a fix for it turns
 # into a FAILURE of that marker (drop the marker) instead of a silent no-op.
 GREEN_GROUPS = ("ptrreg", "kinds_table", "list_inline", "dict_and_itoa",
-                "dict_int_keys", "dict_set_inline", "dict_float_keys",
-                "dict_container_keys", "type_tag")
+                "dict_int_keys", "dict_set_inline", "dict_float_keys")
 KNOWN_BAD_GROUPS = ("boxedstr",)
 
 

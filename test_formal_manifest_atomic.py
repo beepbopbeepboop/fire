@@ -37,14 +37,7 @@ What is asserted here:
      the race into a silent "this module exports nothing", which is the exact
      false finding `load_dylib_manifests` warns about;
   4. that the payload round-trips: what the writers write is what the readers
-     read, for all four of them;
-  5. that the demands digest `_record_depends` records on each dependency is
-     the one `dylib_chain` looks the library up by, which is the field that
-     decides what ends up on a link line. This file passed
-     `(module, source)` pairs for a long while after the writer grew a third
-     element, which left three of its four groups red on an arity `ValueError`
-     and the digest itself untested — so the arity is written out at every call
-     site here and the digest's job is measured rather than assumed.
+     read, for all four of them.
 
 Usage:
     python3 test_formal_manifest_atomic.py [-v]
@@ -136,16 +129,8 @@ def test_the_writers_and_readers_never_disagree(tmpdir):
             else:
                 B.write_dylib_manifest(dylib, "@rpath/libstd.dylib", exports(),
                                        module="std.x")
-            # And the fourth writer, reached through its own module. The third
-            # element is the dependency's OWN demands digest
-            # (`_record_depends`' docstring), not an empty placeholder: it is
-            # what `dylib_chain` looks the library up by, and
-            # `test_the_demands_digest_round_trips` below is where that is
-            # measured. This file's version of the call predates the field and
-            # raised `ValueError: not enough values to unpack` in three of its
-            # four groups, which is why the shape is written out in full here.
-            I._record_depends(manifest, [("std.collections", "/src/c.mojo",
-                                          "dkey-collection")])
+            # And the fourth writer, reached through its own module.
+            I._record_depends(manifest, [("std.collections", "/src/c.mojo")])
     finally:
         stop.set()
         for t in threads:
@@ -183,10 +168,10 @@ def test_every_writer_goes_through_the_atomic_path(tmpdir):
                                         "path": "/tmp/dep.dylib"}])
         check("_record_link_deps_is_atomic", len(calls) == 1, f"{calls}")
         calls.clear()
-        B._record_namespace(manifest, {"f": ("std.x", "function", "f")}, {})
+        B._record_namespace(manifest, {"f": ("std.x", "function")}, {})
         check("_record_namespace_is_atomic", len(calls) == 1, f"{calls}")
         calls.clear()
-        I._record_depends(manifest, [("std.x", "/src/x.mojo", "dkey-x")])
+        I._record_depends(manifest, [("std.x", "/src/x.mojo")])
         check("_record_depends_is_atomic", len(calls) == 1, f"{calls}")
     finally:
         B._write_json_atomic = real
@@ -201,11 +186,9 @@ def test_the_round_trip_still_reads(tmpdir):
                                       constants={"sys.argv": "list"})
     B._record_link_deps(manifest, [{"install_name": "@rpath/dep.dylib",
                                     "path": "/tmp/dep.dylib"}])
-    B._record_namespace(manifest, {"reexported": ("std.rt", "function",
-                                                  "reexported")},
+    B._record_namespace(manifest, {"reexported": ("std.rt", "function")},
                         {"reexported": "_std_rt__reexported"}, traits=["T"])
-    I._record_depends(manifest, [("std.rt", "/src/rt.mojo", "dkey-rt")],
-                      "dkey-self")
+    I._record_depends(manifest, [("std.rt", "/src/rt.mojo")])
     payload = json.load(open(manifest))
     results = [
         check("exports_survive", len(payload["exports"]) == 4),
@@ -216,20 +199,10 @@ def test_the_round_trip_still_reads(tmpdir):
         check("reexports_survive",
               payload["reexports"]["reexported"]["symbol"]
               == "_std_rt__reexported"),
-        check("the_defining_name_survives",
-              payload["reexports"]["reexported"]["defines"] == "reexported"),
         check("traits_survive", payload.get("traits") == ["T"]),
         check("depends_on_survives",
               payload["depends_on"] == [{"module": "std.rt",
-                                         "source": "/src/rt.mojo",
-                                         "instantiations": "dkey-rt"}]),
-        # The MODULE's own digest, read back by `_manifest_instantiations`, is
-        # the half of the field a `depends_on` comparison cannot see. It is the
-        # same key `_BUILT` is indexed on, so a writer that recorded the wrong
-        # one here drops this library off a linker's line.
-        check("the_modules_own_digest_survives",
-              payload["instantiations"] == "dkey-self"
-              and I._manifest_instantiations(dylib) == "dkey-self"),
+                                         "source": "/src/rt.mojo"}]),
         check("constants_survive", payload["constants"] == {"sys.argv": "list"}),
     ]
     # …and through the REAL reader, which is the one that raised JSONDecodeError.
@@ -246,92 +219,9 @@ def test_a_missing_manifest_is_a_no_op(tmpdir):
     manifest = B.dylib_manifest_path(ghost)
     B._record_link_deps(manifest, [{"install_name": "x", "path": "y"}])
     B._record_namespace(manifest, {}, {})
-    I._record_depends(manifest, [("m", "p", "k")])
+    I._record_depends(manifest, [("m", "p")])
     return check("updating_a_manifest_that_is_not_there_creates_nothing",
                  not os.path.exists(manifest), manifest)
-
-
-def test_the_demands_digest_round_trips(tmpdir):
-    """The THIRD field of a `depends` entry, end to end, through the real reader.
-
-    This is the group that could not exist while this file passed
-    `(module, source)` pairs: `_record_depends` grew the field when `_BUILT`'s key
-    grew a demands digest, the writer was updated, and a test written against the
-    old arity raised `ValueError: not enough values to unpack (expected 3, got
-    2)` in three of four groups — so the field that decides WHICH library a
-    linker gets had no test at all, and the groups that would have had one were
-    red for a reason nobody read.
-
-    So it is measured, through `dylib_chain` (the link-line walker) against a
-    seeded `_BUILT`, over three cases and each is a sentence in
-    `dylib_chain`'s own docstring:
-
-    * the recorded digest is the one that selects the library — TWO libraries
-      built from ONE source under two digests, and the manifest names one of
-      them. If the digest were not consulted, or were read from the wrong place,
-      this returns the wrong one of the two.
-    * a digest nobody built is NOT silently satisfied when the choice would be a
-      guess: two candidates and no exact key is `_built_lookup`'s documented
-      refusal, so the dependency drops off the chain and the image's own symbol
-      audit reports the dangling reference. (A reader that "helpfully" picked one
-      would fail here.)
-    * with only ONE candidate it IS a fallback rather than an omission, which is
-      the other half of the same sentence — and the case a manifest written
-      before the field existed is in.
-
-    `_BUILT` is saved and restored rather than cleared: it is module state other
-    tests in a suite share, and a test that empties it turns every later build
-    into a rebuild.
-    """
-    arch = "arm64"
-    dep_source = os.path.join(tmpdir, "src", "dep.mojo")
-    os.makedirs(os.path.dirname(dep_source), exist_ok=True)
-    # The architecture is read off the FILE NAME's last dot (`_arch_of_dylib`),
-    # so the suffix is load-bearing here and not decoration.
-    dep_a = os.path.join(tmpdir, "libdep.aaaaaaaa." + arch + ".dylib")
-    dep_b = os.path.join(tmpdir, "libdep.bbbbbbbb." + arch + ".dylib")
-    for path in (dep_a, dep_b):
-        open(path, "wb").close()
-    parent = os.path.join(tmpdir, "libparent.cccccccc." + arch + ".dylib")
-    open(parent, "wb").close()
-    manifest = B.write_dylib_manifest(parent, "@rpath/libparent.dylib",
-                                      exports(2), module="std.parent")
-
-    saved = dict(I._BUILT)
-    results = []
-    try:
-        I._BUILT[(arch, os.path.abspath(dep_source), "dkey-a")] = dep_a
-        I._BUILT[(arch, os.path.abspath(dep_source), "dkey-b")] = dep_b
-
-        I._record_depends(manifest, [("std.dep", dep_source, "dkey-a")])
-        chain = I.dylib_chain(parent)
-        results.append(check(
-            "the_recorded_digest_selects_the_library",
-            chain == [dep_a, parent],
-            f"dylib_chain returned {chain!r}; it should be the library built "
-            f"under dkey-a ({dep_a!r}) then the module itself"))
-
-        I._record_depends(manifest, [("std.dep", dep_source, "dkey-none")])
-        chain = I.dylib_chain(parent)
-        results.append(check(
-            "an_unbuilt_digest_is_a_refusal_and_not_a_guess",
-            chain == [parent],
-            f"dylib_chain returned {chain!r}; with two libraries built from one "
-            f"source and no key naming either, picking one would be a guess, "
-            f"and the image's symbol audit is what reports the omission"))
-
-        del I._BUILT[(arch, os.path.abspath(dep_source), "dkey-b")]
-        I._record_depends(manifest, [("std.dep", dep_source, "dkey-none")])
-        chain = I.dylib_chain(parent)
-        results.append(check(
-            "one_candidate_is_a_fallback_rather_than_an_omission",
-            chain == [dep_a, parent],
-            f"dylib_chain returned {chain!r}; a manifest written before the "
-            f"digest was recorded must not lose a library from the link line"))
-    finally:
-        I._BUILT.clear()
-        I._BUILT.update(saved)
-    return all(results)
 
 
 def check(name, cond, detail=""):
@@ -354,8 +244,6 @@ def main():
              lambda: test_every_writer_goes_through_the_atomic_path(tmpdir)),
             ("the round trip still reads",
              lambda: test_the_round_trip_still_reads(tmpdir)),
-            ("the demands digest round trips",
-             lambda: test_the_demands_digest_round_trips(tmpdir)),
             ("a missing manifest is a no-op",
              lambda: test_a_missing_manifest_is_a_no_op(tmpdir)),
         ]

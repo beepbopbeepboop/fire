@@ -5,14 +5,6 @@ path and the word is a tag, so `t == Int32` is an integer comparison, a type
 crosses a call boundary, and a `dtype: DType` field holds one. Both
 architectures, tested against CPython and against the interpreter.
 
-**Updated 2026-10-03 (`work/formal16-8`): §5's `DType`-ANNOTATED-FIELD item is
-CLOSED (the `DTYPE_TYPE_NAMES` row, measured before/after on both architectures
-on six shapes, with the numbers in §5), and measuring it found a real defect the
-item had only gestured at — a subscript on a frame slot is a pointer
-dereference, and the two backends disagree about it. One item is left and it is
-a limit rather than work: `DType` as a VALUE needs storage this image does not
-have.** Everything else below is unchanged.
-
 **Coverage: 0 of the 4 reachable files reach `pass`, and 1 of the 5 the 2026-09-30
 sweep named is no longer reachable at all.** Both numbers are measured below, not
 argued, and both are worth reading before anyone plans against this construct.
@@ -48,7 +40,7 @@ arm64 and 0 on x86-64 where the source says 5
 Every clause of that sentence is false about this program. `bool` is not a name
 that was left without a register: it is a TYPE, the source says so where it
 stands, and there is no register question about it. This is the outcome
-`test_refusal_taxonomy.py` calls the worst one — **a refusal
+`bugs/FORMAL_frame_receiver_handoff.md` §4 calls the worst one — **a refusal
 whose stated reason is entirely false** — and a reader sent to the allocator for
 `bool` goes and looks at `_load_var` and finds nothing, because the walk is
 asking the wrong question.
@@ -173,7 +165,7 @@ So: of the four reachable files, the three that moved share ONE next question
 (the bracketed callee in `random.mojo`, which they reach through the same import
 chain) and the fourth has another (a read-before-store). **None of them is this
 construct.** The honest reading of the count is the same one
-the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` §3.1 reached for the `L[T]()` half of
+`bugs/FORMAL_sweep_work_map_2026-09-30.md` §3.1 reached for the `L[T]()` half of
 the same row: the row's "41 files" was one false diagnostic, a dylib export rule,
 a bare-type-name rule and premise B2 — and this document is the bare-type-name
 rule, which is the smallest of the four.
@@ -206,65 +198,30 @@ notes are for is the merge, and each says which way it cuts.
 
 ## 5. What is still open, each with its next step
 
-**The first two entries below CLOSED on 2026-10-01**, together, because they are
-one decision: a type is a value, so it is a KIND. `formal/model.py` has
-`TYPE_KIND`; `ValueKinds.name_kind` returns it for a name no local and no module
-global binds (last, which is the guard — `a_local_named_like_a_type_still_wins`
-cannot regress); `len_refusal` has the row the `None` branch was faking; and
-`model.type_index_refusal` is the sibling of `string_index_refusal` one level up.
-`test_formal_run.py`: `len_of_a_type_is_refused` is now `refuse_without:` (the
-same program, asserting the false sentence is GONE and a type-specific one
-replaced it), plus a bound-local `len` row, three index rows (list, bound local,
-string base) and `TYPE_VALUE_NUMBER_CASES` — two `print` rows whose expected
-answer is `type_tag("bool")` read from the model, because a tag IS a word and
-`print()` must keep printing it (`model.is_number_kind`).
-
-**The filing's prediction for the subscript half was wrong in a way worth
-recording: it is not a wrong number.** §5 below said `xs[bool]` "would read a
-blob at a tag-derived offset instead of refusing". Measured on this tree, both
-architectures, before the change:
-
-| program | arm64 | x86-64 |
-|---|---|---|
-| `xs = [10, 20, 30]; printf("%d", xs[bool])` | exit **1**, nothing printed | exit **1**, nothing printed |
-| `s = "abc"; printf("%d", s[bool])` | **SIGSEGV** | **SIGSEGV** |
-
-The bounds check gets there first — a tag is a large positive 63-bit hash, so it
-is out of range for a three-element blob and takes the out-of-range exit. So the
-defect was a silent *exit* on a program a reader can write, which is still a
-defect (no diagnostic at all, on both architectures, for a program whose failure
-is at build time on CPython with `TypeError: list indices must be integers or
-slices, not type`) but is not the plausible-looking wrong number the rest of
-this file is about. `s[bool]` segfaulting is the worse half and it is the one
-that made the fix worth doing: a string index is `s + i` on a bare `char *` and
-there is no bounds check to catch a tag.
-
-Also measured while doing it, and **a widening this change introduced on purpose**:
-`print(bool)` in the BARE position was refused outright before it ("print()
-cannot tell whether IdentExpr is a string or a number") and now prints the tag,
-which is the same word `print(t)` for `t = bool` already printed. That is the
-same widening the construct already made for `t`, so leaving the bare spelling
-refused would have been the inconsistency rather than the safety.
-
-### Still open
-
-**Update 2026-10-03: the third item is CLOSED.** The float8/float6/float4 formats
-and `UInt128` — 202 corpus spellings, every one of them refused as "a name no
-table in `formal/model.py` lists" — are named in `TYPE_VALUE_NAMES`, so
-`DType.float8_e4m3fn` is the same word `Float8_e4m3fn` is. They are a CLOSED list
-and not a shape rule, and that is the whole of the condition the doc's §2 argued
-for: `type_value_name_space()` stays finite (67 names), so
-`type_value_tags_are_distinct` stays a proof over every pair, and a member
-outside the list is still refused with its own name — `an_unknown_dtype_member_
-is_refused_by_name` now uses `DType.float8_e7m0fnu`, which the corpus does not
-write, because the corpus's own spellings are answered. Two rows in
-`test_formal_run.py`: every format's member and bare name are the same word and
-two different formats are different words, and the tags themselves compared
-against `model.type_tag` rather than against literals.
-
-The other two items are unchanged and are still limits rather than work in this
-tree.
-
+* **`len()` of a type is refused with the wrong reason.** `len(bool)` and
+  `len(List)` get "the source does not say what this operand holds … Annotate it
+  (`x: String`) or bind it to a list" — true as far as it goes (a tag is neither
+  a `char *` nor a counted blob, so both of the two things `len` can answer are
+  correctly declined) and false in the only clause that matters for the reader,
+  because the source does say what the operand holds: it says `bool`. **This is
+  pre-existing and unchanged by this change** — measured with the four
+  production files reverted, byte-identical either way — so it is here as an
+  inherited imprecision, not as something this construct introduced.
+  **Next step:** three lines in each backend's `_emit_len`, before
+  `M.len_refusal` — ask `M.type_value_tag(operand)` and raise a message that says
+  a type is not a container. Deliberately not done here: it is a fourth
+  diagnostic for a program that cannot mean anything, and the two arms would have
+  to agree on it.
+* **A type is classified as an `int`, or as nothing at all.** `ValueKinds` has no
+  `TYPE_KIND`: a bare type-name read is unclassified (None — which is why `len` of
+  one takes its "the source does not say" branch above), and a LOCAL bound to a
+  type is an integer by `_value_kind`'s word default. So a subscript by one
+  (`xs[bool]`) would read a blob at a tag-derived offset instead of refusing.
+  **Next step:** a `TYPE_KIND` in `formal/model.py` plus the two
+  `if kind == M.INT_KIND` format switches in the backends, which is why it is a
+  separate piece of work and not a line in this one. Nothing a program that
+  typechecks can observe today: a subscript by a type is not a program, and this
+  path already computes an answer for `1[0]`.
 * **`DType` as a value is a refusal, and that is a real limit.** A program that
   wants the runtime type object — `DType(Int32)`, `dtype.name`, `dtype.is_signed()`
   — still has no answer, and `formal/model.py`'s `POINTEES_REFUSED` already
@@ -272,68 +229,19 @@ tree.
   object needs storage this image does not have (it is a pointer to something),
   so it is the same class of question as `FORMAL_string_value_model.md` and
   belongs to whoever owns the value model.
-* ~~**A `DType`-ANNOTATED field is still not `TYPE_KIND`.** `declared_type_kind`
-  answers `String` and the integer names and a framed struct and a blob, and
-  `DType` is none of those, so `b.t` for `var t: DType` is unclassified while
-  `t = DType.int32` in a local is now a tag. **Deliberately left**, and the
-  reason is the direction of the risk: the annotation is the one thing this path
-  trusts about a slot, so making a declared `DType` field a tag would let
-  `len(self.t)` and `self.t[i]` take a new branch on a shape the corpus uses
-  (`std/testing/prop/random.mojo` and `func_attribute.mojo` both declare
-  `dtype: DType`) for no gain — the two operations are refused either way, only
-  with different sentences. **Next step**, if a reader wants it: a row in
-  `declared_type_kind`, agreed over the holder's candidates like every other row
-  there.~~ **CLOSED 2026-10-03** — `formal/types.py`'s `DTYPE_TYPE_NAMES`
-  (`{"DType"}`) is the fourth vocabulary, `declared_type_kind` reads it, and it
-  is threaded from both backends through the four readers of a field's declared
-  kind (`struct_field_kind` → `frame_slot_field_kind` and
-  `one_word_receiver_kind`, which is `ValueKinds.declared_kind`), so the
-  agree-or-refuse the item asked for applies unchanged: it is
-  `frame_slot_field_kind`'s, and a single candidate goes through the same rule
-  as several. `frame_slot_value_refusal` gains the fourth row so the slot path
-  does not fall through to "the source does not say what this operand holds".
-
-  **The prediction above held exactly, and that is the measurement worth
-  having.** On six shapes (`var d: DType = 5` and `var d: DType` + an `__init__`
-  that assigns it, each read by `printf`, by bare `print`, by `len()` and by a
-  subscript, plus the one-word-receiver spelling), before and after, on both
-  architectures: **the only differences are in the two `len()` sentences**, so
-  nothing is newly refused, and the `print()` widening the item did not predict
-  does not occur — `print()` consults the slot's recorded VALUE kind, and both
-  spellings already printed the tag. `len(self.d)`: "classified as 'int', and an
-  integer has no length" → "this slot's DECLARED type is 'DType' … not a string
-  and not a container, so there is no length of it to ask for". `len(self)` on a
-  one-word `S`: "classified as 'int'" → "is len() of a TYPE, and on this path a
-  type in a value position is one 64-bit TAG".
-
-  **The subscript half of the sentence is worse than a wrong message, and is
-  filed separately**: `self.t[i]` on a `DType`-annotated field is a SIGSEGV on
-  x86-64 with the field annotated `Int` as well, and a SIGSEGV on BOTH
-  architectures when the field is constructor-established — see
-  commit f0df70b2.
-  That is not a consequence of this row (measured identical with and without it);
-  it is what the item's "takes a new branch on a shape the corpus uses" was
-  pointing at, and the branch it takes is the one that dereferences the slot.
-* ~~**The float8/float4 family and `uint128`** (§2's table). 202 corpus
-  spellings, one entry each in `TYPE_VALUE_NAMES`, and the distinctness check
-  grows with it by construction.~~ **CLOSED 2026-10-03** — see the note above
-  this list; the name space is 67 names and the check is asked over all of it at
-  import of `test_formal_run.py` and again inside the emitted image
-  (`every_type_tag_is_distinct`).
+* **The float8/float4 family and `uint128`** (§2's table). 202 corpus spellings,
+  one entry each in `TYPE_VALUE_NAMES`, and the distinctness check grows with it
+  by construction.
 
 ## 6. Verification
 
-| command | this change | the 2026-10-01 follow-up (`TYPE_KIND`) |
-|---|---|---|
-| `python3 test_formal_run.py` | **PASS=401 FAIL=0**, of which 13 are the new cases below | **PASS=533 FAIL=5** — the same five fail on `master` (four `byref_cross_module_*`, one `a_mutated_module_global_is_refused`), measured by running those case names against `git archive master`; they belong to other claims. 6 of the new rows are the ones in §5 |
-| `python3 test_formal_imports.py` | PASS=41 EXPECTED=0 FAIL=0 | PASS=43 EXPECTED=0 FAIL=0 |
-| `python3 -m unittest test_formal_sweep_truth` | Ran 31 tests — OK | Ran 31 tests — OK |
-| `python3 test_formal_link_accounting.py` | 133 passed, 0 failed, 133 checks | 174 passed, 0 failed, 174 checks |
-| `python3 test_refusal_taxonomy.py` | — | PASS (156/156 checks, 33 families, 53 causes) |
-| `python3 -m unittest test_formal_sweep` | — | Ran 76 tests — OK |
-| `python3 test_formal_value_model.py` | — | PASS=19 FAIL=0 |
-| `python3 test_formal_target_queries.py` | — | PASS=25 FAIL=0 |
-| `python3 test_formal_toplevel.py` | — | PASS=85 FAIL=0 |
+| command | this change |
+|---|---|
+| `python3 test_formal_run.py` | **PASS=401 FAIL=0**, of which 13 are the new cases below |
+| `python3 test_formal_imports.py` | PASS=41 EXPECTED=0 FAIL=0 |
+| `python3 -m unittest test_formal_sweep_truth` | Ran 31 tests — OK |
+| `python3 test_formal_link_accounting.py` | 133 passed, 0 failed, 133 checks |
+| `python3 tools/formal_sweep.py -j 3 -t 120 <the 8 files>` | PASS=0, 0/8, four terminals moved — the table in §3 |
 
 The answered cases' expected values are what CPython prints for the same text
 (`a=12 b=10 c=1 d=1 h=7`, and exit 5 for `int(int(5))`), run with a `printf`
@@ -352,7 +260,6 @@ host architecture for an answered case and both only for a refusal.
 | `formal/arm64_codegen.py` | `_load_var`'s last resort; the `DType.<member>` arm in `_emit_expr` |
 | `formal/x86_64_codegen.py` | the same two, x86-64 |
 | `test_formal_run.py` | `TYPE_VALUE_CASES` (6), `TYPE_VALUE_DTYPE_CASES` (3), `TYPE_VALUE_REFUSALS` (3), `TYPE_VALUE_TAG_CASES` (1, generated) |
-| `formal/model.py`, both backends, `test_formal_run.py` (2026-10-01) | `TYPE_KIND`, `is_number_kind`, the `len_refusal` row, `type_index_refusal`, the `print()` conversion switch and the subscript choke point; `TYPE_VALUE_REFUSALS` (7, one of them reworded to `refuse_without:`) and `TYPE_VALUE_NUMBER_CASES` (2) |
 
 ## 8. Why it is NOT the same construct as the one that was fixed
 

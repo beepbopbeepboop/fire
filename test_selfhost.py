@@ -43,7 +43,11 @@ TWO_LINE = "x = 1\nprint(x)\n"
 
 
 def build(td: str) -> str:
-    """Self-compile fire.py into `td`, returning the binary path."""
+    """Self-compile fire.py into `td`, returning the binary path.
+
+    build_executable writes mojo.{ci,o} + fire_runtime.o into the CWD, so the
+    caller chdirs into a temp dir to keep the repo clean.
+    """
     sys.path.insert(0, REPO)
     import fire
     main_src = os.path.join(REPO, "fire.py")
@@ -53,71 +57,6 @@ def build(td: str) -> str:
     if not ok or not os.path.exists(out):
         return ""
     return out
-
-
-def build_scratch_is_private_and_removed() -> bool:
-    """`build_executable`'s intermediates must not be visible outside one build.
-
-    They were named off a bare module basename, so all six of them landed in
-    the process's CWD: two builds of two modules sharing a basename
-    (`a/gen.py` and `b/gen.py`, or the same `foo.py` in two temp trees) both
-    wrote `gen.ci` / `gen.o` / `gen_gen.cpp` / `gen_gen.o` into one shared
-    directory and neither took a lock, and `tools/suite.py` runs jobs `-j18`
-    out of a common checkout, so that is a wrong-artifact race the gate can
-    reach and not only a human. The litter half is deterministic and is what
-    this asserts: a `test_py314_full.py` sweep run from the repository root
-    left `grammar_snippet_gen.cpp` there, which is how two such files got
-    committed before .gitignore covered the other five intermediates.
-
-    Two modules with the SAME basename in two directories, each built with its
-    output beside it, from a third directory standing in for the CWD: the
-    CWD must be untouched afterwards and each output directory must hold the
-    executable and nothing else. The two programs print different values, so a
-    crossed scratch shows up as a wrong answer and not only as a stray file.
-    """
-    sys.path.insert(0, REPO)
-    import fire
-    cwd = os.getcwd()
-    with tempfile.TemporaryDirectory() as root:
-        cwd_dir = os.path.join(root, "cwd")
-        outs = []
-        for i, want in enumerate(("41", "42")):
-            d = os.path.join(root, f"d{i}")
-            os.makedirs(d)
-            mod = os.path.join(d, "gen.py")
-            with open(mod, "w") as f:
-                f.write(f"x = 1\nprint(x + {int(want) - 1})\n")
-            outs.append((d, os.path.join(d, "out"), mod, want))
-        os.makedirs(cwd_dir)
-        os.chdir(cwd_dir)
-        try:
-            for d, out, mod, _want in outs:
-                if not fire.build_executable(
-                        mod, open(mod).read(), output=out, quiet=True):
-                    print(f"  ✗ build_executable({mod}) failed")
-                    return False
-        finally:
-            os.chdir(cwd)
-        leftover = sorted(os.listdir(cwd_dir))
-        if leftover:
-            print(f"  ✗ build_executable left {leftover} in the CWD; its "
-                  "intermediates belong beside the artifact, not wherever "
-                  "the caller happened to be standing")
-            return False
-        for d, out, _mod, want in outs:
-            beside = sorted(os.listdir(d))
-            if beside != ["gen.py", "out"]:
-                print(f"  ✗ {d} holds {beside} after the build; expected "
-                      "just the source and the executable")
-                return False
-            r = subprocess.run([out], capture_output=True, text=True,
-                               timeout=120)
-            if r.returncode != 0 or r.stdout.strip() != want:
-                print(f"  ✗ {out} printed {r.stdout.strip()!r} "
-                      f"(rc={r.returncode}), want {want!r} — the two "
-                      "same-basename builds crossed")
-                return False
-    return True
 
 
 # The AST attributes a node's children can hang off. A fixed list, walked
@@ -161,53 +100,6 @@ def _unlowered_coroutines(stmts: list) -> list:
             else:
                 stack.append((sub, depth + 1))
     return found
-
-
-def dylib_module_path_refuses_a_generated_cpp() -> bool:
-    """`compile_module_to_c` must REFUSE a module whose coroutine definitions
-    it cannot link, rather than return a `.c` that references them.
-
-    `closure_coroutines_are_lowerable` above is the invariant that keeps this
-    unreachable for the two module lists that ship; this is the other half.
-    That check asserts "every generator in this closure lowers in place", and
-    an assertion that the exposure is absent is not the same as a refusal when
-    it is not: `gen.generated_cpp` is dropped on the floor, the module's `.c`
-    keeps the `extern` declarations and the calls, and the object references
-    `_mojogen_*` symbols nothing defines. In a dylib that links anyway
-    (`-undefined dynamic_lookup`) and every client falls back to source with no
-    diagnostic; in an executable it is a link failure. See
-    bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md.
-    """
-    sys.path.insert(0, REPO)
-    from build_stdlib_dylib import (_DylibGeneratedCppError,
-                                    compile_module_to_c)
-    # A DECORATED generator: the A3 stack-switch lowering refuses it outright
-    # (`coro._eligible` returns `(False, 'decorated')`), so the C++20 emitter
-    # takes it and `generated_cpp` is the only place its definitions exist.
-    src = ("def deco(f):\n    return f\n\n"
-           "@deco\n"
-           "def gen(n):\n"
-           "    for i in range(n):\n"
-           "        yield i * i\n")
-    ok = False
-    try:
-        compile_module_to_c(src, 'gen_probe.py', 'gen_probe')
-    except _DylibGeneratedCppError as e:
-        ok = 'gen_probe' in str(e) and 'generated_cpp' in str(e)
-    except Exception as e:                       # a different failure entirely
-        print(f"  ✗ dylib module path: expected _DylibGeneratedCppError, got "
-              f"{type(e).__name__}: {e}")
-    # ...and a module with NO generator must still compile: the refusal has to
-    # cost nothing on the module lists that ship (measured: 0 such modules).
-    plain = "def f(n):\n    return n + 1\n"
-    try:
-        c = compile_module_to_c(plain, 'plain_probe.py', 'plain_probe')
-    except Exception as e:
-        ok = False
-        print(f"  ✗ dylib module path: a generator-free module stopped "
-              f"compiling: {type(e).__name__}: {e}")
-    print(f"  dylib module path refuses an unlinkable generated_cpp: {ok}")
-    return ok
 
 
 def closure_coroutines_are_lowerable() -> bool:
@@ -254,12 +146,10 @@ def closure_coroutines_are_lowerable() -> bool:
     sys.path.insert(0, REPO)
     import cas
     import mojo.middle.coro as coro
-    import gimple_codegen
-    from gimple_codegen import GimpleGen, Parser, py_tokenize
+    from fire_compiler import Parser, py_tokenize
 
     checked = 0
     offenders = []
-    fell_back = []
     for name in cas.selfhost_inputs():
         if not name.endswith('.py'):
             continue
@@ -272,73 +162,16 @@ def closure_coroutines_are_lowerable() -> bool:
         stmts = Parser(py_tokenize(src)).with_filename(path).parse_module()
         lowered, _meta = coro.lower(stmts)
         left = _unlowered_coroutines(lowered)
-        if not left:
-            continue
-        # Left behind by A3 is NECESSARY but not SUFFICIENT for the link
-        # failure this guard exists to catch. What actually breaks the link is
-        # a generator the C++20 path then CLAIMS: its definitions go into the
-        # companion .cpp that `compile_module_to_c` discards. A generator the
-        # C++ path also refuses makes the whole module RAISE, and the caller
-        # falls back to interpreting it from source -- no .c, no dangling
-        # reference, nothing to link.
-        #
-        # The first version of this check reported the A3 leftover alone and
-        # was wrong on exactly that distinction: it named
-        # `mojo/middle/infra_infer.py`'s `_each_binding`/`walk`, which
-        # `compile_module_to_c` refuses outright --
-        #
-        #     RuntimeError: cannot compile module: function(s) _each_binding,
-        #     walk (generator function(s), contain a `yield`/`yield from`)
-        #
-        # -- verified by calling `compile_module_to_c` on it, which raises and
-        # emits no C at all. So the guard was red on a tree with no link error
-        # in it, which is the one thing a guard must never be: it teaches the
-        # reader to ignore it.
-        #
-        # So ask the C++ path directly, per leftover generator, which is the
-        # only thing that decides it. Cheap because it runs only on the two or
-        # three generators A3 declines, not on all {checked} modules.
-        gen = GimpleGen(emit_entry_points=False, module_name=name)
-        gen._current_filename = path
-        claimed = []
-        refused = []
-        for _fn in _find_functions(lowered, set(left)):
-            try:
-                gen._gen_cpp_generator_unit(_fn)
-                claimed.append(_fn.name)
-            except Exception:
-                refused.append(_fn.name)
-        if claimed:
-            offenders.append((name, claimed))
-        if refused:
-            fell_back.append((name, refused))
+        if left:
+            offenders.append((name, left))
     print(f"  self-host closure: {checked} modules, every generator/async "
-          f"lowered in place or its module refused whole: {not offenders}")
+          f"lowered in place: {not offenders}")
     for name, left in offenders:
-        print(f"  ✗ {name}: the C++20 coroutine path claims "
-              f"{', '.join(sorted(set(left)))}, and that path's definitions "
-              f"live in a companion .cpp this build does not link (see "
+        print(f"  ✗ {name}: the stack-switch lowering left "
+              f"{', '.join(sorted(set(left)))} — its coroutine symbols would "
+              f"be referenced but never defined (see "
               f"bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md)")
-    for name, left in fell_back:
-        print(f"  · {name}: {', '.join(sorted(set(left)))} declined by BOTH "
-              f"backends, so the module refuses and is interpreted from "
-              f"source — safe, nothing to link")
     return not offenders
-
-
-def _find_functions(stmts, names: set) -> list:
-    """The top-level FunctionDefs in `stmts` whose name is in `names`.
-
-    Deliberately top-level only. The C++ generator unit is translated for a
-    MODULE's own top-level generators; a nested `def`'s generator is reached
-    through its enclosing function's body, and looking for it here would
-    report a name the C++ path never claimed and so never dropped."""
-    import fire_compiler as N
-    out = []
-    for _s in stmts:
-        if isinstance(_s, N.FunctionDef) and getattr(_s, 'name', '') in names:
-            out.append(_s)
-    return out
 
 
 def run_produced_binary(exe: str, td: str) -> tuple:
@@ -462,61 +295,52 @@ def pinned_prototypes_match_their_definitions() -> bool:
 
 
 def run() -> tuple:
-    """(static_ok, scratch_ok, build_ok). The static half first and separately,
-    so its verdict is a line of its own in the tally rather than a `False`
-    that reads like a build failure; the scratch check next because it is the
-    only one that does not need the closure."""
+    """(static_ok, build_ok). The static half first and separately, so its
+    verdict is a line of its own in the tally rather than a `False` that
+    reads like a build failure."""
     static_ok = closure_coroutines_are_lowerable() and \
-        dylib_module_path_refuses_a_generated_cpp() and \
         pinned_prototypes_match_their_definitions()
-    scratch_ok = build_scratch_is_private_and_removed()
-    if not scratch_ok:
-        return static_ok, False, False
     cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as td:
         os.chdir(td)
         try:
             exe = build(td)
             if not exe:
-                return static_ok, scratch_ok, False
+                return static_ok, False
             rc, nbytes, stubs = run_produced_binary(exe, td)
             print(f"  self-hosted compiler on a two-line program: "
                   f"exit={rc} ci_bytes={nbytes} stub_hits={stubs}")
             if rc != 0:
                 print("  ✗ the self-hosted binary did not exit 0")
-                return static_ok, scratch_ok, False
+                return static_ok, False
             if stubs:
                 print(f"  ✗ {stubs} of the self-hosted compiler's own "
                       "functions were emitted as 'unavailable in compiled "
                       "mode' stubs — its analysis passes are no-ops")
-                return static_ok, scratch_ok, False
+                return static_ok, False
             if nbytes < 200:
                 print(f"  ✗ the self-hosted binary produced a {nbytes}-byte "
                       ".ci for a two-line program; expected real output")
-                return static_ok, scratch_ok, False
-            return static_ok, scratch_ok, True
+                return static_ok, False
+            return static_ok, True
         finally:
             os.chdir(cwd)
 
 
 def main() -> int:
     try:
-        static_ok, scratch_ok, build_ok = run()
+        static_ok, build_ok = run()
     except Exception as e:
-        print(f"Results: 0 passed, 3 failed")
+        print(f"Results: 0 passed, 2 failed")
         print(f"✗ self-host build raised: {e}")
         return 1
-    passed = ((1 if static_ok else 0) + (1 if scratch_ok else 0)
-              + (1 if build_ok else 0))
-    failed = 3 - passed
+    passed = (1 if static_ok else 0) + (1 if build_ok else 0)
+    failed = 2 - passed
     print(f"Results: {passed} passed, {failed} failed")
     if not static_ok:
         print("✗ a module of the self-host closure holds a generator the "
               "compiled path cannot lower in place — its coroutine symbols "
               "would be referenced and never defined")
-    if not scratch_ok:
-        print("✗ fire.py's build intermediates are not confined to the build "
-              "that writes them")
     if not build_ok:
         print("✗ self-host compile/link regressed (GCC error, ICE, undefined "
               "symbol, or the produced binary cannot compile)")

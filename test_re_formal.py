@@ -56,14 +56,6 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import formal.imports as _FI
-# `BUILD_TIMEOUT` for the child budget (this loop compiles EIGHT files of this
-# repository's own source — `fire_compiler.py`, `reflect.py`, the `spec_gen.py`
-# and `exprtypes.py` pair — so it is a compile and gets the compile budget), and
-# `child_exit_reason` for the four suites' one sentence about how a child died.
-# Measured over these eight on this tree, 2026-10-05: 0.2, 6.5, 10.7, 10.5, 5.9,
-# 5.5, 2.0, 1.1 s — so `COMPILE_TIMEOUT_S`'s 600 is ~56x the worst of them and
-# still 6x inside `DEFAULT_JOB_TIMEOUT_S`. The literal this replaced was 900.
-from exec_budget import BUILD_TIMEOUT, child_exit_reason   # noqa: E402
 
 RE_MODULE = os.path.join(_FI._HOSTMODS_ROOT, "re.mojo")
 FIRE = os.path.join(HERE, "fire.py")
@@ -212,47 +204,6 @@ CASES = [
      "module_spec_gen.py's own, with two non-ASCII bytes"),
     ("(?:→|->)", "a->b", 0, "module_spec_gen.py's split pattern"),
     ("\\s*-\\s+`?\\w+", " - name", 0, "module_spec_gen.py's second pattern"),
-    # ── SCOPED INLINE FLAGS, `(?i: … )` ────────────────────────────────────
-    # The whole of what used to be `bugs/FORMAL_re_the_scoped_inline_flag_form
-    # _is_refused.md`, which is deleted with this fix.
-    # Each case is one that the SCOPED spelling decides and the global one
-    # cannot, so a parser that read the letters and then threw them away — or
-    # a matcher carrying one flag word for the whole program — answers
-    # something else on at least one of them.
-    ("(?i:a)b", "Ab", 0, "SCOPED IGNORECASE, and the b outside it is exact"),
-    ("(?i:a)b", "ab", 0, "the b outside the group is still exact"),
-    ("(?i:a)b", "AB", 0, "the b outside the group does not fold case"),
-    ("a(?i:b)c", "aBc", 0, "a scoped group mid-pattern"),
-    ("a(?i:b)c", "abc", 0, "a scoped group mid-pattern, either case"),
-    ("(?-i:AB)", "ab", 0, "SCOPED clear of IGNORECASE"),
-    ("(?-i:AB)", "AB", 0, "SCOPED clear, the exact spelling"),
-    ("(?i)(?-i:AB)", "AB", 0, "a global i and a scoped clear of it"),
-    ("(?i)(?-i:AB)", "Ab", 0, "and the second half is exact, so no match"),
-    ("(?i:a)(?-i:b)", "AB", 0, "set then clear, in that order"),
-    ("(?i:a)(?-i:b)", "Ab", 0, "and the clear half is what fails here"),
-    ("(?i-m:a)", "A", 0, "set i and clear m in one group"),
-    ("(?i-m:a)", "a", 0, "the cleared m is not what decides this one"),
-    ("(?i:(a))b", "Ab", 0, "a capturing group inside a scoped flag group"),
-    ("(?i:a)+b", "AAAb", 0, "a quantified scoped group, copies included"),
-    ("(?i:ab|c)", "aB", 0, "an alternation inside a scoped flag group"),
-    ("(?i:ab|c)", "AB", 0, "both options of it fold case"),
-    ("(?x: a) c", "a c", 0, "SCOPED VERBOSE, the space inside the group only"),
-    ("(?x: a) c", " b", 0, "and outside it the space is a literal"),
-    ("(?x: a # c\n b)", "ab", 0, "SCOPED VERBOSE with a comment on its own "
-                                   "line, so the `b` is still a `b`"),
-    ("(?x-i: a b)", "ab", 0, "set x and clear i in one group"),
-    ("(?s:a.b)c", "a\nbc", 0, "SCOPED DOTALL"),
-    ("a(?s:.)b", "a\nb", 0, "SCOPED DOTALL on a group mid-pattern"),
-    ("a(?s:.)b.c", "a\nb\nc", 0, "DOTALL scoped to the group, so the second "
-                                  "dot does not cross"),
-    ("a(?s:.)b.c", "a\nbxc", 0, "and it matches when that dot need not cross"),
-    ("(?m:^)b", "a\nb", 0, "SCOPED MULTILINE, `^` on a middle line"),
-    ("a(?m:^b)", "a\nb", 0, "SCOPED MULTILINE inside a pattern"),
-    ("(?i:[a-z])b", "Ab", 0, "a scoped flag on a CLASS, which folds case"),
-    ("(?i:[a-z])B", "Ab", 0, "and the literal after the group does not"),
-    ("(?i)z|(?-i:B)", "B", 0, "a global flag on one option, a scoped clear on "
-                                "the other"),
-    ("b|(?i:z)", "b", 0, "the second option does not disturb the first"),
 ]
 
 
@@ -362,126 +313,50 @@ def expected(pattern, subject, flags):
 
 
 def mojo_str(s):
-    r"""A Mojo string literal whose DECODED bytes are `s` — the INVERSE of
-    `fire_compiler.decode_c_escapes`.
+    """A Mojo string literal for `s`, with the two characters this needs.
 
-    A string literal's body is decoded exactly once on the way in, and it is
-    CPython's decoder (`9023031b`, which gave the formal backends the shared
-    decoder): `\b` is a backspace, `\x41` is `A`, `\n` is a newline and `\\`
-    is one backslash. So the body that delivers the bytes `s` holds is `s`
-    with every backslash DOUBLED, and one doubling is what makes the byte that
-    arrives the byte the Python string holds: `r"\d+"` is written
-    `"\\\\d+"`, and `\\` is written `"\\\\\\\\"`.
-
-    **This used to be the other way round and 14 checks were red because of
-    it.** The premise it replaces said "a literal is interned VERBATIM and its
-    escapes are NOT unescaped"; that was true when written and stopped being
-    true when the decode landed. It was a wrong answer, not a refusal:
-    `\bfn\b` reached `re` as `<BS>fn<BS>`, so every `\b` in the corpus matched
-    nothing — a pattern that means a word boundary silently meant a control
-    character, in the one area this file exists to be right about, and fourteen
-    checks of the `formal-re` gate suite were red on a tree that had been green
-    when the suite was written. Measured on a built-and-run image, one program,
-    the three shapes the corpus uses (`\b`, `\\`, and a VERBOSE `#` comment
-    whose `\n` must stay two characters):
-
-        literal        len  bytes
-        "\b"            2  92 98      a word boundary
-        "\b"            1  8          a BACKSPACE, which is what this wrote
-        "\\"           2  92 92      an escaped backslash
-        "\\"           1  92         an incomplete atom, refused
-
-    So the doubling is not a spelling preference: without it the engine is
-    handed bytes the pattern never contained. `re.mojo` itself is right —
-    given the right bytes it answers every one of those cases as CPython does,
-    which is why `“FORMAL: `re.mojo`'s `\b` never matches”` is gone rather
-    than acted on. `test_mojo_str_round_trips_through_the_decoder` is what now
-    makes the un-doubled state impossible to reach again, and it costs no
-    build: it runs every string this file writes through the one decoder and
-    requires the exact bytes of the Python string back.
-
-    Two things are deliberately NOT doubled, because they are not escapes:
-
-    * an UNRECOGNIZED escape, of which the corpus has many (`\d`, `\w`, `\s`,
-      `\(`, `\[`, `\*`). Doubling those is still right, and is what
-      `decode_c_escapes`'s "an unknown escape keeps its backslash" rule needs:
-      the doubled `\\d` decodes to `\d`, which is what the pattern means.
-    * a REAL newline or tab, which is the other way round: those are written as
-      the escape that DECODES to them, and that is what removed the last limit
-      this function had. It used to split the string on each real newline or tab
-      and compose `mk2`/`mk3` out of the pieces — one separator, two — so a
-      pattern with three tabs (`reflect.py:677`'s C-`typedef` finder, whose
-      `[ \t]` appears four times and which is in the corpus because
-      `corpus_patterns` walks this repository's own `re.compile` calls) raised
-      `AssertionError` out of the encoder and took two gate checks with it. The
-      fix is not a wider `mkN`; it is that `\n` and `\t` are RECOGNISED
-      escapes, in `decode_c_escapes`'s set and in the C compiler the compiled
-      path hands the body to, so `"a\\nb"` decodes to a, newline, b on every
-      path this tree has. Measured on the built-and-run image by
-      `test_mojo_str_round_trips_through_the_decoder`, which round-trips every
-      string in the corpus through the one decoder, and by
-      `test_a_literal_carrying_a_real_newline_and_tab_reaches_the_engine`,
-      which builds one and reads the bytes back off the image.
-
-    So there is ONE spelling per character now, and no composition at all: the
-    literal the function returns is the only thing a reader has to understand.
+    A string literal on the formal path is interned VERBATIM and its escapes
+    are NOT unescaped, so nothing here is escaped: the pattern text a Python
+    raw string holds IS the bytes a Mojo literal must contain, which is why
+    `r"\\d+"` becomes `"\\d+"` and not `"\\\\d+"`. The one thing a literal
+    cannot carry is a real newline, so a subject with one is spelled as two
+    literals and a `memset`, which is what `os/__init__.mojo` calls linesep.
     """
+    for ch, code in (("\n", 10), ("\t", 9)):
+        if ch in s:
+            parts = s.split(ch)
+            assert len(parts) <= 3, s
+            seps = [str(code)] * (len(parts) - 1)
+            if len(parts) == 2:
+                return "mk2(%s, %s, %s)" % (mojo_str(parts[0]), seps[0],
+                                            mojo_str(parts[1]))
+            return "mk3(%s, %s, %s, %s, %s)" % (mojo_str(parts[0]), seps[0],
+                                                mojo_str(parts[1]), seps[1],
+                                                mojo_str(parts[2]))
     assert '"' not in s, s
-    out = []
-    for ch in s:
-        if ch == "\\":
-            out.append("\\\\")
-        elif ch == "\n":
-            out.append("\\n")
-        elif ch == "\t":
-            out.append("\\t")
-        else:
-            out.append(ch)
-    return '"%s"' % "".join(out)
+    return '"%s"' % s
 
 
-# A `mojo_str` expression, read back the way the runtime builds it: the quoted
-# bodies and the byte values between them, in order.  `mojo_str` returns ONE
-# literal now — a real newline and a real tab are written as the escapes that
-# decode to them — so the composed forms this used to parse are gone from the
-# producer. The `mk[23]\(` and `(\d+)` alternatives stay anyway, and the reason
-# is which way the mistake is visible: a reader that can read a composed
-# spelling DECODES it, while one that cannot reports a byte count nobody
-# produced and sends the next reader looking for a string that was never
-# written. (It also used to be load-bearing for the opposite reason — without
-# it the `2` in `mk2` read as a separator byte.)
-_MOJO_PIECE = re.compile(r'mk[23]\(|"((?:[^"\\]|\\.)*)"|(\d+)')
-
-
-def mojo_literal_bytes(expr):
-    """The bytes the runtime will hold for a `mojo_str` expression.
-
-    The literals go through `fire_compiler.decode_c_escapes` — THE decoder
-    every engine calls, and the one this file's encoder has to be the inverse
-    of — so a body carrying `\\n` gives back the newline the Python string held,
-    which is the whole claim. A bare number between two literals is still read
-    as the separator the composed spelling wrote with `memset`.
-    """
-    import fire_compiler as _FC
-    out = bytearray()
-    pieces = list(_MOJO_PIECE.finditer(expr))
-    assert pieces, expr
-    for m in pieces:
-        if m.group(1) is not None:
-            out += _FC.decode_c_escapes(m.group(1)).encode(
-                "utf-8", "surrogateescape")
-        elif m.group(2) is not None:
-            out.append(int(m.group(2)))
-    return bytes(out)
-
-
-# `mk2`/`mk3` used to live here, to build a string that carried a real newline
-# or tab out of two or three literals and a `memset`. Nothing generates that
-# any more — `mojo_str` writes `\\n` and `\\t`, which every engine decodes — and a
-# helper nothing calls in a generated program is a second spelling of "how a
-# string is built" for the next reader to reconcile.
 PRELUDE = '''MARK = 0 - 99
-from os._syscalls import str_len, str_alloc
+from os._syscalls import str_len, str_alloc, str_put
+
+
+def mk2(a: String, mid: Int, b: String) -> Pointer[UInt8]:
+    d = str_alloc(str_len(a) + 1 + str_len(b))
+    u = str_put(d, 0, a, str_len(a))
+    memset(d + u, mid, 1)
+    u = str_put(d, u + 1, b, str_len(b))
+    return d
+
+
+def mk3(a: String, m1: Int, b: String, m2: Int, c: String) -> Pointer[UInt8]:
+    d = str_alloc(str_len(a) + 1 + str_len(b) + 1 + str_len(c))
+    u = str_put(d, 0, a, str_len(a))
+    memset(d + u, m1, 1)
+    u = str_put(d, u + 1, b, str_len(b))
+    memset(d + u, m2, 1)
+    u = str_put(d, u + 1, c, str_len(c))
+    return d
 
 
 def bat(p, i: Int) -> Int:
@@ -653,14 +528,21 @@ def build_and_run(tmpdir, name, source, backend=None):
     # rather than about what happened. Observed on a loaded machine before this
     # check existed — an image that had been killed reported itself as a corpus
     # that answered nothing, which reads as a wrong answer rather than as a
-    # process that is not there. `exec_budget.child_exit_reason` names the
-    # signal when the status is negative (`-11` is SIGSEGV, `-9` SIGKILL) and
-    # says, for the two a harness sends on its own account, that it sent them:
-    # the shared wording four suites had each hand-rolled, one of which printed
-    # a bare `signal 9`.
+    # process that is not there. A negative status is a signal (`-11` is SIGSEGV,
+    # `-9` SIGKILL), so it is reported with its name.
     if run.returncode != 0:
-        raise AssertionError(child_exit_reason(run.returncode, run.stderr)
-                             + " with no usable output")
+        import signal as _signal
+        st = run.returncode
+        name = ""
+        if st < 0:
+            try:
+                name = " (%s)" % _signal.Signals(-st).name
+            except ValueError:                  # pragma: no cover
+                name = " (signal %d)" % -st
+        raise AssertionError("the image exited %d%s with no usable output; "
+                             "stderr: %s"
+                             % (st, name,
+                                (run.stderr or "").strip()[-300:]))
     return [ln for ln in run.stdout.split("\n") if ln.strip() != ""]
 
 
@@ -720,12 +602,11 @@ def test_the_corpus_against_cpython(tmpdir):
 def test_the_corpus_against_cpython_on_x86_64(tmpdir):
     """The same corpus, on the OTHER backend, run and compared the same way.
 
-    This is new coverage rather than a repeat: `re.mojo` used to be seven
-    parameters wide at its widest and could not be compiled for x86-64 AT ALL,
-    so the 45 files that import it were refused with `sub: 7 parameters exceeds
-    the 6 …` and nothing here ever looked at an x86-64 `re` image. It is now
-    six wide and builds for both. A backend that can build the module can also
-    get it wrong — the `sub` walk keeps its
+    This is new coverage rather than a repeat: until `re.mojo` fit six integer
+    argument registers it could not be compiled for x86-64 AT ALL, so the
+    45 files that import it were refused with `sub: 7 parameters exceeds the 6
+    …` and nothing here ever looked at an x86-64 `re` image. A backend that
+    can now build the module can also get it wrong — the `sub` walk keeps its
     output-buffer state in the arena rather than in parameters, which is a
     different program to the one arm64 lowers — so the answers are compared
     against CPython on this backend too, over the same 128 cases.
@@ -813,6 +694,7 @@ UNSUPPORTED = [
     ("a**", "two quantifiers"),
     ("a*+", "a possessive quantifier"),
     ("(?>a)", "an atomic group"),
+    ("(?i)a", "an inline flag"),
     ("(?(1)a|b)", "a conditional"),
     ("(a", "an unclosed group"),
     ("a)", "an unmatched )"),
@@ -875,320 +757,6 @@ def test_unsupported_constructs_are_refused(tmpdir):
         check(got == want,
               "%r (%s) is refused with status %d, not answered" %
               (pat, why, want[0]), "got %s" % got)
-
-
-# `(inline pattern, argument flag, subject, what it decides)`. The first two
-# columns are the SAME feature in CPython's two spellings, and the third is what
-# makes the pair worth a test rather than a spot check: a `(?i)` that parsed and
-# then did nothing would answer 0 where the argument answers 1, and a `(?x)`
-# that parsed and then skipped nothing would match the space where CPython
-# matches the `a`.
-INLINE_FLAG_PAIRS = [
-    ("(?i)AB", re.IGNORECASE, "ab", "IGNORECASE"),
-    ("(?s)a.b", re.DOTALL, "a\nb", "DOTALL"),
-    ("(?m)^b", re.MULTILINE, "a\nb", "MULTILINE"),
-    ("(?x) a", re.VERBOSE, "a", "VERBOSE, a leading space"),
-    ("(?x)#c\na", re.VERBOSE, "a", "VERBOSE, a comment"),
-    ("(?i)(?m)a", re.IGNORECASE | re.MULTILINE, "A", "two flag groups"),
-]
-
-# What CPython REFUSES, and so must this module -- as a status, which is what
-# `test_unsupported_constructs_are_refused` is about. Each is measured against
-# CPython rather than quoted.
-INLINE_FLAG_REFUSED = [
-    ("(?L)a", "bad inline flags: cannot use 'L' flag with a str pattern"),
-    ("(?z)a", "unknown extension ?z)"),
-    ("(?-i)a", "missing -"),
-    ("(?i-m)a", "missing :"),
-    ("(?au)a", "flags 'a', 'u' and 'L' are incompatible"),
-    ("(?ua)a", "flags 'a', 'u' and 'L' are incompatible"),
-    ("(?i)a(?m)b", "global flags not at the start of the expression"),
-    ("(a)(?i)b", "global flags not at the start of the expression"),
-    ("(?i)((?m)a)", "global flags not at the start of the expression"),
-]
-
-# The SCOPED form of the same feature, `(?i: … )`. Same four columns, and the
-# same reason to be a table: the letters here change for ONE GROUP, so a
-# module that compiled them and then ignored them, or that let them reach past
-# the group, answers 0 or 1 where CPython answers the other one. Every case is
-# also in `CASES`, where the whole differential (spans, group text, findall,
-# split, sub) is compared; this table is the cheap status half, and it is here
-# so a failing scoped case names itself instead of arriving as "case 137".
-SCOPED_FLAG_PAIRS = [
-    ("(?i:a)b", 0, "Ab", "IGNORECASE inside, the b outside exact"),
-    ("(?i:a)b", 0, "AB", "and the b outside does not fold"),
-    ("a(?i:b)c", 0, "aBc", "a scoped group in the middle of a pattern"),
-    ("(?-i:AB)", re.IGNORECASE, "ab", "a scoped CLEAR of the argument flag"),
-    ("(?-i:AB)", re.IGNORECASE, "AB", "the same, the spelling that matches"),
-    ("(?i)(?-i:AB)", re.IGNORECASE, "AB", "a global flag and a scoped clear"),
-    ("(?i)(?-i:AB)", re.IGNORECASE, "Ab", "so the second half is exact"),
-    ("(?i:a)(?-i:b)", re.IGNORECASE, "AB", "set then clear, in order"),
-    ("(?i-m:a)", re.IGNORECASE | re.MULTILINE, "A", "set i and clear m together"),
-    ("(?x: a) c", 0, "a c", "VERBOSE inside the group only"),
-    ("(?x: a) c", 0, " b", "and the space outside it is a literal"),
-    ("(?x-i: a b)", 0, "ab", "set x and clear i together"),
-    ("(?s:a.b)c", 0, "a\nb", "DOTALL inside the group only"),
-    ("a(?s:.)b.c", 0, "a\nb\nc", "and the dot after it does not cross"),
-    ("(?m:^)b", 0, "a\nb", "MULTILINE on a `^` inside the group"),
-    ("a(?m:^b)", 0, "a\nb", "MULTILINE inside a pattern"),
-    ("(?i:a)+b", 0, "AAAb", "a quantified scoped group: every copy folds case"),
-    ("(?i:ab|c)", 0, "aB", "an alternation inside the group"),
-    ("(?i:(a))b", 0, "Ab", "a capturing group inside the scoped group"),
-    ("(?i)z|(?-i:B)", re.IGNORECASE, "B", "one option global, one scoped"),
-    ("(?a:a)", 0, "a", "SCOPED `a`: accepted, and it sets nothing"),
-    ("(?u:a)", 0, "a", "SCOPED `u`: the same, the engine is already bytes"),
-    ("(?i:a)(?m:b)", 0, "a\nb", "two scoped groups, and `^` needs its newline "
-                              "BEFORE it"),
-]
-
-# What CPython REFUSES in the SCOPED spelling, and so must this module — each
-# measured, because each is a constraint `_p_flaggroup` has to enforce rather
-# than a shape it happens to fall over on. `(?-i)a` and `(?i-m)a` are in
-# `INLINE_FLAG_REFUSED`'s neighbourhood for the same reason: CPython wants a `:`
-# wherever a `-` appears, and the global spelling has none.
-SCOPED_FLAG_REFUSED = [
-    ("(?i-i:a)", "bad inline flags: flag turned on and off"),
-    ("(?-:a)", "missing flag"),
-    ("(?i-:a)", "missing flag — a `-` with no letter after it"),
-    ("(?i--m:a)", "missing flag — a second `-`"),
-    ("(?i-a-:a)", "missing flag — a second `-`, one letter later"),
-    ("(?L:a)", "cannot use 'L' flag with a str pattern"),
-    ("(?z:a)", "unknown extension ?z)"),
-    ("(?aL:a)", "cannot use 'L' flag with a str pattern"),
-    ("(?au:a)", "flags 'a', 'u' and 'L' are incompatible"),
-    ("(?ua:a)", "flags 'a', 'u' and 'L' are incompatible"),
-    ("(?-a:a)", "cannot turn off flags 'a', 'u' and 'L'"),
-    ("(?-u:a)", "cannot turn off flags 'a', 'u' and 'L'"),
-    ("(?i:a", "missing ), unterminated subpattern"),
-]
-
-
-def _inline_status_program(pairs):
-    lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
-    for index, (pat, flag, subj, _what) in enumerate(pairs):
-        lines.append("    p%d = %s" % (index, mojo_str(pat)))
-        lines.append("    s%d = %s" % (index, mojo_str(subj)))
-        lines.append("    st%d = [0, 0, 0, 0, 0, 0]" % index)
-    for index, (pat, flag, subj, _what) in enumerate(pairs):
-        lines.append("    r%d = re.search(st%d, 6, p%d, s%d, %d)"
-                     % (index, index, index, index, flag))
-        lines.append("    emit(0, r%d)" % index)
-    lines.append("    return 0")
-    return "\n".join(lines) + "\n"
-
-
-def test_inline_flags_answer_like_the_arguments_they_duplicate(tmpdir):
-    """`(?i)` is `re.IGNORECASE`, and the module has to say so on both spellings.
-
-    It used to refuse the spelling inside the pattern, which made the engine
-    answer `STATUS_UNSUPPORTED` for `(?x) a` while answering "matched" for the
-    same pattern with `re.VERBOSE()` as an argument -- the same feature twice,
-    one of them refused, and `re.mojo`'s own docstring claiming `re.VERBOSE` is
-    implemented. Found by generating CPython's own `test_re.py` as a
-    conformance table (`test_formal_hostmods_conformance.py`), which is where
-    `(?x) a` and `(?m)abc$` come from.
-
-    ONE program for the six pairs, and the expected list is CPython's: a status
-    of `STATUS_OK` is 1 and `STATUS_NO` is 0, so the comparison is against
-    `1 if re.search(...) else 0` computed here.
-    """
-    src = _inline_status_program(INLINE_FLAG_PAIRS)
-    want = [1 if re.search(pat, subj, flag) else 0
-            for pat, flag, subj, _what in INLINE_FLAG_PAIRS]
-    try:
-        out = build_and_run(tmpdir, "inlineflags", src)
-    except AssertionError as e:
-        check(False, "the inline-flag program builds", str(e)[:400])
-        return
-    # `build_and_run` answers LINES of whitespace-separated tokens, so one line
-    # here is every case. Flattening is the same two steps the tests below it
-    # do, and it is why the expected value is a flat list and not a list of
-    # lines.
-    out = [int(tok) for line in out for tok in line.split()]
-    check(out == want,
-          "every inline flag group answers as its argument flag does (%d "
-          "spellings)" % len(want),
-          "got %s, CPython %s" % (out, want))
-
-
-def test_inline_flags_that_cpython_refuses_are_refused_here(tmpdir):
-    """The five shapes CPython will not compile, refused with a STATUS.
-
-    A global flag group is legal only before any real part of the pattern, and
-    that rule is CPython's rather than this file's taste: `(?i)(?m)a` compiles
-    and `(?i)a(?m)b` does not. Asserting the refusals is what stops the "at the
-    head" rule from decaying into "anywhere", which is a question with a
-    different answer for every one of the five.
-    """
-    lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
-    for index, (pat, _why) in enumerate(INLINE_FLAG_REFUSED):
-        lines.append("    p%d = %s" % (index, mojo_str(pat)))
-        lines.append("    st%d = [0, 0, 0, 0]" % index)
-    for index, (pat, _why) in enumerate(INLINE_FLAG_REFUSED):
-        lines.append("    emit(0, re.search(st%d, 4, p%d, \"ab\", 0))"
-                     % (index, index))
-    lines.append("    return 0")
-    src = "\n".join(lines) + "\n"
-    try:
-        out = build_and_run(tmpdir, "inlineflagsrefused", src)
-    except AssertionError as e:
-        check(False, "the inline-flag refusal program builds", str(e)[:400])
-        return
-    out = [int(tok) for line in out for tok in line.split()]
-    # Every one of them must be a STATUS the caller can see, and 3 is
-    # STATUS_UNSUPPORTED; a 0 here would be "no match", which is the silent
-    # wrong answer `test_unsupported_constructs_are_refused` exists to prevent.
-    check(out == [3] * len(INLINE_FLAG_REFUSED),
-          "all %d refused flag shapes answer STATUS_UNSUPPORTED"
-          % len(INLINE_FLAG_REFUSED), "got %s" % out)
-
-
-def test_the_scoped_flag_form_answers_like_cpython(tmpdir):
-    """`(?i: … )` is compiled, and answers what CPython answers.
-
-    The counterpart to the two above: a spelling of a feature the module has.
-    It was REFUSED, and the reason recorded in `re.mojo` was that flags are one
-    word `_vm` reads at entry and `_step` tests, so a flag that changes inside
-    a compiled program would need the matcher to carry a MUTABLE word and
-    restore it — a hot-loop change and a proof cost. The fix is not a mutable
-    word: every node that consults a flag carries the word it was compiled
-    under in its p1 (`_term`), so the word is a property of the node and a
-    backtrack entry is still (pc, sp, slot, old).
-
-    Every case below is decided by the scoped form ALONE, which is what makes
-    it worth a program of its own: the same pattern with the flag as an argument
-    answers the same thing, so a module that implemented the feature twice and
-    wired only one of them up would pass a table of the argument spellings.
-
-    The statuses are compared against CPython rather than against a list, so
-    the table cannot rot into "these are the answers we happen to give".
-    """
-    pairs = SCOPED_FLAG_PAIRS
-    src = _inline_status_program(pairs)
-    want = [1 if re.search(pat, subj, flag) else 0 for pat, flag, subj, _w in pairs]
-    try:
-        out = build_and_run(tmpdir, "scopedflags", src)
-    except AssertionError as e:
-        check(False, "the scoped-flag program builds", str(e)[:400])
-        return
-    out = [int(tok) for line in out for tok in line.split()]
-    check(out == want,
-          "every scoped flag group answers as CPython does (%d spellings)"
-          % len(want), "got %s, CPython %s" % (out, want))
-    # The GROUP COUNT is the other half of "this is `(?: … )`": CPython numbers
-    # nothing inside `(?i: … )`, so `(?i:(a))` has one group and `(?i:a)` none,
-    # and a scoped group that numbered itself would shift every later group.
-    # `ngroups` is a separate program because it is a separate question.
-    counts = [(pat, subj) for pat, _f, subj, _w in pairs
-              if pat.count("(") > pat.count("(?:")]
-    lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
-    for index, (pat, _subj) in enumerate(counts):
-        lines.append("    printf(\"G%d \")" % index)
-        # A call's result is not a `printf` argument on this path — the callee's
-        # own arguments have to be in registers before the format's are — so
-        # the answer goes through `emit`, which is what every other print in
-        # this file does.
-        lines.append("    emit(0, re.ngroups(%s))" % mojo_str(pat))
-    lines.append("    printf(\"%s\", re.nl())")
-    lines.append("    return 0")
-    try:
-        out = build_and_run(tmpdir, "scopedgroups", "\n".join(lines) + "\n")
-    except AssertionError as e:
-        check(False, "the scoped-flag ngroups program builds", str(e)[:400])
-        return
-    want = []
-    for i, (pat, _s) in enumerate(counts):
-        want += ["G%d" % i, str(re.compile(pat).groups)]
-    got = [tok for line in out for tok in line.split()]
-    check(got == want,
-          "a scoped flag group numbers nothing itself (%d patterns)"
-          % len(counts), "got %s\nwant %s" % (got, want))
-
-
-def test_the_scoped_flag_shapes_cpython_refuses_are_refused_here(tmpdir):
-    """A scoped flag group has CPython's own refusals, as STATUSES.
-
-    Each is measured against CPython rather than quoted, and each is a shape
-    this module's new arm could plausibly have ACCEPTED by ignoring a
-    constraint: a letter turned both on and off, an empty flag list, a `L`, and
-    the two ways a `-` can appear where CPython wants a `:`. A refusal that
-    answers "no match" instead of a status is the silent wrong answer
-    `test_unsupported_constructs_are_refused` exists to prevent.
-    """
-    lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
-    for index, (pat, _why) in enumerate(SCOPED_FLAG_REFUSED):
-        lines.append("    p%d = %s" % (index, mojo_str(pat)))
-        lines.append("    st%d = [0, 0, 0, 0]" % index)
-    for index, (pat, _why) in enumerate(SCOPED_FLAG_REFUSED):
-        lines.append("    emit(0, re.search(st%d, 4, p%d, \"abc\", 0))"
-                     % (index, index))
-    lines.append("    return 0")
-    src = "\n".join(lines) + "\n"
-    try:
-        out = build_and_run(tmpdir, "scopedflagsrefused", src)
-    except AssertionError as e:
-        check(False, "the scoped-flag refusal program builds", str(e)[:400])
-        return
-    out = [int(tok) for line in out for tok in line.split()]
-    # Every one of them must be a STATUS the caller can see, and 3 is
-    # STATUS_UNSUPPORTED; a 0 here would be "no match".
-    check(out == [3] * len(SCOPED_FLAG_REFUSED),
-          "all %d refused scoped flag shapes answer STATUS_UNSUPPORTED"
-          % len(SCOPED_FLAG_REFUSED), "got %s" % out)
-    # And CPython must agree that each of them is refused at all, which is the
-    # premise: a shape CPython also compiled would be a divergence.
-    for pat, why in SCOPED_FLAG_REFUSED:
-        try:
-            re.compile(pat)
-        except re.error:
-            continue
-        check(False, "%r (%s) compiles in CPython, so refusing it here is a "
-                     "divergence and not a shared limit" % (pat, why), "")
-
-
-def test_mojo_str_round_trips_through_the_decoder(tmpdir=None):
-    """Every string this file writes survives the trip into a literal and back.
-
-    **The premise, made testable without a build.** `mojo_str` used to say "a
-    string literal is interned VERBATIM and its escapes are NOT unescaped",
-    which was true when it was written and stopped being true when
-    `fire_compiler.decode_c_escapes` became the one decoder every engine calls.
-    Fourteen checks in the `formal-re` gate suite were the consequence, and they
-    were the expensive kind of evidence to have to get: a whole corpus built
-    and run per backend to discover what one pure-Python function does to a
-    string. A pattern that means a word boundary reached `re` as a backspace,
-    in the one area a silent wrong answer is least affordable.
-
-    So the check is here instead: the expression `mojo_str` writes, run through
-    the one decoder, must give back the exact bytes of the Python string it was
-    given. It builds nothing and runs nothing, so it is red the moment the
-    encoder and the decoder disagree — which is the failure, stated in the one
-    place that causes it.
-
-    It covers every corpus pattern and subject, every refusal pattern, and the
-    DISCOVERED corpus patterns, whose values come out of `corpus_patterns` — so
-    that walk's decode and this round trip are checked against each other rather
-    than each being right by itself.
-    """
-    found, _dropped = corpus_patterns()
-    cases = []
-    for p, s, _f, _note in CASES:
-        cases.append(("the pattern of case %r" % p, p))
-        cases.append(("the subject of case %r" % p, s))
-    for pat, why in UNSUPPORTED:
-        cases.append(("the unsupported pattern %r (%s)" % (pat, why), pat))
-    for p in sorted(found):
-        cases.append(("the discovered corpus pattern %r" % p, p))
-    bad = []
-    for what, s in cases:
-        got = mojo_literal_bytes(mojo_str(s))
-        want = s.encode("utf-8", "surrogateescape")
-        if got != want:
-            bad.append("%s: %r arrives as %r" % (what, s, got))
-    check(not bad,
-          "every string this file writes reaches the image as the bytes the "
-          "oracle used (%d strings; offenders: %s)"
-          % (len(cases), "; ".join(bad[:3]) or "none"))
 
 
 def test_a_span_list_that_is_too_small_is_a_status_not_a_crash(tmpdir):
@@ -1273,22 +841,8 @@ def corpus_patterns():
     made explicit. What it must not be is SILENT, because a filter that quietly
     discards candidates is how a walk stops being a walk: hence `dropped`, and
     an assertion in the test that says how many were thrown away and why.
-
-    **The candidate is a literal's VALUE, not its source text**, and that is
-    load-bearing in both directions. The walk reads raw source, so a non-raw
-    literal arrives with its escapes still spelled (`"\\\\d"` is four characters
-    in the file and two in the string); compiling that as the pattern and then
-    handing the same text to `mojo_str` would ask the oracle one question and
-    the module another. So a candidate is decoded by the ONE decoder
-    (`fire_compiler.decode_c_escapes`) unless the prefix says `r`, which is
-    `fire_compiler.decoded_literal`'s own rule — and `mojo_str` then encodes it
-    again on the way into the generated program, so the byte that reaches `re`
-    is the byte CPython compiled. Every pattern the walk currently finds is a
-    raw string, so this changes nothing today; it is here because the walk is
-    DISCOVERED, and the day a non-raw pattern appears it must not be wrong.
     """
     import glob
-    import fire_compiler as _FC
     pat = re.compile(r"re\.(?:compile|search|match|fullmatch|split|sub|findall)"
                      r"\(\s*r?([rb]*)(['\"])(.*?)\2", re.S)
     out, dropped = {}, {}
@@ -1302,9 +856,7 @@ def corpus_patterns():
         if "import re" not in text and "re.compile" not in text:
             continue
         for m in pat.finditer(text):
-            prefix, p = m.group(1), m.group(3)
-            if "r" not in prefix:
-                p = _FC.decode_c_escapes(p)
+            p = m.group(3)
             if len(p) > 8 and "{" in p and "\\w" in p:
                 where = os.path.basename(path)
                 try:
@@ -1389,166 +941,17 @@ def test_the_corpus_patterns_all_work(tmpdir):
                   "got %d, CPython %d" % (got[1], want.start()))
 
 
-def test_the_corpus_reaches_the_module_as_the_bytes_python_holds(tmpdir=None):
-    """`mojo_str` writes the INVERSE of the literal decoder, and this says so.
-
-    Every other comparison in this file is between what CPython computed and
-    what an image computed, and this is the one that says the two were asked
-    the SAME question: the pattern the module compiles is only the pattern
-    CPython compiled if the bytes that arrived are the bytes the Python
-    string holds, and a literal's body is decoded once on the way in. The
-    harness's spelling is part of the measurement, not a detail of it.
-
-    `fire_compiler.decode_c_escapes` is the decoder every engine in this tree
-    calls (CLAUDE.md: one implementation, not one per engine), so decoding
-    what `mojo_str` wrote is precisely what the image does to it — and that
-    makes the round trip decidable here, in microseconds, with no build. It
-    is not a synthetic check: the three shapes that failed are all in the
-    corpus (`\b` in five cases, `\\` in one, a VERBOSE `#` comment whose `\n`
-    has to stay two characters in one), and without this they arrive as a
-    backspace, an incomplete atom and a real newline respectively — measured,
-    with the byte tables in `mojo_str`'s docstring.
-
-    The set walked is every pattern and subject in `CASES` and `UNSUPPORTED`,
-    plus the shapes below that no case happens to hold: an empty string, one
-    backslash, an octal escape, a hex escape, and a real tab.
-    """
-    import fire_compiler as F
-
-    def round_trips(s):
-        """True when what `mojo_str` writes DECODES to exactly `s`.
-
-        ONE spelling, and the shape is part of what is checked rather than an
-        implementation detail: `mojo_str` returns a single literal for every
-        string, including one with real newlines and tabs in it, because those
-        are written as the escapes that decode to them. The assertion below is
-        the contract, and it is the assertion that was missing when the encoder
-        asserted `len(parts) <= 3` — a limit nobody could see from the outside,
-        which is how a corpus pattern with four `[ \\t]` in it took two gate
-        checks down inside a pure-Python function.
-        """
-        lit = mojo_str(s)
-        if not lit.startswith('"') or not lit.endswith('"'):
-            check(False, "mojo_str returns one literal",
-                  "%r for %r" % (lit, s))
-            return False
-        return F.decode_c_escapes(lit[1:-1]) == s
-
-    strings = set()
-    for pat, subj, _flags, _note in CASES:
-        strings.add(pat)
-        strings.add(subj)
-    for pat, _why in UNSUPPORTED:
-        strings.add(pat)
-    for extra in ("", "\\", "\\\\", "\\1", "\\101", "\\x41", "\t",
-                  "a\tb", "a\nb\nc", r"\bcat\b", "\\d+", "\\W+"):
-        strings.add(extra)
-    for s in sorted(strings):
-        check(round_trips(s),
-              "the bytes %r reaches the module as the bytes Python holds" % s,
-              "mojo_str wrote %s, which decodes to %r"
-              % (mojo_str(s),
-                 [F.decode_c_escapes(p) for p in
-                  (re.findall(r'"([^"]*)"', mojo_str(s)) or
-                   [mojo_str(s)[1:-1]])]))
-
-
-def test_a_literal_carrying_real_newlines_and_tabs_reaches_the_engine(tmpdir):
-    """`mojo_str`'s spelling for a string with separators in it, on a real image.
-
-    The round trip above is decidable in microseconds because it runs the one
-    decoder in Python, and that is the right place for it — but it cannot see
-    whether the ENGINE agrees that a body carrying `\\n` is a newline, and that
-    is the half this spelling now depends on. `mojo_str` writes `\\n` and `\\t`
-    rather than composing `mk2`/`mk3`, so the claim is: `decode_c_escapes` is
-    what every engine calls, gcc decodes the same body the compiled path hands
-    it, and therefore the bytes the image holds are the bytes the Python string
-    held. Three tabs and two newlines is the shape that used to raise
-    `AssertionError` in the encoder.
-
-    So: one program, one string with three real tabs and one with two real
-    newlines, and three measurements per string — the length, every byte, and
-    a `re.search` whose span is compared with CPython's. The search is the part
-    that would catch a silent wrong answer: a tab that arrived as the two
-    characters `\\` and `t` is not a tab to the engine, so the pattern would
-    compile and match nothing, which is the shape of bug this file exists to
-    be right about.
-    """
-    import re as _re
-    cases = [
-        ("pat", "a\tb\tc\td"),
-        ("subj", "zz a\tb\tc\td zz"),
-        ("nl", "one\ntwo\nthree"),
-    ]
-    lines = [PRELUDE, "",
-             "def show(t: String) -> Int:",
-             "    printf(\"len=%d\", str_len(t))",
-             "    var i = 0",
-             "    while i < str_len(t):",
-             "        printf(\" %d\", bat(t, i))",
-             "        i = i + 1",
-             "    printf(\"\\n\")",
-             "    return 0",
-             "",
-             "def main(n: Int) -> Int:"]
-    for label, text in cases:
-        lines.append("    printf(\"%s\")" % label)
-        lines.append("    show(%s)" % mojo_str(text))
-    pat, subj = cases[0][1], cases[1][1]
-    lines += [
-        "    st = [0, 0, 0]",
-        "    p = %s" % mojo_str(pat),
-        "    s = %s" % mojo_str(subj),
-        "    r = re.search(st, 2, p, s, 0)",
-        "    emit(0, r)",
-        # `out` is `2 * (ngroups + 1)` values, so for a 0-group pattern it is
-        # group 0's START then its END (`re.mojo`'s `search`, and
-        # `case_function`'s own `st[0]`/`st[1]` reads).
-        "    emit(0, st[0])",
-        "    emit(0, st[1])",
-        "    printf(\"\\n\")",
-        "    return 0"]
-    try:
-        out = build_and_run(tmpdir, "separators", "\n".join(lines))
-    except AssertionError as e:
-        check(False, "a program whose literals carry real tabs and newlines "
-                     "builds and runs", str(e))
-        return
-    want = []
-    for label, text in cases:
-        want.append("%slen=%d %s" % (label, len(text),
-                                     " ".join(str(b) for b in
-                                              text.encode("utf-8"))))
-    m = _re.search(pat, subj)
-    want.append("%d %d %d" % (1, m.start(), m.end()))
-    # `emit` writes `"%d "`, so each line but the last ends in a space; the
-    # ENDS are what is compared, the interior spacing is the measurement.
-    got = [ln.rstrip() for ln in out]
-    check(got == want,
-          "the image holds the bytes Python holds, and its search agrees",
-          "got %r\nwant %r" % (got, want))
-
-
 def test_no_signature_is_wider_than_the_smaller_abi(tmpdir=None):
     """No function in `re.mojo` takes more parameters than the SMALLER of the
-    two backends' integer argument register files passes — six.
+    two backends' integer argument register files passes.
 
-    **That ceiling is no longer the ABI's, and the check is now narrower than
-    the rule on purpose.**  Both conventions put the arguments past the register
-    file in the caller's frame (`_MAX_INCOMING_ARGS` = 24 in each backend), so
-    `sub: 7 parameters` builds on x86-64 as it always did on arm64, and the
-    ceiling a module written today has to fit is twenty-four rather than six.
-    `re.mojo`'s widest signatures are six (`split`, `group_text`, `findall`,
-    `_term`, `_subwalk`, `_subfill`, `_run`, `_push`) because its functions were
-    NARROWED to fit six registers while there was no alternative; nothing needs
-    them wider now, and widening a host module's signatures back out is a
-    decision somebody should take rather than drift nobody notices.  So the check
-    stays at six and says why.
-
-    It is still the cheap pre-check it was written as.  The x86-64 half of
-    `test_the_module_builds_as_a_dylib_on_both_backends` is the real check and
-    it costs a whole module compile; this one parses and costs nothing, so it
-    says WHICH function is too wide instead of that a build failed.
+    The cheap pre-check for the thing that made this module x86-64-unbuildable
+    — `sub: 7 parameters exceeds the 6 the formal x86-64 ABI passes in
+    registers`, which cost the module itself and the 45 files that import it.
+    The x86-64 half of `test_the_module_builds_as_a_dylib_on_both_backends` is
+    the real check and it costs a whole module compile; this one parses and
+    costs nothing, so it says WHICH function is too wide instead of that a
+    build failed.
 
     The ceiling is DERIVED from the two emitters rather than written down, for
     `test_struct_formal.py`'s reason: a hardcoded 6 would keep passing if either
@@ -1628,24 +1031,19 @@ def test_module_resolves_and_host_modelled_is_gone(tmpdir):
 def test_the_module_builds_as_a_dylib_on_both_backends(_tmpdir=None):
     """`re.mojo` compiles for arm64 AND x86-64.
 
-    The same question `test_struct_formal.py` asks, for the same reason, and it
-    used to have a premise that has since stopped being true: "a module compiled
-    for BOTH backends has to fit the smaller of their integer argument register
-    files" was right while neither ABI had a stack area, and both do now, so the
-    constraint is a shared frame budget rather than a register count. The check
-    is unaffected — it asserts the module builds for both — and it is now a
-    statement about something weaker than it was.
-
-    It is here because the widest signature in the file USED to be `sub`'s seven
-    parameters, six of which the x86-64 ABI did not pass in registers, so this
-    whole half of the test was unreachable: the build raised the arity refusal
-    before a container was ever chosen, and the refusal was caught by the
-    `except` arm below, which accepted it. Nothing here had ever looked at an
-    x86-64 `re` dylib, and `sub` has since been narrowed to six.
+    The same question `test_struct_formal.py` asks, for the same reason: a
+    module compiled for BOTH backends has to fit the smaller of their integer
+    argument register files, and that is not discoverable from either backend
+    alone. It is a question about the widest signature in the file, and the
+    widest one used to be `sub`'s seven parameters — six of which the x86-64
+    ABI does not pass in registers — so this whole half of the test was
+    unreachable: the build raised the arity refusal before a container was ever
+    chosen, and the refusal was caught by the `except` arm below, which
+    accepted it. Nothing here had ever looked at an x86-64 `re` dylib.
 
     The container is asserted against `default_format(arch)` and NOT hardcoded,
     for `test_struct_formal.py`'s reason and because this check used to carry
-    the premise `“An x86-64 module dylib is a Mach-O, so no x86-64 program can import anything”` was
+    the premise `bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md` was
     filed on and that doc's own author measured to be FALSE: on a macOS host an
     x86-64 image is a Mach-O, because an x86-64 binary that RUNS here has to be
     one Rosetta 2 will load and `fire.py`'s `_formal_run_argv` is what runs it.
@@ -1711,11 +1109,9 @@ def test_the_sweep_files_no_longer_refuse_on_the_import(tmpdir):
             r = subprocess.run(
                 [sys.executable, FIRE, "build", "--formal", "--no-prove",
                  "-o", os.path.join(tmpdir, os.path.basename(rel) + ".bin"),
-                 path], capture_output=True, text=True,
-                 timeout=BUILD_TIMEOUT, cwd=HERE)
+                 path], capture_output=True, text=True, timeout=900, cwd=HERE)
         except subprocess.TimeoutExpired:
-            check(False, "%s builds (timed out at BUILD_TIMEOUT=%ds)"
-                  % (rel, BUILD_TIMEOUT))
+            check(False, "%s builds (timed out)" % rel)
             continue
         text = r.stderr + r.stdout
         check("imports 're'" not in text,
@@ -1732,19 +1128,12 @@ def main():
 
     tests = [
         test_module_resolves_and_host_modelled_is_gone,
-        test_the_corpus_reaches_the_module_as_the_bytes_python_holds,
-        test_a_literal_carrying_real_newlines_and_tabs_reaches_the_engine,
         test_no_signature_is_wider_than_the_smaller_abi,
-        test_mojo_str_round_trips_through_the_decoder,
         test_the_module_builds_as_a_dylib_on_both_backends,
         test_the_corpus_against_cpython,
         test_the_corpus_against_cpython_on_x86_64,
         test_escape_every_byte,
         test_unsupported_constructs_are_refused,
-        test_inline_flags_answer_like_the_arguments_they_duplicate,
-        test_inline_flags_that_cpython_refuses_are_refused_here,
-        test_the_scoped_flag_form_answers_like_cpython,
-        test_the_scoped_flag_shapes_cpython_refuses_are_refused_here,
         test_a_span_list_that_is_too_small_is_a_status_not_a_crash,
         test_the_corpus_patterns_all_work,
         test_the_sweep_files_no_longer_refuse_on_the_import,

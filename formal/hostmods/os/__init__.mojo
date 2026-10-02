@@ -76,32 +76,11 @@ because it is not a matter of taste:
     four functions in `os.path` that return a TUPLE carry no annotation, for
     the reason that file gives.
 
-  * **`environ` IS A VIEW, AND IT IS A FUNCTION.** A process environment is a
-    `char **` in the C library's data, and the first version of this module
-    said that enumerating it "needs a buffer walk this path cannot do" and left
-    the whole of `os.environ` as `getenv`/`putenv`/`unsetenv`. That was wrong on
-    both counts and it is worth recording how, because the second one is the
-    reason this file has a `dlsym` in it. The buffer walk is a loop over an
-    array of pointers, which is what `listdir` above does over `readdir`, and
-    the array itself is reachable: `os/_syscalls.mojo`'s `fs_environ_vec` asks
-    the dynamic loader for `environ` at RUN time, which is a different question
-    from the one that was assumed — binding a DATA symbol needs support this
-    path does not have, and asking the loader for one needs nothing it does not
-    already have. So `environ()` is a snapshot blob in `malloc`'d memory with
-    `count`/`key`/`value`/`find`/`get`/`has`/`set`/`del`/`keys`/`items`/`free`
-    over it, and `getenv`/`putenv`/`unsetenv` stay because they are CPython's
-    own functions and they answer the C library's environment rather than the
-    view's — a difference CPython draws in the same place, and one
-    `test_formal_os_backing.py`'s `environ_view` case measures both halves of.
-
-  * **`os.environ` IS SPELLED `os.environ()`,** for the reason the constants
-    above are functions: a module-level name is not published across a dylib
-    boundary as a value, and a dict-like view is not publishable as one however
-    it is represented. Every CPython operation on it has its own function, and
-    the table that maps them is at the head of the section below. Two of them
-    have no CPython spelling on this path and say so: `os.environ[k]` raises
-    `KeyError` and there is no unwinder to raise into, so `[]` is `get` and
-    answers 0.
+  * `environ` IS ITS THREE FUNCTIONS. A process environment is a `char **` in
+    the C library's data, and enumerating it needs a buffer walk this path
+    cannot do. `getenv`, `putenv` and `unsetenv` are the whole of what can be
+    reached, and they are what `os.environ.get(k)` and `os.environ[k]` have to
+    become.
 
   * **NO FUNCTION HERE HAS A DEFAULT ARGUMENT.** This one is a backend
     defect rather than a property of the target, it is measured, and it is
@@ -131,7 +110,6 @@ from ._syscalls import fs_chdir, fs_chmod, fs_rename, fs_unlink, fs_rmdir
 from ._syscalls import fs_mkdir, fs_free, str_build, str_dup
 from ._syscalls import fs_readdir, fs_rewinddir, fs_closedir
 from ._syscalls import fs_dirent_name, fs_name_is_dot, fs_opendir
-from ._syscalls import fs_environ_vec, str_find, str_cmp
 from .path import exists, isfile, isdir, islink, lexists, getsize
 from .path import join
 
@@ -168,27 +146,19 @@ def pathsep() -> str:
 def linesep() -> str:
     """The line separator: a single newline byte.
 
-    A LITERAL, `"\\n"`, and it is worth saying why that is not the obvious
-    spelling here: this function used to allocate a buffer and `memset` the
-    byte 10 into it, because a string literal on this path was interned
-    VERBATIM and its escapes were not decoded — so `"\\n"` really was the two
-    characters `\\` and `n`. That stopped being true at `9023031b`, which gave
-    the formal backends `fire_compiler.decode_c_escapes`, the decoder every
-    other engine already called, and `formal/hostmods/*.mojo` are compiled into
-    dylibs, so the question is whether a literal is decoded INSIDE A MODULE and
-    not only inside a program. Measured, on both architectures, and pinned by
-    `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`:
-    `sys.write_stderr("a\\nb")` called from inside a module writes three bytes
-    and returns 3.
+    BUILT, not written `"\\n"`. A string literal on this path is interned
+    verbatim and its escapes are not unescaped, so a literal `"\n"` is the two
+    characters `\` and `n` — measured, and recorded in
+    bugs/FORMAL_pointer_value_model.md as a pre-existing `printf`
+    string-escape question. A `memset` of the byte value is the way to say
+    "newline" on this target, and the buffer is already a `str_alloc`'d one, so
+    it is zeroed and then one byte of it is set.
 
-    This is the function three other modules cited as the measurement of the old
-    rule (`ast.mojo`'s character sets, `re.mojo`'s `nl`), so it is the one place
-    that must not keep asserting a limitation that is gone. Their corpora keep
-    the `str_alloc` + `memset` idiom for now — it is correct, and
-    `bugs/FORMAL_sys_mojos_escape_note_is_stale.md` §"what remains" says what
-    simplifying them would take.
+    The caller owns the buffer, like every other string here.
     """
-    return "\n"
+    var b: Pointer[UInt8] = str_alloc(1)
+    memset(b, 10, 1)
+    return b
 
 
 def devnull() -> str:
@@ -218,10 +188,6 @@ def chdir(path) -> int:
 
 
 # ── The environment ────────────────────────────────────────────────────────
-#
-# `getenv`/`putenv`/`unsetenv` are the three POSIX calls, and they are ONE KEY at
-# a time.  Everything under them is `os.environ`, CPython's dict-like view over
-# the process environment, and the whole of it is below.
 
 def getenv(name) -> str:
     """The value of the environment variable `name`, or `""` when it is unset.
@@ -233,9 +199,7 @@ def getenv(name) -> str:
 
     A variable that is set to the empty string returns the empty string, which
     is not the same as being unset — as in CPython, and it is why the two
-    cannot be told apart through this function.  `environ_get` below DOES tell
-    them apart, because it answers about a dict rather than about the C
-    library's `getenv(3)`.
+    cannot be told apart through this function.
     """
     return getenv_or(name, "")
 
@@ -260,15 +224,6 @@ def putenv(name, value) -> int:
     `os.putenv`'s `overwrite=False` default — there is no way to spell the other
     one through a fixed signature, and the overwriting behaviour is the one a
     caller assigning into `environ` means.
-
-    **THIS DOES NOT TOUCH A VIEW**, and that is CPython's own rule rather than
-    a limitation here: `os.putenv(k, v)` changes what `os.getenv(k)` returns and
-    leaves `os.environ` holding what it held.  Both halves of that disagreement
-    are measured on every run of `test_formal_os_backing.py`'s `environ_view`
-    case — `late-getenv` is the moved answer and `late-view-has` is the one that
-    did not — against CPython's own.  A caller that wants both answers to move
-    assigns into the view: `environ_set` below, which is `os.environ[k] = v`
-    and does call `putenv`.
     """
     return fs_setenv(name, value, 1)
 
@@ -277,664 +232,6 @@ def unsetenv(name) -> int:
     """Remove the environment variable `name`. 0 on success, -1 if it was
     not set."""
     return fs_unsetenv(name)
-
-
-# ── `os.environ`: a dict-like view over the process environment ────────────
-#
-# THE SPELLING, and it is not `os.environ`.  A module-level name is not
-# published across a dylib boundary as a value (the note at the top of this
-# file), so `os.environ` is `os.environ()` — the same bargain as `os.sep` being
-# `sep()`, and for the same reason.  What it returns is a BLOB in `malloc`'d
-# memory, so it outlives the call that made it, which is the whole of what
-# `listdir` above needs a heap for.
-#
-#     word 0        n, the number of pairs, as an Int64
-#     word 1 + 2i   key `i`,   a `malloc`'d NUL-terminated buffer
-#     word 2 + 2i   value `i`, a `malloc`'d NUL-terminated buffer
-#
-# so a view is `1 + 2n` words and every buffer in it is the view's own.  The
-# `[count][element]…` shape is `listdir`'s, deliberately: a second convention in
-# one module is a second thing to be wrong, and `test_formal_os.py`'s `blob`
-# group exists to say so out loud.
-#
-# CPython's SPELLING, and what each operation is called here.  A caller who
-# knows one column can read the other; the pairs are the view and the accessors
-# are the only way to ask them a question.
-#
-#     len(os.environ)          environ_count(e)
-#     k in os.environ          environ_has(e, k)
-#     os.environ.get(k)        environ_get(e, k)          0 when unset
-#     os.environ.get(k, d)     environ_get_or(e, k, d)
-#     os.environ.keys()        environ_keys(e, i) for i < environ_count(e)
-#     os.environ.items()       environ_items(e)           the view itself
-#     os.environ[k] = v        e2 = environ_set(e, k, v)  see that function
-#     del os.environ[k]        environ_del(e, k)          0, or -1 when unset
-#     os.environ.pop(k, d)     environ_pop(e, k, d)
-#     os.environ.copy()        environ_copy(e)
-#     dict(os.environ)         environ_copy(e)
-#     os.environ.popitem()     pair = environ_popitem(e)   -> [2][key][value]
-#                              environ_pair_free(pair)  — NOT environ_free
-#     os.environ.clear()       environ_clear(e)
-#     os.environ.update(o)     e2 = environ_update(e, o)
-#     os.environ.setdefault(k, v)
-#                              environ_get_or(e, k, v) then environ_set if 0
-#     os.getenv(k[, d])        getenv(k) / getenv_or(k, d)  — the C library's
-#                              answer, NOT the view's, which is the difference
-#                              CPython draws in the same place
-#
-# `[]` IS `get` HERE, and that is a RECORDED DIVERGENCE rather than an
-# omission: `os.environ[k]` raises `KeyError` on a name that is not there and
-# `os.environ.get(k)` answers `None`, and this path has no unwinder to raise
-# into (the note at the top of this file), so both are the 0 that means "no such
-# key".  A caller that needs CPython's exception has to test the answer, which
-# is what every other failure in this module asks for.
-
-def environ() -> Pointer[Int64]:
-    """The process environment as a dict-like view. The caller OWNS it.
-
-    A SNAPSHOT, and CPython's `os.environ` is one too: it is built from the
-    environment the process started with, and the difference it makes is the
-    one `putenv`'s own docstring above is about.  What is different is WHEN the
-    snapshot is taken, and the answer is that the two agree for every program
-    that does not write to the environment before it reads it — the only way to
-    do that here is `putenv`, which changes no view.  So `environ()` gives
-    CPython's answer for every program whose first environment question is also
-    its first environment write, and `test_formal_os_backing.py`'s
-    `environ_view` case asks CPython for its side of the comparison rather
-    than naming an expected string.
-
-    `0` when the host will not name the environment at all, which
-    `os/_syscalls.mojo`'s `fs_environ_vec` says how it finds it and why it can
-    come back empty.  Every function below answers about a 0 the way
-    `listdir_len`/`listdir_get` answer about a 0, so a caller that checks once
-    can forget.
-
-    A FRESH blob on every call, and `1 + 2n` allocations every time: call it
-    once and keep it.  There is no module-level snapshot to hand out instead,
-    because a module-level name is not published as a value (the note at the top
-    of this file) and a value that outlives the function that made it has to be
-    in the heap, which this is.
-
-    TWO PASSES, the same bargain `listdir` and `walk` make and for the same
-    reason: one to count the variables so the blob is exactly the right size,
-    one to copy them.  The count is the one thing the C library will not give
-    us, and a blob with room to spare has a length that is a property of the
-    program rather than of the environment.
-    """
-    envp = fs_environ_vec()
-    if envp == 0:
-        return 0
-    n = _environ_count(envp)
-    var b: Pointer[Int64] = malloc(8 * (1 + 2 * n))
-    memset(b, 0, 8 * (1 + 2 * n))
-    _environ_fill(envp, b, n)
-    return b
-
-
-def _environ_count(envp: Pointer[Pointer[UInt8]]) -> int:
-    """How many entries the NUL-terminated array `envp` holds.
-
-    The array is `char **` with a 0 word at the end, which is what the kernel
-    gives a process and what every walk of it stops at.  Nothing here reads the
-    CONTENTS: a variable with an empty value is still a variable, and one entry
-    per element of the array is the count `environ_count` reports.
-    """
-    n = 0
-    i = 0
-    while envp[i] != 0:
-        n = n + 1
-        i = i + 1
-    return n
-
-
-def _environ_fill(envp: Pointer[Pointer[UInt8]], b: Pointer[Int64], n) -> int:
-    """Copy `envp`'s `n` entries into the blob `b` as key/value pairs.
-
-    ONE `=` SPLITS AN ENTRY, and the first one: a key cannot contain `=` in a
-    well-formed environment and a value can, so splitting at the first is what
-    makes `A=b=c` the key `A` and the value `b=c` — which is what `execve` says
-    and what CPython reports.  An entry with no `=` at all is a key with an
-    EMPTY value, which is the reading that keeps the pair count the same as the
-    entry count; nothing produces one, and pretending otherwise by dropping it
-    would make `environ_count` disagree with the environment it claims to be.
-    """
-    i = 0
-    while i < n and envp[i] != 0:
-        s = envp[i]
-        at = str_find(s, "=", 0)
-        if at < 0:
-            b[1 + 2 * i] = str_dup(s)
-            b[2 + 2 * i] = str_alloc(0)
-        else:
-            b[1 + 2 * i] = str_prefix(s, at)
-            b[2 + 2 * i] = str_copy(str_alloc(str_len(s) - at - 1),
-                                    s + at + 1, str_len(s) - at - 1)
-        i = i + 1
-    b[0] = n
-    return n
-
-
-def environ_count(e: Pointer[Int64]) -> int:
-    """How many pairs a view holds, or -1 for something that is not one.
-
-    Word 0, which is where every container on this path keeps its count, so
-    this is `len(os.environ)` for a value that has a count to read.  -1 for a
-    0 — what `environ()` returns when the host will not name the environment —
-    and it is the only way to tell an empty environment from no environment
-    through a single word.
-    """
-    if e == 0:
-        return 0 - 1
-    return e[0]
-
-
-def environ_key(e: Pointer[Int64], i) -> str:
-    """The KEY of pair `i`, or `""` when `i` is out of range.
-
-    An ALIAS, not a copy: the key is one of the buffers the view owns, so it
-    lives as long as the view does and must NOT be passed to `os_free` on its
-    own — `environ_free` releases it.  `environ_value`'s note is the same, and
-    a negative `i` is out of range here rather than a count from the end: this
-    is a blob of pairs, not a Python list, and the two index conventions are one
-    more thing a caller would have to know.
-    """
-    if e == 0:
-        return ""
-    if i < 0:
-        return ""
-    if i >= e[0]:
-        return ""
-    return e[1 + 2 * i]
-
-
-def environ_value(e: Pointer[Int64], i) -> str:
-    """The VALUE of pair `i`, or `""` when `i` is out of range.
-
-    An ALIAS, not a copy, for the reason `environ_key` gives.  `""` for an
-    out-of-range index and `""` for a variable set to the empty string are the
-    same word, and `environ_has` is how a caller tells them apart — which is
-    exactly the distinction CPython draws between a missing key and a present
-    one holding nothing.
-    """
-    if e == 0:
-        return ""
-    if i < 0:
-        return ""
-    if i >= e[0]:
-        return ""
-    return e[2 + 2 * i]
-
-
-def environ_find(e: Pointer[Int64], k) -> int:
-    """The index of the pair whose key is `k`, or -1.
-
-    The ONE scan every other function here is written in terms of, published so
-    a caller can walk pairs with it instead of asking the same question twice.
-    The comparison is `strcmp`, which is the same byte order Python compares
-    `str` in (see `os/_syscalls.mojo`'s `str_cmp`), so the answer for a key is
-    the key's and not a hash of it.
-
-    The FIRST match wins, and a view cannot have two pairs with the same key:
-    `environ_set` replaces rather than appends, which is what a dict does.
-    """
-    if e == 0:
-        return 0 - 1
-    i = 0
-    while i < e[0]:
-        if str_cmp(e[1 + 2 * i], k) == 0:
-            return i
-        i = i + 1
-    return 0 - 1
-
-
-def environ_get(e: Pointer[Int64], k) -> str:
-    """The value `os.environ[k]` would give, or 0 when the key is not there.
-
-    AN ALIAS into the view, and a 0 rather than a `KeyError`: see the note at
-    the head of this section.  The 0 is distinguishable from the empty string,
-    which is the one thing `getenv` above cannot do — a variable set to nothing
-    and a variable that is not set are both `""` through `getenv(3)` and are
-    `""` and 0 through here.
-    """
-    i = environ_find(e, k)
-    if i < 0:
-        return 0
-    return environ_value(e, i)
-
-
-def environ_get_or(e: Pointer[Int64], k, default) -> str:
-    """`environ_get(e, k)`, with `default` as the answer when it is unset.
-
-    A separate function rather than a default argument, for the reason
-    `getenv_or` above gives: a default that is not applied across a dylib
-    boundary is a wrong value and not an error.
-    """
-    v = environ_get(e, k)
-    if v == 0:
-        return default
-    return v
-
-
-def environ_has(e: Pointer[Int64], k) -> int:
-    """1 when `k` is a key of the view, else 0. `k in os.environ`.
-
-    Asked of the VIEW rather than answered by `getenv(3)`, which is the whole
-    difference between this and `environ_get(e, k) != 0`: a `putenv` between
-    the snapshot and the question moves one of them and not the other, and
-    which one moves is CPython's rule (see `putenv`'s own docstring above).
-    """
-    if environ_find(e, k) < 0:
-        return 0
-    return 1
-
-
-def environ_set(e: Pointer[Int64], k, v) -> Pointer[Int64]:
-    """`os.environ[k] = v`. The blob the CALLER MUST KEEP, or 0 on failure.
-
-    **THE RETURN IS A BLOB AND NOT A STATUS, and that is the whole contract.**
-    Adding a key makes the view one pair longer, and a view that has to hold
-    one more pair is a bigger allocation, and growing an allocation with
-    `realloc` MAY MOVE IT — so a caller that ignored this answer would go on
-    reading a freed buffer, and the read would be a heap address where a string
-    is expected.  So a caller writes
-
-        e = os.environ_set(e, k, v)
-
-    and the answer is `e` itself when the key was already there (the value's
-    buffer is replaced in place and the view does not move) and a NEW blob when
-    it was not.  0 means the view could not be grown, which on this target means
-    `realloc` failed.
-
-    CPython's `__setitem__` in full, in this order: `putenv` first, so a C
-    library callee sees the new value, then the pair.  A key that is not there
-    is APPENDED, at the end, so a caller that cares about order gets
-    environment order for the variables it did not write and insertion order for
-    the ones it did — which is what CPython's dict does too.
-    """
-    if e == 0:
-        return 0
-    i = environ_find(e, k)
-    if i >= 0:
-        free(e[2 + 2 * i])
-        e[2 + 2 * i] = str_dup(v)
-        fs_setenv(k, v, 1)
-        return e
-    n = e[0]
-    var b: Pointer[Int64] = realloc(e, 8 * (1 + 2 * (n + 1)))
-    if b == 0:
-        return 0
-    b[1 + 2 * n] = str_dup(k)
-    b[2 + 2 * n] = str_dup(v)
-    b[0] = n + 1
-    fs_setenv(k, v, 1)
-    return b
-
-
-def environ_del(e: Pointer[Int64], k) -> int:
-    """`del os.environ[k]`. 0, or -1 when the key is not there.
-
-    CPython raises `KeyError` for the missing key and there is no unwinder to
-    raise into, so -1 is the answer and it is a fact about the view rather than
-    a guess: it is what `environ_find` returned.
-
-    The pair is RELEASED and the LAST pair is moved into the hole, so the
-    numbering stays dense and `environ_key`/`environ_value` never have to know
-    that a pair was removed.  That reorders nothing a caller can rely on and
-    never reallocs, which is why `environ_set` needs to and this does not: a
-    view may hold one pair more than its count says it does, and the count is
-    what says which words are live.  The vacated words keep stale pointers and
-    are not freed twice, because `environ_free` releases exactly the first `n`
-    pairs.
-
-    `unsetenv` is called first, as CPython's `__delitem__` calls it, so a C
-    library callee sees the variable go.
-    """
-    if e == 0:
-        return 0 - 1
-    i = environ_find(e, k)
-    if i < 0:
-        return 0 - 1
-    n = e[0] - 1
-    free(e[1 + 2 * i])
-    free(e[2 + 2 * i])
-    if i != n:
-        e[1 + 2 * i] = e[1 + 2 * n]
-        e[2 + 2 * i] = e[2 + 2 * n]
-    e[0] = n
-    fs_unsetenv(k)
-    return 0
-
-
-def environ_items(e: Pointer[Int64]) -> Pointer[Int64]:
-    """`os.environ.items()` — which IS the view, so this returns `e` itself.
-
-    The pairs of a view are `(environ_key(e, i), environ_value(e, i))` for
-    `i < environ_count(e)`, so the items view and the view are the same words in
-    the same order, and `environ_keys` below is the same two accessors again.
-    A second blob for either one would be a second representation of one fact,
-    and `environ_del` above reorders pairs in place — two layouts would then
-    have to be kept in step with each other for no gain.
-    """
-    return e
-
-
-def environ_keys(e: Pointer[Int64], i) -> str:
-    """The `i`th key of `os.environ.keys()`, i.e. `environ_key(e, i)`.
-
-    **THERE IS NO KEYS BLOB, and this is why.** `keys()` is the keys of the view
-    in the view's order, which is `environ_key(e, i)` for `i < environ_count(e)`
-    — the whole of it, with no copy and no second shape.  A `[count][key]…`
-    blob was written first and is wrong in a way worth recording: `environ_free`
-    releases a view's pairs at words `1 + 2i` and `2 + 2i`, so handing it a
-    `[count][key]…` blob frees words `1, 3, 5, …` as if they were keys, reads
-    past the end for every other one, and lands in the allocator with a double
-    free — measured, SIGABRT after a whole correct run of every other operation
-    in the program, which is the worst possible moment for it.  Two shapes need
-    two release functions, and a caller holding one blob and not knowing which
-    of the two it is holding is exactly the knowledge a shape is supposed to
-    remove.
-    """
-    return environ_key(e, i)
-
-
-def environ_copy(e: Pointer[Int64]) -> Pointer[Int64]:
-    """`os.environ.copy()` / `dict(os.environ)`: an INDEPENDENT snapshot, or 0.
-
-    CPython's `copy()` is a DICT COPY: a new mapping holding the same pairs, and
-    writing to one does not write to the other.  A view here IS its pairs, so a
-    copy is a fresh blob with every key and every value DUPLICATED — one
-    `str_dup` per buffer — and deliberately not a second name for the same
-    words: an aliasing copy would make `environ_free` on either blob free
-    buffers the other still hands out, which is the double free this module's
-    `environ_keys` docstring records being measured the hard way (SIGABRT after
-    a whole correct run of everything else in the program).
-
-    So a copy costs `1 + 2n` allocations, exactly what `environ()` costs, and
-    the CALLER owns it: `environ_free` the copy and the original, separately.
-    That is what `dict(os.environ)` costs in CPython too, and it is why this is
-    a function that RETURNS the copy rather than one that fills a caller's blob:
-    the size is a property of the view, so the module allocates it.
-
-    0 for a 0 view, and 0 when the allocation fails — the same two answers
-    `environ()` gives, for the same reason (there is no exception to raise).
-    A copy of a copy is a copy of the pairs, so nothing here depends on where
-    the original came from.
-    """
-    if e == 0:
-        return 0
-    n = e[0]
-    var b: Pointer[Int64] = malloc(8 * (1 + 2 * n))
-    if b == 0:
-        return 0
-    memset(b, 0, 8 * (1 + 2 * n))
-    var i = 0
-    while i < n:
-        b[1 + 2 * i] = str_dup(e[1 + 2 * i])
-        b[2 + 2 * i] = str_dup(e[2 + 2 * i])
-        i = i + 1
-    b[0] = n
-    return b
-
-
-def environ_pop(e: Pointer[Int64], k, default) -> str:
-    """`os.environ.pop(k, default)`: the value, and the pair goes. `default` if unset.
-
-    **THE VALUE IS DUPLICATED BEFORE THE PAIR IS RELEASED, and that is why this
-    is one function rather than `environ_get` followed by `environ_del`.**
-    `environ_del` frees both buffers of the pair it removes, so the alias
-    `environ_get` handed back a moment earlier would be freed memory by the time
-    the caller printed it — a use-after-free that reads as a plausible string
-    until the allocator reuses the block.  One `str_dup` is the whole cost of
-    getting that right, and CPython's answer is a value that outlives the
-    removal, so this is the honest spelling of it.
-
-    `default` is a REQUIRED parameter, for the reason every default is on this
-    path (`getenv_or` above): a default argument is not applied to a call from
-    another image, and `pop`'s answer for a key that is not there IS the default.
-    CPython raises `KeyError` when the caller passes none, and there is no
-    unwinder to raise into, so a caller here passes what it would have caught.
-
-    The pair goes through `environ_del`, so `unsetenv` is called first and the
-    last pair is moved into the hole — which means a `pop` REORDERS the view
-    (`environ_del`'s own docstring is the measurement).  CPython's dict does not
-    reorder on a removal, and that is a recorded divergence rather than an
-    omission: the order of an environment is not a thing a caller can rely on in
-    either, and the alternative — leaving a hole — is what `environ_keys`'s
-    docstring says a dense numbering is for.
-    """
-    if e == 0:
-        return default
-    var i = environ_find(e, k)
-    if i < 0:
-        return default
-    var v = str_dup(environ_value(e, i))
-    environ_del(e, k)
-    return v
-
-
-def environ_update(e: Pointer[Int64], other: Pointer[Int64]) -> Pointer[Int64]:
-    """`os.environ.update(other)`: every pair of `other` stored. The blob to KEEP.
-
-    **ONE CALL, and the doc's "two calls each" was wrong for exactly this
-    function.**  The limit that forces `setdefault` to be two calls is ONE WORD
-    OF ANSWER: `setdefault` has to hand back the value it kept as well as the
-    view, and this path returns one thing per call.  `update` has nothing to say
-    except the view, so the view IS the answer and the whole operation is one
-    call — the loop that grows the blob happens inside, where the intermediate
-    pointers are words in a register rather than the caller's problem:
-
-        e = os.environ_update(e, other)
-
-    which is `environ_set`'s contract exactly, and for `environ_set`'s reason:
-    storing a key that is not there makes the view one pair longer, and a longer
-    view is a bigger allocation and a `realloc` MAY MOVE IT.  So the answer is
-    `e` itself when every key of `other` was already there, a NEW blob when one
-    was appended, and 0 when the growth failed.
-
-    **CPython's `update` in full**: every pair of the other mapping is stored,
-    in the other mapping's own order, so a key that is already here has its
-    value replaced IN PLACE and a key that is not is APPENDED at the end — and
-    each store calls `putenv`, because that is what `__setitem__` does and what
-    makes `os.getenv` agree with the view afterwards.
-
-    **`update(e, e)` IS SAFE, and the reason is a property of the layout rather
-    than a promise.**  Every key of `other` is then already a key of the
-    receiver, so every store takes `environ_set`'s in-place branch: no `realloc`
-    happens, so `e` never moves, and the loop reads a stable blob.  That is not
-    enough on its own — `environ_set` frees the old value buffer before it
-    duplicates the new one, and for an aliasing `other` the buffer being freed
-    is the one being read — so the value is duplicated first on that path and
-    the duplicate released after.  One `str_dup` and one `free` per pair, and
-    only when the caller asked for `d.update(d)`, which CPython allows and which
-    leaves every pair equal.
-
-    A 0 receiver is a 0 and a 0 `other` changes nothing: `update` of an absent
-    mapping is a no-op in CPython, and the answer is then the receiver the
-    caller already had.
-    """
-    if e == 0 or other == 0:
-        return e
-    var alias = other == e
-    var n = other[0]
-    var i = 0
-    var cur = e
-    while i < n:
-        var k = other[1 + 2 * i]
-        var v = other[2 + 2 * i]
-        if alias:
-            var held = str_dup(v)
-            cur = environ_set(cur, k, held)
-            free(held)
-        else:
-            cur = environ_set(cur, k, v)
-        if cur == 0:
-            return 0
-        i = i + 1
-    return cur
-
-
-def environ_clear(e: Pointer[Int64]) -> int:
-    """`os.environ.clear()`: every pair goes and every variable is unset. 0.
-
-    **IN PLACE, so this answers a STATUS where `environ_set` answers a blob.**
-    That asymmetry is the layout talking and not an inconsistency: adding a pair
-    can move the allocation and removing pairs cannot, so a clear has nothing to
-    hand back.  It is the same reason `environ_del` returns 0.
-
-    CPython's `__clear__` in its order — `unsetenv` for every key first, so a C
-    library callee sees each variable go, then the mapping empty — and both
-    buffers of every pair are released rather than leaked, which is what lets
-    `environ_free` afterwards be the same call it always was: it releases the
-    first `e[0]` pairs, and the count is 0.
-
-    0 for a 0, like every other function in this section.
-    """
-    if e == 0:
-        return 0
-    var n = e[0]
-    var i = 0
-    while i < n:
-        fs_unsetenv(e[1 + 2 * i])
-        free(e[1 + 2 * i])
-        free(e[2 + 2 * i])
-        i = i + 1
-    e[0] = 0
-    return 0
-
-
-def environ_popitem(e: Pointer[Int64]) -> Pointer[Int64]:
-    """`os.environ.popitem()`: remove and return an arbitrary pair as a BLOB.
-
-    **THE ANSWER IS A `[count=2][key][value]` BLOB, and that is one word — which
-    is the whole of why this is ONE call.**  The doc's "a genuine two-word limit
-    (it must hand back a key AND a value, and this path returns one thing per
-    call)" is TRUE of a RETURN VALUE and false of a return BLOB: a blob is a
-    `malloc`'d block whose address is one word, it crosses a dylib boundary and
-    reads by subscript on both architectures (`formal/model.py`'s container
-    return kind is what says so, and `bugs/FORMAL_module_state_no_storage.md`
-    §(3) records the measurement), and `environ_update`'s own docstring states
-    the rule it was written under: **the limit is ONE WORD OF ANSWER, not one
-    field of it**.  `setdefault` is genuinely two calls because its answer is the
-    view PLUS the value it kept, and only the view can move; `popitem`'s view
-    never moves (see below), so its whole answer fits in one block.
-
-    So the caller does what it does for every other blob this module hands out:
-
-        pair = os.environ_popitem(e)
-        if pair != 0:
-            key = pair[1]
-            val = pair[2]
-            os.environ_pair_free(pair)   # NOT environ_free; see its note
-
-    and the pair comes back as a COPY, for the reason `environ_pop` gives: the
-    view's buffers are released by the removal, so an alias would be freed memory
-    by the time the caller printed it.  **A caller MUST release the pair with
-    `environ_pair_free` and must NOT pass it to `environ_free`**, which is the
-    view's own release function and would read word 1 as the key of a view with 2
-    pairs and free the wrong buffers — the shape `environ_keys`' docstring records
-    being measured as a double free.  Two shapes need two release functions, and
-    the reason there is one per shape rather than one clever one is `environ_keys`
-    again: a caller holding a blob and not knowing which shape it is holding is
-    exactly the knowledge a shape is supposed to remove.
-
-    **WHICH PAIR, and the answer is the same one CPython gives.**  CPython's
-    `popitem` is "remove and return an arbitrary (key, value) pair", LIFO since
-    3.7, and this path removes the LAST pair, which is the same answer for every
-    program that does not rely on which one it was.  The word is "arbitrary" in
-    both, and a caller that needs a specific key uses `environ_pop`.
-
-    **THE VIEW DOES NOT MOVE, which is why the answer is a pair and not the view
-    too.**  `environ_del` releases the pair's buffers and shifts the last pair
-    into the hole, in place, and never reallocs — `environ_clear`'s docstring
-    says the same about the other direction.  So unlike `environ_set` and
-    `environ_update`, there is nothing for the caller to keep: `e` is still the
-    view after the call, and the answer is only the pair.
-
-    0 for a 0 view and for an EMPTY one, which is what CPython raises
-    `KeyError` for and there is no unwinder to raise into — so 0 is the answer
-    and it is distinguishable from a pair blob because a blob is never 0 on
-    success.  `environ_count(e) == 0` is the test a caller can ask first, and
-    both are the same fact asked twice.
-    """
-    if e == 0:
-        return 0
-    n = e[0]
-    if n == 0:
-        return 0
-    var i = n - 1
-    var pair: Pointer[Int64] = malloc(24)
-    if pair == 0:
-        return 0
-    memset(pair, 0, 24)
-    pair[1] = str_dup(e[1 + 2 * i])
-    pair[2] = str_dup(e[2 + 2 * i])
-    pair[0] = 2
-    free(e[1 + 2 * i])
-    free(e[2 + 2 * i])
-    e[0] = n - 1
-    fs_unsetenv(pair[1])
-    return pair
-
-
-def environ_pair_free(pair: Pointer[Int64]) -> int:
-    """Release a `environ_popitem` answer and its two buffers. 0.
-
-    **THE SECOND RELEASE FUNCTION IN THIS SECTION, and the shape is why.**
-    `environ_free` is a VIEW's release: it frees the first `e[0]` pairs' key and
-    value buffers at words `1 + 2i` and `2 + 2i` and then the blob.  A
-    `popitem` answer is `[count=2][key][value]` — one key at word 1 and one value
-    at word 2 — so handed to `environ_free` it is read as a view of 2 pairs,
-    whose words 3 and 4 are past the end of a 3-word block: it frees the two
-    buffers it was given and then the allocator is asked to free memory that is
-    not ours.  That is the double free `environ_keys`' docstring records being
-    measured (SIGABRT, after a whole correct run of everything else in the
-    program), so the release is a function of the SHAPE rather than a caller
-    knowing which shape it holds.
-
-    The count is read rather than assumed, so a blob this module did not hand out
-    is refused rather than trusted: a count that is not 2 releases nothing and
-    answers -1.
-
-    0 for a 0, like every release in this module.
-    """
-    if pair == 0:
-        return 0
-    if pair[0] != 2:
-        return 0 - 1
-    free(pair[1])
-    free(pair[2])
-    free(pair)
-    return 0
-
-
-def environ_free(e: Pointer[Int64]) -> int:
-    """Release a view and every buffer in it. 0.
-
-    A view is `1 + 2n` allocations — every key, every value, and the blob — and
-    this is all of them, in the count's own order so a blob that `environ_del`
-    has left stale words past its count cannot free one of them twice.  There is
-    exactly ONE shape of blob this module hands out (`environ`, and `items()`
-    which is the same words), and that is what lets this be one function.
-
-    0 for a 0, so the same call releases "nothing" and a caller that never had
-    a view does not have to test first — the bargain `listdir_free` makes.
-
-    **A KEY OR A VALUE IS NOT A BLOB AND MUST NOT COME HERE.** Both are
-    aliases into a view (`environ_key`, `environ_value`, `environ_get`), so
-    freeing one would leave the view holding a pointer the C library has
-    already reclaimed.  The strings `os_free` releases are a different set:
-    those are the ones the path functions allocated on their own.
-    """
-    if e == 0:
-        return 0
-    n = e[0]
-    i = 0
-    while i < n:
-        free(e[1 + 2 * i])
-        free(e[2 + 2 * i])
-        i = i + 1
-    free(e)
-    return 0
 
 
 # ── Creating, removing and renaming ────────────────────────────────────────
@@ -1071,59 +368,22 @@ def chmod(path, mode) -> int:
 #     word 0      count, as an Int64
 #     word 1..n   one `char *` per entry, in `readdir` order
 #
-# The result is a word, and both ways of saying what that word holds are here:
-# the DECLARED type, which is what a caller on the other side of a dylib
-# boundary reads (`model.imported_callee_kind`), and the three accessors, which
-# ask the blob directly.  They are not two answers to one question — the
-# declared type says what KIND of thing came back, and the accessors are how a
-# caller releases it and how a use site that must decide an element kind reads
-# it.  `listdir_free` has no spelling in the declaration, which is why it
-# exists.
-#
-# `-> List[String]`, and the annotation is not decoration — it is what puts the
-# CONTAINER KIND in this module's manifest, and a container kind is the one
-# thing a caller cannot derive: a list is one word, so the C signature is
-# `int64_t` whether it is declared a list or an integer and says nothing.
-# Measured, both architectures: with `-> int` an unannotated
-# `var names = listdir(dir)` is an INTEGER, so `names[0]` read the local's own
-# storage and answered 704698368 — a heap address — where `listdir_len` says 2.
-# So the trap was not "a pointer needs an annotation" but "this declaration
-# claimed the value was not one", and the two are fixed by different things:
-# the declaration is now true, and an unannotated binding of a cross-image
-# POINTER that has NO container kind is still REFUSED by name rather than
-# silently computing `[word + 8i]` — `formal/build.py`'s
-# `check_subscript_through_an_unclassified_import`, whose measured cases are
-# `re.escape`'s `-> Pointer[UInt8]` and not this one.
-#
-# A STORE through the result is refused by name as well, and that refusal is a
-# different question from the unclassified one: this blob's words are
-# `malloc`'d names that THIS module walks and frees, so `names[i] = v` is a
-# store into memory the caller does not own.  It is keyed on the export, not on
-# the value — `formal/imports.py`'s `HOST_OWNED_BLOBS` and build.py's
-# `check_imported_blob_stores` — so declaring the return type a list does not
-# make it writable, and the two checks do not have to know about each other.
+# The four functions below are the whole of the API, and the split is not
+# taste: this path has no way to return a container whose length is a run-time
+# value AND hand the caller a Python-level list, so the result is a word and
+# the length and the elements are read out of it by name. `len(names)` does not
+# work — a pointer has no count for the builtin to read — and `names[i]` does
+# not either, because the subscript would be asking the blob-walk question
+# about a pointer. `listdir_len` and `listdir_get` ask them of the blob, which
+# IS the shape those operations are about.
 
-def listdir(path) -> List[String]:
+def listdir(path) -> int:
     """The entries of the directory `path`, or 0 when there is no such
     directory.
 
-    A BLOB, and it now SAYS SO: the declared return type is `List[String]`,
-    which on this path is the annotation that means "one word pointing at
-    `[count][element]…`" — exactly the layout the body below builds. That
-    annotation is what lets a caller write `len(names)` and `for x in names`
-    and `names[i]` instead of the three accessors below, and it is what
-    `model.imported_callee_kind` reads across the dylib boundary a caller is
-    really behind (`bugs/FORMAL_listdir_no_run_time_sequence.md` item 1: the
-    representation was already right and the KIND was missing). It costs
-    nothing: the C signature is `int64_t` either way, because a list is one
-    word, so this is metadata and not an ABI change.
-
-    The three accessors REMAIN, because they are the honest spelling for a
-    caller that wants to free the blob, and `listdir_len`/`listdir_get` are
-    what the element-kind refusals read when a use site must decide. The caller
-    OWNS the result and every name in it, which means `listdir_free` is the
-    caller's to call and a store through `names` is refused rather than
-    obeyed — the header above gives the two checks that decide that.
+    A BLOB, not a list: `listdir_len` says how many entries there are,
+    `listdir_get` hands back entry `i`, and `listdir_free` releases the whole
+    thing. The caller OWNS the result and every name in it.
 
     `.` and `..` are NOT in it, as in CPython. The order is the C library's
     `readdir` order, which is the filesystem's own and not sorted — CPython's
@@ -1273,14 +533,9 @@ def listdir_free(names: Pointer[Int64]) -> int:
 # as an index over the blob because a list of a run-time length is what this
 # whole arrangement exists to avoid.
 
-def walk(root, maxdepth) -> List[String]:
+def walk(root, maxdepth) -> int:
     """Every directory at or below `root`, down to `maxdepth` levels, or 0 when
     `root` is not a directory.
-
-    `List[String]` for the reason `listdir` above says: the value is one word
-    pointing at a `[count][element]…` blob, so the annotation is what lets a
-    caller ask its length and iterate it, and it is metadata rather than an ABI
-    change.
 
     `maxdepth` is REQUIRED rather than defaulted, for the reason every
     parameter in this module is (see the note at the top of this file): a

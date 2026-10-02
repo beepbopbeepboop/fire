@@ -153,7 +153,7 @@ statically-base-typed field/variable holding a subclass instance — that is
 precisely what this file's blocker needs (`self.body.tokens()` where
 `self.body`'s declared type is `Stmt` but its runtime type varies). Still
 squarely the excluded polymorphic-dispatch hard-doc cluster
-(`CODEGEN_generator_recursive_yield_from_no_arg_forwarding`/
+(`bugs/hard/CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md`/
 `CODEGEN_generator_classmethod_first_param_must_be_self.md`). Not
 attempted — real vtable/type-tag dispatch in the coroutine codegen path is
 a genuine feature project, not a narrow fix. No code change.
@@ -203,7 +203,7 @@ etc., plus `int64_t`→`char*`/`Stmt*` conversions), though the specific
 line numbers in `parsing_gen.cpp` shifted slightly (179/184/189/192/254/
 259/320/325/386/397/461/470 vs the previous 159/164/.../366/367). No
 regression, no fix — same deliberately-excluded polymorphic-dispatch gap
-(`CODEGEN_generator_recursive_yield_from_no_arg_forwarding`/
+(`bugs/hard/CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md`/
 `CODEGEN_generator_classmethod_first_param_must_be_self.md` cluster). Not
 attempted, per this round's guidance against speculative changes to this
 shared, regression-prone machinery.
@@ -323,9 +323,9 @@ not this file's own code:
 /Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py:20:1: error: type mismatch in binary expression
 ```
 
-Same root cause as `“COMPILE_FAIL: Tools/cases_generator/cwriter.py”`
+Same root cause as `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md`
 (comprehension-assigned struct field defaulting to `int` — see
-`“the constructor-call-site field-typing pass understood only scalars”`).
+`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`).
 Nothing specific to `parsing.py` itself was found. Not fixed here.
 
 ```

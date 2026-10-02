@@ -19,22 +19,13 @@ predicate. **Not fixed** — this is a handoff.
 > `mojo_unsupported_iter` class, not a crash. That is
 > `bugs/CODEGEN_bootstrap_resource_blowup.md` and
 > `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`, and the run status of
-> the three steps below is in CLAUDE.md, "Known-failing tests".
->
-> **Not deleted, and the decision is settled rather than parked.** By this
-> repo's own bug-doc rule a fixed bug's doc is deleted rather than left with a
-> status history — but this is a top-level file, and SIX places cite it *by
-> name*: `bugs/FORMAL_string_value_model.md` (twice), `bugs/
-> RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md`, and three comments
-> in `mojo/backend_gimple/` (`emit_infra.py` twice, `module_gen.py`) that name
-> it as the source of the argument they are making. Deleting it would turn
-> those into dangling prose, and a reader who wants to know what "the CRASH.md
-> fix" was — which is what all six are pointing at — needs §3. Measured
-> 2026-10-01; the question was open in a doc of its own, now deleted
-> with its fix. The `| ab-native | EXPECTED |` row in §2 is correct as
-> of the same date (`disabled=`), and a table row naming a marked test is
-> checked against the registry by `test_suite.py`, so this file cannot go stale
-> on that point again.
+> the three steps below is in CLAUDE.md, "Known-failing tests". By this repo's own
+> bug-doc rule a fixed bug's doc is deleted rather than left with a status
+> history, so this file is a deletion candidate — see
+> `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md` §"Exact next
+> step", which is where the decision is parked. It is kept here for now because
+> `bugs/FORMAL_string_value_model.md` cites the fix by name and a reader who
+> wants to know what "the CRASH.md fix" was needs §3.
 
 ## 1. The crash
 

@@ -12,7 +12,7 @@ signatures sat in `gimple_codegen._KNOWN_SIGS` -- so a program calling
 
 Nothing noticed, because no suite entry built any `test_sqlite3*.mojo` and no
 `.mojo` file in the tree calls any of these namespaces. See
-CODEGEN_optional_runtime_units_not_linked.
+bugs/CODEGEN_optional_runtime_units_not_linked.md.
 
 What is pinned here
 -------------------

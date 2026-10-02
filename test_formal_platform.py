@@ -56,21 +56,8 @@ Mach-O fact: CPython accepts `file -b` output containing `executable` or the
 phrase `shared object`, and this macOS's `file` no longer prints that phrase, so
 CPython answers `('64bit', '')` for a dylib and this module answers the same.
 
-`platform` IS THE GROUP WITH A DIFFERENT ORACLE
-----------------------------------------------
-CPython's `platform()` resolves `uname().processor` with an `uname -p`
-SUBPROCESS, and this module has none, so `uname_processor()` answers `""` —
-which is CPython's own spelling of "cannot be determined". The two `platform()`
-answers therefore differ by exactly one word, and a test that compared the
-strings would be testing `uname -p`. So the `platform` group builds CPython's
-`platform._platform` out of the pieces the IMAGE reports and compares THAT, and
-it gives `platform_string` a corner-case corpus of its own, because none of the
-six parts this host contributes contains a space, a slash, a colon or the word
-`unknown` — so an implementation of the join alone would be indistinguishable
-from a correct one until something else fed it one.
-
 Groups: `resolve`, `uname`, `processor`, `macver`, `alias`, `free`,
-`architecture`, `arch`, `platform`, `exports`, `absent`. With no argument, all.
+`architecture`, `arch`, `exports`, `absent`. With no argument, all.
 """
 import argparse
 import os
@@ -433,152 +420,6 @@ def main() -> int:
     return True, "platform_free works and successive answers do not alias"
 
 
-def group_platform(tmpdir, verbose):
-    """`platform()` and the join behind it, against CPython's own `_platform`.
-
-    **The oracle is NOT `platform.platform()`.** CPython resolves
-    `uname().processor` by running `uname -p`, this path has no subprocess, and
-    so `uname_processor()` answers `""` — which is CPython's OWN spelling of
-    "cannot be determined". So `platform.platform()` is
-    `'macOS-26.6.2-arm64-arm-64bit-Mach-O'` here and `platform()` is
-    `'macOS-26.6.2-arm64-64bit-Mach-O'`, and the difference is exactly the one
-    word a subprocess produces. A test that compared the two strings would be
-    testing `uname -p`, which is a capability this module documents as absent.
-
-    The oracle is therefore CPython's `platform._platform` over the pieces the
-    IMAGE ITSELF reports, which is what makes the assertion about the
-    composition and not about a number somebody typed: the program prints
-    `system()`, `mac_ver_release()`, `machine()`, the two `architecture` halves
-    for the executable it was given, and the four `platform(exe, …)` answers,
-    and this file builds CPython's `_platform(...)` over the same pieces with
-    `system` rewritten to `macOS` — which is the one step of CPython's body that
-    happens AFTER `system_alias`, and the step a paraphrase of that body
-    misses.
-
-    The CORNER CASES are the other half and they are the reason this is a
-    group rather than three more assertions in `macver`: none of the six parts
-    `platform()` passes on this host contains a space, a slash, a colon or the
-    word `unknown`, so the eight single-character replacements and the
-    `unknown`-removal cannot fire from the composition — and an implementation
-    of the join alone would be INDISTINGUISHABLE from a correct one here. So
-    `platform_string` is compared against CPython's `_platform` over a corpus
-    that contains every replacement, both ends of the strip, an empty part and a
-    whitespace-only part. The whitespace-only part is the one that decides
-    whether the filter runs before or after the strip: CPython's is
-    `_platform('', 'a') == 'a'` and `_platform('   ', 'a') == '-a'`, and the
-    difference is visible only because a leading `-` is never stripped.
-    """
-    exe = sys.executable
-    lines = _program("platform_call", """
-import platform
-from platform import platform_string
-
-EXE = EXEPATH
-
-def main() -> int:
-    var out: Pointer[UInt8] = malloc(4096)
-    memset(out, 0, 4096)
-    var u = 0
-    u = rec(out, u, platform.system())
-    u = rec(out, u, platform.mac_ver_release())
-    u = rec(out, u, platform.machine())
-    u = rec(out, u, platform.uname_processor())
-    u = rec(out, u, platform.architecture_bits(EXE))
-    u = rec(out, u, platform.architecture_linkage(EXE))
-    u = rec(out, u, platform(EXE, 0, 0))
-    u = rec(out, u, platform(EXE, 0, 1))
-    u = rec(out, u, platform(EXE, 1, 0))
-    u = rec(out, u, platform(EXE, 1, 1))
-    u = rec(out, u, platform_string("macOS", platform.mac_ver_release(),
-                                     platform.machine(), "",
-                                     platform.architecture_bits(EXE),
-                                     platform.architecture_linkage(EXE)))
-    printf("%s", out)
-    return 0
-""".replace("EXEPATH", mj(exe)))
-    got = [r[2] for r in records(lines)]
-    check(len(got) == 11,
-          f"platform(): one record per value, got {len(got)}")
-
-    # The pieces, against CPython's own, so a difference in `full` names the
-    # piece that differs rather than the composition.
-    bits, linkage = platform.architecture(exe)
-    pieces = [("system()", platform.uname().system),
-              ("mac_ver_release()", platform.mac_ver()[0]),
-              ("machine()", platform.uname().machine),
-              ("uname_processor()", ""),
-              ("architecture_bits()", bits),
-              ("architecture_linkage()", linkage)]
-    for i, (name, want) in enumerate(pieces):
-        check(got[i] == want,
-              f"platform(): {name} is {got[i]!r}, CPython {want!r}")
-
-    full, terse, aliased, both, oracle = got[6:11]
-
-    want_full = platform._platform("macOS", platform.mac_ver()[0],
-                                   platform.uname().machine, "", bits, linkage)
-    check(oracle == want_full,
-          "the composition this module builds equals CPython's _platform over "
-          f"the same pieces — image {oracle!r}, CPython {want_full!r}")
-    check(full == want_full,
-          "platform(exe, 0, 0) is CPython's platform() minus the word only a "
-          f"subprocess produces — image {full!r}, CPython's own "
-          f"{platform.platform()!r}")
-    want_terse = platform.platform(terse=True)
-    check(terse == want_terse,
-          "platform(exe, 0, 1) is CPython's platform(terse=True) exactly — "
-          f"the terse path never asks for the executable; image {terse!r}, "
-          f"CPython {want_terse!r}")
-    check(aliased == full,
-          "aliased is a no-op on Darwin here, as it is in CPython — and both "
-          f"say so: {aliased!r} vs {platform.platform(aliased=True)!r}")
-    check(both == terse,
-          "aliased and terse together are terse, for the same reason")
-
-    # The join's corner cases. Every part is one CPython answer, asked here and
-    # asked of CPython, so a difference names the row.
-    corners = [
-        (("a", "  ", "b"), "a whitespace-only part is NOT an empty part"),
-        (("", "a"), "an empty part is dropped by the filter"),
-        (("   ", "a"), "…and a leading dash survives, because only trailing "
-                       "ones are stripped"),
-        (("unknown-x",), "'unknown' is removed from the middle of a component"),
-        (("a\\b:c;d\"e(f)g",), "all eight single-character replacements"),
-        (("a  b",), "a space becomes an underscore, two of them in a row"),
-        (("a---b",), "the '--' fold reaches a fixed point, not one pass"),
-        (("5-",), "a part that ends in a dash"),
-        (("a-",), "a trailing dash is stripped"),
-        (("  pad  ", "b  "), "each part is stripped before the join"),
-        (("",), "nothing at all"),
-    ]
-    body = ["import platform", "from platform import platform_string", "",
-            "def main() -> int:",
-            "    var out: Pointer[UInt8] = malloc(4096)",
-            "    memset(out, 0, 4096)",
-            "    var u = 0"]
-    for parts_i, _why in corners:
-        args = ", ".join(mj(p) for p in parts_i)
-        args += ", " + ", ".join(["''"] * (6 - len(parts_i)))
-        body.append("    u = rec(out, u, platform_string(%s))" % args)
-    body += ['    printf("%s", out)', "    return 0"]
-    got_c = [r[2] for r in records(_program(
-        "platform_corners", "\n".join(body) + "\n"))]
-    check(len(got_c) == len(corners),
-          f"platform_string: one record per corner, got {len(got_c)}")
-    for i, (parts_i, why) in enumerate(corners):
-        want = platform._platform(*parts_i)
-        if i >= len(got_c):
-            break
-        check(got_c[i] == want,
-              f"platform_string{parts_i!r} == CPython ({why}) — image "
-              f"{got_c[i]!r}, CPython {want!r}")
-    if verbose:
-        print(f"    {len(got)} values and {len(corners)} join corners against "
-              f"CPython's _platform")
-    return True, (f"platform() and {len(corners)} join corners agree with "
-                  f"CPython's _platform")
-
-
 def group_exports(tmpdir, verbose):
     """Every public name `platform.mojo` declares reaches a dylib's export
     table, and every one of them LINKS when called.
@@ -626,14 +467,6 @@ def group_exports(tmpdir, verbose):
         # own `fire.py`, which exists on every checkout that can run this file.
         ("architecture_bits", '("fire.py")'),
         ("architecture_linkage", '("fire.py")'),
-        # `platform(exe, aliased, terse)` takes the executable path CPython
-        # reads from `sys.executable`, which this image cannot discover, and the
-        # two flags have no defaults across a dylib boundary — hence the
-        # explicit `(…, 0, 0)` where CPython writes `platform()`.
-        ("platform", '("fire.py", 0, 0)'),
-        # CPython's `platform._platform`, renamed because this path's export
-        # rule denies a leading underscore and there is no opt-in.
-        ("platform_string", '("a", "  ", "b", "", "", "")'),
     ]
     check(sorted(n for n, _ in calls) == declared,
           f"the call list is not the module's public surface; only in the "
@@ -663,6 +496,11 @@ def group_absent(tmpdir, verbose):
     does not name the name being asked for.
     """
     absent = [
+        # One composition away, and what it is composed of is here: `platform()`
+        # itself, which is `uname` + `mac_ver` + `system_alias` + `architecture`
+        # and one string-formatting helper
+        # (bugs/FORMAL_platform_one_call_from_answered.md).
+        "platform",
         # Subprocesses and a readable file.
         "processor", "libc_ver",
         # No Python on this image.
@@ -863,7 +701,6 @@ GROUPS = {
     "alias": group_alias,
     "free": group_free,
     "architecture": group_architecture,
-    "platform": group_platform,
     "arch": group_arch,
     "exports": group_exports,
     "absent": group_absent,

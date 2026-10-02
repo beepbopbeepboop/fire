@@ -12,22 +12,20 @@ cannot be returned today is that its creator's scratch dies with the creator.
 These cases are about the LAYOUT, and they are deliberately not about whether
 the fix has landed end to end. It has not:
 
+  * `formal/build.py` raises the refusal (`:2423`, `frame_return_refusal`) and
+    that file is in nobody's write set this round — see
+    `bugs/INTERFACE_REQUEST_4_to_formal_build.md`;
   * the hidden argument is a calling-convention change whose proof-side
-    obligation is a `lib/Refine.lean` predicate.  That predicate now exists
-    (`FrameOk_into` / `ReturnsBlockInto`, below), so of the two halves of the
-    original caveat only the layout's own — that the emitters consume the
-    block the layout hands them — is left.
+    obligation is a `lib/Refine.lean` predicate, owned by [3].
 
 So a case here that passed end to end would be a lie, and this file asserts
 only what is true today: the layout is computed, it is the shape the emitters
-need, the two machines would agree on it because they read one function, and
-the callee contract a returning callee owes its caller is stated and proved.
+need, and the two machines would agree on it because they read one function.
 
 Usage:
     python3 test_returned_frame_layout.py [-v]
 """
 import os
-import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -245,18 +243,6 @@ def main(argv):
     #    that makes a returned frame correct on both or wrong on both. This
     #    asserts it structurally: both backends call the shared function and
     #    neither computes its own offsets.
-    #
-    #    The pinned name is `struct_constructor_site_bytes`, not
-    #    `struct_frame_block_bytes`, and the difference is the point rather than
-    #    a rename: the emitters need the bytes ONE SITE reserves, which is not
-    #    the struct's block — a one-field struct whose sole field holds a frame
-    #    reserves the nested block alone, because there is no object, the value
-    #    IS the nested frame's address. `struct_constructor_site_bytes` is the
-    #    one reader that answers that (it is the function
-    #    `struct_constructor_sites` advances its own layout cursor by), so
-    #    pinning it keeps the property this case is about — one site can never
-    #    be reserved one amount and laid out another — instead of pinning a
-    #    name the consolidation deliberately stopped calling.
     for backend, fname in (('formal/arm64_codegen.py', '_frame_recv_bytes'),
                            ('formal/x86_64_codegen.py', '_frame_recv_bytes')):
         path = os.path.join(HERE, backend)
@@ -264,53 +250,8 @@ def main(argv):
             src = fh.read()
         check(f'{os.path.basename(backend)}_shares_the_frame_layout',
               'M.struct_constructor_sites' in src
-              and 'M.struct_constructor_site_bytes' in src
-              and not re.search(r'\n\s*def struct_(?:constructor_sites|'
-                                r'constructor_site_bytes|frame_block_layout)\b',
-                                src),
-              'this backend either does not read the shared frame layout or '
-              'computes one of its own')
-    # ...and the arithmetic really is in the shared model, so "neither backend
-    # defines one" is a fact about the layout and not about where it moved to.
-    # This is the half that survives every rename of the layout function: it
-    # pins the CALL GRAPH rather than a symbol, so a consolidation that moves
-    # the bytes a level down cannot leave the emitters computing them.
-    with open(os.path.join(HERE, 'formal', 'model.py')) as fh:
-        msrc = fh.read()
-    check('the_block_layout_lives_in_the_shared_model',
-          'def struct_constructor_site_bytes' in msrc
-          and 'def struct_frame_block_layout' in msrc
-          and 'struct_constructor_site_bytes(holder, structs_by_name)' in msrc,
-          'model.struct_constructor_sites no longer advances its layout cursor '
-          'by the shared per-site byte count, so a site can be reserved one '
-          'amount and laid out another')
-    for backend, fname in (('formal/arm64_codegen.py', '_frame_recv_bytes'),
-                           ('formal/x86_64_codegen.py', '_frame_recv_bytes')):
-        path = os.path.join(HERE, backend)
-        with open(path) as fh:
-            src = fh.read()
-        check(f'{os.path.basename(backend)}_shares_the_frame_layout',
-              'M.struct_constructor_sites' in src
-              and 'M.struct_constructor_site_bytes' in src
-              and not re.search(r'\n\s*def struct_(?:constructor_sites|'
-                                r'constructor_site_bytes|frame_block_layout)\b',
-                                src),
-              'this backend either does not read the shared frame layout or '
-              'computes one of its own')
-    # ...and the arithmetic really is in the shared model, so "neither backend
-    # defines one" is a fact about the layout and not about where it moved to.
-    # This is the half that survives every rename of the layout function: it
-    # pins the CALL GRAPH rather than a symbol, so a consolidation that moves
-    # the bytes a level down cannot leave the emitters computing them.
-    with open(os.path.join(HERE, 'formal', 'model.py')) as fh:
-        msrc = fh.read()
-    check('the_block_layout_lives_in_the_shared_model',
-          'def struct_constructor_site_bytes' in msrc
-          and 'def struct_frame_block_layout' in msrc
-          and 'struct_constructor_site_bytes(holder, structs_by_name)' in msrc,
-          'model.struct_constructor_sites no longer advances its layout cursor '
-          'by the shared per-site byte count, so a site can be reserved one '
-          'amount and laid out another')
+              and 'M.struct_frame_block_bytes' in src,
+              'this backend does not read the shared frame layout')
 
     # 6. The convention refusal, which is the decision this whole item turns
     #    on, is reachable and says the thing that matters.
@@ -322,47 +263,17 @@ def main(argv):
           M.returned_frame_convention_refusal('make', 2) == '',
           'a callee with room for the hidden word was refused')
 
-    # 7. The budget is SIX, and it is six because of the HIDDEN WORD rather than
-    #    because of a callee's arity.  Both ABIs now put arguments past the
-    #    register file in the caller's frame (`_MAX_INCOMING_ARGS` in both
-    #    backends), so "the argument budget" is no longer six and reading this
-    #    row that way would be reading a number that stopped meaning what its
-    #    name says: what is six is the number of words the hidden block address
-    #    can travel in, because both backends read it by the REGISTER path and
-    #    neither has a stack convention for it.  Pinned because the number is a
-    #    shared decision with a one-machine reason behind it, and a reader who
-    #    "fixes" it to eight makes the two backends answer differently about one
-    #    program.
-    check('the_budget_is_the_smaller_register_file',
+    # 7. The budget is SIX, and it is six because of x86-64 rather than
+    #    arm64.  Pinned because the number is a shared decision with a
+    #    one-machine reason behind it, and a reader who "fixes" it to eight
+    #    makes the two backends answer differently about one program.
+    check('the_budget_is_the_smaller_abi',
           M.returned_frame_convention_refusal('make', 6) != ''
           and M.returned_frame_convention_refusal('make', 5) == '',
-          'the hidden word needs an argument register, and x86-64 passes six')
+          'the hidden word needs a register, and x86-64 passes six')
     check('the_budget_matches_x86_64_argument_registers',
           M.RETURNED_FRAME_MAX_ARGS == 6,
           f'got {M.RETURNED_FRAME_MAX_ARGS}')
-    # …and it is a number of REGISTERS rather than of arguments, stated as a
-    # fact about both backends rather than as a comment.  Each emitter moves the
-    # hidden word home by naming the argument register it arrived in, and
-    # neither has a path that would find it in the caller's frame: the stack-area
-    # convention is `_load_home_from_stack`, and the hidden word does not go
-    # through it.  A future change that gives the hidden word a stack slot has to
-    # move these two lines AND `RETURNED_FRAME_MAX_ARGS` together, and this is
-    # what fails first if it moves one of them — the failure being a budget that
-    # quotes six while the backend is handing out twenty-four.
-    for backend, line in (
-            ('formal/arm64_codegen.py',
-             'self._load_home_from_reg(_SRET_LOCAL, sret_arg)'),
-            ('formal/x86_64_codegen.py',
-             'self.asm.emit(encode_mov_r64_r64(Reg.R11, ARG_REGS[sret_arg]))')):
-        with open(os.path.join(HERE, backend)) as fh:
-            src = fh.read()
-        check(f'{os.path.basename(backend)}_reads_the_hidden_word_from_a_register',
-              line in src
-              and '_load_home_from_stack(_SRET_LOCAL' not in src,
-              'the hidden word is no longer read out of an argument register in '
-              'this backend, so RETURNED_FRAME_MAX_ARGS is no longer its budget '
-              'and this check — which exists to catch exactly that — has to '
-              'move with it')
 
     # 8. A call whose result is NOT bound to a name still needs a block, and
     #    this is the change from the landed version.  `return make()`,
@@ -411,41 +322,6 @@ def main(argv):
     check('an_if_without_else_can_fall_off_the_end',
           M.returns_on_every_path(make_fn.body) is False,
           'the `if` has no else, so one path ends the body')
-
-    # 11. The PROOF-SIDE half, which was the last thing standing between this
-    #     file and an end-to-end claim: the callee contract for a callee that
-    #     RETURNS a frame.  `lib/Refine.lean` carries it now —
-    #     `FrameOk_into` (the caller's window, plus every 8-byte word outside
-    #     the destination block, unchanged) and `ReturnsBlockInto` (that, and
-    #     the return word IS the block the caller passed).
-    #
-    #     A textual check, deliberately.  The elaborate is `prooflib`'s job —
-    #     it is the `deps` of every proof-checking test — so a `Refine.lean`
-    #     that stopped typechecking is already a red gate; what THIS file pins is
-    #     that the predicate the request asked for exists under the name the
-    #     request named, because a renamed or deleted contract would leave the
-    #     gate green with the obligation unmet.
-    refine = os.path.join(HERE, 'lib', 'Refine.lean')
-    try:
-        text = open(refine, encoding='utf-8').read()
-    except OSError as e:
-        check('the_returned_frame_callee_contract_exists', False, repr(e))
-    else:
-        present = [n for n in ('def OutsideBlock', 'def FrameOk_into',
-                               'def ReturnsBlockInto',
-                               'theorem frameWrites_into_block',
-                               'theorem ReturnsBlockInto_of_copy',
-                               'theorem FrameOk_into_zero')
-                   if n not in text]
-        check('the_returned_frame_callee_contract_exists', not present,
-              f'lib/Refine.lean is missing: {present} — the callee contract '
-              f'a returning callee owes its caller')
-        # The recovery argument is the reason adding a predicate is safe, so it
-        # is checked as a NAME and not left to the reader: an empty block has
-        # to recover the plain predicate every existing proof uses.
-        check('an_empty_block_recovers_FrameOk',
-              'FrameOk_into_zero' in text and 'FrameOk_into_window' in text,
-              'the recovery lemma and the window lemma are both gone')
 
     print(f'\n{_PASS} passed, {_FAIL} failed')
     return 1 if _FAIL else 0

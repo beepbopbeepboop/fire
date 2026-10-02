@@ -6,7 +6,7 @@
 is False for every pair of containers that are equal but not the SAME object --
 which is every `while nxt != proven:` convergence test, since each round builds
 a fresh one. With no GC such a loop never terminates and leaks a set per round:
-the 43 GB two-line compile in “CODEGEN: `==` / `!=` between two containers is POINTER identity”,
+the 43 GB two-line compile in bugs/CODEGEN_container_eq_is_pointer_identity.md,
 and a prime suspect in the self-hosted compiler's own footprint. `is` / `is not`
 keep pointer identity, which is what they mean.
 
@@ -369,22 +369,13 @@ CASES = [
         "    return 0")),
 ]
 
-# Ordering comparisons between containers are NOT covered here and have their
-# OWN file: test_container_ordering.py (`mojo_list_cmp` / `mojo_set_cmp` /
-# `mojo_value_cmp`, folded by `mojo_cmp_fold`, with the dict and cross-kind
-# refusals decided at compile time by `_ord_pair_is_refused`). A sibling branch
-# wrote a second set of ordering cases into this file instead, against a
-# parallel runtime family (`MOJO_ORD_INCOMPARABLE`, `mojo_*_order`,
-# `mojo_dict_order`); that family is not in the tree, so those cases would have
-# been testing a lowering that does not exist. Their shapes are not lost: the
-# cases the dedicated file did not already have -- a SET of floats compared
-# against integers, `[1] < [None]`, `[1] < "a"`, and a non-strict `<=` through
-# an erased helper over a SET -- are added there instead, so there is one home
-# for container ordering rather than two that can drift.
-#
-# No case here uses `<`, `>`, `<=` or `>=` on a container, so a future change to
-# those cannot be mistaken for coverage this test provides -- and that file
-# cannot be mistaken for coverage of `==`, which it also does not duplicate.
+# Ordering comparisons between containers are NOT covered here and are a
+# separate open bug: they still lower to a pointer comparison, and the CPython
+# this diffs against (3.14) answers `a < b` for lists and sets, so a
+# `mojo_list_lt` is now ANSWERABLE rather than a refusal. See
+# bugs/CODEGEN_container_ordering_is_pointer_identity.md. No case here uses
+# `<`, `>`, `<=` or `>=` on a container, so a future change to those cannot be
+# mistaken for coverage this test provides.
 
 
 def _py_source(src: str) -> str:
@@ -431,27 +422,7 @@ def run_compiled(src: str, tmp: str, name: str):
         raise RuntimeError("generated C rejected by gcc -fgimple:\n"
                            + r.stderr[-3000:])
     p = subprocess.run([exe], capture_output=True, text=True, timeout=60)
-    return p.stdout, p.returncode, p.stderr
-
-
-def _is_type_error_refusal(rc: int, err: str) -> bool:
-    """Is CPython's verdict for this program "raises TypeError"?
-
-    Only TypeError counts, and only on the LAST line: a case whose reference
-    program fails for any other reason (a NameError from a typo in the case, a
-    SyntaxError from the `var`-stripping) is a broken TEST, and admitting it as
-    a refusal would let a case whose reference never ran pass by having the
-    compiled side also fail to run.
-
-    Nothing in `CASES` is expected to refuse today: `==` / `!=` between two
-    containers of the same kind, or between two different kinds, is an answer
-    rather than a TypeError. So this is a NARROW test on purpose -- it exists
-    for the case the file cannot currently express, and a refusal appearing
-    here is a signal to look, not a thing to relax.
-    """
-    if rc == 0 or not err.strip():
-        return False
-    return err.strip().splitlines()[-1].startswith("TypeError:")
+    return p.stdout, p.returncode
 
 
 def _diff(want: str, got: str) -> str:
@@ -479,38 +450,7 @@ def main() -> int:
     try:
         for name, src in CASES:
             py_out, py_rc, py_err = run_cpython(src, tmp)
-            want_refusal = _is_type_error_refusal(py_rc, py_err)
-            if want_refusal:
-                # A REFUSAL case, and the verdict is still CPython's: the
-                # compiled program must fail the same way. Its stderr is
-                # "Unhandled exception: " plus the same message, so the
-                # comparison is on the message line and the exit status, not
-                # on a byte-for-byte stderr match that no runtime would make.
-                # A compiled program that PRINTS a comparison instead is a
-                # wrong answer, not a differently-worded refusal, and fails
-                # here — which is the whole point of the dict cases.
-                try:
-                    c_out, c_rc, c_err = run_compiled(src, tmp, name)
-                except Exception as e:                       # noqa: BLE001
-                    status, note = "FAIL", str(e)
-                    failed += 1
-                else:
-                    want_msg = py_err.strip().splitlines()[-1]
-                    got_msg = (c_err.strip().splitlines() or [""])[-1]
-                    if c_rc == py_rc and c_out == py_out \
-                            and got_msg.endswith(want_msg):
-                        status = "PASS"
-                        note = "both refuse: %s" % want_msg
-                        passed += 1
-                    else:
-                        status = "FAIL"
-                        note = "compiled did not refuse the way CPython does\n" \
-                            "      cpython: rc=%d out=%r msg=%r" % (
-                                py_rc, py_out, want_msg) \
-                            + "\n      compiled: rc=%d out=%r msg=%r" % (
-                                c_rc, c_out, got_msg)
-                        failed += 1
-            elif py_rc != 0 or py_err.strip():
+            if py_rc != 0 or py_err.strip():
                 # A reference program that cannot run makes the case
                 # meaningless; say so instead of reporting a phantom failure.
                 status = "BROKEN"
@@ -519,7 +459,7 @@ def main() -> int:
                 failed += 1
             else:
                 try:
-                    c_out, c_rc, _c_err = run_compiled(src, tmp, name)
+                    c_out, c_rc = run_compiled(src, tmp, name)
                 except Exception as e:                       # noqa: BLE001
                     status, note = "FAIL", str(e)
                     failed += 1
@@ -536,7 +476,7 @@ def main() -> int:
                         note += "\n" + _diff(py_out, c_out)
                         failed += 1
             if status != "PASS" or args.verbose:
-                print("%-6s %-28s %s" % (status, name, note))
+                print("%-6s %-24s %s" % (status, name, note))
         if args.keep:
             print("kept: %s" % tmp)
             tmp = None
@@ -546,8 +486,7 @@ def main() -> int:
                 os.unlink(os.path.join(tmp, f))
             os.rmdir(tmp)
 
-    print("PASS=%d FAIL=%d of %d" % (passed, failed,
-                                     len(CASES)))
+    print("PASS=%d FAIL=%d of %d" % (passed, failed, len(CASES)))
     return 1 if failed else 0
 
 

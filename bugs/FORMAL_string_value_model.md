@@ -9,34 +9,12 @@ found the same defect class in **eleven more operators** — every one measured,
 every one refused. Wave 6 closed the three it left (`~`, the truthiness
 conversion, and a slice of a string) and found **three more** in the same family
 that no list had recorded: `if []:`, a short-circuit chain used as a condition,
-and an x86-64 `assert` that always failed. 2026-10-03 closed the unannotated
-parameter's fabricated truthiness — the call site's argument kind propagated
-into the callee — and, on `work/formal13-6`, the comprehension guard and the
-`for`-loop variable's kind beside it, which was the last open item in the "what
-was found while looking" section with a decidable fix (the comprehension case
-re-measured as still open at the time, with its scope question named, and it was
-a different hook rather than a smaller version of the same one). What
-is still NOT fixed, and is the larger thing, is the collision between that
-representation and the stdlib's own `String` struct — which is what all 16 of
-the "a String receiver is returned/passed" refusals in the stdlib sweep actually
-are, and which is not a string-value-model problem at all. Two regressions that
-arrived from outside this work, with a merge, are at the bottom. **`not <string>`
-— the one item this document left as "a choice rather than a limit" — landed
-2026-10-02 on `work/formal8-11` (see "Sites deliberately NOT routed" below), and
-the `%s` family that reached a non-text value through a one-field struct, through a
-conversion and through a bare expression is closed with its doc deleted.
-(Named without the `bugs/` prefix on purpose: the file is not there, and
-`tools/dangling_doc_refs.py` counts a citation of a doc that is not there, so
-re-introducing the spelling to say it is missing would put this file back on
-its own census.)**
-
-**Wave 9 (`work/formal26-unicode`, 2026-10-04) is the bottom of this document
-and it is about something this one never asked: `strlen` counts BYTES and
-Python's `len()` counts CHARACTERS, so every answer above was right about a
-`char *` and silent about what a `char *` HOLDS.** Non-ASCII text made `len`,
-`find`, `s[i]` and a `%<width>s` wrong on both machines — measured numbers, a
-table, and the three answers now in `formal/model.py`'s TEXT ENCODING block at
-the very bottom. The representation decision at the top is untouched.
+and an x86-64 `assert` that always failed. What is still NOT fixed, and is the
+larger thing, is the collision between that representation and the stdlib's own
+`String` struct — which is what all 16 of the "a String receiver is
+returned/passed" refusals in the stdlib sweep actually are, and which is not a
+string-value-model problem at all. Two regressions that arrived from outside
+this work, with a merge, are at the bottom.
 
 ## The decision, and the reasoning that decides it
 
@@ -485,20 +463,11 @@ reads.
 
 **Sites deliberately NOT routed, and why:**
 
-- **`not s`** — **LANDED (2026-10-02, `work/formal8-11`), and it was the item
-  this bullet named.** Both `not` arms now go through `_emit_truthy_word`, so
-  `not s` is the same `strlen` `if s:` makes and `cmp/cset eq` against zero is
-  its negation; `model.string_unary_refusal` keeps `-` and `~` and lost the
-  `not` row. Measured before and after on both architectures, `s = "abc"`,
-  `e = ""`, `printf("%d %d", 1 if not s else 0, 1 if not e else 0)`: **`0 0`
-  before, `0 1` after**, where CPython says `0 1`. The other two rows of the
-  same table are in the same test — `not 0` is 1, `not 3` is 0, `not []` is 1,
-  `not [1]` is 0 — plus a short-circuit chain, whose operand is the WORD the
-  chain returns (`p and ""` yields the empty string, so `not` of it is True even
-  though `p` is not): `1 0 0 1 chain`. That last row is the one a null test
-  cannot get right and is why the conversion is shared rather than
-  re-implemented. `str_not_refused_because_empty_string_is_falsy` became
-  `not_a_string_is_the_truthiness_conversion`, with the guard rows beside it.
+- **`not s`** is still a refusal (`str_not_refused_because_empty_string_is_falsy`).
+  It is not a wrong answer, and it is now a CHOICE rather than a limit:
+  `_emit_truthy_word` can produce the honest answer here too, so the only thing
+  left holding it back is that the refusal is what a test asserts today. Whoever
+  wants it should delete the marker and the message together.
 - **Every `CBZ`/`CBNZ`/`TEST` that tests a compiler-generated invariant** — a
   division-by-zero guard, a list slice's clamped bound, a `strlen` result of
   zero inside `count`, a blob's count against a cap, a loop counter against an
@@ -547,142 +516,26 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   a string bug; the `_emit_mov_imm(Reg.R11, 1)` next to it was also dead — R11 is
   the divisor, the shift count and the alloc size on this path and an `assert`
   does none of those — and is gone.)
-- **An UNANNOTATED `String` parameter was a fabricated truthiness. FIXED
-  2026-10-03 (`work/formal10-5`).**
-  `def f(s): if s:` called with `f("")` printed `1`, because `ValueKinds` seeded
-  an unannotated parameter as `INT_KIND` (a word) and nothing downstream could
-  tell a word from a `char *`. A `String`-ANNOTATED parameter was classified
-  correctly and answered `0 1`. This was the same gap the `ValueKinds` docstring
-  already records for `print` ("A `char *` reaching print through an unannotated
+- **An UNANNOTATED `String` parameter is still a fabricated truthiness.**
+  `def f(s): if s:` called with `f("")` prints `1`, because `ValueKinds` seeds an
+  unannotated parameter as `INT_KIND` (a word) and nothing downstream can tell a
+  word from a `char *`. A `String`-ANNOTATED parameter is classified correctly and
+  now answers `0 1`. This is the same gap the `ValueKinds` docstring already
+  records for `print` ("A `char *` reaching print through an unannotated
   parameter is the remaining gap, and it is the gap the annotation exists to
-  close") — a second site rather than a new gap.
-
-  **It took the first of the two repairs this bullet offered, and the one it
-  called the honest answer.** `model.string_parameters_by_call_site` propagates
-  the CALL SITE's argument kind into the callee, unanimity over every call site
-  of the name in the image, reading the evidence from the argument's OWN SHAPE (a
-  string literal, or a call to a function whose declared return type is a string).
-  It is `ValueKinds`' sixth hook `param_kind`, asked only where a parameter has no
-  annotation, so an annotation is never overridden. The other repair — refusing
-  `if <word>:` for an unclassified operand — was not taken, and this bullet's own
-  argument against it stands and is now the reason it was not needed: the
-  identity test is right for every kind except a string, so the fix belongs in
-  the kind table and only there.
-
-  Measured before and after on BOTH architectures, `f("")` / `f("abc")`:
-  **`1 1` → `0 1`**, where CPython says `0 1`. Four cases in `test_formal_run.py`:
-  the literal case, the keyword-bound case (`f(s="")`), the string-returning
-  callee, and the negative one — a function whose three call sites DISAGREE (a
-  string, an integer, a string-returning callee) stays `1 1 1`, because a
-  parameter that is a `char *` at one site and a word at another is a word.
-
-  **What it deliberately does not read, and each is a decision rather than a
-  gap.** The CALLER's `ValueKinds`, so `f(some_local)` is still unclassified —
-  reading it means building a ValueKinds per caller from inside the callee's,
-  which is the recursion `func_kind` already guards with a depth limit, and a
-  kind that depends on which function the emitter reached first decides whether
-  `printf("%s", s)` formats a pointer or bytes. A SPECIALIZED call `f[a](x)`,
-  whose brackets shift every position. A call mixing positionals with keywords,
-  whose positionals bind parameters this does not enumerate. `*args` / `**kwargs`
-  at the call site.
-
-  Verified not to move anything: `test_formal_run.py` PASS=702 FAIL=0, and a
-  252-file stdlib sweep on x86-64 reports "unchanged: 252" — 18 pass, 13 codegen,
-  219 codegen/dependency, identical family counts. It is a wrong-answer fix with
-  no new refusal surface.
-- **A comprehension over a list of STRINGS does not filter on truthiness. FIXED
-  2026-10-03 (`work/formal13-6`) — and the fix found a SECOND row beside it,
-  which no list had recorded, plus a capability the row was refused for.**
-  `[x for x in ["p", "", "q"] if x]` kept all three (exit 3, where CPython says
-  2), and the re-measurement confirmed it had not moved after the parameter fix
-  above — correctly, because that one was a PARAMETER hook and this is the
-  `for`-target kind. `ValueKinds._scan` binds `F.ForStmt`'s target from
-  `_iterable_kind` and has no `F.Comprehension` arm at all, so a comprehension's
-  loop variable was in no kind map and `if x:` fell to `TRUTHY_NONZERO` — a null
-  test on the ADDRESS of the empty string.
-
-  **The scope shape this bullet predicted is the one that landed**, and
-  `formal/build.py`'s `_comprehension_scoped_names` is the reader of its two
-  halves. It is an OVERLAY rather than a `_bind` into `locals`, and the reason is
-  the same one that function was written for: a comprehension has its own scope
-  in Python 3, so `var x = 5` beside `[x for x in ["a", "b"]]` is two bindings
-  that do not meet, and a `_bind` would file them as a conflict — costing the
-  OUTER `x` an answer it had and buying the comprehension nothing. So:
-
-  | | where |
-  |---|---|
-  | the maps, one per generator level and cumulative | `model.ValueKinds.comprehension_generator_scopes` |
-  | the innermost-first lookup, and why a hit does not fall through | `model.scope_lookup` |
-  | the consulted choke point, with `scopes=` | `ValueKinds.kind_of` |
-  | the two emitters' stacks, pushed after each generator's target store | `formal/arm64_codegen.py`, `formal/x86_64_codegen.py`: `self._compr_scopes` |
-
-  The push is placed AFTER the target store because that is Python's rule and
-  not a convenience: generator `gi`'s own ITERABLE is evaluated in the scope of
-  generators `0 … gi-1`, and the parent frame has already pushed exactly that
-  and has not popped it. So the iterable reads the enclosing scope and
-  everything from the target store down — conditions, element, key, and every
-  nested comprehension inside them — reads this generator's own.
-
-  `own_shape_kind` deliberately does NOT read the overlay, and that is a
-  decision rather than an omission: it answers "did a **statement of this
-  function** bind this name to a shape of its own", and a comprehension's target
-  is bound by no statement of the function.
-
-  Nine cases in `test_formal_run.py`, eight in `PRINTF_TEXT_CASES` and one in
-  `BOTH_ARCH_CASES` (`both_arch_loop_and_comprehension_variable_hold_an_element`,
-  because the cause is one table in `model.py` that both backends ask and what
-  needs proving is that they come out the same). Seven of the nine FAIL on the
-  pre-change tree; two are guards that pass both ways (`for row in [[1, 2],
-  [3, 4]]: len(row)`, and a comprehension over a parameter). The
-  capability row: `len(k)` over a comprehension target was **refused** — "the
-  source does not say what this operand holds" — and is a `strlen` now.
-  `test_formal_run.py` PASS=791 FAIL=0 after, PASS=782 FAIL=0 before.
-
-  ### The `for`-target row beside it, which no list had either, and it CRASHED
-
-  The same fix had to change what `_iterable_own_shape` returns, because it was
-  answering the CONTAINER's kind for a name that holds ONE ELEMENT. `["p", "",
-  "q"]` is `list:str`, so a `for` target over it was classified `list:str` and
-  every reader of a container took it at its word:
-
-  | source | before (both backends) | after |
-  |---|---|---|
-  | `for x in ["p", "", "q"]: if x: c = c + 1` | **3**, where CPython says 2 | 2 |
-  | `for x in ["p", ""]: if x: … else: c += 100` | **2** — right only because the two strings happened to land adjacent to their own NULs | 101 |
-  | `len(x)` over the same | **2013266032** (0x78000070 = `p\0` and the first three bytes of the next interned string) | the `strlen` this document decided a string's length is — `sum(len(x) for x in ["p","abc"])` is 4 on both |
-  | `for x in [1, 0, 2]: if x: c = c + 1` | **SIGSEGV, exit 139** — the count-field load is `LDR [x, #0]` with X0 holding the integer 1 | 2 |
-
-  The string half is the same defect this document has been about for six waves:
-  a `char *` has no count word at offset 0, and reading eight bytes there reads
-  the eight bytes of `__TEXT,__text` that FOLLOW the terminating NUL — so
-  whether the empty string came out truthy depended on which other string the
-  linker interned next to it. The integer half is the same load dereferencing
-  an integer, which is a hard crash rather than a plausible number. `_emit_len`'s
-  own docstring already named the failure for the unclassified case
-  (`LEN_FROM_BLOB_FIELD` over a word "invents a length"); this is the same
-  defect reached through a kind that was confidently WRONG instead of absent.
-
-  The element kind needs the nested-container arm (`model._kind_of_nested_elements`,
-  `_pair_value_kind`'s question from the second reader that needs it) because
-  `for row in [[1, 2], [3, 4]]` is ordinary and its target IS a blob — without
-  the arm the target kind falls to the word default and `len(row)`, which has
-  always worked, starts refusing. That row is a guard case for exactly that
-  reason.
-
-  **What it does not do.** A TUPLE target's names still all get the iterable's
-  element kind, which is one level too coarse for `[[1, 2], [3, 4]]` unpacked
-  into `a, b` (each holds an integer). That is the `for` statement's pre-existing
-  limit and it is left as one imprecision rather than two; it is also why a
-  comprehension over a **parameter** is unchanged — `_iterable_own_shape`
-  answers None there, so the overlay claims nothing and the name falls through
-  to the function's own map, which is exactly what happened before.
-
-  **One thing found while looking, filed not fixed:**
-  `FORMAL_nested_comprehension_generator_temps_are_not_collected` — a
-  comprehension inside a comprehension's ITERABLE has no `_ci1`/`_cb1`, because
-  the collector and the emitter disagree by one about the nesting counter, and
-  every nested comprehension is refused on both machines today. Re-measured with
-  the patch above reverted, so it is not a regression from it.
+  close") — it is now a second site rather than a new gap, and the fix belongs
+  in the kind table rather than in `truthy_lowering`. **Next step:** either
+  propagate the CALL SITE's argument kind into the callee (the honest answer,
+  and the same by-reference question as the frame table) or refuse `if <word>:`
+  when the word is unclassified, which is a much larger diagnostic surface.
+  `truthy_lowering` deliberately does NOT refuse the unclassified case: an
+  unclassified operand is a case where the identity test is right for every kind
+  except a string, and refusing would turn every `if <unannotated name>:` in a
+  codebase that annotates almost nothing into a diagnostic.
+- **A comprehension over a list of STRINGS does not filter on truthiness.**
+  `[x for x in ["p", "", "q"] if x]` keeps all three, because the loop variable of
+  a `list:str` is typed as a word by `types.function_var_types`. Same root cause
+  and the same next step as the bullet above, in the `for`-target kind.
 - **`s[i]` gives the BYTE, not a one-character String.** `s[0]` is 97 on both
   backends, which is a true fact about the representation rather than a
   fabricated value, so it is left alone. **Next step:** a one-character String
@@ -690,123 +543,14 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   missing buffer as `upper`. It belongs in `LENGTH_DEPENDENT_METHODS` with the
   rest of that family rather than in a refusal, and it is a consequence of the
   representation decision above, not a separate bug.
-- **The PROOF MODEL had no value for a string — it had a FABRICATED one. FIXED
-  2026-10-03 (`work/formal16-7`).** This is the item the `len` bullet below
-  was measured against, and it is upstream of it: `formal/arm64_proof_gen.py`'s
-  `_expr_go`, `_expr_go_t` and `_expr_ast` each answered a `StringLiteral`
-  with `"(0 : UInt64)"` / `'MojoExpr.var ""'`, while the machine's value for
-  one is the ADDRESS the emitter gave that text's bytes. The file's own
-  docstring states the rule this broke — *"a stated gap costs a program its
-  proof, and a fabricated model costs it a proof of something FALSE"* — and
-  both were true at once:
-
-  | program | before (both backends) | after |
-  |---|---|---|
-  | `printf("hi\n"); return 5` | **Lean rejects** — `main_pre_arg_0 : run_x0 … = 0`, and x0 holds the format string's address | proved, 0 sorries |
-  | `return "small"` | **Lean rejects** — four `is false` obligations, the model saying 0 and the machine an address | proved, 0 sorries |
-  | `print(42)` (the control) | proved | proved, unchanged |
-
-  **So `NO program that prints a string literal proved on either machine**, and
-  the reason nobody saw it is that `print(42)` — the one calling program in
-  `test_formal_call_proof_gen.py` — passed throughout: an integer argument is a
-  machine word the model does have. That is the same lesson as the `if s:`
-  fabrication above, in the one component where it was not a wrong answer but a
-  **false theorem**.
-
-  The address cannot be recomputed by the generator — the data label is
-  `str_<emission counter>`, so where a text landed is a property of the order
-  the emitter interned in — so both backends publish their own intern map as
-  `info["str_addrs"]` (decoded text → address), and it rides on the `_Scope`
-  every renderer in the shared generator already takes, for `_Scope`'s own
-  stated reason. `_str_addr_term` is the ONE reader, so the semantic model, the
-  AST bridge and the machine-facing argument theorem cannot disagree about what
-  a string is; a literal with no table entry REFUSES rather than defaulting,
-  which is reachable only from a caller with no image to read.
-
-  Two follow-ons landed with it, both of which are the same defect seen from
-  the other side:
-
-  * **`formal/x86_64_proof_gen.py`'s `_returns_string_literal` guard is
-    DELETED.** It suppressed the concrete run tests for any function handing
-    back a string, on the stated ground that *"no numeric model of `return
-    "small"` is that address"* — which is the fabricated `0` above. With the
-    model fixed, `main_runs_n` / `main_terminates_n` are back for n ∈ {0,1,2,5,10}
-    and Lean accepts all of them. Deleted rather than switched off: a flag
-    nobody reads is a second thing to keep in step.
-  * **The extern ARGUMENT theorem now says something true.** `pre_arg` was the
-    `printf` half; where an argument has no modellable value at all (which the
-    intern table makes reachable only for a caller with no image) the theorem is
-    not emitted and a NOTE says why, leaving the reachability and `BL`-step
-    theorems — the same answer the concrete run test already gave, for the same
-    reason.
-
-  `test_formal_call_proof_gen.py` gains `TestStringValueInTheModel`: both
-  programs on both machines, the table's publication and content-interning
-  properties, the model term and the AST term read out of the generated Lean,
-  the refusal guard, and a Lean typecheck (0 sorries on arm64; on x86-64
-  exactly the two trust boundaries `x86_64_proof_gen.py`'s own header declares).
-
-  **What it does not do, and this is the part that stays.** The model can now
-  state a string's value, and that value is a `char *` — it still has no
-  `strlen`, so `len(s) == 5` remains unprovable for the reason the `len` bullet
-  below gives. And the run-time BUFFER is still missing, so `s[i]` above and
-  `upper`/`strip`/`join` below it are unchanged: none of them became easier
-  because the model stopped lying about where a string is.
-- **The proving arm64 build cannot prove `len` or any string method.** Re-measured
-  2026-10-01, and re-measured again 2026-10-03: **the transcript quoted below
-  no longer reproduces, and for a better reason than a fix.** `len(s)` is now
-  refused at GENERATION time (`model: call to 'len' has no model in this image
-  (an extern, or a function this generator emits no '_go' for); refusing rather
-  than inventing its return value`) instead of emitting a theorem that is false,
-  so the build is red rather than green-and-wrong. The bullet's prescribed fix
-  (suppress the post-extern theorem on `_call_boundary`) was therefore not
-  needed for `len` — the `_call_go` refusal upstream of it already says what
-  this model cannot do — and the remaining text below is kept for the case that
-  is still live, an argument the model has no value for.
-
-  What was there, and the `len_go` half of the original report is STALE — there
-  is no `len_go` in `formal/arm64_proof_gen.py` any more and no `Unknown
-  identifier` error. What was there instead is narrower and better located:
-
-  ```
-  $ python3 fire.py build --formal -o pg1.proof pg1.mojo     # len(s) on a string
-  build: proof check failed: … run_result_exit {let __src := main_pre_0; …}
-         main_code 4294968178 200000 = mojo 10
-  is false
-  ```
-
-  The theorem is `{name}_post_extern_given_callee_returns`, and its own comment
-  states its hypothesis: *"the callee … left every register and the stack frame
-  otherwise as it found them. That is the calling convention."* **It is emitted
-  exactly when that hypothesis is false.** The guard is
-  `ret_type_of.get(last["sym"], "int") not in ("none", "")` — i.e. the theorem
-  appears only when the callee RETURNS a value — and a returning callee returns
-  it IN `x0`, which is the register the conclusion is about. `main` here is
-  `return len(s)`, so the program's answer IS the unknown callee's result and no
-  assumption of the form "every register as it found it" can support it.
-
-  **The fix is the one this file already applied to the sibling theorem.**
-  `_gen_step_blocks`'s caller already suppresses the CONCRETE RUN TEST when
-  `_call_boundary` says the call leaves the image, with a comment saying why
-  ("a run test would compare the machine against `0 = mojo n` and pass for the
-  wrong reason — both sides zero because nothing ran"). `_call_boundary`
-  classifies `strlen` correctly — measured by instrumenting it: `{'kind':
-  'opaque', 'pc': 0x100000358, …}` — so the fact is available at the same site.
-  Suppressing the post-extern theorem on the same condition is the honest
-  answer, and it leaves the one theorem that IS decidable: the reachability
-  statement that the program gets to the call, for every input.
-
-  **What that does not do, and why the gap is real.** With the theorem
-  suppressed the build would be green while proving nothing about `len(s) == 5`,
-  which is the truth: the length of a runtime string is a fact about the
-  C library's memory, and this model cannot compute it. So the STRING half of
-  "cannot prove `len`" is not a codegen gap and not fixable by a lemma — it
-  closes when the model gains a `strlen`, which is a different project from
-  anything in this document. The `s.startswith(...)` half is unchanged and
-  still refuses by name (`call to 's.startswith' has no model in this image (an
-  extern, or a function this generator emits no '_go' for); refusing rather
-  than inventing its return value`), which is the correct refusal and not a
-  gap.
+- **The proving arm64 build cannot prove `len` or any string method.** Both
+  pre-date the representation decision and both are outside it:
+  `formal/arm64_proof_gen.py` looks for a function called `len_go` when it
+  sees `len(...)` (`Unknown identifier 'len_go'`), and it raises
+  `unsupported: recursion argument bound` on a program containing
+  `s.startswith(...)`. Nothing since has made either worse and neither has
+  been made right; the codegen change is in the `--no-prove` path the sweep
+  uses.
 - **`lib/ProofLib.lean` still carries two `sorry`s**, at `InImage` and
   `Semantics` (line ~4510). Pre-existing, and recorded here only so the next
   reader of the Lean side knows they are there.
@@ -894,10 +638,7 @@ above, and the two attributions they guessed.
   now `PASS=29 KNOWN-GAP=6 FAIL=10` and on x86-64 `PASS=44 KNOWN-GAP=0
   FAIL=1` — the `@spec` files build and typecheck again, so the residual
   failures are a THIRD `19bc0dd` regression in `formal/`, not string work.
-  The doc that recorded it (`FORMAL_default_int_type_typed_flag_collapse.md`,
-  named without the `bugs/` prefix because it is not there any more — it went
-  with its fix, which is this project's rule) is gone, so the attribution
-  stands here and the evidence for it does not.
+  See `bugs/FORMAL_default_int_type_typed_flag_collapse.md`.
 
 
 ---
@@ -962,235 +703,7 @@ and `a` holds a `char *`; `_constructor_bindings` sees a name in
 then through a text-section address plus 8. Two answers to one question, in one
 file, and the measurement is a crash rather than a wrong number.
 
-The doc that held the reproducer and the two candidate fixes
-(`FORMAL_string_constructor_collision.md`, named without the `bugs/` prefix
-because it is not there any more) went with its fix, and the fix is measured on
-this tree: the SIGBUS is a REFUSAL now, and one that names the collision rather
-than the crash it used to cause. Same reproducer, both architectures build it
-and answer:
-
-```
-$ python3 tools/memslot.py --gb 8 --label sc -- python3 fire.py build \
-      --formal --no-prove -o .tmp/sc/sc .tmp/sc/sc.mojo
-build: a = String(...) binds a to a value this path holds as TEXT, and a.<field>
-asks for a frame: String is declared here as a struct of 3 field(s):
-_ptr_or_data, _len_or_data, _capacity_or_data, so the field has a slot, and
-String is also a type this path lowers as a conversion, so the call is a
-conversion and a is the address of a NUL-terminated `char *`. …
-```
-
-So the collision is refused by name and nothing in this document has to
-re-derive it. **What that does not do is make the collision resolvable** — the
-two representations are still in force at once, and this refusal is what stands
-between them. A `String`-shaped frame on this path is still the project.
-
----
-
-# Wave 9: `strlen` counts BYTES and `len()` counts CHARACTERS
-
-**`work/formal26-unicode`, 2026-10-04.** Every answer in this document is right
-about a `char *`, and none of them ever said what a `char *` HOLDS. It holds
-**bytes**, and a Python `str` is a sequence of **code points**, and for ASCII
-those are the same number — which is the only reason any of the answers above
-was right, and it was right by accident. For anything else they are not, and
-the divergence is not a rounding error: it changes **which character a position
-names**, so a program that uses one reads out of range. Measured on both
-architectures, every case building, running and exiting 0:
-
-| source | before | CPython |
-|---|---|---|
-| `len("héllo")` | **6** | 5 |
-| `len("日本")` | **6** | 2 |
-| `len("a😀b")` | **6** | 3 |
-| `"héllo".find("llo")` | **3** | 2 |
-| `s = "日本"; printf("[%c]", s[1])` | **one `0x9c`** — the second byte of `本` | `[本]` |
-| `printf("%6s", "héllo")` | **`[héllo]`** | `[ héllo]` |
-| `printf("%-6s", "héllo")` | **`[héllo]`** | `[héllo ]` |
-
-The representation decision at the top of this document **stands and is not
-revisited**. What is new is the one question it never asked, and it is asked in
-one place — `formal/model.py`'s TEXT ENCODING block — with three answers rather
-than one, so the two machines cannot answer differently about one source file:
-
-* **A LITERAL's text is known at compile time**, so its character count is a
-  folded immediate. That is a new CAPABILITY, not a repair: `len("日本")` is 2 on
-  both backends where it answered 6, and `"héllo".find("llo")` is 2 where it
-  answered 3.
-* **Otherwise, an image with no non-ASCII string literal in it has every string
-  in it ASCII**, so `strlen` IS `len()` and nothing changes. This condition is
-  sound rather than convenient, and the argument is this document's own point 3:
-  every string value is a literal's interned bytes or an interior pointer into
-  them, so an image's literals are exactly its possible string CONTENTS. It is
-  also what keeps the block from costing the corpus anything — the corpus is
-  ASCII, and 212 existing string/`len`/`printf`/truthy cases in
-  `test_formal_run.py` pass unchanged.
-* **Otherwise it is a REFUSAL naming the non-ASCII case** and quoting the
-  offending literals. A byte count presented where a character count belongs is
-  the most plausible wrong number in the file: small, positive, stable across
-  runs and identical on both architectures.
-
-**What is measured RIGHT and deliberately left alone**, with the reason, because
-the alternative is a block whose only evidence is that it did not break
-something nobody measured. `==`, `in`, `count`, `startswith`, `endswith`,
-`lstrip`, truthiness and a `%s` with no width are all byte operations, and for
-**well-formed UTF-8 a byte answer IS CPython's answer**: the encoding is
-self-synchronising, so a byte substring test has the same BOOLEAN result, the
-same COUNT and the same PREFIX/SUFFIX answer as a code point test, and a string
-is empty iff its first byte is the terminator. Measured on both architectures in
-`test_formal_unicode.py`, 17 rows.
-
-**What is refused rather than folded, and why the reason differs from `len`'s.**
-`s[i]` on non-ASCII text: the answer CPython wants is a one-CHARACTER object,
-which is a new object, and a string value here is a `char *` into text the
-image maps read+execute and interns by content — so there is nowhere to put it.
-That is the missing BUFFER `LENGTH_DEPENDENT_METHODS` names, reached from an
-index instead of from `upper()`, and it is why this is a refusal where `len` is a
-fold. A `%<width>s` on non-ASCII text: `printf` is a C function and C has no
-characters, so `%6s` pads to six BYTES — which is why this needed a width column
-nothing had (`printf_text_widths`, the second reader of the conversion regex;
-a PRECISION is the same defect and `%.3s` is refused for the same reason).
-
-**The `s[i]` bullet in "what was found while looking" above is now CONDITIONAL
-rather than deleted, and that is the honest state of it.** For an ASCII string it
-still gives the byte where CPython gives a one-character `str` — a type
-divergence, recorded there and not fixed here. For a non-ASCII string it gave a
-byte from the MIDDLE of a multi-byte sequence, which is a wrong VALUE, and that
-is refused by name.
-
-## The next step, which is not in this document's subject
-
-**`\uXXXX`, `\UXXXXXXXX`, `\N{…}` and octal escapes are not decoded by any engine
-in this repository**, so `len("\u00e9")` is 6 here and 1 in CPython, on the
-interpreter, the compiled path and both formal backends alike. That is
-`fire_compiler.decode_c_escapes` and it is a FRONT-END defect, not a
-string-value-model one: `bugs/LEXER_unicode_escapes_are_not_decoded.md`, with the
-four-row measurement and the reason "an unknown escape keeps its backslash" and
-"a known escape is missing" are the same behaviour here and opposite behaviours
-in CPython. It is worth knowing that the encoding block above makes the formal
-half of that fix free: `len("\u00e9")` is 1 on both backends the moment the
-decoder knows the escape, because the fold reads the decoded text.
-
-## `ord`, `chr` and `hash` were not an encoding question at all
-
-Worth its own note because it was found *while* measuring the encoding and is
-**not fixed by anything in wave 9**: all three names reached the LINKER as a
-dangling symbol, because none of them was in `EMITTER_BUILTINS` and the extern
-path turns an unlowered call into a `BL` to a symbol no library defines.
-
-```
-build: the image would bind 1 symbol(s) that nothing provides, so it could not
-be loaded: ord. `ord` is a call this build emitted and nothing provides it …
-(Provider check: asked the C library (dlsym).)
-```
-
-**For `ord("A")` — an ASCII case**, which is the point. This is a question the
-path never answered, so the encoding block had nothing to add to it and the
-honest thing was to measure it rather than to fold it into the encoding story.
-
-One of the three has an answer and two do not, and the reason is the direction
-the value has to travel:
-
-| | direction | answer | why |
-|---|---|---|---|
-| `ord` | character → NUMBER | **folded** | a number is one word, which is what a formal value already is, and a literal's one character is known at compile time. `ord("é")` is 233 and `ord("😀")` is 128512 — neither is reachable by reading a byte, which is what makes this the unicode-relevant half |
-| `chr` | NUMBER → character | refused | the answer is a NEW one-character object, and a string value here is a `char *` into text the image maps read+execute and interns by content. `LENGTH_DEPENDENT_METHODS`'s missing buffer, from the other direction — and the reason `ord` folds where `chr` cannot is where each answer would LIVE, not how much work it is |
-| `hash` | text → NUMBER | refused | CPython randomises a `str` hash per process unless `PYTHONHASHSEED` is fixed, so two runs of one program disagree by design and **there is no value of the text for this to be right about**. That is not a gap and must not become one |
-
-`FRAME_VALUE_ONLY_CALLS` already carried all three, so a frame address handed to
-any of them was a category error before this — which is why intercepting them
-needed no argument-side change. Pinned by 12 rows in `test_formal_unicode.py`:
-four answered (`ord` over ASCII, Latin-1, CJK and an astral character; the fold
-in arithmetic; the `\xHH` spelling; the `0x7F` boundary) and eight refused, the
-three refusals' reasons being unrelated enough that one message would have made
-at least two of them false.
-
-## The encoding condition is a fact about the IMAGE, not about the MODULE
-
-Wave 9's condition is "this unit holds no non-ASCII string literal", and a unit
-turned out to be the wrong unit. `_prepare_functions` runs for the ENTRY first
-and for each imported module after it, so a per-module REPLACE leaves the table
-holding whichever module was compiled LAST — and a string one module interns is a
-value another module can hold, through a return value or a parameter, however
-many of that other module's own literals are ASCII.
-
-Measured on both architectures with three files, where only the FIRST of the two
-imported modules carries the accented literal and `h3.mojo` exists only to be
-compiled last:
-
-```
-h2.mojo   def tag() -> String: return "héllo"
-h3.mojo   def plain() -> Int: return 3
-e2.mojo   from h2 import tag
-          from h3 import plain
-          def main(n): printf("len=%d n=%d", len(tag()), plain())
-
-arm64   len=6 n=3      CPython  len=5 n=3
-x86-64  len=6 n=3      CPython  len=5 n=3
-```
-
-Six bytes, exit 0, both machines, on the wave-9 code — a byte answer presented
-where a character count belongs, which is the exact failure the whole block
-exists to prevent, introduced by the block's own bookkeeping.
-
-**So `publish_non_ascii_strings` ACCUMULATES where `publish_module_symbols`
-REPLACES, and the difference is the direction each mistake goes.** A globals
-table must not accumulate: a name one unit declares and another does not is a
-real conflict, and a union would invent a binding. A non-ASCII string list must,
-because the question is about the IMAGE and the honest answer for a multi-module
-image is the union. And `compile_formal` clears it at the top of each image,
-which is what keeps "accumulate" from meaning "accumulate for the whole
-process" — a harness that builds several programs in one invocation would
-otherwise have the second refuse `len()` over text that never had any, and a
-false refusal is the expensive direction here rather than the cheap one.
-
-Three rows in `test_formal_unicode.py`, and the first is the measured one: the
-cross-module refusal, a FOLD that crosses the boundary (a module's own literal
-is its own text, so `len("日本")` written in the imported module is 2 — the row
-that stops a "refuse anything non-ASCII in the closure" fix from taking it), and
-an all-ASCII image that must not see any of it (the condition is "a non-ASCII
-literal exists somewhere", not "there are imports").
-
-## Measured 2026-10-05 (`formal29-2-r2`, while working the float value model):
-## the compiler's OWN host modules carry non-ASCII literals, so four registered
-## suites are red on master for this reason and nothing says so
-
-The condition above is "this IMAGE holds a non-ASCII string literal"
-(`publish_non_ascii_strings`), and the image includes every imported module's
-docstrings — so a non-ASCII literal in **this repository's own host modules**
-refuses every file that imports one of them. `formal/hostmods/os/_syscalls.mojo`
-is written with em-dashes (`—`) throughout its prose and quotes `len("日本")` by
-name, both of which are string literals in its docstrings:
-
-```
-$ python3 -c "print([ (i, l) for i, l in enumerate(
-      open('formal/hostmods/os/_syscalls.mojo', encoding='utf-8').read().splitlines(), 1)
-      if any(ord(c) > 127 for c in l) ][:3])"
-[(9, '  platform.mojo` needs the string primitives below for its own reasons — a'), …]
-```
-
-Every one of those images is refused at `d[i]`, and the suites that build them
-are red for that one reason:
-
-| suite | measured | the reason, on every failing group |
-|---|---|---|
-| `python3 test_formal_os.py` | **1/7** | `d[i] is refused on a string whose text is not ASCII` |
-| `python3 test_formal_math.py` | **7/8** | the same, from `math`'s `os.path` import |
-| `python3 test_formal_time.py` | **3/5** | the same |
-| `python3 test_struct_formal.py` | **28/191** | the same, from `from struct import calcsize` |
-
-**This is pre-existing and not attributable to any change of mine** —
-`formal/hostmods/os/_syscalls.mojo` is byte-identical to `master`
-(`git diff --quiet master -- formal/hostmods/os/_syscalls.mojo`), and the
-refusal text is the `s[i]` bullet above, quoted with its own advice
-("keep the text ASCII, which is what every other answer here assumes"). It is
-recorded here because nothing ELSE records it: four red suite jobs, each with a
-`build failed: …` line that ends mid-sentence in the middle of the message, and
-no marker on any of the four, so a reader re-running them spends the time
-rediscovering that it is one fact and not 174.
-
-**Two directions, and they are not the same size.** The one that is a repair:
-ASCII-fold the prose in that module (the em-dashes are punctuation in
-docstrings, not text any test reads), which unblocks every group above with no
-change to the string value model at all. The one that is a project: the
-`d[i]` refusal itself, which is this document's subject and is what the em-dash
-removal only avoids.
+Full reproducer, the two candidate fixes and their blast radii, and the
+denominator warning that goes with either:
+`bugs/FORMAL_string_constructor_collision.md`. It is the file to read before
+trying to land a `String`-shaped frame on this path.

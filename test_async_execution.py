@@ -1,5 +1,5 @@
 """Interpreter tests for real async/await execution — Milestone 3b of
-INTERP_generator_yield_entirely_unimplemented.
+bugs/INTERP_generator_yield_entirely_unimplemented.md.
 
 Milestone 3a (already landed) added PARSER-ONLY support: real AwaitExpr /
 FunctionDef.is_async / ForStmt.is_async / WithStmt.is_async static marking

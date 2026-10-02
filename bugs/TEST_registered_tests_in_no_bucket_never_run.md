@@ -1,0 +1,188 @@
+# TEST: a registered test in no bucket is in the estate's inventory and in no run
+
+## Status
+
+OPEN for three of fifteen. The count was nineteen when this doc was written, the
+same commit that wrote it moved five of them into a bucket (`cli-usage-text`,
+`md2html`, `ownership-destruct`, `arm64-encoders` in `check`, `x86-decode` in
+`x86`) — which is **fourteen** — and `new-syntax-parse` arrived on master after
+the nineteen were counted, which is **fifteen** again.
+
+    $ python3 tools/suite.py --list | grep '\[\]$' | awk '{print $1}' | sort | tr '\n' ' '
+    async-runtime-scaffold async-void-return async-with-lock-guard coro-detached-async
+    coro-future-await gimple-async-runner metalgpu mutable-async-capture nested-async-generic
+    new-syntax-parse prooflib taskgroup transitive-closure-capture x86-containers x86-examples
+    # 15, and 11 + 1 + 3 is 15
+
+Eleven of the fifteen belong to another doc, one is deliberate, and the three
+that are left are `metalgpu`, `new-syntax-parse` and `x86-examples`.
+
+## What is believed
+
+The estate check in `test_suite.py` answers "is every `test_*.py` in the repo
+named by a registered spec, or declared with a reason". It reads `cmd`, and it
+cannot tell a registration that is EXECUTED from one that is merely present: a
+spec in no bucket is named, so the estate counts it as covered, while
+`make check`, `make gate` and every other bucket walk straight past it. The
+registry's own `--list` prints `[]` in the bucket column for exactly these, and
+nothing else in the tree reads that column.
+
+Measured on the merged tree, 2026-09-30, with
+`python3 tools/suite.py --list | grep '\[\]'`:
+
+    19 registered tests were in no bucket at all.
+
+They fall into three groups, and only one of them is a mistake.
+
+    11  `expect=`-marked and ungated — async-runtime-scaffold,
+        async-void-return, async-with-lock-guard, coro-detached-async,
+        coro-future-await, gimple-async-runner, mutable-async-capture,
+        nested-async-generic, taskgroup, transitive-closure-capture and
+        x86-containers. This is exactly the table in
+        bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md, which owns this
+        group and the anti-rot argument for it. NOT TOUCHED here: bucket
+        membership for a known-failure row is `tools/suite.py:disabled-status`,
+        another worker's claim.
+
+     1  `prooflib` — DELIBERATE and correct. It is a dependency rather than a
+        test (`formal/lean.py`'s `ensure_library` builds it under a lock, and
+        every proof-checking job `deps` on it), and CLAUDE.md says outright that
+        it is in no bucket on purpose so `make check`/`make gate` do not pay for
+        it. Naming it here so the count reconciles and nobody "fixes" it.
+
+     3  registered, NOT expect-marked, and ungated — the actual gap: metalgpu,
+        x86-examples and new-syntax-parse. The other five of the seven that
+        were ungated when this was written have since been given a bucket; they
+        are named above and in the Status section, and they are left out of the
+        list here so it is the census rather than a history.
+
+## What was run, and what it showed
+
+    $ python3 tools/suite.py --list | grep '\[\]' | awk '{print $1}'
+    ... 19 names ...
+
+    $ for t in test_cli_usage_text.py test_md2html.py test_arm64_encoders.py \
+               test_ownership_destruct.py test_x86_64_decode.py; do
+          python3 tools/memslot.py --gb 8 --label "$t" -- python3 .tmp/peak.py python3 "$t"
+      done
+    test_cli_usage_text.py    MEASURED_PEAK_GB = 0.04  elapsed 1.1s  exit 0
+    test_md2html.py           MEASURED_PEAK_GB = 0.01  elapsed 0.5s  exit 0
+    test_arm64_encoders.py    MEASURED_PEAK_GB = 0.04  elapsed 15.1s exit 0
+    test_ownership_destruct.py MEASURED_PEAK_GB = 0.01  elapsed 0.5s  exit 0
+    test_x86_64_decode.py     MEASURED_PEAK_GB = 0.01  elapsed 0.5s  exit 0
+
+    # …and that they are not vacuous runs, which the numbers alone do not show:
+    $ python3 test_ownership_destruct.py   # 113/113 ownership_destruct fixture cases passed
+    $ python3 test_x86_64_decode.py        # ok: every x86-64 encoder round-trips through the decoder
+    $ python3 test_md2html.py              # Ran 14 tests — OK
+
+Five of the six were therefore measured, given `mem='tiny'` (which is what the
+ratchet assigns at those peaks), and NAMED in a bucket: `cli-usage-text`,
+`ownership-destruct`, `md2html` and `arm64-encoders` in `check`, `x86-decode` in
+`x86`. That is the fix, and it is why this doc's status is OPEN for three rather
+than eight (seven from that commit, plus `new-syntax-parse` from master).
+
+Re-run on the merged tree after those five landed, and again after
+`new-syntax-parse` arrived from master, to confirm the census the Status section
+quotes:
+
+    $ python3 tools/suite.py --list | grep '\[\]$' | awk '{print $1}' | sort | tr '\n' ' '
+    async-runtime-scaffold async-void-return async-with-lock-guard coro-detached-async
+    coro-future-await gimple-async-runner metalgpu mutable-async-capture nested-async-generic
+    new-syntax-parse prooflib taskgroup transitive-closure-capture x86-containers x86-examples
+    # 15, and 11 + 1 + 3 is 15
+
+## `new-syntax-parse`, the fifteenth, added 2026-10-01 with master's new-modular work
+
+`new-syntax-parse` (`test_new_syntax_parsing.py`) is an eighth instance of
+group 3, and it arrived the same way the other seven did: a registration that
+satisfied the estate check and nothing ever ran. Master's `92a71744` wrote both
+the test and the spec, and `076977dd` did not bucket it. It is NOT an artefact
+of any merge — `git show master:tools/suite.py | grep new-syntax-parse` prints
+the registration and no bucket line, so it is ungated on master too.
+
+Measured, because the fix for this group is always "measure, then name":
+
+    $ python3 tools/memslot.py --gb 8 --label new-syntax-parse -- \
+        python3 tools/memcap.py --limit-gb 8 --label new-syntax-parse -- \
+        python3 test_new_syntax_parsing.py
+    Results: 87 passed, 0 failed
+    memcap: done, peak 0.0 GB across up to 1 procs (ceiling 8.0 GB), child exit 0
+
+    $ python3 tools/suite.py new-syntax-parse
+    suite: 1 passed, 0 failed, 0 skipped  (1 tests, 1 jobs, 0.6s wall)
+
+So the measurement the next step needs is already in hand: 0.6 s and 0.0 GB,
+`mem='tiny'`, and `check` beside `examples-parse` (the other parser suite) is
+where it belongs. NOT DONE here — `tools/suite.py` bucket membership is not
+this branch's to change, and the merge that surfaced it has no mandate to edit
+registrations beyond resolving its own conflict. It is also `cache=True` with
+`extra=['test_new_syntax_parsing.py', 'fire_compiler.py']`, so unlike the
+other seven it cannot silently rot into a stale PASS: the key covers the file
+under test, and editing the parser re-runs it.
+
+## The three that are left, and why
+
+**`metalgpu`** — `test_metal_codegen.py`: MSL emitted by
+`mojo/backend_gimple/emit_metal.py`, compiled by Apple's real Metal compiler and
+run ON THE GPU against a CPU reference. It is `cache=True`, so a recorded PASS
+replays and the bucket question is the only open one, but whether it is green at
+all needs a GPU and a whole codegen path, which no registration may assume. Its
+natural home is `check`, beside the `llm-reference` CPU reference it is paired
+with — and the honest first step is to run it once, alone:
+
+    python3 tools/memslot.py --gb 8 --label metalgpu -- python3 tools/suite.py metalgpu
+
+**`new-syntax-parse`** — measured, 0.6 s and 0.0 GB, and the measurement is in
+the section above. `check`, beside `examples-parse` (the other parser suite),
+is where it belongs; nothing more needs measuring to put it there.
+
+**`x86-examples`** — `test_x86_64_examples.py` builds every `formal/examples/*.mojo`
+for x86-64 and compares each answer with the source. Its natural home is `x86`,
+beside `formal-x86`/`formal-x86-endtoend`/`formal-x86-model`, and it is a
+whole-sweep run rather than a single test; the measurement has to come from a
+`formal-x86`-shaped run, not from a guess.
+
+## Why this is the same bug as the estate one
+
+`bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md` (closed and deleted
+2026-09-30) was about the inventory of what runs being outside every gate. This
+is the same defect one level down: the inventory now sees these tests, so the
+estate is GREEN, and green here has been indistinguishable from run. Five of the
+seven arrived that way — `cli-usage-text` was registered by the integrator with
+a comment saying so, and the registration satisfied the check that was supposed
+to notice.
+
+## The next step, exactly
+
+1. Add `new-syntax-parse` to `check` with `mem='tiny'` beside `examples-parse`.
+   It is measured (0.6 s, 0.0 GB) and green, so this is the whole of it — the
+   cheapest of the three by an order of magnitude, and the one with no open
+   question behind it.
+2. Run `metalgpu` alone, once, on a machine with a GPU. If it is green, add it to
+   `check` and give it a measured row; if it is red, register the red with an
+   `expect=` and a bug doc, which is the discipline CLAUDE.md states for a
+   subject that really is broken.
+3. Run `x86-examples` the way `formal-x86` runs (or add it to the `x86` bucket
+   and let the bucket report it), then bucket it on the result.
+4. Not this: sweeping the eleven `expect=`-marked ones in from here. That group
+   is `bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md`, and the
+   argument for it — a marker nobody can observe going stale — is written down
+   there and in CLAUDE.md, "Known-failing tests". Sweeping them in is also not
+   free: eight of them are `mem=small` and `gimple-async-runner` alone declares
+   36 failing cases, so it is a measured change to what the gate does, not a
+   bookkeeping one.
+
+## Related
+
+- `--list` is the tool that finds these: the bucket column is `[]` and nothing
+  else in the tree reads it. `tools/suite.py` refuses a name used for both a
+  bucket and a test, but nothing requires every registered test to be in one.
+- A cheap guard, not written, and named here so the next person does not have to
+  re-derive it: `test_suite.py` already reads every registry field for its own
+  estate (`expect`, `memwhy`, `cmd`), and "every non-`expect` registered test is
+  in at least one bucket" is one more `check()` over the same table. It is NOT
+  written because `prooflib` is a legitimate exception and a check that needs an
+  exception list is the excuse table this doc is arguing against; the honest
+  form is a per-spec opt-out (`dep=True`) beside the registration, which is a
+  change to `Spec` that deserves its own commit.

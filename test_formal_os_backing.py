@@ -12,16 +12,16 @@ each of them was a SILENT WRONG ANSWER rather than a refusal:
     the string as a list blob's element count and then loaded at
     `base + 8 + 8*count` — a text-section address. `f("AB")[0]` returned
     -8070450326089498624 where 65 is the answer
-    (“`s[i]` on a `String`-annotated PARAMETER reads the blob's count field”).
+    (bugs/CODEGEN_string_parameter_subscript_reads_count_field.md).
   * `p[i]` on a `Pointer[UInt8]` was the same question `p.value()` already
     answered, asked in a spelling only one of the two was routed: -1879048144
     for the first four characters of a string read as a little-endian word, and
     a bare `exit 1` with no message for a `malloc`'d buffer whose count is 0
-    (FORMAL_subscript_of_a_pointer_reads_a_blob_count).
+    (bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md).
   * `stat(2)`'s out-parameter could not be read at all, so `isfile` was
     `exists and not isdir` — 1 for `/dev/null` where CPython says 0 — and
     `islink`, `lexists` and `samefile` did not exist
-    (“FORMAL_stat_out_parameter_is_unreadable: `isfile` cannot be exact”).
+    (bugs/FORMAL_stat_out_parameter_is_unreadable.md).
   * `readdir(3)`'s `d_name` is a `char[]` inside a struct the source never
     declares, so there was no name to read and therefore no `listdir`
     (bugs/FORMAL_listdir_no_run_time_sequence.md — the name half of it).
@@ -51,25 +51,14 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from exec_budget import (BUILD_TIMEOUT, RUN_TIMEOUT, TIMEOUT_RC,   # noqa: E402
-                         EXTERNAL_SIGNAL_NAMES, child_exit_reason,
-                         died_by_external_signal)
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
-# `BUILD_TIMEOUT` and `RUN_TIMEOUT` are `exec_budget`'s, not this file's own
-# numbers. They were `300` and `60` here, which is the shape of literal
-# `tools/suite.py`'s `doc-refs` ratchet exists to stop: a reader cannot tell a
-# deliberate budget from a stale one, and this file's `stat_*` cases build and
-# execute two images each, so the pair IS this file's cost. `COMPILE_TIMEOUT_S`
-# and `RUN_TIMEOUT_S` are both 600 and 120 against a whole-file measurement of a
-# few minutes.
+BUILD_TIMEOUT = 300
+RUN_TIMEOUT = 60
 
-# The record terminator, for the reason `test_formal_os.py` gives: a separator
-# this suite can read back without asking whether the image decoded a literal,
-# so a program here emits its records back to back and this is what separates
-# them.
+# The record terminator, for the reason `test_formal_os.py` gives: a Mojo string
+# literal's `\n` is not unescaped on this path, so a program here emits its
+# records back to back and this is what separates them.
 REC = "@@"
 
 S_IFMT = 0o170000
@@ -95,31 +84,18 @@ class Case:
         that has to be refused rather than answered.
 
     Every program below ends its records with `@@` rather than a newline, for
-    the reason `test_formal_os.py` gives: a separator this file can read back
-    without asking whether the image decoded a literal, `@@` being two bytes a
-    real newline cannot collide with.
+    the reason `test_formal_os.py` gives: a Mojo string literal's `\n` is not
+    unescaped on this path, so a formal image prints the two characters backslash and
+    `n` and a record-structured program has to choose its own terminator.
     """
 
     def __init__(self, name, source, expect=None, oracle=None, refusal=None,
-                 archs=None, archs_reason=None, env=None):
+                 archs=None, archs_reason=None):
         self.name = name
         self.source = source
         self.expect = expect
         self.oracle = oracle
         self.refusal = refusal
-        # The ENVIRONMENT the image is started with, or None to inherit this
-        # process's. It is a constructor argument and not an oracle fact
-        # because of the one case that needs it: `os.environ`'s whole claim is
-        # that it is populated from the real environment, so a case that reads
-        # it has to know exactly which environment "the real" was. Inheriting
-        # gives an answer that changes with the machine and with whatever ran
-        # before — measured, and the difference is not small: this process's
-        # `os.environ` and the `envp` block its child inherits disagreed by one
-        # entry, because a shell adds `_` to the child's block and cannot add
-        # it to a parent that has already started. A fixed dict answers that,
-        # and a fixed dict can hold the shapes an inherited one cannot (a
-        # variable set to the empty string, a value containing `=`).
-        self.env = env
         # Which architectures this case can run on, or None for all of them, and
         # WHY when the list is short. The reason is a constructor argument and
         # not a sentence in the runner because this file used to carry ONE
@@ -353,269 +329,6 @@ def main(n):
 ''',
     {"a": "100", "b": "97"},
 ))
-
-# ── 2b. `listdir` as a PYTHON-LEVEL list ───────────────────────────────────
-#
-# The three shapes above read a blob through the module's own accessors,
-# because that is what it published: `listdir` was declared `-> int` and a
-# caller could do nothing else with the word. That was the half of
-# `bugs/FORMAL_listdir_no_run_time_sequence.md` that was open, and it was a
-# KIND and not a representation — the value has been one word pointing at
-# `[count][element]…` since the blob landed. With `-> List[String]` on the
-# declaration the annotation says so across the dylib boundary, and the three
-# spellings a Python caller writes all lower:
-#
-#     len(names)        the count word at offset 0
-#     names[i]          the element, as the element KIND the annotation gives
-#     for x in names    a loop whose target is that element kind
-#
-# `n`, `bytes` and `first` are the aggregate answers and `len`-through-the-
-# accessor is the CONTROL: the same count read both ways, in one image, so a
-# difference between them is a difference in how the kind was used rather than
-# in what the filesystem said. The oracle is CPython's `os.listdir` of the same
-# fixture, and its ORDER is the filesystem's `readdir` order, which is what
-# both sides walk.
-#
-# **`bytes` and not `chars`, and the change is the subject of
-# `FOREIGN_BYTES_KIND`.** This row's aggregate used to be
-# `chars = chars + len(x)`, which answered 11 where CPython answers 10 for a
-# directory holding `plain` and `héllo` — a `strlen` in a sum presented as a
-# character count, green build, exit 0, nothing on stderr, on BOTH
-# architectures. `len(x)` is now REFUSED by name (see
-# `len_of_a_directory_entry_is_refused` below, which is where that construct is
-# pinned), so the aggregate is spelled `os.str_len(x)` — the same `strlen`,
-# asked for as BYTES on purpose — and the oracle sums `len(os.fsencode(x))`,
-# which is the only CPython answer a byte count can be equal to. Every other
-# answer in this row is unchanged and is the control that says the kind was
-# seeded at the element and nowhere else: `len(names)` is still the count field,
-# `names[i]` is still the element, and a loop over the blob still walks it.
-CASES.append(Case(
-    "listdir_is_a_python_level_list",
-    '''\
-from os import listdir, listdir_len, listdir_free, str_len
-
-def show(tag, p):
-    names = listdir(p)
-    printf("%s_n=%d@@", tag, len(names))
-    printf("%s_acc=%d@@", tag, listdir_len(names))
-    bytes = 0
-    for x in names:
-        bytes = bytes + str_len(x)
-    printf("%s_bytes=%d@@", tag, bytes)
-    printf("%s_first=[%s]@@", tag, names[0])
-    printf("%s_last=[%s]@@", tag, names[len(names) - 1])
-    listdir_free(names)
-    return 0
-
-
-def main(n):
-    show("root", "@@ROOT@@")
-    show("dir", "@@ROOT@@/dir")
-    return 0
-''',
-    None,
-    oracle=lambda: _listdir_as_list_oracle(),
-))
-
-
-def _listdir_as_list_oracle():
-    """CPython's answers for `listdir_is_a_python_level_list`.
-
-    Computed against the SAME fixture the image walked, which is what makes the
-    three aggregate answers comparable rather than merely equal: `bytes` is the
-    sum of `len(os.fsencode(x))` over the same names, so a wrong element KIND
-    shows up as a wrong sum rather than as a crash.
-
-    **`os.fsencode` and not `len(x)`**, and the reason is the refusal this row's
-    comment names: `len(x)` counts CHARACTERS and the image's `str_len(x)` counts
-    BYTES, so the oracle has to be the same question CPython was asked. It is
-    still a real oracle rather than a copy of the image: `os.fsencode` is the
-    round trip through the same filesystem encoding `readdir(3)` produced, so a
-    name the kernel handed over as five characters and six bytes is six here and
-    would be five through `len(x)`.
-
-    **Only directories that EXIST**, and the reason is in the module rather than
-    here: a missing path makes `listdir` answer the WORD 0 rather than a blob,
-    and `len(0)` is a load at address 0 — a question about a null pointer, not
-    about a directory listing. The 0-for-missing answer is `listdir_and_walk`'s
-    row, through the accessors, which is where it belongs.
-    """
-    root = _FIXTURE[0]
-    out = {}
-    for tag, path in (("root", root), ("dir", os.path.join(root, "dir"))):
-        names = os.listdir(path)
-        out[f"{tag}_n"] = str(len(names))
-        out[f"{tag}_acc"] = str(len(names))
-        out[f"{tag}_bytes"] = str(sum(len(os.fsencode(x)) for x in names))
-        # The brackets are part of the RECORD, not of the value: the program
-        # prints `[%s]` so an empty listing is visible as `[]` rather than as a
-        # missing field, and the oracle strips them back off for the comparison.
-        out[f"{tag}_first"] = f"[{names[0]}]"
-        out[f"{tag}_last"] = f"[{names[-1]}]"
-    return out
-
-
-# ── 2c. BYTES THE KERNEL SUPPLIED, and what `len` cannot answer about them ──
-#
-# `os.listdir`'s names, `os.getenv`'s values and `os.getcwd`'s path are bytes the
-# KERNEL wrote, not bytes this image interned, and that is the only difference
-# that matters to `len`: `strlen` counts BYTES and CPython counts CHARACTERS, the
-# two agree for every ASCII name and disagree for every other one, and nothing in
-# the SOURCE says which it is holding. Measured before the kind existed, both
-# architectures, over `plain` + `héllo`: the image answered 11 where CPython
-# answers 10. Green build, exit 0, nothing on stderr.
-#
-# So the cases below are three things, and the third is the one that says the
-# kind was seeded correctly rather than over-seeded.
-CASES.append(Case(
-    "len_of_a_directory_entry_is_refused",
-    '''\
-from os import listdir, listdir_free
-
-def main(n):
-    names = listdir("@@UTF8@@")
-    for x in names:
-        printf("%d@@", len(x))
-    listdir_free(names)
-    return 0
-''',
-    refusal="is len() of bytes the KERNEL supplied",
-))
-
-# THE CONTROL, and it is the row that carries the claim. `printf("%s", …)` over a
-# kernel-supplied name is a property of the BYTES and CPython agrees on it —
-# `os.listdir` decodes with `surrogateescape` and writes the same bytes back out
-# — so this must still build, still run and still print `héllo` rather than a
-# refused message or a number. `str_len` is the deliberate byte count, and the
-# oracle is `os.fsencode`, so all three answers are compared against the same
-# filesystem rather than against a table.
-CASES.append(Case(
-    "a_directory_entry_prints_and_measures_as_bytes",
-    '''\
-from os import listdir, listdir_free, str_len
-
-def main(n):
-    names = listdir("@@UTF8@@")
-    printf("n=%d@@", len(names))
-    total = 0
-    i = 0
-    for x in names:
-        printf("name%d=[%s]@@", i, x)
-        printf("bytes%d=%d@@", i, str_len(x))
-        total = total + str_len(x)
-        i = i + 1
-    printf("total=%d@@", total)
-    listdir_free(names)
-    return 0
-''',
-    None,
-    oracle=lambda: _utf8_bytes_oracle(),
-))
-
-
-def _utf8_bytes_oracle():
-    """CPython's answers for `a_directory_entry_prints_and_measures_as_bytes`.
-
-    `bytes` is `len(os.fsencode(name))` and never `len(name)`: the image is
-    measuring BYTES, and the character count is the number
-    `len_of_a_directory_entry_is_refused` is about. The fixture's non-ASCII
-    entry is the whole point of it — APFS hands it back NFD-normalised, so it is
-    five characters and six bytes whichever spelling created it, and an oracle
-    written from the directory rather than from the source is what makes the row
-    survive a filesystem that normalises differently.
-    """
-    names = os.listdir(_UTF8[0])
-    out = {"n": str(len(names)), "total": str(sum(len(os.fsencode(x))
-                                                  for x in names))}
-    for i, x in enumerate(names):
-        out[f"name{i}"] = f"[{x}]"
-        out[f"bytes{i}"] = str(len(os.fsencode(x)))
-    return out
-
-
-# The value the two `getenv` rows hand to the image, and it is a CONSTANT rather
-# than something read out of `os.environ`, for the `env` contract: that dict is
-# the IMAGE's environment, not this process's, so an oracle reading
-# `os.environ[...]` would raise `KeyError` on a machine where the variable is
-# unset. One constant used by both rows makes them agree by construction, and it
-# makes the expected byte count (5 characters, 6 bytes) a claim about the source
-# rather than about whatever a shell did to the environment.
-_NONASCII_VALUE = "héllo"
-
-# A `getenv` value is the other half of the same kind and it is a DIFFERENT
-# kernel call, so it is its own row rather than a comment on the listdir one: a
-# seed that had covered only `readdir(3)` would leave this silent.
-CASES.append(Case(
-    "len_of_an_environment_value_is_refused",
-    '''\
-from os import getenv, getenv_or
-
-def main(n):
-    printf("%d@@", len(getenv("GMOJO_TESTS_NONASCII")))
-    printf("%d@@", len(getenv_or("GMOJO_TESTS_ABSENT", "fallback")))
-    return 0
-''',
-    env={"GMOJO_TESTS_NONASCII": _NONASCII_VALUE,
-         "GMOJO_TESTS_ABSENT": ""},
-    refusal="is len() of bytes the KERNEL supplied",
-))
-
-# …and the same value is fine to PRINT, which is what makes the refusal a
-# statement about `len` rather than about the value. Without this row a rule that
-# simply made every kernel string unprintable would pass the three above.
-CASES.append(Case(
-    "an_environment_value_prints",
-    '''\
-from os import getenv, str_len
-
-def main(n):
-    v = getenv("GMOJO_TESTS_NONASCII")
-    printf("value=[%s]@@", v)
-    printf("bytes=%d@@", str_len(v))
-    return 0
-''',
-    env={"GMOJO_TESTS_NONASCII": _NONASCII_VALUE},
-    expect={"value": f"[{_NONASCII_VALUE}]",
-            "bytes": str(len(_NONASCII_VALUE.encode()))},
-))
-
-# `getcwd` is `getcwd(3)` and not `environ`, so it is its own row for the same
-# reason: it is the third kernel source the seed names.
-CASES.append(Case(
-    "len_of_the_working_directory_is_refused",
-    '''\
-from os import getcwd, str_len
-
-def main(n):
-    printf("%d@@", len(getcwd()))
-    printf("%d@@", str_len(getcwd()))
-    return 0
-''',
-    refusal="is len() of bytes the KERNEL supplied",
-))
-
-# The seed is not one module's fix, and this is the row that says so: `glob`
-# reaches the same kinds through a DIFFERENT dylib and a different walk, and
-# `platform.node` through `uname(2)`. A seed that had covered only `os` would
-# leave both of these building, and it would leave them building the way the
-# `os` rows used to — exit 0 and a byte count.
-CASES.append(Case(
-    "len_of_a_globbed_name_is_refused",
-    '''\
-from glob import glob, glob_free
-from platform import node
-
-def main(n):
-    paths = glob("@@UTF8@@/*")
-    for p in paths:
-        printf("%d@@", len(p))
-    glob_free(paths)
-    printf("%d@@", len(node()))
-    return 0
-''',
-    refusal="is len() of bytes the KERNEL supplied",
-))
-
 
 # ── 3. The refusals ───────────────────────────────────────────────────────
 #
@@ -982,663 +695,33 @@ def _listdir_oracle(root):
     return out
 
 
-# ── 7. `os.environ`, against a FIXED process environment ───────────────────
-#
-# The fifth construct, and the only one whose answer is a fact about the host
-# rather than about a file: the process environment. `formal/hostmods/os/
-# __init__.mojo` reaches the `envp` block by asking the dynamic loader for the
-# `environ` global at RUN time (`os/_syscalls.mojo`'s `fs_environ_vec`), so
-# what has to be measured is that the block the kernel actually built is the
-# block the view reports — the keys, the values, the ORDER, the count, and the
-# two shapes an inherited environment cannot provide.
-#
-# **THE ENVIRONMENT IS FIXED, AND THAT IS THE POINT.** An inherited one cannot
-# answer this: a shell adds `_` to a child's block and cannot add it to a parent
-# that has already started, so this process's `os.environ` and the `envp` its
-# child inherits are not the same dictionary — measured, one entry apart before
-# any test code ran. A fixed dict makes the oracle exact, and it lets the case
-# hold the two entries that separate a dict from a `getenv(3)` wrapper:
-#
-#   * `FORMAL_ENV_VIEW_EMPTY` set to the EMPTY STRING. Present, and not the same
-#     as absent. `os.getenv` cannot tell those apart (both are `""`) and
-#     `environ_get` can (0 against `""`), which is the whole reason the view is
-#     a dict and not three functions.
-#   * `FORMAL_ENV_VIEW_EQUALS` whose VALUE contains `=`. The split is at the
-#     FIRST `=`, which is what `execve` says, so this is key
-#     `FORMAL_ENV_VIEW_EQUALS` and value `a=b=c`.
-#
-# ORDER is compared, not just membership: the view walks `envp` in the order the
-# block has, `subprocess` builds that block from this dict's iteration order,
-# and CPython's `os.environ` keeps the order it was given. Two of the three
-# moving and the third not would show up as a mismatch on `K0`.
-#
-# The `@@` in a value is replaced before it is printed, for the reason `REC`
-# gives: a value that contained the terminator would split a record in half and
-# the suite would report a disagreement that is really its own punctuation.
-ENV_VIEW_ENV = {
-    # Present on BOTH architectures and in this exact position on purpose.
-    # `run_case` starts the x86-64 image through `arch -x86_64`, and a
-    # TRANSLATED process is launched with `__CF_USER_TEXT_ENCODING` in its
-    # environment whether the parent put it there or not — measured, arm64 with
-    # `env -i` sees 0 variables and x86-64 with `env -i` sees this one. Putting
-    # it in the fixed dict is what makes the two arms compare the SAME block:
-    # the wrapper SETS the variable rather than appending a second one, so with
-    # it declared both arms see exactly these entries in exactly this order.
-    "__CF_USER_TEXT_ENCODING": "0x1F9:0x0:0x0",
-    "FORMAL_ENV_VIEW_PLAIN": "one",
-    "FORMAL_ENV_VIEW_EMPTY": "",
-    "FORMAL_ENV_VIEW_EQUALS": "a=b=c",
-    "FORMAL_ENV_VIEW_SPACE": "two words",
-    "FORMAL_ENV_VIEW_TAIL": "last",
-}
-
-ENV_VIEW_PROGRAM = """\
-from os import environ, environ_count, environ_key, environ_value
-from os import environ_find, environ_get, environ_get_or, environ_has
-from os import environ_set, environ_del, environ_items, environ_keys
-from os import environ_copy, environ_pop, environ_clear, environ_update
-from os import environ_popitem, environ_pair_free
-from os import environ_free, getenv, putenv
-from os._syscalls import str_replace_all
-
-def show(s):
-    return str_replace_all(s, "@@", "\\x01")
-
-
-def main(n):
-    var e = environ()
-    var c = environ_count(e)
-    printf("count %d@@", c)
-    printf("start-has %d@@", environ_has(e, "FORMAL_ENV_VIEW_PROBE"))
-    # EVERY key and value, in order: the whole claim of the view is that the
-    # block the kernel built is the block this reports.
-    var i = 0
-    while i < c:
-        printf("K%d [%s]@@", i, show(environ_key(e, i)))
-        printf("V%d [%s]@@", i, show(environ_value(e, i)))
-        i = i + 1
-    # a key that is not there, through every spelling of "not there"
-    printf("find-missing %d@@", environ_find(e, "FORMAL_ENV_VIEW_PROBE"))
-    printf("has-missing %d@@", environ_has(e, "FORMAL_ENV_VIEW_PROBE"))
-    printf("getor-missing [%s]@@",
-           show(environ_get_or(e, "FORMAL_ENV_VIEW_PROBE", "dflt")))
-    printf("del-missing %d@@", environ_del(e, "FORMAL_ENV_VIEW_PROBE"))
-    # out of range in both directions
-    printf("oob-key [%s]@@", show(environ_key(e, c)))
-    printf("neg-value [%s]@@", show(environ_value(e, 0 - 1)))
-    printf("items-is-view %d@@", environ_items(e) == e)
-    printf("keys-vs-key %d@@", environ_keys(e, 0) == environ_key(e, 0))
-    printf("keys-oob [%s]@@", show(environ_keys(e, c)))
-    # `os.environ[k] = v` on a key that is not there: the blob grows and BOTH
-    # answers move, because CPython's __setitem__ calls putenv.
-    var e2 = environ_set(e, "FORMAL_ENV_VIEW_PROBE", "one")
-    printf("set-new-count %d@@", environ_count(e2))
-    printf("set-new-has %d@@", environ_has(e2, "FORMAL_ENV_VIEW_PROBE"))
-    printf("set-new-get [%s]@@", show(environ_get(e2, "FORMAL_ENV_VIEW_PROBE")))
-    printf("set-new-getenv [%s]@@", show(getenv("FORMAL_ENV_VIEW_PROBE")))
-    # and on a key that is: the value is replaced, the count does not move
-    var e3 = environ_set(e2, "FORMAL_ENV_VIEW_PROBE", "two")
-    printf("set-same-count %d@@", environ_count(e3))
-    printf("set-same-get [%s]@@", show(environ_get(e3, "FORMAL_ENV_VIEW_PROBE")))
-    # `putenv` after the snapshot moves getenv and NOT the view, which is
-    # CPython's own rule rather than a limitation of this one.
-    printf("putenv %d@@", putenv("FORMAL_ENV_VIEW_LATE", "late"))
-    printf("late-getenv [%s]@@", show(getenv("FORMAL_ENV_VIEW_LATE")))
-    printf("late-view-has %d@@", environ_has(e3, "FORMAL_ENV_VIEW_LATE"))
-    printf("late-view-get-is-0 %d@@",
-           environ_get(e3, "FORMAL_ENV_VIEW_LATE") == 0)
-    # `del os.environ[k]`: the pair goes and the variable goes
-    printf("del %d@@", environ_del(e3, "FORMAL_ENV_VIEW_PROBE"))
-    printf("del-count %d@@", environ_count(e3))
-    printf("del-has %d@@", environ_has(e3, "FORMAL_ENV_VIEW_PROBE"))
-    printf("del-getenv [%s]@@", show(getenv("FORMAL_ENV_VIEW_PROBE")))
-    # the keys, at both ends, after the pair that was appended is gone
-    printf("keys-0 [%s]@@", show(environ_keys(e3, 0)))
-    printf("keys-last [%s]@@", show(environ_keys(e3, environ_count(e3) - 1)))
-    # ── copy(): a DICT COPY, and the assertion is INDEPENDENCE ──
-    # A copy that shared the original's buffers would answer every count and
-    # every key below correctly and still be wrong: `environ_free` on either
-    # blob would free what the other hands out. So the copy is written to and
-    # the ORIGINAL is read back — which is the only way to see the two are two.
-    var ec = environ_copy(e3)
-    printf("copy-count %d@@", environ_count(ec))
-    printf("copy-0 [%s]@@", show(environ_key(ec, 0)))
-    printf("copy-last [%s]@@", show(environ_key(ec, environ_count(ec) - 1)))
-    var ec2 = environ_set(ec, "FORMAL_ENV_VIEW_PLAIN", "written-in-copy")
-    printf("copy-write [%s]@@", show(environ_get(ec2,
-                                                 "FORMAL_ENV_VIEW_PLAIN")))
-    printf("copy-original [%s]@@",
-           show(environ_get(e3, "FORMAL_ENV_VIEW_PLAIN")))
-    printf("copy-original-count %d@@", environ_count(e3))
-    printf("free-copy %d@@", environ_free(ec2))
-    # ── pop(k, default): the value outlives the pair ──
-    # The pair goes through `environ_del`, so a pop that returned the alias
-    # would hand back freed memory — and the count has to drop by one, which is
-    # what says the removal happened at all rather than the value being copied
-    # out and nothing removed.
-    printf("pop [%s]@@", show(environ_pop(e3, "FORMAL_ENV_VIEW_PLAIN",
-                                         "dflt")))
-    printf("pop-count %d@@", environ_count(e3))
-    printf("pop-has %d@@", environ_has(e3, "FORMAL_ENV_VIEW_PLAIN"))
-    printf("pop-getenv [%s]@@", show(getenv("FORMAL_ENV_VIEW_PLAIN")))
-    printf("pop-absent [%s]@@", show(environ_pop(e3, "FORMAL_ENV_VIEW_PROBE",
-                                                "dflt")))
-    printf("pop-absent-count %d@@", environ_count(e3))
-    # ── popitem(): an ARBITRARY pair, as ONE blob ──
-    # On a view the program BUILDS ITSELF from three known pairs, and that is the
-    # whole reason: "which pair" is only decidable if the view's ORDER is known,
-    # and a fresh `environ()` is a snapshot of a process environment the test
-    # harness composed (`ENV_VIEW_ENV` plus whatever `putenv` added, and the
-    # `…_LATE` above is one such) while `e3`'s order has been edited twice by the
-    # removals above — `environ_del` shifts the LAST pair into the hole, which
-    # `environ_pop`'s own docstring calls a recorded divergence rather than an
-    # omission. A cleared view with three `environ_set` calls in it has neither
-    # problem: the order is the three stores in that order, on both
-    # architectures.
-    #
-    # Four things are being said at once, and the first is the point of the
-    # function existing: the answer is ONE word — a blob's address — carrying
-    # BOTH halves of the pair, which is what
-    # `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` §4 called
-    # "a genuine two-word limit" and is not. The second is that the count word
-    # says how many elements the blob has, so a caller reads it by subscript
-    # rather than trusting a convention. The third is that the removal happened:
-    # the view is one pair shorter and `getenv` no longer sees the variable,
-    # because CPython's `popitem` unsets it. The fourth is that the pair
-    # OUTLIVES the view entry it came from — a copy, not the alias `environ_pop`
-    # shows it must not be — and that it is released by its own release function.
-    # `pair` is ANNOTATED, and that is not incidental: a subscript through an
-    # unannotated word cannot read a buffer, which is the refusal this block
-    # first hit and which `re.escape`'s own docstring records being measured
-    # three ways.
-    var ep = environ_copy(e3)
-    environ_clear(ep)
-    ep = environ_set(ep, "FORMAL_ENV_VIEW_TAIL", "last")
-    ep = environ_set(ep, "FORMAL_ENV_VIEW_SPACE", "two words")
-    ep = environ_set(ep, "FORMAL_ENV_VIEW_EQUALS", "a=b=c")
-    var epn = environ_count(ep)
-    var pair: Pointer[Int64] = environ_popitem(ep)
-    printf("popitem-before %d@@", epn)
-    printf("popitem-n %d@@", pair[0])
-    printf("popitem-key [%s]@@", show(pair[1]))
-    printf("popitem-value [%s]@@", show(pair[2]))
-    printf("popitem-after %d@@", environ_count(ep))
-    printf("popitem-getenv [%s]@@", show(getenv(pair[1])))
-    printf("popitem-free %d@@", environ_pair_free(pair))
-    printf("popitem-free-null %d@@", environ_pair_free(0))
-    # An EMPTY view has no pair, and CPython raises KeyError for it: 0 is the
-    # answer and a blob is never 0 on success, so `pair != 0` is the test.
-    var eq = environ_copy(e3)
-    environ_clear(eq)
-    printf("popitem-empty %d@@", environ_popitem(eq))
-    printf("popitem-null %d@@", environ_popitem(0))
-    printf("popitem-empty-free %d@@", environ_free(eq))
-    # ── update(other): every pair of the other view, in ONE call ──
-    # Two views, both copies, so the rest of this program still has `e3`: the
-    # receiver carries what `e3` carries and the other view changes ONE value
-    # that is already there and adds ONE key that is not. Those are the two
-    # branches of `environ_set` — in place, and append-and-maybe-move — and the
-    # append is what makes `update`'s answer a blob rather than a status, which
-    # is the whole contract `update-count-moved` is about.
-    var ur = environ_copy(e3)
-    var uo = environ_copy(e3)
-    uo = environ_set(uo, "FORMAL_ENV_VIEW_PLAIN", "updated")
-    uo = environ_set(uo, "FORMAL_ENV_VIEW_UPDATE_NEW", "added")
-    var before = environ_count(ur)
-    var u = environ_update(ur, uo)
-    printf("update-count %d@@", environ_count(u))
-    printf("update-count-before %d@@", before)
-    # …and the count MOVED UP, which is what says the append happened rather
-    # than the call being ignored: a `realloc` that does not move answers the
-    # old pointer, and the caller cannot tell the two apart without this.
-    printf("update-count-moved %d@@", environ_count(u) - before)
-    printf("update-plain [%s]@@", show(environ_get(u, "FORMAL_ENV_VIEW_PLAIN")))
-    printf("update-new-has %d@@", environ_has(u, "FORMAL_ENV_VIEW_UPDATE_NEW"))
-    printf("update-new-get [%s]@@",
-           show(environ_get(u, "FORMAL_ENV_VIEW_UPDATE_NEW")))
-    printf("update-new-getenv [%s]@@",
-           show(getenv("FORMAL_ENV_VIEW_UPDATE_NEW")))
-    printf("update-kept [%s]@@", show(environ_get(u, "FORMAL_ENV_VIEW_TAIL")))
-    # The SOURCE view is untouched, which is the same independence `copy()`
-    # asserts and the reason `uo` is a copy rather than `e3` itself.
-    printf("update-source [%s]@@", show(environ_get(uo,
-                                                    "FORMAL_ENV_VIEW_PLAIN")))
-    # `update(e, e)` — CPython allows `d.update(d)` and every pair is equal
-    # afterwards, so this is the case that says the aliasing path duplicated the
-    # value before handing it to a store that frees the buffer it was read
-    # from. Read back through the view AFTER the call, because the failure this
-    # row exists for is a freed buffer that still prints.
-    var ua = environ_copy(u)
-    ua = environ_update(ua, ua)
-    printf("update-self-count %d@@", environ_count(ua))
-    printf("update-self-plain [%s]@@",
-           show(environ_get(ua, "FORMAL_ENV_VIEW_PLAIN")))
-    printf("update-self-new [%s]@@",
-           show(environ_get(ua, "FORMAL_ENV_VIEW_UPDATE_NEW")))
-    printf("update-free %d@@", environ_free(ua))
-    printf("update-free-other %d@@", environ_free(uo))
-    printf("update-free-receiver %d@@", environ_free(u))
-    # An EMPTY other view changes nothing and answers the receiver — CPython's
-    # `update` of an empty mapping, and the 0-pair view is one this program
-    # builds with `clear` rather than one it needs a second environment for.
-    var ue = environ_copy(e3)
-    environ_clear(ue)
-    var ur2 = environ_copy(e3)
-    var u2 = environ_update(ur2, ue)
-    printf("update-empty-count %d@@", environ_count(u2))
-    printf("update-empty-plain [%s]@@",
-           show(environ_get(u2, "FORMAL_ENV_VIEW_TAIL")))
-    printf("update-empty-free %d@@", environ_free(ue))
-    printf("update-empty-free-receiver %d@@", environ_free(u2))
-    # ── clear(): every pair, and every variable, gone ──
-    # On a COPY, so the rest of this program still has a view to free — and
-    # `clear-getenv` is the half a view-only implementation would miss: CPython
-    # unsets each variable, so the C library stops seeing them too.
-    var ed = environ_copy(e3)
-    printf("clear %d@@", environ_clear(ed))
-    printf("clear-count %d@@", environ_count(ed))
-    printf("clear-getenv [%s]@@", show(getenv("FORMAL_ENV_VIEW_TAIL")))
-    printf("clear-free %d@@", environ_free(ed))
-    printf("clear-untouched %d@@", environ_count(e3))
-    printf("free-view %d@@", environ_free(e3))
-    return 0
-"""
-
-
-def _update_oracle():
-    """CPython's `dict.update` answers for the `update` half of this program.
-
-    Computed, not written out: the program builds two views out of copies of
-    `e3`, changes one value that is already there and adds one key that is not,
-    and then reads the receiver back. A dict in this process asked the same
-    question is the oracle, because `os.environ.update` IS `MutableMapping.
-    update` and the only thing a table written here would add is a second place
-    for the two answers to disagree.
-
-    `update-count-moved` is the one row that is about the CALL rather than the
-    mapping: it is 1 because the added key made the view one pair longer, and
-    the view is a `malloc`'d block that a `realloc` may move — which is why
-    `environ_update` answers a blob and not a status.
-    """
-    recv = {k: v for k, v in ENV_VIEW_ENV.items()
-            if k != "FORMAL_ENV_VIEW_PLAIN"}      # what `e3` holds at that point
-    other = dict(recv)
-    other["FORMAL_ENV_VIEW_PLAIN"] = "updated"
-    other["FORMAL_ENV_VIEW_UPDATE_NEW"] = "added"
-    n_before = len(recv)
-    recv.update(other)                            # CPython's own operation
-    recv.update(dict(recv))                       # `d.update(d)`: every pair equal
-    # The EMPTY-other rows are about a DIFFERENT receiver: a fresh copy of `e3`,
-    # which never had the two keys this block added. So they answer from the
-    # count `e3` holds at that point — the six above less the one the `pop`
-    # removed — and not from `recv`, which by now holds seven pairs. Saying so
-    # here is cheaper than a reader working out which receiver a row is about.
-    e3_count = len(ENV_VIEW_ENV) - 1
-    return {
-        "update-count": str(len(recv)),
-        "update-count-before": str(n_before),
-        "update-count-moved": str(len(recv) - n_before),
-        "update-plain": f"[{recv['FORMAL_ENV_VIEW_PLAIN']}]",
-        "update-new-has": "1",
-        "update-new-get": f"[{recv['FORMAL_ENV_VIEW_UPDATE_NEW']}]",
-        # `putenv`: the store went through `__setitem__`, so the C library
-        # answers the new value too — the same fact `set-new-getenv` is.
-        "update-new-getenv": f"[{recv['FORMAL_ENV_VIEW_UPDATE_NEW']}]",
-        "update-kept": f"[{recv['FORMAL_ENV_VIEW_TAIL']}]",
-        "update-source": "[updated]",
-        "update-self-count": str(len(recv)),
-        "update-self-plain": f"[{recv['FORMAL_ENV_VIEW_PLAIN']}]",
-        "update-self-new": f"[{recv['FORMAL_ENV_VIEW_UPDATE_NEW']}]",
-        "update-free": "0",
-        "update-free-other": "0",
-        "update-free-receiver": "0",
-        "update-empty-count": str(e3_count),
-        "update-empty-plain": f"[{ENV_VIEW_ENV['FORMAL_ENV_VIEW_TAIL']}]",
-        "update-empty-free": "0",
-        "update-empty-free-receiver": "0",
-    }
-
-
-def _popitem_oracle(items):
-    """CPython's answers for the `popitem` block of `ENV_VIEW_PROGRAM`.
-
-    **The one row that cannot be derived from `items` alone is the KEY**, and
-    that is the honest answer rather than a missing one: CPython's `popitem` is
-    documented as "remove and return an arbitrary (key, value) pair" and is LIFO
-    since 3.7, so an oracle can only be written by RUNNING CPython's own
-    `popitem` on the same mapping.  A table written out here would be a second
-    place for the two answers to disagree, which is what every other oracle in
-    this file is for.
-
-    The mapping is the three-pair view the PROGRAM builds — a cleared view with
-    three `environ_set` calls in it — and NOT `e3` and NOT the process
-    environment, for the reason the block's own comment gives: `environ_del`
-    reorders a view in place, so `e3`'s order is no longer `ENV_VIEW_ENV`'s, and
-    the harness's environment is not the image's. A view whose order the program
-    wrote down is the only one whose "which pair" is decidable.
-
-    So the dict is asked, and every other row is read off what it answered:
-
-      * `popitem-before` / `popitem-after` are the count either side of the call,
-        so the row says the removal happened rather than the pair being copied
-        out and nothing removed;
-      * `popitem-n` is 2 because a container on this path keeps its count at word
-        0 and this is a two-element blob — the same convention `environ_count`
-        reads;
-      * `popitem-getenv` is `[]`, not the value: `__delitem__` calls `unsetenv`,
-        so the C library stops seeing the variable, which is the same fact
-        `del-getenv` and `clear-getenv` are.
-    """
-    # The view the PROGRAM built: a cleared view with three `environ_set` calls
-    # in it, in that order, so the order is the three stores in that order and
-    # CPython is asked about exactly that mapping. Nothing here is derived from
-    # the process environment the harness composed, which is the whole point —
-    # see the block's own comment.
-    env = {"FORMAL_ENV_VIEW_TAIL": "last",
-           "FORMAL_ENV_VIEW_SPACE": "two words",
-           "FORMAL_ENV_VIEW_EQUALS": "a=b=c"}
-    before = len(env)
-    d = dict(env)
-    key, value = d.popitem()                      # CPython's own operation
-    return {
-        "popitem-before": str(before),
-        "popitem-n": "2",
-        "popitem-key": f"[{key}]",
-        "popitem-value": f"[{value}]",
-        "popitem-after": str(len(d)),
-        "popitem-getenv": "[]",
-        "popitem-free": "0",
-        "popitem-free-null": "0",
-        "popitem-empty": "0",
-        "popitem-null": "0",
-        "popitem-empty-free": "0",
-    }
-
-
-def _env_view_oracle():
-    """CPython's answers for `ENV_VIEW_PROGRAM` over `ENV_VIEW_ENV`.
-
-    The environment-dependent half is read off `ENV_VIEW_ENV` rather than off
-    this process's `os.environ`, because `ENV_VIEW_ENV` is what the image is
-    started with — see `ENV_VIEW_ENV`'s own comment for why those are not the
-    same dictionary.
-
-    The rest are CPython's answers about the operations, stated rather than
-    derived, and each is a fact the case would otherwise only be able to check
-    against the module:
-
-      * `set-new-getenv` is `[one]` because `os.environ[k] = v` calls `putenv`,
-        so `os.getenv(k)` answers the new value too;
-      * `late-view-has` is 0 and `late-getenv` is `[late]` because
-        `os.putenv` changes what `os.getenv` says and leaves `os.environ`
-        holding what it held — the disagreement this module's `putenv`
-        docstring is about, measured rather than described;
-      * `del-getenv` is `[]` because `__delitem__` calls `unsetenv`;
-      * `del-missing` is -1 where CPython raises `KeyError`, and
-        `getor-missing` is the default where `os.environ.get(k, d)` would
-        return it. Both are the recorded divergence, pinned.
-    """
-    items = list(ENV_VIEW_ENV.items())
-    n = len(items)
-    out = {
-        "count": str(n),
-        "start-has": "0",
-        "find-missing": "-1",
-        "has-missing": "0",
-        "getor-missing": "[dflt]",
-        "del-missing": "-1",
-        "oob-key": "[]",
-        "neg-value": "[]",
-        "items-is-view": "1",
-        "keys-vs-key": "1",
-        "keys-oob": "[]",
-        "set-new-count": str(n + 1),
-        "set-new-has": "1",
-        "set-new-get": "[one]",
-        "set-new-getenv": "[one]",
-        "set-same-count": str(n + 1),
-        "set-same-get": "[two]",
-        "putenv": "0",
-        "late-getenv": "[late]",
-        "late-view-has": "0",
-        "late-view-get-is-0": "1",
-        "del": "0",
-        "del-count": str(n),
-        "del-has": "0",
-        "del-getenv": "[]",
-        "keys-0": f"[{items[0][0]}]",
-        "keys-last": f"[{items[-1][0]}]",
-        # `copy()`: a dict copy holds the same pairs, so every count and key
-        # above is the answer for the copy too, and the value written into it
-        # is NOT the original's — which is what CPython's dict copy means and
-        # what an aliasing copy would fail.
-        "copy-count": str(n),
-        "copy-0": f"[{items[0][0]}]",
-        "copy-last": f"[{items[-1][0]}]",
-        "copy-write": "[written-in-copy]",
-        "copy-original": f"[{ENV_VIEW_ENV['FORMAL_ENV_VIEW_PLAIN']}]",
-        "copy-original-count": str(n),
-        "free-copy": "0",
-        # `pop(k, default)`: CPython returns the value and the key is gone —
-        # from the dict AND from `os.getenv`, because `__delitem__` unsets it.
-        "pop": f"[{ENV_VIEW_ENV['FORMAL_ENV_VIEW_PLAIN']}]",
-        "pop-count": str(n - 1),
-        "pop-has": "0",
-        "pop-getenv": "[]",
-        "pop-absent": "[dflt]",
-        "pop-absent-count": str(n - 1),
-        # `update(other)`: computed with CPython's OWN `dict.update` over the
-        # same starting mapping, because the point of these rows is that the
-        # answer is a dict operation rather than a table written here. `recv` is
-        # what `e3` holds at this point (every key but `…_PLAIN`, which the
-        # `pop` above removed) and `other` is `recv` with one value replaced and
-        # one key added — the in-place branch and the appending one.
-        **_update_oracle(),
-        # `popitem()`: CPython's own `dict.popitem` on the mapping the program
-        # has at this point, for the reason `_popitem_oracle` gives.
-        **_popitem_oracle(items),
-        # `clear()`: the mapping is empty and every variable is unset, so
-        # `os.getenv` — the C library's answer — is empty too.
-        "clear": "0",
-        "clear-count": "0",
-        "clear-getenv": "[]",
-        "clear-free": "0",
-        "clear-untouched": str(n - 1),
-        "free-view": "0",
-    }
-    for i, (k, v) in enumerate(items):
-        out[f"K{i}"] = f"[{k}]"
-        out[f"V{i}"] = f"[{v}]"
-    return out
-
-
-CASES.append(Case("environ_view", ENV_VIEW_PROGRAM, None,
-                  oracle=_env_view_oracle, env=dict(ENV_VIEW_ENV)))
-
-
-# ── 8. `os.environ`: a variable set to the EMPTY STRING, and an EMPTY view ──
-#
-# The other end of the same range, and the one that separates a dict from a
-# `getenv(3)` wrapper. `environ_get` answers 0 for a key that is NOT there and
-# `""` for a key that is there holding nothing, and those two are the same word
-# through `os.getenv` — `formal/hostmods/os/__init__.mojo`'s `getenv`
-# docstring says so and this is the case that would notice if it stopped being
-# true.
-#
-# It also walks a view down to ZERO pairs, which is the smallest view there is
-# and the only place `environ_keys(e, -1)` is asked of a real view rather than
-# of an index past the end.
-#
-# `__CF_USER_TEXT_ENCODING` is here for the reason `ENV_VIEW_ENV` gives, and it
-# carries `arch`'s own value: a translated process OVERWRITES that variable
-# rather than adding one, so passing it empty is not the way to get an empty
-# value — measured, arm64 answered `[]` and x86-64 answered
-# `[0x1F9:0x0:0x0]` for the same dict. `ENV_VIEW_ENV`'s value is the one that
-# makes the two arms agree.
-ENV_VIEW_EMPTY_ENV = {
-    "__CF_USER_TEXT_ENCODING": "0x1F9:0x0:0x0",
-    "FORMAL_ENV_VIEW_EMPTY": "",
-}
-
-ENV_VIEW_EMPTY_PROGRAM = """\
-from os import environ, environ_count, environ_key, environ_value
-from os import environ_has, environ_get, environ_set, environ_del
-from os import environ_keys, environ_free
-
-NAME = "FORMAL_ENV_VIEW_EMPTY"
-ABSENT = "FORMAL_ENV_VIEW_ABSENT"
-
-def main(n):
-    var e = environ()
-    var c = environ_count(e)
-    printf("count %d@@", c)
-    printf("empty-has %d@@", environ_has(e, NAME))
-    printf("empty-get [%s]@@", environ_get(e, NAME))
-    # THE CASE: present-and-empty is NOT absent, and the two are different
-    # words.
-    printf("empty-get-is-0 %d@@", environ_get(e, NAME) == 0)
-    printf("absent-has %d@@", environ_has(e, ABSENT))
-    printf("absent-get-is-0 %d@@", environ_get(e, ABSENT) == 0)
-    printf("keys-0 [%s]@@", environ_keys(e, 0))
-    printf("keys-last [%s]@@", environ_keys(e, c - 1))
-    # overwriting a key that IS there replaces the value and leaves the count
-    var e2 = environ_set(e, NAME, "x")
-    printf("set-same-count %d@@", environ_count(e2))
-    printf("set-same-get [%s]@@", environ_get(e2, NAME))
-    # and `del` walks the view down to nothing
-    printf("del-empty %d@@", environ_del(e2, NAME))
-    printf("del-empty-count %d@@", environ_count(e2))
-    printf("del-cf %d@@", environ_del(e2, "__CF_USER_TEXT_ENCODING"))
-    printf("del-count %d@@", environ_count(e2))
-    printf("del-has %d@@", environ_has(e2, NAME))
-    printf("keys-empty [%s]@@", environ_keys(e2, 0))
-    printf("keys-neg [%s]@@", environ_keys(e2, 0 - 1))
-    printf("free %d@@", environ_free(e2))
-    return 0
-"""
-
-
-def _env_view_empty_oracle():
-    """CPython's answers for a two-variable environment, one of them empty.
-
-    `empty-get-is-0` is 0 and `absent-get-is-0` is 1, and that pair is the whole
-    case: `os.environ[NAME]` is `""` and `os.environ.get(ABSENT)` is `None`, so
-    an implementation that answered both with the same word could not tell them
-    apart — which is exactly what `os.getenv` cannot do either, and why this is
-    the case rather than one more lookup in the case above.
-    """
-    return {
-        "count": "2",
-        "empty-has": "1",
-        "empty-get": "[]",
-        "empty-get-is-0": "0",
-        "absent-has": "0",
-        "absent-get-is-0": "1",
-        "keys-0": "[__CF_USER_TEXT_ENCODING]",
-        "keys-last": "[FORMAL_ENV_VIEW_EMPTY]",
-        "set-same-count": "2",
-        "set-same-get": "[x]",
-        "del-empty": "0",
-        "del-empty-count": "1",
-        "del-cf": "0",
-        "del-count": "0",
-        "del-has": "0",
-        "keys-empty": "[]",
-        "keys-neg": "[]",
-        "free": "0",
-    }
-
-
-CASES.append(Case("environ_view_empty", ENV_VIEW_EMPTY_PROGRAM, None,
-                  oracle=_env_view_empty_oracle,
-                  env=dict(ENV_VIEW_EMPTY_ENV)))
-
-
-# ── a child's OUTCOME: a HANG, a SIGNAL, or an answer ─────────────────────
-#
-# A child that died on a SIGNAL used to be reported as `exit -9, stderr ''`.
-# `subprocess` reports that as a NEGATIVE return code, and every value a
-# program can choose for itself is non-negative — an image cannot decide to
-# exit -9, and cannot write a byte of the empty stderr that arrived with it. The
-# sign is not an answer the module gave; it is a fact about the machine the case
-# ran on, and printing it in the same shape as an ordinary wrong exit is exactly
-# how `bugs/OPEN_WORK.md` §C2's warning ("A SIGKILL here is evidence of
-# nothing. A manual `kill -9` and an OS kill are the same signal") has been
-# misdiagnosed twice in this area. Two `stat_*` cases died this way in a FULL run
-# under load on four of six runs, and passed 6/6 alone; the report said the `os`
-# module was broken, twice, for a reason that was not about the `os` module.
-#
-# So the outcome is a THREE-valued status (`_image_status`) rather than a
-# boolean, and it is still a FAILURE and still fails the run: a killed case
-# obtained no answer, and no answer is not a pass. What it must not be is
-# indistinguishable from the `os` module answering wrongly. The wording, the
-# signal's name, and the sentence about what this harness does not send are all
-# `exec_budget`'s, because four suites hand-rolled them with four different
-# wordings.
-
-
 def build(src, out, arch):
-    """`(rc, detail)` for one compile.
-
-    `rc` is `subprocess`'s own negative-for-a-signal value, because the caller
-    classifies it with `_image_status` rather than reading a number here: a
-    `fire.py build` the machine kills mid-flight used to reach the caller as
-    `build failed: ` with an empty message, which is a report with no content at
-    all.
-    """
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            "--backend=" + arch, "-o", out, src]
     p = subprocess.run(cmd, capture_output=True, text=True,
                        timeout=BUILD_TIMEOUT, cwd=HERE)
-    return p.returncode, p.stderr or p.stdout or ""
+    return p.returncode, (p.stderr or p.stdout or "")
 
 
-def run(out, arch, env=None):
-    """`(rc, stdout, stderr)` for one image, a HANG and a KILLING both
-    reported rather than raised.
+def run(out, arch):
+    """`(rc, stdout, stderr)` for one image, a HANG reported rather than raised.
 
     A timeout is a FAILURE of the case, not of the suite: a formal image that
     never terminates is one of the wrong answers this file exists to catch, and
     the way it showed up before was `subprocess.TimeoutExpired` escaping `main`
     and taking the remaining twenty-odd cases with it — so the one case that
-    hangs is reported and every other case still runs. `rc` is `exec_budget`'s
-    `TIMEOUT_RC` (the shell's timeout convention, 124, which is a status no
-    compiled program of ours returns and is deliberately not a signal) and
-    stderr names the timeout, so the caller sees a case that failed with a
-    reason rather than a case that vanished.
-
-    **A SIGNAL is not that, and the caller is told which signal it is.** `rc` is
-    negative when the kernel ended the child rather than the child exiting, and
-    this file's own history is the reason this is stated rather than assumed: two
-    of six full runs were 56/58 and both times the same pair of `stat_*` cases
-    reported `exit -9, stderr ''` and nothing else — which reads as a defect in
-    the `os` module, and is a machine that killed a build (memcap's ceiling, the
-    OOM killer, or another process; nothing here signals a child it launched).
-    `run_case` turns that into its own `KILLED` status, so "the machine killed it"
-    and "the module answered wrongly" cannot both print `FAIL`.
-
-    **and only SOME signals are that.** A FAULT — SIGSEGV, SIGBUS, SIGFPE,
-    SIGILL, SIGABRT — is the image's own doing, which is exactly what this suite
-    exists to catch ("every case EXECUTES, because a lowering that builds a
-    plausible wrong image is precisely what this suite is for"), so a fault stays
-    an ordinary `FAIL`. Tagging a SIGSEGV `KILLED` would excuse the one death
-    this suite must never excuse, so the split is `exec_budget`'s
-    `died_by_external_signal`, not "any signal".
-
-    `env` replaces the environment the image starts with; `None` inherits this
-    process's, which is what every case but `environ_view` wants. It is the
-    CHILD's block either way: `arch` on the x86-64 arm is resolved in this
-    process, so a case with a minimal `env` still finds it.
+    hangs is reported and every other case still runs. `rc` is the shell's
+    timeout convention (124) and stderr names the timeout, so the caller sees a
+    case that failed with a reason rather than a case that vanished.
     """
     argv = [out]
     if arch == "x86_64" and sys.platform == "darwin":
         argv = ["arch", "-x86_64", out]        # Rosetta 2
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=RUN_TIMEOUT, env=env)
+                           timeout=RUN_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return (TIMEOUT_RC, "",
-                f"the image did not finish within {RUN_TIMEOUT}s")
+        return 124, "", f"the image did not finish within {RUN_TIMEOUT}s"
     return p.returncode, p.stdout, p.stderr
 
 
@@ -1706,52 +789,18 @@ def rosetta():
 
 # ── the runner ────────────────────────────────────────────────────────────
 
-# The three statuses a case can end in, and the reason a SIGNAL is one of them
-# rather than a flavour of FAIL. `KILLED` is what `died_by_external_signal`
-# fires on, and it exists because this file's `stat_*` cases were twice observed dying
-# with `exit -9, stderr ''` on a machine carrying a dozen other builds — a fact
-# about the machine that printed the same line a wrong `os` module would print.
-# A reader who cannot tell those apart will attribute a resource death to the
-# module, and `bugs/OPEN_WORK.md` §C2 records that this area has been
-# misdiagnosed twice already by doing so.
-PASS = "PASS"
-FAIL = "FAIL"
-KILLED = "KILLED"
-# …and the distinction that makes `KILLED` honest. These three are the signals a
-# program cannot raise on itself — SIGKILL is the kernel's (nothing catches or
-# ignores it), SIGTERM the supervisor's, SIGINT the terminal's — so a death by one
-# of them is the machine's and not the module's. The SET lives in `exec_budget`
-# beside the wording that uses it, because both are about the same fact, and the
-# text is what `main`'s summary names. A FAULT is the image's own doing and stays
-# an ordinary `FAIL`; see `run()` for why that is the one line this suite must
-# not blur.
-EXTERNAL_SIGNALS_TEXT = "/".join(sorted(EXTERNAL_SIGNAL_NAMES))
-
-
-def _image_status(rc, stderr, what):
-    """`(status, detail)` for an image that did not exit 0.
-
-    The three answers a caller has to be able to tell apart, and each needs a
-    different next step: `FAIL` is the module's, `KILLED` is the machine's, and
-    a build budget is neither. The wording is `exec_budget`'s, shared with the
-    three other suites that had their own copy.
-    """
-    reason = child_exit_reason(rc, stderr, subject=what)
-    return (KILLED if died_by_external_signal(rc) else FAIL), reason
-
-
 def run_listdir_case(arch, tmpdir, fixture, verbose):
-    """(status, detail) for the `listdir`/`walk` program on one architecture."""
+    """(ok, detail) for the `listdir`/`walk` program on one architecture."""
     src = os.path.join(tmpdir, "os_listdir.mojo")
     with open(src, "w") as f:
         f.write(LISTDIR_PROGRAM.replace("@@ROOT@@", fixture))
     out = os.path.join(tmpdir, "os_listdir." + arch)
     rc, text = build(src, out, arch)
     if rc != 0:
-        return _image_status(rc, text, "the build")
+        return False, f"build failed: {text.strip()[-400:]}"
     rc, stdout, stderr = run(out, arch)
     if rc != 0:
-        return _image_status(rc, stderr, "the image")
+        return False, f"exit {rc}, stderr {stderr.strip()[:200]!r}"
     want = {(k.split()[0], k.split()[1] if len(k.split()) > 1 else "",
             k.split()[2] if len(k.split()) > 2 else ""): v
             for k, v in _listdir_oracle(fixture).items()}
@@ -1759,108 +808,52 @@ def run_listdir_case(arch, tmpdir, fixture, verbose):
     bad = [f"{k}: the image says {got.get(k)!r}, os.listdir says {v!r}"
            for k, v in sorted(want.items()) if got.get(k) != v]
     if bad:
-        return FAIL, ("%d of %d answers differ from CPython's:\n      %s"
-                      % (len(bad), len(want), "\n      ".join(bad[:20])))
+        return False, ("%d of %d answers differ from CPython's:\n      %s"
+                       % (len(bad), len(want), "\n      ".join(bad[:20])))
     if verbose:
         print(f"      {len(want)} listing answers identical to os.listdir/"
               f"os.walk")
-    return PASS, ""
+    return True, ""
 
 
-# The fixture root, for the oracle of a case whose program names `@@ROOT@@`.
-# A one-element list because the oracle is a zero-argument callable (the `Case`
-# contract) and the fixture only exists inside `main`'s `TemporaryDirectory`.
-_FIXTURE = [""]
-
-# The NON-ASCII fixture, and it is a SEPARATE directory rather than two more
-# entries in `_FIXTURE` for a measured reason: `listdir_and_walk` walks
-# `@@ROOT@@` recursively against a CPython oracle, and adding a subdirectory to
-# that tree changes every one of its 49 answers for a change that has nothing to
-# do with them. A fixture whose only consumer is the byte-count rows keeps every
-# other row's numbers exactly as they were, which is what makes "the seed did
-# not change anything else" checkable rather than asserted.
-_UTF8 = [""]
-
-
-def make_utf8_fixture(root):
-    """A directory whose names make the BYTE/CHARACTER question visible.
-
-    Two entries, one ASCII and one not, because the whole defect is invisible on
-    an all-ASCII directory: `strlen` and `len()` are the same number for every
-    ASCII name, so a fixture of ASCII names cannot tell a correct byte answer
-    from a wrong one. The non-ASCII entry is written from its source spelling and
-    the ORACLE reads it back through `os.listdir` + `os.fsencode`, so a
-    filesystem that normalises the name to NFD (APFS does) is answered correctly
-    rather than compared against a hard-coded byte count.
-    """
-    os.makedirs(root)
-    for name in ("plain", "héllo"):
-        with open(os.path.join(root, name), "w") as f:
-            f.write("x")
-    return root
-
-
-def run_case(case, arch, tmpdir, verbose, fixture=None):
-    """(status, detail) for one case on one architecture.
-
-    `@@ROOT@@` is the fixture directory every case's source may name, so a case
-    can ask a question about a directory whose contents it did not write. The
-    convention is `LISTDIR_PROGRAM`'s own, generalised from it: a case that does
-    not mention the marker is unaffected, and one that does gets the same
-    `run_listdir_case` does.
-
-    `status` is `PASS` / `FAIL` / `KILLED` and the last is its own value rather
-    than a flavour of `FAIL`, for `run_listdir_case`'s reason: the `stat_*`
-    cases are the ones a resource death lands on, and a `KILLED` line says so in
-    the one column a reader scans. A FAULT stays `FAIL` — see `run`.
-
-    `@@UTF8@@` is the second marker, for the same reason with a narrower scope:
-    it names the non-ASCII fixture, which is a different directory because only
-    the byte-count rows should see it.
-    """
+def run_case(case, arch, tmpdir, verbose):
+    """(ok, detail) for one case on one architecture."""
     src = os.path.join(tmpdir, case.name + ".mojo")
     with open(src, "w") as f:
-        text = case.source
-        if fixture:
-            text = text.replace("@@ROOT@@", fixture)
-        f.write(text.replace("@@UTF8@@", _UTF8[0]))
+        f.write(case.source)
     out = os.path.join(tmpdir, case.name + "." + arch)
     rc, text = build(src, out, arch)
     if case.refusal:
         if rc == 0:
-            return FAIL, ("it BUILT. A base whose pointee is not established "
-                          "must be refused: the blob path bounds-checks "
-                          "against the byte at offset 0 of the pointer and "
-                          "returns a number assembled out of it")
+            return False, ("it BUILT. A base whose pointee is not established "
+                           "must be refused: the blob path bounds-checks "
+                           "against the byte at offset 0 of the pointer and "
+                           "returns a number assembled out of it")
         if case.refusal not in text:
-            return FAIL, (f"refused, but the message does not name "
-                          f"{case.refusal!r}: {text.strip()[-300:]}")
+            return False, (f"refused, but the message does not name "
+                           f"{case.refusal!r}: {text.strip()[-300:]}")
         if verbose:
             print(f"      refused with: {text.strip()[-160:]}")
-        return PASS, ""
+        return True, ""
     if rc != 0:
-        # A build the machine killed is the same shape as a run it killed, and
-        # it is the one this file's `stat_*` cases were twice observed dying in:
-        # `fire.py build` is the biggest child here, so it is the first thing a
-        # memory ceiling reaches.
-        return _image_status(rc, text, "the build")
-    rc, stdout, stderr = run(out, arch, case.env)
+        return False, f"build failed: {text.strip()[-400:]}"
+    rc, stdout, stderr = run(out, arch)
     if rc != 0:
-        return _image_status(rc, stderr, "the image")
+        return False, f"exit {rc}, stderr {stderr.strip()[:200]!r}"
     got = parse(stdout)
     want = case.expect
     if want is None and case.oracle is not None:
         want = case.oracle()
     if want is None:
-        return FAIL, "the case has neither `expect` nor an `oracle`"
+        return False, "the case has neither `expect` nor an `oracle`"
     bad = [f"{k}: the image says {got.get(k)!r}, the expected answer is {v!r}"
            for k, v in want.items() if got.get(k) != v]
     if bad:
-        return FAIL, ("%d of %d answers wrong:\n      %s"
-                      % (len(bad), len(want), "\n      ".join(bad)))
+        return False, ("%d of %d answers wrong:\n      %s"
+                       % (len(bad), len(want), "\n      ".join(bad)))
     if verbose:
         print(f"      {len(want)} answers correct")
-    return PASS, ""
+    return True, ""
 
 
 def build_stat_case(path, tmpdir):
@@ -1871,20 +864,6 @@ def build_stat_case(path, tmpdir):
                                path.replace("\\", "\\\\").replace('"', '\\"'))
     return Case("stat_" + os.path.basename(path).replace(".", "_"),
                 src, None, oracle=lambda: _stat_oracle(path))
-
-
-def _line(status, name, arch, detail):
-    """One screen line, and the status is the FIRST thing on it."""
-    pad = " " * (max(len(PASS), len(FAIL), len(KILLED)) - len(status))
-    return (f"{status}{pad}  {name} [{arch}]"
-            + (("  " + detail) if detail else ""))
-
-
-def _tally(status, name, arch, failed, killed):
-    """Book a result. `KILLED` is its own list, so neither tally hides it."""
-    if status == PASS:
-        return
-    (killed if status == KILLED else failed).append(f"{name}[{arch}]")
 
 
 def main():
@@ -1903,20 +882,11 @@ def main():
               "arm64 only")
 
     failed = []
-    # The cases the MACHINE killed, kept apart from the ones that failed. Both
-    # count as failures - a case that obtained no answer has not passed - but
-    # they are different claims and the tally has to say which is which, or
-    # "56/58" reads as "the os module got two answers wrong" when what happened
-    # is that nothing answered twice.
-    killed = []
     total = 0
     with tempfile.TemporaryDirectory() as tmpdir:
         fixture = os.path.realpath(os.path.join(tmpdir, "fx"))
         os.makedirs(fixture)
-        _FIXTURE[0] = fixture
         paths = make_shapes(fixture)
-        _UTF8[0] = make_utf8_fixture(
-            os.path.join(tmpdir, "utf8"))
         cases = list(CASES)
         for shape, p in sorted(paths.items()):
             cases.append(build_stat_case(p, tmpdir))
@@ -1940,31 +910,24 @@ def main():
                         print(f"SKIP {n} [{arch}]  ({case.archs_reason})")
                         continue
                     total += 1
-                    status, detail = run_listdir_case(arch, tmpdir, fixture,
-                                                      args.verbose)
-                    print(_line(status, n, arch, detail))
-                    _tally(status, n, arch, failed, killed)
+                    ok, detail = run_listdir_case(arch, tmpdir, fixture,
+                                                  args.verbose)
+                    print(("PASS " if ok else "FAIL ") + f"{n} [{arch}]" +
+                          (("  " + detail) if detail else ""))
+                    if not ok:
+                        failed.append(f"{n}[{arch}]")
                 continue
             for arch in archs:
                 if case.archs is not None and arch not in case.archs:
                     print(f"SKIP {n} [{arch}]  ({case.archs_reason})")
                     continue
                 total += 1
-                status, detail = run_case(case, arch, tmpdir, args.verbose,
-                                          fixture)
-                print(_line(status, n, arch, detail))
-                _tally(status, n, arch, failed, killed)
-    # Three numbers rather than two, and the split is the point: a `KILLED` case
-    # is not a wrong answer and is not counted as one, because the machine
-    # killed it on one of `EXTERNAL_SIGNALS_TEXT` — a signal this suite never
-    # sends. Before this file could say so, `exit -9, stderr ''` printed
-    # `FAIL stat_fifo [arm64]`, which is the same line a defect in `os` prints —
-    # and `bugs/OPEN_WORK.md` §C2 says this area has already been misdiagnosed
-    # twice that way.
-    print(f"\n{total - len(failed) - len(killed)}/{total} passed"
-          + (f", {len(killed)} obtained NO verdict because the machine killed "
-             f"them on {EXTERNAL_SIGNALS_TEXT}, which is not a wrong answer: "
-             f"{', '.join(killed)}" if killed else ""))
+                ok, detail = run_case(case, arch, tmpdir, args.verbose)
+                print(("PASS " if ok else "FAIL ") + f"{n} [{arch}]" +
+                      (("  " + detail) if detail else ""))
+                if not ok:
+                    failed.append(f"{n}[{arch}]")
+    print(f"\n{total - len(failed)}/{total} passed")
     return 1 if failed else 0
 
 

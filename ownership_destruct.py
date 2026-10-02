@@ -213,16 +213,9 @@ def _is_fresh_string_expr(node) -> bool:
     `receiver_results_consumed` decide those, per call site, and the receiver
     may not even be a string), and any other call (whether it is fresh is
     exactly the question being asked)."""
-    # `N.is_fstring_literal(node)` as well as the (never-constructed, see its
-    # own definition) `TstringLiteral`: an f-string is a plain `StringLiteral`
-    # whose value keeps its `f` prefix and quotes, so without this an
-    # interpolated string read as a CONSTANT here and the name that holds it
-    # was never credited with owning anything.
-    if isinstance(node, (N.TstringLiteral, N.SliceExpr)) or N.is_fstring_literal(node):
+    if isinstance(node, (N.TstringLiteral, N.SliceExpr)):
         return True
-    if isinstance(node, N.BinaryOp) and node.op == '+':
-        return True
-    return _is_string_percent_expr(node)
+    return isinstance(node, N.BinaryOp) and node.op == '+'
 
 
 def _is_maybe_fresh_expr(node) -> bool:
@@ -235,34 +228,11 @@ def _is_maybe_fresh_expr(node) -> bool:
     really is, keeps ownership only when it can prove the value fresh at the
     declaration (emit_infra.maybe_push_owned_local); otherwise the name is
     dropped from the candidates right there."""
-    if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension,
-                         N.TstringLiteral)) or N.is_fstring_literal(node):
+    if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension, N.TstringLiteral)):
         return True
     if isinstance(node, N.BinaryOp) and node.op == '+':
         return True
-    return _is_string_percent_expr(node)
-
-
-def _is_string_percent_expr(node) -> bool:
-    """`'%s' % xs` -- the one `%` that builds a fresh STRING.
-
-    `%` is two operations in Python and the AST does not say which: string
-    interpolation when the left operand is a string, numeric modulo otherwise
-    (`5 % 2`). Only the first allocates, and only the first may be freed, so
-    the left operand has to be a string LITERAL to answer it from the AST
-    alone -- which is what the codegen's own `_lower_percent` does too (it
-    returns None, and the caller falls through to integer modulo, for every
-    shape it cannot prove).
-
-    Without this arm `s = '%s' % xs` was not credited with owning its value,
-    so a container on the right leaked its repr buffer once per iteration:
-    measured 12.8 B/iteration, flat over a 4x range. `%d` of a container is
-    impossible, so the container case is `%s`/`%r` and both are covered by
-    the same left-operand test.
-    """
-    if not isinstance(node, N.BinaryOp) or node.op != '%':
-        return False
-    return isinstance(node.left, N.StringLiteral)
+    return False
 
 
 class _FuncFacts:
@@ -1653,7 +1623,7 @@ def list_elements_owned(fn_body, name: str) -> bool:
     leaking on purpose") and for a dict/set's `key_views_consumed` above; this
     is the LIST-element counterpart, and the leak it does close — the
     ~48 B/iteration of `String("a b c").split(" ")` measured over 100k and
-    400k iterations in CODEGEN_call_result_container_never_freed — is
+    400k iterations in bugs/CODEGEN_call_result_container_never_freed.md — is
     the `len()`-and-drop shape, which is the common one."""
     return _list_str_uses_ok(fn_body, name)
 
@@ -1760,44 +1730,6 @@ def lambda_value_owned(fn_body, name: str) -> bool:
     safe, and lifting that exclusion is a separate piece of work. This rule
     asks nothing about containers, so it holds on a body the container analysis
     refuses to look at."""
-    return _lambda_uses_ok(fn_body, name)
-
-
-def nested_def_env_owned(fn_body, name: str) -> bool:
-    """True iff the environment `_alloc_<name>_env()` allocated for a nested
-    `def name` may be freed when the enclosing function returns.
-
-    The same rule `lambda_value_owned` applies to a capturing lambda's value,
-    and for the same reason: the environment dies with the scope that made it
-    only if that scope is its last holder, and "holder" is narrow — the ONLY
-    acceptable mention of `name` is as the CALLEE of a call. `return inner(1)
-    + inner(2)` (one env, two calls, the shape
-    bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1 measured
-    at +16 B/iteration) qualifies; `g = inner`, `kept.append(inner)`,
-    `return inner`, `inner.attr` and a mention inside any nested
-    `lambda`/`def` (whose own environment can outlive this scope) do not.
-
-    What is DIFFERENT from a capturing lambda, and why this is its own name
-    rather than a second rule:
-
-    * a capturing lambda's value is a `MojoBoundMethod *` PLUS the env, one
-      allocation unit freed by `mojo_closure_free` (which also drops the
-      `_reg_bound_method` entry — freeing the object without it makes
-      `mojo_is_bound_method` report whatever the allocator hands back next);
-    * a nested `def` produces NO bound method at all. Its call sites are
-      DIRECT (`helper_inner (_env_inner, 1)`), the env var is
-      function-scoped, and the value is a plain `malloc` block — so the
-      teardown is a bare `free` and the unwind entry is `MOJO_CLEANUP_PTR` /
-      `mojo_cleanup_push_ptr` ("a plain malloc/calloc block: a struct
-      instance"). `mojo_closure_free` would be WRONG here: it would treat a
-      `helper_inner_env *` as a `MojoBoundMethod` and free two words of it.
-
-    So it is the same question with a different teardown, which is exactly
-    what `lambda_value_owned`'s own docstring means by "This rule asks
-    nothing about containers, so it holds on a body the container analysis
-    refuses to look at" — this one asks nothing about a callable VALUE,
-    because there is none.
-    """
     return _lambda_uses_ok(fn_body, name)
 
 

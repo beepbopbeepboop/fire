@@ -56,43 +56,13 @@ import mojo.backend_gimple.emit_infra as ginf
 from mojo.middle.funcs_shared import *  # noqa: F401,F403
 from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
-    _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
+    _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
     _param_ctype, _parsed_import, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
 
 def _gen_stmt_FunctionDef(gen, node: FunctionDef):
-    # The body that OWNS this nested `def`'s environment — read ONCE, here,
-    # before anything nested is lifted. It is emphatically NOT the AST body of
-    # whatever function was lowered most recently: lifting `mid`'s own body
-    # lowers `inner`'s environment statement, and it is `mid`'s body that owns
-    # that environment, not `outer`'s. That is not a near miss -- `outer`'s
-    # body never mentions `inner` at all, so asking about the wrong body always
-    # answers "yes, safe", and
-    #     def outer():
-    #         total = 0
-    #         def mid():
-    #             def inner(k):
-    #                 nonlocal total
-    #                 total = total + k
-    #             return inner        # <-- a real escape
-    #         f = mid(); f(3); f(4)
-    # emitted `free (_env_inner)` in `mid` immediately after handing that same
-    # pointer back as its return value, and the caller's first `f(3)` then
-    # dereferenced freed memory (SIGSEGV, test_nonlocal.py's "two closure
-    # levels deep" pair). `mid`'s own body DOES mention `inner` as a returned
-    # value, so the same rule asked of the right body declines to free it.
-    #
-    # `gen._cur_func_body` is that right body, and it is right here because
-    # `_reset_func` -- the one place that begins lowering a body -- sets it, so
-    # `_gen_lifted_closure` sets it too. The ownership analysis used to read a
-    # SECOND field for this (`_own_fn_body`), which only `begin_function`
-    # assigned, so every one of those questions was answered about a top-level
-    # function's body even while a closure was being lowered; the two fields
-    # are one field now, and the same class of stale read is documented at
-    # `emit_calls.py`'s `_cur_func_body` note.
-    owner_body = gen._cur_func_body
     # A nested `async def` (not an async generator) — whether nested
     # inside a struct method (device_context.mojo's `async def
     # wrapper(...) capturing -> None:` shape, discovered by gen_module's
@@ -134,11 +104,6 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
         gen._declare_var(env_var, f"{ci.env_struct} *")
         gen._emit(f"  {env_var} = {alloc_fn} ();")
         for vname, vtype in ci.captures:
-            # The FIELD's type, once, for every branch below — a by-reference
-            # capture (`ci.mut_names`) is stored as a pointer to the owner's
-            # box, and this is the code that has to agree with the typedef
-            # emitted elsewhere. See `gimple_ctypes._env_field_ctype`.
-            _fct = gimple_ctypes._env_field_ctype(ci, _as_str(vname))
             _own_mut_ptr = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
             if vname in ci.mut_names and _own_mut_ptr:
                 # DOUBLY-NESTED by-reference capture. This function is
@@ -188,34 +153,20 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 # `discover_closures`'s transitive fixup now rules out --
                 # falls through to the by-value branch below rather than
                 # emit something silently wrong.
-                ptr_val = gen._new_val(_fct, gen._cname(vname))
+                ptr_val = gen._new_val(f"{vtype} *", gen._cname(vname))
                 gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {ptr_val};")
             # If vname is captured in the current function's own env, read from _env->vname.
             elif vname in gen._captures and gen._env_param:
                 # GIMPLE: cannot use component_ref directly as RHS of struct store;
                 # load into a temp first.
-                _cur_t = _as_str(gen._captures.get(vname) or 'int64_t')
-                if _fct.endswith(' *') and not _cur_t.endswith(' *'):
-                    # THIS function holds the name by VALUE while the closure it
-                    # is building wants it by REFERENCE: forward a box, not the
-                    # value. Through a plain local, since a component_ref's
-                    # address is not a GIMPLE operand.
-                    _boxed = gen._new_val(_cur_t, f"{gen._env_param}->{gimple_ctypes._c_field_name(vname)}")
-                    tmp = gen._new_val(_fct, f'&{_boxed}')
-                else:
-                    tmp = gen._new_val(_fct, f"{gen._env_param}->{gimple_ctypes._c_field_name(vname)}")
+                tmp = gen._new_val(vtype, f"{gen._env_param}->{gimple_ctypes._c_field_name(vname)}")
                 gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {tmp};")
             else:
                 # Use _safe_coerce_emit to handle int→int64_t and other conversions.
                 local_type = gen.var_types.get(vname, vtype)
                 cname = gen._write_dest(vname)  # resolve capture path if nested
-                gen._safe_coerce_emit(local_type, _fct, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
+                gen._safe_coerce_emit(local_type, vtype, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
         gen._closure_envs[node.name] = env_var
-        # Take ownership of the environment this nested `def` just allocated,
-        # if the enclosing body proves nothing can hold it past this scope.
-        # A no-op otherwise, which is today's leak and never a double free.
-        # See `ginf.register_nested_env_free`.
-        ginf.register_nested_env_free(gen, node.name, env_var, owner_body)
     else:
         gen._closure_envs[node.name] = ''
 
@@ -866,26 +817,9 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         if unrolled and step != 0:
             if node.target not in gen.var_types:
                 gen._declare_var(node.target, 'int64_t')
-            # The induction variable's own ctype is whatever the loop target
-            # resolved to (int64_t unless something already declared it
-            # otherwise) — do NOT assume it here, and do NOT emit a bare
-            # decimal into it either. A raw `i = 0;` into an `int64_t` is
-            # `non-trivial conversion in 'integer_cst'` under -fgimple (an
-            # unadorned integer literal has C type `int`, and GIMPLE's
-            # verifier rejects the widening rather than inserting the
-            # conversion the C front end would), which is exactly how the
-            # `comptime for idx in range(2)` inside std/utils/index.mojo's
-            # `IndexList.__init__` failed to compile as its own
-            # instantiation TU. Route it through the same coercion
-            # chokepoint every other store uses (`_sce_simple_emit`'s
-            # literal-to-int64_t branch), so the emitted form is decided by
-            # the destination type rather than re-derived per call site.
-            # See bugs/CODEGEN_imported_generic_never_elaborated_calls_
-            # nothing_defines.md.
-            dst = gen.var_types.get(node.target) or 'int64_t'
             i = start
             while (step > 0 and i < stop) or (step < 0 and i > stop):
-                gen._safe_coerce_emit('int', dst, str(i), node.target)
+                gen._emit(f"  {node.target} = {i};")
                 for s in node.body:
                     gen.gen_stmt(s)
                 i += step
@@ -1750,72 +1684,6 @@ def _record_home_def_pts(gen, bare_name: str, pts: list) -> None:
         store[key] = list(pts)
 
 
-def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> None:
-    """Publish one free function's DEFINITION-side return ctype into the
-    whole-program-shared `_home_def_return_types`, under the qualifier its own
-    emitted symbol was built from — the return-type twin of
-    `_record_home_def_pts`, for the same reason `func_return_types[bare_name]`
-    cannot be trusted on its own (see that store's declaration).
-
-    `stmt` is how "this unit actually DEFINES the name" is decided, and it has
-    to be: every return-type inference pass walks `all_functions` — this
-    module's own `stmts` PLUS the flat transitive closure — so most of the
-    statements it visits belong to a sibling whose own unit publishes them.
-    Publishing from here without that test would let a sibling's answer land
-    under THIS unit's key for any bare name the two share, and since `stmts`
-    comes FIRST in `all_functions` the sibling would be the last writer and
-    would win. The test is statement IDENTITY against this unit's own top-level
-    FunctionDefs rather than the name-based `_local_top_level_func_names`,
-    because a name in that set can still be a sibling's definition being
-    visited here — it is exactly the same two-modules-one-bare-name case.
-
-    Plain assignment, NOT `_record_home_def_pts`'s first-wins `setdefault`: the
-    value is REFINED by three successive passes in the same unit (Pass 1.3's
-    first inference, then Pass 2.3e's and Pass 3b's re-inference once param
-    and closure-value inference have run), so the last writer is the one that
-    knows most. That is the discipline `func_return_types[bare_name]` itself
-    follows, and it is why `_func_csym` re-mirrors on every call rather than
-    freezing the first value it sees.
-    """
-    store = getattr(gen, '_home_def_return_types', None)
-    if store is None or not ctype:
-        return
-    if id(stmt) not in getattr(gen, '_local_top_level_func_stmt_ids', ()):
-        return
-    # Never raises for a name this unit defines: `_func_qualifier`'s tier-1
-    # check (`bare_name in _local_top_level_func_names`) answers from the
-    # module being compiled itself, ahead of the `_AMBIGUOUS_FUNC_HOME`
-    # refusal that tiers 2/3 can raise.
-    store[_pair_key(_func_qualifier(gen, bare_name), bare_name)] = ctype
-
-
-def _home_def_return_type(gen, qualifier: str, bare_name: str):
-    """The return ctype the DEFINING unit published for `bare_name` under
-    `qualifier`, or None when this name has no per-definition entry (a name no
-    unit in the closure defines, or a definition that is not being inlined into
-    this unit at all — a dylib in link mode, whose return type comes from
-    `imported_symbols` instead).
-
-    `qualifier` is passed in rather than resolved here, and that is deliberate:
-    the caller is `_func_csym`, which has ALREADY called `_func_qualifier` to
-    build the symbol this entry is about to be mirrored under. Asking again
-    would be a second walk of the same tiers whose only added effect could be
-    the `_AMBIGUOUS_FUNC_HOME` RuntimeError, on a path that already raises it
-    microseconds later. Reusing the one answer is also what makes the two
-    halves agree by construction rather than by two independent computations
-    happening to match.
-
-    The empty qualifier is a real key, not a wildcard: it is what a unit with
-    no module identity of its own publishes under, and only such a unit can
-    write it, so a reference that resolves to the empty qualifier is asking
-    about exactly that definition.
-    """
-    store = getattr(gen, '_home_def_return_types', None)
-    if not store:
-        return None
-    return store.get(_pair_key(qualifier, bare_name))
-
-
 def _imported_def_pts(gen, bare_name: str):
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
@@ -2261,31 +2129,6 @@ def _func_qualifier(gen, bare_name: str) -> str:
     return ''
 
 
-def _func_home_qualifier(gen, bare_name: str) -> str:
-    """`_func_qualifier`'s answer for `bare_name`, or `''` when the reference
-    is the genuinely-AMBIGUOUS one that function refuses to answer — never an
-    exception.
-
-    For the readers that want a per-definition answer but must not be able to
-    fail: `_quick_type` is a pure ESTIMATOR that runs over speculative paths
-    all over inference, and turning "this reference is ambiguous" into a
-    hard error there would introduce a failure mode that does not exist
-    today, in a place that is not the one that reports it. `''` is the right
-    "no answer" for such a reader anyway: it means no definition of its own to
-    consult, so the caller falls back to the shared bare slot exactly as it
-    did before.
-
-    Same disposition as `_imported_def_pts`, which resolves to `None` for an
-    `_AMBIGUOUS_FUNC_HOME` entry with the same reasoning written out; the
-    authoritative refusal stays in `_func_qualifier`, which every `_func_csym`
-    call — i.e. every call this compiler actually EMITS — runs anyway.
-    """
-    try:
-        return _func_qualifier(gen, bare_name)
-    except RuntimeError:
-        return ''
-
-
 def _locally_binds_name(gen, bare_name: str) -> bool:
     """Whether the module CURRENTLY being compiled itself defines or
     imports a free function named `bare_name` — i.e. tiers 1/2 of
@@ -2309,7 +2152,7 @@ def _locally_binds_name(gen, bare_name: str) -> bool:
     2-argument handling) purely because some unrelated module
     elsewhere in the same whole-program build happens to define a
     function with the same bare name. See
-    “CODEGEN_generator_function: Lib/symtable.py”'s `with open(path,
+    bugs/CODEGEN_generator_function_Lib_symtable.md's `with open(path,
     'rb') as f:` repro (symtable.py imports tokenize transitively but
     never binds its `open`)."""
     if bare_name in getattr(gen, '_local_top_level_func_names', ()):
@@ -2420,10 +2263,10 @@ def _func_csym(gen, bare_name: str) -> str:
     # `func_return_types['_join_abb124'] = 'int64_t'` permanently;
     # `_t8 = _join_abb124(_t5, _t7);` (a real char*-returning call
     # assigned into an int64_t temp with no cast) then failed
-    # -Wint-conversion. Always re-mirroring the CURRENT value is strictly
-    # more correct than freezing at first use — the whole reason
-    # `func_return_types`/`func_param_types` get corrected after the
-    # fact is that later passes have STRICTLY MORE information than
+    # -Wint-conversion. Always re-mirroring the CURRENT bare-name value
+    # is strictly more correct than freezing at first use — the whole
+    # reason `func_return_types`/`func_param_types` get corrected after
+    # the fact is that later passes have STRICTLY MORE information than
     # earlier ones, never less.
     if mangled != base:
         # Mirror from the SAME effective param types _overload_suffix just
@@ -2438,28 +2281,8 @@ def _func_csym(gen, bare_name: str) -> str:
         _eff_pts = _effective_param_types(gen, bare_name)
         if _eff_pts is not None:
             gen.func_param_types[mangled] = _eff_pts
-        # The RETURN-type twin of `_effective_param_types` above, and the same
-        # discipline for the same reason: read the DEFINING unit's answer, not
-        # the shared bare-name slot. `func_return_types[bare_name]` cannot serve
-        # a name two modules of this translation unit both define — it holds
-        # whichever module's pass wrote last, so one of the two call sites is
-        # typed by the other module's return type. Measured: offload.py's
-        # `_mentions(...) -> bool` read `MojoList *` (elab_intu.py's
-        # unannotated `_mentions`), so the call site's temp was declared
-        # `MojoList *`, `mojo_list_len` was applied to a bool, and gcc failed
-        # the whole self-host build with one -Wint-conversion. `qualifier` is
-        # the same string this symbol's prefix was just built from, so the
-        # entry consulted is by construction the one belonging to the
-        # definition this call site actually emits a call to.
-        #
-        # Fallback stays the bare slot, so a name with no per-definition entry
-        # (no unit in the closure defines it here — a dylib in link mode, whose
-        # return type comes from `imported_symbols`) behaves exactly as before.
-        _eff_ret = _home_def_return_type(gen, qualifier, bare_name)
-        if _eff_ret is None:
-            _eff_ret = gen.func_return_types.get(bare_name)
-        if _eff_ret is not None:
-            gen.func_return_types[mangled] = _eff_ret
+        if bare_name in gen.func_return_types:
+            gen.func_return_types[mangled] = gen.func_return_types[bare_name]
     return mangled
 
 
@@ -2496,19 +2319,8 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._callable_param_gen_api = dict(
             (getattr(gen, '_coro_body_callable_param_apis', None) or {})
             .get(node.name, {}))
-        # A coroutine body carries the FACT (`_mojo_coro_callable_param_fns`,
-        # attached by `coro._mark_coro_callable_param_fns`) rather than the
-        # answer, because `register` is an AST pre-pass that runs before any
-        # module-level function's `func_return_types` entry exists. Resolved
-        # here, where it does exist -- see that function's docstring.
-        gen._callable_param_ret_types = {}
-        for _cpt_pn, _cpt_fn in (getattr(node, '_mojo_coro_callable_param_fns', None) or {}).items():
-            _cpt_rt = gen.func_return_types.get(_as_str(_cpt_fn))
-            if _cpt_rt and _cpt_rt != 'void':
-                gen._callable_param_ret_types[_as_str(_cpt_pn)] = _cpt_rt
     else:
         gen._callable_param_gen_api = ggc._callable_param_generator_apis(gen, node)
-        gen._callable_param_ret_types = ggc._callable_param_ret_types(gen, node)
     # BUG-2026-016's allow-list: locals whose DECLARATION carries an
     # explicit NUMERIC/boolean annotation (`hin_id: UInt64 = 0`). Such a
     # variable can never legitimately hold a pointer, so when one is
@@ -2544,11 +2356,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     gen.current_func_name = node.name
-    # Which of THIS function's parameters are annotated `bool` — see
-    # `gimple_exprtypes.record_bool_params`. Recorded here because this is the
-    # one place the annotation text and the emitted function name are both in
-    # hand, and `is_python_bool_expr` reads it back while the body is lowered.
-    gimple_exprtypes.record_bool_params(gen, node)
 
     # Seed param types into var_types BEFORE return-type inference so
     # _quick_type can resolve param names during the pre-pass. Unannotated
@@ -2672,21 +2479,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             gen._elem_types[bare] = e
             if ne:
                 gen._nested_elem_types[bare] = ne
-    # ...and the dict-VALUE half of the same contract, for the same reason and
-    # beside it. A dict parameter has no binding site inside the callee, so
-    # without this every `d[k]` / `d.items()` in the body fell to the
-    # `int64_t` default and read a `char *` slot through `mojo_dict_get_int` --
-    # the stored pointer's own bits, printed as a decimal, exit 0 (measured:
-    # `f({"x": "1"})` printed an address where CPython prints `1`, while the
-    # same call with the literal bound to a local first was already correct).
-    _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
-    for bare in _pdv:
-        # '' is the conflicting-call-sites marker (see _record_param_dict_val),
-        # and an unseeded slot is already the `int64_t` default, so both are
-        # no-ops here -- deliberately, rather than seeding a lie.
-        _pdv_v = _as_str(_pdv[bare])
-        if _pdv_v:
-            gen._dict_val_types[bare] = _pdv_v
     # Seed local container element types too, so return inference can see
     # through nested subscripts on locals (e.g. `return bodies[0][0]` where
     # bodies is a local list-of-double-lists). Lowering re-derives the same.
@@ -2726,22 +2518,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen.func_ret_type = ret_type
     # Sync so forward declarations (Phase 2b) match Phase 2a inference
     gen.func_return_types[node.name] = ret_type
-    # ...and so does every CALL SITE of this definition, which reaches this
-    # function's answer through `_home_def_return_type` rather than through
-    # the bare slot above. `gen_func` is the DEFINITION-side writer and the
-    # most authoritative one there is — it has the real emitted body, and the
-    # annotation when there is one — so its answer has to be the one a call
-    # site uses, in preference to whatever any inference pass guessed.
-    #
-    # It is also the writer that made the collision observable in the first
-    # place: definitions emit in source order, so a definition late in a file
-    # lands in the shared slot AFTER a sibling module's inference passes had
-    # put theirs there, and any bare reader in between sees whichever ran last
-    # rather than whichever it means. Real: `offload._mentions`'s call site
-    # (generated line 885606) precedes its own definition (885849), so the
-    # definition's own answer was not in the slot yet and the call site read
-    # elab_intu's `MojoList *`.
-    _record_home_def_return_type(gen, node, node.name, ret_type)
 
     # Run layout solver for struct locals
     solver = gimple_solvers.LayoutSolver(gen.struct_field_types)
@@ -2998,7 +2774,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     finally:
         gen._in_toplevel_gen = False
 
-    # Dependency-init prelude: a `fire dylib` build compiles every
+    # Dependency-init prelude: a `mojo dylib` build compiles every
     # module SEPARATELY (see gen_module's population of
     # `_toplevel_dep_init_modules`) and links them together, each with
     # its own unprioritized `__attribute__((constructor))`. Constructor
@@ -3042,7 +2818,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     # wrapper (unchanged, pre-existing), PLUS (library/dylib modules
     # only, see gen_module) an automatic `__attribute__((constructor))`
     # AND a publicly-exported `<module>_init()` a C host may call
-    # directly (DYLIB_module_scope_never_executes). Whichever
+    # directly (bugs/DYLIB_module_scope_never_executes.md). Whichever
     # combination of those actually fires at runtime, module-scope code
     # must run exactly once — the guard lives HERE, inside the single
     # underlying function every caller funnels through, rather than in
@@ -3114,7 +2890,7 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
     function `f` (e.g. `from base.chest import chest_total_count` where
     chest_total_count's own signature takes a `Chest`, but this file
     never imports `Chest` itself) — see
-    DYLIB_sibling_import_calls_bind_to_weak_stubs's "struct-
+    bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "struct-
     typed function parameter" gap and
     bugs/hard/... crash-repro writeup for why a bare int64_t placeholder
     there is unsafe (a caller-side `S()`/field-write on that placeholder
@@ -3440,7 +3216,7 @@ def _register_imported_structs(gen, stmts) -> None:
     dynamic `_mojo_dispatch_setattr` on that placeholder — a crash, not
     merely a missed optimization (the exact shape a reverted symbol-hash-
     only fix for a related gap was found to reintroduce; see
-    DYLIB_sibling_import_calls_bind_to_weak_stubs's "follow-on
+    bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "follow-on
     attempt #2" section). Tightly scoped beyond that to avoid disturbing
     the many imported structs a module merely passes through untouched."""
     if gen.do_imports or not getattr(gen, '_current_filename', None):
@@ -3484,7 +3260,7 @@ def _register_imported_structs(gen, stmts) -> None:
     # call on that null placeholder — a crash, not merely imprecise
     # codegen (the exact shape a reverted symbol-hash-only fix for a
     # related gap was found to reintroduce; see
-    # DYLIB_sibling_import_calls_bind_to_weak_stubs's "follow-on
+    # bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "follow-on
     # attempt #2"). Combined with the existing _field_accessed check
     # below (which already requires an actual `name.field` textual
     # access, not just an assignment), this only pulls in structs that
@@ -3788,13 +3564,6 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             gen._elem_types[_mbare] = _me
             if _mne:
                 gen._nested_elem_types[_mbare] = _mne
-    # ...and the dict-VALUE half, same reason, same qualified key. Without it a
-    # method handed a `{'k': 'v'}` reads that slot back as an integer.
-    _mpdv = getattr(gen, '_param_dict_val_types', {}).get(_mkey, {})
-    for _mbare2 in _mpdv:
-        _mpdv_v = _as_str(_mpdv[_mbare2])
-        if _mpdv_v:
-            gen._dict_val_types[_mbare2] = _mpdv_v
     _mloc_elem, _mloc_nested, _mloc_dict_val = gen._scan_container_elems(node.body)
     for _mv in _mloc_elem:
         gen._elem_types.setdefault(_as_str(_mv), _as_str(_mloc_elem[_mv]))
@@ -3851,7 +3620,6 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # Key by overload so overloaded methods don't share closure state (each
     # overload's lifted closures + capture env are distinct).
     gen.current_func_name = f"{struct_name}_{node.name}{overload_id}"
-    gimple_exprtypes.record_bool_params(gen, node)
     gen._current_struct_name = struct_name  # for Self() constructor call lowering
 
     # Seed param types for pre-pass inference

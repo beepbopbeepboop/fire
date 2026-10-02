@@ -1,101 +1,5 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
-## Status (2026-10-02, this pass — the VARIADIC shape is now admitted inside a compiled generator body, so occurrence #2 is closed)
-
-### What landed
-
-`mojo/middle/coro.py`'s `_lambdas_ok` refused EVERY generator body containing
-a lambda with a `*args`/`**kwargs` parameter, on the reasoning that the shared
-gimple path "emits a broken forward declaration" for that shape. That stopped
-being true in September, when the fix below landed — `MojoVarargFn` carries
-the callee, the env, the count of ordinary leading parameters and which of the
-three variadic shapes it has, and `mojo_fnptr_call_N` dispatches on it, so the
-packing happens in the runtime; the forward declaration stopped dropping its
-`*`-prefixed parameters in the same pass. **The guard was never revisited, so
-for two months it was the last thing between the shape and the A3 stack-switch
-lowering, for a reason that no longer existed.**
-
-The guard is now `_lambda_shape_ok`, and it refuses only what is measured
-wrong. Every row below was compiled, linked and run against CPython *inside a
-generator body* on 2026-10-02:
-
-| shape | CPython | compiled |
-|---|---|---|
-| `lambda *a: add(a[0], a[1])`, `e(4, 5)` | `9` | `9` |
-| `lambda *a: addall(a)`, `e(1, 2, 3)` | `6` | `6` |
-| `lambda *args, **kwargs: add(n, args[0])` capturing `n` | `13` | `13` |
-| a variadic lambda ESCAPING as a call argument | `13` | `13` |
-| a variadic lambda RETURNED out of the generator, called after | `3` | `3` |
-| a variadic lambda held in a local and called there (the `iter_files` shape) | right | right |
-| 1-4 ordinary leading parameters before the `*args` | right | right |
-| `lambda **k: ...` called with a keyword | `7` | `7` |
-| `lambda x=n: x + 1`, `lambda x, y=n: x + y`, `lambda x, *, k=n:`, `lambda *a, k=n:`, `lambda *, x=n:` | right | right |
-| `lambda x=n, *a: x + a[0]`, `e(0, 5)` | **`5`** | **`8`** — refused |
-| `lambda x, y=n, z=10: x + y + z`, `e(4)` | **`17`** | **`135`** — refused |
-
-Nine regression tests in `test_gimple_generator_runner.py` (six positive, two
-for the refusals, one for `_lower_LambdaExpr`'s own five-leading-parameter
-limit, which is the outermost edge of the admitted set and is now asserted
-rather than assumed).
-
-### What is still refused — RESOLVED 2026-10-04, nothing is left
-
-**Both refusal clauses are deleted and both shapes are correct.** Nothing in
-this section is still refused; it is kept because the measurement is the reason
-the guard is gone, and because "a boundary nobody asserts is a boundary that
-moves silently" is why the replacement cases exist.
-
-The two failures were `8` for `5` and `135` for `17` — exit 0 with a plausible
-integer, which is why they were refused rather than warned about. Their cause
-was one mechanism in two directions: `_lower_LambdaExpr` captured a declared
-default into the lifted function's ENV under the parameter's OWN name (so it
-and an argument at the call site named the same C slot and the env read won),
-and nothing filled in an argument the call site OMITTED. Fixed by
-`lambdareduce.params_supplied_at_calls` (never capture a parameter a call site
-supplies) and `emit_calls._pad_lambda_defaults` (pad the omitted ones from the
-lambda's own declaration, at the one chokepoint every callable-value call
-reaches). The env stays for a KEYWORD-ONLY parameter's default, which is the
-only way it can travel at all, and which is why the two halves had to land
-together.
-
-Re-measured on the generator path (the A3 stack-switch lowering, where this
-guard lives), every shape against CPython: `lambda *a`, `lambda *args,
-**kwargs`, `lambda *a, k=n`, `lambda f, *a`, `lambda **k`, `lambda *, x=n`,
-`lambda x=n`, `lambda x, y=n`, `lambda x, *, k=n`, `lambda x=n, *a`, and
-`lambda x, y=n, z=10` — all right. The table is
-`mojo/middle/coro.py`'s `_lambda_shape_ok` docstring, and the cases are
-`generator_lambda_default_before_star_args`,
-`generator_lambda_with_two_defaults` and
-`generator_every_admitted_lambda_shape` in `test_gimple_generator_runner.py`.
-
-**This is the doc's occurrence #2** — `Tools/c-analyzer/c_common/fsutil.py`'s
-`get_files = lambda *a, **k: _walk(*a, walk=_files, **k)` — so the "Still
-deliberately excluded" section below is now wrong about it and is superseded
-here. See `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` for what
-the file's own remaining blockers are.
-
-### The residue table, corrected
-
-The 2026-10-02 entry below lists four residue rows and says three belong to
-another worker. Three of the four docs are now **deleted**, i.e. fixed and
-merged, so that list is stale: what remains is
-
-* a **capturing** lambda inside a **nested `def`** whose env-struct field types
-  disagree with the stores into them — `bugs/CODEGEN_nested_def_capturing_
-  lambda_env_field_types_disagree.md`, still open, re-measured still broken
-  on 2026-10-02 (an `int` capture fails the build with `non-trivial conversion
-  in 'var_decl'`; a `char *` or `double` capture prints a pointer's own bits
-  and exits 0).
-
-So this doc still cannot be deleted — one row of its table is still open, and
-the ~20 live references to it (`mojo/backend_gimple/cpp_core.py`,
-`cpp_async.py`, `emit_calls.py`, `mojo/middle/coro.py`, and five
-`test_*.py` sites) would all become dangling. Per this doc's own disposition
-rule, whoever closes that last row deletes this doc in the same commit that
-repoints every one of those references.
-
-## Older status entries (kept for the mechanism history)
-
 **State: PARTIAL.** The variadic SIGSEGV is FIXED, and so are the two shapes this
 doc's 2026-09-26 entry called "the definition side is done; the call side is
 the whole of what remains" — a variadic lambda now works through EVERY way of
@@ -104,43 +8,6 @@ holding the value, and the doc's second named target
 current tree and did not need anything. What remains is listed precisely at the
 end of the section below: three defects, none of them a variadic one, each
 filed with its own doc.
-
-**State as of 2026-10-02 (no code change): this doc's OWN scope is closed and
-verified; the residue is four defects in four other docs, none of them in this
-one.** Re-measured the 25-shape matrix the 2026-09-29 entry describes — the
-three variadic rows (`lambda *a: add(a[0], a[1])`, `lambda *a: addall(a)`,
-`lambda *args, **kwargs: add(n, args[0])` capturing `n`), both ordinary-arity
-lambdas called as bare expressions, `sorted(key=...)`, `map`/`filter` with a
-lambda, a closure returned from a nested `def`, and a `*a, **k` lambda called
-through a subscript — all compile, link, run and agree with CPython on the
-current tree, unchanged by this session. The doc's two named targets are
-therefore done, not merely argued.
-
-The residue is the four rows of the table under "What is left, precisely"
-below. **Three of the four are claimed by other workers and are not this
-session's to touch**: `CODEGEN_lambda_bool_return_prints_as_int.md`,
-`CODEGEN_lambda_in_nested_def_body_never_emitted.md` and
-`CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md` all belong
-to `bugs3-codegen-1-r2`. The fourth, found while running that matrix on
-2026-10-02, is a NEW doc written this session and is unclaimed:
-`CODEGEN_nested_def_capturing_lambda_env_field_types_disagree` — a
-capturing lambda inside a nested `def`, whose env-struct field types disagree
-with the stores into them (a hard `non-trivial conversion in 'var_decl'` for an
-`int` capture, a silent pointer decimal with exit 0 for a `char *` or `double`
-one). It is distinct from the nested-`def` row already in the table, which is
-about the body never being emitted at all.
-
-This doc cannot be deleted on the strength of that: its own bug (the variadic
-call convention) is fixed, which is the rule CLAUDE.md states, but it is cited
-by ~20 live locations including source comments in `mojo/backend_gimple/`
-(`cpp_core.py`, `cpp_async.py`, `emit_calls.py`), `mojo/middle/coro.py` and
-five `test_*.py` sites, so a `git rm` would orphan all of them — the exact rot
-`bugs/hard/README.md` catalogues. Deleting it together with repointing every
-one of those references is a docs pass that belongs with
-`bugs/DOCS_deleted_bug_doc_still_cited_in_three_places`, which is another
-worker's claim. **The right disposition for whoever closes the last of the
-four residue rows is: delete this doc in the same commit that repoints its
-references**, not before.
 
 ## Status (2026-09-29 — the variadic SIGSEGV is FIXED; the doc's two named targets re-tested; what is left is three OTHER bugs)
 
@@ -235,22 +102,16 @@ rather than argued.
 
 ### What is left, precisely — none of it a variadic defect
 
-Four rows as of 2026-10-02; the three 2026-09-29 rows are unchanged.
-
 | shape | CPython | compiled | doc |
 |---|---|---|---|
-| `_colorize.can_colorize = lambda *args, **kwargs: False` | `False` | `0` | `“CODEGEN: a lambda whose body is a bool returns int64 0/1”` — a lambda whose body is a bool returns `int64_t` 0/1. Nothing to do with the call convention; an ordinary `def` returning the same value is right. |
-| a lambda inside a **nested `def`** | correct | link error, body never emitted | `“CODEGEN: a lambda inside a nested `def` is lifted but never DEFINED”` — the lifted function is declared and referenced, never defined. |
-| a **capturing** lambda inside a **nested `def`** (a second, distinct defect in the same shape, found 2026-10-02) | correct | **build failure** for an `int` capture, and a **silent pointer decimal, exit 0** for a `char *` or `double` one | `CODEGEN_nested_def_capturing_lambda_env_field_types_disagree` — the body IS emitted and the program links; the env struct's FIELD types disagree with the stores that fill them (`int z;` field against an `int64_t` store, `-fgimple`'s "non-trivial conversion in 'var_decl'"). The same program with the `def` at module scope is correct, so the trigger is the extra nesting level. Not the row above: that one never emits the body at all. |
-| `sorted(key=<any user function>)` | correct | interpreter crash | `CODEGEN_interpreter_user_function_as_builtin_callback_crashes` — so the compiled path cannot be diffed against the interpreter for that shape. |
+| `_colorize.can_colorize = lambda *args, **kwargs: False` | `False` | `0` | `bugs/CODEGEN_lambda_bool_return_prints_as_int.md` — a lambda whose body is a bool returns `int64_t` 0/1. Nothing to do with the call convention; an ordinary `def` returning the same value is right. |
+| a lambda inside a **nested `def`** | correct | link error, body never emitted | `bugs/CODEGEN_lambda_in_nested_def_body_never_emitted.md` — the lifted function is declared and referenced, never defined. |
+| `sorted(key=<any user function>)` | correct | interpreter crash | `bugs/CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md` — so the compiled path cannot be diffed against the interpreter for that shape. |
 
 Two more were found and filed while measuring, and are also not this doc's:
-a callable reached through a subscript (`d['k'](2, 3)` printing `0`, and the
-list/tuple/call-result siblings — all fixed since, by the container-neutral
-`note_container_callable_ret` and its three chokepoints, pinned by
-`gimple_call_through_subscript_callee` and
-`gimple_call_through_a_list_subscript_callee`), and
-`“CODEGEN: a lambda whose body is a bool returns int64 0/1”`'s sibling, a named function
+`bugs/CODEGEN_call_through_subscript_callee_stubbed.md` (a callable reached
+through a subscript, `d['k'](2, 3)`, prints `0`) and
+`bugs/CODEGEN_lambda_bool_return_prints_as_int.md`'s sibling, a named function
 with `*args` taken as a value — which WAS this defect and IS fixed, see
 `gimple_variadic_named_function_through_a_value`.
 
@@ -494,7 +355,7 @@ whose body contains a `lambda` with a starred or defaulted parameter is
 refused, falling through to the cpp path's own honest refusal instead
 of emitting broken/wrong C. Closing occurrence #2 for real needs the
 separate variadic-forwarding work tracked in
-`CODEGEN_args_kwargs_signature_assumed_forwarding_only` —
+`bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md` —
 and, per the 2026-08-24 note below, `iter_files` has five further
 independently-refused generators regardless, so this alone would not
 unblock that file.
@@ -505,7 +366,7 @@ doc's scope: a `lambda` with a default parameter (garbage for the
 default), and `sorted(iterable, key=lambda ...)` silently ignoring
 `key=`. A bound-method value stored in a local then called
 (`getpos = self.tell; getpos()`) is likewise codegen-wide — tracked in
-`“CODEGEN (A3 stack-switch): 4 further generator-body semantic gaps found”` #3.
+`bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md` #3.
 
 ## Status (re-verified 2026-08-26, independent check against current master `e60b9cd` — unchanged)
 
@@ -834,7 +695,7 @@ file at all for the file).
   A lambda with `*args`/`**kwargs` forwarding params, calling a
   module-level function (`_walk`) with those forwarded args plus an
   extra keyword. This shape additionally overlaps
-  `CODEGEN_args_kwargs_signature_assumed_forwarding_only`
+  `bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md`
   (task #142, deliberately held back for separate dedicated attention)
   — even if `LambdaExpr` itself were supported, this specific
   occurrence would likely still need that separate fix too.

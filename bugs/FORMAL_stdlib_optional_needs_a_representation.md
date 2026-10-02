@@ -3,19 +3,10 @@
 **Area:** FORMAL (the value model; shared by both backends and the Lean proof).
 Found 2026-10-01 on `work/formal2-re-and-slice`. **NOT FIXED — it is a
 value-model decision, and it is the last thing between the `builtin_slice` row
-and 13 files.** Its own dependency chain has since moved TWICE and is now
-blocked one layer EARLIER than either revision of it below says: see
-"Re-measured 2026-10-03" at the end, whose first arrow is a frame-identity
-question in somebody else's area (a one-word struct whose only field is a nested frame, whose `__init__` was read as returning a frame — the doc that filed it was deleted with the fix, and its subject is now `test_formal_dylib.py`'s `a receiver write-back is not a returned frame`).
-Read that section first if you are picking this up; the two below it are
-history and both name an arrow that is no longer the first one.
+and 13 files.**
 
-This doc exists to say what the frame-holder document — deleted 2026-10-05,
-consolidated, because every arm of it was closed and the row it measured had
-moved three refusals deeper — left open, with the measurement that settles the
-question of which wall it is.  What it left behind is in
-`test_formal_method_param_field.py`'s "a struct-typed FIELD, initialised from a
-constructor ARGUMENT" case and in `formal/model.py::struct_field_names`.
+This doc exists to say what `bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`
+left open, with the measurement that settles the question of which wall it is.
 
 ## What the frame-holder doc measured, and what was behind it
 
@@ -183,62 +174,6 @@ value-model level and neither is local:
   says the same about its own table). A fix that lands on one machine and not the
   other is the two-machines-one-language failure this backend exists to prevent.
 
-## Re-measured 2026-10-01 (`work/formal3-7`): the dependency chain's FIRST
-## arrow has MOVED, and it moved to something this doc does not cover
-
-`builtin_slice.mojo` still lands where this doc says it does, which is the
-whole of what this doc is about:
-
-```
-$ python3 tools/memslot.py --gb 8 --label bsl -- python3 fire.py build \
-      --formal --no-prove -o .tmp/esc/bsl \
-      ../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo
-build: builtin_slice.mojo imports 'std.format._utils', which cannot be built
-either: builtin_slice.mojo: self.step.or_else() is an Optional unwrap […]
-```
-
-**But `std/utils/variant.mojo` no longer refuses on `__mlir_op`.** This doc's
-§"The wall behind THAT" puts the first arrow of the chain at
-`get_discriminant`'s `__mlir_op.\`pop.variant.discr_gep\`` and measured that
-refusal as the thing standing between `Optional.or_else` and a build. That
-refusal has moved EARLIER in the file and now says something else:
-
-```
-$ python3 tools/memslot.py --gb 8 --label var -- python3 fire.py build \
-      --formal --no-prove -o .tmp/esc/var \
-      ../new-modular/Mojo/stdlib/std/utils/variant.mojo
-build: Self._Storage reads a `comptime` class attribute of Variant, whose
-value is `_VariantStorageFor[…]` — and a formal value is one 64-bit word with
-nowhere to keep a non-literal one […]
-```
-
-The `__mlir_op` code is still in the source — `variant.mojo:362` still reads
-`__mlir_op.\`pop.variant.discr_gep\`` and `:154`/`:310` still call
-`__get_mvalue_as_litref` — so this doc's claim that reaching the tag needs the
-MLIR intrinsic is unchanged as a statement about the SOURCE. What changed is
-the ORDER: a `comptime` class attribute holding a computed value is now
-refused earlier than the intrinsic is reached, so `construct:mlir-and-gpu-globals`
-is no longer the first thing in the way.
-
-**So the chain in §"The wall behind THAT" now reads:**
-
-    comptime class attribute whose value is a computation (`_VariantStorageFor[…]`)
-      ->  Variant.get_discriminant's `__mlir_op` (unchanged, now second)
-        ->  Optional.or_else
-          ->  builtin_slice.mojo builds
-            ->  the 13 files reach their own next refusal
-
-and the first arrow is a *value-model* question about a `comptime` class
-attribute holding a non-literal — closer to this doc's own subject than the
-MLIR one was, and NOT covered by anything this doc records. Anyone picking up
-option 2 should measure that arrow first rather than reaching for
-`__mlir_op`, which is what this doc's own text tells them to do.
-
-What did NOT move: `Optional`'s own refusal, `builtin_slice.mojo`'s terminal
-cause, and therefore the honest accounting — still 0 of the 13 files gained a
-PASS. Verified on arm64 only; the x86-64 half of this doc's measurements is
-from its author and I did not repeat it.
-
 ## What was measured, and what was not
 
 * Both refusals, on arm64 and x86-64, identical text.
@@ -251,100 +186,3 @@ from its author and I did not repeat it.
   answer for any file this unblocks, and whether `Variant`'s discriminator
   survives this path's own value model — that is the first thing to check when
   option 2 is picked up, and it is checkable on one file.
-* **Re-measured on arm64 only** by the 2026-10-01 session above, which did not
-  repeat the x86-64 half.
-## Re-measured 2026-10-03 (`work/formal10-5`): the chain has a NEW first arrow, and it is not a value-model question
-
-Both revisions above end with a chain whose first arrow is a value-model or MLIR
-question. **That is no longer where the chain starts.** Measured, both
-architectures, byte-identical text:
-
-```
-$ for a in arm64 x86_64; do python3 tools/memslot.py --gb 8 --label bsl -- \
-      python3 fire.py build --formal --no-prove -o .tmp/esc/bsl \
-      ../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo; done
-build: builtin_slice.mojo imports 'std.format._utils', which cannot be built
-either: builtin_slice.mojo: StridedSlice___init__ returns a frame address, so it
-cannot be compiled into a dylib: the returned-frame convention needs the CALLER
-to reserve the block the object is built in, and an importer of this library is a
-compilation this build does not perform …
-```
-
-and the same text, on the same two architectures, for `std/utils/variant.mojo`
-— the file whose `__mlir_op` refusal was this doc's original first arrow.
-
-So the chain now reads:
-
-    a one-word struct whose only field is a nested frame: its `__init__` is
-    classified as returning a frame, so the module cannot be a dylib
-      ->  `std/builtin/builtin_slice.mojo` builds as a library
-        ->  the 2026-10-01 arrow (`comptime` class attribute of a computed value)
-          ->  `Variant.get_discriminant`'s `__mlir_op` (option 2's second half)
-            ->  `Optional.or_else`
-              ->  the 13 files reach their own next refusal
-
-**What that means for picking this up, and it is the useful part.** Option 2
-below is still the right answer to the representation question, and neither of
-its two halves can be started until the arrow above them is closed — so a
-session that reads only "the next step" section below will implement a
-`Variant` tag reader and discover the wall on the way. The 2026-10-01 session
-said the same thing about its own predecessor, and it was right; this is the
-third revision of that chain and the second time the first arrow has been a
-frame or boundary question rather than a value-model one. **Measure the first
-refusal before starting any of it**, which is what this section exists for.
-
-The new arrow was filed, with a 15-line reproducer and the four-step chain, as a
-doc about a one-word struct whose only field is a nested frame; that doc has
-since been deleted with its fix, so the arrow is named here by its symptom
-instead: a receiver write-back whose receiver is a nested frame was classified as
-a RETURNED FRAME, which refused a library whose only frame was the caller's own
-object. It is a
-frame-identity question (a receiver writeback that hands back the address it was
-given) in the frame/export boundary, and it is worth more than this row: it is
-the first blocking fact of 20+ files in `bugs/sweeps/sweep-x86-6.txt`, every one
-of which is an importer of `builtin_slice` or `rebind`.
-
-**Not measured here:** whether closing the new arrow actually moves
-`builtin_slice.mojo` past its own next refusal, or how many of the 13 files gain
-a PASS when it does. Both need the integrator's sweep, and both are the kind of
-number this document has twice recorded wrongly by estimating it.
-
-## Re-measured 2026-10-03 (`work/formal13-6`): the first arrow is UNCHANGED, so
-## option 2 still cannot be started, and the reason it cannot is worth naming
-
-That arrow says to measure the first refusal before starting anything here, and
-the answer is that it has not moved. arm64 and x86-64, byte-identical:
-
-```
-build: builtin_slice.mojo imports 'std.format._utils', which cannot be built
-either: builtin_slice.mojo: self is assigned other in StridedSlice___init__(),
-and self is this method's receiver, so it is the address the CALLER passed rather
-than a name either side can re-declare. …
-```
-
-That is the new arrow's own subject — a struct whose ONLY field is a nested frame,
-whose `__init__` writes `self` — so **this document's chain still starts one layer
-below `Optional`, and that layer is `formal13-5`'s claim, not this one's.** Option
-2 is therefore still not startable here, and the three revisions of the chain
-below it are history in the way §"Re-measured 2026-10-03" says they are.
-
-**One measurement of this document's OWN subject that is cheap and is not in it.**
-The chain says `Optional`'s single field is a `Variant` and the discriminator
-lives "a SECOND frame away". That is still true, and it is worth being precise
-about why the unwrap is two hops rather than one, because it is the difference
-between a tag reader and a layout reader:
-
-    Optional._value : Variant            one word naming the Variant's frame
-      Variant._storage                    one word naming the storage's frame
-        _CustomNicheStorage               3 fields — the tag is HERE, at a
-                                          declared offset
-        _NichedOptionalStorage            3 fields
-        _DefaultVariantStorage            1 field
-
-so an unwrap is "read the word at `Optional._value + 8*slot(_storage)`, then read
-the word at THAT + 8*slot(<the chosen storage's tag>)" — and WHICH storage is
-`_VariantStorageFor[…]`, a `comptime` class attribute holding a computed value,
-which is the 2026-10-01 arrow in the chain above. So option 2's second half is
-not "read a `Variant`'s discriminant" but "read a discriminant at an offset that
-depends on a comptime choice this path cannot make", which is why the two
-readings have to land together and why neither is a `lib/Refine.lean` question.

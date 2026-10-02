@@ -1,134 +1,158 @@
-# CODEGEN: a `bool`-annotated struct field and parameter — the print spellings, the method return and the parameter are all fixed; `isinstance`/`type` are not
+# CODEGEN: a `bool`-annotated struct FIELD prints as 1/0 in every spelling
 
-**State: PARTIAL, 2026-10-02.** Everything this document opened for has landed.
-One narrow shape remains, and it is the one shape the original author of this
-document predicted would need a separate session: option A,
-`_TYPE_MAP['bool'] = '_Bool'`.
+**State: OPEN, found 2026-09-30 while smoke-testing the
+`construct:compiled-silent-wrong-values` batch, mechanism located, not
+fixed.** Not a duplicate of
+`bugs/CODEGEN_repr_of_a_bool_prints_1.md` (fixed 2026-09-30) — that one was
+a `_Bool` value whose C type was already `_Bool` and whose repr chokepoint had
+no arm for it. This is the same *class* one level out: for a struct field the
+bool-ness is gone before anything can look at it, so no chokepoint can recover
+it.
 
-## What landed, and in what order
-
-The three printing shapes — a `bool`-annotated FIELD, a method that RETURNS
-one, and a `bool`-annotated PARAMETER — are all correct now, and they all go
-through the ONE shared predicate, `mojo/middle/exprtypes.py::is_python_bool_expr`,
-so no consumer can disagree with another about the same value. Measured with
-CPython alongside, on this tree:
-
-| shape | before | now |
-|---|---|---|
-| `print(b.flag)` / `repr` / `str` / `'%r' %` / `f'{...}'` at MODULE scope | `1` | `True` |
-| the same, inside a `def` | `True` | `True` |
-| `{'k': b.flag}` / `[b.flag]` / a mixed `{'flag': ..., 'n': ...}` | `{'k': 1}` | `{'k': True}` |
-| `b.get()` / `repr(b.get())` / `{'g': b.get()}` (unannotated return) | `1` | `True` |
-| `b.get2()` (`-> bool`) | `1` | `True` |
-| `print(v)` where `def show(v: bool)` | `1` | `True` |
-| `{'k': v}` where `def show(v: bool)` | `{'k': 1}` | `{'k': True}` |
-| `print(other)` inside `def report(self, other: bool)` | `1` | `True` |
-| `v + 1` / `int(v)` / `str(v) + 'x'` / `not v` / `if v:` on a bool param | already right | still right |
-
-Regressions, all in `test_gimple_runner.py`: `gimple_bool_annotated_struct_field`
-(both spellings), `gimple_bool_field_in_a_list_and_through_a_receiver`,
-`gimple_dict_of_bool_values`, and the new `gimple_bool_annotated_parameter`.
-
-### The three mechanisms, because they are three different gaps
-
-1. **A FIELD.** `struct_bool_fields` already recorded which fields carry a
-   `bool` annotation, and only the struct's own generated `_mojo_repr_<Sn>`
-   consulted it — so `print(b)` said `flag=True` while `print(b.flag)` said
-   `1`. `is_python_bool_expr` gained a `MemberExpr` arm, and
-   `_gmi_collect_self_assigns` (which is the pass that infers that field's
-   type at all, for the canonical `self.flag = flag` spelling that puts the
-   annotation on the `__init__` PARAMETER) registers the field it lands on.
-2. **The receiver.** `_is_python_bool_field` and `_is_python_bool_method`
-   resolve the receiver through `_receiver_ctypes`, which is a LIST of every
-   type this backend has RECORDED for the name — not `gen._quick_type`, which
-   reads `var_types` and has no entry for a MODULE-LEVEL global. That is why
-   `b.flag` at module scope and the identical `b.flag` inside a `def` used to
-   disagree, and why a list is the honest shape: a single winner would be a
-   guess about the wrong struct.
-3. **A PARAMETER.** `'bool'` resolves to `'int'` and `'int'` to `'int64_t'`,
-   so a bool param IS distinguishable from an int param in `func_param_types`
-   — but NOT from a small integer LITERAL's own lowering, which is also a
-   plain C `int` (`_local_literal_ctype`'s docstring). Keying off the type
-   would have turned `x = 5; print(x)` into `True`. So the annotation is
-   captured where it is still readable: `record_bool_params`, called from the
-   two places in `emit_funcs.py` that set `gen.current_func_name` with the
-   `FunctionDef` in hand (a free function's name, and a method's
-   `<Struct>_<method><overload>`), keyed by `current_func_name` verbatim, and
-   read back per function by `bool_param_in_scope`.
-
-`_signature_ctypes` looks like the chokepoint for (3) and is NOT: on the
-body-lowering path it is only reached for a varargs signature. That is why the
-recorder is called where `current_func_name` is set.
-
-### The dict half — a merge dropped its call sites
-
-A whole-DICT bool registry (`mojo_mark_dict_bool_values` / `mojo_is_bool_dict`)
-was replaced by a per-SLOT tag (`_DictSlot.kind == 3`, set by
-`mojo_dict_set_bool`), because one bool value in a dict made every OTHER value
-print as True/False too. `mojo_mark_dict_bool_values` was removed from the
-runtime, and the five `d[k] = v` / dict-literal / dict-comprehension spellings
-that used to call it were meant to be consolidated into the ONE function
-`emit_infra.py::emit_dict_int_value_store`. The consolidation did not survive
-the merge into this tree: the helper was present and DEAD, every call site still
-called the deleted runtime function, and `GimpleGen._emit_dict_int_value_store`
-(the one-line delegate, and the reason `test_gimple_runner.py` reported
-`'GimpleGen' object has no attribute '_emit_dict_int_value_store'` on four
-bytes-dict tests) was missing. All of it is back, and `emit_dict_int_value_store`
-has exactly the five callers its own docstring names.
-
-The merge damage was measured rather than inferred: the missing delegate and
-the same four test failures were filed independently by another worker, and
-this change fixes that doc's subject — its doc is deleted with it. The same
-merge also left a DUPLICATE copy of that delegation behind (`gimple_codegen.py`
-is the aggregator both copies of the shared file fed, and the merge was
-resolved file by file), so the name was simultaneously reported missing and
-present twice; the duplicate is gone too, and
-`test_gimple.py`'s `no_name_is_defined_twice_in_a_codegen_class` reads the
-source with `ast` to keep it gone. `test_suite.py` now checks the other half
-— every `gen.X(...)` the backend calls must be a method `GimpleGen` has —
-because a missing delegate is an `AttributeError` during codegen that no exit
-code anywhere reports, and one name is not a family.
-
-## What is STILL wrong
-
-`isinstance` and `type` on a `bool`:
+## What I ran and what I saw
 
 ```python
-def show(v: bool):
-    print(isinstance(v, bool))
-    print(type(v))
-def showi(v: int):
-    print(isinstance(v, bool))
-    print(type(v))
-show(True)
-showi(1)
+class Box:
+    def __init__(self, flag: bool, n: int):
+        self.flag = flag
+        self.n = n
+
+def main():
+    b = Box(True, 5)
+    print(b.flag)
+    print(repr(b.flag))
+    print(b.n)
+    c = Box(False, 5)
+    print(c.flag)
+    print('%r' % (b.flag,))
+    print(f'{b.flag}')
+    d = {'k': b.flag}
+    print(d)
+main()
 ```
 
 | | CPython | compiled |
 |---|---|---|
-| `isinstance(True, bool)` | `True` | `False` |
-| `type(True)` | `<class 'bool'>` | `0` |
-| `isinstance(1, bool)` | `False` | `False` |
+| `print(b.flag)` | `True` | `1` |
+| `print(repr(b.flag))` | `True` | `1` |
+| `print(b.n)` (an `int` field) | `5` | `5` — **correct** |
+| `print(c.flag)` | `False` | `0` |
+| `print('%r' % (b.flag,))` | `True` | `1` |
+| `print(f'{b.flag}')` | `True` | `1` |
+| `print({'k': b.flag})` | `{'k': True}` | `{'k': 1}` |
 
-Both are option A: the lowered C type of a `bool` is `int`, so
-`mojo_isinstance(v, 'bool')` has nothing to match and the `type()` read has no
-tag to report. The fix is one line — `_TYPE_MAP['bool'] = '_Bool'` — and it is
-deliberately NOT applied here, for the reason this document's original author
-recorded and still holds:
+Every spelling is wrong and none says anything: exit 0, a plausible number.
+The `int` field in the same struct is right, so it is specific to `bool`.
 
-* `_quick_type` writes the enclosing function's PROTOTYPE and every local
-  DECLARATION. Claiming `_Bool` for a value the lowering really loads as `int`
-  writes a `_Bool x = <int>` store into a `__GIMPLE` body, which gcc rejects
-  outright (`invalid conversion in gimple assignment`), not merely warns about.
-* `_Bool` then propagates into struct field layout, comparison mnemonics and
-  the formal arm64 backend, all of which read `_TYPE_MAP` — so it is a
-  whole-program change.
+## Mechanism
 
-Applied, it would also make most of the mechanism above redundant (a `_Bool`
-param needs no side table), which is the strongest argument for doing it as
-its own change rather than behind the three fixes that are already in.
+`_TYPE_MAP` maps `'bool': 'int'`, so `_resolve_type('bool')` returns `'int'`
+(verified by instrumenting `_resolve_type` on this exact source: six calls,
+all `'bool' -> 'int'`). Everything downstream therefore sees an ordinary
+integer:
 
-**Done when** `isinstance(True, bool)` is `True`, `type(True)` is
-`<class 'bool'>`, and `_TYPE_MAP['bool'] = '_Bool'` survives `make gate` — plus
-`stdlib-syntax`'s `U` count not increasing and a `stdlib-dylib` `skip` count not
-increasing, both per CLAUDE.md's rule about type-resolution changes.
+```c
+typedef struct Box { int64_t __mojo_type_id; int flag; int64_t n; } Box;
+void __GIMPLE Box___init__ (Box * self, int flag, int64_t n) { self->flag = flag; }
+...
+_t4 = b->flag;        /* lowered type `int` */
+mojo_print (<sprintf %d of _t4>);
+```
+
+A `BoolLiteral` also lowers to `int` on purpose — see
+`_lower_BoolLiteral`'s own comment, quoted in
+`mojo/backend_gimple/emit_calls.py`'s `str()` lowering: "`_lower_BoolLiteral`
+returns ctype 'int' (not '_Bool')", and other sites depend on it. So a plain
+`print(True)` is handled by `_gen_print`'s `_Bool`-or-`_bool_valued` arms, and
+a `bool` FIELD has neither: it is not `_Bool`, and `_bool_valued` (the set
+`_record_bool_valued` fills, keyed by NAME, for `b = True`) is not consulted
+for a `MemberExpr` at all — `is_python_bool_expr` checks
+`isinstance(node, IdentExpr) and node.name in gen._bool_valued`, which a field
+access can never satisfy.
+
+So the information is destroyed at `_resolve_type` and there is no chokepoint
+left that could recover it.
+
+## Two candidate fixes, and the trade-off between them
+
+**A. `_TYPE_MAP['bool'] = '_Bool'`.** The real fix: the annotation says bool,
+so the C type should say bool, and every existing `_Bool` arm
+(`_gen_print`, `_repr_value`, `_stringify_value`, `mojo_bool_to_str`) starts
+answering for free — the field read lowers to `_Bool`, the struct field is
+declared `_Bool`, and the dict store's `is_python_bool_expr` fires on
+`_quick_type(MemberExpr) == '_Bool'`.
+
+The cost is GIMPLE's typing rules. `__GIMPLE` requires both operands of a
+binary expression to be the IDENTICAL type, so every `bool`-annotated value
+reaches arithmetic and comparison as `_Bool` where it used to be `int`:
+`n: bool; n + 1`, `n == True`, `f(n)` where `f` declares `int64_t`, a
+`bool` FIELD read passed to something expecting `int`. Each needs a coercion
+emitted at the right place, and the same widening is what the project's
+existing boxing helpers (`_to_int64`, `mojo_box_int`) exist for. This is a
+real change to a shared type table with a wide blast radius — it needs the
+full gate and its own session, not a patch.
+
+**B. Record the bool fields and consult the map.** The codebase already
+carries per-struct side tables for exactly this kind of thing —
+`struct_field_types`, `_field_elem_types`, `_field_dict_val_types`,
+`_struct_field_kinds` — so a `_field_is_bool: dict[str, set]` populated where
+the StructDef's annotations are still readable, and consulted by the four
+consumers that already have a `_Bool` arm (`_gen_print`, `_repr_value`,
+`_stringify_value`, the dict store) is the conservative shape and touches no
+type table.
+
+Its honest limit: it is a *print/str/repr* fix only. A bool field still
+occupies an `int` slot, so a program that relies on the width or on
+`isinstance` still sees an int. A is the fix; B is the one that can land
+without a type-table decision.
+
+## Also found alongside it, and part of the same smoke test
+
+A `bool`-annotated struct field is not the only place a value's real type is
+lost before a chokepoint sees it. The same smoke program also showed
+`def show(t): print(t)` called with `show(1.5)` printing `1` and `show("s")`
+printing a pointer decimal — a genuine **float** passed to a parameter whose
+slot is `int64_t`, truncated at the call site. That one is already documented,
+with both halves of its fix located, in
+`bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md` ("Also
+unfixed and worth knowing"), and is not repeated here.
+
+## Exact next step
+
+1. Decide A or B. B is the smaller, safer landing and is what I would do first:
+   `_field_is_bool` populated from the StructDef's field annotations at the
+   point `struct_field_types` is built (the annotation is still in hand
+   there), consulted by the four `_Bool` consumers.
+2. Under either, cover: `print(f)`, `repr(f)`, `'%r' % (f,)`, `f'{f}'`,
+   `str(f)`, `{'k': f}`, `[f]`, a list-of-bools-field, and a bool field read
+   through a bound method (`b.flag` where `b` is a `self` parameter).
+3. Then measure the same matrix for a **method return**: `def flag(self):
+   return self.flag` with a `bool` field. That is the shape most real code
+   uses. **Measured 2026-09-30, and it is ALSO broken**, so it belongs in the
+   same test rather than being assumed to follow:
+
+   ```python
+   class Box:
+       def __init__(self, flag: bool):
+           self.flag = flag
+       def get(self):
+           return self.flag
+
+   b = Box(True)
+   print(b.get())          # CPython True   -> compiled 1
+   print(repr(b.get()))    # CPython True   -> compiled 1
+   print(b.get() == True)  # CPython True   -> compiled True
+   ```
+
+   The method's return type is inferred from its body, and the body is
+   `return self.flag` — an `int` field — so the inference lands on `int64_t`
+   exactly as the direct read does. Note the third line: `b.get() == True` is
+   CORRECT, because the comparison itself produces a `_Bool`. So a test that
+   only checks the equality would pass while the two print spellings are
+   wrong, which is the same trap `CODEGEN_repr_of_a_bool_prints_1.md`
+   documents for `print` vs `repr`.
+
+## Suite-bucket note
+
+None. `test_gimple_runner.py` (`gimplerunner`, in both `check` and `gate`) is
+where these belong, with CPython's exact text as the expectation.

@@ -74,20 +74,15 @@ load fixed there is no loop.
 
 TWO CONSEQUENCES OF THIS PATH THAT THE CODE BELOW IS WRITTEN AROUND
 ----------------------------------------------------------------
-  * **A CHARACTER CLASS IS A COMPARISON AGAINST A NUMBER.** Every
-    character-class test below is `b == 34` rather than a `strspn` against a set
-    literal, because what a JSON scanner wants is the byte VALUE: the double
-    quote is 34, the backslash is 92, and the control bytes are 9, 10, 13 and
-    32. Naming the number once is the same idea as the `os` module's
-    `str_at(path, j, "/")` with one element in it, and it keeps one spelling per
-    byte instead of a set literal beside a numeric test.
-    (This file used to give a different and now false reason for the same code
-    — "a string escape is NOT interpreted in a literal, so there is NO way to
+  * **A STRING ESCAPE IS NOT INTERPRETED IN A LITERAL.** A Mojo source
+    literal is copied byte for byte, so `"\\""` is THREE source bytes and the
+    C string is two — a backslash and a quote. There is therefore NO way to
     write a double quote, a backslash or a control byte into a string
-    constant". `9023031b` gave these backends the decoder every engine shares:
-    a literal IS decoded, inside a module as well as inside a program, on both
-    architectures, measured through a module dylib and pinned by
-    `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`.)
+    constant, and every character-class test below is a comparison against a
+    NUMBER (`b == 34`) rather than a `strspn` against a set literal. It reads
+    worse than the `os` module's `str_at(path, j, "/")` and it is the same
+    fact that makes it correct: `"` is 34, and a JSON scanner needs 34, 92,
+    9, 10 and 13 more than it needs any particular spelling of them.
   * **THERE ARE NO EXCEPTIONS AND NO MODULE STATE.** Every failure is a
     return value — `-1` for "no such index", `0` for "not valid", and for
     `loads_*` a documented sentinel. A module-level name is a value inlined

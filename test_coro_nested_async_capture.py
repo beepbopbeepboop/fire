@@ -653,12 +653,10 @@ struct S:
 # case is testing:
 #   * it is ONE function, because a container handed across a call boundary
 #     reaches codegen as a boxed `int64_t`, and `x in <boxed dict>` then goes
-#     through the `mojo_in_dispatch_*` runtime dispatcher rather than the
-#     typed `mojo_dict_contains` — a registry probe per membership test.
-#     (That dispatcher used to have no dict branch at all on the int view,
-#     which was a silent "not present"; see test_container_membership.py.)
-#     coro.py's fixed point keeps every one of its tables local for the same
-#     reason.
+#     through `mojo_in_dispatch_int`, which has no dict branch at all
+#     (bugs/CODEGEN_in_dispatch_int_has_no_dict_branch.md) -- a silent "not
+#     present". coro.py's fixed point keeps every one of its tables local for
+#     the same reason.
 #   * it prints each clean function's INDEX in `names`, so the comparison
 #     needs no string value back out of a `list[str]`.
 _FIXED_POINT_PROGRAM = '''\

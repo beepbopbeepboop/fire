@@ -412,7 +412,7 @@ def reflection_member_refusal(name: str) -> str:
 # not, and it was WRONG on the first program it met: `x: Optional[int] = None`
 # parses to `IdentExpr('None')` on this parser, not to a `NoneLiteral`, so a
 # node-type list would have called it a call.
-def _folds(value, structs_by_name: dict = None) -> bool:
+def _folds(value) -> bool:
     """Whether the build can KNOW this class-level default's value.
 
     `model.fold_literal_expr` is the whole test, called rather than
@@ -420,28 +420,12 @@ def _folds(value, structs_by_name: dict = None) -> bool:
     right authority: its docstring says its job is "can the build KNOW this
     value", and a class-level constant is materialized WHERE IT IS READ
     (`formal/build.py`'s `_rewrite_class_constants`), so a default it cannot
-    fold is materialized as a call and refused by `module_global_refusal`.
-
-    `structs_by_name` adds ONE shape to that, and it is a shape rather than a
-    second rule: a default that NAMES another class's constant
-    (`origin: TypeOrigin = TypeOrigin.DEFAULT`, which is this repository's
-    `type_system.py` and the ordinary way to write an enum-valued default).
-    `model.class_constant_word_in` resolves it through that constant's own
-    declaration, and it is the SAME resolution `formal/build.py` performs when
-    the read is substituted — so this test asks the build's question rather
-    than a second one that agrees today. Without the table the test is
-    unchanged, which is what the two other callers of this function get.
-    """
+    fold is materialized as a call and refused by `module_global_refusal`."""
     if value is None:
         return True          # no default: the field is uninitialized, which is
                              # what `x: T` already means
     M = _model()
-    if M.fold_literal_expr(value) is not None:
-        return True
-    if isinstance(structs_by_name, dict):
-        return M.class_constant_word_in(
-            structs_by_name, value)[0] != M.DEFAULT_OPAQUE
-    return False
+    return M.fold_literal_expr(value) is not None
 
 
 def lower_field(node):
@@ -515,8 +499,7 @@ def lower_field(node):
     return opts["default"], ""
 
 
-def field_refusal(name: str, default, declared_type,
-                  structs_by_name: dict = None) -> str:
+def field_refusal(name: str, default, declared_type) -> str:
     """The refusal for a field whose default this path cannot hold.
 
     Only reached for a default `model.fold_literal_expr` cannot fold, which is
@@ -529,30 +512,21 @@ def field_refusal(name: str, default, declared_type,
     sends the next reader looking for the wrong thing, which is the failure
     `bugs/FORMAL_known_limits.md` exists to prevent.
 
-    **`None` used to need a branch of its own here, and no longer does.** It
-    was the common case and the one a reader is most likely to believe is
-    free, so it was named rather than folded into the generic message: on this
-    path `None` is a NAME (`IdentExpr('None')`) and not a literal, so there was
-    nothing for a class-level constant to be materialized as. `model`'s
-    `NONE_WORD` fixed that by making `None` the word 0 — which is the
-    REPRESENTATION rather than an approximation, since it is what an unwritten
-    frame slot already is — and `fold_literal_expr` folds it, so `_folds` is
-    `True` and this function returns `""` before reaching any branch. The
-    branch is deleted rather than left as unreachable code with a docstring
-    claiming `None` is refused: a message that describes a construct this
-    backend now answers is worse than no message, and the comparison it used to
-    guard is refused by name in `formal/build.py`'s `refuse_none_comparisons`
-    because the model is one untagged word (`None` and the integer 0 are the
-    same expression after the fold, and CPython says `None == 0` is False).
-
-    The limit the fold does not remove, and the reason that refusal is a
-    refusal rather than an answer: `None` is not the integer 0 at every use.
-    It is falsy as `0` is, and `None == 0` is False in Python while `0 == 0` is
-    True, so the two must not be conflated — which is what
-    `refuse_none_comparisons` is for, and why this function can now say
-    nothing at all about `None` and still be correct."""
-    if _folds(default, structs_by_name):
+    A `None` default is the common case and is worth naming, because it is the
+    one a reader is most likely to believe is free: on this path `None` is a
+    NAME (`IdentExpr('None')`), not a literal, so it is materialized as a call
+    and refused — the same thing a module-level `G = None` does."""
+    if _folds(default):
         return ""
+    if isinstance(default, F.IdentExpr) and default.name == "None":
+        return (f"the default for field {name!r} is `None`, and on this path "
+                f"`None` is a NAME rather than a literal — it parses to a bare "
+                f"identifier, not to a value — so there is nothing for a "
+                f"class-level constant to be materialized as. A formal value "
+                f"is one 64-bit word, and the only thing a class-level name "
+                f"can be read as is the literal it is written with. Leave the "
+                f"field undeclared (`{name}: T`) so it reads as the zero an "
+                f"unwritten slot gives, or give it a literal")
     return (f"the default for field {name!r} is not a value this build can "
             f"materialize, and a class-level default on this path has to be "
             f"one: a formal value is a single 64-bit word, a class-level "
@@ -620,35 +594,21 @@ def comparison_chain(field_op: str, join_op: str, left, right,
 def inheritance_refusal(name: str, base: str) -> str:
     """The refusal for `@dataclass class C(A)`.
 
-    **What changed when the layout merge landed, and what did not.** The field
-    list is no longer the class's own body: `formal/model.py`'s
-    `attach_inherited_fields` merges a declared base's fields in, base-first,
-    which is the order CPython's generated `__init__` takes them in — so the
-    first reason this used to give ("this path's struct has no base-class field
-    merge at all, so C(1, 2) would fill C's OWN fields and drop A's without a
-    word") is no longer true, and a refusal that still gave it would send the
-    reader to look for a merge that is there.
-
-    What is still true is the half this file is about. Everything the DATACLASS
-    path derives is read off the class's OWN body — `field(default=…)` is
-    lowered by walking `model.struct_fields`, and `InitVar` is detected the same
-    way — so a base's fields and a base's `field(...)` wrappers are not part of
-    what is generated here, and the dataclass's own members (`__eq__`,
-    `__repr__`) would be built from this class's fields alone. Refusing the
-    class is what keeps that from being a wrong answer; the layout merge fixed
-    the slots, not the members."""
+    Measured: `class C(A)` parses with `bases=['A']` and this path's struct has
+    no base-class field merge, so `C(1, 2)` would fill C's OWN fields and drop
+    A's without a word. CPython's dataclass puts the BASE's fields first, so
+    the two disagree on the field ORDER as well as the field SET — and the
+    order is what decides which value lands in which slot, so this is a wrong
+    answer rather than a missing one. Refused."""
     return (f"{name} inherits from {base!r}, and a dataclass's fields are the "
             f"base class's fields FOLLOWED BY its own (CPython's generated "
-            f"`__init__` takes them in that order). The layout merge is in "
-            f"place — `formal/model.py`'s `attach_inherited_fields` puts "
-            f"{base}'s fields in {name}'s slots in that order — but everything "
-            f"the DATACLASS path generates is read off {name}'s own class body: "
-            f"`field(default=…)` is lowered from `model.struct_fields`, and an "
-            f"`InitVar` in {base} is not seen as one. So the fields would land "
-            f"in the right slots and the members built from them would not be "
-            f"the ones CPython builds. Declare {name} without the base and "
-            f"write the fields out, or keep {base} a plain struct and pass it "
-            f"as a field")
+            f"`__init__` takes them in that order). This path's struct has no "
+            f"base-class field merge at all: the declared fields of {name} are "
+            f"the only ones it has slots for, so inheriting would silently drop "
+            f"{base}'s — the values would be filled into the wrong slots and "
+            f"the program would run and print numbers the source never wrote. "
+            f"Declare the inherited fields on {name} itself, or keep "
+            f"{base} a plain struct and pass it as a field")
 
 
 def post_init_refusal(name: str) -> str:
@@ -793,26 +753,21 @@ def check_dataclass_classes(classes: dict) -> None:
         for m in M.struct_methods(st):
             if getattr(m, "name", None) == "__post_init__":
                 raise CodegenError(post_init_refusal(name))
-            # A class with its own `__eq__` is NOT refused here any more, and
-            # what replaced the refusal is a question about the COMPARISONS in
-            # the file rather than about the class: `rewrite_equality` already
-            # declined to desugar one (it skips `info["own_eq"]`), so the
-            # operator's own dispatch owns the comparison, and the only shapes
-            # that can still be wrong are the ones the dispatch does not lower.
-            # `formal/build.py`'s `_check_own_eq_dispatch` asks that, with the
-            # holder tables it has already published, and refuses through
-            # `own_eq_refusal` when a comparison names the class and no dispatch
-            # answers it. Refusing the CLASS is what this stopped doing, because
-            # it refused a program that computes exactly: `Point(3, 4) ==
-            # Point(3, 4)` with a `__eq__` that returns True is 1 on this path
-            # and 1 in CPython.
+            if getattr(m, "name", None) == "__eq__":
+                # Checked here rather than declined in `rewrite_equality`,
+                # because a refusal has to be a fact about the FILE and
+                # `rewrite_equality` cannot see a class the program never
+                # compares — so a class with a user `__eq__` would be accepted
+                # and then be wrong the first time it was used. See
+                # `own_eq_refusal` for the measurement.
+                raise CodegenError(own_eq_refusal(name))
         for f in M.struct_fields(st):
             ann = getattr(f, "type_ann", None)
             if isinstance(ann, str) and "InitVar" in ann:
                 raise CodegenError(init_var_refusal(name, _field_name(f)))
 
 
-def lower_field_defaults(classes: dict, structs_by_name: dict = None) -> None:
+def lower_field_defaults(classes: dict) -> None:
     """`field(default=LITERAL)` → the literal. A REWRITE, not a check.
 
     It has to run before anything reads the field defaults, and before
@@ -834,8 +789,7 @@ def lower_field_defaults(classes: dict, structs_by_name: dict = None) -> None:
             if new_value is not None:
                 f.value = new_value
             bad = field_refusal(fname, getattr(f, "value", None),
-                               getattr(f, "type_ann", None),
-                               structs_by_name)
+                               getattr(f, "type_ann", None))
             if bad:
                 raise_from_field(f"{name}.{fname}: {bad}")
 
@@ -1058,48 +1012,49 @@ def bound_module_names(stmts: list) -> set:
     return out
 
 
-def own_eq_refusal(name: str, comparison: str, why: str) -> str:
-    """The refusal for a COMPARISON of a `@dataclass` that brings its own
-    `__eq__`, in a shape the operator's dispatch does not lower.
+def own_eq_refusal(name: str) -> str:
+    """The refusal for a `@dataclass` that declares its OWN `__eq__`.
 
     CPython keeps the user's `__eq__` in preference to the generated one
     (measured: with `@dataclass class T` defining `__eq__`, `T(1) == T(2)` is
     True where the generated one would say False), so the class is LEGAL and
-    its meaning is unambiguous, and this transform now ACCEPTS it — it declines
-    to desugar the comparison (`rewrite_equality` skips `info["own_eq"]`) and
-    hands the operator to `formal/build.py`'s `_rewrite_eq_on_frame_receivers`.
+    its meaning is unambiguous. It is refused anyway, and the reason is a
+    measurement rather than a policy:
 
-    What that rewrite lowers is a shape and not a promise: both operands must
-    be bare NAMES this image can say are values of the same struct. Every
-    comparison that is not that shape would fall back to the word compare the
-    rewrite exists to replace — the address compare, which for a class whose
-    `__eq__` says True answers 0 where CPython answers 1 — so the shapes are
-    REFUSED, by name and with the comparison quoted, rather than left to answer
-    wrongly. `s == 5`, `s == None`, `Point(3, 4) == p` and a chain with a call
-    in an operand are the four the corpus writes.
+        class Plain:            # no decorator at all
+            x: int
+            y: int
+            def __eq__(self, other): return True
+        def eq(a, b):
+            if a == b: return 1
+            return 0
+        # arm64:  eq(p, q) == 0        CPython: 1
+        # arm64:  p.__eq__(q) == 1     CPython: 1
 
-    THE HISTORY, because the scope looks arbitrary without it and is not:
+    `==` on this path is ONE flag-setting compare of two words
+    (formal/arm64_codegen.py's `_emit_binop`) and never dispatches by name, so
+    the user's `__eq__` is reachable only as an explicit `p.__eq__(q)` — which
+    is the second line, and it is right. Accepting the class would therefore
+    produce an image that runs `eq(p, q)` as an address compare and prints 0
+    where the source's own method says 1: a wrong answer, silently, from a
+    program that did nothing unusual. The same is true of a `__repr__`, and
+    `repr` is a worse one because printing a struct receiver SEGFAULTS today
+    (measured) rather than merely answering wrongly.
 
-    * 2026-09-29: the class was refused, and the stated reason was measured —
-      `==` did not dispatch by name at all on this path, so accepting the class
-      would have meant building an image that runs the comparison as an address
-      compare. That reason was FIXED (the dispatch landed, and the doc that
-      recorded the measurement is deleted with it), and a refusal whose stated
-      reason has been fixed is a refusal nobody looks at again.
-    * the transform's own half then became the stated reason: `rewrite_equality`
-      DESUGARS `==` into a field-wise chain, which would silently replace the
-      method the source wrote. That half needed no new analysis — it already
-      skips a class with `own_eq`, so the class is accepted and the DESUGARING
-      is what is skipped.
-    * and what is left is this: the residue the dispatch does not reach.
-
-    The `__repr__` half is unaffected and still necessary: printing a struct
-    receiver SEGFAULTS today (measured) rather than merely answering wrongly."""
-    return (f"{name} declares its own __eq__, which CPython keeps in preference "
-            f"to the generated one, and this transform leaves the comparison to "
-            f"the operator's dispatch rather than desugaring it into a "
-            f"field-wise chain. But `{comparison}` is not a shape that dispatch "
-            f"lowers, so nothing here would answer it except the word compare "
-            f"the dispatch exists to replace: {why}. Bind the class's value to a "
-            f"name on both sides of the comparison, or call the method "
-            f"explicitly (`__eq__`), which is right today")
+    So: refused, with the repair named. This is the one place where the
+    transform declines a class CPython accepts, and it declines it because the
+    capability that would make it right — a comparison that dispatches to a
+    method — does not exist here, not because the class is unusual."""
+    return (f"{name} declares its own __eq__, which CPython keeps in "
+            f"preference to the generated one (so the class is legal and its "
+            f"meaning is unambiguous). It is refused because `==` on this path "
+            f"is one flag-setting compare of two words and never dispatches by "
+            f"name: measured, a class with a user __eq__ that returns True "
+            f"gives `a == b` as 0 here and 1 under CPython, while an explicit "
+            f"`a.__eq__(b)` gives 1 under both. So accepting {name} would build "
+            f"an image that runs the comparison as an address compare and "
+            f"prints a number the method in the source contradicts — silently, "
+            f"from a program that did nothing unusual. Call the method "
+            f"explicitly (`x == y` becomes `x.__eq__(y)`), or drop the method "
+            f"and let the field-wise comparison this transform generates "
+            f"answer it")

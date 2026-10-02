@@ -47,18 +47,12 @@ cache in front of the runner rather than the runner:
   the estate   every `test_*.py` in the repo is named by a registered spec, or
                is in a list that says why not. 50 of 81 were named by nothing
               when this was written; 38 excuses over 118 files remain.
-  needles     a string a test pins as a MESSAGE has to be a message the tree
-               can still say. Two bug docs in `bugs/` were one stale needle
-               each — a refusal that was still correct, in a sentence no build
-               could print — and the second cost a session to diagnose because
-               the words were still in the tree, said by a different check.
 
 Run:  python3 test_suite.py         (or `make check-suite`, part of `smoke`)
 """
 
 import ast
 import contextlib
-import glob
 import io
 import json
 import os
@@ -1034,7 +1028,7 @@ def test_an_expect_marker_points_at_a_doc_that_exists():
     fixed (CLAUDE.md's rule, and `6ad8efd5` is an example — a closed bug's doc
     removed in the same commit). So a reason that reads
 
-        expect='FORMAL_something — red on X'
+        expect='bugs/FORMAL_something.md — red on X'
 
     is a pointer at a file whose deletion is the normal outcome, and nothing
     checked it. The failure is quiet and it is the bad direction: the doc goes,
@@ -1061,208 +1055,12 @@ def test_an_expect_marker_points_at_a_doc_that_exists():
           f'is fixed, so the row outlives its own next step: {dangling}')
 
 
-def test_an_expect_marker_count_is_checked_against_the_run():
-    """A marker states how many cases fail; the run is asked whether it does.
-
-    The gap this closes is
-    `TEST_expect_marker_undercounts_the_failures_it_absorbs`. An
-    `expect=` marker forgives FAIL and ERROR wholesale, so a NEW failure
-    inside an already-marked test is absorbed silently and the tally still
-    says EXPECTED — the marker has become a category rather than a claim. It
-    was found on `formal-receiver-position`, whose marker said "2 of 12" and
-    whose file reported three, the third being a module-state refusal from a
-    different bug entirely.
-
-    So the count is now checkable, from two numbers that already exist: the one
-    the marker writes down and the one the harness prints. Both readings are
-    checked here against synthetic output first (a parser that matches nothing
-    reports green forever, which is the one thing a guard of this shape must
-    not be able to do), and then against the real registry, so a marker whose
-    prose shape stops matching its own rule is caught here rather than by a
-    gate that silently stops checking it.
-    """
-    check('expect count: the marker reader takes the leading count, past a '
-          'doc path',
-          suite.marker_failures('2 of 12: a thing') == 2
-          and suite.marker_failures(
-              'bugs/SOME.md — 36 failing: a thing') == 36,
-          'the two shapes the registry spells: "N of M:" and "N failing:"')
-    check('expect count: ...and reads a count out of the middle of prose only '
-          'when it leads',
-          suite.marker_failures(
-              'the marker said "2 of 12" until then') is None,
-          'an unanchored read picks up a number the marker is QUOTING rather '
-          'than claiming, which is how a stale count survives being quoted')
-
-    check('expect count: the run reader knows all three summary shapes',
-          suite.observed_failures('Results: 9 passed, 3 failed') == 3
-          and suite.observed_failures('[x86_64] PASS=59 FAIL=1 of 60') == 1
-          and suite.observed_failures('\n146/148 checks passed') == 2,
-          'Results:/PASS=FAIL=/checks-passed are the three families of harness '
-          'in this tree')
-    check('expect count: ...and reports no count as no count, not as zero',
-          suite.observed_failures('a fanout item with nothing to say') is None,
-          'a missing count read as 0 would make every marker agree')
-    check('expect count: an interim tally cannot make a test look better than '
-          'its final line',
-          suite.observed_failures('Results: 1 passed, 1 failed\n'
-                                  'Results: 3 passed, 2 failed') == 2,
-          'the largest count any summary line reports is the one used')
-
-    # The two verdicts, on synthetic specs whose output says what we say it
-    # says. The FAIL one is the point of the whole check; the EXPECTED one is
-    # the control that says it did not fire on a marker that is telling the
-    # truth, and the no-count one is the case that must stay silent.
-    def verdict(expect, output):
-        with Sandbox(m=dict(cmd=ok_cmd('pass'), expect=expect)):
-            spec = suite.REGISTRY['m']
-            state = {'m': suite.FAIL}
-            res = {'m': suite.Result(suite.FAIL, 0.0, output=output)}
-            suite._apply_expectations({'m': 1}, state, suite.Log(None), res)
-            return state['m']
-
-    check('expect count: a marker whose count matches the run is EXPECTED',
-          verdict('2 of 12: a thing', 'PASS=10 FAIL=2') == suite.EXPECTED,
-          'the control')
-    check('expect count: a NEW failure inside a marked test is a FAILURE, not '
-          'an absorbed EXPECTED',
-          verdict('2 of 12: a thing', 'PASS=9 FAIL=3') == suite.FAIL,
-          'this is the whole check: three failures against a marker that '
-          'claims two is a marker that no longer describes its test')
-    check('expect count: a marker with no count is left alone',
-          verdict('a whole-job condition, not a case count', 'nothing') ==
-          suite.EXPECTED,
-          'four markers in the registry describe a condition rather than a set '
-          'of cases, and inventing a number for them would be a fiction')
-
-    # …and the FANOUT shape, which is the one count in the registry that has
-    # no summary line to read: `bootstrap-stage2-dumps` is 46 per-file dumps of
-    # the stage2 binary — the registry spells that fanout's argv
-    # `['./mojo', '--dump', '../{file}']` and runs it with `cwd='stage2'`, so
-    # the name there is the compiled stage binary and not the tool — and its
-    # marker's count is checked against the per-item verdicts. Before this the
-    # count was read out of the LONGEST item's output — one file's compiler
-    # diagnostic, which has no "N passed, M failed" line in it — so a
-    # count-checked marker on a fanout reported UNCHECKED and therefore FAILED,
-    # which is the marker being unusable rather than the rule being strict.
-    ITEMS = ['a', 'b', 'c', 'd', 'e']
-
-    def fanout_verdict(expect, statuses):
-        fan = suite.Fanout(name='m', cmd=ok_cmd('pass'), items=ITEMS,
-                           mem='tiny', expect=expect)
-        with Sandbox(m=fan):
-            spec = suite.REGISTRY['m']
-            state = {'m': suite.FAIL}
-            res = {f'm:{it}': suite.Result(st, 0.0, output='')
-                   for it, st in zip(ITEMS, statuses)}
-            suite._apply_expectations({'m': len(ITEMS)}, state,
-                                      suite.Log(None), res)
-            return state['m']
-
-    def fanout_count(statuses):
-        fan = suite.Fanout(name='m', cmd=ok_cmd('pass'), items=ITEMS,
-                           mem='tiny')
-        with Sandbox(m=fan):
-            spec = suite.REGISTRY['m']
-            res = {f'm:{it}': suite.Result(st, 0.0, output='')
-                   for it, st in zip(ITEMS, statuses)}
-            return suite.observed_fanout_failures(spec, res)
-
-    check('expect count: a fanout marker is checked against its item verdicts',
-          fanout_verdict('2 of 5: a thing',
-                         [suite.PASS, suite.FAIL, suite.FAIL, suite.PASS,
-                          suite.PASS]) == suite.EXPECTED,
-          'the control, on the shape the one fanout marker in the registry has')
-    check('expect count: …and a NEW failing item in a marked fanout is a '
-          'FAILURE',
-          fanout_verdict('2 of 5: a thing',
-                         [suite.PASS, suite.FAIL, suite.FAIL, suite.PASS,
-                          suite.FAIL]) == suite.FAIL,
-          'the same anti-rot as a single-process marker: three items failed '
-          'against a marker that claims two')
-    check('expect count: a fanout marker counts FAIL and ERROR items and '
-          'neither a RESOURCE nor a TIMEOUT one',
-          fanout_count([suite.PASS, suite.FAIL, suite.ERROR, suite.RESOURCE,
-                        suite.TIMEOUT]) == 2,
-          'those two are facts about the machine: a marker never forgives '
-          'them, so it must not count them as its cases either')
-
-    # …and the real registry, so the rule cannot rot into matching nothing.
-    counted = {n: suite.marker_failures(getattr(s, 'expect', '') or '')
-               for n, s in suite.REGISTRY.items()
-               if getattr(s, 'expect', '')}
-    stated = {n: c for n, c in counted.items() if c is not None}
-    check('expect count: most registered markers state a count',
-          len(stated) >= 12,
-          f'only {len(stated)} of {len(counted)} markers state one '
-          f'({sorted(stated)}); a rule with nothing to check reports green '
-          f'forever')
-    check('expect count: the counts the registry states are the ones the '
-          'reader sees',
-          stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
-                     'async-with-lock-guard': 2,
-                     'bootstrap-stage2-dumps': 40, 'coro-detached-async': 2,
-    # bugs4-10's entry, MINUS the two it still listed and master has since
-    # dropped: `formal-external-call` and `formal-module-attr` no longer carry
-    # an `expect=` (both markers were removed on 2026-10-02, once the failures
-    # they named were rewrites of an assertion that could no longer see the case
-    # it was watching), so a census that still states them fails on the
-    # registry's own state — which is the check working, not the entry being
-    # wrong. `formal-x86-machine-model` is a FIFTH drop and the only one of the
-    # five that was ever green: its marker said `1 of 45 WRONG: udivmod`, and
-    # `formal/x86_64_model_test.py` has reported `agree 52  WRONG 0  NO-RUN 0`
-    # since 2026-10-04, when `e54d2f4e` fixed the defect the marker named
-    # (`idiv` wrote its quotient through `UInt64.ofNat q.toNat`, zero for every
-    # negative quotient). Nobody re-measured it, so an `expect=` on a passing
-    # test was reporting itself as a FAILURE on every run — which is the
-    # anti-rot half of the marker mechanism firing on a marker nobody visited.
-    # `formal-receiver-position` is a FOURTH
-    # drop, and it is the only one of the four that is interesting: the check
-    # below was BUILT because that marker's count understated what its file
-    # reported, and the marker then outlived even the correction — the three
-    # cases it forgived stopped failing, the job went 38/38 green (its count was
-    # 3 of 33 when it was written and the file has 38 cases now), and an
-    # `expect=` on a passing test is reported as a FAILURE ("marked expect=…
-    # but it PASSES"). The count was never the problem; the marker was. Its
-    # entry is gone here for the reason the two above name: a census that still
-    # states a removed marker fails on the registry's own state.
-                     'coro-future-await': 17,
-                     'gimple-async-runner': 36,
-                     'gimplerunner': 3,
-                     'mutable-async-capture': 2, 'nested-async-generic': 2,
-                     'taskgroup': 3, 'transitive-closure-capture': 2,
-                     'x86-containers': 1},
-          f'the reader sees {stated}; a marker whose prose shape has drifted '
-          f'stops being checked, which is the failure this whole mechanism '
-          f'is for. `bootstrap-stage2-dumps` is the one count a FANOUT states '
-          f'(40 of its 46 items exit non-zero), and it is checked against the '
-          f'per-item verdicts rather than against a summary line \u2014 see '
-          f'`observed_fanout_failures`. `gimplerunner` is the merge worker\u0027s '
-          f'4 of 380 \u2014 the '
-          f'compile-and-execute rows that are interactions between the ten '
-          f'branches rather than a bug in any one of them; the count was 4 '
-          f'until 2026-10-04, when the dict-value-kind row it named was '
-          f'fixed (the census had to '
-          f'learn it here too: adding a marker without adding its entry is '
-          f'exactly the drift this check names). `formal-toplevel`, '
-          f'`formal-module-attr` and '
-          f'`formal-external-call` are NOT here and that is the mechanism '
-          f'working: each `expect=` was removed when the rows it described '
-          f'were rewritten as build-and-RUN cases (the last one when '
-          f'`formal/model.py`\'s `type_position_nodes` answered the bracket-in-'
-          f'a-TYPE-position question the marker had been absorbing), so a '
-          f'pinned census that still listed any of them would be asserting a '
-          f'marker the tree no longer has.')
-
-
 # A Markdown table row that is unmistakably a status inventory: a pipe, a
 # backticked name, and a status word. Deliberately narrow, because the whole
 # value of this check is that it has no exemptions and no false positives —
-# a rule that needs an exception list is an excuse table, and an excuse table
-# is how nineteen registrations came to sit in the estate's inventory and in no
-# run at all (see `test_every_registered_test_is_in_a_bucket_or_says_it_is_a
-# _dependency` below, which is the same argument with a `dep=True` field
-# instead of a list).
+# a rule that needs an exception list is the excuse table
+# `bugs/TEST_registered_tests_in_no_bucket_never_run.md` argues against, and it
+# would rot the same way.
 _STATUS_ROW = re.compile(
     r'^\s*\|(?P<cells>.*)\|\s*$')
 _CELL_NAME = re.compile(r'^`(?P<name>[\w.-]+)`$')
@@ -1285,7 +1083,7 @@ def _stated_statuses(text, name):
 
       * it is a TABLE row — the line starts with `|`, not `> |`. A quoted line
         is someone showing you an example, including the quoted stale row in
-        `“Three places state a test's status”`, which
+        `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md`, which
         is the bug this check was written from and must not itself trip;
       * one of its cells is EXACTLY the backticked name, so a cell that also
         narrates is not being read as the name;
@@ -1550,7 +1348,7 @@ def test_every_job_is_reserved_before_it_starts():
     `make` are one process each and `make` starts the workload as a
     grandchild, while a fanout is one SPEC that expands into N jobs — the case
     that actually collapsed the machine, because `build_cmd` used to skip the
-    whole wrapper for a `Fanout` and eighteen `./mojoc --dump-full` runs at 30-43 GB
+    whole wrapper for a `Fanout` and eighteen `./mojo --dump` runs at 30-43 GB
     each went out with no ceiling and no reservation.
 
     The jobs report the ledger's own number from inside themselves, so what is
@@ -1989,275 +1787,6 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
              if n.startswith(mod.SRC_PREFIX) or n.startswith('abt999999_')]
     check('ab-native scratch: the self-test left nothing in the repo root',
           not stray, f'{stray}')
-
-
-# ── the per-child-budget residue: file -> how many literals it still spells ──
-#
-# The census `test_no_stale_per_child_budget_is_left_as_a_literal` walks, kept
-# as DATA so the check that reads it can be a ratchet instead of a prohibition.
-# Read the reasoning there and the per-file reading in
-# `bugs/TEST_stale_per_child_timeout_literals.md`; converting a file means
-# deleting its row here in the same commit, which is the only thing that makes
-# the number a measure of progress rather than a number.
-#
-# It is a per-file list rather than a regex over `timeout=[0-9]+` because the
-# question at a site is which KIND of child it is — a COMPILE, a LINK, a RUN, a
-# sweep, or none of the four — and that is not decidable from the text. Measured
-# 2026-10-04 with python3 3.14: 206 sites over 58 files, after this tree's
-# `test_formal_sweep.py` (7) and `test_formal_libc_symbol.py` (1) were converted
-# and `test_formal_call_proof_gen.py` (1) joined the census — a `subprocess.run`
-# of an image the div0-guard case builds, added by `work/formal27-1` — and
-# 2026-10-05 added three rows whose literals had already arrived without them
-# (`test_formal_sweep_truth.py` with `76143aaa`, `test_formal_specs.py` and
-# `test_formal_peephole.py` with the contracts-language and peephole branches),
-# which is the failure `budgets: the residue census is the residue` exists to
-# name: a census that is not the walk is a census of itself.
-# That is this predicate's census — a `timeout=` KEYWORD read off the AST, over
-# `is_test_file_name`, which is EITHER spelling and so also holds the two
-# `formal/*_test.py` and the one `scripts/*_test.py` — and it is smaller than
-# the doc's 217-over-63 for two measurable reasons: a grep counts a `timeout=NN`
-# that is not a call keyword at all, and it walks `build/` and the other derived
-# trees this one skips.
-STALE_PER_CHILD_BUDGETS = {
-    'formal/x86_64_endtoend_test.py': 1,
-    'formal/x86_64_model_test.py': 1,
-    'scripts/bootstrap_full_test.py': 1,
-    'test_ab_native.py': 2,
-    'test_arm64_emission.py': 1,
-    'test_async_runtime_scaffold.py': 1,
-    'test_async_void_return.py': 5,
-    'test_async_with_lock_guard.py': 5,
-    'test_closure_capture_comptime_func_params.py': 2,
-    'test_comptime_bracket_params.py': 1,
-    'test_container_equality.py': 3,
-    'test_container_membership.py': 3,
-    'test_container_ordering.py': 3,
-    'test_coro_detached_async.py': 4,
-    'test_coro_future_await.py': 4,
-    'test_coro_nested_async_capture.py': 5,
-    'test_coro_runtime.py': 1,
-    'test_coro_scoreboard.py': 2,
-    'test_dict_tuple_key.py': 3,
-    'test_formal_admitted.py': 7,
-    'test_formal_call_proof_gen.py': 1,
-    'test_formal_cross_module.py': 2,
-    'test_formal_dylib.py': 2,
-    'test_formal_external_call.py': 1,
-    'test_formal_frame_return_overloads.py': 1,
-    'test_formal_link_accounting.py': 2,
-    'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
-                                   # image-run of an emitted artifact
-    'test_formal_proof_breadth.py': 5,
-    'test_formal_runtime_link.py': 1,
-    'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
-                                 # `lean` run of a generated spec proof
-    'test_formal_specialization.py': 2,
-    'test_formal_sweep_cache_key.py': 2,
-    'test_formal_sweep_truth.py': 1,  # +1 on 2026-10-04 (76143aaa), a row the
-                                      # census missed when that file's literal
-                                      # arrived with the derived host-import rows
-    'test_formal_sys.py': 2,
-    'test_formal_tempfile.py': 3,
-    'test_formal_x86_64_dylib.py': 3,
-    'test_general_mutable_closure_capture.py': 2,
-    'test_import_integration.py': 4,
-    'test_link_mode.py': 2,
-    'test_metal_codegen.py': 9,
-    'test_mixed_cpp_link.py': 1,
-    'test_mutable_async_capture.py': 5,
-    'test_nested_async_generic.py': 5,
-    'test_nonlocal.py': 2,
-    'test_ptr_registry.py': 2,
-    'test_python_source_mut_capture.py': 1,
-    'test_runtime_dylib.py': 1,
-    'test_selfhost.py': 2,  # +1 on 2026-10-04: work/bugs6-1's
-                                       # build_scratch_is_private_and_removed
-    'test_selfhost_memory.py': 1,
-    'test_stdlib.py': 1,
-    'test_taskgroup.py': 4,
-    'test_transitive_closure_capture.py': 5,
-    'test_x86_64_containers.py': 1,
-    'test_x86_64_decode.py': 1,
-}
-
-#: Files where a per-child literal is the SUBJECT rather than residue, with the
-#: reason each one is. Both are about admission and scheduling: a budget there
-#: is the thing under test, and converting one to `RUN_TIMEOUT_S` would make a
-#: self-test take hours and destroy what it asserts. Stated here rather than
-#: filtered, because a filter for "looks like a budget test" is a guess.
-BUDGET_IS_THE_SUBJECT = ('test_memslot.py', 'test_suite.py')
-BUDGET_SUBJECT_WHY = {
-    'test_memslot.py':
-        "p.wait(timeout=10) is testing that admission refuses an over-budget "
-        "request within a known window, and the sandbox jobs deliberately use "
-        "small budgets so the self-test finishes; RUN_TIMEOUT_S would make it "
-        "take hours and assert nothing",
-    'test_suite.py':
-        "the same subject from the runner's side — a driver under a cap, a "
-        "timeout that must be reported as its own class — plus the four "
-        "assertions that keep this file's own checks honest, whose windows are "
-        "what they are asserting about",
-}
-
-
-def test_no_stale_per_child_budget_is_left_as_a_literal():
-    """A file that adopted the shared per-child budgets must not still spell one.
-
-    `exec_budget.py` exists because a per-child wall clock sized for "much more
-    than a tiny program needs" was firing on a loaded machine, and a timeout
-    inside a test file is reported as an ordinary FAIL — that is, as a compiler
-    bug.  Its docstring names the mechanism that let the defect spread: "a
-    literal is how this defect spread across 29 files in the first place, and a
-    reader has no way to tell a deliberate 5-second budget from a stale one".
-
-    What it does not say is that adopting the constants is only half of it, and
-    the other half is what happened twice.  Naming `RUN_TIMEOUT_S` at the top of
-    a file changes nothing; every CALL SITE has to read it.  On 2026-10-03
-    `gimplegenerators` failed with `7 cases "timed out after 10 seconds" plus one
-    TIMEOUT` and `gimplerunner` with `300 passed, 1 failed, 8 timed out` — every
-    one of them a site that still said `timeout=10`, in files whose own comments
-    claimed the conversion had been done.  So this reads the call sites with
-    `ast` rather than believing a comment, and it fails on the literal.
-
-    It is deliberately scoped to the files that IMPORT `exec_budget`.  That is
-    the set where "literal" is unambiguously wrong — the file has already
-    declared that its budgets are shared — and it is what makes this a check
-    rather than a sweep of every `timeout=NN` in the repo, which is a different
-    piece of work over 40 other files.  The census of that residue is in
-    `bugs/TEST_stale_per_child_timeout_literals.md`; extending this check to
-    cover a file that has NOT opted in is the step that doc describes, and it is
-    deliberately not taken here because the mapping from "this child" to "which
-    budget" is a per-file judgement.
-
-    Three checks, because each alone is satisfiable without meaning anything:
-    the walk found some importers, each importer really uses a shared constant,
-    and none of them still has a literal.
-    """
-    import ast
-    importers, literals, unused = [], [], []
-    for rel in _test_files_in_repo():
-        path = os.path.join(HERE, rel)
-        try:
-            with open(path, 'r', errors='replace') as f:
-                src = f.read()
-            tree = ast.parse(src, filename=rel)
-        except (OSError, SyntaxError):
-            continue
-        shared = []
-        for n in ast.walk(tree):
-            if isinstance(n, ast.ImportFrom):
-                if n.module == 'exec_budget':
-                    shared.append(n)
-            elif isinstance(n, ast.Import):
-                if any(a.name == 'exec_budget' for a in n.names):
-                    shared.append(n)
-        if not shared:
-            continue
-        importers.append(rel)
-        # `timeout=` as a KEYWORD, which is how every call site spells it. The
-        # value has to be read off the tree rather than the text so a number in
-        # a comment or a docstring is not mistaken for a budget.
-        values = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            for kw in node.keywords:
-                if kw.arg == 'timeout':
-                    values.append((node.lineno, kw.value))
-        for lineno, value in values:
-            if isinstance(value, ast.Constant) and isinstance(value.value, int):
-                literals.append(f'{rel}:{lineno} timeout={value.value}')
-        # An import that binds a name nothing reads is the same class of
-        # mistake: the file LOOKS converted and behaves as if it had not been.
-        bound = {a.asname or a.name
-                 for n in shared for a in n.names if hasattr(a, 'asname')}
-        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        if not (bound & used):
-            unused.append(rel)
-
-    check('budgets: the walk found the files that adopted exec_budget',
-          len(importers) >= 3, f'found {importers}')
-    check('budgets: every one of them reads a shared constant it imported',
-          not unused,
-          'imported but never used, so the file reads as converted and is not: '
-          + ', '.join(sorted(unused)))
-    check('budgets: no adopted file still spells a per-child timeout as a '
-          'literal', not literals,
-          f'{len(literals)} site(s): ' + ', '.join(sorted(literals)[:12]))
-    print(f'      budgets: {len(importers)} files on the shared constants, '
-          f'{len(literals)} stale literal(s)')
-
-    # ── the rest of the corpus, as a RATCHET ────────────────────────────────
-    #
-    # The three checks above are scoped to files that IMPORT `exec_budget`,
-    # which is the set where "literal" is unambiguously wrong — and that scoping
-    # is also the hole: a file avoids the check forever by not importing, which
-    # is exactly what `test_gimple_runner.py` did (ten literals, no import)
-    # while its sibling `test_gimple_generator_runner.py` had the import and
-    # four literals anyway. So the other direction is asked here, over EVERY
-    # test file, and it is a ratchet rather than a prohibition:
-    # `STALE_PER_CHILD_BUDGETS` below is the census, and it has to match the
-    # walk EXACTLY — a file that is converted loses its row (or fails, if the
-    # count is stale), and a file that grows a literal appears in the diff and
-    # fails. That is what makes the residue shrink without making 56 files red
-    # on the day the rule is written.
-    #
-    # Converting a file is per-file reading, not a substitution: `test_gimple.py`
-    # mixes a 300 s `fire.py build` with a 30 s run of the executable it
-    # produced, and a site whose right answer is "none of these three" (a
-    # SIGTERM drain window, a host-tool probe) is named at the site rather than
-    # forced into a constant that does not describe it. The census, the
-    # exemptions and that reasoning are in
-    # `bugs/TEST_stale_per_child_timeout_literals.md`.
-    residue, subject = {}, {}
-    for rel in _test_files_in_repo():
-        path = os.path.join(HERE, rel)
-        try:
-            with open(path, 'r', errors='replace') as f:
-                tree = ast.parse(f.read(), filename=rel)
-        except (OSError, SyntaxError):
-            continue
-        n = 0
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            for kw in node.keywords:
-                if (kw.arg == 'timeout' and isinstance(kw.value, ast.Constant)
-                        and isinstance(kw.value.value, int)):
-                    n += 1
-        if not n:
-            continue
-        (subject if rel in BUDGET_IS_THE_SUBJECT else residue)[rel] = n
-
-    check('budgets: the residue census is the residue',
-          residue == STALE_PER_CHILD_BUDGETS,
-          'the census and the walk disagree. Converted a file? drop its row. '
-          'Added a literal? add the file with its count and read its call '
-          'sites. Difference: '
-          + '; '.join(
-              f'{k}: census {STALE_PER_CHILD_BUDGETS.get(k, 0)} vs walk '
-              f'{v}' for k, v in sorted(residue.items())
-              if STALE_PER_CHILD_BUDGETS.get(k) != v)
-          + ' | census-only: '
-          + ', '.join(sorted(set(STALE_PER_CHILD_BUDGETS) - set(residue))))
-    check('budgets: a file where the budget is the SUBJECT still has one',
-          sorted(subject) == sorted(BUDGET_IS_THE_SUBJECT),
-          'the exemption list and the files that actually carry literals '
-          'disagree: walk '
-          + repr(sorted(subject)) + ' vs declared '
-          + repr(sorted(BUDGET_IS_THE_SUBJECT)))
-    for rel in BUDGET_IS_THE_SUBJECT:
-        check(f'budgets: {rel} says why a literal is its subject',
-              len(BUDGET_SUBJECT_WHY.get(rel, '')) >= 40,
-              'the reason is what tells the next reader this is not residue')
-    check('budgets: the residue is not allowed to GROW',
-          len(residue) <= len(STALE_PER_CHILD_BUDGETS),
-          f'{len(residue)} files carry a literal against a census of '
-          f'{len(STALE_PER_CHILD_BUDGETS)}')
-    print(f'      budgets: {sum(residue.values())} literal(s) in '
-          f'{len(residue)} unconverted file(s), {sum(subject.values())} in '
-          f'{len(subject)} where the budget is the subject')
 
 
 def test_missing_fanout_item_is_a_named_failure():
@@ -2818,83 +2347,13 @@ def test_selfhost_key_is_complete():
           'a codegen source missing from the self-host key')
 
 
-def test_selfhost_key_hashes_nothing_dead():
-    """The OTHER direction of the key, and the one that was unchecked.
-
-    `test_selfhost_key_is_complete` above asks "does the key cover everything
-    the closure reaches?". This asks "does the key cover anything the closure
-    does NOT reach?", and the asymmetry is deliberate in one direction only:
-    too narrow serves a stale binary, too wide only costs a rebuild — which is
-    true, and is also why a dead entry is invisible forever. `build_mojo_cli.py`
-    was in the key for its whole life with no importer, no Makefile rule and no
-    caller — a second generator of the `build/mojo` CLI script, next to the real
-    one — and `python3 build_mojo_cli.py` still "worked", so nothing failed.
-    Deleted, and this is what keeps the next one loud.
-
-    Two halves, because they fail differently:
-
-      * `missing` — a hashed file that does not exist. The fingerprint
-        tolerates this by folding `\0missing:<name>` into the key, so a deleted
-        input looks like a present one instead of failing, and the key goes on
-        "covering" it.
-      * `unreached` — a hashed file no import walk reaches, which is either dead
-        or an entry point. Entry points are run rather than imported, so they
-        are declared as entries in `cas._SELFHOST_ENTRIES` rather than excused
-        here: an unstated exception is the thing this check exists to end.
-
-    Each half is mutation-tested below, because a check that cannot be shown to
-    fail is the trap `bugs/UNTESTED.md` §4 documents.
-    """
-    import cas
-    missing, unreached, reached = cas.selfhost_extra_is_justified()
-    check('self-host key: no hashed input is a file that is not there',
-          not missing,
-          f'deleted but still hashed, so the fingerprint is folding a '
-          f'"missing" marker and going on: {missing}')
-    check('self-host key: no hashed input is a file nothing reaches',
-          not unreached,
-          'in the key with no importer and no declared entry point, so it is a '
-          'live dependency on a file nothing builds against — delete it and its '
-          f'_SELFHOST_EXTRA entry together: {unreached}')
-
-    # Anti-vacuity, the same two guards the orphan walk has: neither half can
-    # be empty-because-broken. A walk that reached nothing would make
-    # `unreached` everything and this check red anyway, but the reverse
-    # failure — a check that reads an empty list and calls it a pass — is what
-    # these guards are for.
-    check('self-host key: ...and the walk it judges against really walked',
-          len(reached) > 30,
-          f'only reached {len(reached)} files from '
-          f'{len(cas._SELFHOST_ENTRIES)} entries, so "nothing hashes an '
-          f'unreached file" would be a statement about a walk that did not run')
-    check('self-host key: ...and the entries are declared, not inferred',
-          all(os.path.isfile(os.path.join(HERE, e))
-              for e in cas._SELFHOST_ENTRIES)
-          and len(set(cas._SELFHOST_EXTRA) & set(cas._SELFHOST_ENTRIES)) == len(
-              cas._SELFHOST_ENTRIES),
-          f'entries={cas._SELFHOST_ENTRIES}: every declared entry point must '
-          f'exist AND be in _SELFHOST_EXTRA, or the declaration is a way to '
-          f'remove a file from the walk without removing it from the key')
-
-    # And the mutation test, run for real rather than argued: hand the checker
-    # a key with one dead file in it and require it to say so. This is the
-    # property `build_mojo_cli.py` violated, exercised on a file that exists.
-    victim = 'fire_main.py'
-    _m, widened, _r = cas.selfhost_extra_is_justified(
-        entries=[e for e in cas._SELFHOST_ENTRIES if e != victim])
-    check('self-host key: ...and the check detects an unreached file',
-          victim in widened,
-          f'dropping {victim} from the declared entries made no difference, so '
-          f'the "unreached" half is vacuous: {widened}')
-
-
 def test_the_compiler_imports_from_every_real_entry_point():
     """Every module the compiler is entered through must import FIRST.
 
-    The middle tier and the gimple backend WERE mutually recursive —
+    The middle tier and the gimple backend are mutually recursive by design —
     `mojo/middle/funcs_shared.py` and `mojo/middle/module_shared.py` both
     `import gimple_codegen`, which imports the backend, which imports them
-    back — so the graph had a load order it tolerated and a set it did not,
+    back — so the graph has a load order it tolerates and a set it does not,
     and Python resolves a cycle by letting whichever module the process
     reached first finish, which is why this failure reads as an unrelated
     `ImportError` a long way from the import that closed the loop.
@@ -2918,15 +2377,6 @@ def test_the_compiler_imports_from_every_real_entry_point():
         `mojo/backend_gimple/module_gen.py` -> `module_shared` ->
         `funcs_shared` -> `gimple_codegen`.
 
-    The exemption list this used to carry is now EMPTY (2026-10-04). All
-    eight `mojo/middle/*` modules opened with a module-level `import
-    gimple_codegen`, and only three of them read anything from it —
-    `_SELFHOST_DIR` and `_selfhost_impl_py_files` — so those three now import
-    inside the function that uses them. That is the whole fix: `import X`
-    binds a module object and survives a half-initialised X (its attribute
-    reads happen later, at call time), while `from X import NAME` resolves
-    EAGERLY and does not. Every other middle-tier module's copy was dead code.
-
     Each module that can be a process's FIRST `mojo.*` import is therefore
     probed in a FRESH interpreter. Checking from inside this process would
     prove nothing: by the time this test runs, `sys.modules` already holds
@@ -2936,40 +2386,13 @@ def test_the_compiler_imports_from_every_real_entry_point():
     The probe is EVERY module under `mojo/middle/` and `mojo/backend_gimple/`
     plus the top-level entry points, not a hand-kept shortlist, so a new
     module that closes a cycle is caught by being added rather than by
-    somebody remembering to extend a list. `declared` is the exemption list,
-    and it is checked in BOTH directions — a new entry appearing in the
-    failure set fails, and so does an entry in the declaration that no longer
-    fails, because a stale exemption is a hole the next reader cannot see
-    through.
-
-    **It is EMPTY, and getting it that way was nine cycles' worth of work
-    rather than a decision.** Until 2026-10-04 it named eight
-    `mojo/middle/*` modules, with a comment saying each is "load-order
-    dependent" by design — `mojo/middle/funcs_shared.py` and
-    `mojo/middle/module_shared.py` both `import gimple_codegen`, which
-    imports the backend, which imports them back. That was accurate and it
-    was also the thing the check exists to prevent: an exemption is a
-    permanent hole, and nine modules' worth of "already broken" means a NEW
-    cycle in any of them is absorbed into a row that was already red, so the
-    guard guarded nothing for them. The design was never the constraint — the
-    constraint was that nobody had noticed the cycle had only two ends. Each
-    middle module now reaches `gimple_codegen` at its USE SITE (four of the
-    eight imported a module they never read; the other four wanted
-    `_SELFHOST_DIR` / `_selfhost_impl_py_files`, which is what
-    `mojo/backend_gimple/module_gen.py` was already forced to do for the same
-    reason), and every module in both directories imports on its own:
-
-        $ for m in mojo/middle/*.py mojo/backend_gimple/*.py; do
-        >   python3 -c "import ${m%.py}" | tr / .; done
-        36 OK
-
-    So the rule a new cycle has to beat is the middle tier's own: the
-    direction that stays top-level is `backend -> middle`, and an edge the
-    other way is at its use site. `declared` is kept as the declaration
-    rather than deleted, because the two directions are the anti-rot: if a
-    module can no longer be imported first, its entry has to be DELETED in the
-    same commit, which is only a rule if there is a list to delete from.
+    somebody remembering to extend a list. `_LOAD_ORDER_DEPENDENT` is the
+    declared exemption, and it is checked in BOTH directions — a new entry
+    appearing in the failure set fails, and so does an entry in the
+    declaration that no longer fails, because a stale exemption is a hole
+    the next reader cannot see through.
     """
+    import glob
     import subprocess
     entries = ['fire', 'fire_main', 'myinterpreter', 'reflect',
                'gimple_codegen', 'formal.build', 'formal.model']
@@ -2986,17 +2409,23 @@ def test_the_compiler_imports_from_every_real_entry_point():
             last = [l for l in r.stderr.strip().splitlines() if l.strip()]
             bad.append(f'{mod}: {last[-1] if last else "failed"}')
     failed = {b.split(':', 1)[0] for b in bad}
-
     # The eight `mojo/middle/*` modules that each `import gimple_codegen`,
-    # which imports the gimple backend, which imports them back. That list is
-    # now EMPTY: the middle tier no longer imports `gimple_codegen` at module
-    # level at all, so there is nothing to exempt. Kept as a named declaration
-    # rather than deleted because the check that reads it is checked in BOTH
-    # directions, and a list that can silently reappear is the point.
-    # No `mojo/backend_gimple/*` module is exempt: the backend sits
-    # downstream of `gimple_codegen`, so every one of them is reachable first
-    # and a new cycle among them would be caught here.
-    declared: set = set()
+    # which imports the gimple backend, which imports them back. That is the
+    # middle tier's pre-existing shape — measured identical on master, before
+    # any of the branches this test was written for — so none of the eight can
+    # be the first `mojo.*` import a program makes, and every one of them
+    # DOES import fine behind `gimple_codegen` or `fire.py`. Named rather than
+    # omitted so a reader who finds one of them broken learns it was already
+    # load-order-dependent instead of concluding the exemption is where to
+    # start looking. No `mojo/backend_gimple/*` module is exempt: the backend
+    # sits downstream of `gimple_codegen`, so every one of them is reachable
+    # first and a new cycle among them would be caught here.
+    declared = {
+        'mojo.middle.calls_shared', 'mojo.middle.funcs_shared',
+        'mojo.middle.infra_infer', 'mojo.middle.loops_shared',
+        'mojo.middle.methods_shared', 'mojo.middle.module_shared',
+        'mojo.middle.resolve_shared', 'mojo.middle.stmts_shared',
+    }
     check('imports: every real entry point imports first',
           failed <= declared, '; '.join(bad))
     check('imports: the load-order exemption list is not stale',
@@ -3006,392 +2435,6 @@ def test_the_compiler_imports_from_every_real_entry_point():
     check('imports: the probe actually probed something', len(entries) >= 30,
           f'only reached {len(entries)} modules — the glob or the list went '
           f'stale and this check is vacuous')
-    # The exemption list is now EMPTY, which means the check above is
-    # currently `not bad`. Assert that it is not vacuous by construction: an
-    # empty list with a non-empty failure set is the state this whole test
-    # exists to prevent, and `failed <= declared` alone would pass it.
-    check('imports: no middle-tier module needs an exemption any more',
-          not (declared or failed),
-          f'exempt={sorted(declared)} failing={sorted(failed)} — the middle '
-          f'tier must not import gimple_codegen at module level (see '
-          f'mojo/middle/methods_shared.py\'s header comment for the rule)')
-
-
-def test_every_backend_call_of_a_gen_method_has_the_delegate():
-    """`mojo/backend_gimple/*` calls the codegen's methods as `gen.X(...)`,
-    and every one of them has to be a method `GimpleGen` actually has.
-
-    The backend is a set of module-level functions that take the generator as
-    their first argument, so `gimple_codegen.py`'s `GimpleGen` is nothing but
-    the delegating half of one API — and the two halves are edited separately.
-    A merge that takes `gimple_codegen.py` from one side and `emit_stmts.py`
-    from the other produces a call to a method nobody defined, and the only
-    symptom is an `AttributeError` raised during codegen, on the four test
-    cases that happen to reach that store. It is invisible to `gcc`, to the
-    linker and to every exit code: the failure never gets far enough to have
-    an artifact. That is how a doc could sit open describing a one-line fix —
-    `'GimpleGen' object has no attribute '_emit_dict_int_value_store'`, on
-    four bytes-dict tests — while every gate stayed green.
-
-    Checked statically over CALLS only. A bare `gen._registry` read of an
-    attribute `__init__` assigns is not this defect — and there are ~330 of
-    them, so including reads would drown the ~2 real ones in noise.
-    `mojo/backend_gimple/spec_gen.py` is excluded because its `gen` is the
-    spec generator's own object, not a `GimpleGen`; it is the only backend
-    module whose `gen` is not one.
-    """
-    import glob
-
-    import gimple_codegen
-    cls = gimple_codegen.GimpleGen
-    known = set(vars(cls))
-    tree = ast.parse(open(os.path.join(HERE, 'gimple_codegen.py')).read())
-    cdef = next(n for n in tree.body
-                if isinstance(n, ast.ClassDef) and n.name == 'GimpleGen')
-    for n in ast.walk(cdef):
-        # `self.x = ...` inside any method, plus the class-level constants.
-        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
-                and n.value.id == 'self':
-            known.add(n.attr)
-        if isinstance(n, ast.Name):
-            known.add(n.id)
-    bad = []
-    for path in sorted(glob.glob(os.path.join(HERE, 'mojo/backend_gimple/*.py'))):
-        if os.path.basename(path) == 'spec_gen.py':
-            continue
-        for n in ast.walk(ast.parse(open(path).read())):
-            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                    and isinstance(n.func.value, ast.Name)
-                    and n.func.value.id in ('gen', 'gen0')
-                    and n.func.attr not in known):
-                bad.append(f'{os.path.relpath(path, HERE)}:{n.lineno} '
-                           f'gen.{n.func.attr}')
-    check('the backend never calls a gen method GimpleGen does not have',
-          not bad, '; '.join(bad))
-
-
-# Every `.py` and `.mojo` whose text can end up in a refusal a test pins, and
-# every line of a `formal/hostmods/*.mojo` read as raw text: a hostmod is Mojo
-# source and says things no Python literal can.
-#
-# `test_*.py` is EXCLUDED from this list even though the glob below appears to
-# take it in, and that exclusion is the whole check. A needle is a string
-# literal in a test file, so a corpus that reads the test files satisfies every
-# needle with the needle: the census would report 0 misses on a tree where
-# every message in it had been reworded, which is the failure it exists to
-# catch. Measured — with `test_*.py` in the corpus, 66 of 66 needles "match",
-# including a synthetic tree whose producer had been deleted outright.
-_SAID_BY_PY = ('*.py', 'formal/**/*.py', 'mojo/**/*.py', 'tools/*.py')
-_SAID_BY_RAW = ('formal/hostmods/**/*.mojo',)
-# The calls a needle can be an argument of. `check(needle in text, why)` is this
-# tree's convention everywhere it pins a message; the `assert*` three are the
-# same shape spelled the unittest way.
-_NEEDLE_CALLS = ('check', 'assertTrue', 'assertFalse', 'assertIn')
-# An interpolation: a character the message's own text does not contain and a
-# substituted value does. Matched by `_said_contains`.
-_SUBSTITUTED = None
-_WORD = re.compile(r'\S+')
-
-
-def _said_by(root, pattern, raw=False):
-    """One char list per string the module can SAY, substitutions marked.
-
-    A list of single characters rather than the string, because that is what
-    makes the two awkward shapes work. A needle is usually a FRAGMENT of a
-    message, so it has to be findable in the middle of one (`'DEFINES the
-    name'` out of a fifteen-line refusal); and it often spans a value the
-    message substituted (`'widen binds 3 symbol(s) that nothing provides'` — the
-    `3` is an f-string field). Matching characters with the substitution
-    matching any run of them handles both, where a word-per-token match fails
-    on `'`thing_`'` alone: the template spells it `` ` `` `{attr}` `` `_`, `` —
-    three tokens for one word.
-    """
-    for path in sorted(glob.glob(os.path.join(root, pattern), recursive=True)):
-        if os.path.basename(path).startswith('test_'):
-            continue
-        if raw:
-            try:
-                text = open(path, encoding='utf-8', errors='replace').read()
-            except OSError:
-                continue
-            for line in text.splitlines():
-                if line.strip():
-                    yield list(line)
-            continue
-        try:
-            tree = ast.parse(open(path, encoding='utf-8',
-                                  errors='replace').read(), path)
-        except (SyntaxError, ValueError, RecursionError):
-            continue
-        # A DOCSTRING is not something a module says to a user, and several
-        # quote a message verbatim to explain it — which is how
-        # `model.function_value_refusal`'s surviving docstring kept the deleted
-        # copy's wording alive as something a test could still match. Counting
-        # prose about a message as the message is the same self-satisfying
-        # defect as reading the tests.
-        quoted = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
-                                 ast.AsyncFunctionDef)):
-                body = getattr(node, 'body', None)
-                if (body and isinstance(body[0], ast.Expr)
-                        and isinstance(body[0].value, ast.Constant)
-                        and isinstance(body[0].value.value, str)):
-                    quoted.add(id(body[0].value))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if id(node) in quoted:
-                    continue
-                if node.value.strip():
-                    yield list(node.value)
-            elif isinstance(node, ast.JoinedStr):
-                chars = []
-                for value in node.values:
-                    if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                        chars += list(value.value)
-                    else:
-                        chars.append(_SUBSTITUTED)
-                # An f-string with no text of its own — `f"{a}{b}"` — is not a
-                # template, it is a wildcard that matches every string in the
-                # tree, and one of those makes this census vacuous.
-                if ''.join(c for c in chars if c is not _SUBSTITUTED).strip():
-                    yield chars
-
-
-def _said_contains(needle, said):
-    """Whether one string the tree can say CONTAINS the needle.
-
-    Whitespace is not pinned: these messages are wrapped across source lines
-    and a needle that spans the wrap has a newline in the middle of it, so any
-    whitespace matches any whitespace. Everything else must line up.
-    """
-    def same(a, b):
-        return a == b or (a.isspace() and b.isspace())
-
-    n, m = len(needle), len(said)
-
-    def from_here(i, j):
-        while j < m:
-            c = said[j]
-            if c is _SUBSTITUTED:
-                # A substituted value can be any length, including none, so
-                # every split of the remaining needle is a candidate.
-                for k in range(i, n + 1):
-                    if k == n or from_here(k, j + 1):
-                        return True
-                return False
-            if i >= n:
-                return True
-            if not same(c, needle[i]):
-                return False
-            i, j = i + 1, j + 1
-        return i >= n
-
-    for start in range(m):
-        c = said[start]
-        if c is _SUBSTITUTED:
-            # The needle can START inside a substituted value, which is the
-            # shape every message that names the callee has: `'widen binds 3
-            # symbol(s)…'` against `f"{name} binds {n} symbol(s)…"`. So the
-            # needle index enters at 0 and the substitution absorbs from there.
-            if from_here(0, start):
-                return True
-        elif same(c, needle[0]) and from_here(1, start + 1):
-            return True
-    return False
-
-
-def _is_a_message_fragment(s):
-    """Whether a needle is PROSE — and so names something a module can say.
-
-    The floor is three words at least 90% letters and spaces, which is what
-    separates `'brackets cannot be bound'` from `'typedef'`, `'/tmp/x.dylib'`
-    and `'done-sha256=3@@'`. A test pins a dozen of those in every file and
-    they are not messages; requiring prose is what keeps this check about
-    messages and about nothing else.
-    """
-    if len(s.split()) < 3:
-        return False
-    return sum(c.isalpha() or c == ' ' for c in s) / len(s) > 0.9
-
-
-def _unmatched_needles(root):
-    """`(missing, total, n_said)` for a tree — the census, reusable.
-
-    Split out from the check so the check's own ability to FAIL is pinned on a
-    synthetic tree, which is the only way to know a green run means the
-    messages agree rather than that the walk stopped walking.
-
-    **Only a POSITIVE needle is in scope.** `check(needle not in text, …)`
-    asserts a message is NOT said — `'only function it declares' not in reason`
-    is guarding a branch that was deleted on purpose — and there is nothing to
-    check a negative pin against: the string is supposed to be absent, so
-    "the tree can say it" is the wrong answer and "the tree cannot" is a claim
-    about a message nobody should write. Both of this file's bugs were
-    positive pins, and the fix for a negative one is a different check
-    entirely.
-    """
-    said = []
-    for pattern in _SAID_BY_PY:
-        said += list(_said_by(root, pattern))
-    for pattern in _SAID_BY_RAW:
-        said += list(_said_by(root, pattern, raw=True))
-    # A necessary condition worth having: a message that cannot say any word
-    # of the needle cannot contain it, and this turns 66 x 90,947 into 66 x a
-    # few hundred.
-    words = [frozenset(_WORD.findall(''.join(c for c in s if c is not _SUBSTITUTED)))
-             for s in said]
-    missing, total = [], 0
-    for path in sorted(glob.glob(os.path.join(root, 'test_*.py'))):
-        try:
-            tree = ast.parse(open(path, encoding='utf-8').read(), path)
-        except (SyntaxError, ValueError):
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = getattr(func, 'id', None) or getattr(func, 'attr', None)
-            if name not in _NEEDLE_CALLS:
-                continue
-            for arg in list(node.args) + [k.value for k in node.keywords]:
-                for sub in ast.walk(arg):
-                    if not (isinstance(sub, ast.Compare)
-                            and isinstance(sub.left, ast.Constant)
-                            and isinstance(sub.left.value, str)
-                            and _is_a_message_fragment(sub.left.value)):
-                        continue
-                    if [type(o).__name__ for o in sub.ops] == ['NotIn']:
-                        continue
-                    needle = sub.left.value
-                    total += 1
-                    needle_words = set(_WORD.findall(needle))
-                    if any((needle_words & w) and _said_contains(needle, s)
-                           for w, s in zip(words, said)):
-                        continue
-                    missing.append(f'{os.path.basename(path)}:{sub.lineno} '
-                                   f'{needle!r}')
-    return missing, total, len(said)
-
-
-def test_a_message_a_test_pins_is_still_a_message_the_tree_can_say():
-    """A needle and the sentence it pins cannot drift apart unnoticed.
-
-    `check("brackets cannot be bound" in text, …)` is how this tree pins a
-    refusal, and nothing said the sentence and the needle had to agree. Two
-    bugs in `bugs/` were that, and both were the same shape: the refusal was
-    still correct, the words were still in the tree somewhere else, and the
-    TEST was asserting a sentence the build could not print —
-
-      * `TEST_formal_specialization_pins_a_message_master_deleted.md`, whose
-        needles named a copy of `model.function_value_refusal` that Python's
-        rebinding had made DEAD, so the case was red on a tree whose behaviour
-        was right;
-      * `TEST_formal_specialization_cross_module_row_expects_the_bracket_
-        sentence.md`, whose needle was still said — by a different check, for a
-        different shape — so the row read as a regression of the message when
-        the message had only become more specific.
-
-    Either way the reader of the red is sent to the wrong thing, and the cost
-    is a session: both needed one to establish that the behaviour was fine.
-
-    So this is the census, on every gate. Every message-shaped string literal
-    that is the LEFT operand of a positive comparison inside a
-    `check(...)` / `assert*(...)` call in any `test_*.py` must be CONTAINED in
-    something the tree can say. Measured on this tree: 90,947 sayable strings,
-    66 positive needles, **0 unmatched**, 3.1 s — of which 2.3 s is parsing the
-    corpus and 0.2 s is the matching.
-
-    The corpus is deliberately wider than the messages it has to catch. A
-    needle naming a sentence from a module not in it is reported here rather
-    than passing for the wrong reason, and the fix is one line of corpus.
-    """
-    missing, total, n_said = _unmatched_needles(HERE)
-    check('needles: every message a test pins is one the tree can still say',
-          not missing,
-          f'{len(missing)} of {total} message-shaped needles match no string '
-          f'in the tree — either the message was reworded without the test '
-          f'following it, or the corpus above is missing where it is said: '
-          f'{missing[:6]}')
-    check('needles: the census is not vacuous', total >= 40,
-          f'only found {total} positive message-shaped needles — the AST walk '
-          f'or the prose floor went stale and this check would pass on nothing')
-    check('needles: the corpus is not empty', n_said >= 10000,
-          f'only {n_said} sayable strings — the globs or the parser went stale '
-          f'and every needle would be reported missing')
-
-
-def test_the_needle_census_fails_on_a_needle_nothing_says():
-    """The census above, on a tree built to be wrong, so green means something.
-
-    A census that cannot report a miss is a comment with a subprocess in it,
-    and this one has four ways to go vacuous that no amount of reading the real
-    tree would reveal: the glob finds no `test_*.py`, the AST walk stops
-    recognising `check`, the corpus starts reading the test files (which
-    satisfies every needle with itself), and a docstring's quotation of a
-    message counts as the message. All four are exercised here, on a
-    three-file synthetic tree.
-    """
-    def write(name, text):
-        with open(os.path.join(root, name), 'w') as f:
-            f.write(text)
-
-    with tempfile.TemporaryDirectory() as root:
-        write('prod.py',
-              'PLAIN = "the brackets cannot be bound here"\n'
-              'def refuse(name, n):\n'
-              '    return (f"{name} binds {n} symbol(s) that nothing provides"\n'
-              '            f" on this link line")\n')
-        write('test_synthetic.py',
-              'def check(cond, detail=""):\n'
-              '    assert cond, detail\n'
-              'def test_it():\n'
-              '    check("the brackets cannot be bound here" in PLAIN)\n'
-              '    check("widen binds 3 symbol(s) that nothing provides on '
-              'this link line"\n'
-              '          in refuse("widen", 3))\n')
-        missing, total, n_said = _unmatched_needles(root)
-        check('needles: a live tree is not reported missing',
-              not missing and total == 2 and n_said >= 2,
-              f'{missing} / {total} needles, {n_said} sayable — a needle the '
-              f'producer really can say was reported missing, which would '
-              f'make the real check cry wolf')
-        # …and the same tree with ONE of the producer's two messages reworded
-        # under the test that pins it: exactly the drift the census exists to
-        # catch, and exactly what `model.function_value_refusal`'s two
-        # definitions produced — one message, two sentences, and the test
-        # asserting the copy Python's rebinding had made dead. ONE and not two
-        # matters: a census that reports everything missing the moment any
-        # producer changes is a census nobody can act on.
-        write('prod.py',
-              'PLAIN = "the brackets are a comptime parameter list"\n'
-              'def refuse(name, n):\n'
-              '    return (f"{name} binds {n} symbol(s) that nothing provides"\n'
-              '            f" on this link line")\n')
-        missing, total, _ = _unmatched_needles(root)
-        check('needles: a needle the tree can no longer say IS reported',
-              len(missing) == 1 and 'brackets cannot be bound' in missing[0]
-              and total == 2,
-              f'{missing} / {total} — expected exactly the one reworded needle, '
-              f'and nothing else')
-        # …and the docstring exclusion, the quieter half of the same
-        # defect: a module that explains its own message by QUOTING it has
-        # not been reworded, and a census that counts prose as speech
-        # reports it live — which is how the dead copy of
-        # `function_value_refusal` would have stayed pinned forever.
-        write('prod.py',
-              chr(34)*3 + 'The refusal says: the brackets cannot be bound '
-              'here.' + chr(34)*3 + chr(10) +
-              'PLAIN = "the brackets are a comptime parameter list"' + chr(10) +
-              'def refuse(name, n):' + chr(10) +
-              '    return (f"{name} binds {n} symbol(s) that nothing '
-              'provides"' + chr(10) +
-              '            f" on this link line")' + chr(10))
-        missing, total, _ = _unmatched_needles(root)
-        check('needles: a message quoted in a DOCSTRING is not a message said',
-              len(missing) == 1 and 'brackets cannot be bound' in missing[0],
-              f'{missing} — the docstring was counted as speech, so a module '
-              f'that explains its own message keeps every old needle alive')
 
 
 def test_bucket_dedup():
@@ -3847,13 +2890,16 @@ def test_checked_run_replays_a_pass_and_reruns_a_failure():
 # the point: every removal below is a test something now runs.
 # The reason the formal backend's per-construct suites give, said once. It is a
 # variable rather than a repeated literal because a literal repeated fifteen
-# times is fifteen places to forget to update, and it is a sentence a reader can
-# match on when they want to know why a suite they just found is not in a gate.
+# times is fifteen places to forget to update, and this text names a file
+# (`bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`) that a
+# reader has to be able to grep for.
 _FORMAL_SUITE_REASON = (
     'Builds and RUNS images on both architectures against CPython, one table '
     'entry per construct; run directly rather than from a gate because a run '
     'of one is minutes of real compilation. The construct and its bug doc are '
-    'named in the file\'s own docstring.')
+    'named in the file\'s own docstring. '
+    'bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md records '
+    'what registering them properly would cost.')
 
 
 UNREGISTERED = {
@@ -3862,64 +2908,6 @@ UNREGISTERED = {
     #    reading of a bug doc.
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
-    # `formal/x86_64_model_fuzz.py` is a TOOL and its two `HARNESS` verdict rows
-    # are the ones a reader must not go looking for in `lib/X86.lean`, so the
-    # harness's own entry path needs a check even though the sweep it feeds does
-    # not. This file is that check, and it is unregistered for the reason its own
-    # docstring gives: three of its four cases are Lean-free and cheap, but the
-    # fourth compiles the harness `clang -arch x86_64` and runs it `arch -x86_64`,
-    # and it SKIPS where that is unavailable — so on a host that cannot run
-    # x86-64 code the row that matters most reports nothing, which is the shape
-    # `formal-receiver-position` was moved out of `proofs` for.
-    'test_x86_64_model_fuzz.py':
-        'The model-fuzz harness\'s two unread steps: its ENTRY register file, '
-        'read back through `--entry-probe` (if the stub\'s real `mov` loads did '
-        'not land, every field of every program the harness compares is a false '
-        'disagreement), and its VERDICT rules, which decide `WRONG` (a model '
-        'bug) against `HARNESS` (a disagreement no x86-64 CPU can produce) from '
-        'the program\'s bytes and the differing fields alone. The text cases are '
-        'Lean-free; one builds and runs the harness under `arch -x86_64` and '
-        'SKIPS where that is not available, which is why this is listed rather '
-        'than registered — a registered job that skips its only substantive '
-        'case is a green line that says nothing.',
-
-    # A DOCUMENT check, and the cheapest file in this list by a wide margin:
-    # import-and-compare against `runtime_abi()`, `reflect` and three Markdown
-    # files. 0.17 s wall and 81 MB maximum RSS measured three times on
-    # 2026-10-04 (`/usr/bin/time -l`, because at 0.17 s memcap's own poll cannot
-    # see a process that is gone before the first tick), no build and no Lean.
-    #
-    # It is listed rather than registered because its branch's task says not to
-    # touch the registry — NOT because it is expensive. It is the cheapest thing
-    # here, so the cost rule wants it registered rather than excused, and the
-    # only thing standing between it and a registration is the instruction.
-    #
-    # Exact next step, in `check` beside `suite-self-test` and `doc-refs`, which
-    # are the other two files that read the tree's own documents:
-    #
-    #   test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'],
-    #        extra=['test_formal_doc_truth.py', 'FORMAL.md', 'OPUS.md',
-    #               'doc/ABI.md', 'runtime', 'lib', 'formal/model.py',
-    #               'formal/lean.py', 'formal/build.py',
-    #               'formal/arm64_proof_gen.py',
-    #               'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
-    #               'reflect.py'],
-    #        desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
-    #             'agrees with the tree')
-    #
-    # `extra` names the runtime headers and `lib/` because two of its six groups
-    # read them, and `doc-refs`'s own key does not: a `formal/hostmods/` edit
-    # that moved a declared `mojo_*` signature would otherwise replay a recorded
-    # PASS.
-    'test_formal_doc_truth.py': (
-        'Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md -- counts, '
-        'function names, limits, refusal messages, ABI signatures, tool flags -- '
-        'out of the documents and compares them with the tree, both directions. '
-        '0.17 s and 81 MB measured, no build and no Lean; it found three wrong '
-        'numbers in FORMAL.md §2.2 (540/219/321 against a real 668/262/406) and '
-        'three `lib/` holes published as live in §7 that had been closed for a '
-        'week. Listed because this branch\'s task says not to register anything; '
-        'the cost argues for the registration above.'),
 
     # ── the formal backend's per-construct suites, run by hand ──
     #
@@ -3933,327 +2921,25 @@ UNREGISTERED = {
     # (program, expected) built and run on both architectures against CPython —
     # so a per-file sentence would be fifteen copies of one sentence, and the
     # table's own comment is where a reader looks for what these have in
-    # common.
-    #
-    # Since 2026-10-04 even the KEYS are gone for the members that had nothing
-    # of their own to say: the family is `_DECLARED_BY_RULE` below, which
-    # carries every `test_formal_*.py` and so makes the next member of it cost
-    # nobody an edit here. The formal suites still listed in this block are
-    # listed because each says something the family's sentence cannot, which is
-    # the rule's own rule: an entry beats a rule.
-    #
-    # `test_formal_returned_frame.py` is one of them and its reason is further
-    # down, where the row that survives lives — a duplicate key here would win
-    # by assignment order, not by which sentence is the better one, and the
-    # estate check below is what says so.
-    #
-    # `test_formal_bracketed_method_field_set.py` was here too, under the same
-    # reason, and was REGISTERED instead (2026-10-04, as
-    # `formal-bracketed-method-field-set`, in `check` and `proofs`): 3.7 s and
-    # 0.05 GB measured, 26 rows, no Lean — `_FORMAL_SUITE_REASON`'s "minutes per
-    # job" is a measurement of the suites that build and RUN a program per group,
-    # and this file does that for its last two rows out of twenty-six. It was also
-    # the file whose four ask-COUNT rows had been red in no bucket, which is the
-    # cost argument and the coverage argument agreeing.
+    # common. `bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`
+    # records the gap and what closing it properly costs.
+    'test_formal_returned_frame.py': _FORMAL_SUITE_REASON,
+    'test_formal_bracketed_method_field_set.py': _FORMAL_SUITE_REASON,
     'test_formal_cross_module.py': _FORMAL_SUITE_REASON,
     'test_formal_debug_assert.py': _FORMAL_SUITE_REASON,
     'test_formal_eval_eq_mojo_bridge.py': _FORMAL_SUITE_REASON,
     'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
     'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
     'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
-    # The formal backend's only test that looks at a dylib from OUTSIDE. It
-    # builds one real `.dylib` per architecture, then binds it from a C program
-    # (linked with `cc`, run natively and under Rosetta) and from `ctypes` (in
-    # process, and in an x86-64 interpreter under `arch -x86_64`), with the
-    # declarations generated from the library's own manifest — which is why it
-    # is not `_FORMAL_SUITE_REASON`: that sentence says "builds and RUNS images
-    # on both architectures against CPython, one table entry per construct", and
-    # this one builds LIBRARIES and runs CONSUMERS of them, so the cost and the
-    # thing being protected are both different.
-    #
-    # CHEAP and wants a REGISTRATION rather than an excuse, by CLAUDE.md's cost
-    # rule: `python3 test_formal_chain_probe.py` is 12 cases, no builds and no
-    # Lean, and 0.29 s measured 2026-10-04 (its only cost is two `copytree` calls
-    # of the stdlib, one per class, and it asserts on the list of paths
-    # `stub_targets` WOULD rewrite rather than writing them). It is listed here
-    # rather than registered because this branch's task is a sweep scope and
-    # says not to touch the registry. Exact next step:
-    # `test('formal-chain-probe', [PY, 'test_formal_chain_probe.py'], ...)` in
-    # the `check` bucket beside `formal-sweep-truth`, which covers the other
-    # instrument's truthfulness.
-    'test_formal_chain_probe.py': (
-        'Runs no build and no Lean: 12 cases over the two shapes of "module X '
-        'refused" and the choice of which group to rewrite next. 0.29 s '
-        'measured, so it wants a registration by CLAUDE.md\'s cost rule; listed '
-        'here because this branch is a sweep scope and is not touching the '
-        'registry. Next step: test(\'formal-chain-probe\', [PY, '
-        '\'test_formal_chain_probe.py\'], ...) beside \'formal-sweep-truth\'.'),
-    # The AXIOM half of `test_formal_admitted.py`'s census, and the measurement
-    # that file's own header says it cannot make.  `formal/admitted.py::
-    # library_trust` counts `native_decide`/`bv_decide` SITES in the source; this
-    # asks Lean what a theorem's proof term actually closes over, which is
-    # transitive (so a theorem with no site of its own still reports its
-    # callees' axioms) and knows whether a site ran at all.  It closes the
-    # arithmetic: 687 generated axioms for 688 counted sites, every axiom
-    # attributable to a declaration the census names and every theorem's OWN
-    # count equal to its sites.
-    #
-    # It is listed rather than registered for the same reason as
-    # `test_formal_chain_probe.py` above: this branch's task says not to touch
-    # the registry.  Its cost is NOT its own reason to be listed — measured
-    # 2026-10-04, `python3 test_formal_axioms.py` is 0.8 s of Lean and 0.9 GB
-    # when `lib/*.olean` is current, so it wants a registration by CLAUDE.md's
-    # cost rule, and unlike the entry above it cannot live in `check` because it
-    # needs `deps=['prooflib']`.
-    #
-    # Exact next step, in the `proofs` bucket beside `formal-dylib` (which is
-    # the other `mem='tiny'` job with a `prooflib` dep):
-    #
-    #   test('formal-axioms', [PY, 'test_formal_axioms.py'],
-    #        deps=['preflight', 'prooflib'], mem='tiny', timeout=1200,
-    #        extra=['test_formal_axioms.py', 'test_formal_dylib.py',
-    #               'formal/admitted.py', 'formal/lean.py', 'lib'],
-    #        desc='every axiom lib/ reaches is Lean\'s foundation or one of '
-    #             'its 688 counted tactic sites, measured by #print axioms')
-    'test_formal_axioms.py': (
-        'The axiom census `test_formal_admitted.py` cannot make: #print axioms '
-        'over all 600 askable declarations of lib/, one Lean process, 0.8 s and '
-        '0.9 GB with the library current. Listed because this branch\'s task '
-        'says not to register anything; the cost does not justify the excuse '
-        '(CLAUDE.md\'s cost rule wants it registered). Next step: '
-        'test(\'formal-axioms\', [PY, \'test_formal_axioms.py\'], '
-        'deps=[\'preflight\', \'prooflib\'], mem=\'tiny\', timeout=1200, '
-        'extra=[..., \'lib\']) in the `proofs` bucket beside \'formal-dylib\'.'),
-    # The same shape as the group above and CHEAP like `formal-hostmods-census`
-    # below: measured 2026-10-03, `python3 test_formal_list_splat.py` is 5
-    # cases x 2 backends = 10 builds plus one CPython oracle each, ~7 s
-    # wall. So by CLAUDE.md's cost rule it wants a REGISTRATION rather than
-    # an excuse, and it is listed here because this branch's subject is the
-    # sweep probe and the parity corpus, not the registry. Exact next step:
-    # `test('formal-list-splat', [PY, 'test_formal_list_splat.py'], ...)` in
-    # the `proofs` bucket beside `formal-x86`.
-    'test_formal_list_splat.py': _FORMAL_SUITE_REASON,
-    # The same shape, and its own reason rather than the group's: this file runs
-    # a DIFFERENTIAL FUZZER over twenty pinned seeds per architecture and checks
-    # the generator's own corpus, so what it protects is the measurement rather
-    # than a construct. Its heavier settings (a few thousand seeds) are a sweep,
-    # not a check, and they belong to whoever runs a formal sweep rather than to
-    # a gate — CLAUDE.md's rule is that a job a gate cannot afford is declared,
-    # not quietly omitted. `tools/formal_fuzz.py` is the tool and this file is
-    # its regression suite; the bug docs it found are named in the tool's
-    # `KNOWN_DIVERGENCES`.
-    'test_formal_fuzz.py':
-        'Builds and runs twenty generated images per architecture and compares '
-        'each against CPython on the same text — a differential fuzzer\'s own '
-        'regression suite, so it protects the measurement rather than a '
-        'construct. Measured 2026-10-03: ~29 s wall, 0.1 GB peak, both '
-        'architectures. Declared rather than registered because its heavier '
-        'settings (a few thousand seeds) are a sweep, and CLAUDE.md\'s rule '
-        'for a job no gate can afford is to declare it. The estate check this '
-        'table feeds records the same gap for the per-construct suites below, '
-        'which is why they carry one family reason between them.',
-    # The same shape as `test_formal_fuzz.py` above, and for the same reason: it
-    # is a differential FUZZER's own regression suite, and what it protects is
-    # the measurement. It is cheaper than that one (its Lean half is declared
-    # rather than run — see its own docstring), it adds the one assertion that
-    # file has no place for, which is that the corpus still REACHES the proof
-    # layer: a generator change that made every program a refusal would leave
-    # `test_formal_fuzz.py` green and this campaign measuring nothing.
-    'test_formal_proof_fuzz.py':
-        'The proof-layer differential fuzzer\'s own regression suite: the '
-        'generator\'s corpus (60 indexes, no compiler), the classifier\'s '
-        'cross of Lean\'s verdict with the image\'s, and — through the real '
-        '`compile_formal`, with `check=False` so no Lean — that two programs '
-        'which the 2026-10-03 fix widened to the proof layer still do, and that '
-        'a two-call program is still refused by name rather than crashing. '
-        'Measured 2026-10-03: ~25 s wall, 0.3 GB peak. Declared rather than '
-        'registered for the reason `test_formal_fuzz.py` is: a fuzzer\'s '
-        'heavier settings are a sweep, not a check.',
-    # `test_formal_{admitted,fcntl,math,shutil,stat}.py` were listed here when
-    # they landed on the formal6 merge (2026-10-03), and are REGISTERED now
-    # (`formal-admitted`, `formal-fcntl`, `formal-math`, `formal-shutil`,
-    # `formal-stat`, all `tiny` in the `proofs` bucket) — for
-    # `formal-tempfile`/`formal-textwrap`'s reason below: 7.0-34.5 s and
-    # 0.07-0.13 GB measured one at a time, so an excuse was a permanent one and
-    # these are the only coverage that diffs those five host modules' answers
-    # against CPython on both backends.  `proofs` rather than `check` because
-    # what they are ABOUT decides it: each builds and executes a formal image
-    # per group, and a 34.5 s `formal-shutil` and a 7.0 s `formal-fcntl` do
-    # not agree about the clock.
     'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
-    # The same shape, and here for the same reason. `posixpath` is a SPELLING
-    # of `os.path` — every one of its thirty functions is a one-line forward —
-    # so this file checks it against TWO oracles: `forward` against CPython's
-    # own `posixpath`, and `same` against `os.path` in the SAME image, because
-    # a forward that called the wrong name or dropped an argument would agree
-    # with CPython on most of the corpus and disagree with `os.path` on the
-    # rest, and only the second comparison sees that. Measured 2026-10-03 on
-    # this branch: 5/5 groups pass, 968 CPython answers + 908 in-image element
-    # comparisons + 6 constants, on both backends, ~0.1 GB peak.
-    # The same shape, and here for the same reason. `html.escape` is five
-    # ORDERED substring replacements and the ORDER is the whole function: `&`
-    # is replaced first, so the `&` the later replacements introduce is never
-    # itself replaced. Measured 2026-10-03 on this branch: 4/4 groups pass,
-    # 112 corpus answers (28 cases x CPython's two `quote` values) + 1020
-    # per-byte answers (every byte 1..255 x both values), on both backends,
-    # ~0.1 GB peak.
-    'test_formal_html.py': _FORMAL_SUITE_REASON,
-        # …and this one is in the group for a different reason, because it is the
-    # CHEAPEST file here by an order of magnitude and its absence from a gate is
-    # a hole rather than a cost: `test_formal_x86_64_call_tree.py` builds NO
-    # image and runs no Lean. It is a unit test of
-    # `formal/x86_64_endtoend_test.py`'s `_tree` over a hand-written
-    # five-instruction body, and it runs in 0.000 s.
-    #
-    # That is the whole point of it. The thing it guards is
-    # `formal/x86_64_endtoend_test.py`'s own entry point, which is 43 Lean
-    # proofs and is one of the eight Lean-checking suites a gate does not run --
-    # so the `call_rel32` arm had no test anybody could run without a Lean
-    # budget. A pin nobody can run is not a pin. (The filing that asked for that
-    # arm is deleted with its fix — `formal/x86_64_endtoend_test.py`'s "no tree"
-    # line now keeps its FORM and `_tree` has the `call_rel32` arm — so the
-    # reference is to the code rather than to a doc that is gone.) Exact next
-    # step:
-    # `test('formal-x86-call-tree', [PY, 'test_formal_x86_64_call_tree.py'], ...)`
-    # in the `x86` bucket beside `formal-x86`: at 0.000 s and 0.0 GB it costs a
-    # gate nothing, so the reason it is declared rather than registered is that
-    # this branch's subject is not the registry.
-    'test_formal_x86_64_call_tree.py':
-        "A UNIT test of formal/x86_64_endtoend_test.py's `_tree`: it builds "
-        "no "
-        'image and runs no Lean, asking the path-tree builder about a '
-        'hand-written five-instruction body, and it runs in 0.000 s. Declared '
-        'rather than registered because the thing it guards (the end-to-end '
-        'driver) is one of the eight Lean-checking suites a gate does not run, '
-        'so the `call_rel32` arm had no affordable test at all -- a pin nobody '
-        'can run is not a pin. Exact next step: '
-        '`test(\'formal-x86-call-tree\', [PY, '
-        '\'test_formal_x86_64_call_tree.py\'], ...)` in the `x86` bucket.',
-                        # `test_formal_tempfile.py` and `test_formal_textwrap.py` were listed here
-    # when they landed on 2026-10-03, and are REGISTERED now (`formal-tempfile`
-    # and `formal-textwrap` in the `proofs` bucket) — which is what this
-    # branch's own note said the registering commit would do. 0.051 GB / 35.8 s
-    # and 0.050 GB / 15.8 s, measured one at a time, which is the cost class of
-    # `formal-core-hostmods` and `formal-pathlib`: cheap enough that an excuse
-    # for them was a permanent one, and they are the only coverage that diffs
-    # those two modules' answers against CPython on both backends.
-            
-    # ── STRINGS AND UNICODE against CPython, both machines ──
-    #
-    # NOT the reason above, and it is cheap: measured 2026-10-04 on
-    # `work/formal26-unicode`, `python3 test_formal_unicode.py` —
-    # **97.0 s wall, 59.4 MB peak** (`/usr/bin/time -l`, 96 cases: 43 answered
-    # against CPython, 15 refusals whose words both machines must share, 3
-    # CROSS-MODULE rows over an image of several files, and 38 in-process rows
-    # over `formal/model.py`'s TEXT ENCODING block).  That is
-    # the same cost class as `formal-globals` and `formal-hostmods-census`, so
-    # by the cost rule in CLAUDE.md it WANTS a registration; it is listed rather
-    # than registered because this branch's task says not to register anything,
-    # and nothing else stands in the way.
-    #
-    # Its own `extra` matters more than its row, and the reason is the one this
-    # whole project keeps meeting: the 36 in-process rows read
-    # `formal/model.py`'s decision functions and would otherwise replay a
-    # recorded PASS over an encoding block that had moved, which is the wrong
-    # answer with a green tick.  `FORMAL_BUILD_INPUTS` already covers
-    # `formal/`; the encoding block's own table is what the keys need.
-    'test_formal_unicode.py':
-        'STRINGS AND UNICODE against CPython: builds and RUNS both '
-        'architectures and requires byte equality with what CPython prints for '
-        'the same program, so the expectation is not a constant this tree\'s '
-        'author wrote about a lowering the same author wrote. 35 answered rows '
-        '(the character-count and character-position FOLDS), 10 refusals that '
-        'both machines must word identically and that must name the non-ASCII '
-        'case, and 17 rows for the operations measured RIGHT already '
-        '(`count`/`in`/`startswith`/`endswith`/`lstrip`/`==`/truthiness/`%s` '
-        'with no width) with the reason recorded so they are not re-derived. '
-        '47.3 s and 53.8 MB measured, no Lean, well under the cost rule -- it '
-        'is listed because this branch\'s task says not to register anything. '
-        'Exact next step, in `check` beside `formal-run`: test(\'formal-unicode\', '
-        '[PY, \'test_formal_unicode.py\'], mem=\'tiny\', extra=[\'formal\', '
-        '\'fire_compiler.py\'], desc=\'len/find/index/%%s-width answer in CODE '
-        'POINTS for non-ASCII text on both formal backends, or are refused by '
-        'name\').',
-    # NOT the reason above, and deliberately said so: this one is CHEAP.
-    # Measured 2026-10-02 on the merge of work/merge-formal4, `python3
-    # tools/memslot.py --gb 8 -- python3 test_formal_hostmods_census.py`:
-    # **17.5 s wall, 0.1 GB peak, 16 modules x 2 backends, 4/4 properties** —
-    # which is the same cost class as `formal-globals` above (registered) and
-    # `formal-ast` (in `check`), so by the cost rule in CLAUDE.md it wants a
-    # REGISTRATION, not an excuse: nothing here is over 4 GB or over a few
-    # minutes. It is listed rather than registered because this merge is not
-    # where a registry row is added — the file arrived with work/merge-formal4
-    # and the row belongs to whoever registers it. Exact next step: `test(
-    # 'formal-hostmods-census', [PY, 'test_formal_hostmods_census.py'],
-    # mem='tiny', deps=['preflight'], extra=['test_formal_hostmods_census.py',
-    # 'formal'] + FORMAL_BUILD_INPUTS, desc='every formal/hostmods module
-    # builds as a program on both backends, and x86-64 is a subset of arm64')`.
-    # NOT the group reason above, and the reason is the SHAPE: this one
-    # harvests its cases out of CPython's own regression suites at run
-    # time, so what it covers depends on which interpreter is running it,
-    # and a corpus that moves with the interpreter is a fact about the box
-    # rather than about the tree. Measured 2026-10-04 on
-    # work/formal24-hostmods-conformance, `python3 tools/memslot.py --gb 8
-    # -- python3 test_formal_hostmods_conformance.py`: **59 s wall, 0.1 GB
-    # peak, 7 modules x 2 backends, 348 cases** -- cheap by the cost rule in
-    # CLAUDE.md, so it wants a REGISTRATION rather than this excuse, and
-    # the row belongs to whoever registers it. **AND RED: an earlier version
-    # of this entry called it green, which was a lie with a mechanism.**
-    # `main()` fell off its end, so `sys.exit(main())` exited 0 with six of
-    # the seven groups printing `FAILED` -- nothing in the file could report
-    # a failure. Measured 2026-10-05 on work/merge-formal27a-r2, `1 of 7
-    # groups ok; FAILED: posixpath, textwrap, struct, shlex, re, html`, all
-    # six reporting the SAME refusal -- the encoding guard asked of a byte
-    # buffer rather than of a character -- so it was six instances of ONE
-    # defect rather than six, and six is what made it worth a document rather
-    # than a line.
-    # **BOTH halves are now fixed, and that is why this entry is still
-    # unregistered rather than merely red.** `main()` returns 1, so a failing
-    # group is visible to anything that reads an exit status; and the encoding
-    # refusal no longer fires on a `bytes` receiver (commit `1abb8992`, "a
-    # `bytes` receiver is not a `str`": the element refusal asked only about
-    # the IMAGE and applied the answer to every subscript whose receiver's
-    # kind was `str`, when a `char *` here is EITHER a `str` or a `bytes` and
-    # those are different ANSWERS rather than different types --
-    # `formal/model.py::string_element_refusal`'s `receiver_is_declared_bytes`
-    # is what answers it now). The DOCSTRING half landed with it
-    # (`formal/model.py::is_docstring_statement`, skipped by
-    # `non_ascii_strings_in` without descending into it), which is why the two
-    # are one fix rather than two. Re-measured 2026-10-05 on this tree:
-    #     python3 tools/memslot.py --gb 8 --label t -- \
-    #       python3 test_formal_hostmods_conformance.py
-    #     -> host-module conformance: 7 of 7 groups ok
-    #        memcap: done, peak 0.2 GB, child exit 0
-    # So the excuse this entry carried ("registering it as it stands turns a
-    # hidden red into a gate red") is GONE -- that sentence is now FALSE, and
-    # a reader who finds it still there is reading a stale paragraph. What is
-    # left is the REGISTRATION itself, which is a cost question and not a red
-    # one. It is 59 s at a 0.1-0.2 GB peak measured, so by CLAUDE.md's own rule
-    # it is CHEAP and wants registering:
-    #     test('formal-hostmods-conformance', [PY,
-    #         'test_formal_hostmods_conformance.py'], mem='tiny',
-    #         deps=['preflight'],
-    #         extra=['test_formal_hostmods_conformance.py', 'formal'] +
-    #         FORMAL_BUILD_INPUTS, desc='every host module against CPython\'s
-    #         OWN regression tests, the case table generated from them')
-    # NOT done here: this is a REGISTRY edit, and a registration decides what
-    # every gate run costs, so it belongs with the line that owns
-    # `tools/suite.py` rather than with a merge of other people's branches.
-    # What is registered is not the point; that the entry's stated reason is
-    # no longer true is, and it is recorded here.
-    'test_formal_hostmods_conformance.py': 'The host-module CONFORMANCE '
-        'table: every module in `formal/hostmods` whose CPython counterpart '
-        'ships a regression suite, driven over the cases GENERATED from '
-        'that suite rather than a hand-picked corpus, with CPython in this '
-        'process as the oracle and both backends compared against each '
-        'other first. Cheap (59 s, 0.1 GB measured) and RED — 1 of 7 groups '
-        'ok, all six failures the same byte-buffer encoding refusal — so it '
-        'wants the fix before the registration; the row is spelled out above.',
-    'test_formal_hostmods_census.py': 'The host-module census: every '
-        '`formal/hostmods` module built as a program on BOTH backends, asserting '
-        'that x86-64 is a SUBSET of arm64 — the one divergence a per-backend '
-        'test cannot see. Cheap (17.5 s, 0.1 GB measured) and green (4/4), so '
-        'it wants registering rather than listing; the row is spelled out above.',
+    'test_formal_platform.py': _FORMAL_SUITE_REASON,
+    'test_formal_recursion_contract.py': _FORMAL_SUITE_REASON,
+    'test_formal_short_circuit_cond.py': _FORMAL_SUITE_REASON,
+    'test_formal_specialized_method_call.py': _FORMAL_SUITE_REASON,
+    'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
+    'test_formal_trait_module.py': _FORMAL_SUITE_REASON,
+    'test_formal_type_application.py': _FORMAL_SUITE_REASON,
+    'test_formal_x86_64_parity.py': _FORMAL_SUITE_REASON,
 
     # ── the encoders, differentially, against the platform assembler ──
     'test_arm64_emission.py': 'A hand count that the new arm64 instructions '
@@ -4274,62 +2960,6 @@ UNREGISTERED = {
         'test_formal_run.py rather than inside it, because the convention is '
         'one construct and the suite that hosts it is already the longest.',
 
-    'test_formal_declared_param_census.py': 'The declared-parameter census '
-        "TOOL: a parse and a walk over one `.mojo` file, with no build and no "
-        'Lean (0.1 s for its 15 cases). It is not registered because this '
-        "session's task says not to register anything, and it is listed here "
-        'because the estate check below exists to make an unaccounted-for test '
-        "file impossible — it covers `tools/formal_declared_param_census.py`'s "
-        'six type readers, the three shapes that must stay undecided, and the '
-        'two stdlib declaration bugs the readers found.',
-
-    'test_formal_frame_field_census.py': 'The frame-field census TOOL, and '
-        'the same shape as the entry above: a parse and a walk, no build and no '
-        'Lean (7 cases, 0.3 s). Not registered because this session\'s task '
-        'says not to register anything; listed here for the reason the estate '
-        "check below exists. It covers `tools/formal_frame_field_census.py`'s "
-        'two filters — each with a case that turns it OFF, because the first '
-        "cut of that instrument reported 52 sites of which 28 were a word — the "
-        'delegating constructor that is 13 of its 14 corpus sites, and the one '
-        '`other` row, both read off the real tree rather than written for the '
-        'test.',
-
-    'test_formal_frame_slot_subscript_census.py': 'The frame-slot-subscript '
-        'census TOOL, and the same shape as the two entries above: a parse and '
-        'a walk over `.mojo` files, no build and no Lean (5 cases, 0.002 s). '
-        "Not registered because this session's task says not to register "
-        'anything; listed here for the reason the estate check below exists. '
-        'It covers `tools/formal_frame_slot_subscript_census.py`\'s '
-        'classification of every `X.<field>[i]` base — a container field, a '
-        'chain, a one-field receiver\'s own field, and the framed struct whose '
-        'two corpus sites are the dict case `frame_slot_element_refusal`\'s '
-        'placement is load-bearing for — each with the exclusion that turns it '
-        'off, because the census is what decides a row and a filter with no '
-        'negative case is a filter nobody has measured.',
-
-    'test_formal_returnless_census.py': 'The return-less census TOOL, and the '
-        'third census tool in this shape: a parse and a walk over `.mojo` files, '
-        'no build and no Lean (11 cases, 0.01 s — the instrument is cheap, not '
-        "the corpus it walks). Not registered because this session's task says "
-        'not to register anything; listed here for the reason the estate check '
-        "below exists. It covers `tools/formal_returnless_census.py`'s rules "
-        'that DECIDE a row, including the two that remove one (a discarded '
-        'call, a struct construction) and the three that would otherwise '
-        "invent 456 — generators, coroutines, and a name whose definitions "
-        'disagree about whether it returns, which is the defect the census it '
-        'replaces had (`bugs/FORMAL_a_function_with_no_return_yields_a_word_'
-        'where_cpython_yields_None.md` §0), as a case.',
-
-    # `test_formal_proof_breadth.py` was listed here when it landed on
-    # 2026-10-03 with the note that the registering commit deletes the excuse,
-    # and is REGISTERED now (`formal-proof-breadth-tool` in the `proofs`
-    # bucket).  Re-measured on the merged tree: 7.9 s wall, 0.135 GB peak, and
-    # still NO Lean run — every assertion is about the census TOOL (its 60-item
-    # workload is a function of the tree, one function per file, closed and
-    # parseable, and three programs with known verdicts classify into the
-    # classes the census table depends on). The census itself is not a test and
-    # is not meant to be gated; this is the instrument's own check.
-
     'test_string_literal_lexing.py': 'The LEXER: escapes, the line model, tab '
         'expansion, CR, an unterminated literal, and a backslash line '
         'continuation inside a raw literal \u2014 build-and-run against CPython '
@@ -4344,30 +2974,23 @@ UNREGISTERED = {
     'test_formal_mlir_precedence.py': 'WHICH of the two MLIR refusals answers a '
         'template, and that the answer is the same on both backends: seven '
         'cases, each asserted to refuse on BOTH architectures with the same '
-        'sentence (formal/build.py`s `first_mlir` pre-pass). Build-only, but '
+        'sentence (bugs/FORMAL_mlir_refusal_preemption.md). Build-only, but '
         'twice per case, because a backend that answers differently about one '
         'construct is the defect this file exists for.',
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '
         'myinterpreter.mojo, which is the reference every compiled-path answer '
         'is measured against.',
-    # `test_myinterpreter_simple.py`, `test_phase2_parser.py` and
-    # `test_phase2_parser_simple.py` were here until 2026-10-02, and were all
-    # DELETED with their excuses rather than repaired. Every one of them opened
-    # `mojo/ast_nodes.mojo`, `mojo/tokenizer.mojo` and `mojo/parser.mojo`, and
-    # `mojo/` has no `.mojo` files at all: the tokenizer and parser became
-    # `fire_compiler.py` and `ast_nodes` was deleted outright. They died at
-    # their first `open()` and reported success while doing it — the `coro`
-    # story from CLAUDE.md, one file over. The doc that catalogued them
-    # (`bugs/UNTESTED.md` Tier 3) named both options and said deletion was the
-    # defensible one: a test of a module that no longer exists is not a slow
-    # test, it is a wrong claim.
-    #
-    # `test_myinterpreter_validation.py` was the fourth, and the one worth
-    # having: it compares the interpreter's `py_tokenize` with the imported
-    # one. It was in exactly the same state — dead at its first `open()` — and
-    # it was REPOINTED at `fire_compiler.py` rather than deleted, so the
-    # strongest cheap parity check in the tree now exists and runs. Registered
-    # as `interp-tokenizer-oracle`.
+    'test_myinterpreter_simple.py': 'The same interpreter reached through '
+        'module loading rather than run_mojo_main, which is the path the '
+        'compiled path actually uses.',
+    'test_myinterpreter_validation.py': "The interpreter's output validated "
+        "against Python's OWN tokenizer. The strongest cheap parity check "
+        "available and the only one that is not this project grading itself.",
+    'test_phase2_parser.py': 'The interpreter executes the parser and the ASTs '
+        'are compared, which is the check that a parser change is semantics-'
+        'preserving rather than merely accepted.',
+    'test_phase2_parser_simple.py': 'The minimal form of the above: the '
+        'interpreter can execute parser.mojo at all.',
 
     # ── the dispatch solver, four phase-ordered files ──
     'test_dispatch_solver.py': 'DispatchSolver phase A, the table planner. '
@@ -4428,42 +3051,6 @@ UNREGISTERED = {
         'entry beside `gimple`/`gimplerunner` (a `cmd` step, memclass small: '
         '24 programs, ~25 s, peak 0.1 GB) and `extra` naming this file so '
         'checked_run.py\'s content-addressed cache invalidates when it changes.',
-    # The three that came with the same branch's other two fixes. Same reason
-    # and the same registration each wants, so they are one paragraph: three
-    # `cmd` steps, `tiny` memclass, each `extra` naming its own file. Measured
-    # here, alone, through memslot: membership 17 programs / 31 s / 0.1 GB,
-    # ordering 35 / 65 s / 0.1 GB, tuple-key 17 / 36 s / 0.1 GB.
-    'test_container_membership.py': '`x in <container>` on the compiled path, '
-        'including the dict arm that had no branch at all and the needle-typed '
-        'dispatch the int view needed (17 programs). Unregistered for the '
-        'reason `test_container_equality.py` above gives.',
-    'test_container_ordering.py': '`<` / `<=` / `>` / `>=` between containers as '
-        'PYTHON orders them rather than by heap address, and `None` against a '
-        'number refused rather than compared (35 programs, the largest of the '
-        'three). Unregistered for the reason `test_container_equality.py` '
-        'above gives.',
-    'test_dict_tuple_key.py': 'A tuple used as a dict key is keyed by its '
-        'CONTENT and not by the object\'s address, which is the one that '
-        'silently lost every entry the moment the tuple stopped living (17 '
-        'programs). Unregistered for the reason `test_container_equality.py` '
-        'above gives.',
-    # ── the other spelling, and what widening the estate check revealed ──
-    #
-    # `is_test_file_name` above now counts `*_test.py` as well as `test_*.py`,
-    # because this repo uses both and four files were outside the inventory
-    # entirely. Two of them are registered (`formal/x86_64_endtoend_test.py`,
-    # `formal/x86_64_model_coverage_test.py`) and are now REGISTERED rather
-    # than excused; the other two are here.
-    'scripts/bootstrap_full_test.py': 'A REPORT GENERATOR, not a test: it '
-        'shells out to the bootstrap stages with a 30 s timeout each and '
-        'prints a per-stage ✓/✗ table with no assertion of its own, so its '
-        'exit status is a summary of subprocess statuses rather than a verdict '
-        'on anything. Registering it would add a job that can only fail when '
-        'a SUBPROCESS fails, which is what the bootstrap stages themselves '
-        'already report. Found by widening the estate check to this file\'s '
-        'spelling; see `is_test_file_name`\'s own docstring for the four '
-        'files the old single-spelling walk left outside the inventory.',
-
     'test_imports.py': 'That import statements generate extern declarations. '
         'A missing extern is a link failure attributed to something else.',
     'test_kwargs_stmt.py': 'kwargs in statement-level calls, a shape the '
@@ -4510,127 +3097,8 @@ def _unregistered_reason_table():
     return out
 
 
-# The families a RULE accounts for, as (matcher, the family's reason).
-#
-# This is the instrument the per-file list could not be. The estate check's
-# inventory is the set of `test_*.py` ON DISK, so a list keyed by filename makes
-# every new suite an obligation for whoever adds it — and that obligation was
-# paid five times over: eleven formal suites, then five more, then one, then
-# one again, each arrival turning `python3 test_suite.py` red for a reason that
-# had nothing to do with whatever anyone had just changed. It is the most
-# expensive kind of red to read, because the file it names is the one that
-# checks the tree is honest.
-#
-# A rule answers the same question for a whole family, so a family's next
-# member costs nobody an edit. What it must not do is swallow a file that has
-# something SPECIFIC to say, so:
-#
-#   * an entry in `UNREGISTERED` always wins over a rule — the sixteen formal
-#     suites that are cheap, or that are a unit test of something else, or that
-#     are cheap because they build nothing, each say what theirs is for and a
-#     family's sentence would be strictly less true;
-#   * a rule is a statement about a family, not an excuse for one file, so
-#     registering one of its files does NOT make the rule stale and the
-#     "no excuse for a file that is now registered" assertion deliberately does
-#     not look at rules;
-#   * the check prints how many files each rule is carrying, so a family that
-#     starts absorbing cheap suites is visible in the output rather than
-#     invisible in the source.
-#
-# The cost rule still applies to a NEW member: a cheap suite in a covered
-# family wants registering, and the registration supersedes the rule for that
-# file without any edit here.
-_DECLARED_BY_RULE = (
-    # The per-construct formal suites: one table entry per construct, building
-    # and RUNNING real Mach-O images on both architectures against CPython. A
-    # run of one is minutes of real compilation, which is why they are run by
-    # hand and said so — see `_FORMAL_SUITE_REASON`, which twenty of them used
-    # to repeat key by key.
-    (re.compile(r'^test_formal_[A-Za-z0-9_]+\.py$'), _FORMAL_SUITE_REASON),
-)
-
-
-def _unregistered_keys_as_written():
-    """`UNREGISTERED`'s keys as they appear IN THE SOURCE, duplicates and all.
-
-    A repeated key in a dict literal is not a second row: the later assignment
-    wins and the earlier reason is dead text that still reads as though it were
-    saying something. `_unregistered_reason_table()` cannot see this — by the
-    time it runs, the information is gone — which is the same shape as
-    `test_no_test_name_is_registered_twice` one function below, and the reason
-    the check is written here rather than left implicit.
-
-    Measured while this was being fixed: `test_formal_returned_frame.py` was in
-    the table twice, once with the family's reason and once with its own
-    ("the returned-frame convention: builds, runs and compares with CPython on
-    arm64 AND x86-64"), and only the second was ever in the dict.
-    """
-    with open(os.path.join(HERE, 'test_suite.py')) as f:
-        src = f.read()
-    start = src.index('UNREGISTERED = {')
-    end = src.index('\ndef _unregistered_reason_table', start)
-    body = src[start:end]
-    keys = re.findall(r"^    '([^']+)'\s*:", body, re.M)
-    counts = {}
-    for k in keys:
-        counts[k] = counts.get(k, 0) + 1
-    return keys, sorted(k for k, n in counts.items() if n > 1)
-
-
-def _rule_reason_for(basename):
-    """The family's reason for `basename`, or None if no rule covers it."""
-    for matcher, why in _DECLARED_BY_RULE:
-        if matcher.match(basename):
-            return why
-    return None
-
-
-def _declared_by_rule(basenames):
-    """`{file: reason}` for the inventory a rule already accounts for."""
-    out = {}
-    for name in basenames:
-        why = _rule_reason_for(name)
-        if why is not None:
-            out[name] = why
-    return out
-
-
-def is_test_file_name(fn: str) -> bool:
-    """ONE predicate for "is this a test file", both spellings.
-
-    This repo uses `test_*.py` and `*_test.py`, and the estate check read only
-    the first. Four files were therefore outside the inventory entirely: two
-    that a registered spec names (`formal/x86_64_endtoend_test.py`,
-    `formal/x86_64_model_coverage_test.py` — found by the `named` half, not by
-    the walk, which is why the mismatch was visible in the arithmetic at all)
-    and two in neither a spec nor `UNREGISTERED`
-    (`formal/x86_64_model_test.py`, `scripts/bootstrap_full_test.py`), which
-    nothing counted and nothing checked.
-
-    The live consequence was not cosmetic:
-    `formal/x86_64_model_test.py` is the only check on `lib/X86.lean` that
-    EXECUTES a machine model rather than typechecking it, and it ran by
-    nothing. A deletion of either registered file left a spec pointing at
-    nothing with nothing to say so, which is what step 4 below now reports.
-
-    Derived here and read by `_test_files_in_repo` and by nothing else, so the
-    two walks (`test_suite.py`'s and `checked_run.expand_globs`') cannot
-    disagree about what a test file is — the failure
-    `is_test_file_name`'s own docstring records.
-    The matching cache-key half is `suite-self-test`'s `extraglob`, which must
-    name BOTH patterns; `test_the_estate_check_is_in_a_gate_and_can_see_its_
-    own_subject` is what keeps the two in step.
-    """
-    return fn.endswith('.py') and (fn.startswith('test_') or fn.endswith('_test.py'))
-
-
-# The two glob patterns that say the same thing, kept next to the predicate so
-# the walk and the cache key are changed together or not at all.
-TEST_FILE_GLOBS = ('**/test_*.py', '**/*_test.py')
-
-
 def _test_files_in_repo():
-    """Every test file in the repo under EITHER spelling, repo-relative.
+    """Every `test_*.py` in the repo, repo-relative.
 
     The skip list is `checked_run.DERIVED_DIRS` and not a second copy of it:
     `build/`, `__pycache__`, `aside/` and `bside/` are all trees whose contents
@@ -4640,16 +3108,19 @@ def _test_files_in_repo():
     version of the estate check and its cache key each had their own, and a
     subdirectory was found by one and invisible to the other.
 
-    What counts as a test file is `is_test_file_name` above, one predicate for
-    both spellings and both walkers; `TEST_FILE_GLOBS` is the same answer
-    spelled for `suite-self-test`'s cache key.
+    The spelling is still `test_*.py` only, and the gap that leaves is written
+    down rather than fixed here: `formal/x86_64_endtoend_test.py` and
+    `formal/x86_64_model_coverage_test.py` are registered but outside the
+    inventory (both spellings are in use in this repo), plus two `*_test.py`
+    files that are in neither a spec nor a list. See
+    `bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md`.
     """
     import checked_run
     found = []
     for dirpath, dirnames, filenames in os.walk(HERE):
         dirnames[:] = [d for d in dirnames if not checked_run.is_derived_dir(d)]
         for fn in filenames:
-            if is_test_file_name(fn):
+            if fn.startswith('test_') and fn.endswith('.py'):
                 found.append(os.path.relpath(os.path.join(dirpath, fn), HERE))
     return sorted(set(found))
 
@@ -4663,22 +3134,6 @@ def _registered_test_files():
             for m in re.findall(r'[\w./-]*test[\w./-]*\.py', str(c)):
                 out.add(os.path.basename(m))
     return out
-
-
-def _any_path_for_basename(basename: str) -> bool:
-    """True if `basename` is a test file that exists somewhere in the repo.
-
-    The `named` half of the estate check works in basenames (a spec's `cmd` is
-    a list of argv strings, and the file it names is wherever it names it), so
-    answering "is that name real?" means going back to the walk. A basename is
-    not unique — `formal/model.py` and `test_formal_model.py` both end in
-    `model` — but `is_test_file_name` has already constrained the question to
-    names this repo would treat as tests, and the check this serves only asks
-    whether AT LEAST ONE real file has the name, which is the question "does
-    this registration point at something that exists".
-    """
-    return os.path.basename(basename) in {
-        os.path.basename(p) for p in _test_files_in_repo()}
 
 
 def test_cached_spec_names_its_own_test():
@@ -4735,14 +3190,10 @@ def test_every_test_file_is_registered():
           len(named) > 10, f'only {len(named)} test files are named by a spec')
 
     orphans = {f for f in on_disk if os.path.basename(f) not in named}
-    # An ENTRY beats a rule, and a rule beats nothing: a file in neither is the
-    # undeclared set the check is about.
-    ruled = _declared_by_rule(os.path.basename(f) for f in orphans)
-    undeclared = sorted(orphans - set(excused) - set(ruled))
+    undeclared = sorted(orphans - set(excused))
     check('the estate: every test file is run by something, or says why not',
           not undeclared,
-          'not run by any registered spec, not in UNREGISTERED, and in no '
-          'declared family: '
+          'not run by any registered spec and not in UNREGISTERED: '
           + ', '.join(undeclared))
 
     # The other two directions, which is what stops the list becoming a
@@ -4758,179 +3209,9 @@ def test_every_test_file_is_registered():
     thin = sorted(p for p, why in excused.items() if len(why) < 40)
     check('the estate: every excuse is a reason, not a shrug', not thin,
           f'too short to be a reason: {thin}')
-    # The same assertion for a rule's reason, because a rule excuses everything
-    # its family adds from then on: a shrug there is a shrug with a much wider
-    # blast radius than a shrug in the table.
-    thin_rules = sorted(why[:40] for _rx, why in _DECLARED_BY_RULE if len(why) < 40)
-    check('the estate: every family reason is a reason, not a shrug',
-          not thin_rules, f'too short to be a reason: {thin_rules}')
-    keys_as_written, dupes = _unregistered_keys_as_written()
-    check('the estate: no reason in UNREGISTERED is dead text', not dupes,
-          'these keys are in the table more than once, and the dict keeps only '
-          f'the last: {dupes} — the earlier reason is read by nobody')
-    # And the other way, which is what makes the count above worth printing: a
-    # key that no longer names a test file is a stale excuse, asserted above,
-    # and a key that is now REGISTERED is a wrong one, also asserted above. So
-    # the two numbers together account for every line in the table.
-    check('the estate: the table has no key the walk cannot see',
-          len(keys_as_written) >= len(excused),
-          f'{len(keys_as_written)} keys in the source, {len(excused)} in the '
-          f'table — the difference is the None placeholders, and there are '
-          f'more of them than expected')
-
-    # The rule's own two edges, which the check above cannot show on its own: a
-    # rule that matched nothing would leave the estate exactly as red as it was,
-    # and a rule that matched EVERYTHING would be a hole wearing a reason's
-    # clothes. Both are one line each, and they are what a future edit to
-    # `_DECLARED_BY_RULE` would break.
-    check('the estate: a declared family reaches its own next member',
-          _rule_reason_for('test_formal_a_suite_that_does_not_exist_yet.py')
-          == _FORMAL_SUITE_REASON,
-          'the rule does not match a file of the family it claims — every '
-          'future member of it is an obligation again')
-    check('the estate: and reaches nothing else',
-          _rule_reason_for('test_a_nonformal_suite.py') is None,
-          'a rule is covering a file outside its family, so a new non-formal '
-          'suite would be excused without anyone deciding that')
-    # A rule is a statement about a FAMILY, so registering one of its files
-    # must not turn the family reason into a stale per-file excuse — or every
-    # registration in the family would demand a source edit that says nothing.
-    # `test_formal_run.py` is the worked example: registered (`formal-run` in
-    # the `proofs` bucket) AND covered by the rule, and the `resolved`
-    # assertion above deliberately does not look at rules.
-    check('the estate: a rule keeps covering a file that later gets registered',
-          'test_formal_run.py' in named
-          and _rule_reason_for('test_formal_run.py') == _FORMAL_SUITE_REASON,
-          'this is the case that decides whether a rule is a family statement '
-          'or a per-file excuse in disguise: a file that is both registered '
-          'and rule-covered is what every future registration in the family '
-          'will look like')
-
-    # The direction nothing computed, and the one that has a live consequence.
-    # `named` counts basenames, so it cannot distinguish "a spec runs this
-    # file" from "a spec's command line contains this string" — but it CAN
-    # distinguish a name that is in the repo from one that is not, and a spec
-    # naming a file that is gone (renamed, deleted, moved) is a broken
-    # registration: `fire.py build formal/x86_64_endtoend_test.py` fails at
-    # the runner's own argv check, or worse, a spec with a `Fanout` simply
-    # loses an item. Nothing said so until this check.
-    #
-    # It could not have been written before the subject set was widened: with
-    # `test_*.py` alone, the two registered `formal/*_test.py` files were
-    # "named but not on disk" on every run, so the property was untestable
-    # rather than false, and it would have passed vacuously about exactly the
-    # four files the widening is for. The resolution asks "does a real file
-    # have this name" rather than joining on a path, because `named` is
-    # basenames by construction (a spec's `cmd` is argv strings) and a basename
-    # is not unique across the repo (`formal/model.py` and
-    # `test_formal_model.py` both end in `model`) — so a path join would report
-    # a collision as a deletion.
-    dangling = sorted(n for n in named if not _any_path_for_basename(n))
-    check('the estate: every test file a spec NAMES is a file that exists',
-          not dangling,
-          f'registered specs name {len(dangling)} test file(s) that are not in '
-          f'the repo under either spelling — a renamed or deleted file leaves '
-          f'the registration pointing at nothing: {dangling}')
     print(f'      the estate: {len(on_disk)} test files, {len(named - orphans)} '
-          f'of them run by a registered spec, {len(excused)} declared one by '
-          f'one, {len(ruled)} by a declared family, {len(undeclared)} '
-          f'undeclared, {len(dangling)} dangling')
-    for matcher, why in _DECLARED_BY_RULE:
-        carried = sorted(n for n in ruled if matcher.match(n))
-        if carried:
-            print(f'        family {matcher.pattern} carries {len(carried)}: '
-                  f'{carried[0]}, ...')
-
-
-def test_no_test_name_is_registered_twice():
-    """A second `test('name', …)` overwrites the first, and nothing says so.
-
-    `test()` registers into a dict (`REGISTRY[s.name] = s`), so a duplicate name
-    is not a duplicate row — it is a LOST one. The name resolves to whichever
-    call came last, the earlier call costs a dict store, and `--list` shows one
-    line, so the only thing a reader can notice is that the `desc` in the
-    registry is whichever commit landed last.
-
-    Real, twice, both from different commits that each registered two test files
-    nobody had registered before: `formal-field-walk` (5b2e62c3, then 574d9135)
-    and `formal-glob` (the same pair). Their two `desc`s disagreed — "glob:
-    CPython's own glob, both backends, 6 groups" against "glob: has_magic,
-    hidden files, symlinks and escapes, against CPython" — so the sentence in
-    the registry was decided by commit order.
-
-    The registry cannot answer this question: by the time anything reads it the
-    overwrite has happened and there is one row per name. So this reads the
-    SOURCE, as an AST walk rather than a grep, so a name that appears in a
-    comment or in a string is not counted as a registration. Both registrars are
-    walked — `test()` and `fanout()` are two functions that each store into
-    `REGISTRY`, so a name registered once each is the same lost row. Three
-    extra properties keep it from being a rule that fails on its first day:
-
-      * it reads every registration CALL, including ones inside `if`/`for`,
-        which is what "written twice" means; and
-      * it cross-checks the count against `len(REGISTRY)`, so the walk and the
-        registry still agree about how many names there are. Without that, a
-        walk that silently found nothing would pass every row above vacuously —
-        and it is a real check here, not a formality: it is what found that
-        `fanout()` is a second registrar (three names: the bootstrap dump
-        fanouts), which a walk of `test()` calls alone would have read as three
-        names the registry invented.
-    """
-    path = os.path.join(HERE, 'tools', 'suite.py')
-    source = open(path).read()
-    tree = ast.parse(source, filename=path)
-    # The registrars are DISCOVERED, not listed: a module-level function whose
-    # body assigns into `REGISTRY`. A hardcoded ('test', 'fanout') would be a
-    # second copy of a fact `tools/suite.py` already states, and the day a third
-    # registrar appears this check would keep reporting agreement with a
-    # registry that has a name in it from nowhere — which is the same
-    # vacuous-pass direction as a walk that found nothing.
-    registrars = set()
-    for node in tree.body:
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        for sub in ast.walk(node):
-            targets = []
-            if isinstance(sub, ast.Assign):
-                targets = sub.targets
-            elif isinstance(sub, (ast.AnnAssign, ast.AugAssign)):
-                targets = [sub.target]
-            for t in targets:
-                if (isinstance(t, ast.Subscript)
-                        and isinstance(t.value, ast.Name)
-                        and t.value.id == 'REGISTRY'):
-                    registrars.add(node.name)
-    check('the registry: the registrar discovery found the registrars',
-          {'test', 'fanout'} <= registrars,
-          f'tools/suite.py registers through {sorted(registrars)}, and the two '
-          f'that were there when this was written are missing — the check below '
-          f'would be walking a subset and reporting it as agreement')
-    where = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        fn = node.func
-        if not (isinstance(fn, ast.Name) and fn.id in registrars):
-            continue
-        if not node.args or not isinstance(node.args[0], ast.Constant):
-            continue
-        name = node.args[0].value
-        if not isinstance(name, str):
-            continue
-        where.setdefault(name, []).append(node.lineno)
-    dupes = {n: ls for n, ls in where.items() if len(ls) > 1}
-    check('the registry: no name is registered twice', not dupes,
-          'the second registration replaces the first and the first is dead '
-          'code — delete it and keep the one that runs: '
-          + '; '.join(f'{n} at lines {ls}' for n, ls in sorted(dupes.items())))
-    check('the registry: the source walk and the registry agree on the count',
-          len(where) == len(suite.REGISTRY),
-          f'the walk found {len(where)} distinct registered names and REGISTRY '
-          f'holds {len(suite.REGISTRY)}, so one of them is not counting the '
-          f'registrations this check is about')
-    print(f'      the registry: {len(where)} names registered in '
-          f'tools/suite.py through {sorted(registrars)}, {len(dupes)} of them '
-          f'more than once')
+          f'of them run by a registered spec, {len(excused)} declared with a '
+          f'reason, {len(undeclared)} undeclared')
 
 
 def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
@@ -4983,12 +3264,10 @@ def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
           'was supposed to catch it')
 
     check('the estate: ...and it is cached, so its key has to see the subject',
-          spec.cache and set(TEST_FILE_GLOBS) <= set(spec.extraglob),
+          spec.cache and '**/test_*.py' in spec.extraglob,
           f'cache={spec.cache}, extraglob={list(spec.extraglob)}: a cached PASS '
           f'is replayed, so a key that cannot see a new test file serves the '
-          f'last green run instead of running this check. Both spellings have '
-          f'to be there: the walk finds {TEST_FILE_GLOBS[0][2:]} AND '
-          f'{TEST_FILE_GLOBS[1][3:]}')
+          f'last green run instead of running this check')
 
     on_disk = set(_test_files_in_repo())
     nested = sorted(f for f in on_disk if os.path.dirname(f))
@@ -5017,539 +3296,6 @@ def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
           f'glob-only: {sorted(rel - on_disk)[:5]}; '
           f'walk-only: {sorted(on_disk - rel)[:5]}; '
           f'empty patterns: {empty}')
-
-
-def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
-    """Being named is not being run, and only the bucket column knows which.
-
-    `test_every_test_file_is_registered` above asks "is every `test_*.py` in the
-    repo named by a registered spec?". It reads `cmd`, and it CANNOT tell a
-    registration that is EXECUTED from one that is merely present: a spec in no
-    bucket is named, so the estate counted it as covered, while `make check`,
-    `make gate` and every other bucket walked straight past it. Nineteen tests
-    were in that state — eleven of them `expect=`-marked, which is the worse
-    half, because a marker nobody can observe going stale is immortal. Both
-    groups were written up as bug docs and both docs are DELETED with this
-    commit, per CLAUDE.md's "Bug docs": a doc for a fully fixed bug is removed
-    rather than left with a Status history, because a fixed bug still listed is
-    indistinguishable from an open one. What is left in their place is this
-    check, the buckets, and the measured table at the registrations.
-
-    The opt-out is a per-spec `dep=True`, not a name list here, and the reason
-    is the same one the `--list` ratchets above give: a list inside the checker
-    is an excuse table, and an excuse table is how the nineteen got in.
-    `prooflib` is the one legitimate case — 27 MB, ~80 s, a `deps` of sixteen
-    proof-checking jobs, and deliberately in no bucket so `make check` does not
-    pay for it (CLAUDE.md, "Shared expensive dependencies").
-
-    And the opt-out is EARNED, which is the clause that stops `dep=True` from
-    being a way to be ungated: a registration that claims to be a dependency
-    and that nothing declares a `deps` on is refused. The marker can therefore
-    only ever be the statement "this is run, as a dependency, on purpose" — it
-    cannot be "this is not run". It is also checked from the other side: a
-    `dep=True` registration that IS in a bucket is refused too, because the
-    marker is then not saying what it is for. The opt-out is a per-spec field
-    rather than a name list here for the reason the `--list` ratchets above
-    give — a list inside the checker is an excuse table, and an excuse table is
-    how the nineteen got in — so the census of what currently carries `dep=True`
-    is a check that reads the registry, not one that restates it. That is also
-    why `dep` is not consulted for the vacuity floor: with a synthetic sandbox
-    spec in the checks below, the rule is exercised on a registry that is
-    deliberately not the real one.
-    """
-    in_a_bucket = set()
-    # `expand_bucket` is the runner's own answer to "what does this bucket
-    # reach", transitivity and de-duplication included, and it is reused rather
-    # than re-implemented: two implementations of that question is the
-    # disagreement this check exists to catch, in the other direction.
-    for bucket in suite.BUCKETS:
-        in_a_bucket.update(suite.expand_bucket(bucket))
-    in_a_bucket = {n for n in in_a_bucket if n in suite.REGISTRY}
-
-    declared_deps = set()
-    for spec in suite.REGISTRY.values():
-        declared_deps.update(getattr(spec, 'deps', ()) or ())
-
-    check('the buckets: the rule is not vacuous — most tests are in one',
-          len(in_a_bucket) >= 100,
-          f'only {len(in_a_bucket)} of {len(suite.REGISTRY)} registered tests '
-          f'are in any bucket, so a rule that reads buckets is reading almost '
-          f'nothing and would pass on a registry of one')
-    # A name listed TWICE in one bucket is a second comment claiming the reader
-    # has been told something they have not, and the duplicate is invisible to
-    # every other check here: `expand_bucket` de-duplicates, so `in_a_bucket` is
-    # the same set either way, and nothing else reads the raw lists. Six such
-    # rows were live on this tree when this check was written — one in `check`
-    # and five in `proofs`, each added by a commit that did not see the one
-    # above it — and the cost of that is not a double run (expansion
-    # schedules a test once per run) but a reader who counts the entries in a
-    # bucket, which is exactly what a bucket list is for.
-    repeated = []
-    for bucket, names in suite.BUCKETS.items():
-        seen = set()
-        twice = sorted({n for n in names if n in seen or seen.add(n)})
-        if twice:
-            repeated.append(f'{bucket}: {", ".join(twice)}')
-    check('the buckets: no name is in one twice', not repeated,
-          'a test listed twice in the same bucket is a duplicate comment, not a '
-          'second run (expansion schedules each test once), and it makes the '
-          'entry count of a bucket a number nobody can read: '
-          + '; '.join(repeated))
-    check('the buckets: every registered test is in one, or declares dep=True',
-          not [n for n, s in sorted(suite.REGISTRY.items())
-               if n not in in_a_bucket and not getattr(s, 'dep', False)],
-          'these are registered and in no bucket, so no run in this tree '
-          'executes them and --list prints `[]` in the only column that says '
-          'so: '
-          + ', '.join(n for n, s in sorted(suite.REGISTRY.items())
-                      if n not in in_a_bucket
-                      and not getattr(s, 'dep', False)))
-    check('the buckets: a dep=True is in NO bucket, or the marker is a lie',
-          not [n for n, s in sorted(suite.REGISTRY.items())
-               if getattr(s, 'dep', False) and n in in_a_bucket],
-          'these claim to be dependencies but are in a bucket, so `dep=True` is '
-          'not saying what it is for: '
-          + ', '.join(n for n, s in sorted(suite.REGISTRY.items())
-                      if getattr(s, 'dep', False) and n in in_a_bucket))
-    check('the buckets: the dependency opt-out is not a blank cheque',
-          {n for n, s in suite.REGISTRY.items() if getattr(s, 'dep', False)}
-          == {'prooflib'},
-          'the one legitimate `dep=True` in the tree is `prooflib` (the Lean '
-          '.olean every proof job deps on); a second one has to be argued for '
-          'rather than copied')
-    check('the buckets: a dep=True is earned — something depends on it',
-          not [n for n, s in sorted(suite.REGISTRY.items())
-               if getattr(s, 'dep', False) and n not in declared_deps],
-          'dep=True claims "I am run as a dependency"; these are depended on '
-          'by nothing, so the claim is empty and the marker is a way to be '
-          'ungated: '
-          + ', '.join(n for n, s in sorted(suite.REGISTRY.items())
-                      if getattr(s, 'dep', False) and n not in declared_deps))
-
-    # The rule on a registry built for the purpose, because a check that can
-    # only be exercised by the real one is a check that goes red the first time
-    # somebody registers a test and cannot say why. `Sandbox` ADDS to the real
-    # registry rather than replacing it, so the assertion is scoped to the six
-    # synthetic names — otherwise it would be re-asserting the checks above
-    # over the whole tree, which is how a check ends up passing for the wrong
-    # reason.
-    synthetic = ('gated', 'ungated', 'as_dep', 'claimed_dep', 'needs_it',
-                 'dep_and_gated')
-    with Sandbox(gated=dict(cmd=ok_cmd('pass')),
-                 ungated=dict(cmd=ok_cmd('pass')),
-                 as_dep=dict(cmd=ok_cmd('pass'), dep=True),
-                 claimed_dep=dict(cmd=ok_cmd('pass'), dep=True),
-                 needs_it=dict(cmd=ok_cmd('pass'), deps=['as_dep']),
-                 dep_and_gated=dict(cmd=ok_cmd('pass'), dep=True)):
-        saved = dict(suite.BUCKETS)
-        try:
-            suite.BUCKETS['probe'] = ['gated']
-            suite.BUCKETS['probe2'] = ['dep_and_gated']
-            reached = {n for n in suite.expand_bucket('probe')
-                       if n in suite.REGISTRY}
-            check('the buckets: a bucket reaches a test and nothing else',
-                  reached == {'gated'}, f'got {sorted(reached)}')
-            reached2 = {n for n in suite.expand_bucket('probe2')
-                        if n in suite.REGISTRY}
-            in_any_bucket = reached | reached2
-            ungated = sorted(n for n in synthetic
-                             if n not in in_any_bucket
-                             and not getattr(suite.REGISTRY[n], 'dep', False))
-            check('the buckets: an ungated registration is named by the rule',
-                  ungated == ['needs_it', 'ungated'],
-                  f'got {ungated}: the rule must catch the ungated one, exempt '
-                  f'the two that declared dep=True, and — the case that is easy '
-                  f'to get wrong — still catch `needs_it`, which HAS a deps and '
-                  f'is nevertheless in no bucket. Depending on something is not '
-                  f'the same as being run.')
-            earned = sorted(n for n in synthetic
-                            if getattr(suite.REGISTRY[n], 'dep', False)
-                            and n not in {d for s in suite.REGISTRY.values()
-                                          for d in getattr(s, 'deps', ()) or ()})
-            check('the buckets: a dep=True nothing depends on is named too',
-                  earned == ['claimed_dep', 'dep_and_gated'],
-                  f'got {earned}: `claimed_dep` declares dep=True and nothing '
-                  f'depends on it, which is the loophole, and the rule has to '
-                  f'reach it')
-            shadowed = sorted(n for n in synthetic
-                              if getattr(suite.REGISTRY[n], 'dep', False)
-                              and n in in_any_bucket)
-            check('the buckets: a dep=True that IS in a bucket is named too',
-                  shadowed == ['dep_and_gated'],
-                  f'got {shadowed}: `dep_and_gated` claims to be a dependency '
-                  f'and is named in `probe2`, so the marker is not saying what '
-                  f'it is for — the other direction of the same loophole')
-        finally:
-            suite.BUCKETS.clear()
-            suite.BUCKETS.update(saved)
-
-
-def test_a_deleted_bug_doc_is_not_still_cited():
-    """A reference to a `bugs/` path that is not there is a lie in a file that
-    exists to be believed — and the project's own rule manufactures them.
-
-    CLAUDE.md deletes a bug doc when the bug is fixed, rather than leaving it
-    behind with a Status history, and that is the right rule: a fixed bug still
-    listed is indistinguishable from an open one to whoever reads the queue
-    next. It has a cost nobody was measuring, though, and the first instance
-    found was a test file's module docstring sending a reader to a file that is
-    not there. `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md` is
-    the write-up, rewritten after the walk turned out to be a hundred times
-    bigger than the two places it named.
-
-    So the WALK is `tools/dangling_doc_refs.py`, and these checks are about
-    the walk rather than about the corpus, which is the only shape that can
-    land: the census ran to 335 citations across 127 deleted names, two thirds
-    of them inside `fire_compiler.py`, `gimple_codegen.py`, `formal/` and
-    `mojo/` — files that belong to whoever owns that area. A `check()` over the
-    whole corpus goes red on every one of those branches for something it did
-    not do, and a red check is indistinguishable from a real regression. What
-    is checked here is that the tool finds a corpus, that it does not invent
-    one, and that the two citations this bug named are gone.
-
-    The corpus is now ZERO outside this file, which is the shape a sweep can
-    leave behind and the reason the non-vacuity check below no longer asserts a
-    size: "there are more than 50 dangling citations" is a check that can only
-    be satisfied by leaving the tree broken. So non-vacuity is proved with the
-    one corpus guaranteed to exist — this file's own negative controls, which is
-    also the property a sweep would destroy silently, since rewriting
-    `bugs/NEVER_WRITTEN.md` into prose leaves every other check green while
-    deleting the proof that the marker checks can fail at all.
-
-    `test_suite.py` itself is skipped, and that is not an exception list: the
-    checks below for `expect=` and `disabled=` markers deliberately name
-    documents that do not exist (`NEVER_WRITTEN.md`,
-    `NO_SUCH_DOC_ANYWHERE.md`) to prove those checks can fail. This file is
-    where a walk for missing files is guaranteed to find one.
-    """
-    sys.path.insert(0, os.path.join(HERE, 'tools'))
-    try:
-        import dangling_doc_refs
-    except ImportError as e:
-        check('dangling refs: the walk is importable', False, repr(e))
-        return
-
-    have, by_doc, by_file = dangling_doc_refs.find()
-    fixtures = {'NEVER_WRITTEN.md', 'NEVER_WRITTEN_REAL.md',
-                'NO_SUCH_DOC_ANYWHERE.md', 'DELETED_ONCE.md', 'SOME.md'}
-    found = {n for n in by_doc if all(f == 'test_suite.py' for f, _ in by_doc[n])}
-    check('dangling refs: the walk is not vacuous — it finds a corpus',
-          fixtures <= found,
-          f'the walk must find this file\u0027s own non-existent fixture names '
-          f'({sorted(fixtures)}) and found {sorted(found)}; a walk that matches '
-          f'nothing reports green forever, which is the one thing it must not be '
-          f'able to do, and the fixtures are the only corpus that exists here by '
-          f'construction')
-    outside = {n: v for n, v in by_doc.items() if n not in fixtures}
-    check('dangling refs: ...and outside those controls the corpus is empty, '
-          'which is what a sweep buys',
-          not outside,
-          f'{len(outside)} dangling citation(s) outside test_suite.py '
-          f'({sorted(outside)[:8]}); a new one is a ratchet failure')
-    check('dangling refs: it does not invent one — a cited doc that EXISTS is '
-          'not reported',
-          'bugs/FORMAL_known_limits.md' in have
-          and 'FORMAL_known_limits.md' not in by_doc
-          and 'CODEGEN_ab_native_fails.md' not in by_doc,
-          f'the walk found {len(have)} docs under bugs/; a walk that reports '
-          f'every citation would make the census meaningless, so the '
-          f'exists-branch is checked against names this tree really cites')
-    check('dangling refs: every name it reports really is absent',
-          not [n for n in by_doc if f'bugs/{n}' in have],
-          f'{[n for n in by_doc if f"bugs/{n}" in have]}')
-
-    # The two the bug doc named, by file and by name — the specific defect,
-    # asserted directly rather than read out of a total, because a census check
-    # cannot tell "fixed" from "the number went down".
-    #
-    # The control doc of the check above is `FORMAL_known_limits.md` and not the
-    # right-shift doc this used to name: that one is DELETED (its fix landed, so
-    # CLAUDE.md's rule removed it), and a control that asserts "this doc exists"
-    # about a deleted doc fails for a reason that has nothing to do with the walk.
-    # `FORMAL_known_limits.md` is cited from 38 files, so the branch is exercised
-    # by a real corpus rather than by a name nothing mentions.
-    gone = {('test_formal_hashlib.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_'
-             'every_amount_above_8.md'),
-            ('test_formal_run.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_every_'
-             'amount_above_8.md')}
-    still = [f'{f}: {d}' for f, d in sorted(gone)
-             if any(d == n for n, _ln in by_file.get(f, ()))]
-    check('dangling refs: the two this bug named are rewritten by symptom',
-          not still,
-          f'still cited: {still}. The fix is to name the BUG — the symptom, or '
-          f'the commit that fixed it — which is what '
-          f'test_arm64_encoders.py says at its shift sweep.')
-
-    # The BARE walk's existence test, which was INVERTED for bug docs until
-    # 2026-10-05 and made the census it prints an over-count of 64 on this tree:
-    # it built "every `.md` basename MINUS the bug docs'" and then reported a
-    # citation when the name was not in that set, so a bare citation of a LIVE
-    # bug doc was reported as dangling. 14 of them were
-    # `FORMAL_known_limits.md`, which is the very document the check above uses
-    # as its positive control for the `bugs/`-prefixed class — so the tool
-    # reported its own control as broken and every figure quoted from it
-    # (`DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md` quotes
-    # 289) was wrong by 64. The bare class is deliberately outside the ratchet,
-    # so nothing else would have caught it.
-    bare_by_doc, bare_by_file = dangling_doc_refs.bare_find()
-    live = {n.rsplit('/', 1)[-1]: v for n, v in bare_by_doc.items()
-            if f'bugs/{n}' in have}
-    check('dangling refs: the BARE walk does not report a citation of a bug '
-          'doc that EXISTS — the existence test it had inverted',
-          not live,
-          f'{sum(len(v) for v in live.values())} bare citation(s) of '
-          f'{len(live)} name(s) that are in bugs/ right now '
-          f'({sorted(live)[:5]}); `bare_find` must skip a name that resolves, '
-          f'and the census it prints is quoted in bugs/ documents')
-    # …and it must still find a corpus, or the fix is a walk that matches
-    # nothing. 200+ is the measured floor on this tree after the fix.
-    check('dangling refs: the BARE walk is still not vacuous after that fix',
-          sum(len(v) for v in bare_by_doc.values()) >= 200,
-          f'{sum(len(v) for v in bare_by_doc.values())} citations of '
-          f'{len(bare_by_doc)} names that are nowhere; a walk that skips every '
-          f'name because it skips too many is the same defect wearing the '
-          f'opposite sign')
-    # The ledger's floor is read by TWO mechanisms now — the ratchet below and
-    # the strict check above — so the readers that decide what it records are
-    # checked against a synthetic corpus rather than against this tree's, whose
-    # two entries happen to sit on either side of nothing in particular. The
-    # three cases are the three that can be got wrong independently: exactly at
-    # the ceiling (sanctioned, not a gain), one over it (a gain, and NOT
-    # sanctioned — the join must not become a hole), and one under it (not a
-    # gain, but a ledger entry the corpus has outgrown, which a ceiling cannot
-    # report and `stale_baseline_entries` exists to).
-    synth = {'a.py': [('X.md', 1)], 'b.py': [('Y.md', 1), ('Z.md', 2)],
-             'c.py': [], 'd.py': [('W.md', 3)]}
-    synth = {rel: cites for rel, cites in synth.items() if cites}
-    led = {'a.py': 1, 'b.py': 1, 'c.py': 2, 'd.py': 4}
-    check('dangling refs: the ledger floor is read by one implementation, and a '
-          'file with no entry is allowed zero',
-          dangling_doc_refs.ledger_verdicts(synth, led)
-          == {'a.py': (1, 1), 'b.py': (2, 1), 'd.py': (1, 4)}
-          and dangling_doc_refs.sanctioned(synth, led) == {'a.py', 'd.py'}
-          and dangling_doc_refs.ratchet_regressions(synth, led)
-          == [('b.py', 2, 1)],
-          f'verdicts {dangling_doc_refs.ledger_verdicts(synth, led)}, '
-          f'sanctioned {sorted(dangling_doc_refs.sanctioned(synth, led))}, '
-          f'gains {dangling_doc_refs.ratchet_regressions(synth, led)}; at or '
-          f'under the ceiling is sanctioned (so a worker who fixed a file is '
-          f'not asked for a ledger change), over it is a gain AND unsanctioned '
-          f'— one regime, not two — and an absent entry is zero, which is '
-          f'what catches a brand-new file citing a deleted doc')
-    check('dangling refs: a ledger entry the corpus has outgrown is visible, '
-          'which a ceiling cannot report',
-          dangling_doc_refs.stale_baseline_entries(synth, led) == {'d.py': (1, 4)},
-          f'stale {dangling_doc_refs.stale_baseline_entries(synth, led)}; the '
-          f'ledger is a CEILING, so a file that fixed its citations needs no '
-          f'entry change to stay green and an entry left behind by a fix is '
-          f'indistinguishable from one still needed — a worker who fixes a '
-          f'citation should drop the entry rather than leave it')
-
-
-def test_the_formal_doc_index_is_current():
-    """`bugs/OPEN_WORK.md`'s formal queue is GENERATED, and this is the check
-    that keeps it true.
-
-    The section it replaced was a hand-maintained table, and it was wrong in the
-    way a hand-maintained table is: it named documents that had been deleted,
-    it carried `*(deleted 2026-10-02)*` rows explaining a fix in three sentences
-    — a Status history inside an index, which is the one thing an index must not
-    be — and it had no way to notice either. `bugs/OPEN_WORK.md`'s own header
-    says it is generated by `tools/formal_doc_index.py`, from each document's
-    most-cited `formal/` file (the area) and from `tools/control.py`'s registry
-    (the claim), so adding a document, deleting one, or moving a file changes
-    the index and this file says so.
-
-    **The check deliberately excludes the CLAIM column**, and that is the
-    interesting half. Claim status is a fact about the MACHINE, not about the
-    tree: this repository is worked from a dozen worktrees at once and every one
-    of them starts or finishes a task while the others are mid-run, so two
-    workers' branches would disagree about it legitimately. CLAUDE.md's rule is
-    explicit that a check which goes red on branches that did nothing wrong is
-    worse than no check, because a red check is indistinguishable from a real
-    regression — so the tree's facts (the document list, the areas, the titles)
-    are compared and the machine's are reported as a number.
-
-    Three checks, each shown to fail on a planted defect:
-      - the block in OPEN_WORK.md is current;
-      - `--check` is not vacuous: adding a document makes it fail;
-      - it is not blind either: rewriting every claim in the file leaves it
-        green (and `--strict`, which is the full comparison, red).
-    """
-    import shutil
-    sys.path.insert(0, os.path.join(HERE, 'tools'))
-    try:
-        import formal_doc_index as F
-    except ImportError as e:
-        check('formal doc index: the generator is importable', False, repr(e))
-        return
-
-    def run_check(argv):
-        import io
-        import contextlib
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            argv = ['formal_doc_index.py'] + argv
-            old, sys.argv = sys.argv, argv
-            try:
-                rc = F.main()
-            finally:
-                sys.argv = old
-        return rc, buf.getvalue()
-
-    rc, out = run_check(['--check'])
-    check('formal doc index: OPEN_WORK.md\'s generated block is current',
-          rc == 0, out.strip() or f'--check exited {rc}')
-
-    path = os.path.join(HERE, 'bugs', 'OPEN_WORK.md')
-    backup = os.path.join(F.ROOT, '.tmp', 'OPEN_WORK.md.bak')
-    os.makedirs(os.path.dirname(backup), exist_ok=True)
-    shutil.copy(path, backup)
-    try:
-        # A NEW document is a fact about the tree and must be a failure.
-        ghost = os.path.join(HERE, 'bugs', 'FORMAL_zz_check_plant.md')
-        with open(ghost, 'w', encoding='utf-8') as f:
-            f.write('# FORMAL_zz_check_plant.md: a planted document\n\n'
-                    'This file exists so the index check can be shown to fail.\n')
-        rc_added, _ = run_check(['--check'])
-        os.remove(ghost)
-
-        # Every CLAIM rewritten is a fact about the MACHINE and must not be.
-        # **In memory, not on disk.** The first version of this check wrote the
-        # planted text into bugs/OPEN_WORK.md and restored it in a `finally` —
-        # which means a run killed between the write and the restore (a timeout,
-        # a SIGTERM from the suite's own drain, an interrupt) leaves the
-        # repository's triage index holding a fiction. A check on the tree that
-        # damages the tree when it dies is worse than one that damages nothing,
-        # and the comparison does not need the file: `without_claims` is the
-        # whole reduction, so the same question is answerable on a string.
-        text = open(path, encoding='utf-8').read()
-        block = F.block_in(text)
-        planted = block.replace('| **unclaimed** |', '| `nobody-at-all` |')
-        planted = planted.replace(', 0 claimed', ', 999 claimed')
-    finally:
-        shutil.copy(backup, path)
-        os.remove(backup)
-
-    check('formal doc index: a NEW document makes it fail — the check is not '
-          'vacuous',
-          rc_added == 1,
-          f'planting a document left --check at rc={rc_added}; an index that '
-          f'cannot notice a document appearing is a hand-maintained table with '
-          f'a generator in front of it')
-
-    rendered = F.render()
-    reduced = F.without_claims(rendered)
-    names = [r[0] + '.md' for r in F.rows()]
-    # The AREA tokens, not the whole heading lines: the "N claimed" tail of a
-    # heading is one of the things the reduction blanks, so comparing the line
-    # would fail for the right change.
-    areas = re.findall(r'^### `([^`]+)`', rendered, re.M)
-    check('formal doc index: --check compares the tree and ignores the machine '
-          '— a claim-only edit is invisible to it, and the document list, the '
-          'areas and the titles survive the reduction',
-          F.without_claims(planted).strip() == reduced.strip()
-          and planted.strip() != rendered.strip()
-          and len(areas) >= 5
-          and all(n in reduced for n in names)
-          and all(f'### `{a}`' in reduced for a in areas)
-          and all(r[5] in reduced for r in F.rows()),
-          'the reduction must blank the claim cell and the counts that are '
-          'functions of it, and NOTHING else. Two ways to get that wrong, both '
-          'seen: blanking every backticked cell in a row (which also drops the '
-          'document name, so a deleted document stops being noticed) and '
-          'comparing planted-against-planted, which is SYMMETRIC and so cannot '
-          'detect over-blanking at all — hence the two asymmetric assertions '
-          'about names and headings surviving')
-
-    rc_after, out_after = run_check(['--check'])
-    check('formal doc index: ...and the file is byte-identical afterwards',
-          rc_after == 0 and out_after == out,
-          'the planted-document probe must put the file back exactly, or this '
-          'check has a side effect on the tree it is checking')
-
-
-def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
-    """Twenty per-round work maps became one, and the two halves of that are
-    what can rot again.
-
-    `bugs/` held 143 `FORMAL_*.md` documents and GREW: every worker filed more
-    than it deleted. The formal sweep series was the worst of it — twenty
-    documents, 8 676 lines, one per round, each superseded by the next and each
-    carrying round-over-round tables whose only content was "this number
-    changed". A reader planning formal work had twenty documents to choose a
-    "current" one from and no way to tell which was current except the base
-    commit inside each.
-
-    They are now `bugs/FORMAL_sweep_work_map.md`: §1 is the latest census,
-    §2 is what the earlier rounds established and still holds, and §3 is an
-    INDEX of the twenty rounds with the base commit, the scope, and — because
-    seventy-odd files in this tree cite a round by its section number — what
-    each cited section carried. The citations were rewritten to "the `b9` round
-    of `bugs/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
-
-    So two properties, and both are checked here because the failure mode that
-    produced twenty documents is not a crash:
-
-    1. **There is ONE sweep work map.** A twenty-first round's author must add
-       to §1/§2 of this document or file a document that is not a per-round map
-       of this series; a file matching the pattern is either a mistake or the
-       cluster is regrowing.
-    2. **Every round tag any file cites is a row in the index.** That is what
-       makes the rewrite in (1) durable: a citation of "the `b14` round" with no
-       index row is a reference to a document nobody can find, and it is the
-       same dangling citation the check above exists for, in the one spelling
-       that check cannot see because the path it names DOES resolve.
-    """
-    import glob
-    maps = sorted(glob.glob(os.path.join(HERE, 'bugs',
-                                        'FORMAL_sweep_work_map*.md')))
-    canonical = 'FORMAL_sweep_work_map.md'
-    check('sweep maps: there is exactly ONE per-round map, and it is the '
-          'consolidated one',
-          [os.path.basename(m) for m in maps] == [canonical],
-          f'{[os.path.basename(m) for m in maps]}; every round of the formal '
-          f'sweep series is one document with an index of its rounds, and a '
-          f'second file matching this pattern is the cluster regrowing')
-
-    if not maps:
-        return
-    index = open(os.path.join(HERE, 'bugs', canonical), encoding='utf-8').read()
-    # The tags §3 declares, read out of the index's own first column rather than
-    # hand-listed here: a hand-maintained copy of an index is a second copy.
-    tags = set()
-    for line in index.splitlines():
-        m = re.match(r'\|\s*`([^`]+)`\s*\|', line)
-        if m:
-            tags.add(m.group(1))
-    # …and the ones the tree cites, in the rewritten spelling.
-    cited = {}
-    for rel in sorted(glob.glob(os.path.join(HERE, '**', '*.py'),
-                                recursive=True)) + \
-            sorted(glob.glob(os.path.join(HERE, '**', '*.md'),
-                             recursive=True)):
-        if not os.path.isfile(rel) or rel.endswith(os.path.join('bugs', canonical)):
-            continue
-        if 'build/' in rel or '__pycache__' in rel:
-            continue
-        try:
-            text = open(rel, encoding='utf-8', errors='replace').read()
-        except OSError:
-            continue
-        for tag in re.findall(r'the `([^`]+)` round of `[^`]*FORMAL_sweep_work_map'
-                              r'\.md`', text):
-            cited.setdefault(tag, []).append(
-                os.path.relpath(rel, HERE).replace(os.sep, '/'))
-    missing = {t: sorted(set(v)) for t, v in cited.items() if t not in tags}
-    check('sweep maps: every round tag the tree cites is a row in the index, '
-          'so "the `bN` round, §X.Y" resolves',
-          not missing and len(cited) >= 5,
-          f'{missing}; a citation of a round the index does not list sends the '
-          f'reader to a section number that exists nowhere. The index is '
-          f'{canonical} §3 / §3.1 and its tags are read out of that file; the '
-          f'walk found {len(cited)} distinct cited tag(s), and fewer than 5 '
-          f'means it is not seeing the rewritten spelling and would pass '
-          f'vacuously')
 
 
 def _module_const_paths(src, tree):
@@ -5750,17 +3496,13 @@ def main():
                test_exclusive_is_alone, test_fanout_aggregates,
                test_fanout_enumeration_ignores_untracked_scratch,
                test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root,
-               test_no_stale_per_child_budget_is_left_as_a_literal,
                test_missing_fanout_item_is_a_named_failure,
                test_timeout_is_a_failure_not_a_vanished_job,
                test_tally_accounts_for_every_test,
                test_a_status_with_no_counter_stops_the_runner,
                test_artifact_cache,
                test_selfhost_key_is_complete,
-               test_selfhost_key_hashes_nothing_dead,
                test_the_compiler_imports_from_every_real_entry_point,
-               test_a_message_a_test_pins_is_still_a_message_the_tree_can_say,
-               test_the_needle_census_fails_on_a_needle_nothing_says,
                test_a_disabled_test_is_registered_but_never_runs,
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
@@ -5770,22 +3512,8 @@ def main():
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
-               test_no_test_name_is_registered_twice,
-               test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
-               test_a_deleted_bug_doc_is_not_still_cited,
-               test_the_formal_doc_index_is_current,
                test_no_test_preflights_on_an_unbuildable_artifact,
-               # A missing DELEGATE is the same class of defect and the same
-               # escape: `'GimpleGen' object has no attribute
-               # '_emit_dict_int_value_store'` is an AttributeError raised
-               # during codegen, so it reaches no exit code and no test that
-               # does not happen to lower the shape that calls it. This one was
-               # DEFINED and never CALLED, which is the memory-campaign
-               # failure above in a second place — a guard nothing runs reports
-               # green forever — and it is the only check that can see the
-               # defect statically at all.
-               test_every_backend_call_of_a_gen_method_has_the_delegate,
                # The memory-campaign tests. They were DEFINED and never CALLED
                # — three functions, 300-odd lines, nothing in this list — which
                # is the same defect as a test file in no bucket: the coverage
@@ -5809,7 +3537,6 @@ def main():
                test_over_provisioned_classes_are_reported_not_silently_kept,
                test_every_job_over_the_debt_line_says_why,
                test_an_expect_marker_points_at_a_doc_that_exists,
-               test_an_expect_marker_count_is_checked_against_the_run,
                test_a_doc_that_states_a_tests_status_agrees_with_the_registry,
                test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
         fn()

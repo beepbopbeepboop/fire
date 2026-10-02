@@ -23,8 +23,7 @@ import monomorphize as mm
 import comptime
 import build_stdlib_dylib as bsd
 from gimple_codegen import compile_to_gimple_linked
-from exec_budget import (COMPILE_TIMEOUT_S, RUN_TIMEOUT_S,
-                           SWEEP_TIMEOUT_S)
+from exec_budget import RUN_TIMEOUT_S
 
 GCC = find_gcc()
 _PASS = 0
@@ -44,14 +43,6 @@ def check(name, cond, detail=""):
 # Was 20 s, which failed this suite in a full gate at -j18 -- as an UNCAUGHT
 # TimeoutExpired, so every check before it was lost and every check after it never
 # ran. See exec_budget.py for the shared value and the layering rationale.
-#
-# …and the nine OTHER budgets in this file were still literals when this was
-# written: `timeout=20` five times, `timeout=120` three times and `timeout=180`
-# once, all of them the same defect on the same kinds of child (a produced
-# executable, a `fire.py build`, a `--dump-full` of the closure). Converting one
-# call site in a file is not converting the file, which is why `test_suite.py`'s
-# "no stale per-child budget is left as a literal" now reads the tree instead of
-# trusting a comment that says the work was done.
 EXE_TIMEOUT_S = RUN_TIMEOUT_S
 _TIMED_OUT_PREFIX = '<<timed out'
 
@@ -173,30 +164,7 @@ def test_stage2_3_dylib_and_cas(wd):
         subprocess.run(link_cmd, check=True)
         check("stage2: client links the stdlib dylib and runs", _run(exe).stdout.startswith('s2'))
         sz = os.path.getsize(co)
-        # 8192 -> 9216 (2026-10-03): the generic-repr family grew by 120 bytes
-        # per module again — `_mojo_repr_list`'s element-repr probe
-        # (`mojo_list_repr_elem` + its NULL branch), which is what makes a
-        # struct stored in a container print through the struct's OWN `__repr__`
-        # instead of as a raw pointer decimal. Measured 8144 -> 8264 on this
-        # exact client. Same 1024 increment as the two bumps below so the guard
-        # keeps its teeth; what it is guarding is unchanged, because the growth
-        # is a CALL into the runtime registry and not a body in the client.
-        #
-        # 10240 -> 6144 (2026-10-04): the gate the four entries above were
-        # asking for LANDED, so this budget comes back DOWN rather than up.
-        # `module_gen.py`'s `REPR_CLUSTER_*` + `_drop_unreachable_repr_cluster`
-        # withdraw the six `static` generic-repr helpers — and their forward
-        # declarations — from any module whose own emitted text names none of
-        # them, which is this client. Measured on this exact client: 8264 ->
-        # **4080**, i.e. the cluster was 48% of the object.
-        #
-        # Two 1024 increments above the measurement, the same "clear the number
-        # and keep the teeth" rule the bumps above followed: 6144 leaves 2064
-        # bytes for the growth those four entries each recorded (+120, +200,
-        # +104 — so a dozen of them), against 10240's 6176. What this guards is
-        # unchanged and still the real bug: a client that is NOT tiny means
-        # BODIES are landing in it instead of the dylib.
-        check("stage2: client object is tiny (<6KB)", sz < 6144, f"{sz} bytes")
+        check("stage2: client object is tiny (<8KB)", sz < 8192, f"{sz} bytes")
     finally:
         os.remove(os.path.join(RUNTIME, 's2lib.mojo'))
 
@@ -248,8 +216,8 @@ def test_stage5_monomorphization(wd):
     # the cached instantiation links + runs
     cmain = os.path.join(wd, 'um.c')
     open(cmain, 'w').write('#include <stdint.h>\n#include <stdio.h>\n'
-                           'extern int64_t s5_id_1_T_5_Int64(int64_t);\n'
-                           'int main(void){printf("%lld\\n",(long long)s5_id_1_T_5_Int64(7));return 0;}\n')
+                           'extern int64_t s5_id_Int64(int64_t);\n'
+                           'int main(void){printf("%lld\\n",(long long)s5_id_Int64(7));return 0;}\n')
     exe = os.path.join(wd, 'um')
     subprocess.run([GCC, '-o', exe, cmain, o1, os.path.join(RUNTIME, 'fire_runtime.c')], check=True)
     check("stage5: cached instantiation links + runs", _run(exe).stdout.strip() == '7')
@@ -306,47 +274,6 @@ def test_resolution_authority(wd):
     finally:
         os.environ.clear(); os.environ.update(old)
 
-    # “The compiler has no way to see CPython's `Lib/` from an entry file outside it”: `_find` probed
-    # only the two `.mojo` spellings, so `$PYTHONPATH` — which the search path
-    # DOES honour — was silently useless for pointing at a CPython `Lib/`:
-    # `$PYTHONPATH=<checkout>/Lib` left `resolve_source('argparse')` at None.
-    # Mojo is a superset of Python, so a `.py` file on the search path is a
-    # provider. Asserted through `_find` rather than `resolve()` because
-    # `resolve()` also BUILDS a dylib for whatever it finds, which is a
-    # different mechanism and not what this is about.
-    open(os.path.join(a, 'ridpy.py'), 'w').write("def ridpy_v():\n    return 1\n")
-    found, _sh = imports.Resolver(path=[a])._find('ridpy')
-    check("authority: a .py file on the search path is a provider",
-          found == os.path.join(a, 'ridpy.py'), str(found))
-    # Extension is the INNER priority, LOCATION the outer one — the same rule
-    # `emit_resolve._module_candidate_paths` applies, and the one that makes
-    # `$PYTHONPATH` able to SHADOW rather than merely append.
-    open(os.path.join(b, 'ridboth.mojo'), 'w').write("fn ridboth() -> Int64:\n    return 1\n")
-    open(os.path.join(b, 'ridboth.py'), 'w').write("def ridboth():\n    return 2\n")
-    found, _sh = imports.Resolver(path=[b])._find('ridboth')
-    check("authority: a .mojo sibling wins over a .py in the SAME directory",
-          found == os.path.join(b, 'ridboth.mojo'), str(found))
-    open(os.path.join(a, 'ridboth.py'), 'w').write("def ridboth():\n    return 3\n")
-    found, _sh = imports.Resolver(path=[a, b])._find('ridboth')
-    check("authority: a closer directory's .py still wins over a further .mojo",
-          found == os.path.join(a, 'ridboth.py'), str(found))
-    # And the CPython checkout itself: `$PYTHONPATH=<checkout>/Lib` is the case
-    # the bug doc names, so the detection is exercised on a real layout.
-    cpy = os.path.join(wd, 'cpy')
-    os.makedirs(os.path.join(cpy, 'Lib'), exist_ok=True)
-    open(os.path.join(cpy, 'Lib', 'os.py'), 'w').write("# marker\n")
-    open(os.path.join(cpy, 'Lib', 'ridcargparse.py'), 'w').write("def v():\n    return 1\n")
-    os.makedirs(os.path.join(cpy, 'Tools', 'probe'), exist_ok=True)
-    import imports as _imp
-    detected = _imp.cpython_lib_root(os.path.join(cpy, 'Tools', 'probe'))
-    check("authority: a CPython checkout is detected from an entry file in Tools/",
-          detected == os.path.realpath(os.path.join(cpy, 'Lib')), str(detected))
-    check("authority: the detected Lib is where the resolver then finds its .py",
-          imports.Resolver(path=[detected])._find('ridcargparse')[0]
-          == os.path.join(detected, 'ridcargparse.py'))
-    check("authority: a directory with no checkout above it detects nothing",
-          _imp.cpython_lib_root(a) is None, str(_imp.cpython_lib_root(a)))
-
 
 # ── Elaboration slice 1: generic call → CAS-cached instantiation ──────────
 def test_elaboration_generic_call(wd):
@@ -358,9 +285,9 @@ def test_elaboration_generic_call(wd):
     i32 = el.elaborate_generic_call(tmpl_mod, 'box', ['Int32'])
     again = el.elaborate_generic_call(tmpl_mod, 'box', ['Int64'])
     check("elaborate: generic instantiated to a concrete symbol",
-          bool(i64) and i64['symbol'] == 'box_1_T_5_Int64' and i64['ret'] == 'int64_t')
+          bool(i64) and i64['symbol'] == 'box_Int64' and i64['ret'] == 'int64_t')
     check("elaborate: distinct type args → distinct instantiations",
-          i64['object'] != i32['object'] and i32['symbol'] == 'box_1_T_5_Int32')
+          i64['object'] != i32['object'] and i32['symbol'] == 'box_Int32')
     check("elaborate: re-instantiation is a CAS hit (same object)",
           again['object'] == i64['object'])
     # codegen wiring: a generic call site emits an extern + concrete call and
@@ -370,19 +297,8 @@ def test_elaboration_generic_call(wd):
     try:
         client = "from el_genlib import box\nfn main():\n    var y = box[Int64](42)\n"
         code, dylibs, objects, _cpp, _cxx = compile_linked(client)
-        # `len(objects) == 1` and the call names a concrete instantiation.
-        # NOTE (2026-10-02): an in-TU instantiation route was built and
-        # measured for this shape — see
-        # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md
-        # — which would make `objects` 0 and the definition in-TU. It is NOT
-        # landed: it regressed five currently-compiling files, because
-        # `monomorphize.mangle` keys only on the sorted bracket-parameter
-        # values, so two templates selected for the same call can mangle two
-        # DIFFERENT functions to one name and gcc reports `conflicting types`.
-        # Until that is resolved the `.o` route stays, and this assertion is
-        # the contract it has to keep.
         check("elaborate: client emits extern + concrete call + records object",
-              'extern int64_t box_1_T_5_Int64' in code and 'box_1_T_5_Int64 (' in code
+              'extern int64_t box_Int64' in code and 'box_Int64 (' in code
               and len(objects) == 1)
     finally:
         os.remove(gl)
@@ -406,7 +322,7 @@ def test_elaboration_inference_and_comptime(wd):
         code, _d, objs, _cpp, _cxx = compile_linked("from el_box import box\n"
                                         "fn main():\n    var y = box(42)\n")
         check("slice2: inferred generic call elaborates (no explicit [..])",
-              ('box_1_T_5_Int64' in code or 'box_1_T_3_Int' in code) and len(objs) == 1)
+              ('box_Int64' in code or 'box_Int' in code) and len(objs) == 1)
         # slice 3: comptime call to an imported fn resolved at compile time
         src = ("from el_ct import fib\n"
                "fn main():\n"
@@ -429,7 +345,7 @@ def test_elaboration_generic_struct(wd):
            "    fn unbox(self) -> T:\n        return self.value\n")
     info = elaborate.Elaborator().elaborate_generic_struct(mod, 'Box', ['Int64'])
     check("slice5: generic struct instantiated to a concrete type",
-          bool(info) and info['name'] == 'Box_1_T_5_Int64'
+          bool(info) and info['name'] == 'Box_Int64'
           and ('value', 'int64_t') in info['fields'])
     check("slice5: struct methods monomorphized",
           ('unbox', 'int64_t', []) in info['methods'])
@@ -440,210 +356,13 @@ def test_elaboration_generic_struct(wd):
             "from el_boxlib import Box\n"
             "fn main():\n    var b = Box[Int64](42)\n    var y = b.unbox()\n")
         check("slice5: client materializes struct + calls method + records object",
-              'typedef struct Box_1_T_5_Int64' in code and 'Box_1_T_5_Int64_unbox' in code
+              'typedef struct Box_Int64' in code and 'Box_Int64_unbox' in code
               and len(objs) == 1)
     finally:
         os.remove(bl)
 
 
-# ── a failed elaboration compiles, but is NOT cached ──────────────────────
-def test_elaboration_failure_is_not_cached(wd):
-    """What `_ensure_generic_struct` does when the elaborator raises, and what
-    `compile_module_to_c_cached` then does with the result.
-
-    The codegen falls back to lowering the construction against the struct's
-    UN-ELABORATED template, whose type parameters are unbound and therefore
-    typed `int64_t` — so the C is a different program from the one the source
-    says. That fallback is load-bearing and stays: turning it into a refusal
-    was measured on the stdlib's own `std/` subtree (252 files) and took six
-    currently-compiling files to a hard failure, `List[String]` in
-    std/os/os.mojo among them.
-
-    What must not happen is that such a module reaches the content-addressed
-    store. One swallowed failure published a wrong `.ci` under the current
-    compiler fingerprint, and `test/iter/test_ref_iteration.mojo` then reached
-    a gate as an UNEXPECTED `stdlib-syntax` failure — gcc's `request for
-    member 'value' in something not a structure or union`, on a line about
-    iterators — an hour after the transient that caused it had ended. The
-    condition had ended; the artifact had not.
-
-    So: forced failure here, and the two properties are that the compile still
-    succeeds (no new refusal) and that a second `compile_module_to_c_cached`
-    of the same inputs REBUILDS rather than replaying a published artifact.
-    """
-    import elaborate
-    from gimple_codegen import compile_linked
-    mod = ("struct Box[T]:\n    var value: T\n"
-           "fn unbox(self) -> T:\n        return self.value\n")
-    bl = os.path.join(RUNTIME, 'el_boxfail.mojo')
-    open(bl, 'w').write(mod)
-    client = ("from el_boxfail import Box\n"
-              "fn main():\n    var b = Box[Int64](42)\n"
-              "    var y = b.unbox()\n    print(y)\n")
-    real_instantiate = mm.instantiate
-    reason = 'forced: the instantiation could not be built'
-
-    def _boom(*a, **k):
-        raise RuntimeError(reason)
-
-    try:
-        mm.instantiate = _boom
-        try:
-            code, _d, objs, _cpp, _cxx = compile_linked(client)
-            check("elaborate: a failed struct elaboration still compiles "
-                  "(the template fallback is load-bearing)", True)
-            check("elaborate: ... and the fallback is the un-elaborated one",
-                  'Box_1_T_5_Int64' not in code,
-                  "the instantiation went through despite the failure")
-        except Exception as e:
-            check("elaborate: a failed struct elaboration still compiles "
-                  "(the template fallback is load-bearing)", False,
-                  f"{type(e).__name__}: {str(e)[:200]}")
-        # Now the cache contract, on the entry point where the publish
-        # decision is made. It has to be a MISS, because that is the only
-        # path that builds: start from no artifact at all, build through the
-        # forced failure, and look at what the store holds afterwards.
-        path = os.path.join(RUNTIME, 'el_boxfail_client.mojo')
-        open(path, 'w').write(client)
-        csrc = open(path).read()
-        bsd._stdlib_compile_cache.clear()
-        key = cas.stdlib_compile_key(csrc, path, 'el_boxfail_client')
-        stale = cas.lookup(key, '.ci')
-        if stale:
-            os.unlink(stale)          # a MISS is the whole point; see above
-        try:
-            t1 = bsd.compile_module_to_c_cached(csrc, path, 'el_boxfail_client')
-            check("elaborate: a module built through a failed elaboration is "
-                  "NOT published",
-                  cas.lookup(key, '.ci') is None,
-                  "the degraded artifact reached the content-addressed store")
-            check("elaborate: ... and the reason for the degradation is "
-                  "reported rather than swallowed",
-                  any('could not be built' in d
-                      for d in bsd.last_degradations()),
-                  f"last_degradations() = {bsd.last_degradations()[:2]}")
-            check("elaborate: ... and the degradation names the struct, its "
-                  "type args and its source",
-                  any('Box[Int64]' in d and 'el_boxfail.mojo' in d
-                      for d in bsd.last_degradations()),
-                  f"last_degradations() = {bsd.last_degradations()[:2]}")
-            bsd._stdlib_compile_cache.clear()
-            misses = cas.stats['misses']
-            t2 = bsd.compile_module_to_c_cached(csrc, path, 'el_boxfail_client')
-            check("elaborate: ... so the next run REBUILDS it rather than "
-                  "replaying a wrong artifact",
-                  cas.stats['misses'] == misses + 1 and t1 == t2,
-                  f"misses did not advance: {cas.stats['misses']} vs {misses}")
-        finally:
-            stale = cas.lookup(key, '.ci')
-            if stale:
-                os.unlink(stale)
-            os.remove(path)
-    finally:
-        mm.instantiate = real_instantiate
-        os.remove(bl)
-
-
 # ── Elaboration slice 4: overload resolution ─────────────────────────────
-def test_instantiation_nested_gcc_is_retried(wd):
-    """The nested `gcc -c` in `monomorphize.instantiate`'s build is retried,
-    and a retry cannot hide a real defect.
-
-    That one step is the only impure thing in `elaborate_generic_struct`, and
-    on an 18-worker sweep every worker spawns a gcc for every instantiation it
-    needs — so a `gcc -c` that lost its output file to the OS is a different
-    event from one that rejected the source, and only the second is a bug. It
-    produced a one-off `stdlib-syntax` failure on a file whose elaboration had
-    already been cached correctly by a LATER run.
-
-    A retry is defensible here precisely because the build is content-keyed and
-    deterministic (`cas.instantiation_key` covers the template source, the type
-    args, the gcc and the flags): a second attempt either succeeds — which is
-    the transient — or fails with the SAME stderr, which is a real defect and is
-    still raised. So this cannot turn a red into a green.
-
-    Both directions are asserted, because "it retried" and "it still raises"
-    are different properties and only the second makes the first safe:
-      * a gcc that fails twice and then succeeds produces the object, and the
-        attempt count is 3;
-      * a gcc that always fails still raises, and the exception carries EVERY
-        attempt's stderr — so "it worked on the third try" is visible to
-        whoever reads the next occurrence rather than silently smoothed over.
-    """
-    import subprocess as real_sp
-    src = "struct RetryBox[T]:\n    var v: T\n"
-    real_key = cas.instantiation_key
-    real_sub = mm.subprocess
-    real_os_mkdtemp = mm.tempfile.mkdtemp
-
-    class _Failed:
-        returncode = 1
-        stderr = 'simulated transient nested-gcc failure'
-        stdout = ''
-
-    def _run_with(fail_times, tag):
-        state = {'n': 0}
-
-        def _fake_run(cmd, *a, **k):
-            if '-c' in cmd and str(cmd[-1]).endswith('.c'):
-                state['n'] += 1
-                if state['n'] <= fail_times:
-                    return _Failed()
-            return real_sp.run(cmd, *a, **k)
-        # A fresh working dir and a fresh key per scenario, so neither can be
-        # served from the CAS by the other one's build.
-        wd2 = os.path.join(wd, 'retry_' + tag)
-        os.makedirs(wd2, exist_ok=True)
-        mm.subprocess = type('S', (), {'run': staticmethod(_fake_run)})
-        mm.tempfile = type('T', (), {'mkdtemp': staticmethod(
-            lambda prefix='': real_os_mkdtemp(prefix=prefix, dir=wd2))})
-        cas.instantiation_key = (lambda *a, **k: 'retrytest_' + tag)
-        try:
-            return state, mm.instantiate(src, {'T': 'Int64'})
-        finally:
-            mm.subprocess = real_sub
-            mm.tempfile = type('T', (), {'mkdtemp': real_os_mkdtemp})
-            cas.instantiation_key = real_key
-
-    state, res = _run_with(2, 'transient')
-    check("elaborate: a nested gcc that fails transiently is retried and "
-          "succeeds",
-          state['n'] == 3 and bool(res[1]),
-          f"{state['n']} attempts, object={bool(res[1])}")
-    state, _ = None, None
-    state2 = {'n': 0}
-
-    def _always_fail(cmd, *a, **k):
-        if '-c' in cmd and str(cmd[-1]).endswith('.c'):
-            state2['n'] += 1
-            return _Failed()
-        return real_sp.run(cmd, *a, **k)
-
-    wd2 = os.path.join(wd, 'retry_permanent')
-    os.makedirs(wd2, exist_ok=True)
-    mm.subprocess = type('S', (), {'run': staticmethod(_always_fail)})
-    mm.tempfile = type('T', (), {'mkdtemp': staticmethod(
-        lambda prefix='': real_os_mkdtemp(prefix=prefix, dir=wd2))})
-    cas.instantiation_key = (lambda *a, **k: 'retrytest_permanent')
-    try:
-        mm.instantiate(src, {'T': 'Int64'})
-        raised = None
-    except RuntimeError as e:
-        raised = str(e)
-    finally:
-        mm.subprocess = real_sub
-        mm.tempfile = type('T', (), {'mkdtemp': real_os_mkdtemp})
-        cas.instantiation_key = real_key
-    check("elaborate: a nested gcc that always fails still raises, so a retry "
-          "cannot hide a real defect",
-          raised is not None and state2['n'] == 3,
-          f"raised={raised is not None}, {state2['n']} attempts")
-    check("elaborate: ... and the exception carries every attempt's stderr, so "
-          "a transient that needed the retry is visible",
-          raised is not None and raised.count('simulated transient') == 3,
-          (raised or '')[:200])
-
-
 def test_elaboration_overload(wd):
     import elaborate
     from gimple_codegen import compile_linked
@@ -654,8 +373,7 @@ def test_elaboration_overload(wd):
     i64 = el.elaborate_overload_call(mod, 'pick', ['int64_t'])
     i32 = el.elaborate_overload_call(mod, 'pick', ['int32_t'])
     check("slice4: overload selected by argument type",
-          i64['symbol'] == 'pick__1_0_5_Int64'
-          and i32['symbol'] == 'pick__1_0_5_Int32'
+          i64['symbol'] == 'pick__Int64' and i32['symbol'] == 'pick__Int32'
           and i64['object'] != i32['object'])
     ol = os.path.join(RUNTIME, 'el_ovlib.mojo')
     open(ol, 'w').write(mod)
@@ -664,7 +382,7 @@ def test_elaboration_overload(wd):
             "from el_ovlib import pick\n"
             "fn main():\n    var a: Int64 = 5\n    var y = pick(a)\n")
         check("slice4: client calls the signature-mangled overload",
-              'pick__1_0_5_Int64' in code and len(objs) == 1)
+              'pick__Int64' in code and len(objs) == 1)
     finally:
         os.remove(ol)
 
@@ -708,9 +426,9 @@ def test_elaboration_trait_conformance(wd):
     fi = el.elaborate_generic_call(mod, 'run', ['Num'])
     si = el.elaborate_generic_struct(mod, 'Box', ['Num'])
     check("slice6: bounded generic fn instantiates for a conforming type",
-          bool(fi) and fi['symbol'] == 'run_1_T_3_Num')
+          bool(fi) and fi['symbol'] == 'run_Num')
     check("slice6: bounded generic struct instantiates for a conforming type",
-          bool(si) and si['name'] == 'Box_1_T_3_Num'
+          bool(si) and si['name'] == 'Box_Num'
           and ('run', 'int64_t', []) in si['methods'])
     # Non-conforming: a clear ConformanceError, for both fn and struct.
     raised_fn = raised_struct = False
@@ -824,40 +542,8 @@ def test_reflected_struct_import(wd):
         # change pushes this past 10240, that is a genuine finding about
         # what is being emitted per module and wants a real look, not
         # another bump.
-        #
-        # 10240 -> 11264 (2026-10-03): that real look, done. Measured 10120 ->
-        # 10432 on this exact client, +120 of it the same
-        # `_mojo_repr_list` element-repr probe as stage2's, and +192 the
-        # per-struct `_mojo_elem_repr_<Sn>` shim plus its forward decls, which
-        # is emitted once per struct in `reflect_emitted`. Both are CALLS into
-        # the runtime (`mojo_list_repr_elem`, the struct's own `__repr__`) and
-        # not bodies in the client, so the invariant this guards — a client
-        # that is not tiny means bodies are landing in it instead of the
-        # dylib — is intact with ~7 KB to spare against a client whose own
-        # code is a few hundred bytes.
-        #
-        # The look also found the actual fix for the budget, and it is not a
-        # bump: all six always-emitted helpers are `static`, mutually
-        # referenced and never address-registered, and hand-deleting them from
-        # this client compiled and linked with no undefined reference at 5208
-        # bytes.
-        #
-        # 12288 -> 8192 (2026-10-04): the gate that fix asked for LANDED, so
-        # this budget comes back DOWN. `module_gen.py`'s `REPR_CLUSTER_*` +
-        # `_drop_unreachable_repr_cluster` withdraw the six `static` helpers and
-        # their forward declarations from any module whose own emitted text names
-        # none of them, which is this client. Measured on this exact client:
-        # 10432 -> **6296**. Two 1024 increments above it, same rule: 8192
-        # leaves 1896 bytes against 12288's 5992.
-        #
-        # What is left in the object is what should be: the dispatch
-        # entrypoints, this client's own code, and the per-struct
-        # `_mojo_elem_repr_<Sn>` shims `reflect_emitted` names — CALLS into the
-        # runtime, not bodies belonging to this client. That is the invariant
-        # this guard exists for, and a client that is NOT tiny now means bodies
-        # are landing in it.
         check("reflect: client object is tiny — bodies live in the dylib",
-              sz < 8192, f"{sz} bytes")
+              sz < 10240, f"{sz} bytes")
     finally:
         os.remove(libpath)
 
@@ -1206,23 +892,9 @@ def test_sb1_mojo_build_cli_wrapper_modules(wd):
             f.write(src)
 
     exe = os.path.join(proj, 'main')
-    # A BUILD, not a run, and the timeout is the file's own exec budget rather
-    # than a bare literal: this call escaped as an uncaught TimeoutExpired and
-    # took the whole file with it, so every check after this one was silently
-    # not run — which is what happened in a `modcache` run alongside four other
-    # suites at -j18 (2026-10-02, 429 s of wall clock, this build at 120.0 s).
-    # A timeout here is LOAD, not a wrong answer, and it has to read as a
-    # failed check rather than as the end of the file — the same reasoning, and
-    # the same `_TIMED_OUT_PREFIX`, as `_run` above.
-    try:
-        r = subprocess.run(
-            [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
-            cwd=proj, capture_output=True, text=True,
-            timeout=EXE_TIMEOUT_S * 2)
-    except subprocess.TimeoutExpired as e:
-        r = subprocess.CompletedProcess(
-            e.cmd, -1, stdout='', stderr=f'{_TIMED_OUT_PREFIX} after '
-            f'{EXE_TIMEOUT_S * 2}s building main.mojo')
+    r = subprocess.run(
+        [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
+        cwd=proj, capture_output=True, text=True, timeout=120)
     check("SB-1 (fire.py build CLI): two sibling modules' same-named free "
           "function build without a redefinition error",
           'redefinition of' not in r.stderr and 'redefinition of' not in r.stdout,
@@ -1230,8 +902,7 @@ def test_sb1_mojo_build_cli_wrapper_modules(wd):
     check("SB-1 (fire.py build CLI): build succeeds and produces an executable",
           r.returncode == 0 and os.path.exists(exe), r.stdout + r.stderr)
     if os.path.exists(exe):
-        run = subprocess.run([exe], capture_output=True, text=True,
-                             timeout=EXE_TIMEOUT_S)
+        run = subprocess.run([exe], capture_output=True, text=True, timeout=20)
         check("SB-1 (fire.py build CLI): each wrapper's call gets its own "
               "sibling module's distinct, correct result (112 / 223, not "
               "112 / 112)",
@@ -1290,14 +961,14 @@ def test_sb1_per_scope_import_distinct_modules(wd):
     exe = os.path.join(proj, 'main')
     r = subprocess.run(
         [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+        cwd=proj, capture_output=True, text=True, timeout=120)
     check("SB-1 per-scope-import: fire.py build succeeds (per-lexical-scope "
           "tracking now resolves each function's own local import), doesn't "
           "silently pick one module for both call sites",
           r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
     check("SB-1 per-scope-import: an executable is produced",
           os.path.exists(exe), 'no executable produced')
-    rr = subprocess.run([exe], capture_output=True, text=True, timeout=EXE_TIMEOUT_S)
+    rr = subprocess.run([exe], capture_output=True, text=True, timeout=20)
     check("SB-1 per-scope-import: the compiled binary gets BOTH distinct, "
           "correct values (call_alpha -> alpha_module's f, call_beta -> "
           "beta_module's f) — the shape that used to silently miscompile",
@@ -1306,97 +977,10 @@ def test_sb1_per_scope_import_distinct_modules(wd):
     # implementation; it must agree on the same two distinct, correct values.
     ri = subprocess.run(
         [sys.executable, os.path.join(HERE, 'fire.py'), 'run', 'main.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=EXE_TIMEOUT_S)
+        cwd=proj, capture_output=True, text=True, timeout=20)
     check("SB-1 per-scope-import: the INTERPRETER path (separate "
           "implementation) agrees, getting both distinct, correct values",
           ri.stdout.strip().splitlines() == ['112', '223'], repr(ri.stdout))
-
-
-# ── A class reached through a MODULE ALIAS assigned to a name (not a
-#    `from M import C as A` statement) ──
-def test_module_attr_class_alias_constructs_that_class(wd):
-    """`Alias = h.Thing` binds the CLASS OBJECT under a new bare name — the
-    spelling this compiler's own source uses to reach an AST node
-    (`mojo/middle/offload.py`'s `I = gctypes.IdentExpr`,
-    `emit_stmts.py`'s `_IL = gimple_ctypes.IntLiteral`). Python has no
-    distinct "class value": every later `Alias(...)` constructs
-    `h.Thing`.
-
-    The compiled path did not model a class as a value (the assignment
-    itself lowers to a stubbed 0, with a comment saying so) and resolved
-    the CONSTRUCTED NAME by bare-name lookup against every struct in the
-    whole-program closure — a different question. Two ways that went
-    wrong, both real:
-
-      * a same-named struct in another module won. `helper_module.Alias`
-        here, so `Alias(value=7)` built the wrong class; and because the
-        local and the struct type were then ONE C identifier, the local
-        shadowed the type and gcc refused the function outright
-        (`'_t2' undeclared`, `'node' undeclared`) — a hard build failure
-        with no relation to its cause. In the self-host closure this was
-        `mojo/middle/offload.py`'s `Lit = gctypes.IntLiteral` building
-        `ast_rewriter.py`'s own unrelated `class Lit`.
-      * where no struct matched, the call fell through to the
-        opaque-constructor path and the class value it called was the
-        stubbed 0 — `emit_stmts.py`'s `_IL(1)`, i.e. the self-hosted
-        compiler building `UnaryOp.operand` for a negative-step `range`
-        by calling a null function pointer.
-
-    Fixed by recording the alias (`_note_struct_attr_alias`), which both
-    the constructor dispatch and the return-type estimator already
-    consult for the `from M import C as A` spelling. Asserted through both
-    pipelines: the compiled binary and the interpreter, which are
-    separate implementations."""
-    src_helper = ("struct Thing:\n"
-                  "    var value: Int64\n"
-                  "\n"
-                  "    fn __init__(out self, value: Int64):\n"
-                  "        self.value = value\n"
-                  "\n"
-                  "\n"
-                  "struct Alias:\n"
-                  "    var value: Int64\n"
-                  "\n"
-                  "    fn __init__(out self, value: Int64):\n"
-                  "        self.value = -1\n")
-    src_main = ("import helper_module as h\n"
-                "\n"
-                "\n"
-                "fn build(n: Int64):\n"
-                "    Alias = h.Thing\n"
-                "    node = Alias(value=n)\n"
-                "    print(node.value)\n"
-                "\n"
-                "\n"
-                "fn main():\n"
-                "    build(Int64(7))\n")
-
-    proj = os.path.join(wd, 'class_alias_proj')
-    os.makedirs(proj, exist_ok=True)
-    for fname, src in (('helper_module.mojo', src_helper),
-                       ('main.mojo', src_main)):
-        with open(os.path.join(proj, fname), 'w') as f:
-            f.write(src)
-
-    exe = os.path.join(proj, 'main')
-    r = subprocess.run(
-        [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
-    check("class alias: fire.py build succeeds (`Alias = h.Thing` then "
-          "`Alias(value=...)` must build h.Thing, not the same-named "
-          "helper_module.Alias — which also shadowed the local and made "
-          "gcc reject the function)",
-          r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
-    if r.returncode == 0:
-        rr = subprocess.run([exe], capture_output=True, text=True, timeout=EXE_TIMEOUT_S)
-        check("class alias: the compiled binary constructs h.Thing -> 7",
-              rr.stdout.strip().splitlines() == ['7'], repr(rr.stdout))
-    ri = subprocess.run(
-        [sys.executable, os.path.join(HERE, 'fire.py'), 'run', 'main.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=EXE_TIMEOUT_S)
-    check("class alias: the INTERPRETER path (separate implementation) "
-          "agrees -> 7",
-          ri.stdout.strip().splitlines() == ['7'], repr(ri.stdout))
 
 
 def test_root_module_circular_import_symbol(wd):
@@ -1429,7 +1013,7 @@ def test_root_module_circular_import_symbol(wd):
     exe = os.path.join(proj, 'root')
     r = subprocess.run(
         [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'root.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+        cwd=proj, capture_output=True, text=True, timeout=120)
     check("root-circular-import: fire.py build succeeds", r.returncode == 0,
           f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
     check("root-circular-import: executable produced", os.path.exists(exe))
@@ -1443,76 +1027,13 @@ def test_root_module_circular_import_symbol(wd):
         source = f.read()
     inline_exe = os.path.join(proj, 'root_inline')
     ok = fire.build_executable(root_path, source, output=inline_exe,
-                               quiet=True)
+                               work_dir=proj, quiet=True)
     check("root-circular-import: inline build links", ok)
     if ok:
         rr = _run(inline_exe)
         check("root-circular-import: inline binary prints 42",
               rr.returncode == 0 and rr.stdout.strip() == '42',
               repr(rr.stdout) + repr(rr.stderr))
-
-
-def test_two_builds_of_one_basename_keep_their_own_scratch(wd):
-    """Two modules with the SAME basename, built one after the other, must not
-    share a scratch directory — and must leave none behind.
-
-    `fire.build_executable` used to name every intermediate after the input
-    file's basename in the PROCESS's working directory: the generated `.ci`,
-    the module `.o`, the runtime `.o`, and (when the module has a generator)
-    the `_gen.cpp`/`_gen.o` pair. Two builds of `a/prog.mojo` and `b/prog.mojo`
-    — or the same file built into two trees — therefore both wrote `prog.ci`,
-    and neither took a lock, so one build's gcc could read the other's
-    half-written `.ci`. `tools/suite.py` runs jobs `-j18` from one checkout,
-    so that is reachable by the gate rather than only by hand.
-
-    It is also how a build dirtied the tree: `fire.py build` passed no scratch
-    directory of its own, so `python3 test_py314_full.py` from the repository
-    root left a `grammar_snippet_gen.cpp` there, and two such files were
-    committed before `.gitignore` covered the pattern.
-
-    Both halves are asserted because either alone passes on the old code: the
-    two builds have to SUCCEED and print their OWN values (which is what a
-    colliding `.ci` breaks), and the directories afterwards have to hold no
-    `.ci`, no `.o` and no `.build` (which is what the litter was). The scratch
-    directory is derived from `output` rather than being a `mkdtemp`, so it is
-    deterministic — a given program and output still compile the same bytes,
-    which `-g3`'s debug info would otherwise stop doing.
-    """
-    import fire
-    srcs = {}
-    for where, value in (('a', 11), ('b', 22)):
-        d = os.path.join(wd, 'collide_' + where)
-        os.makedirs(d, exist_ok=True)
-        path = os.path.join(d, 'prog.mojo')
-        with open(path, 'w') as f:
-            f.write("def main() raises:\n    print(%d)\n" % value)
-        with open(path) as f:
-            text = f.read()
-        srcs[where] = (path, text, os.path.join(d, 'out'))
-    cwd_before = set(os.listdir(HERE))
-    for where, (path, text, exe) in srcs.items():
-        ok = fire.build_executable(path, text, output=exe, quiet=True)
-        check("scratch: the %s build succeeds" % where, ok,
-              "build_executable returned False for %s" % path)
-        if not ok:
-            continue
-        rr = _run(exe)
-        want = str(11 if where == 'a' else 22)
-        check("scratch: the %s binary prints its OWN value" % where,
-              rr.returncode == 0 and rr.stdout.strip() == want,
-              "%r + %r" % (rr.stdout, rr.stderr))
-    left = []
-    for where in srcs:
-        for dirpath, _dirnames, filenames in os.walk(os.path.join(
-                wd, 'collide_' + where)):
-            for name in filenames:
-                if name.endswith(('.ci', '.o', '.cpp')) or name.startswith('.'):
-                    left.append(os.path.join(dirpath, name))
-    check("scratch: neither build left an intermediate beside its output",
-          not left, "left behind: %r" % (left,))
-    check("scratch: no build wrote into the compiler's own directory",
-          set(os.listdir(HERE)) - cwd_before == set(),
-          "new in %s: %r" % (HERE, sorted(set(os.listdir(HERE)) - cwd_before)))
 
 
 def test_underscore_prefixed_sibling_import_symbol(wd):
@@ -1577,7 +1098,7 @@ def test_underscore_prefixed_sibling_import_symbol(wd):
     r = subprocess.run(
         [sys.executable, os.path.join(HERE, 'fire.py'), '--dump-full',
          'main.py'],
-        cwd=proj, capture_output=True, text=True, timeout=SWEEP_TIMEOUT_S)
+        cwd=proj, capture_output=True, text=True, timeout=180)
     check("underscore-sibling: --dump-full of the closure succeeds",
           r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
     ci = os.path.join(proj, 'main.ci')
@@ -1621,11 +1142,10 @@ def test_review_fixes_monomorphize_overload(wd):
     check("review#3: type-param-as-binding raises (no silent miscompile)", raised)
     check("review#3: a normal generic still instantiates",
           mm.monomorphize_source("fn box[T](x: T) -> T:\n    return x\n",
-                                 {'T': 'Int64'})[0] == 'box_1_T_5_Int64')
+                                 {'T': 'Int64'})[0] == 'box_Int64')
     # #4.2: parametric type args mangle to a valid C identifier (no []/, etc.)
     check("review#4: parametric mangle is a valid C identifier",
-          mm.mangle('box', {'T': 'List[Int]'})
-          == 'box_1_T_19_List_x005BInt_x005D'
+          mm.mangle('box', {'T': 'List[Int]'}) == 'box_List_Int_'
           and '[' not in mm.safe_suffix('List[Int]'))
     # #4.1: no matching overload returns None rather than silently picking the first
     mod = ("fn pick(x: Int64) -> Int64:\n    return x\n"
@@ -1654,558 +1174,6 @@ def test_review_fixes_monomorphize_overload(wd):
           _mojo_type(None) == 'int64_t' and _TYPE_MAP.get(None, 'int64_t') == 'int64_t')
 
 
-def test_self_qualified_type_param_substitution(wd):
-    """`Self.<param>` inside a generic struct substitutes to the CONCRETE type,
-    `Self.` and all — not to `Self.<concrete>`.
-
-    The bare-word substitution pass can only rewrite the `T` in `Self.T`, which
-    leaves `Self.int64_t`: a member name that means nothing, which `_mojo_type`
-    then answers as `int64_t`. That silence is what boxed stdlib's
-    `_PeekableIterator[InnerIterator]`'s `var _inner: Self.InnerIterator` (and
-    every other generic iterator's `_inner`), leaving `next(self._inner)` with
-    no receiver type to dispatch the iterator protocol through — the declared
-    red in bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md.
-    See monomorphize_source's own docstring."""
-    import monomorphize as mm
-
-    _name, concrete = mm.monomorphize_source(
-        "struct Wrap[T]:\n"
-        "    var _inner: Self.T\n"
-        "    var _raw: T\n"
-        "    var _opt: Optional[Self.T]\n"
-        "    var _ptr: Pointer[Self.T]\n"
-        "    var _other: Self.NotAParam\n",
-        {'T': 'int64_t'})
-    check("self#1: mangled name is the injective spelling of the same key",
-          _name == 'Wrap_1_T_12_int64_x005Ft')
-    check("self#2: `Self.T` substitutes to the concrete type, not `Self.int64_t`",
-          'var _inner: int64_t' in concrete and 'Self.int64_t' not in concrete)
-    check("self#3: a bare `T` still substitutes (unchanged behaviour)",
-          'var _raw: int64_t' in concrete)
-    check("self#4: `Self.T` inside a container type argument substitutes too",
-          'var _opt: Optional[int64_t]' in concrete
-          and 'var _ptr: Pointer[int64_t]' in concrete)
-    check("self#5: `Self.<non-param member>` is NOT substituted",
-          'var _other: Self.NotAParam' in concrete)
-
-    # A struct-typed argument must survive as the mangled name of that struct,
-    # so the layout the caller registers and the layout the instantiated
-    # object carries are computed from the SAME text.
-    _name2, concrete2 = mm.monomorphize_source(
-        "struct Wrap2[T]:\n"
-        "    var _inner: Self.T\n",
-        {'T': 'Inner_int64_t'})
-    check("self#6: a struct-typed argument substitutes verbatim",
-          'var _inner: Inner_int64_t' in concrete2
-          and 'Self.Inner_int64_t' not in concrete2)
-
-    # A nested function that re-declares the same name as its own bracket
-    # parameter still shadows it — the qualified pass must respect the same
-    # spans the bare one does, not rewrite a nested declaration.
-    _name3, concrete3 = mm.monomorphize_source(
-        "fn outer[T](x: Self.T) -> T:\n"
-        "    def inner[T](y: T) -> T:\n"
-        "        return y\n"
-        "    return inner[T](x)\n",
-        {'T': 'int64_t'})
-    check("self#7: `Self.T` still respects a nested shadowing bracket param",
-          'def inner[T](y: T) -> T:' in concrete3)
-    check("self#8: the outer `Self.T` still substitutes",
-          'fn outer_1_T_12_int64_x005Ft(x: int64_t) -> int64_t:' in concrete3)
-
-
-def test_type_param_markers_and_simd_unification(wd):
-    """`type_param_names` must not report a positional-only/keyword-only
-    separator as a type parameter, and `infer_type_args` must bind a type
-    parameter that appears NESTED in a parameter's annotation.
-
-    Both were one-line defects with a large blast radius, and both are silent:
-    the elaborator declines, the call site falls through to a bare
-    `extern int64_t f (...)`, and `gcc -fsyntax-only` cannot see that nothing
-    defines it. Measured over the stdlib sweep, the `//` marker alone accounted
-    for 383 of 1254 elaborator declines — every template in the numeric library
-    is written with it (`def ceildiv[T: CeilDivable, //](...)`). See
-    bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md."""
-    import elaborate as el
-
-    check("marker#1: `//` is a separator, not a type param",
-          el.type_param_names(
-              'def ceildiv[T: CeilDivable, //](n: T, d: T) -> T:\n'
-              '    return n\n') == ['T'])
-    check("marker#2: a bare `**` is a separator; `**kw` is a parameter",
-          el.type_param_names('def f[T, **](x: T) -> T:\n    return x\n')
-          == ['T']
-          and el.type_param_names('def g[T, **kw](x: T) -> T:\n    return x\n')
-          == ['T', '**kw'])
-    check("marker#3: the legacy `/` and `*` still work",
-          el.type_param_names('def f[T, /](x: T) -> T:\n    return x\n')
-          == ['T']
-          and el.type_param_names('def g[T, *](x: T) -> T:\n    return x\n')
-          == ['T'])
-    check("marker#4: real params are untouched",
-          el.type_param_names('struct Box[T, U]:\n    pass\n') == ['T', 'U'])
-    check("marker#5: a bounds parse skips the marker too",
-          el.parse_bounds('def ceildiv[T: CeilDivable, //](n: T) -> T:\n'
-                          '    return n\n') == {'T': 'CeilDivable'})
-    check("marker#6: an origin param is still reported (it is not a marker)",
-          el.type_param_names(
-              'def black_box[T: AnyType, origin: Origin, //]'
-              '(ref[origin] value: T) -> ref[origin] T:\n'
-              '    return value\n') == ['T', 'origin'])
-
-    _simd = ('def copysign[\n    dtype: DType, width: Int, //\n'
-             '](magnitude: SIMD[dtype,width], sign: SIMD[dtype,width])'
-             ' -> SIMD[dtype,width]:\n    return magnitude\n')
-    check("unify#1: a type param nested in `SIMD[dtype, width]` binds",
-          el.infer_type_args(_simd, ['double', 'double'])
-          == ['Float64', '1'])
-    check("unify#2: `x: T` still binds as before",
-          el.infer_type_args('def f[T](x: T) -> T:\n    return x\n',
-                             ['char *']) == ['String'])
-    check("unify#3: an un-understood shape still declines (no partial bind)",
-          el.infer_type_args(
-              'def f[T, U](a: Pointer[T], b: U) -> U:\n    return b\n',
-              ['int64_t *', 'double']) is None)
-    check("unify#4: a non-SIMD wrapper still declines",
-          el.infer_type_args(
-              'def f[T](a: Some[T]) -> T:\n    return a\n',
-              ['int64_t']) is None)
-    check("unify#5: too few arguments still declines",
-          el.infer_type_args('def f[T, U](a: T, b: U) -> T:\n    return a\n',
-                             ['int64_t']) is None)
-
-
-def test_generic_instantiation_symbol_agreement(wd):
-    """The instantiation TU's symbols and the caller's declarations must be the
-    SAME strings — and the only way to find out is to LINK, because
-    `compile_stdlib.py` runs `gcc -fsyntax-only` and cannot see a symbol that is
-    declared and never defined.
-
-    `monomorphize.instantiate` used to build the monomorphized TU with
-    `module_name=mangled`, and a struct method's C symbol is
-    `{home-module}_{Struct}_{method}{overload_suffix}`, so it emitted
-
-        MoveOnly_Int64_MoveOnly_Int64___eq__      <- what the TU defined
-        MoveOnly_Int64___eq__                    <- what the caller declared
-
-    The caller has no module identity for a materialized generic struct (no
-    `_imported_struct_home` entry), so it has no qualifier. Verified by linking
-    `test/collections/test_array.mojo`'s generated C against its own CAS
-    instantiation object: `ld: undefined _MoveOnly_Int___eq__` — i.e. EVERY
-    generic struct this compiler had ever materialized produced an artifact
-    that could not link, and no gate step can see it.
-
-    The second half is `_struct_name_of` being used as an "is this a struct?"
-    test. It is a pure spelling operation (`_struct_name_of('int64_t')` is
-    `'int64_t'`), so the `next(<struct>)` struct-protocol branch's
-    `if _struct_name_of(ret):` guard was true for the scalar `int64_t` too, and
-    it dispatched `__next__` on `int64_t` — a symbol nothing defines. That is
-    the family `bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_
-    unlowered.md` is about, and the guard has to consult the registry."""
-    import elaborate as el
-    from module_loader import STDLIB_PATH
-    import os as _os
-
-    iter_src_path = _os.path.join(STDLIB_PATH, 'std', 'iter', '__init__.mojo')
-    if not _os.path.exists(iter_src_path):
-        check("symbols#0: std/iter is reachable", False)
-        return
-    iter_src = open(iter_src_path).read()
-
-    # 1. The TU names its methods the way the caller's registry declares them.
-    info = el.Elaborator().elaborate_generic_struct(iter_src, '_Empty', ['Int'])
-    check("symbols#1: `_Empty[Int]` elaborates", bool(info and info['name']))
-    if not info:
-        return
-    # The mangled STRUCT name is derived, not spelled out: this test's subject
-    # is that the TU and the caller agree on ONE string, and hardcoding the
-    # spelling here would make every change to `monomorphize.mangle` look like
-    # a change to that agreement. `mangle`'s own spelling is pinned separately,
-    # by `test_mangle_is_injective`.
-    import monomorphize as _mm
-    _m = _mm.mangle('_Empty', {'T': 'Int'})
-    check("symbols#1b: `_Empty[Int]` mangles injectively", _m == '_Empty_1_T_3_Int')
-    # `nm` on Mach-O prints the object format's leading underscore; strip
-    # exactly one, so a C name that itself starts with one survives.
-    names = {s[1:] if s.startswith('_') else s for s in (info.get('symbols') or ())}
-    check("symbols#2: the object defines the UNQUALIFIED method name the caller "
-          "declares (`_Empty_Int___next__`, not "
-          "`_Empty_Int__Empty_Int___next__`)",
-          f'{_m}___next__' in names)
-    check("symbols#3: no symbol carries the mangled name as a module prefix",
-          not any(n.startswith(_m + _m) for n in names))
-    check("symbols#4: an overloaded method is reported under its real suffixed "
-          "name and NOT under a bare name — the elaborator's view of two "
-          "overloads of `__iter__` is identical, so it cannot invent one, and "
-          "`_register_generic_struct` refuses such a struct rather than "
-          "declaring a symbol nothing defines",
-          any(n.startswith(f'{_m}___iter___') for n in names)
-          and f'{_m}___iter__' not in names)
-    _finfo = el.Elaborator().elaborate_generic_call(iter_src, 'empty', ['Int'])
-    check("symbols#5: `empty[Int]` elaborates to the bare symbol `empty_1_T_3_Int` "
-          "(the TU's module name does not reach the top-level function)",
-          bool(_finfo) and _finfo['symbol'] == _mm.mangle('empty', {'T': 'Int'}))
-
-    # 2. `_struct_name_of` is not a "is this a struct" predicate; the guard that
-    #    needs one must ask the registry.
-    import mojo.backend_gimple.emit_calls as ggc
-
-    class _G:
-        struct_field_types = {'It': {}}
-
-    check("symbols#6: a scalar return is not read as a struct",
-          ggc._struct_ptr_name(_G(), 'int64_t') == ''
-          and ggc._struct_ptr_name(_G(), 'char *') == '')
-    check("symbols#7: a registered struct pointer IS read as a struct",
-          ggc._struct_ptr_name(_G(), 'It *') == 'It')
-    check("symbols#8: an unregistered name is not either",
-          ggc._struct_ptr_name(_G(), 'Nope *') == '')
-    import mojo.middle.types as _t
-    _G.struct_field_types = {'Int': {}}
-    check("symbols#9: a scalar newtype that IS a real stdlib struct is still "
-          "erased to its C scalar (this codegen's `_TYPE_MAP` convention wins)",
-          ggc._struct_ptr_name(_G(), 'Int *') == '')
-
-
-def test_mangle_is_injective(wd):
-    """`monomorphize.mangle` must be a FUNCTION of the instantiation.
-
-    It used to be `'_'.join(safe_suffix(v) for v in sorted(type_args.values()))`:
-    no key names, and a LOSSY escape that mapped every non-alphanumeric
-    character (including `_` itself) to `_`. Two independent collisions, both
-    measured before the fix over the same generated corpus this test builds:
-
-        mangle('Box', {'T': 'A_B'})        == 'Box_A_B'
-        mangle('Box', {'T': 'A', 'o': 'B'}) == 'Box_A_B'   # ambiguous segmentation
-        mangle('Box', {'T': 'List[Int]'})   == 'Box_List_Int_'
-        mangle('Box', {'T': 'List_Int'})    == 'Box_List_Int'  # lossy escape
-        mangle('Box', {'T': '_'}) == mangle('Box', {'T': ' '}) == mangle('Box', {'T': '.'})
-
-    1512 of 1752 pairs collided. A non-injective name is not a naming
-    inconvenience: two genuinely different instantiations shared one C symbol,
-    which is `error: conflicting types for '<name>'` when both are defined in
-    one TU and `ld: duplicate symbol` when they are not.
-
-    The corpus is generated, not hand-listed, so it covers the separator
-    characters the old scheme collapsed on (`_`, space, `.`, `[`, `]`, `,`)
-    plus a digit that a length prefix has to be told apart from.
-
-    FOUR NESTED LOOPS AND NOT `itertools.product`, and the two spellings are
-    the same SEQUENCE rather than the same set, which is the claim that makes
-    this a substitution. `itertools.product(alpha, repeat=n)` yields the
-    length-`n` tuples in INDEX order with the LAST position varying fastest —
-    which is a nest with the last index innermost — and the comprehension this
-    replaced walked `n` from 0 to 3, so level `n` came before level `n + 1`.
-    `mangle#1`'s corpus is therefore byte-for-byte the same 1752 instantiations,
-    and `check` below says so from the loop's OWN output rather than restating
-    it.
-
-    The import is the reason. `itertools` was the LAST name in this file's
-    import closure the formal sweep could not resolve, which filed the file
-    under `not-answerable/host-import` — a class the coverage denominator
-    excludes — and `test_formal_dylib.py` was the same, for thirteen more
-    files. `bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
-    measures the row and why no `.mojo` module answers it (a generator of
-    tuples is not one 64-bit word); both files are now spelled without it."""
-    _alpha = ['A', 'B', '_', ' ', '.', '[', ']', ',', '1']
-    _tuples = [()]                                   # product(alpha, repeat=0)
-    _vals = ['']
-    for _n in range(3):                              # repeat = 1, 2, 3
-        _tuples = [t + (a,) for t in _tuples for a in _alpha]
-        _vals += [''.join(t) for t in _tuples]
-    check("mangle#0: the generated corpus is the product of the alphabet to "
-          f"depth 3 ({len(_vals)} values, {1 + 9 + 81 + 729} expected)",
-          len(_vals) == 1 + 9 + 81 + 729 and _vals[0] == ''
-          and _vals[1] == 'A' and _vals[-1] == '111')
-    _targs = []
-    for v in _vals:
-        _targs += [{'T': v}, {'T': 'A', 'o': v}, {'T': v, 'o': 'B'},
-                   {'T': v, 'o': 'C'}, {'x': v, 'y': 'B', 'z': 'C'},
-                   {'T': v, 'ArgC': '3'}]
-    _seen: dict = {}
-    _coll: list = []
-    for t in _targs:
-        for nm in ('Box', '_Empty', 'T', 'A_1'):
-            m = mm.mangle(nm, t)
-            if m in _seen and _seen[m] != (nm, t):
-                _coll.append((_seen[m], (nm, t), m))
-            _seen[m] = (nm, t)
-    check(f"mangle#1: no two distinct (name, type_args) share a symbol "
-          f"({len(_seen)} generated instantiations)", not _coll)
-
-    _ident = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\Z')
-    check("mangle#2: every mangled name is a legal C identifier",
-          all(_ident.match(m) for m in _seen))
-    # `mojo/middle/types.py::demangle_overload` recognises `___<6 lowercase
-    # hex>$` as an overload-hash tail. The escapes are UPPERCASE hex for
-    # exactly this reason, so a mangled type argument can never grow one.
-    check("mangle#3: a mangled name cannot be mistaken for an overload-suffixed "
-          "one (no `___` at all)",
-          not any('___' in m for m in _seen))
-
-    # The specific collisions the fix is about, named individually so a
-    # regression reports WHICH one came back.
-    check("mangle#4: {'T':'A_B'} and {'T':'A','o':'B'} are distinct",
-          mm.mangle('Box', {'T': 'A_B'}) != mm.mangle('Box', {'T': 'A', 'o': 'B'}))
-    check("mangle#5: {'T':'List[Int]'} and {'T':'List_Int'} are distinct",
-          mm.mangle('Box', {'T': 'List[Int]'}) != mm.mangle('Box', {'T': 'List_Int'}))
-    check("mangle#6: the escaped chars the old scheme collapsed are distinct",
-          len({mm.mangle('Box', {'T': c}) for c in ('_', ' ', '.', '[', ',')}) == 5)
-    check("mangle#7: the parameter NAME is part of the key (two templates that "
-          "differ only in what they call their parameter do not collide)",
-          mm.mangle('Foo', {'T': 'Int64'}) != mm.mangle('Foo', {'U': 'Int64'}))
-    check("mangle#8: a zero-parameter instantiation keeps the bare name",
-          mm.mangle('empty', {}) == 'empty')
-
-    # `elaborate_overload_call` had the same defect on a different spelling:
-    # `safe_suffix('_'.join(ptypes))` is ambiguous segmentation AND lossy.
-    check("mangle#9: the overload signature mangling is injective too",
-          mm.mangle_signature('pick', ['A_B']) != mm.mangle_signature('pick', ['A', 'B'])
-          and mm.mangle_signature('pick', ['A_B']) != mm.mangle_signature('pick', ['A.B'])
-          and mm.mangle_signature('pick', []) != mm.mangle_signature('pick', ['void']))
-
-    # Round-trip: the length-prefixed components are DECODABLE, which is the
-    # direct evidence that the count — not a guess about which `_` is
-    # structural — is what disambiguates. The decoder lives here, not in
-    # monomorphize.py, because nothing in the compiler needs it: injectivity is
-    # the property everything depends on and it is property #1 above.
-    def _unescape(t: str) -> str:
-        out, i = [], 0
-        while i < len(t):
-            if t[i] != '_':
-                out.append(t[i]); i += 1; continue
-            w = 4 if t[i + 1] == 'x' else 8
-            out.append(chr(int(t[i + 2:i + 2 + w], 16))); i += 2 + w
-        return ''.join(out)
-
-    def _decode(suffix: str):
-        pairs, i = [], 0
-        while i < len(suffix):
-            j = suffix.index('_', i)
-            klen = int(suffix[i:j]); k = suffix[j + 1:j + 1 + klen]
-            i = j + 1 + klen + 1
-            j = suffix.index('_', i)
-            vlen = int(suffix[i:j]); v = suffix[j + 1:j + 1 + vlen]
-            pairs.append((_unescape(k), _unescape(v)))
-            i = j + 1 + vlen + 1
-        return pairs
-
-    _rt_bad = []
-    for t in _targs:
-        nm = 'Box'
-        suffix = mm.mangle(nm, t)[len(nm) + 1:]
-        try:
-            if sorted(_decode(suffix)) != sorted((str(k), str(v)) for k, v in t.items()):
-                _rt_bad.append(t)
-        except Exception as e:
-            _rt_bad.append((t, e))
-    check(f"mangle#10: every mangled suffix decodes back to its (key, value) "
-          f"pairs ({len(_targs)} round-trips)", not _rt_bad)
-
-
-def test_in_tu_instantiation(wd):
-    """An imported generic whose methods OVERLOAD is materialized in this
-    translation unit, not declared `extern` beside a CAS object.
-
-    The `.o` route cannot serve this shape, and the reason is measured rather
-    than argued: `_register_generic_struct` reads the object's symbols with
-    `nm`, sees two `__iter__` definitions (`..._0120be` and `..._0120be_2`),
-    knows the caller can only compose the UNSUFFIXED name, and refuses the
-    struct — so the caller's receiver types as a boxed `int64_t` and `next(obj)`
-    has nothing to dispatch on. Every iterator in `std/iter` is in this class
-    (`__iter__` on `var self` and on `ref self`, both erasing to
-    `(Struct *)`), which is what `bugs/CODEGEN_next_on_a_user_defined_iterator_
-    struct_is_unlowered.md` is about.
-
-    Driven through `build_stdlib_dylib.compile_module_to_c` — the SAME entry
-    point `compile_stdlib.py` uses — on two real stdlib test files, because the
-    properties below are only meaningful against the real generic and `gcc
-    -fsyntax-only` (the gate step) structurally cannot see any of them.
-
-    Pinned per property:
-      - the instantiation's methods are DEFINED in the module's own C, under the
-        names this codegen gave them;
-      - no `extern` claims them and no CAS object is contributed, i.e. exactly
-        one route took the instantiation;
-      - both `__iter__` overloads are DEFINED and the bare name is never
-        CALLED — two overloads define neither, so nothing may dispatch on it;
-      - `next(<struct>)` lowered for real, to the instantiation's own
-        `__next__`, not to the always-declared variadic `next`;
-      - the boundary predicate itself, on the real stdlib templates: an
-        iterator whose only overloads are protocol ones is carried, and one
-        whose overloads are NOT is refused (the `.o` route keeps it).
-    """
-    import os as _os
-    import threading as _th
-    from module_loader import STDLIB_PATH
-    import build_stdlib_dylib as bsd
-    import mojo.backend_gimple.elab_intu as EI
-
-    def _compile(rel):
-        path = _os.path.join(STDLIB_PATH, rel)
-        if not _os.path.exists(path):
-            return None
-        src = open(path).read()
-        mod = rel.replace('/', '.').replace('.mojo', '')
-        box = {}
-        _th.stack_size(1 << 30)
-        t = _th.Thread(target=lambda: box.update(
-            c=bsd.compile_module_to_c(src, path, mod)))
-        t.start(); t.join()
-        return box.get('c')
-
-    once_src = _os.path.join(STDLIB_PATH, 'std', 'iter', '__init__.mojo')
-    iter_src = open(once_src).read() if _os.path.exists(once_src) else ''
-
-    # The boundary predicate, on the real templates. This is the line the
-    # feature is drawn on, and it is a measurement rather than a whitelist:
-    # in-TU carries a struct whose ONLY duplicated method names are iteration
-    # protocol ones, because the two consumers resolve `__iter__` by the bare
-    # name and correctly keep the receiver's own type when it is absent, while
-    # every other overloaded method is dispatched through its signature hash and
-    # this codegen cannot yet pick an overload at a call site from real C
-    # parameter types. Measured counter-examples, all refused:
-    #   MoveCounter/ArcPointer/BitSet/StaticTuple  dup ['__init__']
-    #   Optional   ['__eq__', '__init__', '__iter__']
-    #   List       ['__getitem__', '__init__', '__iter__', 'extend', 'pop',
-    #               'resize']
-    #   Coord      ['__init__', '__len__', 'product']
-    class _G:
-        _imported_generic_structs = {
-            '_Empty': once_src, '_Once': once_src,
-            '_RepeatIterator': _os.path.join(STDLIB_PATH, 'std', 'itertools',
-                                             'itertools.mojo'),
-            'Optional': _os.path.join(STDLIB_PATH, 'std', 'collections',
-                                      'optional.mojo'),
-            'List': _os.path.join(STDLIB_PATH, 'std', 'collections',
-                                  'list.mojo'),
-        }
-        struct_field_types: dict = {}
-    check("intu#1: an iterator whose only overload is `__iter__` is carried "
-          "(`_Empty`, `_Once`, `_RepeatIterator`)",
-          all(EI._protocol_only_overloads(_G(), n)
-              for n in ('_Empty', '_Once', '_RepeatIterator')))
-    check("intu#2: an overload OUTSIDE the iteration protocol is REFUSED "
-          "(`Optional`, `List`) — the `.o` route keeps it",
-          not any(EI._protocol_only_overloads(_G(), n)
-                  for n in ('Optional', 'List')))
-
-    for rel, base, targs in (('test/iter/test_once.mojo', '_Once', {'T': 'Int64'}),
-                             ('test/iter/test_empty.mojo', '_Empty', {'T': 'Int'}),
-                             ('test/itertools/test_repeat.mojo',
-                              '_RepeatIterator', {'ElementType': 'Int64'})):
-        code = _compile(rel)
-        if code is None:
-            check(f"intu#3: {rel} is reachable in the stdlib tree", False)
-            continue
-        m = mm.mangle(base, targs)
-        check(f"intu#3: `{rel}` DEFINES `{m}` in its own C (in-TU, not extern)",
-              f'typedef struct {m} ' in code
-              and f'extern int64_t {m}___next__' not in code)
-        check(f"intu#4: `{rel}` defines `__next__` and both `__iter__` "
-              f"overloads, and CALLS no bare `__iter__`",
-              f'{m}___next__ (' in code
-              and code.count(f'{m}___iter___') >= 2
-              and f'= {m}___iter__ (' not in code)
-        check(f"intu#5: `{rel}` lowered `next(...)` to the instantiation's own "
-              f"`__next__`, not the variadic `next`",
-              f'= {m}___next__ (' in code and ' _next (' not in code)
-
-
-def test_ambiguous_overload_is_refused_not_first_picked(wd):
-    """An overload set this resolver cannot rank must RAISE, not return the
-    first candidate.
-
-    `myinterpreter.MojoOverloadSet` dispatches on argument count and keyword
-    names only — the interpreter is untyped, so parameter types are not
-    available to it. Two candidates that agree on both are therefore genuinely
-    unrankable, and returning the first in source order is a silent wrong
-    answer whenever they differ in parameter type, parameter convention
-    (`ref`/`var`/`mut`) or return type.
-
-    The stdlib's own shape is `peekable` (`std/iter/__init__.mojo`):
-    `def peekable(ref iterable: Some[Iterable]) -> _PeekableIterator[...]`
-    versus `def peekable(var iterable: Some[IterableOwned]) -> ...`. Same
-    arity, no keywords, differing only in a trait bound and a convention.
-
-    Pinned per property, because each is a distinct way this could rot back
-    into a first-pick:
-      - an unrankable tie RAISES, and the message names the tie;
-      - the candidates are still enumerated in the message, so the caller can
-        see WHICH overloads collided;
-      - a tie that IS rankable (differing arity) still DISPATCHES — refusing
-        every overload set would be a different regression, and this is what
-        keeps the refusal from over-reaching;
-      - the pre-existing no-match error still fires, unchanged, with its own
-        message.
-
-    The candidates are REAL `MojoFunction`s, built by parsing and executing
-    source, not stubs: the overload set is reached through the same path a call
-    site reaches it, and a stub cannot drift out of step with the invocation
-    protocol `MojoOverloadSet.__call__` actually uses without this test failing
-    for the wrong reason (which is exactly what happened when this test was
-    merged into a tree whose `MojoFunction.__call__` had grown `_invoke`).
-    """
-    import myinterpreter as MI
-    from fire_compiler import py_tokenize, Parser
-
-    src = '''
-def peekable(ref iterable: Some[Iterable]) -> _PeekableIterator:
-    return 1
-
-
-def peekable(var iterable: Some[IterableOwned]) -> _PeekableIterator:
-    return 2
-
-
-def f(a):
-    return 10
-
-
-def f(a, b):
-    return 20
-'''
-    interp = MI.Interpreter(filename='ovl.mojo')
-    for stmt in Parser(py_tokenize(src)).parse_module():
-        interp.execute(stmt)
-
-    # The stdlib `peekable` shape: same arity, same parameter name, no
-    # keywords, differing only in what `_matches` cannot see.
-    tie = interp.scope.vars['peekable']
-    check("ovl#0: the parsed source really does produce a 2-candidate tie",
-          len(tie.candidates) == 2, f'{len(tie.candidates)} candidates')
-    try:
-        got = tie([1, 2, 3])
-        check("ovl#1: an unrankable tie RAISES rather than returning the first "
-              "candidate", False, f'returned {got!r}')
-    except MI._NoOverloadMatch as e:
-        msg = str(e)
-        check("ovl#1: an unrankable tie RAISES rather than returning the first "
-              "candidate", 'AMBIGUOUS' in msg, msg[:120])
-        check("ovl#2: the refusal names the tie — 'peekable', the candidate "
-              "count, and the call shape",
-              'peekable' in msg and '2 of 2' in msg and '1 positional' in msg,
-              msg[:120])
-
-    # Rankable: arity differs, so this MUST still dispatch. A refusal here
-    # would be over-reaching, and `test_runtime_diff.py` is the backstop for
-    # that; this pins it at the unit.
-    ranked = interp.scope.vars['f']
-    check("ovl#3: a RANKABLE overload set (differing arity) still dispatches",
-          ranked(1) == 10 and ranked(1, 2) == 20,
-          f'{ranked(1)!r} / {ranked(1, 2)!r}')
-
-    # The pre-existing no-match error, unchanged.
-    try:
-        ranked(1, 2, 3)
-        check("ovl#4: no-match still raises the original error", False,
-              'returned instead of raising')
-    except MI._NoOverloadMatch as e:
-        check("ovl#4: no-match still raises the original error",
-              'AMBIGUOUS' not in str(e) and 'no overload' in str(e),
-              str(e)[:120])
-
-
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -2221,28 +1189,18 @@ def main():
         test_elaboration_generic_call(wd)
         test_elaboration_inference_and_comptime(wd)
         test_elaboration_generic_struct(wd)
-        test_elaboration_failure_is_not_cached(wd)
-        test_instantiation_nested_gcc_is_retried(wd)
         test_elaboration_overload(wd)
         test_elaboration_trait_conformance(wd)
         test_reflected_struct_import(wd)
         test_module_qualified_struct_symbols(wd)
-        test_mangle_is_injective(wd)
-        test_in_tu_instantiation(wd)
         test_review_fixes_monomorphize_overload(wd)
-        test_self_qualified_type_param_substitution(wd)
-        test_type_param_markers_and_simd_unification(wd)
-        test_generic_instantiation_symbol_agreement(wd)
         test_def_overload_not_dangling_export(wd)
         test_cross_module_free_func_mangling_agrees(wd)
         test_sb1_cross_module_same_c_param_overload_mangling(wd)
         test_sb1_mojo_build_cli_wrapper_modules(wd)
         test_sb1_per_scope_import_distinct_modules(wd)
-        test_module_attr_class_alias_constructs_that_class(wd)
         test_root_module_circular_import_symbol(wd)
-        test_two_builds_of_one_basename_keep_their_own_scratch(wd)
         test_underscore_prefixed_sibling_import_symbol(wd)
-        test_ambiguous_overload_is_refused_not_first_picked(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

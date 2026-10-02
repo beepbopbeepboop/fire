@@ -1,43 +1,6 @@
 # The dylib module compile throws away `generated_cpp`, so a generator in any dylib module silently loses its definitions
 
-## Status (2026-10-02, `work/bugs4-2`) — candidate 2 (REFUSE) is LANDED and pinned; candidate 1 (the real fix) is not
-
-`build_stdlib_dylib.compile_module_to_c` now raises when
-`gen.generated_cpp` is non-empty, so `build()`'s existing per-module error
-path prints `skip <module>: ...` and the client falls back to source. The
-exception is a named class (`_DylibGeneratedCppError`) rather than a bare
-`RuntimeError`, so a caller that DOES know how to link a companion object can
-tell it apart from a genuine compile failure — candidate 1 is exactly that
-caller, and it should not have to match on a message.
-
-Pinned by `test_selfhost.py::dylib_module_path_refuses_a_generated_cpp`, which
-is deliberately the OTHER half of `closure_coroutines_are_lowerable`: that check
-asserts the exposure is ABSENT for the two module lists that ship, and an
-assertion that the exposure is absent is not a refusal when it is not. It
-compiles a decorated generator (the shape the A3 stack-switch pass refuses, so
-the C++20 emitter takes it and `generated_cpp` is the only place the
-definitions exist) and requires the refusal, and then compiles a
-generator-FREE module and requires that it still compiles — the second half is
-what keeps the refusal from costing anything on the module lists that ship.
-
-Cost on this tree: **zero `skip` lines**, measured two ways.
-`closure_coroutines_are_lowerable` still reports 61 modules / 0 unlowered, and
-the production stdlib is 249 modules / 0 real generator-or-async defs (the
-entry above's own census, re-confirmed by the refusal not firing for a plain
-generator module either — which is the sharper statement, because a plain
-generator is exactly what the C++20 emitter accepts). So the sequencing advice
-this doc gives stands, and candidate 1 now has a measurement to not increase:
-the skip count the refusal adds.
-
-What candidate 1 still needs is unchanged and is the doc's own open decision:
-route `compile_module_to_c` through `gimple_codegen._run_pipeline` (so it stops
-being a second front door into `gen_module`), and give `_compile_one_object` a
-companion that compiles `generated_cpp` into a second object. The new
-`_DylibGeneratedCppError` is the seam to do that behind — a caller that wants
-the object can catch it, and a caller that does not is already correct.
-
-## Earlier status
-
+## Status
 
 **Open. Root cause of the 2026-10-01 `mojoc` / `selfhost` / `bootstrap-stage2-cc`
 red, which is fixed at the call site, not here.** One `@contextlib.contextmanager`
@@ -70,54 +33,6 @@ Not fixed here on purpose: the fix changes what every dylib module's compiled C
 looks like (or adds a C++ object per generator-bearing module to the dylib link
 line), which is a `make gate` change, and this was landed by a worker that is not
 allowed to run one.
-
-## Status addendum (2026-10-01, `work/bugs3-codegen-2-r2` — the choice is still a choice, and the measurements that settle it are still missing)
-
-Nothing here was fixed, and the reason is unchanged and concrete: both
-candidate fixes change what every dylib module's compiled C looks like (or add
-a C++ object per generator-bearing module to the dylib link line), and
-verifying either needs `build_stdlib_dylib.py` end to end plus
-`compile_stdlib.py`'s `U` count — a `make gate` this branch is not allowed to
-run. Re-deciding the choice from the source would be worse than leaving it to
-whoever can gate it, so this addendum records only what can be established
-cheaply, and one thing that is now known that the entry above does not say.
-
-**What is now known: the exposure inside this tree is ZERO, measured.** The
-entry above measured the *production stdlib* is clean (249 modules, 0 real
-generators). The self-host closure was measured too
-(`test_selfhost.py::closure_coroutines_are_lowerable`: 61 modules, 3
-generator/async functions before lowering, 0 after). So on THIS tree no dylib
-module carries a `generated_cpp` at all, and neither candidate fix changes a
-single byte of generated C for any module in either module list. That is worth
-saying plainly because it changes the risk calculus: candidate 2 (refuse)
-costs **zero** `skip` lines today, not "a skip per generator-bearing module",
-and candidate 1's plumbing is exercised by nothing here either.
-
-**So the cheap sequencing advice is the reverse of what the entry implies**:
-land candidate 2 first (a one-line refusal, invisible on this tree, and it
-converts the hole into a visible one for the module lists that DO have
-generators — a project's own `.py` under `mojo dylib`, which is where the
-silent wrong behaviour actually bites), then candidate 1 as the real fix, with
-candidate 2 as the invariant that must keep the two consistent. Doing them in
-that order means the real fix is never the first thing to touch a link line,
-and the refusal's own skip count becomes the measurement candidate 1 has to not
-increase — which is the CLAUDE.md `stdlib-dylib` before/after comparison, used
-for the first time on a count that starts at zero.
-
-**The measurement candidate 1 needs and nobody has taken** is what the doc
-should say is next: the two _compile_one_object / link-mode paths differ, and
-the difference is not cosmetic — `fire.py build_executable` already inlines
-each imported sibling's `generated_cpp` through
-`_compile_imported_module` → `_compile_link_inline_cpp_unit`
-(`mojo/backend_gimple/emit_resolve.py:912`), while `compile_module_to_c` does
-not even run `gimple_codegen._run_pipeline`'s pre-passes. **Before writing any
-plumbing, measure how many module lists actually reach
-`compile_module_to_c` with a non-empty `generated_cpp`** — over
-`cas.selfhost_inputs()`-shaped lists, over `mojo dylib` on a project whose own
-`.py` has a generator the A3 pass declines, and over the production stdlib
-(known: zero). If the answer is "only user projects", candidate 2 alone is a
-complete and honest fix for this tree and the plumbing is a separate,
-better-informed change.
 
 ## The hole
 

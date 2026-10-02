@@ -15,18 +15,7 @@ import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-# NO module-level `import gimple_codegen` here: nothing in this file reads
-# anything from it. The edge middle-tier -> `gimple_codegen` (which imports the
-# whole `mojo/backend_gimple/*` tier at its own top level, gimple_codegen.py:738)
-# -> that tier reading THIS module back at ITS top level is an import CYCLE, and
-# only `test_suite.py`'s declared exemption list was hiding it — a process
-# entering through a middle module met a half-built module and an ImportError
-# about a name in it, a long way from the edge that closed the loop. A middle
-# module that does need something from `gimple_codegen` imports it at its USE
-# SITE, the shape `mojo/backend_gimple/module_gen.py:6727` already uses for
-# `mojo/middle/infra_infer.py`. The rule in full, and why a function-local
-# `import X` survives where `from X import NAME` cannot, is in
-# `mojo/middle/methods_shared.py`'s header comment.
+import gimple_codegen  # constants used by some extracted helpers
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -59,7 +48,7 @@ def _annotation_container_elem_type(gen, ann, ctype) -> str | None:
     only from a callee came back as ints, because the element type of a
     list is otherwise recorded by the `append` sites, and a caller that
     only sees the list through a call has none
-    (CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee,
+    (bugs/CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md,
     closed and removed when this helper landed).
     """
     if ctype not in ('MojoList *', 'MojoSet *'):

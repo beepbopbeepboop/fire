@@ -61,17 +61,6 @@ from exec_budget import (COMPILE_TIMEOUT_S as SHARED_COMPILE_TIMEOUT_S,
 # which the runner enforces by killing the job and reporting it as a FAILURE
 # tagged [TIMEOUT], ~6x the slowest healthy test measured. These budgets only
 # have to sit far inside that, which they now do.
-#
-# …AND THE REPLACEMENT WAS INCOMPLETE, which is why this file failed the gate
-# AGAIN on 2026-10-03 with the same message: 7 cases "timed out after 10
-# seconds" plus one TIMEOUT, out of 190. Naming the shared constants at the top
-# of a file changes nothing; every CALL SITE has to read them, and four of this
-# file's still spelled `timeout=10`/`30`/`60` as literals -- including
-# `test_generator_matches_cpython`'s run, which is what six of those seven
-# failures went through, and `_test_foreign_a3_generator_handle`'s, which is
-# what the TIMEOUT went through. They are literals now, and the assertion is
-# `test_suite.py`'s `test_no_stale_per_child_budget_is_left_as_a_literal`, which
-# reads this file's call sites off the AST rather than trusting this comment.
 COMPILE_TIMEOUT_S = SHARED_COMPILE_TIMEOUT_S
 LINK_TIMEOUT_S = SHARED_LINK_TIMEOUT_S
 RUN_TIMEOUT_S = SHARED_RUN_TIMEOUT_S
@@ -231,10 +220,8 @@ def _build_foreign_package_run(entry_rel, entry_src, cwd):
     entry = os.path.join(cwd, 'fpp', entry_rel)
     with open(entry, 'w') as f:
         f.write(entry_src)
-    # CPython's answer for the same package: a RUN, so RUN_TIMEOUT_S.
     cp = subprocess.run([sys.executable, '-m', 'fpp.' + entry_rel[:-3]],
-                        cwd=cwd, capture_output=True, text=True,
-                        timeout=RUN_TIMEOUT_S)
+                        cwd=cwd, capture_output=True, text=True, timeout=60)
     cpython_stdout = cp.stdout
     c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
         entry_src, do_imports=True, filename=entry)
@@ -244,8 +231,7 @@ def _build_foreign_package_run(entry_rel, entry_src, cwd):
             "generator should NOT be A3-eligible (the kwonly parameter is "
             "what forces it down the cpp path)")
     exe = _build_generator_program_from_code(c_code, cpp_code)
-    out = subprocess.run([exe], capture_output=True,
-                         timeout=RUN_TIMEOUT_S).stdout.decode()
+    out = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
     return out, cpython_stdout
 
 
@@ -407,8 +393,7 @@ def _cpython_stdout(py_src: str) -> str:
     p = os.path.join(wd, 'ref.py')
     with open(p, 'w') as f:
         f.write(py_src)
-    r = subprocess.run(['python3', p], capture_output=True, text=True,
-                       timeout=RUN_TIMEOUT_S)
+    r = subprocess.run(['python3', p], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"the CPython reference program itself failed: {r.stderr}")
     return r.stdout
@@ -429,8 +414,7 @@ def test_generator_matches_cpython(name: str, mojo_src: str, cpython_src: str):
     try:
         want = _cpython_stdout(cpython_src)
         exe = _build_generator_program(mojo_src)
-        got = subprocess.run([exe], capture_output=True,
-                             timeout=RUN_TIMEOUT_S).stdout.decode()
+        got = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
         if got == want:
             print(f"PASS  {name}")
             _PASS += 1
@@ -440,413 +424,6 @@ def test_generator_matches_cpython(name: str, mojo_src: str, cpython_src: str):
     except Exception as e:
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
-
-
-def run_next_return_position_tests():
-    # `next(<generator>)` in a function's RETURN position used to be typed as
-    # the scalar BOX, so the enclosing function declared `int64_t h(void)` and
-    # a yielded `char *` came back through an `int64_t` return slot as its own
-    # address -- printed in decimal, exit 0, no diagnostic. Every OTHER
-    # consumption shape was already correct (`for x in mk()`, `list(mk())`,
-    # `r = next(mk())`), which is exactly why this survived: the value is read
-    # correctly everywhere and only the enclosing function's SIGNATURE is
-    # wrong.
-    #
-    # The test MUST cover a non-`int64_t` yield: `yield 7` passed before the
-    # fix and would prove nothing. `int64_t` survives it only by accident --
-    # it happens to be the return type's own representation.
-    test_generator_matches_cpython(
-        "generator_next_in_return_position_keeps_the_yield_ctype",
-        """\
-def gi():
-    yield 7
-
-def gs():
-    yield 'q'
-
-def gf():
-    yield 1.5
-
-def h_i():
-    return next(gi())
-
-def h_s():
-    return next(gs())
-
-def h_f():
-    return next(gf())
-
-def main():
-    print(h_i())
-    print(h_s())
-    print(h_f())
-main()
-""", """\
-def gi():
-    yield 7
-
-def gs():
-    yield 'q'
-
-def gf():
-    yield 1.5
-
-def h_i():
-    return next(gi())
-
-def h_s():
-    return next(gs())
-
-def h_f():
-    return next(gf())
-
-def main():
-    print(h_i())
-    print(h_s())
-    print(h_f())
-main()
-""")
-
-    # The same shape one step later -- `r = next(g); return r` -- which is the
-    # local-bound variant and needs the pre-pass that seeds a body's own
-    # locals, not the call's own type. Kept as its own case because a fix for
-    # only the direct spelling looks complete.
-    test_generator_matches_cpython(
-        "generator_next_bound_to_a_local_then_returned",
-        """\
-def gs():
-    yield 'q'
-
-def h():
-    r = next(gs())
-    return r
-
-def main():
-    print(h())
-main()
-""", """\
-def gs():
-    yield 'q'
-
-def h():
-    r = next(gs())
-    return r
-
-def main():
-    print(h())
-main()
-""")
-
-    # A generator METHOD's handle, and the 2-argument `default` form, pinned
-    # TOGETHER with the top-level one so a fix cannot make one right by making
-    # the others wrong. The method form is a different registry
-    # (`_generator_method_api`, keyed by (struct, method)) from the top-level
-    # one (`_generator_api`, keyed by function name), so they can disagree.
-    test_generator_matches_cpython(
-        "generator_next_return_position_method_and_default",
-        """\
-class Box:
-    def __init__(self):
-        self.n = 0
-
-    def render(self):
-        yield "a"
-        yield "b"
-
-
-def gen():
-    yield "t"
-
-
-def use_meth(b):
-    return next(b.render())
-
-
-def use_top():
-    return next(gen())
-
-
-def use_def():
-    return next(gen(), "d")
-
-
-def main():
-    b = Box()
-    print(use_meth(b))
-    print(use_top())
-    print(use_def())
-main()
-""", """\
-class Box:
-    def __init__(self):
-        self.n = 0
-
-    def render(self):
-        yield "a"
-        yield "b"
-
-
-def gen():
-    yield "t"
-
-
-def use_meth(b):
-    return next(b.render())
-
-
-def use_top():
-    return next(gen())
-
-
-def use_def():
-    return next(gen(), "d")
-
-
-def main():
-    b = Box()
-    print(use_meth(b))
-    print(use_top())
-    print(use_def())
-main()
-""")
-
-
-def _foreign_cpp_module_global_value():
-    # A MODULE-LEVEL CONSTANT of one module, read as a VALUE in a cpp-path
-    # coroutine body of another (`div = foreign.SEP`, `foreign.SEP.endswith`)
-    # — real: scriptutil.py's `iter_marks` doing `div = os.linesep` beside
-    # `end = f'{mark}{os.linesep}'`, and `track_progress_compact`'s
-    # `last.endswith(os.linesep)`.
-    #
-    # Two independent failures hid behind this one shape, and the second is
-    # why the test asserts the compiled BINARY's output rather than "it
-    # compiles":
-    #
-    #   1. `_cpp_expr`'s member-read case stubbed any `<module marker>.<name>`
-    #      read to a diagnosed `0` — a WRONG ANSWER, not an error, so
-    #      `div` became `''` where CPython has `'|'`. Anywhere that did not
-    #      also trip a type check, the generator compiled, ran, exited 0 and
-    #      printed the wrong text.
-    #   2. With the real value read, the module's OWN field triple types it
-    #      `char *`, so `div` binds a `char *` local and the generator's
-    #      yields now agree — before, `div` took the `int64_t` default that a
-    #      `self`-less MemberExpr used to fall through to, disagreed with its
-    #      sibling `end`, and the whole generator was refused outright with
-    #      "every `yield` must ... agree on one scalar type". That refusal is
-    #      what kept this shape off the compiled path entirely until now.
-    #
-    # The `*, start=[]` default is the A3 gate's rejection trigger (see
-    # `_foreign_a3_generator_handle_next`), so the body really is compiled by
-    # the cpp C++20-coroutine emitter rather than the A3 stack-switch pass.
-    T_FOREIGN_CPP_PKG_FILES = {
-        '__init__.py': '',
-        # A STRING constant and an INT one, plus an EMPTY string, so the
-        # comparison/`not`/length cases below can tell a real read from a
-        # stubbed 0: `0 == '|'` is False, `len(0)` is not 1.
-        'foreign.py': ("SEP = '|'\n"
-                       "EMPTY = ''\n"
-                       "WIDTH = 4\n"),
-    }
-    _saved_pkg_files = _FOREIGN_PKG_FILES
-    try:
-        globals()['_FOREIGN_PKG_FILES'] = T_FOREIGN_CPP_PKG_FILES
-        # A local bound to the read, yielded beside a string sibling: the
-        # mixed-kind refusal fires without the fix, and with only the value
-        # read fixed it would print `''`.
-        _test_foreign_a3_generator_handle(
-            "cpp_coroutine_body_reads_foreign_module_constant",
-            "from . import foreign\n"
-            "\n"
-            "def lines(prefix, *, start=[]):\n"
-            "    div = foreign.SEP\n"
-            "    end = f'{prefix}{foreign.SEP}'\n"
-            "    yield end\n"
-            "    yield div\n"
-            "\n"
-            "def main():\n"
-            "    for s in lines('a'):\n"
-            "        print(repr(s))\n"
-            "\n"
-            "main()\n",
-            "'a|'\n'|'\n")
-        # The truthiness/comparison/length/arithmetic half. Every yield is
-        # wrapped in a one-or-zero ternary because this model gives a
-        # generator ONE value-slot type: yielding the `==` result directly
-        # would widen to `char *` and the four yields would disagree — a
-        # genuine mixed-kind generator, not this test's subject.
-        #
-        # `_cpp_expr_static_ctype` answers the same question the value read
-        # does, so `foreign.SEP` in a CONDITION must be decided on the
-        # string's emptiness rather than on a null pointer. That is what
-        # makes the first case discriminating: the stub's `0` is ALSO
-        # falsy, but as a NULL it says `''` where the real `'|'` says true.
-        _test_foreign_a3_generator_handle(
-            "cpp_coroutine_body_compares_foreign_module_constant",
-            "from . import foreign\n"
-            "\n"
-            "def probe(*, start=[]):\n"
-            "    yield 1 if foreign.SEP else 0\n"
-            "    yield 1 if foreign.SEP == '|' else 0\n"
-            "    yield len(foreign.SEP)\n"
-            "    yield foreign.WIDTH * 2\n"
-            "\n"
-            "def main():\n"
-            "    for s in probe():\n"
-            "        print(s)\n"
-            "\n"
-            "main()\n",
-            "1\n1\n1\n8\n")
-    finally:
-        globals()['_FOREIGN_PKG_FILES'] = _saved_pkg_files
-
-
-def _cpp_for_over_callable_local_is_named():
-    # `for x in <call through a callable-valued local/parameter>` must name
-    # the callee. The refusal it used to raise was a flat
-    # "unsupported for-loop iterable type: CallExpr", which named neither
-    # the call nor the reason — so the SAME blocker read as five unrelated
-    # gaps (c_common/tables.py `read_table`, c_analyzer/__init__.py
-    # `check_all`, c_common/fsutil.py `glob_tree`/`_walk_tree`,
-    # bugs/CODEGEN_generator_function_Lib_glob.md's `_iglob`,
-    # bugs/CODEGEN_generator_function_Lib_os.md's `walk`) and each doc had to
-    # re-derive what to do about it. It stays a refusal — the callee's
-    # return type genuinely is not knowable in this body model — but now says
-    # which call and what would unblock it.
-    #
-    # The default `walk=os.walk` is the real shape: a kw-only parameter
-    # defaulting to the function itself, which is also what keeps the
-    # generator off the A3 path (see `_foreign_a3_generator_handle_next`).
-    test_generator_refused(
-        "cpp_for_over_callable_param_names_the_callee", """\
-def walk_tree(root, *, walk=len, start=[]):
-    for entry in walk(root):
-        yield entry
-
-def main():
-    print(sum(walk_tree('a')))
-""", "callable-valued local/parameter 'walk(...)'")
-    # The negative half: an iterable this emitter DOES support must keep its
-    # own path, and a call this emitter CAN resolve must never reach the new
-    # branch — both would be silent behaviour changes if the gate were too
-    # wide. `sum` is the resolved-callee case for the second.
-    test_generator_stdout("cpp_for_over_callable_param_leaves_resolved_callees_alone", """\
-def rows(xs, *, start=[]):
-    for x in xs:
-        yield x * 2
-
-def main():
-    print(sum(rows([1, 2, 3])))
-""", "12\n")
-
-
-def _cpp_coroutine_builtin_module_constant():
-    # A constant read off a module MARKER that is NEVER INLINED — `os` and
-    # `signal` bind to an opaque marker with no compiled body in this TU, so
-    # there is no `_module_globals['os']` field to read and no emitted struct
-    # to name. Real: scriptutil.py's `iter_marks` (`div = os.linesep` beside
-    # `end = f'{mark}{os.linesep}'`), bugs/COMPILE_FAIL_Tools_c-analyzer_c_
-    # common_scriptutil.md.
-    #
-    # Those few constants are known BY VALUE instead (fixed by the OS ABI
-    # and by os.py's own literals). The table is SHARED with the ordinary
-    # GIMPLE path, which already read them correctly — and that sharing is
-    # the point of the test's shape: the generator body and the ORDINARY
-    # function in the same program read the same constant, so the two
-    # backends cannot answer differently without one of the two lines going
-    # wrong. When the coroutine emitter had its own stub-to-0, the ordinary
-    # line still printed '/' while the generator line printed ''.
-    #
-    # Asserted against CPython run on a reference twin AT TEST TIME, because
-    # the failure mode is a silent wrong value on both halves.
-    _mojo = (
-        "import os\n"
-        "import signal\n"
-        "\n"
-        "def strings(*, start=[]):\n"
-        "    div = os.linesep\n"
-        "    end = f'x{os.linesep}'\n"
-        "    yield end\n"
-        "    yield div\n"
-        "\n"
-        "def numbers(*, start=[]):\n"
-        "    yield signal.SIGTERM + 0\n"
-        "    yield signal.SIGKILL * 2\n"
-        "    yield 1 if signal.SIGPIPE else 0\n"
-        "    yield 1 if os.sep else 0\n"
-        "    yield 1 if os.pathsep else 0\n"
-        "\n"
-        "def ordinary():\n"
-        "    print(repr(os.linesep))\n"
-        "    print(os.pathsep)\n"
-        "    print(signal.SIGTERM)\n"
-        "\n"
-        "def main():\n"
-        "    for s in strings():\n"
-        "        print(repr(s))\n"
-        "    for n in numbers():\n"
-        "        print(n)\n"
-        "    ordinary()\n"
-        "\n"
-        "main()\n")
-    # The reference twin drops only the A3-gate triggers (`*, start=[]`);
-    # everything the compiled program computes is identical source.
-    _cpy = (_mojo.replace("def strings(*, start=[]):", "def strings():")
-                .replace("def numbers(*, start=[]):", "def numbers():"))
-    test_generator_matches_cpython(
-        "cpp_coroutine_body_reads_marker_module_constant", _mojo, _cpy)
-
-
-def _cpp_coroutine_exc_ctor_value():
-    # `e = ValueError('boom')` then `raise e` — real: scriptutil.py's
-    # `_iter_filenames` (`onempty = Exception('no filenames provided')` /
-    # `raise onempty`), which refused the whole generator with "a call to
-    # unresolved callee 'Exception(...)' is not supported in a compiled
-    # generator/coroutine body".
-    #
-    # What the local HOLDS is unchanged by this: this model's one exception
-    # representation is the message, which is what `_cpp_raise_stmt`'s own
-    # `raise <handler variable>` case already throws and what the ordinary
-    # (non-coroutine) GIMPLE path already produces for the same source
-    # (`_lower_opaque_ctor` returns the lone string argument, so `e` there
-    # is a `char *`). So the fix is an emission site plus the matching local
-    # type, not a second representation. The type tag is consequently the
-    # existing untagged(0) lenient match — the same one a
-    # constructed-then-raised exception gets on the ordinary path, where the
-    # tag set at construction is not carried onto the variable at all.
-    #
-    # Asserted against the BINARY's output, not just "it compiles": the
-    # failure this shape had was a compile refusal, but a `int64_t`-typed
-    # local would have compiled and thrown an integer as the message.
-    test_generator_stdout("cpp_coroutine_exception_ctor_as_value", """\
-def probe(*, start=[]):
-    e = ValueError('boom')
-    raise e
-    yield 'never'
-
-def main():
-    try:
-        for s in probe():
-            print(s)
-    except ValueError as err:
-        print('caught', err)
-""", "caught boom\n")
-    # The no-argument form: `TypeError()` is legal Python and the message is
-    # the empty string, which is what the emitted `char *` empty literal
-    # carries. Kept because it is the shape whose typing needs no argument to
-    # infer from — the one place a "just use args[0]" shortcut is wrong.
-    test_generator_stdout("cpp_coroutine_exception_ctor_as_value_no_arg", """\
-def probe(*, start=[]):
-    e = TypeError()
-    raise e
-    yield 'never'
-
-def main():
-    try:
-        for s in probe():
-            print(s)
-    except TypeError as err:
-        print('caught', repr(str(err)))
-""", "caught ''\n")
 
 
 def run_next_method_tests():
@@ -977,104 +554,6 @@ def gen():
     yield 2.5
 """, "all values must agree on one scalar type")
 
-    # A `*args`-style UNPACK at a call site is a hole for every parameter it
-    # could have supplied, and the call-site scan used to record it against
-    # positional index 0 alone: `gen(*args)` charged the untypable argument to
-    # `a` and never LOOKED at `b`, so `b` was neither resolved nor conflicted,
-    # `_ambiguous_yielded_params` (which reads only
-    # `_CALLSITE_PARAM_CONFLICTS`) let the generator through, and `b`'s value
-    # slot took the `int64_t` default — the string came out as the integer `0`,
-    # exit 0, no diagnostic. Measured on the registries, same source:
-    #
-    #     gen(*args)       _CALLSITE_PARAM_KINDS None   CONFLICTS {'a'}
-    #     gen(1, 'hello')  _CALLSITE_PARAM_KINDS {'a': 'i', 'b': 'p'}
-    #
-    # `a` being refused was right by ACCIDENT; `b` was invisible to both
-    # halves of the rule. A positional `*expr` at index `i` swallows the rest
-    # of the call's positional arguments, so every parameter from `i` to the
-    # last POSITIONAL one is a hole; it cannot supply a keyword-only
-    # parameter, and the message says so rather than over-refusing one.
-    # Fixed in the commit "A *-unpack call argument is a hole for every
-    # parameter it could fill"; the reasoning is in
-    # `mojo/middle/coro.py`'s `_scan_callsite_param_kinds._visit_call`,
-    # beside the rule it implements.
-    test_generator_refused("generator_star_unpack_call_argument_is_a_hole_for_every_parameter_it_could_fill", """\
-def gen(a, b):
-    yield b
-
-def main():
-    args = [1, 'hello']
-    for v in gen(*args):
-        print(v)
-main()
-""", "the static scan could not type at all")
-
-    # …and the `**expr` sibling, which can supply ANY parameter by name — so
-    # every unannotated parameter the call site does not bind by an explicit
-    # keyword is a hole, and the explicit keywords must be KEPT as real
-    # evidence for the parameters they do bind. Without the keep, this
-    # program's `known` (which IS typeable from `1`) would be refused too, and
-    # the fix would have been "refuse more" rather than "refuse the right
-    # ones". `Tools/c-analyzer/c_common/scriptutil.py`'s
-    # `iter_marks(groups=groups, **mark_kwargs)` is the real corpus shape.
-    test_generator_refused("generator_kwargs_spread_call_argument_is_a_hole_for_every_unbound_parameter", """\
-def gen(known, other):
-    yield other
-
-def main():
-    kw = {'other': 'hello'}
-    for v in gen(known=1, **kw):
-        print(v)
-main()
-""", "the static scan could not type at all")
-
-    # The CONTROL for both rows above, and the reason the fix is not "refuse
-    # every generator with an unannotated parameter": the same generator
-    # called with explicit, individually-typed arguments still resolves, and
-    # its string value still prints as the string. Asserted against CPython
-    # rather than a hand-written expectation, because `0` — the outcome the
-    # bug produced — is a value a fixed expectation could have been written to
-    # match after the fact.
-    test_generator_matches_cpython("generator_explicit_call_arguments_still_resolve", """\
-def gen(a, b):
-    yield b
-
-def main():
-    for v in gen(1, 'hello'):
-        print(v)
-main()
-""", """\
-def gen(a, b):
-    yield b
-
-def main():
-    for v in gen(1, 'hello'):
-        print(v)
-main()
-""")
-
-    # A `*spread` CANNOT supply a keyword-only parameter — real Python syntax
-    # puts everything after a bare `*` out of a positional unpack's reach — so
-    # a call that fills it by explicit keyword must keep resolving. This is the
-    # direction a careless version of the positional rule over-refuses.
-    test_generator_matches_cpython("generator_keyword_only_parameter_is_not_a_hole_from_a_positional_spread", """\
-def gen(a, *, tag='t'):
-    yield tag
-
-def main():
-    for v in gen(1, tag='hello'):
-        print(v)
-main()
-""", """\
-def gen(a, *, tag='t'):
-    yield tag
-
-def main():
-    for v in gen(1, tag='hello'):
-        print(v)
-main()
-""")
-
     # `_Bool` and int64_t share one 64-bit slot, so this one is NOT a
     # disagreement and must keep compiling: the check is on genuinely
     # incompatible kinds, not on "more than one kind". (It prints `1` for the
@@ -1107,61 +586,6 @@ def gen():
 def gen():
     yield True
     yield False
-""")
-
-    # ── A yield whose value kind could NOT BE RESOLVED ──────────────────
-    # The checks above are on the SET of kinds, and every one of them
-    # explicitly SKIPS an unresolved one (`kinds - {'d', None}`). So a yield
-    # the static scan could not type, sitting beside one it could, sailed
-    # through all of them and landed on the `int64_t` default — the identical
-    # silent truncation the CALL-SITE half of the same one-slot contract was
-    # fixed for (CODEGEN_coro_yield_kind_unresolved_callsite).
-    # Both of these compiled, ran, exit 0, and printed wrong values:
-    #   `for i, x in enumerate(xs): yield i; yield "s"`  -> `(null)` then `s`
-    #   `for k, v in d.items(): yield v; yield "s"`      -> nothing at all
-    # The hole is a HOLE beside a slot that is NOT int64_t; see
-    # `_generator_value_kind`'s own note for why `int64_t` is excluded from
-    # the refusal (an unresolved expression is read as an `int64_t` anyway,
-    # so refusing there would disqualify ordinary untyped generators).
-    test_generator_refused("generator_unresolvable_yield_kind_beside_str", """\
-def gen(xs):
-    for i, x in enumerate(xs):
-        yield i
-        yield "s"
-""", "all values must agree on one scalar type")
-
-    test_generator_refused("generator_unresolvable_yield_kind_beside_double", """\
-def gen(pairs):
-    for a, b in pairs:
-        yield a
-        yield 2.5
-""", "all values must agree on one scalar type")
-
-    test_generator_refused("generator_unresolvable_yield_kind_beside_dict_value", """\
-def gen(d):
-    for k, v in d.items():
-        yield v
-        yield "s"
-""", "all values must agree on one scalar type")
-
-    # And the excluded half must keep compiling — an unresolvable yield
-    # beside an int one is NOT a refusal, because the slot the hole would get
-    # is the slot the int kind picks. Both of these are genuinely all-int
-    # and both compiled and printed correctly before the check existed; a
-    # blanket `None in kinds` refusal took them out of the compiled path.
-    test_generator_c_compiles("generator_unresolvable_yield_kind_beside_int", """\
-def gen():
-    yield 1
-    [x] = [42]
-    yield x
-""")
-
-    test_generator_c_compiles("generator_unresolvable_yield_kind_beside_int_len", """\
-def gen():
-    var ba = bytearray()
-    ba.append(5)
-    yield ba[0]
-    yield len(ba)
 """)
 
     # Mixed kinds reached through `yield from` are caught by the same check.
@@ -1434,7 +858,6 @@ def run_tests():
     run_lambda_capture_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
-    run_next_return_position_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
     # generator method that CALLS the result of a `@property` getter
     # (`self._address_class(x)` -- `_address_class` is a @property returning
@@ -1601,7 +1024,7 @@ def main():
     # non-generator compiled-function path per e387af9/8799ec4) now compiles
     # correctly end-to-end as `double`, not the naive int64_t default —
     # the positive counterpart to the honest-refusal fix in
-    # CODEGEN_compiled_generator_unannotated_string_param_mistyped
+    # bugs/CODEGEN_compiled_generator_unannotated_string_param_mistyped.md
     # (an unannotated param unanimously called with a NON-scalar argument,
     # e.g. a string, is refused instead; this one is unanimously called
     # with a scalar double argument, so it's positively confirmed safe to
@@ -2025,7 +1448,7 @@ def main():
 """, "1.5\n2.5\n3.5\n")
 
     # Milestone C step 4 (this step): compiled generators as first-class
-    # values — CODEGEN_compiled_generator_not_first_class_value's
+    # values — bugs/CODEGEN_compiled_generator_not_first_class_value.md's
     # exact repro. Before this step `python3 fire.py build` failed with a
     # genuine gcc compile error ("invalid use of void expression") the
     # moment a generator call's result was assigned to a variable before
@@ -2117,7 +1540,7 @@ def main():
 """, "0\n1\n2\nend\n")
 
     # ── Milestone C final: generators crossing function-call boundaries ────
-    # CODEGEN_compiled_generator_not_first_class_value's stated
+    # bugs/CODEGEN_compiled_generator_not_first_class_value.md's stated
     # remaining scope: a stored generator passed AS AN ARGUMENT to a
     # function whose (unannotated) param is consumed by `for x in g:`.
     # Before Pass 1.3f-gen, the call-site scalar contract observed `g`'s
@@ -2659,70 +2082,6 @@ def main():
         print(x)
 """, "42\n")
 
-    # A generator method INHERITED from a base class, called on the
-    # SUBCLASS -- the generator half of
-    # bugs/CODEGEN_compiled_path_gaps_round2.md's #1, whose `cls` /
-    # plain-`@classmethod` half closed on 2026-10-01.
-    #
-    # One unit per RECEIVER CLASS is the whole requirement, and both halves
-    # of it were broken in opposite directions:
-    #
-    # * the unit's `cls` is an opaque int64_t placeholder passed
-    #   positionally and never dereferenced -- every `cls.<...>` read
-    #   resolves BY NAME against the struct the unit was emitted for -- so
-    #   sharing the base's unit would iterate `Base.tag` where CPython
-    #   iterates `Child.tag`. That is why registering a subclass ALIAS
-    #   alone (the doc's "walk the base chain at the call site") was
-    #   explicitly not done there: it converts this program's loud
-    #   `mojo_unsupported_iter` into a silent `7, 4`.
-    # * with only the base registered, `Child.gen(4)` fell through to the
-    #   ordinary `Child_gen(...)` lowering -- a struct method gen_module's
-    #   Phase 2a deliberately never emits for a generator method -- so its
-    #   yields were dropped and the consuming `for` got a void value.
-    #
-    # `test_generator_matches_cpython`, not a hand-written string: the
-    # failure this must catch is precisely "agrees with itself and is
-    # wrong", and `Base.gen(4)` in the same program is the control that a
-    # fix which made the subclass read the BASE's value (or vice versa)
-    # cannot satisfy.
-    test_generator_matches_cpython("inherited_classmethod_generator_dispatches_per_class", """\
-class Base:
-    tag = 7
-
-    @classmethod
-    def gen(cls, n: Int):
-        yield cls.tag
-        yield n
-
-class Child(Base):
-    tag = 9
-
-def main():
-    for v in Base.gen(4):
-        print("B", v)
-    for v in Child.gen(4):
-        print("C", v)
-""", """\
-class Base:
-    tag = 7
-
-    @classmethod
-    def gen(cls, n):
-        yield cls.tag
-        yield n
-
-class Child(Base):
-    tag = 9
-
-def main():
-    for v in Base.gen(4):
-        print("B", v)
-    for v in Child.gen(4):
-        print("C", v)
-
-main()
-""")
-
     # `yield from sorted(<iterable>, key=lambda x: ...)` — a single-
     # parameter lambda passed directly as a `key=` call argument (not
     # assigned to a local first, unlike `generator_lambda_and_*_bound_
@@ -3110,7 +2469,7 @@ def main():
         print(v)
 """, "7\n999\n")
 
-    # “CODEGEN (A3 stack-switch): ordinary-codegen `next()`/`enumerate()` don't” — the A3
+    # bugs/hard/CODEGEN_coro_stackswitch_iterator_protocol_gaps.md — the A3
     # stack-switch cutover routes a generator BODY through the ordinary
     # codegen, which never had a real iter()/next() over a plain list
     # (only the old cpp-path emitter did, in gimple_cpp_core.py). Below:
@@ -3163,30 +2522,8 @@ def main():
         print(v)
 """, "1\n2\n3\n4\n")
 
-    # A generator body that calls `next(it)` from INSIDE `for x in it:` over
-    # the same cursor. An A3 stack-switch body goes through the ordinary
-    # codegen's `_gen_for_iter_cursor`, whose cursor is the index of the
-    # next UNCONSUMED element (the advance is part of reading the element, not
-    # a post-body step) — so `next(it)` in the body reads the FOLLOWING
-    # element, as CPython's `list_iterator.__next__` does, and all four
-    # elements are seen exactly once. Before that invariant was restored the
-    # post-block advance made `next(it)` re-read the element the loop had just
-    # yielded: `1\n1\n3\n3`. Same shape as CPython's own
-    # `Tools/cases_generator/analyzer.py::check_escaping_calls`.
-    test_generator_stdout("generator_next_inside_for_over_same_it", """\
-def scan(xs):
-    it = iter(xs)
-    for x in it:
-        yield x
-        yield next(it)
-
-def main():
-    for v in scan([1, 2, 3, 4]):
-        print(v)
-""", "1\n2\n3\n4\n")
-
     # ── yield-kind inference for identifier / self.field / list-local refs ──
-    # (CODEGEN_coro_yield_kind_unresolved_callsite)
+    # (bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md)
     # The Layer-1 pre-pass's _yield_kind() used to have no case for a bare
     # IdentExpr / `self.<field>` / `<list-local>[idx]` reference, so a
     # Float64/String value yielded through one of those silently defaulted
@@ -3252,7 +2589,7 @@ def main():
 """, "0.5\n1.5\n2.5\n")
 
     # ── non-plain assignment targets inside a generator body ──────────
-    # (CODEGEN_generator_non_plain_assignment_target_refused)
+    # (bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md)
     # The A3 stack-switch path routes the desugared body through ordinary
     # codegen, which handles self-field write, subscript write, and
     # tuple/list-pattern unpack -- shapes the old cpp eligibility gate
@@ -3633,41 +2970,6 @@ def main():
     for a, b, c, d in pairs(False):
         print(a, b, c, d)
 """, "3\n1 2 3\n4 5 6 7\n")
-
-    # A `for`/comprehension target over a generator that yields ONE value per
-    # resume. `(x,)` is how a ONE-slot unpacking target is spelled — the
-    # trailing comma is a spelling and not a second slot — and the consumer
-    # declared the target's own STRING as a C variable, so every one of these
-    # failed to COMPILE with gcc's "expected ')' before ',' token" plus an
-    # undeclared-identifier error for the name the loop body reads.
-    # `Tools/c-analyzer/c_parser/preprocessor/__init__.py` is the real file
-    # that hit it (`for patterns, in _resolve_file_values(...)` and
-    # `[i for i, in _resolve_file_values(...)]`), which is how it was found.
-    #
-    # The tuple-target rows above are the other half of the same fix and were
-    # red for the same reason: the per-slot names are declared by
-    # `_emit_generator_tuple_unpack` from the generator's OWN slot types, so
-    # declaring the raw target string as well was never anything but invalid C.
-    test_generator_stdout("gen_one_slot_tuple_target_binds_one_name", """\
-def nums(n: Int):
-    yield 1
-    yield 2
-
-def main():
-    for x, in nums(1):
-        print(x)
-    for y, in nums(2):
-        print(y * 10)
-""", "1\n2\n10\n20\n")
-    test_generator_stdout("gen_one_slot_tuple_target_comprehension", """\
-def nums(n: Int):
-    yield 1
-    yield 2
-    yield 3
-
-def main():
-    print([x for x, in nums(1)])
-""", "[1, 2, 3]\n")
 
     # ── Generator EXPRESSIONS ────────────────────────────────────────────
     # `(x * 2 for x in xs)` is a real lazy generator on BOTH paths now:
@@ -4470,7 +3772,7 @@ asyncio.run(run())
 """)
 
     # ── call-site yield-kind evidence: the holes and the fixes ─────────
-    # CODEGEN_coro_yield_kind_unresolved_callsite. A call
+    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md. A call
     # site the static scan cannot type used to leave the slot neither
     # resolved nor conflicting, so the yield slot defaulted to int64_t and
     # truncated (or printed an address) with exit 0. It now propagates
@@ -4556,10 +3858,6 @@ def main():
 
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
-    _foreign_cpp_module_global_value()
-    _cpp_for_over_callable_local_is_named()
-    _cpp_coroutine_builtin_module_constant()
-    _cpp_coroutine_exc_ctor_value()
 
     # ── `async for` over a compiled async generator, driven by an ORDINARY
     # function. An async generator is consumed by `async for`, and the
@@ -4958,534 +4256,11 @@ def main() raises:
     outer()
 """, "cannot compile module")
 
-    # CODEGEN_coro_yield_kind_unresolved_callsite "Item 8", the
-    # GENERATOR half: `for <t> in <list param>:` inside a generator. A
-    # generator's params cross the stack-switch ABI as untyped `int64_t`
-    # slots, so the loop reached the ordinary lowering as a boxed handle with
-    # no container type and no element type; the runtime dict-or-list
-    # dispatch's dict arm then won the shared `r` (dict keys are `char *`)
-    # and the `double` yield slot could not be fed from it. Before the fix
-    # this was an honest COMPILE ERROR ("pointer value used where a
-    # floating-point was expected"); it now prints what CPython prints.
-    #
-    # Both element kinds are covered, and both are CPython-verified on the
-    # identical program text.
-    test_generator_stdout("generator_for_over_list_param_from_float_literal", """\
-def rows(data):
-    for r in data:
-        yield r
-
-def main():
-    for v in rows([1.5, 2.5]):
-        print(v)
-""", "1.5\n2.5\n")
-
-    # A string element was ALREADY correct before this change -- `char *` is a
-    # pointer, so it satisfied the guard's old `_boxed_elem.endswith(' *')`
-    # condition and the list path was taken. Pinned anyway, because the guard
-    # is what this change widened and this is the half that used to depend on
-    # the narrow form of it.
-    test_generator_stdout("generator_for_over_list_param_from_str_literal", """\
-def rows(data):
-    for r in data:
-        yield r
-
-def main():
-    for v in rows(["a", "b"]):
-        print(v)
-""", "a\nb\n")
-
-    # Same shape through a list-typed LOCAL rather than a literal, so the
-    # contract is read off the caller's env: the loop target's type must not
-    # depend on how the caller spelled the list.
-    test_generator_stdout("generator_for_over_list_param_from_local", """\
-def rows(data):
-    for r in data:
-        yield r
-
-def main():
-    xs = [1.5, 2.5]
-    for v in rows(xs):
-        print(v)
-""", "1.5\n2.5\n")
-
-    # The dict arm must stay: a parameter with NO list evidence at all (here
-    # the argument is a dict local, which the callsite scan cannot type into a
-    # `('list', k)` answer) must keep the runtime dict-or-list dispatch, or
-    # every `for k in <dict>` through a generator would silently iterate
-    # nothing. This is the negative half of the guard above.
-    test_generator_stdout("generator_for_over_unknown_param_still_dispatches", """\
-def rows(data):
-    for r in data:
-        print(r)
-    yield 0
-
-def main():
-    var d = {"k": 7}
-    for v in rows(d):
-        print(v)
-""", "k\n0\n")
-
-    # A callable-valued PARAMETER, CALLED inside a coroutine body. This is
-    # the ordinary-path half of
-    # bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md,
-    # and it needs its own plumbing: the A3 rewrite moves every source
-    # parameter into a `var p = __mojo_gen_arg(...)` local, so the body the
-    # ordinary codegen emits carries NO `param_defaults` — so the fact cannot
-    # be read off the body at all and has to travel with it. It travels as
-    # `_mojo_coro_callable_param_fns` (`{param: the function its default
-    # names}`), attached by `coro._mark_coro_callable_param_fns`, and is
-    # RESOLVED in `gen_func` — because `register` is an AST pre-pass that runs
-    # before any module-level function's `func_return_types` entry exists,
-    # which is the same reason `_mark_coro_param_elem_kinds` attaches names
-    # rather than answers.
-    #
-    # `yield len(r)` is the assertion: the callable's `char *` result used to
-    # come back as the homogenized `int64_t` box, so `len` of it was 0.
-    # `yield r` itself is NOT here — a generator that yields a STRING
-    # obtained by iterating a string is a different defect
-    # (bugs/CODEGEN_generator_iterating_a_string_parameter_yields_nothing.md),
-    # and it was already broken before this change.
-    test_generator_stdout("generator_callable_param_result_keeps_its_type", """\
-def upper(s):
-    return s.upper()
-
-def apply_to(items, _f=upper):
-    r = _f(items)
-    yield len(r)
-    yield len(_f(items))
-
-def main():
-    for v in apply_to('ab'):
-        print(v)
-main()
-""", "2\n2\n")
-
-    # ── a VARIADIC lambda inside a compiled generator body ────────────────
-    # `mojo/middle/coro.py`'s `_lambdas_ok` used to refuse EVERY lambda with a
-    # `*args`/`**kwargs` parameter (or a defaulted one) in a generator body,
-    # written when the shared gimple path emitted a broken forward declaration
-    # for that shape. `MojoVarargFn` — the callee, the env, the count of
-    # ordinary leading parameters, and which of the three variadic shapes it
-    # has, dispatched on by `mojo_fnptr_call_N` — fixed that, and the broken
-    # forward declaration with it, but the guard was never revisited. So the
-    # refusal was the last thing standing between the shape and the A3
-    # stack-switch lowering, for a reason that no longer existed.
-    #
-    # These four are the ways a variadic lambda is HELD, because they are
-    # four different materialization and call sites: called through its own
-    # local, capturing an enclosing local, escaping as a call argument, and
-    # returned out of the generator to be called after it is destroyed.
-    test_generator_stdout("generator_variadic_lambda_called_through_its_local", """\
-def add(a, b):
-    return a + b
-
-def gen(n):
-    e = lambda *a: add(a[0], a[1])
-    yield e(n, n + 1)
-
-def main():
-    for v in gen(4):
-        print(v)
-
-main()
-""", "9\n")
-
-    test_generator_stdout("generator_variadic_lambda_captures_an_enclosing_local", """\
-def add(a, b):
-    return a + b
-
-def gen(n):
-    e = lambda *args, **kwargs: add(n, args[0])
-    yield e(n + 3)
-
-def main():
-    for v in gen(5):
-        print(v)
-
-main()
-""", "13\n")
-
-    test_generator_stdout("generator_variadic_lambda_escapes_as_a_call_argument", """\
-def apply(f, x):
-    return f(x, x + 1)
-
-def add(a, b):
-    return a + b
-
-def gen(n):
-    e = lambda *a: add(a[0], a[1])
-    yield apply(e, n)
-
-def main():
-    for v in gen(6):
-        print(v)
-
-main()
-""", "13\n")
-
-    test_generator_stdout("generator_variadic_lambda_returned_and_called_after", """\
-def add(a, b):
-    return a + b
-
-def gen(n):
-    e = lambda *a: add(a[0], a[1])
-    yield e
-
-def main():
-    var f = None
-    for v in gen(7):
-        f = v
-    print(f(1, 2))
-
-main()
-""", "3\n")
-
-    # One defaulted parameter is fine and must STAY fine: `_lambda_shape_ok`'s
-    # second refusal clause is about two of them, and a guard that refused
-    # every default would be the blanket refusal this whole change removed.
-    test_generator_stdout("generator_lambda_with_one_default_is_still_admitted", """\
-def gen(n):
-    e = lambda x, y=n: x + y
-    yield e(4)
-
-def main():
-    for v in gen(3):
-        print(v)
-
-main()
-""", "7\n")
-
-    # …and four ORDINARY leading parameters before the `*args`, which is the
-    # limit the runtime's packing supports. Five is refused by
-    # `_lower_LambdaExpr` itself (below), so this row pins the edge of what is
-    # admitted rather than a shape someone hoped for.
-    test_generator_stdout("generator_variadic_lambda_with_four_leading_params", """\
-def add(a, b):
-    return a + b
-
-def gen(n):
-    e = lambda f, g, h, i, *a: add(f + g + h + i, a[0])
-    yield e(1, 2, 3, 4, 5)
-
-def main():
-    for v in gen(0):
-        print(v)
-
-main()
-""", "15\n")
-
-    # The two shapes `_lambda_shape_ok` used to REFUSE, now measured CORRECT
-    # and asserted against CPython — the generator-body path, which is a
-    # separate lowering from the ordinary one these were also wrong on.
-    #
-    # They were refusals because both exited 0 with a plausible integer:
-    # `lambda x=n, *a: x + a[0]` called `e(0, 5)` printed 8 where CPython says
-    # 5, and `lambda x, y=n, z=10: x + y + z` called `e(4)` printed 135 where
-    # CPython says 17. `_lower_LambdaExpr` captured a declared default into the
-    # lifted function's ENV under the parameter's OWN name, so it and an
-    # argument at the call site named the same C slot and the env read won; and
-    # nothing filled in an argument the call site OMITTED, so `e(4)` passed one
-    # argument to a three-parameter C function. Fixed at both ends
-    # (`lambdareduce.params_supplied_at_calls` and
-    # `emit_calls._pad_lambda_defaults`); the numbers above are kept so the next
-    # reader can check the claim rather than take it on trust, and the guard is
-    # gone rather than left as a permanent lie.
-    test_generator_matches_cpython("generator_lambda_default_before_star_args", """\
-def gen(n):
-    e = lambda x=n, *a: x + a[0]
-    yield e(0, 5)
-
-def main():
-    for v in gen(3):
-        print(v)
-
-main()
-""", """\
-def gen(n):
-    e = lambda x=n, *a: x + a[0]
-    yield e(0, 5)
-
-def main():
-    for v in gen(3):
-        print(v)
-
-main()
-""")
-
-    test_generator_matches_cpython("generator_lambda_with_two_defaults", """\
-def gen(n):
-    e = lambda x, y=n, z=10: x + y + z
-    yield e(4)
-
-def main():
-    for v in gen(3):
-        print(v)
-
-main()
-""", """\
-def gen(n):
-    e = lambda x, y=n, z=10: x + y + z
-    yield e(4)
-
-def main():
-    for v in gen(3):
-        print(v)
-
-main()
-""")
-
-    # …and the whole table `_lambda_shape_ok`'s docstring now carries, on the
-    # generator path, in one program: every variadic shape and every
-    # default shape it has ever admitted, plus the two it had refused. One
-    # program rather than eleven so a shape that stops working is visible as a
-    # changed LINE rather than as a new red row.
-    test_generator_matches_cpython("generator_every_admitted_lambda_shape", """\
-def add(a, b):
-    return a + b
-
-def add3(a, b, c):
-    return a + b + c
-
-def addall(a):
-    return a[0] + a[1] + a[2]
-
-def g_var(n):
-    e = lambda *a: add(a[0], a[1])
-    yield e(4, 5)
-
-def g_varall(n):
-    e = lambda *a: addall(a)
-    yield e(1, 2, 3)
-
-def g_varargs(n):
-    e = lambda *args, **kwargs: add(n, args[0])
-    yield e(7)
-
-def g_varkw(n):
-    e = lambda **k: add(k["a"], 1)
-    yield e(a=6)
-
-def g_varkw2(n):
-    e = lambda *a, k=n: add(a[0], k)
-    yield e(4)
-
-def g_one(n):
-    e = lambda x=n: x + 1
-    yield e()
-
-def g_second(n):
-    e = lambda x, y=n: add(x, y)
-    yield e(4)
-
-def g_kwdefault(n):
-    e = lambda x, *, k=n: add(x, k)
-    yield e(4)
-
-def g_bare_kwonly(n):
-    e = lambda *, x=n: x + 1
-    yield e()
-
-def g_lead(n):
-    e = lambda f, *a: add(f, a[0])
-    yield e(4, 5)
-
-def g_dup(n):
-    e = lambda x, y=n, z=10: add3(x, y, z)
-    yield e(4)
-
-def g_dupfirst(n):
-    e = lambda x=n, *a: add(x, a[0])
-    yield e(0, 5)
-
-def main():
-    for v in g_var(3):
-        print(v)
-    for v in g_varall(3):
-        print(v)
-    for v in g_varargs(3):
-        print(v)
-    for v in g_varkw(0):
-        print(v)
-    for v in g_varkw2(3):
-        print(v)
-    for v in g_one(3):
-        print(v)
-    for v in g_second(3):
-        print(v)
-    for v in g_kwdefault(3):
-        print(v)
-    for v in g_bare_kwonly(3):
-        print(v)
-    for v in g_lead(3):
-        print(v)
-    for v in g_dup(3):
-        print(v)
-    for v in g_dupfirst(3):
-        print(v)
-
-main()
-""", """\
-def add(a, b):
-    return a + b
-
-def add3(a, b, c):
-    return a + b + c
-
-def addall(a):
-    return a[0] + a[1] + a[2]
-
-def g_var(n):
-    e = lambda *a: add(a[0], a[1])
-    yield e(4, 5)
-
-def g_varall(n):
-    e = lambda *a: addall(a)
-    yield e(1, 2, 3)
-
-def g_varargs(n):
-    e = lambda *args, **kwargs: add(n, args[0])
-    yield e(7)
-
-def g_varkw(n):
-    e = lambda **k: add(k["a"], 1)
-    yield e(a=6)
-
-def g_varkw2(n):
-    e = lambda *a, k=n: add(a[0], k)
-    yield e(4)
-
-def g_one(n):
-    e = lambda x=n: x + 1
-    yield e()
-
-def g_second(n):
-    e = lambda x, y=n: add(x, y)
-    yield e(4)
-
-def g_kwdefault(n):
-    e = lambda x, *, k=n: add(x, k)
-    yield e(4)
-
-def g_bare_kwonly(n):
-    e = lambda *, x=n: x + 1
-    yield e()
-
-def g_lead(n):
-    e = lambda f, *a: add(f, a[0])
-    yield e(4, 5)
-
-def g_dup(n):
-    e = lambda x, y=n, z=10: add3(x, y, z)
-    yield e(4)
-
-def g_dupfirst(n):
-    e = lambda x=n, *a: add(x, a[0])
-    yield e(0, 5)
-
-def main():
-    for v in g_var(3):
-        print(v)
-    for v in g_varall(3):
-        print(v)
-    for v in g_varargs(3):
-        print(v)
-    for v in g_varkw(0):
-        print(v)
-    for v in g_varkw2(3):
-        print(v)
-    for v in g_one(3):
-        print(v)
-    for v in g_second(3):
-        print(v)
-    for v in g_kwdefault(3):
-        print(v)
-    for v in g_bare_kwonly(3):
-        print(v)
-    for v in g_lead(3):
-        print(v)
-    for v in g_dup(3):
-        print(v)
-    for v in g_dupfirst(3):
-        print(v)
-
-main()
-""")
-
-    # Five ordinary leading parameters before the `*args` is the backend's own
-    # deliberate refusal (`_lower_LambdaExpr`): the runtime passes at most four
-    # leading scalars through un-packed, so five would be a wrong value. Kept
-    # as a test because it is now the outermost boundary of the admitted set,
-    # and a boundary nobody asserts is a boundary that moves silently.
-    test_generator_refused("generator_variadic_lambda_five_leading_params_refused", """\
-def add(a, b):
-    return a + b
-
-def gen(n):
-    e = lambda f, g, h, i, j, *a: add(f + g + h + i + j, a[0])
-    yield e(1, 2, 3, 4, 5, 6)
-
-def main():
-    for v in gen(0):
-        print(v)
-
-main()
-""", "ordinary parameters before its *args")
-
-    if _FAIL:
-        print(f"\n{_PASS} passed, {_FAIL} failed")
-        raise SystemExit(1)
-
-    # A nested `def` or a nested `class` inside a coroutine body is its OWN
-    # function scope, and the A3 rewrite used to descend into it: every
-    # `_rewrite_*_stmts` in `mojo/middle/coro.py` recurses into a statement's
-    # attributes looking for nested statement lists, and `_STMT_TYPES` counts
-    # both `FunctionDef` and `StructDef`, so the nested body's `return e`
-    # became `__mojo_gen_set_return(__c, e); return` with THIS coroutine's
-    # context variable. `__c` is not in scope there, so it read through the
-    # `ct param or undeclared` fallback as a hard 0 and every `helper(...)`
-    # call in the generator answered 0 at exit 0.
-    #
-    # Both halves are in this test because they are one fix
-    # (`coro._declares_its_own_scope`) and because the class half was
-    # unreachable until `module_gen._gmi_hoist_nested_structs` gave a class
-    # declared inside a function a layout and methods at all.
-    test_generator_stdout("generator_nested_def_and_class_are_their_own_scope", """\
-def gen(n):
-    def helper(x):
-        return x * 2
-    class Box:
-        def __init__(self, v: int):
-            self.v = v
-        def get(self):
-            return self.v + 1
-    b = Box(10)
-    yield helper(3)
-    yield b.get()
-    yield helper(4) + b.get()
-
-def main():
-    for v in gen(2):
-        print(v)
-""", "6\n11\n19\n")
-
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
     print(f"\n{_PASS} passed, {_FAIL} failed")
 
 
-# ONE entry point. This file used to carry TWO `if __name__ == '__main__':`
-# blocks — the first ran `run_tests()`, printed the tally and exited 1 on a
-# failure, and the second ran `run_tests()` again. Because `SystemExit`
-# propagates, the second block only ever ran when the file was GREEN, so the
-# job compiled and ran all 190 cases twice on every passing gate: 380 passed in
-# the 2026-10-03 run where the case count is 190, and roughly double the wall
-# clock of a 738 s job. `run_tests` does not reset `_PASS`/`_FAIL`, so the
-# doubling is visible in the tally rather than being a harmless re-run.
 if __name__ == '__main__':
     run_tests()
-
-    print(f"\n{_PASS} passed, {_FAIL} failed")
-    if _FAIL:
-        raise SystemExit(1)

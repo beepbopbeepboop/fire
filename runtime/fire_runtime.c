@@ -673,16 +673,6 @@ typedef struct {
     uint64_t addr;    /* the MojoList address; 0 = empty slot */
     char    *kinds;   /* one byte per slot, or NULL */
     void   **boxes;   /* lazily allocated, one entry per list element */
-    /* How to REPR one element of this list, or NULL. Same "the information
-     * travels with the value" bargain as `kinds`, and for the same reason: the
-     * codegen knows a literal's element type where it BUILDS the list and has
-     * no way to tell a runtime walker later, because a struct-allocated value
-     * carries no type tag for `_mojo_dispatch_repr` to find (that is the whole
-     * of bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
-     * container_spellings.md). One pointer per row, and only for a list whose
-     * elements are a registered struct. Not copied either: it is a function
-     * address in this image. */
-    char   *(*repr_fn)(int64_t);
 } _KindRow;
 
 static struct {
@@ -791,60 +781,12 @@ char mojo_list_slot_kind(MojoList *l, int64_t i)
 /* `dst` is a fresh list built slot-for-slot out of `src`: it holds the same
  * values, so it describes them the same way. Every list->list copy in this
  * file calls this; that is the whole reason `list(mixed_tuple)` and
- * `m[:]` are right rather than only the original.
- *
- * The ELEMENT REPR travels with it for the same reason and by the same route:
- * a copy holds the same values, so it reprs them the same way, and `list(t)`
- * printing a raw pointer decimal where `t` printed `R<a>` would be the same
- * bug one call away. */
+ * `m[:]` are right rather than only the original. */
 void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
 {
     if (!dst || !src) return;
     const char *k = mojo_list_get_kinds(src);
     if (k) mojo_list_set_kinds(dst, k);
-    _KindRow *sr = _kinds_row((uint64_t)(uintptr_t)src);
-    if (sr && sr->repr_fn) mojo_list_set_elem_repr(dst, (void *)sr->repr_fn);
-}
-
-/* ── The per-list ELEMENT REPR ────────────────────────────────────────────
-   `mojo_list_set_elem_repr` records how to render one element of this list;
-   `mojo_list_repr_elem` is what a repr walker asks per slot and gets NULL from
-   when the list says nothing (so the walker's own generic reader still runs,
-   and a list this was never called for is exactly as it was).
-
-   Why a function pointer on the VALUE rather than a global type->repr table:
-   the element's static type is known where the list is built and is thrown away
-   by the time anything walks it, and the two ways to recover it both fail —
-   `_mojo_dispatch_repr` needs a runtime type TAG, which a struct-allocated
-   local does not carry (its first word is its first field), and a global
-   address->type registry would go stale the moment a frame is reused, handing a
-   later struct at the same address another struct's repr. Recording the
-   function on the list has neither failure mode: it is set once, from the
-   compile-time type, and it dies with the list.
-
-   Emitted by the codegen beside the `mojo_list_set_kinds` call for the same
-   literal (mojo/backend_gimple/emit_exprs.py's `_lower_list_literal`), for a
-   homogeneous literal whose element type is a registered struct — the case the
-   kinds table deliberately leaves alone, since one accessor is already exact
-   for reading and says nothing about REPR.
-*/
-void mojo_list_set_elem_repr(MojoList *l, void *fn)
-{
-    if (!l) return;
-    uint64_t addr = (uint64_t)(uintptr_t)l;
-    int fresh = 0;
-    _KindRow *r = _kinds_row_for_write(addr, &fresh);
-    r->repr_fn = (char *(*)(int64_t))fn;
-    if (fresh && !fn) _kinds_forget(addr);
-}
-
-/* The recorded element repr, or NULL. The walker decides what a NULL means —
-   that is the point of returning NULL rather than a generic answer here. */
-char *mojo_list_repr_elem(MojoList *l, int64_t v)
-{
-    _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
-    if (!r || !r->repr_fn) return NULL;
-    return r->repr_fn(v);
 }
 
 static void _kinds_forget(uint64_t addr)
@@ -913,16 +855,6 @@ static void _kinds_forget(uint64_t addr)
 typedef struct {
     uint64_t magic;
     int64_t  bits;
-    /* The slot's own kind byte (mojo_list_set_kinds' alphabet), copied from
-     * the list at BOX time. A box exists precisely because the raw word is
-     * not self-describing — a double has no int64_t spelling, and a str
-     * slot's word is a bare pointer with nothing to say it is one — so the
-     * consumer has to be able to ASK rather than guess. Without this the box
-     * only ever carried the float case and every other kind came back as the
-     * bare word: `mojo_repr_boxed` could only answer "box ⇒ float", so a
-     * STRING slot of the same heterogeneous list printed as its address
-     * decimal. */
-    char     kind;
 } MojoBox;
 
 static _PtrReg _reg_box;
@@ -936,15 +868,8 @@ int mojo_is_boxed(int64_t v)
 int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
 {
     if (!l || i < 0 || i >= l->len) return 0;
-    char _k = mojo_list_slot_kind(l, i);
-    /* An int slot is its own answer and stays the bare word: a box is a heap
-     * cell per (list, slot), and taxing every int in a mixed list to serve the
-     * uncommon kinds would be the wrong trade. Every OTHER kind is boxed —
-     * not just 'd' — because for each of them the raw word is ambiguous: a
-     * double has no int64_t spelling, and a `char *` slot's word is a bare
-     * pointer a consumer cannot tell from an int. */
-    if (_k == 'i')
-        return l->data[i];
+    if (mojo_list_slot_kind(l, i) != 'd')
+        return l->data[i];          /* the raw word, exactly as before */
     uint64_t addr = (uint64_t)(uintptr_t)l;
     int fresh = 0;
     _KindRow *r = _kinds_row_for_write(addr, &fresh);
@@ -964,7 +889,6 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
          * it is what mojo_list_get_double does. Storing the double TRUNCATED
          * to an int64_t instead would read back 2.5 as 2.0. */
         bx->bits = l->data[i];
-        bx->kind = _k;
         _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
         r->boxes[i] = bx;
     }
@@ -991,176 +915,33 @@ int64_t mojo_double_to_bits(double v) {
     return bits;
 }
 
-/* The box read as a double. A value that is NOT a box — or a box of a kind
- * that is not a double's — comes back as its own numeric value, not 0: the
- * codegen marks a whole READ SITE as possibly boxed (the runtime decides per
- * slot), so a call here must be correct for the int slots of the same list
- * too — and promoting an int to a double is exactly what an operation with a
- * float operand already does to it. A non-double box unwraps to its raw word
- * first, which is what that same slot returned before it was boxed at all. */
+/* The box read as a double. A value that is NOT a box comes back as its own
+ * numeric value, not 0: the codegen marks a whole READ SITE as possibly
+ * boxed (the runtime decides per slot), so a call here must be correct for
+ * the int slots of the same list too — and promoting an int to a double is
+ * exactly what an operation with a float operand already does to it. */
 double mojo_box_double(int64_t v)
 {
     if (!mojo_is_boxed(v)) return (double)v;
-    MojoBox *bx = (MojoBox *)(intptr_t)v;
-    if (bx->kind != 'd') return (double)bx->bits;
-    return mojo_double_from_bits(bx->bits);
+    return mojo_double_from_bits(((MojoBox *)(intptr_t)v)->bits);
 }
 
 /* The box read as an integer: Python's own conversion (truncation toward
- * zero) of a DOUBLE box, and the raw word for anything else — including a
- * non-double box, whose slot is not a number at all and whose word is what
- * the unboxed read returned. */
+ * zero), and the value itself when it is not a box. */
 int64_t mojo_box_int(int64_t v)
 {
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (!bx || !mojo_is_boxed(v)) return v;
-    if (bx->kind != 'd') return bx->bits;
     return (int64_t)mojo_box_double(v);
 }
 
-/* The repr of a possibly-boxed int64_t. A box is described by its OWN kind
- * byte (see MojoBox): 'd' the double it holds, 'p' a str, 's' bytes, 'l' a
- * nested container, 'n' None, anything else the plain integer. Not a box ->
- * the plain integer, which is what every other int64_t in this runtime
- * already is. One call so the consumer needs no branch.
-
- * The per-kind arms are `mojo_repr_list_kinds`' own, so a str slot and a str
- * element of a heterogeneous list cannot print differently — and the str arm
- * is why this cannot go on answering "box ⇒ float": a `char *` slot's word is
- * a bare pointer, so without asking the box a str element printed as its own
- * address decimal. */
+/* The repr of a possibly-boxed int64_t. Box -> the double it holds; not a
+ * box -> the plain integer, which is what every other int64_t in this
+ * runtime already is. One call so the consumer needs no branch. */
 char *mojo_repr_boxed(int64_t v)
 {
-    if (mojo_is_boxed(v)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)v;
-        switch (bx->kind) {
-            case 'd': return mojo_repr_float(mojo_double_from_bits(bx->bits));
-            /* str() semantics, NOT repr(): every caller of this function is a
-             * str() spelling (`print`, an f-string, `%s`, the `str` builtin),
-             * where `str("yy")` is `yy` and only `repr` would quote it. The
-             * float case could not tell the two apart, which is why the
-             * name says "repr" and the behaviour was never checked; the str
-             * slot can. strdup'd because the string belongs to the list, and
-             * callers treat this result as their own (see
-             * mojo_cstr_or_int_str's ownership comment). */
-            case 'p': return strdup((char *)(intptr_t)bx->bits);
-            case 's': return mojo_bytes_repr((MojoBytes *)(intptr_t)bx->bits);
-            case 'l': return mojo_repr_list_kinds(
-                (MojoList *)(intptr_t)bx->bits, NULL);
-            case 'n': return strdup("None");
-            default:  return mojo_repr_int(bx->bits);
-        }
-    }
+    if (mojo_is_boxed(v)) return mojo_repr_float(mojo_box_double(v));
     return mojo_str_from_int(v);
-}
-
-
-/* ── id(): an identity token that IS an integer ─────────────────────────────
- *
- * CPython's `id(x)` is an `int`, and every consumer in this runtime depends
- * on that being true rather than on the value being an address: the self-host
- * closure keys its memo caches on it (`if id(body) in cache`, `{id(n) for n
- * in ...}`, `str(id(func))`), so a token that any predicate here reads as
- * something other than an integer is a WRONG ANSWER, not an approximation.
- *
- * What this replaces was the generated stub `static int64_t id (int64_t x)
- * { return x; }` — the VALUE rather than the identity. For an integer
- * argument that is merely imprecise; for a container it hands back the live
- * HANDLE, and the container registries (`mojo_is_registered_list` and its
- * siblings) then read the token as that very container. `mojo_dict_key_for`
- * correctly refuses a list as a dict key, so
- * `mojo/middle/lambdareduce.py`'s `if id(body) in cache` raised
- * `TypeError: unhashable type: 'list'` — inside `gen_module_impl`, on every
- * input including an empty one, which is why the self-hosted compiler
- * compiled nothing at all (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
- *
- * So the token is a BOX holding the address. A box is this runtime's existing
- * answer to "an int64_t that is not self-describing", and every classifier
- * already treats a registered box as an integer: `mojo_boxed_is_str` excludes
- * boxes (so the token is never mistaken for a string) and `_value_kind`
- * matches only the list/dict/set registries (so never for one of those).
- * `int(token)` and `str(token)` read it back through `mojo_box_int` /
- * `mojo_repr_boxed` as the object's own address, so a program that PRINTS an
- * id still prints an address, as it does under CPython.
- *
- * The box is INTERNED per address, and that is not an optimisation: it is what
- * makes `id(x) == id(x)`, which the caches depend on (`cache[id(body)]` reads
- * and then writes the same key, so a fresh box per call would never hit).
- * The table is open-addressed on the word itself, the same shape as `_PtrReg`
- * above, and deliberately NOT a `MojoDict` keyed by the value: a container key
- * makes a dict build a CONTENT key — walking the whole list — on every single
- * `id()` call, and `id()` is called on statement lists in inner loops.
- *
- * The table is never pruned. That is the same rule the box cache follows (a
- * boxed value read out of a list outlives the list) and it is what keeps
- * `id(x)` STABLE for the life of the process; one 24-byte cell per distinct
- * `id()`-ed word is a rounding error against the containers themselves.
- * Occupancy is `v[j] != 0` rather than `k[j] != 0`, because the key here is
- * an arbitrary word and one of them is 0 (`id(None)`). */
-typedef struct {
-    uint64_t *k;
-    uint64_t *v;      /* the box address; 0 means the slot is empty */
-    uint64_t  cap;    /* power of two */
-    uint64_t  used;
-    int       shift;  /* 64 - log2(cap) */
-} _IdTab;
-
-static _IdTab _id_tab;
-
-static void _id_rehash(uint64_t ncap)
-{
-    uint64_t *ok = _id_tab.k, *ov = _id_tab.v, ocap = _id_tab.cap;
-    _id_tab.k = (uint64_t *)calloc((size_t)ncap, sizeof(uint64_t));
-    _id_tab.v = (uint64_t *)calloc((size_t)ncap, sizeof(uint64_t));
-    _id_tab.cap = ncap;
-    _id_tab.shift = 64;
-    for (uint64_t c = ncap; c > 1; c >>= 1) _id_tab.shift--;
-    _id_tab.used = 0;
-    for (uint64_t i = 0; i < ocap; i++) {
-        if (!ov[i]) continue;
-        uint64_t h = ((ok[i] >> 3) * 0x9E3779B97F4A7C15ULL) >> _id_tab.shift;
-        while (_id_tab.v[h]) h = (h + 1) & (ncap - 1);
-        _id_tab.k[h] = ok[i];
-        _id_tab.v[h] = ov[i];
-        _id_tab.used++;
-    }
-    free(ok);
-    free(ov);
-}
-
-static uint64_t _id_slot(uint64_t key)
-{
-    uint64_t mask = _id_tab.cap - 1;
-    uint64_t j = ((key >> 3) * 0x9E3779B97F4A7C15ULL) >> _id_tab.shift;
-    while (_id_tab.v[j] && _id_tab.k[j] != key) j = (j + 1) & mask;
-    return j;
-}
-
-int64_t mojo_id(int64_t x)
-{
-    if (!_id_tab.cap) _id_rehash(256);
-    uint64_t key = (uint64_t)x;
-    uint64_t j = _id_slot(key);
-    if (_id_tab.v[j]) return (int64_t)_id_tab.v[j];
-    /* Same load invariant as `_pr_add`: grow at half full, so a probe always
-     * reaches an empty slot. */
-    if ((_id_tab.used + 1) * 2 > _id_tab.cap) {
-        _id_rehash(_id_tab.cap * 2);
-        j = _id_slot(key);
-    }
-    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
-    /* Out of memory is not a shape this runtime reports; returning the word
-     * unchanged keeps the program running with the OLD (wrong) answer rather
-     * than a NULL token that would read as `id(x) == 0`. */
-    if (!bx) return x;
-    bx->magic = MOJO_BOX_MAGIC;
-    bx->bits = x;
-    bx->kind = 'i';
-    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
-    _id_tab.k[j] = key;
-    _id_tab.v[j] = (uint64_t)(uintptr_t)bx;
-    _id_tab.used++;
-    return (int64_t)(uintptr_t)bx;
 }
 
 
@@ -1272,20 +1053,8 @@ int mojo_boxed_is_str(int64_t v) {
      * struct.unpack('<if', buf): print(x)`) was classified as a string and
      * handed to strlen — a wrong number turned into a segfault. The
      * discriminator is a live membership probe, not a shape test, so a box
-     * is excluded wherever it has actually been built.
-     *
-     * The DICT and SET registries are excluded for the same reason and were
-     * missing: a registered `MojoDict *` is exactly as pointer-shaped as a
-     * registered `MojoList *`, so `d[some_dict] = 1` classified its own key as
-     * a string and `strdup`'d the first bytes of the struct — a garbage key
-     * and no diagnostic, where CPython raises `unhashable type: 'dict'`. All
-     * three are excluded TOGETHER on purpose: this predicate's job is "is this
-     * a boxed string", and a container of any kind is a different answer, so
-     * adding one kind now and the other two later is how the list-only version
-     * shipped in the first place. */
-    return _mojo_ptr_shaped(v) && !mojo_is_registered_list(v)
-        && !mojo_is_registered_dict(v) && !mojo_is_registered_set(v)
-        && !mojo_is_boxed(v);
+     * is excluded wherever it has actually been built. */
+    return _mojo_ptr_shaped(v) && !mojo_is_registered_list(v) && !mojo_is_boxed(v);
 }
 
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
@@ -2030,19 +1799,6 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
             mojo_list_set_kinds(r, kk);
         }
     }
-    /* The element repr propagates on the same terms as the kinds string
-     * above: recorded on ONE side and nothing on the other, or recorded on
-     * both and the SAME function. Two lists of different struct types
-     * concatenated record nothing, because one slot array cannot describe
-     * both -- which leaves the generic reader, exactly as before. */
-    {
-        _KindRow *ra = _kinds_row((uint64_t)(intptr_t)a);
-        _KindRow *rb = _kinds_row((uint64_t)(intptr_t)b);
-        char *(*rfa)(int64_t) = ra ? ra->repr_fn : NULL;
-        char *(*rfb)(int64_t) = rb ? rb->repr_fn : NULL;
-        if (rfa && !rfb) mojo_list_set_elem_repr(r, (void *)rfa);
-        else if (rfa && rfb && rfa == rfb) mojo_list_set_elem_repr(r, (void *)rfa);
-    }
     return r;
 }
 
@@ -2161,29 +1917,9 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
          * quadratic - confirmed as the actual cause of a stage2-bootstrap
          * runaway (mojo_compiler.py's own py_tokenize scanning for a
          * closing triple-quote across mojo.py's ~900KB source, self-hosted,
-         * took 100% CPU and dozens of GB before this fix).
-         *
-         * The scan is `memchr` rather than the byte-at-a-time loop this
-         * used to be, which is the SAME value by definition (the offset of
-         * the first NUL within s[0..stop), or `stop` when there is none)
-         * and is what every libc already vectorises. Measured on the exact
-         * scanning shape above (see
-         * bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md): 14x on
-         * the same inputs, with a byte-for-byte equality check over every
-         * position confirming the two agree.
-         *
-         * It is a constant-factor win, NOT a complexity one, and the doc
-         * says why it cannot be more: a bare `char *` carries no length, so
-         * "is `start` inside this string?" cannot be answered without a
-         * scan from byte 0, and every caller of this function has to ask
-         * that question (a slice whose start is past the end has to be
-         * reported as the empty string). Making the scan start-relative,
-         * which would be linear, means reading s[start] before anything
-         * has established that index is in bounds. */
-        {
-            const char *nul = (const char *)memchr(s, '\0', (size_t)stop);
-            len = nul ? (int64_t)(nul - s) : stop;
-        }
+         * took 100% CPU and dozens of GB before this fix). */
+        len = 0;
+        while (len < stop && s[len]) len++;
     }
     if (stop == MOJO_SLICE_STOP_OMITTED) stop = len;
     if (start < 0) start += len;
@@ -2231,12 +1967,8 @@ int mojo_cstr_region_eq(char *s, int64_t start, int64_t stop, char *needle)
         if (start < 0) start += len;
         if (stop  < 0) stop  += len;
     } else {
-        /* Same value as the byte-at-a-time scan this replaced, for the
-         * same reason mojo_cstr_slice's does (see the note there): it is
-         * the offset of the first NUL in s[0..stop), or `stop`. memchr
-         * computes it ~14x faster on the tokenizers' scanning shape. */
-        const char *nul = (const char *)memchr(s, '\0', (size_t)stop);
-        len = nul ? (int64_t)(nul - s) : stop;
+        len = 0;
+        while (len < stop && s[len]) len++;
     }
     if (start < 0) start = 0;
     if (stop > len) stop = len;
@@ -2319,43 +2051,6 @@ int mojo_cstr_cmp(char *a, char *b)
     return strcmp(a, b);
 }
 
-/* `mojo_cstr_cmp(a, b)` for the case where ONE side is an int64_t slot whose
- * REPRESENTATION the codegen could not resolve: a boxed string pointer, or a
- * byte code (this backend lowers `s[i]` on a `char *` to a C `char`, so a
- * `char`-typed operand holds the byte, and the 1-character string on the other
- * side is spelled with mojo_char_to_str). Same convention as its twin --
- * 0 means EQUAL -- so the codegen arm that calls it is the same shape as the
- * one that calls `mojo_cstr_cmp`, and `!=` needs no separate answer.
- *
- * The codegen cannot tell those two representations apart at compile time,
- * and guessing is what this replaces: `mojo_char_to_str((char)w)` truncated a
- * boxed string POINTER to its low byte and compared that, so a quote character
- * never matched itself. `fire_compiler.py`'s `_strip_inline_comment` and
- * `_split_on_separators` leave a single-quoted string open on exactly that
- * comparison (`c == in_str`, where `in_str` is an unannotated local widened to
- * int64_t and assigned a `char *` LATER in the loop body than the read), so
- * the `;` after ``in_str !='`'`` read as string content and the self-hosted
- * parser refused the file with `Unexpected SEMICOLON(';')`
- * (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
- *
- * At RUN time the two are trivially distinguishable and the answer is exact: a
- * byte code is one byte, a boxed string is pointer-shaped.
- *
- * The word cases are exhaustive over what a slot can hold, and the LAST one is
- * why this is not `mojo_cstr_or_int_str`: a larger integer's decimal spelling
- * would compare equal to the string of those digits, and
- * `3000000000 == "3000000000"` is False in Python. 0 (None) and a double's raw
- * bits are likewise never equal to a string. Ordering is not answered at all,
- * so the word side is always last and each operand order calls this once. */
-int mojo_cstr_cmp_word(char *s, int64_t w)
-{
-    if ((intptr_t)s < 65536) return 1;      /* a NULL/None string: never equal */
-    if (w > 0 && w < 256)
-        return (s[0] == (char)w && s[1] == '\0') ? 0 : 1;
-    if (mojo_boxed_is_str(w)) return strcmp(s, (char *)(intptr_t)w);
-    return 1;
-}
-
 int mojo_str_contains(char *haystack, char *needle)
 {
     if ((intptr_t)haystack < 65536 || (intptr_t)needle < 65536) return 0;
@@ -2373,23 +2068,6 @@ void mojo_str_print(MojoStr *s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
  * by any bytes operation is immutable, which is what lets every reader
  * (notably memoryview `.readonly`) trust the flag without asking where
  * the object came from. */
-/* Registry of every MojoBytes this runtime allocates — the fourth member of
- * the container-registry family, added with `len()` on a polymorphic
- * parameter in mind (emit_infra._len_of_boxed). A boxed bytes value is
- * pointer-shaped and is none of a list, dict, set or box, so
- * `mojo_boxed_is_str` calls it a STRING; `mojo_strlen` over it then walked
- * the bytes object's own payload for a NUL, and answered a length that
- * happened to be right only because `MojoBytes.len` sits at the same offset
- * as `MojoList.len`. Registered in `mojo_bytes_alloc` and NEVER removed —
- * this runtime has no `mojo_bytes_free`, so a bytes object's address is
- * never recycled and there is no stale entry to reason about. */
-static _PtrReg _reg_bytes;
-
-int mojo_is_registered_bytes(int64_t addr) {
-    if (addr < 65536) return 0;
-    return _pr_has(&_reg_bytes, (uint64_t)addr);
-}
-
 static MojoBytes *mojo_bytes_alloc(int64_t len)
 {
     MojoBytes *b = malloc(sizeof(MojoBytes));
@@ -2397,11 +2075,6 @@ static MojoBytes *mojo_bytes_alloc(int64_t len)
     b->data = malloc((size_t)(len < 0 ? 0 : len) + 1);
     b->data[len < 0 ? 0 : len] = 0;
     b->readonly = 1;
-    /* Every bytes object this runtime builds comes from here, so this is the
-     * one place the container-registry family needs to know about them (see
-     * `mojo_is_registered_bytes`'s own comment for why there is no
-     * matching removal). */
-    _pr_add(&_reg_bytes, (uint64_t)(uintptr_t)b);
     return b;
 }
 
@@ -2497,24 +2170,6 @@ int mojo_bytes_eq(MojoBytes *a, MojoBytes *b)
     if (a == b) return 1;
     if (a == NULL || b == NULL) return 0;
     return a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
-}
-
-/* The three-way sibling of mojo_bytes_eq, for `b'a' < b'b'` and for a bytes
- * ELEMENT of an ordered container (`[b'a'] < [b'b']`, which is what _slot_cmp
- * asks). A prefix orders first, same as every other sequence here. Defined
- * next to mojo_bytes_eq rather than at the ordering block because it is a
- * primitive of the bytes type, not of the comparison operators. */
-int mojo_bytes_cmp(MojoBytes *a, MojoBytes *b)
-{
-    if (a == b) return 0;
-    if (a == NULL || b == NULL) return MOJO_CMP_UNORDERABLE;
-    int64_t n = a->len < b->len ? a->len : b->len;
-    if (n > 0) {
-        int r = memcmp(a->data, b->data, (size_t)n);
-        if (r) return r < 0 ? -1 : 1;
-    }
-    if (a->len == b->len) return 0;
-    return a->len < b->len ? -1 : 1;
 }
 
 int mojo_bytes_truthy(MojoBytes *b) { return b != NULL && b->len != 0; }
@@ -4186,49 +3841,6 @@ char *mojo_char_to_str(char c) {
     return s;
 }
 
-/* `s[i]` on a str: the character at i, as a 1-character STRING — which is what
- * a Python subscript means, and the same value `mojo_char_to_str` builds. It
- * exists as its OWN entry point rather than as `mojo_char_to_str(s[i])` at the
- * call site because gimple refuses a `char` argument ("invalid argument to
- * gimple call": a char is promoted to int64_t non-trivially), so the two-step
- * spelling is not available to the codegen at all. Two int64_t-scale arguments
- * are.
- *
- * It is the same immortal table, which is the point: the call sites that
- * already reached `mojo_char_to_str` (a `char` from a struct field, a loop
- * counter, `chr()`) and the ones that come through here now share ONE string
- * per byte value instead of a table plus a malloc per character.
- *
- * Before this, a subscript reached `mojo_cstr_slice(s, i, i + 1)` — a correct
- * NUL-terminated 1-char string, allocated per character and owned by nobody.
- * `for c in s: ...` over a 96-character line leaked 1226 bytes a pass, and
- * 246.7 MB over the 4.8M characters that `gimplerunner`'s
- * `gimple_char_scan_allocates_nothing_per_character` tripwire runs. (Both
- * figures measured; the doc that carried them is deleted now that the residual
- * is gone, which is why they live here.)
- *
- * The result is NOT the caller's to free, exactly as for `mojo_char_to_str`:
- * it is deliberately absent from the codegen's `_FRESH_STRING_RETURNS`, which
- * is what keeps a `free()` of it from being emitted. It is never written to
- * either — the invariant `mojo_char_to_str` already carries. */
-char *mojo_char_at_str(char *s, int64_t i) {
-    if (!s) return mojo_char_to_str(0);
-    if (i < 0) {
-        i += (int64_t)strlen(s);
-        if (i < 0) return mojo_char_to_str(0);
-    } else if (memchr(s, 0, (size_t)i + 1) != NULL) {
-        /* A NUL at or BEFORE i means the string ended at or before it, so
-           `s[i]` is past the end: "", which is what the slice returned. A NUL
-           exactly AT i is that same case (`mojo_cstr_slice(s, i, i+1)` stops at
-           the first NUL within `s[0..i]`, inclusive of `i`). `memchr` for the
-           non-negative case rather than a second `strlen`, for the reason
-           `mojo_cstr_slice` uses it: a scan over a long string must not re-scan
-           the whole thing once per character. */
-        return mojo_char_to_str(0);
-    }
-    return mojo_char_to_str(s[i]);
-}
-
 /* Python's ord()/chr() builtins had NO real implementation at all — just a
  * declared-but-never-defined variadic stub (`int64_t ord(...);`), an
  * undefined symbol at link time for any program that actually calls either.
@@ -4254,42 +3866,13 @@ char *mojo_chr(int64_t code) {
     return mojo_char_to_str((char)code);
 }
 
-
-/* Clamp an optional `[start[, end]]` window the way Python's str methods do,
- * for a NUL-terminated `char *`. `MOJO_SLICE_STOP_OMITTED` means "end was not
- * given"; a negative bound is relative to the end and clamps to 0; an
- * over-large one clamps to len.
- *
- * Unlike `mojo_bytes_clamp_range` this does NOT collapse an inverted window
- * (`start > end`) to an empty one, because Python does not: `"abc"[5:9]`
- * raises, and `"abc".find("", 2, 1)` / `.rfind("", 2, 1)` answer -1 rather
- * than the empty-slice answer a collapsed window would give. Every caller
- * below tests `stop < start` itself, and the predicate family wants the
- * count as `stop - start` (negative there means "no room", which is the
- * right answer) rather than as a clamped zero. */
-static void mojo_str_clamp_range(char *s, int64_t *start, int64_t *stop) {
-    int64_t len = s ? (int64_t)strlen(s) : 0;
-    int64_t lo = *start, hi = *stop;
-    if (hi == MOJO_SLICE_STOP_OMITTED) hi = len;
-    if (lo < 0) lo += len;
-    if (hi < 0) hi += len;
-    if (lo < 0) lo = 0;
-    if (hi > len) hi = len;
-    *start = lo; *stop = hi;
-}
-
-int mojo_str_startswith_from(char *s, char *prefix, int64_t start, int64_t stop) {
-    if (!s || !prefix) return 0;
-    mojo_str_clamp_range(s, &start, &stop);
-    if (stop < start) return 0;
-    int64_t plen = (int64_t)strlen(prefix);
-    if (plen == 0) return 1;
-    if (stop - start < plen) return 0;
-    return memcmp(s + start, prefix, (size_t)plen) == 0;
-}
-
 int mojo_str_startswith(char *s, char *prefix) {
-    return mojo_str_startswith_from(s, prefix, 0, MOJO_SLICE_STOP_OMITTED);
+    if (!s || !prefix) return 0;
+    while (*prefix) {
+        if (!*s || *s != *prefix) return 0;
+        s++; prefix++;
+    }
+    return 1;
 }
 
 /* Python str character-class predicates. All require at least one character
@@ -4321,18 +3904,12 @@ int mojo_str_isprintable(char *s) { return mojo_cstr_is(s, MOJO_IS_PRINT); }
  * this answered before. */
 int mojo_str_isnumeric(char *s) { return mojo_cstr_is(s, MOJO_IS_NUMERIC); }
 
-int mojo_str_endswith_from(char *s, char *suffix, int64_t start, int64_t stop) {
-    if (!s || !suffix) return 0;
-    mojo_str_clamp_range(s, &start, &stop);
-    if (stop < start) return 0;
-    int64_t slen = (int64_t)strlen(suffix);
-    if (slen == 0) return 1;
-    if (stop - start < slen) return 0;
-    return memcmp(s + stop - slen, suffix, (size_t)slen) == 0;
-}
-
 int mojo_str_endswith(char *s, char *suffix) {
-    return mojo_str_endswith_from(s, suffix, 0, MOJO_SLICE_STOP_OMITTED);
+    if (!s || !suffix) return 0;
+    int slen = strlen(s);
+    int suflen = strlen(suffix);
+    if (suflen > slen) return 0;
+    return strcmp(s + slen - suflen, suffix) == 0;
 }
 
 int mojo_str_startswith_char(char *s, char c) {
@@ -4354,48 +3931,40 @@ int64_t mojo_str_find(char *s, char *needle) {
     return (int64_t)(found - s);
 }
 
-/* str.rfind(needle[, start[, end]]) over a window. An empty needle matches at
- * the window's END (CPython: "abc".rfind("", 1) == 3, "abc".rfind("", 0, 2)
- * == 2), and an inverted or out-of-range window is a miss rather than the
- * empty-slice answer. Mirrors mojo_bytes_rfind_from, which is the same
- * search over a length-tagged buffer. */
-int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop) {
-    if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
-    if (!s || !needle) return -1;
-    mojo_str_clamp_range(s, &start, &stop);
-    if (stop < start) return -1;
-    int64_t nlen = (int64_t)strlen(needle);
-    if (nlen == 0) return stop;
-    for (int64_t i = stop - nlen; i >= start; i--) {
-        if (memcmp(s + i, needle, (size_t)nlen) == 0) return i;
-    }
-    return -1;
-}
-
 /* str.rfind(needle): index of the LAST occurrence of needle in s, or -1.
  * Empty needle matches at strlen(s) (CPython: "ab".rfind("") == 2). */
 int64_t mojo_str_rfind(char *s, char *needle) {
-    return mojo_str_rfind_from(s, needle, 0, MOJO_SLICE_STOP_OMITTED);
-}
-
-/* str.find(needle[, start[, end]]) with CPython semantics: negative bounds are
- * relative to the end (clamped to 0 after adjustment); a start beyond the
- * string length is a guaranteed miss (-1), as is an inverted window; an empty
- * needle matches at `start` itself, as long as start <= len (e.g. "ab".find("",
- * 2) == 2 but "ab".find("", 3) == -1). On a hit the returned index is absolute
- * (relative to `s`, not to `s + start`). */
-int64_t mojo_str_find_from(char *s, char *needle, int64_t start, int64_t stop) {
     if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
     if (!s || !needle) return -1;
-    int64_t len = (int64_t)strlen(s);
-    mojo_str_clamp_range(s, &start, &stop);
-    if (start > len || stop < start) return -1;
     int64_t nlen = (int64_t)strlen(needle);
-    if (nlen == 0) return start;
-    for (int64_t i = start; i + nlen <= stop; i++) {
+    int64_t slen = (int64_t)strlen(s);
+    if (nlen == 0) return slen;
+    if (nlen > slen) return -1;
+    for (int64_t i = slen - nlen; i >= 0; i--) {
         if (memcmp(s + i, needle, (size_t)nlen) == 0) return i;
     }
     return -1;
+}
+
+/* str.find(needle, start) with CPython semantics: negative start is relative
+ * to the end (clamped to 0 after adjustment); start beyond the string length
+ * is a guaranteed miss (-1); an empty needle matches at `start` itself, as
+ * long as start <= len (e.g. "ab".find("", 2) == 2 but "ab".find("", 3) ==
+ * -1). On a hit the returned index is absolute (relative to `s`, not to
+ * `s + start`). */
+int64_t mojo_str_find_from(char *s, char *needle, int64_t start) {
+    if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
+    if (!s || !needle) return -1;
+    int64_t len = (int64_t)strlen(s);
+    if (start < 0) {
+        start += len;
+        if (start < 0) start = 0;
+    }
+    if (start > len) return -1;
+    if (!*needle) return start;
+    char *found = strstr(s + start, needle);
+    if (!found) return -1;
+    return (int64_t)(found - s);
 }
 
 /* Deliberately NOT named mojo_getenv: `getenv` is in _FORCE_RENAME_RESERVED
@@ -4657,33 +4226,20 @@ MojoList *mojo_str_split(char *s, char *sep) {
     return l;
 }
 
-/* Python str.count(sub[, start[, end]]): number of non-overlapping
- * occurrences. `str.count` had no lowering at all before (any call fell
- * through to the generic "unknown char* method" stub, always returning 0) —
- * real bug found via mojo_compiler.py's own multi-line-string handling, which
- * counts '\n' in a matched docstring to preserve line numbers after
- * collapsing it to a placeholder; every count silently came back 0, undoing
- * that fix once self-hosted.
- *
- * An empty `sub` matches at every boundary of the window plus its end, which
- * is CPython's `stop - start + 1` ("abc".count("") == 4) — this used to answer
- * 0, which was both wrong and, worse, wrong DIFFERENTLY depending on whether
- * the caller spelled the window out. */
-int64_t mojo_str_count_from(char *s, char *sub, int64_t start, int64_t stop) {
-    if (!s || !sub) return 0;
-    mojo_str_clamp_range(s, &start, &stop);
-    if (stop < start) return 0;
-    int64_t nlen = (int64_t)strlen(sub);
-    if (nlen == 0) return stop - start + 1;
-    int64_t n = 0;
-    for (int64_t i = start; i + nlen <= stop; i++) {
-        if (memcmp(s + i, sub, (size_t)nlen) == 0) { n++; i += nlen - 1; }
-    }
-    return n;
-}
-
+/* Python str.count(sub): number of non-overlapping occurrences. `str.count`
+ * had no lowering at all before (any call fell through to the generic
+ * "unknown char* method" stub, always returning 0) — real bug found via
+ * mojo_compiler.py's own multi-line-string handling, which counts '\n' in a
+ * matched docstring to preserve line numbers after collapsing it to a
+ * placeholder; every count silently came back 0, undoing that fix once
+ * self-hosted. */
 int64_t mojo_str_count(char *s, char *sub) {
-    return mojo_str_count_from(s, sub, 0, MOJO_SLICE_STOP_OMITTED);
+    if (!s || !sub || !*sub) return 0;
+    size_t sub_len = strlen(sub);
+    int64_t n = 0;
+    const char *p = s;
+    while ((p = strstr(p, sub)) != NULL) { n++; p += sub_len; }
+    return n;
 }
 
 /* Python str.splitlines(): splits on \n, \r\n or \r, but — unlike
@@ -4868,6 +4424,27 @@ static uint64_t _str_hash(char *s)
     return h;
 }
 
+/* A dict whose values are all Python bools (e.g. `flags[name] = True`) has
+ * no runtime marker distinguishing that from any other int64_t-valued dict
+ * — like the None/int and tuple/list ambiguities elsewhere in this runtime,
+ * generic repr() (_mojo_generic_elem_repr, via _mojo_repr_dict) can't tell a
+ * real boxed 0/1 boolean apart from a genuine small int, so it always
+ * printed 0/1 instead of False/True. Marked explicitly wherever codegen
+ * knows (from the RHS's static type) that a `dict[key] = True_or_False`
+ * assignment is storing a real bool; checked by _mojo_repr_dict to choose
+ * the right value formatting for the whole dict. */
+static _PtrReg _reg_bool_dict;
+
+void mojo_mark_dict_bool_values(MojoDict *d) {
+    if (!d) return;
+    _pr_add(&_reg_bool_dict, (uint64_t)(uintptr_t)d);
+}
+
+int mojo_is_bool_dict(MojoDict *d) {
+    if (!d) return 0;
+    return _pr_has(&_reg_bool_dict, (uint64_t)(uintptr_t)d);
+}
+
 static _PtrReg _reg_dict;
 
 int mojo_is_registered_dict(int64_t addr) {
@@ -4953,25 +4530,6 @@ char *mojo_dict_slot_key(MojoDict *d, int64_t i)
     return _slot_key(&d->slots[i]);
 }
 
-/* The DOUBLE twin of `mojo_dict_slot_key`, for the same caller and the same
- * reason: `_mojo_repr_dict` walks slots by INDEX (the order
- * `mojo_dict_order_indices` hands back), and `mojo_dict_get_double` takes a
- * KEY, so the emitted repr had no way to read a `kind == 1` slot back at its
- * own width. It went to `_mojo_generic_elem_repr` instead, which treats
- * `val > 65536` as a pointer and dereferences it through
- * `mojo_read_type_tag_safe` — and a double's IEEE-754 bits are exactly such a
- * word (3.5 is 0x400C000000000000), so `print({"c": 3.5})` was a SIGSEGV.
- *
- * `memcpy` rather than a `double *` cast: the slot is an `int64_t` in a
- * struct, and reading it through a `double *` is a strict-aliasing violation
- * (every other double accessor in this file copies for the same reason). */
-double mojo_dict_slot_double(MojoDict *d, int64_t i)
-{
-    double v;
-    memcpy(&v, &d->slots[i].val, sizeof(v));
-    return v;
-}
-
 /* mojo_dict_init/mojo_dict_destroy: see mojo_set_init/mojo_set_destroy's
  * comment (same Phase 6 rationale, same refactor shape). */
 void mojo_dict_init(MojoDict *d)
@@ -4979,7 +4537,6 @@ void mojo_dict_init(MojoDict *d)
     d->cap      = MOJO_DICT_INLINE;
     d->used     = 0;
     d->next_seq = 0;
-    d->val_repr = NULL;
     d->slots    = d->inl;       /* the first table lives inside the struct */
     memset(d->inl, 0, sizeof d->inl);
     _pr_add(&_reg_dict, (uint64_t)(uintptr_t)d);
@@ -4988,6 +4545,7 @@ void mojo_dict_init(MojoDict *d)
 void mojo_dict_destroy(MojoDict *d)
 {
     _pr_del(&_reg_dict, (uint64_t)(uintptr_t)d);
+    _pr_del(&_reg_bool_dict, (uint64_t)(uintptr_t)d);
     for (int64_t i = 0; i < d->cap; i++) _slot_free_key(&d->slots[i]);
     if (d->slots != d->inl) free(d->slots);
 }
@@ -5234,78 +4792,6 @@ void mojo_dict_set_str(MojoDict *d, char *key, char *v)
     _dict_set_raw(d, key, (int64_t)(uintptr_t)v, 2);
 }
 
-/* A Python bool is a 0/1 int64_t here (see _lower_BoolLiteral), so it needs
- * its own _DictSlot.kind to stay distinguishable from a genuine 0/1 int once
- * it is a slot — same reason `kind` exists for double and char * above. This
- * replaces a whole-DICT registry (`mojo_mark_dict_bool_values`, since deleted)
- * that answered for every value at once, so `{'name': p.name, 'ok': p.ok}`
- * rendered the int as True/False too. Per-slot is the shape the slot's `kind`
- * already had; only the one value stored through this setter changes. */
-void mojo_dict_set_bool(MojoDict *d, char *key, int v)
-{
-    _dict_set_raw(d, key, v ? 1 : 0, 3);
-}
-
-/* A Python `None` value is int64_t 0 here (see `_lower_IdentExpr`), which is
- * the SAME slot the integer 0 stores — so it needs its own kind for exactly
- * the reason mojo_dict_set_bool above does, and for the same reason it has to
- * be a per-SLOT tag rather than a whole-dict flag.
- *
- * Without it, `print(d)` and `print({'z': 0})` disagreed the other way:
- * `_mojo_generic_elem_repr`'s `val == 0` arm answers "None" (it exists for a
- * NULL pointer slot), so every plain zero in every dict printed as `None` —
- * `{'z': 0}`, `{'i': 0}`, `{k: 0 for k in ...}` — while a real `None` was
- * right only by coincidence. Tagging the store is what lets both be right, and
- * the tag is decided where the value is still an AST node. */
-void mojo_dict_set_none(MojoDict *d, char *key)
-{
-    _dict_set_raw(d, key, 0, 4);
-}
-
-/* A struct stored as a dict VALUE, plus the function that renders it. See
- * MojoDict.val_repr's own comment for why the function travels on the value
- * rather than in a global address->type table.
- *
- * The SETTER is separate from the RECORD on purpose: which struct this value
- * is is a property of the slot (hence `kind == 5`), while how to render it is
- * a property of the dict (hence the one function). A dict holding two
- * different struct types therefore tags both slots 5 and renders both through
- * the most recent shim — which is wrong for the older one, and is why the
- * codegen only records a shim for a dict whose values agree (see
- * `emit_dict_int_value_store`); a dict that mixes structs with ints keeps
- * recording nothing and its ints stay ints. */
-void mojo_dict_set_struct(MojoDict *d, char *key, void *obj)
-{
-    _dict_set_raw(d, key, (int64_t)(uintptr_t)obj, 5);
-}
-
-/* A struct the dict's recorded repr does NOT describe: the second struct type
- * in one dict. Tagged apart from kind 5 so the walker can hand this slot to
- * the generic dispatch while the kind-5 slots go to the recorded function —
- * a dict holding two struct types gets one of them right and the other one
- * plain, instead of getting the OTHER one's repr for both (which is a wild
- * read, not merely a wrong string) or losing both the moment a second type
- * appears. */
-void mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj)
-{
-    _dict_set_raw(d, key, (int64_t)(uintptr_t)obj, 6);
-}
-
-void mojo_dict_set_val_repr(MojoDict *d, void *fn)
-{
-    if (!d) return;
-    d->val_repr = (char *(*)(int64_t))fn;
-}
-
-/* The recorded repr of one `kind == 5` value, or NULL when this dict says
- * nothing about how to render it — the walker's own generic reader still runs,
- * so a dict this was never called for is exactly as it was. */
-char *mojo_dict_repr_val(MojoDict *d, int64_t v)
-{
-    if (!d || !d->val_repr) return NULL;
-    return d->val_repr(v);
-}
-
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
@@ -5379,26 +4865,6 @@ void mojo_dict_set_bytes_double(MojoDict *d, MojoBytes *key, double v)
 void mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v)
 { _dict_set_bytes_raw(d, key, (int64_t)(uintptr_t)v, 2); }
 
-/* The bytes-key twin of mojo_dict_set_bool: same value, same slot kind, its
- * own key DOMAIN (see mojo_dict_set_bytes_int). */
-void mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v)
-{ _dict_set_bytes_raw(d, key, v ? 1 : 0, 3); }
-
-/* ...and of mojo_dict_set_none, whose slot kind (4) is what separates a
- * `None` value from the integer 0 it shares a representation with. */
-void mojo_dict_set_bytes_none(MojoDict *d, MojoBytes *key)
-{ _dict_set_bytes_raw(d, key, 0, 4); }
-
-/* ...and of mojo_dict_set_struct (kind 5, rendered by the dict's recorded
- * val_repr). */
-void mojo_dict_set_bytes_struct(MojoDict *d, MojoBytes *key, void *obj)
-{ _dict_set_bytes_raw(d, key, (int64_t)(uintptr_t)obj, 5); }
-
-/* ...and of mojo_dict_set_other_struct: same value, kind 6, no recorded repr
- * claims it. */
-void mojo_dict_set_bytes_other_struct(MojoDict *d, MojoBytes *key, void *obj)
-{ _dict_set_bytes_raw(d, key, (int64_t)(uintptr_t)obj, 6); }
-
 static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key)
 {
     if (!d) return NULL;
@@ -5443,21 +4909,21 @@ int64_t mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt
     return dflt;
 }
 
-static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind, int64_t dflt);
+static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind);
 
 /* The value-domain siblings of mojo_dict_pop_bytes_int. All three share
  * this body: a dict slot is one int64_t of bits, so what differs is only
  * how the caller wants them READ BACK — a double through memcpy (never a
  * pointer/int punning cast, which strict-aliasing gcc may reorder), a
- * char* straight through, an int as-is — and the str-key domain now spells the
- * same three (mojo_dict_pop_int/_str/_double), so this is the ONE pop family
- * rather than a bytes-only one beside it. */
+ * char* straight through, an int as-is. `pop` on a str-keyed dict only ever
+ * had the int spelling, so a bytes-keyed dict with str values popped its
+ * value as a raw pointer decimal. */
 static int64_t _dict_pop_bytes_raw(MojoDict *d, MojoBytes *key, int64_t dflt)
 {
     if (!d) return dflt;
     if (!mojo_dict_contains_bytes(d, key)) return dflt;
     char *k = mojo_bytes_cstr_key(key);
-    int64_t v = _dict_pop_k(d, k, 1 /* bytes key */, dflt);
+    int64_t v = _dict_pop_k(d, k, 1 /* bytes key */);
     free(k);
     return v;
 }
@@ -5465,14 +4931,11 @@ static int64_t _dict_pop_bytes_raw(MojoDict *d, MojoBytes *key, int64_t dflt)
 int64_t mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt)
 { return _dict_pop_bytes_raw(d, key, dflt); }
 
-char *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key, char *dflt)
-{ return (char *)(uintptr_t)_dict_pop_bytes_raw(d, key, (int64_t)(uintptr_t)dflt); }
+char *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key)
+{ return (char *)(uintptr_t)_dict_pop_bytes_raw(d, key, 0); }
 
-/* Probed before the remove for the same reason as mojo_dict_pop_double: a
- * MISS must answer `dflt` and `0` is a legitimate double. */
-double mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key, double dflt)
+double mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key)
 {
-    if (!d || !mojo_dict_contains_bytes(d, key)) return dflt;
     int64_t bits = _dict_pop_bytes_raw(d, key, 0);
     double v;
     memcpy(&v, &bits, sizeof(v));
@@ -5534,27 +4997,14 @@ static char *_fmt_dict_val_str(int64_t v, int64_t kind, char *dblbuf, size_t dbl
          * nothing further needed for common values. */
         return dblbuf;
     }
-    /* kind 3 (bool) and 4 (None) are the two slots whose value is a Python
-     * object rather than a number: `'%(k)s' % {'k': True}` says True and
-     * `'%(k)s' % {'k': None}` says None in CPython, and both were 1/0 here
-     * because they fell through to mojo_str_from_int. */
-    if (kind == 3) return v ? "True" : "False";
-    if (kind == 4) return "None";
     return mojo_str_from_int(v);
 }
 
-char *mojo_str_format_dict(char *fmt, MojoDict *vals,
-                           char *(*dict_str)(MojoDict *))
+char *mojo_str_format_dict(char *fmt, MojoDict *vals)
 {
     if (!fmt) return NULL;
     _FmtBuf out = {0};
     const char *p = fmt;
-    /* CPython gives a non-tuple right operand to exactly ONE spec (see the
-     * header): `'%s' % d` is `str(d)`, and a SECOND unkeyed spec has nothing
-     * left to consume and is a real TypeError — "'%s %s' % d" answers "not
-     * enough arguments for format string". One flag, because a keyed spec
-     * (`%(k)s`) draws from `vals` slot by slot and does not consume it. */
-    int whole_consumed = 0;
     while (*p) {
         if (*p != '%') {
             const char *start = p;
@@ -5566,46 +5016,15 @@ char *mojo_str_format_dict(char *fmt, MojoDict *vals,
         if (p[1] == '%') { _fmtbuf_putn(&out, "%", 1); p += 2; continue; }
         /* Dict-keyed form: %(key)[flags][width][.prec]conv */
         if (p[1] != '(') {
-            /* An UNKEYED spec, and the mapping itself is its operand — which is
-             * what `'%s' % d` is, and CPython's answer for it is `str(d)`. The
-             * dict's repr is the generated `_mojo_repr_dict`, handed in by the
-             * caller for exactly the reason `MojoDict.val_repr` travels on the
-             * value: this file cannot render a dict with its slot kinds and
-             * its recorded struct repr without becoming a second, drifting
-             * copy of that walker. */
-            /* `p++` FIRST: this scan starts AT the '%', so a scan written as
-             * `while (*p && *p != '%') p++;` would not advance at all and the
-             * loop would come back here with the mapping already consumed —
-             * which is how the first version of this arm raised "not enough
-             * arguments" on `'%s' % d`, the very case it was written for. */
-            const char *spec = p;
+            /* Not a keyed spec — a stray '%' in a dynamic template. Real
+             * Python would fail with "unsupported format character" /
+             * ValueError only when a conversion follows; a lone trailing
+             * '%' raises ValueError too. Copy verbatim and keep going:
+             * matches _lower_percent_format's established lenient
+             * degradation for templates that weren't really format
+             * strings, and never crashes. */
+            _fmtbuf_putn(&out, p, 1);
             p++;
-            while (*p && *p != '%') p++;
-            if (dict_str && !whole_consumed) {
-                char *_d = dict_str(vals);
-                if (_d) {
-                    _fmtbuf_puts(&out, _d);
-                    free(_d);
-                }
-                whole_consumed = 1;
-                continue;
-            }
-            if (whole_consumed) {
-                /* A second unkeyed spec with nothing left to consume. This used
-                 * to print the spec through, which is the silent-wrong-answer
-                 * shape: it prints `%s` where CPython raises, and a template
-                 * like this is far more often a bug in the caller than an
-                 * intentional passthrough. */
-                free(out.buf);
-                mojo_raise_type_error(
-                    (char *)"not enough arguments for format string");
-                return NULL;  /* unreached */
-            }
-            /* No renderer available (a caller in a TU with no generated
-             * reflection block): copy the spec through, which is the lenient
-             * degradation this function has always had for a template that
-             * wasn't really a format string. Never crashes. */
-            _fmtbuf_putn(&out, spec, (size_t)(p - spec));
             continue;
         }
         const char *key_start = p + 2;
@@ -6239,26 +5658,14 @@ MojoSet *mojo_set_copy(MojoSet *s) {
     return out;
 }
 
-/* `dst |= src`, and the merge behind a multi-clause set comprehension
-   (`{i + j for i in range(3) for j in range(3)}`, lowered as one
-   `mojo_set_update` per outer element). Walks the SOURCE in INSERTION order
-   (mojo_set_order_indices), not raw hash-slot order: the destination's own
-   order is what a set's iteration and repr report, so a slot-order walk made
-   the merged result's order depend on where the heap put the source's
-   elements. `s |= other` is a merge in the source's order for the same
-   reason. */
 void mojo_set_update(MojoSet *dst, MojoSet *src) {
     if (!dst || !src) return;
-    int64_t *order = mojo_set_order_indices(src);
-    int64_t n = order ? src->used : 0;
-    for (int64_t oi = 0; oi < n; oi++) {
-        _SetSlot *s = &src->slots[order[oi]];
-        if (s->tag == 0)
-            mojo_set_add_int(dst, s->val_i);
-        else if (s->tag == 1)
-            mojo_set_add_str(dst, s->val_s);
+    for (int64_t i = 0; i < src->cap; i++) {
+        if (src->slots[i].tag == 0)
+            mojo_set_add_int(dst, src->slots[i].val_i);
+        else if (src->slots[i].tag == 1)
+            mojo_set_add_str(dst, src->slots[i].val_s);
     }
-    free(order);
 }
 
 /* ── MojoSetIter ─────────────────────────────────────────────────────────*/
@@ -6367,22 +5774,8 @@ void mojo_set_iter_free(MojoSetIter *it) { free(it->order); free(it); }
 int mojo_in_dispatch_str(int64_t container, char *needle)
 {
     if (container == 0) return 0;
-    if (mojo_is_registered_dict(container)) {
-        /* The needle can be a CONTAINER even on this "str" view: `k in d`
-         * where `k` is a tuple leaves the dict ambiguous but types the needle
-         * as `char *`, because the codegen's only evidence about it is the
-         * pointer type it was cast to. Keying that by its address is the
-         * bug this fixes (see mojo_dict_key_for), so the content key is
-         * needed on BOTH views — the view is chosen from the CONTAINER, and
-         * this one is a dict either way. */
-        if (mojo_is_registered_list((int64_t)(uintptr_t)needle)) {
-            char *ck = mojo_dict_key_for((int64_t)(uintptr_t)needle);
-            int hit = mojo_dict_contains((MojoDict *)(uintptr_t)container, ck);
-            mojo_dict_key_free(ck);
-            return hit;
-        }
+    if (mojo_is_registered_dict(container))
         return mojo_dict_contains((MojoDict *)(uintptr_t)container, needle);
-    }
     if (mojo_is_registered_list(container))
         return mojo_list_contains_str((MojoList *)(uintptr_t)container, needle);
     if (mojo_is_registered_set(container))
@@ -6390,48 +5783,9 @@ int mojo_in_dispatch_str(int64_t container, char *needle)
     return 0;
 }
 
-/* The int view asks the same question with BOTH operands erased to
- * int64_t, so the NEEDLE is as untyped as the container and needs the same
- * treatment, and the dict branch is `mojo_dict_contains_kw` rather than
- * `mojo_dict_contains` because of it: on the int view the needle is not known
- * to be an integer at all. An erased key can be a boxed `char *` (a str
- * subscripted dict read through an int64_t accessor), and `_kw` is the existing
- * helper that decides between the two key domains from `mojo_boxed_is_str` --
- * the same discriminator `mojo_cstr_or_int_str` and every `_kw` dict entry
- * point already use, so no new notion of "which words are strings" enters the
- * runtime here, and `d[k]` and `k in d` agree on the same erased key instead of
- * one of them answering for a key the other cannot see. Casting the needle to
- * `char *` unconditionally (what this used to be written as the moment a dict
- * branch existed) makes an int-keyed dict compare its integer bits as if they
- * were a string.
- *
- * Without that treatment this function asked the INT predicates about a boxed
- * `char *`:
- *
- *   - a dict fell off the end entirely (there was no dict branch at all), so
- *     `x in d` answered False for every erased dict -- bugs/
- *     CODEGEN_in_dispatch_int_has_no_dict_branch.md;
- *   - a set of strings answered False too, for a different reason: its
- *     elements live in tag-1 string slots and `_set_slot_int` probes the
- *     int domain, which cannot hold a pointer-shaped key at all.
- *
- * Both were silent: exit 0, no diagnostic, and the "no" inverts whatever
- * branch of the program the membership test was guarding. A container that
- * is none of the three kinds really is not a container, so the trailing 0
- * is the honest answer and not a fallback.
- *
- * The list and set branches stay on their int view deliberately: there is no
- * `_kw` twin for either, and inventing one means strcmp-ing slots that hold
- * bare integers, which is the segfault the `contains` pair's own note in this
- * file records having been tried. That is an element-type inference gap in the
- * codegen, where the static type is known, not something to guess at here. */
 int mojo_in_dispatch_int(int64_t container, int64_t needle)
 {
     if (container == 0) return 0;
-    if (mojo_boxed_is_str(needle))
-        return mojo_in_dispatch_str(container, (char *)(intptr_t)needle);
-    if (mojo_is_registered_dict(container))
-        return mojo_dict_contains_kw((MojoDict *)(intptr_t)container, needle);
     if (mojo_is_registered_list(container))
         return mojo_list_contains_int((MojoList *)(intptr_t)container, needle);
     if (mojo_is_registered_set(container))
@@ -6495,33 +5849,8 @@ static int _kind_to_eq(char k)
     return MOJO_EQ_INT;                    /* 'i' and 'n' (None) */
 }
 
-/* The Python type name an MOJO_EQ_* code stands for, for the TypeError text
- * an unordered comparison raises. Derived from the SAME table `_kind_to_eq`
- * reads, so a new element code cannot produce a message naming a type this
- * runtime does not have. MOJO_EQ_UNKNOWN is an int as far as the caller knows
- * (nothing better was available), which is the right answer for the erased
- * operand in `an_erased_handle < ["a"]`. */
-static const char *_eq_typename(int code)
-{
-    if (code == MOJO_EQ_DOUBLE) return "float";
-    if (code == MOJO_EQ_STR) return "str";
-    if (code == MOJO_EQ_BYTES) return "bytes";
-    return "int";                          /* INT, GENERIC and UNKNOWN */
-}
-
 static int _slot_eq(int64_t x, int64_t y, int ea, int eb, char ka, char kb)
 {
-    /* `None` against a NUMBER, before the codes are resolved: `_kind_to_eq`
-     * below folds 'n' into MOJO_EQ_INT (they are the same int64_t at the C
-     * level, and a `None == 0` test is a real thing to answer), which is right
-     * for ordering's purposes and wrong for equality's. `[None] == [0]` is
-     * CPython's False and this answered True, because both slots are the word
-     * 0 and `x == y` below cannot tell them apart. The per-slot kind is the
-     * only evidence that can, which is why the codegen records it for a
-     * homogeneous `[None]` too (see `_lower_list_literal`). One 'n' against a
-     * number is unequal; TWO 'n's are the same value, and `x == y` still
-     * answers that. */
-    if ((ka == 'n') != (kb == 'n')) return 0;
     if (ea == MOJO_EQ_UNKNOWN) ea = _kind_to_eq(ka);
     if (eb == MOJO_EQ_UNKNOWN) eb = _kind_to_eq(kb);
     if ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE)) {
@@ -6616,24 +5945,6 @@ static int _set_has_double(MojoSet *s, double want)
     return 0;
 }
 
-/* Does `b` hold `a`'s i-th entry? ONE reading of a set slot, shared by
- * mojo_set_eq (membership in both directions) and the subset test
- * mojo_set_cmp needs — the two differ only in what they conclude from the
- * answer, and keeping the slot-kind dispatch in one place is what stops them
- * drifting on the `mixed` float case, where a set of floats stores its bits
- * in an int slot. */
-static int _set_has_slot(MojoSet *b, MojoSet *a, int64_t i, int mixed)
-{
-    _SetSlot *sl = &a->slots[i];
-    if (sl->tag == 1)
-        return mojo_set_contains_str(b, sl->val_s);
-    if (sl->tag == 2)
-        return mojo_set_contains_bytes(b, (MojoBytes *)(intptr_t)sl->val_s);
-    if (mixed)
-        return _set_has_double(b, _eq_as_double(sl->val_i));
-    return mojo_set_contains_int(b, sl->val_i);
-}
-
 int mojo_set_eq(MojoSet *a, MojoSet *b, int ea, int eb)
 {
     if (a == b) return 1;
@@ -6642,7 +5953,17 @@ int mojo_set_eq(MojoSet *a, MojoSet *b, int ea, int eb)
     int mixed = ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE));
     for (int64_t i = 0; i < a->cap; i++) {
         if (a->slots[i].tag < 0) continue;          /* empty slot */
-        if (!_set_has_slot(b, a, i, mixed)) return 0;
+        int hit;
+        if (a->slots[i].tag == 1)
+            hit = mojo_set_contains_str(b, a->slots[i].val_s);
+        else if (a->slots[i].tag == 2)
+            hit = mojo_set_contains_bytes(b,
+                                (MojoBytes *)(intptr_t)a->slots[i].val_s);
+        else if (mixed)
+            hit = _set_has_double(b, _eq_as_double(a->slots[i].val_i));
+        else
+            hit = mojo_set_contains_int(b, a->slots[i].val_i);
+        if (!hit) return 0;
     }
     return 1;
 }
@@ -6693,339 +6014,6 @@ int mojo_value_eq(int64_t a, int64_t b, int elem)
                                                elem, elem);
     return mojo_set_eq((MojoSet *)(intptr_t)a, (MojoSet *)(intptr_t)b,
                        elem, elem);
-}
-
-/* A SECOND implementation of this same fix was written independently on
- * another branch: `MOJO_ORD_INCOMPARABLE`, `mojo_value_order`,
- * `mojo_list_order` / `mojo_set_order` / `mojo_dict_order` /
- * `mojo_value_order_op`, and a `mojo_list_cmp(a, b, ea, eb)` that took NO
- * operator. It is not here, and the reason is worth writing down rather than
- * leaving to the next reader who finds those names in a branch:
- *
- *   - ONE comparison, folded at the call site. The `*_order` family is a
- *     per-operator entry point, which is the shape the `==` family already had
- *     before it was consolidated into `mojo_*_eq`; re-introducing it for the
- *     four ordering operators would put two spellings of the same three-way
- *     comparison back in the file. `mojo_cmp_fold` is the fold.
- *   - `op` is threaded down rather than handed to a per-operator wrapper,
- *     because the TypeError text must name the operator the SOURCE wrote and a
- *     nested container (`[[1]] < [['a']]`) must keep naming the OUTERMOST one.
- *     With a per-operator wrapper that becomes the wrapper's problem at every
- *     level of the recursion.
- *   - `mojo_dict_order` (always raises) is redundant with the codegen's
- *     compile-time `_ord_pair_is_refused`, and on the erased route -- the only
- *     route it would still be reachable from -- the registry cannot say "dict"
- *     at all, so `mojo_value_cmp` refuses on the same MOJO_CMP_UNORDERABLE.
- *
- * Its one thing this block did NOT have is folded in below: the explicit
- * `ka == 'n' || kb == 'n'` refusal. `None` shares MOJO_EQ_INT with the integers
- * here, so the per-slot kind is the only thing that can say "None is in no
- * order with anything, itself included" -- `[None] < [None]` is a TypeError on
- * CPython, and without this check the word 0 is compared against the word 0 and
- * answers "equal", which for `<=` is False where CPython raises.
- */
-/* ── `<` / `<=` / `>` / `>=` between containers: Python's ordering ────────
- *
- * The same lowering question `==` was, one level up: `a < b` between two
- * containers used to fall out of C as the same raw POINTER comparison `==`
- * used to, so the answer was decided by heap addresses — a stable, plausible
- * and wrong answer, exit 0, no diagnostic. Unlike `==` this is answerable
- * rather than a refusal: CPython implements ordering for lists (lexicographic,
- * a shorter prefix ordering FIRST) and for sets (proper subset), and this
- * project's CPython is the oracle the tests diff against.
- *
- * A dict is the one container kind with NO ordering — `{'a':1} < {'b':2}` is
- * a genuine TypeError even on 3.14 — so the dict arm raises rather than
- * inventing an answer, which is also what a pair of DIFFERENT kinds and a
- * container against a non-container must do.
- *
- * The element comparison is `_slot_cmp`, the three-way sibling of `_slot_eq`
- * above, and it reads the same evidence: a per-side MOJO_EQ_* code from the
- * codegen, falling back to the value's own per-slot kinds. Allocation-free,
- * for `_slot_eq`'s reason — this runs inside fixed points.
- */
-
-/* The one place "these have no ordering" becomes a Python-level exception, so
- * every producer refuses identically instead of each spelling it. CPython's
- * text for `[1] < ['a']` is "'<' not supported between instances of 'int' and
- * 'str'"; the element type names are what the element codes carry, so this
- * spells them from the same MOJO_EQ_* table `_kind_to_eq` reads rather than
- * from a second list.
- *
- * `op` is the operator SPELLING the program used, not the internal code, so the
- * message says `'<= not supported…'` for `<=` rather than always saying `'<'`:
- * CPython names the operator the user wrote, and a diagnostic that misreports
- * which one failed is worse than none. */
-/* The kind byte, when it is more specific than the MOJO_EQ_* code, wins the
- * type name — and `None` is the case that makes this necessary rather than
- * tidy. `_kind_to_eq` folds `'n'` into MOJO_EQ_INT because a `None` slot IS
- * the word 0 at the C level, which is the right answer for deciding the
- * comparison. It is the wrong answer for NAMING it: `[1] < [None]` raised
- * "'<' not supported between instances of 'int' and 'int'", while CPython
- * names `'NoneType'`, so the message blamed the wrong operand for a refusal
- * that was correct. `_slot_cmp`'s `ka == 'n' || kb == 'n'` arm is what
- * decided to refuse, so the kind is the same evidence that did the deciding
- * and the two must not disagree about what was refused.
- *
- * Only `'n'` overrides. Every other kind is faithfully represented by its
- * code, and a `'?'` / unknown kind means there was no per-slot evidence at
- * all, which is what MOJO_EQ_UNKNOWN already says. */
-static const char *_cmp_side_typename(int code, char kind)
-{
-    if (kind == 'n') return "NoneType";
-    return _eq_typename(code);
-}
-
-static void _raise_unorderable_ea_kinds(int ea, int eb, char ka, char kb,
-                                        const char *op)
-{
-    char detail[128];
-    snprintf(detail, sizeof detail,
-             "'%s' not supported between instances of '%s' and '%s'",
-             op, _cmp_side_typename(ea, ka), _cmp_side_typename(eb, kb));
-    mojo_raise_type_error(detail);
-}
-
-static void _raise_unorderable_ea(int ea, int eb, const char *op)
-{
-    _raise_unorderable_ea_kinds(ea, eb, 0, 0, op);
-}
-
-/* The list/tuple half: a tuple and a list are the same C type with a marker to
- * tell them apart, and CPython's message names which one each side was — it
- * has the real Python types, this backend only has the markers. Same helper,
- * the two type names passed in, so there is one place that builds this text. */
-static void _raise_unorderable(const char *ta, const char *tb, const char *op)
-{
-    char detail[128];
-    snprintf(detail, sizeof detail,
-             "'%s' not supported between instances of '%s' and '%s'",
-             op, ta, tb);
-    mojo_raise_type_error(detail);
-}
-
-/* Which operator is being evaluated, as the string the exception message needs.
- * Threaded down from the codegen (which knows the operator the source spelled)
- * rather than derived here, so the recursion through nested containers
- * (`[[1]] < [['a']]`) keeps naming the OUTERMOST operator — which is the one
- * CPython reports, and the only one the user wrote. */
-static const char *_cmp_op_name(int op)
-{
-    switch (op) {
-    case MOJO_CMP_OP_LE: return "<=";
-    case MOJO_CMP_OP_GT: return ">";
-    case MOJO_CMP_OP_GE: return ">=";
-    default:             return "<";
-    }
-}
-
-/* NaN is unordered against everything INCLUDING itself, which is not the same
- * as equal: `[nan] <= [nan]` is False in Python while `nan == nan` is also
- * False, so folding NaN into either verdict gets one of the two wrong. */
-static int _cmp_double(double x, double y)
-{
-    if (x < y) return -1;
-    if (x > y) return 1;
-    if (x == y) return 0;
-    return MOJO_CMP_UNORDERABLE;
-}
-
-/* One slot word pair, three-way: <0, 0, >0, or MOJO_CMP_UNORDERABLE.
- *
- * UNORDERABLE rather than a plain 0 because 0 means EQUAL, and the two
- * collapse into each other at the call site if this returns "equal" for a
- * pair Python refuses: `[1] < ['a']` must raise, not answer False, and
- * `mojo_list_cmp` has to be able to tell "these differ" from "these cannot
- * be compared". Every arm that dereferences ranges-checks its words first,
- * for `_slot_eq`'s reason — the erased-operand path can guess STR for a
- * container whose elements are not strings, and a strcmp on a small integer
- * is a segfault, not a wrong answer. */
-static int _slot_cmp(int64_t x, int64_t y, int ea, int eb, char ka, char kb,
-                     int op)
-{
-    if (ea == MOJO_EQ_UNKNOWN) ea = _kind_to_eq(ka);
-    if (eb == MOJO_EQ_UNKNOWN) eb = _kind_to_eq(kb);
-    /* `None` is in NO order with anything, itself included: CPython raises for
-     * `[None] < [None]`. It shares MOJO_EQ_INT with the integers here (as it
-     * does in `_slot_eq`), so the per-slot KIND is the only thing that can say
-     * so, and that is what this test reads. Without it the two 0 words compare
-     * equal, which for `<=` answers False where CPython raises -- a refusal
-     * turned into a verdict, and the quietest possible version of it. */
-    if (ka == 'n' || kb == 'n') return MOJO_CMP_UNORDERABLE;
-    /* Exactly one side DOUBLE: a genuine int/float pair compares NUMERICALLY
-     * ([1] < [1.5] is True), so the integer word is CONVERTED rather than
-     * reinterpreted -- `_eq_as_double`, the same helper `_slot_eq` uses, for
-     * the same reason. A pointer-typed side against a float is not a numeric
-     * comparison at all and is unordered. */
-    if ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE)) {
-        if (ea == MOJO_EQ_INT)  return _cmp_double((double)x, _eq_as_double(y));
-        if (eb == MOJO_EQ_INT)  return _cmp_double(_eq_as_double(x), (double)y);
-        return MOJO_CMP_UNORDERABLE;
-    }
-    /* Two DIFFERENT non-numeric codes have no ordering between them, and this
-     * is the arm `==` gets for free (`if (ea != eb) return 0`) while ordering
-     * does not: `[1] < ['a']` is a TypeError, and falling through to the INT
-     * arm below because the LEFT side is an int would compare the integer 1
-     * against the string's ADDRESS and answer True — a refusal turned into a
-     * verdict. Only two float-ish codes ever legitimately differ, and the arm
-     * above has already handled those. */
-    if (ea != eb) return MOJO_CMP_UNORDERABLE;
-    /* Equal int codes: the word is either a number or, when the codegen could
-     * not type it, a nested container handle (`[[1]] < [[2]]` recurses). */
-    if (ea == MOJO_EQ_INT) {
-        if (x == y) return 0;
-        int nk = _value_kind(x), nl = _value_kind(y);
-        if (nk != MOJO_VK_NONE || nl != MOJO_VK_NONE)
-            return mojo_value_cmp(x, y, MOJO_EQ_UNKNOWN, op);
-        return x < y ? -1 : 1;
-    }
-    if (ea == MOJO_EQ_DOUBLE) return _cmp_double(_eq_as_double(x), _eq_as_double(y));
-    if (ea == MOJO_EQ_STR) {
-        if (!_mojo_ptr_shaped(x) || !_mojo_ptr_shaped(y))
-            return MOJO_CMP_UNORDERABLE;
-        char *sx = (char *)(intptr_t)x, *sy = (char *)(intptr_t)y;
-        if (!sx || !sy) return MOJO_CMP_UNORDERABLE;   /* a NULL slot is None */
-        int r = strcmp(sx, sy);
-        return r < 0 ? -1 : (r > 0 ? 1 : 0);
-    }
-    if (ea == MOJO_EQ_BYTES) {
-        if (!_mojo_ptr_shaped(x) || !_mojo_ptr_shaped(y))
-            return MOJO_CMP_UNORDERABLE;
-        return mojo_bytes_cmp((MojoBytes *)(intptr_t)x,
-                              (MojoBytes *)(intptr_t)y);
-    }
-    /* MOJO_EQ_GENERIC: a nested container, ordered by the same rules at the
-     * next level down. */
-    return mojo_value_cmp(x, y, MOJO_EQ_UNKNOWN, op);
-}
-
-/* CPython's list rule: lexicographic on the elements, and a SHORTER prefix
- * orders first (`[1] < [1, 2]`). A tuple and a list are the same C type, so
- * the marker decides — and when the markers DISAGREE there is no ordering at
- * all (`[1] < (1,)` is a TypeError), which is UNORDERABLE rather than an
- * invented answer. */
-int mojo_list_cmp(MojoList *a, MojoList *b, int ea, int eb, int op)
-{
-    if (!a || !b) return MOJO_CMP_UNORDERABLE;
-    if (mojo_is_tuple(a) != mojo_is_tuple(b)) {
-        _raise_unorderable(mojo_is_tuple(a) ? "tuple" : "list",
-                           mojo_is_tuple(b) ? "tuple" : "list",
-                           _cmp_op_name(op));
-        return MOJO_CMP_UNORDERABLE;
-    }
-    int64_t n = a->len < b->len ? a->len : b->len;
-    for (int64_t i = 0; i < n; i++) {
-        int c = _slot_cmp(a->data[i], b->data[i], ea, eb,
-                          mojo_list_slot_kind(a, i), mojo_list_slot_kind(b, i),
-                          op);
-        if (c == MOJO_CMP_UNORDERABLE) {
-            int ca = ea, cb = eb;
-            char ska = mojo_list_slot_kind(a, i), skb = mojo_list_slot_kind(b, i);
-            if (ca == MOJO_EQ_UNKNOWN) ca = _kind_to_eq(ska);
-            if (cb == MOJO_EQ_UNKNOWN) cb = _kind_to_eq(skb);
-            _raise_unorderable_ea_kinds(ca, cb, ska, skb, _cmp_op_name(op));
-            return MOJO_CMP_UNORDERABLE;
-        }
-        if (c != 0) return c;
-    }
-    if (a->len == b->len) return 0;
-    return a->len < b->len ? -1 : 1;
-}
-
-/* CPython's set rule, which is NOT the list rule: `s1 < s2` is "s1 is a
- * PROPER SUBSET of s2", not a lexicographic order — `{1,2} < {1,3}` is False,
- * and so is `{1,2} < {2,3}`. So the three-way answer is derived from
- * SUBSETNESS, in both directions, and a pair that is neither (the `{1,2}` /
- * `{1,3}` case) is UNORDERABLE in both directions — which is exactly what
- * CPython says, since all four of `<`, `<=`, `>`, `>=` are False for it.
- *
- * `mojo_set_difference`'s emptiness shortcut is NOT the test: it answers
- * "does s1 have something s2 lacks", which is what `s1 - s2` means, and it
- * says nothing about the other direction — `s1 > s2` is False for two
- * equal-size proper subsets of each other, which is the case that failed.
- * `_set_has_slot` (beside mojo_set_eq) is the per-slot read this and
- * mojo_set_eq share. */
-
-/* Is every entry of `a` also in `b`? */
-static int _set_subset(MojoSet *a, MojoSet *b, int mixed)
-{
-    if (!a || !b) return 0;
-    if (a == b) return 1;
-    if (a->used > b->used) return 0;
-    for (int64_t i = 0; i < a->cap; i++) {
-        if (a->slots[i].tag < 0) continue;          /* empty slot */
-        if (!_set_has_slot(b, a, i, mixed)) return 0;
-    }
-    return 1;
-}
-
-int mojo_set_cmp(MojoSet *a, MojoSet *b, int ea, int eb, int op)
-{
-    if (!a || !b) return MOJO_CMP_UNORDERABLE;
-    int mixed = ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE));
-    int ab = _set_subset(a, b, mixed);       /* a proper-or-not subset of b */
-    int ba = _set_subset(b, a, mixed);
-    if (ab && ba) {
-        /* Both subset tests pass, so the two hold the same elements -- a set
-         * cannot be a proper subset of itself, whatever `used` says. */
-        return 0;
-    }
-    if (ab) return -1;
-    if (ba) return 1;
-    /* Neither is a subset of the other: CPython answers False for all four of
-     * `<`, `<=`, `>`, `>=` here and does NOT raise, because a set ordering
-     * test is a subset question and "no" is a real answer to it. That is why
-     * this one is UNORDERABLE-without-a-raise while mojo_list_cmp's is not:
-     * MOJO_CMP_UNORDERABLE is the value the fold reads, not a synonym for
-     * "TypeError", and only the producers that CPython actually refuses call
-     * _raise_unorderable. */
-    return MOJO_CMP_UNORDERABLE;
-}
-
-/* `a OP b` for two operands whose static types the codegen could not BOTH
- * resolve — the erased-handle shape, the twin of mojo_value_eq. The kind
- * pair decides everything, exactly as it does there: only same-kind operands
- * have an ordering, and a dict has none, so this raises. That raise is
- * CPython's own answer for every pair that reaches it, which is why a wrong
- * guess about an erased operand's kind is a loud failure rather than a wrong
- * verdict. */
-int mojo_value_cmp(int64_t a, int64_t b, int elem, int op)
-{
-    if (a == b) return 0;
-    int ka = _value_kind(a), kb = _value_kind(b);
-    if (ka != kb || ka == MOJO_VK_NONE) {
-        _raise_unorderable_ea(MOJO_EQ_UNKNOWN, MOJO_EQ_UNKNOWN,
-                              _cmp_op_name(op));
-        return MOJO_CMP_UNORDERABLE;
-    }
-    if (ka == MOJO_VK_LIST)
-        return mojo_list_cmp((MojoList *)(intptr_t)a,
-                             (MojoList *)(intptr_t)b, elem, elem, op);
-    if (ka == MOJO_VK_SET)
-        return mojo_set_cmp((MojoSet *)(intptr_t)a,
-                            (MojoSet *)(intptr_t)b, elem, elem, op);
-    _raise_unorderable("dict", "dict", _cmp_op_name(op));
-    return MOJO_CMP_UNORDERABLE;
-}
-
-/* Fold a three-way answer to the `_Bool` the operator wants.
- *
- * MOJO_CMP_UNORDERABLE is refused explicitly rather than left to fall out of
- * `c < 0` / `c > 0`, because 2 satisfies BOTH of those: `[1] < ['a']` would
- * answer False from `c < 0` and True from `c > 0` off one and the same
- * unordered answer. It has already raised by the time it gets here -- both
- * `mojo_*_cmp` raise where they produce it -- so this is the never-taken
- * branch, and it is the False that a program which somehow got here would get
- * rather than a second wrong answer. */
-int mojo_cmp_fold(int c, int op)
-{
-    if (c == MOJO_CMP_UNORDERABLE) return 0;
-    switch (op) {
-    case MOJO_CMP_OP_LT: return c < 0;
-    case MOJO_CMP_OP_LE: return c <= 0;
-    case MOJO_CMP_OP_GT: return c > 0;
-    default:             return c >= 0;      /* MOJO_CMP_OP_GE */
-    }
 }
 
 int mojo_isinstance(int64_t obj, int type_id) {
@@ -7140,61 +6128,6 @@ static int _mojo_tagged_addr_ok(int64_t addr)
     return 1;
 }
 
-/* The ONE read of a struct's leading `__mojo_type_id`, for both exported
- * readers below, and it validates what it read.
- *
- * `_mojo_tagged_addr_ok` answers a question about the ADDRESS ("may I read 8
- * bytes here?"); this answers the other one ("were those 8 bytes a type id?"),
- * and a boxed string is the value that separates them.
- *
- * A tag is 31 bits BY CONSTRUCTION: `_struct_type_id(name)` is
- * `h * 31 + c & 2147483647` (`mojo/middle/exprtypes.py`) and the exception ids
- * are `(zlib.crc32(name) & 0x7fffffff) or 1`, so a word outside
- * (0, 0x7fffffff] is not a type id at all — it is whatever bytes happened to
- * sit at offset 0 of something that is not a registered struct, and handing
- * those bytes back as an identity is a forged one. The codegen already relies
- * on that where it CAN see the receiver: `__class__` on a
- * `char *`/`MojoList *`/`MojoSet *`/`MojoDict *` lowers to a literal 0 for
- * exactly this reason (`emit_exprs.py`'s `__class__` arm — "every real struct
- * tag comes from `_struct_type_id`, a nonzero hash"). This is the same rule for
- * the receivers it cannot see, which is every value boxed as an int64_t — an
- * erased parameter, a field read out of a heterogeneous container, a call
- * result.
- *
- * A heap `char *` string passes every address check there is: it is a real
- * pointer, it is 8-byte aligned, and `malloc_size` says it is at least eight
- * bytes long whenever the string is five characters or more. That is the whole
- * of the measured crash on the self-hosted compiler's own generic AST walkers
- * (`_walk_ast_into`, which reaches `type(node)` for a node BEFORE it reaches
- * its `isinstance(node, str)` early-return): the eight bytes at the address of
- * the string "print" — 'p','r','i','n','t',0,0,0 — came back as the int64_t
- * 0x746e697270. That is not a struct and not a small value, so
- * `mojo_boxed_is_str` classified it as a boxed string on the way into the next
- * hop and the next hop dereferenced it:
- * `mojo_dict_get_int_kw(d, <tag>)` -> `_canon_int`, SIGSEGV. So
- * `mojo/middle/exprtypes.py`'s `_WALK_DATACLASS_CACHE`, keyed by `type(node)`,
- * filed it — and 0x746e697270 is inside [2^31, 2^47), which every pointer
- * predicate in this file accepts.
- * (`bugs/CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults.md` and
- * `bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md`; the same shape as
- * `bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md`, at its one
- * producer this file can answer for. CRASH.md is the OPPOSITE direction — a
- * 31-bit tag mistaken for a pointer — which is why it could not see this one:
- * there the tag is not small.)
- *
- * 0 is the honest answer for a value that is not a tagged struct, and it is
- * what these readers already return for every address they refuse — so the
- * check makes the read's failure mode match its own contract instead of
- * inventing an identity out of adjacent memory. It cannot collide with a real
- * tag: every real one is a nonzero hash, or was already read as 0.
- */
-static int64_t _mojo_struct_type_tag(int64_t addr)
-{
-    if (!_mojo_tagged_addr_ok(addr)) return 0;
-    int64_t tag = *(int64_t *)(intptr_t)addr;
-    if (tag <= 0 || tag > 0x7fffffff) return 0;
-    return tag;
-}
 int64_t mojo_read_type_tag(int64_t addr) {
     /* Was: `if (!addr) return 0; return *(int64_t*)addr;` — but once the
      * compiler's own generic AST walkers actually recurse (mojo_isinstance
@@ -7203,7 +6136,8 @@ int64_t mojo_read_type_tag(int64_t addr) {
      * type-tag, and the bare deref segfaulted. Same guard as
      * mojo_read_type_tag_safe: nothing legitimate lives below 2GiB on any
      * platform this runtime targets. */
-    return _mojo_struct_type_tag(addr);
+    if (!_mojo_tagged_addr_ok(addr)) return 0;
+    return *(int64_t *)(intptr_t)addr;
 }
 
 /* Like mojo_read_type_tag, but for callers that don't statically know
@@ -7215,15 +6149,7 @@ int64_t mojo_read_type_tag(int64_t addr) {
  * Dereferencing a small int as a pointer is UB; the same small-vs-real-
  * pointer heuristic mojo_str() already uses (a real heap/stack address is
  * never this small) turns that into a safe "not a tagged struct" instead
- * of a crash.
- *
- * The two are one function. They were separate only so the STRICT caller
- * (mojo_isinstance, whose operand's static type is a struct) and the loose
- * one (a boxed int64_t of unknown shape) could read differently, and the
- * first crash of this shape was a divergence between them; the difference
- * they document is a difference in what the CALLER knows, not in what is
- * safe to read, and both are now answered from one predicate so the next
- * hardening of it cannot reach one and miss the other. */
+ * of a crash. */
 int64_t mojo_read_type_tag_safe(int64_t addr) {
     /* < 64KiB: None / small ints / bools. Also reject the whole 31-bit
      * range the struct type-tags themselves occupy (`zlib.crc32(name) &
@@ -7232,7 +6158,8 @@ int64_t mojo_read_type_tag_safe(int64_t addr) {
      * here and dereference the tag as a pointer. On every platform this
      * runtime targets a genuine heap/stack/static address is far above
      * 2GiB, so nothing legitimate is lost. */
-    return _mojo_struct_type_tag(addr);
+    if (!_mojo_tagged_addr_ok(addr)) return 0;
+    return *(int64_t *)(intptr_t)addr;
 }
 
 char *mojo_str(void *obj) {
@@ -7376,32 +6303,6 @@ char *mojo_repr_float(double v) {
     return strdup(buffer);
 }
 
-/* `mojo_str_cat` with its LEFT operand released. `mojo_str_cat` allocates a
-   new buffer and deliberately leaves both arguments alone, so a chain of N
-   cats needs the caller to free N-1 buffers. Every repr walker below is such
-   a chain and none of them did, which was only a slow leak on a debug print
-   until these walkers became a dict KEY's renderer
-   (`_container_key_str`), where they run once per key in whatever loop the key
-   is used in: measured +78 B per lookup, the same per-access growth the
-   Int-key side had just been fixed for
-   (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). `a` must be a buffer the
-   caller owns -- every use below is one this file just built -- and `b` is
-   untouched, so passing a shared static (`mojo_repr_obj`'s buffer) is safe.
-
-   PUBLIC, and declared in fire_runtime.h, because the repr walkers the
-   CODEGEN emits into every generated program (`_mojo_repr_list`,
-   `_mojo_repr_pair`, `_mojo_repr_dict`, `_mojo_repr_set`,
-   `mojo/backend_gimple/module_gen.py`) are the same chain and were leaking
-   the same N-1 buffers per printed container. Emitting a second copy of this
-   helper into the preamble instead would have been two implementations of one
-   rule in two languages, which is the thing the runtime's own note about
-   `mojo_repr_obj`'s shared buffer exists to make impossible. */
-char *mojo_str_cat_free(char *a, char *b) {
-    char *r = mojo_str_cat(a, b);
-    free(a);
-    return r;
-}
-
 /* A list that records its OWN per-slot kinds (mojo_list_set_kinds) is
    described by them more precisely than any single-accessor reader chosen
    for the whole list can be, so every uniform list repr below defers to it
@@ -7437,20 +6338,11 @@ char *mojo_repr_list_doubles(MojoList *l) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
-        /* One owned `_s`, released after the cat, rather than a cat per
-           expression: `mojo_repr_float` returns a fresh heap string and a
-           chain of N cats that never frees its left operands leaked N+1
-           buffers (sized to the text so far, so O(N^2) bytes) per printed
-           container -- ~500 B per `print` of an 8-element list, which is a
-           `--dump`, a logging line, or any other loop that prints. Fixed; the
-           bug doc is deleted with the fix and its reasoning is this comment. */
-        char *_s = mojo_repr_float(mojo_list_get_double(l, _i));
-        _buf = mojo_str_cat_free(_buf, _s);
-        free(_s);
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_list_get_double(l, _i)));
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
-    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_list_ints(MojoList *l) {
@@ -7478,15 +6370,11 @@ char *mojo_repr_list_ints(MojoList *l) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
-        /* `mojo_repr_int` owns its return -- see mojo_repr_list_doubles's
-           identical note on why the chain releases its left operands. */
-        char *_s = mojo_repr_int(mojo_list_get_int(l, _i));
-        _buf = mojo_str_cat_free(_buf, _s);
-        free(_s);
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
-    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_list_bools(MojoList *l) {
@@ -7509,16 +6397,11 @@ char *mojo_repr_list_bools(MojoList *l) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
-        /* The chain releases its left operands; the per-slot string does NOT
-           need releasing, because `mojo_repr_bool` is one of this file's two
-           repr helpers that returns SHARED storage (the other is
-           `mojo_repr_obj`, and see mojo_str_cat_free's own comment for why the
-           right operand of a cat must be left alone). */
-        _buf = mojo_str_cat_free(_buf, mojo_repr_bool((int)mojo_list_get_int(l, _i)));
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        _buf = mojo_str_cat(_buf, mojo_repr_bool((int)mojo_list_get_int(l, _i)));
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
-    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
 }
 
 /* Pair-list reprs: a list whose ELEMENTS are 2-element lists — what
@@ -7530,64 +6413,33 @@ char *mojo_repr_list_bools(MojoList *l) {
    1 str, 2 double) — passed in rather than sniffed, because a double and an
    int are indistinguishable in the raw slot. */
 static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
-    /* A list that brought its own per-slot kinds is described by them
-       (see _mojo_repr_defers_to_kinds). */
-    char *_dk = _mojo_repr_defers_to_kinds(l);
-    if (_dk) return _dk;
     if (!l) return "[]";
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup("[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
         int64_t _p = mojo_list_get_int(l, _i);
         if (!mojo_is_registered_list(_p)) {
-            /* NOT owned: `mojo_repr_obj` returns its shared static, which is
-               why it stays on the RIGHT of the cat (mojo_str_cat_free's own
-               comment). */
-            _buf = mojo_str_cat_free(_buf, mojo_repr_obj(_p));
+            _buf = mojo_str_cat(_buf, mojo_repr_obj(_p));
             continue;
         }
         MojoList *_pair = (MojoList *)(intptr_t)_p;
-        _buf = mojo_str_cat_free(_buf, "(");
-        char *_s = mojo_repr_int(mojo_list_get_int(_pair, 0));
-        _buf = mojo_str_cat_free(_buf, _s);
-        free(_s);
-        _buf = mojo_str_cat_free(_buf, ", ");
+        _buf = mojo_str_cat(_buf, "(");
+        _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(_pair, 0)));
+        _buf = mojo_str_cat(_buf, ", ");
         int64_t _v = mojo_list_get_int(_pair, 1);
-        /* The pair's own recorded value repr, asked for slot 1 and ONLY for
-         * slot 1 — the same question the codegen's emitted `_mojo_repr_pair`
-         * asks, and for the same reason (asking for slot 0 hands the KEY, a
-         * char *, to a struct shim). `mojo_dict_items` records the slot's
-         * value kind here, so this arm is what makes `dict.items()` of a
-         * dict holding a zero, a bool or a float describe them: without it
-         * the static `_kind` guess below is all there is, and a zero printed
-         * as `None` and a float faulted in mojo_read_type_tag_safe. NULL
-         * means this pair says nothing, which is every codegen-built pair
-         * (a literal `[(1, 'a')]`) — so the guess stays for those. */
-        char *_pr = mojo_list_repr_elem(_pair, _v);
-        if (_pr) {
-            _buf = mojo_str_cat_free(_buf, _pr);
-            free(_pr);
-        } else if (_kind == 1) {
-            _s = mojo_repr_str((char *)(intptr_t)_v);
-            _buf = mojo_str_cat_free(_buf, _s);
-            free(_s);
+        if (_kind == 1) {
+            _buf = mojo_str_cat(_buf, mojo_repr_str((char *)(intptr_t)_v));
         } else if (_kind == 2) {
-            _s = mojo_repr_float(mojo_list_get_double(_pair, 1));
-            _buf = mojo_str_cat_free(_buf, _s);
-            free(_s);
+            _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_list_get_double(_pair, 1)));
         } else if (mojo_boxed_is_str(_v)) {
-            _s = mojo_repr_str((char *)(intptr_t)_v);
-            _buf = mojo_str_cat_free(_buf, _s);
-            free(_s);
+            _buf = mojo_str_cat(_buf, mojo_repr_str((char *)(intptr_t)_v));
         } else {
-            _s = mojo_repr_int(_v);
-            _buf = mojo_str_cat_free(_buf, _s);
-            free(_s);
+            _buf = mojo_str_cat(_buf, mojo_repr_int(_v));
         }
-        _buf = mojo_str_cat_free(_buf, ")");
+        _buf = mojo_str_cat(_buf, ")");
     }
-    return mojo_str_cat_free(_buf, "]");
+    return mojo_str_cat(_buf, "]");
 }
 
 /* A list whose elements are LISTS OF INTS (`[[0, 7], [1, 8]]`) — what a
@@ -7595,112 +6447,33 @@ static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
    the inner lists through the None-sentinel heuristic, so an inner 0 printed
    as `None` (`[[None, 7], [1, 8]]`). The codegen knows statically that the
    inner lists hold plain ints (that is exactly what routes this helper), so
-   read every inner slot as an int.
-
-   The outer value and every inner value each pick their own brackets from
-   `mojo_is_tuple`, the same way every other repr helper here does. That is not
-   cosmetic: `[(5, j) for j in range(3)]` and `[[5, j] for j in range(3)]`
-   are the same comprehension with a tuple or a list element, both route here
-   (both elements are int lists, so both carry the same nested element type),
-   and the tuple one printed as `[[5, 0], [5, 1], [5, 2]]`. Hardcoding `[`
-   here also misreported a tuple of int lists. */
-static char *_mojo_repr_intlists(MojoList *l) {
-    /* A list that brought its own per-slot kinds is described by them
-       (see _mojo_repr_defers_to_kinds). */
-    char *_dk = _mojo_repr_defers_to_kinds(l);
-    if (_dk) return _dk;
-    int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+   read every inner slot as an int. */
+char *mojo_repr_list_intlists(MojoList *l) {
+    if (!l) return "[]";
     int64_t _n = mojo_list_len(l);
-    char *_buf = strdup(_is_tup ? "(" : "[");
+    char *_buf = strdup("[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
         int64_t _p = mojo_list_get_int(l, _i);
         if (!mojo_is_registered_list(_p)) {
-            /* NOT owned -- `mojo_repr_obj`'s shared static. */
-            _buf = mojo_str_cat_free(_buf, mojo_repr_obj(_p));
+            _buf = mojo_str_cat(_buf, mojo_repr_obj(_p));
             continue;
         }
         MojoList *_in = (MojoList *)(intptr_t)_p;
         int64_t _m = mojo_list_len(_in);
-        /* Each INNER element is a tuple or a list in its own right, and
-         * `mojo_repr_list_ints`/`_doubles`/`_bytes` all open on
-         * `mojo_is_tuple(this)` for exactly that reason. This helper used
-         * to hardcode "[" / "]" for the inner pair, which made a list of
-         * TUPLES print as a list of lists: `[(5, 0), (5, 1)]` printed
-         * `[[5, 0], [5, 1]]`, and so did `[(5, j) for j in range(2)]`.
-         * The outer brackets stay "[" -- this helper is reached only for a
-         * list whose elements are containers, and a LIST OF TUPLES is
-         * itself a list. */
-        int _in_tup = mojo_is_tuple(_in);
-        _buf = mojo_str_cat_free(_buf, _in_tup ? "(" : "[");
+        _buf = mojo_str_cat(_buf, "[");
         for (int64_t _j = 0; _j < _m; _j++) {
-            if (_j > 0) _buf = mojo_str_cat_free(_buf, ", ");
-            char *_s = mojo_repr_int(mojo_list_get_int(_in, _j));
-            _buf = mojo_str_cat_free(_buf, _s);
-            free(_s);
+            if (_j > 0) _buf = mojo_str_cat(_buf, ", ");
+            _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(_in, _j)));
         }
-        if (_in_tup && _m == 1) _buf = mojo_str_cat_free(_buf, ",");
-        _buf = mojo_str_cat_free(_buf, _in_tup ? ")" : "]");
+        _buf = mojo_str_cat(_buf, "]");
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
-    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
+    return mojo_str_cat(_buf, "]");
 }
-
-char *mojo_repr_list_intlists(MojoList *l) { return _mojo_repr_intlists(l); }
 
 char *mojo_repr_list_pairs(MojoList *l) { return _mojo_repr_pairlist(l, 0); }
 char *mojo_repr_list_pairs_s(MojoList *l) { return _mojo_repr_pairlist(l, 1); }
 char *mojo_repr_list_pairs_d(MojoList *l) { return _mojo_repr_pairlist(l, 2); }
-
-/* A list whose elements are inner lists/tuples that ALL share one per-slot
-   kind pattern — `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]`,
-   `[(cfg, model), (cfg, model)]`. `kinds` is that pattern, one byte per
-   INNER slot, in mojo_repr_list_kinds' own alphabet; the inner brackets, the
-   single-element trailing comma and the per-slot value reading are all that
-   function's, so this is the same reader applied one level up — which is why
-   it delegates rather than repeating the switch.
-
-   Without it the generic walker read each inner slot through the
-   None-sentinel heuristic, so every int 0 in a non-zero slot printed as
-   `None` (`[('a', 0, 1)]` → `[('a', None, 1)]`) and a double read as an int
-   printed its raw IEEE-754 bits — or, when those bits looked like a heap
-   address, faulted inside mojo_read_type_tag_safe (`[(1.5, 2)]` SIGSEGV'd).
-   The codegen has the pattern statically (`_tuple_slot_types`, recorded for
-   every tuple literal whose slots are not all one type), which is what routes
-   here.
-
-   A value that recorded its OWN per-slot kinds is described by those instead
-   (see _mojo_repr_defers_to_kinds, like every other helper here). `kinds` is
-   the CALLER's description of the INNER slots, which is only the right
-   description when every element really is an inner list — and for a value
-   that is itself a heterogeneous tuple (`([[1, 2], 3], 4)`) it is not, so the
-   scalar slot was rendered by the `mojo_is_registered_list` fallback as
-   `<object at 0x4>`. */
-char *mojo_repr_list_slotkinds(MojoList *l, const char *kinds) {
-    char *_dk = _mojo_repr_defers_to_kinds(l);
-    if (_dk) return _dk;
-    int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
-    int64_t _n = mojo_list_len(l);
-    char *_buf = strdup(_is_tup ? "(" : "[");
-    for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
-        int64_t _p = mojo_list_get_int(l, _i);
-        if (!mojo_is_registered_list(_p)) {
-            /* NOT owned -- `mojo_repr_obj`'s shared static. */
-            _buf = mojo_str_cat_free(_buf, mojo_repr_obj(_p));
-            continue;
-        }
-        /* `mojo_repr_list_kinds` owns its return (see its own comment), so the
-           chain releases its left operand AND this one. */
-        char *_s = mojo_repr_list_kinds((MojoList *)(intptr_t)_p, kinds);
-        _buf = mojo_str_cat_free(_buf, _s);
-        free(_s);
-    }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
-    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
-}
 
 char *mojo_repr_list_bytes(MojoList *l) {
     /* A list that brought its own per-slot kinds is described by them
@@ -7715,92 +6488,12 @@ char *mojo_repr_list_bytes(MojoList *l) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
         MojoBytes *_b = (MojoBytes *)(uintptr_t)mojo_list_get_int(l, _i);
-        /* `mojo_bytes_repr` owns its return. */
-        char *_s = mojo_bytes_repr(_b);
-        _buf = mojo_str_cat_free(_buf, _s);
-        free(_s);
+        _buf = mojo_str_cat(_buf, mojo_bytes_repr(_b));
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
-    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
-}
-
-/* ── One renderer for "a slot of this kind holding this word" ───────────────────────*/
-
-char *mojo_repr_slot_kind(char kind, int64_t v)
-{
-    /* See the header for why this exists and why it answers NULL rather than
-     * guessing for the kinds it does not own. The arms are the ones
-     * `mojo_repr_list_kinds` grew, plus 'b' — which no list literal produces and
-     * which is why it is here rather than there: a bool only ever reaches a
-     * walker through a dict slot, whose `_DictSlot.kind == 3` tag this
-     * function's sibling `mojo_dict_kind_byte` translates. */
-    switch (kind) {
-    case MOJO_KIND_NONE:
-        return strdup("None");
-    case MOJO_KIND_BOOL:
-        return strdup(v ? "True" : "False");
-    case MOJO_KIND_DOUBLE: {
-        double x;
-        memcpy(&x, &v, sizeof(x));
-        return mojo_repr_float(x);
-    }
-    case MOJO_KIND_STR:
-        return mojo_repr_str((char *)(intptr_t)v);
-    case MOJO_KIND_BYTES:
-        return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
-    case MOJO_KIND_LIST:
-        /* The nested container's own kinds-aware repr, so a list inside a list
-         * describes ITS slots — `mojo_repr_list_kinds`'s own 'l' arm verbatim,
-         * because that is the answer, not a re-derivation of it. */
-        return mojo_repr_list_kinds((MojoList *)(intptr_t)v, NULL);
-    case MOJO_KIND_INT:
-        /* A ZERO word under a STATED int kind is the integer 0, and this is
-         * the whole reason the pair walkers were wrong: a slot that says it
-         * holds an int cannot be holding a null pointer, so the "None for a
-         * zero word" heuristic its callers fell back on does not apply to it.
-         * `mojo_dict_items` used to record no kinds at all for such a slot,
-         * which is why `sorted({'mid': 0}.items())` printed `[('mid', None)]`.
-         *
-         * A NON-zero word declines (NULL) rather than answering, because that
-         * one CAN be a boxed pointer and telling the two apart needs the
-         * generated dispatch this file cannot call. That asymmetry is the
-         * contract, not an oversight: the caller has to be able to tell "I am
-         * asked about a kind I do not own" from "the answer is nothing". */
-        return v ? NULL : mojo_repr_int(0);
-    default:
-        /* No stated kind (0, and anything unrecognised). The caller's own
-         * answer, which for a pair walker includes the None heuristic. */
-        return NULL;
-    }
-}
-
-char mojo_dict_kind_byte(int64_t dict_kind)
-{
-    /* `_DictSlot.kind` records WHICH SETTER RAN, not what is in the word; the
-     * MOJO_KIND_* alphabet records what is in the word. They overlap but are
-     * not the same vocabulary, and this is the one place they meet. `0` means
-     * "not one the renderer owns", which covers a plain int (the caller's own
-     * int path, which must keep dispatching for a boxed pointer) and both
-     * struct kinds — a struct value is rendered by the DICT's recorded
-     * `val_repr`, not by the slot's kind, so routing it through here would
-     * answer a decimal for a value the walker already knows how to print — and
-     * for an UNRECOGNISED kind, where declining is the only honest answer.
-     *
-     * `MOJO_KIND_INT` for kind 0 is not a formality: the renderer answers "0"
-     * for a zero word under a stated int kind, and that is what makes
-     * `print({'z': 0})` print `0` where it used to print `None`. Declining kind 0
-     * here would push the zero word to the generic reader, whose `val == 0` arm
-     * answers "None" for a null pointer. */
-    switch (dict_kind) {
-    case 0: return MOJO_KIND_INT;
-    case 1: return MOJO_KIND_DOUBLE;
-    case 2: return MOJO_KIND_STR;
-    case 3: return MOJO_KIND_BOOL;
-    case 4: return MOJO_KIND_NONE;
-    default: return 0;
-    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
@@ -7835,55 +6528,29 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
-        /* A NULL kinds string is not "no kinds" but "no kinds to apply": every
-           slot then falls back to the int accessor, which is the documented
-           behaviour for a slot the string does not cover (see the comment
-           above). It was `kinds && !kinds[_i]`, which reads `kinds[_i]` in the
-           else arm anyway — so a NULL kinds string dereferenced NULL, and
-           `mojo_repr_list_kinds(l, NULL)` was only ever safe because every
-           caller happened to pass a non-NULL string first. Two callers did
-           not: the nested-list recursion just below, and a dict key's content
-           key (`_container_key_str`), whose tuple carries no kinds row when
-           codegen appended to it slot by slot. */
-        char _k = (!kinds || !kinds[_i]) ? 'i' : kinds[_i];
-        /* One `_s`, released after the cat, rather than a cat per branch: every
-           repr helper here returns a fresh heap string and none of them was
-           freed, so a repr of a mixed N-slot list leaked N of them. That was
-           only ever a slow leak on a debug print, but this function is now
-           also a dict KEY's renderer (`_container_key_str`), where it runs once
-           per lookup in whatever loop the key is used in — which is exactly the
-           shape that turned a tuple-keyed miss into gigabytes of live memory
-           (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). Every arm of the
-           chain below owns a heap string now — `mojo_repr_slot_kind` copies
-           'None' rather than handing back a literal — so one `free` covers all
-           of them and none of them can be missed. */
-        char *_s;
-        /* The list's own ELEMENT REPR wins over every kind byte below: it is
-           the codegen saying what this list's elements actually ARE, which is
-           strictly more information than a slot's storage kind ('i' for a
-           struct pointer is as true as 'i' for a small int and as useless). */
-        char *_re = mojo_list_repr_elem(l, mojo_list_get_int(l, _i));
-        if (_re) {
-            _buf = mojo_str_cat_free(_buf, _re);
-            free(_re);
-            continue;
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        char _k = (kinds && !kinds[_i]) ? 'i' : kinds[_i];
+        if (_k == 'd') {
+            _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_list_get_double(l, _i)));
+        } else if (_k == 's') {
+            MojoBytes *_b = (MojoBytes *)(uintptr_t)mojo_list_get_int(l, _i);
+            _buf = mojo_str_cat(_buf, mojo_bytes_repr(_b));
+        } else if (_k == 'p') {
+            char *_p = (char *)(intptr_t)mojo_list_get_int(l, _i);
+            _buf = mojo_str_cat(_buf, mojo_repr_str(_p));
+        } else if (_k == 'l') {
+            /* A nested list/tuple slot: recurse through the same kinds-aware
+             * repr, so `[[1, 2.5], 3]` describes its inner list too. */
+            MojoList *_in = (MojoList *)(intptr_t)mojo_list_get_int(l, _i);
+            _buf = mojo_str_cat(_buf, mojo_repr_list_kinds(_in, NULL));
+        } else if (_k == 'n') {
+            _buf = mojo_str_cat(_buf, "None");
+        } else {
+            _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
         }
-        /* ONE call, not this function's own six-arm switch: the renderer is
-         * `mojo_repr_slot_kind` (see the header for why it is one function),
-         * and it answers NULL for MOJO_KIND_INT — which is the ONLY arm left,
-         * and the one that cannot move, because a plain int slot can still hold
-         * a boxed pointer that only this file's callers can dispatch. It OWNS
-         * its return on every arm, including 'n', which is why the literal-None
-         * fast path this switch had is gone: the copy is on a debug print, and
-         * one ownership rule is worth more than two saved allocations. */
-        _s = mojo_repr_slot_kind(_k, mojo_list_get_int(l, _i));
-        if (!_s) _s = mojo_repr_int(mojo_list_get_int(l, _i));
-        _buf = mojo_str_cat_free(_buf, _s);
-        free(_s);
     }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
-    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
 }
 
 char *mojo_repr_obj(int64_t addr) {
@@ -8665,109 +7332,6 @@ void mojo_raise_index_error(char *detail) {
     mojo_raise();
 }
 
-/* `list(<a str>)`: one fresh 1-character string per BYTE, which is the
- * element type Python's own `for c in s` loop binds (a one-character
- * string, not a character code) and what `_gen_for_str` already builds with
- * mojo_strlen + mojo_cstr_slice. Split out of `mojo_iter_boxed_list` because
- * it is answerable without knowing anything about the value — `list(s)` on a
- * statically-typed `char *` reaches this directly. */
-MojoList *mojo_str_chars(char *s)
-{
-    MojoList *l = mojo_list_new();
-    if (!s) return l;
-    size_t n = strlen(s);
-    for (size_t i = 0; i < n; i++)
-        mojo_list_append_str(l, mojo_cstr_slice(s, (int64_t)i, (int64_t)(i + 1)));
-    return l;
-}
-
-
-/* Iterating a value whose container KIND is a runtime fact — the runtime
- * half of `_materialize_as_list`'s ambiguous arm
- * (mojo/backend_gimple/emit_infra.py). The caller has already established
- * that `v` is not a registered list, dict or set; two answers remain, and
- * they are opposite in kind, which is why they cannot be one lookup.
- *
- * 1. A boxed STRING. Python iterates a str CHARACTER BY CHARACTER, so
- *    `','.join(<boxed str>)`, `all(<boxed str>)` and `list(<boxed str>)` are
- *    all legal and all have real answers. This arm used to answer an EMPTY
- *    list for them — a silent wrong answer, since the join then printed
- *    nothing at all — and refusing here instead would be a lie of the other
- *    kind ("not iterable" for a type that is iterable). Byte-wise, matching
- *    the string-iteration loop the codegen already emits
- *    (`_gen_for_str`: mojo_strlen + mojo_cstr_slice per byte), so the two
- *    spellings of the same iteration cannot disagree.
- * 2. Anything else. A plain int, a bool, None, a function pointer, a struct
- *    type tag: every shape that reaches an iterable-typed slot in this
- *    dynamic model. This used to answer an empty list as well, and THAT is
- *    the silent wrong answer worth removing — `list(5)` printed `[]`, so a
- *    program's loop body never ran and nothing said so, with exit 0. (Before
- *    the arm was made fail-closed at all it was a SIGSEGV, reading a length
- *    out of whatever address it was handed.) Raising is what this runtime
- *    already does for every other bad receiver (`mojo_require_mutable_list`
- *    and the typed raisers above), and it reaches the program the way a
- *    Python exception does: "Unhandled exception: TypeError: ..." on stderr
- *    and exit 1.
- *
- * CPython names the offending TYPE ("'int' object is not iterable") and this
- * cannot: the model has a registry per container kind plus
- * `mojo_boxed_is_str`, but nothing that tells an int from a bool from None
- * from a function pointer, so any name would be a guess. The message states
- * the fact instead, which is the same rule the rest of this file follows
- * where the model has nothing to say.
- *
- * The empty list after the raise is unreachable (`mojo_raise_type_error`
- * longjmps, or exits when nothing is enclosing) and exists only because the
- * generated branch must have a value of the right C type. */
-MojoList *mojo_iter_boxed_list(int64_t v)
-{
-    if (mojo_boxed_is_str(v))
-        return mojo_str_chars((char *)(intptr_t)v);
-    mojo_raise_type_error((char *)"object is not iterable");
-    return mojo_list_new();
-}
-
-/* `NotImplementedError: <detail>` — the sixth typed raiser, same mechanism and
- * same hardcoded-tag derivation as the five above. It exists for ONE caller and
- * that caller is the whole reason it is a RAISER rather than a printed note:
- * a call on a module this compile never compiled (`argparse`,
- * CPython's `Apple/__main__.py`) used to be answered with the receiver
- * unchanged, so `ArgumentParser(...)` "constructed" the module marker (an
- * int64_t 0), `add_argument`/`parse_args` echoed it back, and the program
- * computed with a parser that is not a parser until the first attribute read
- * off the result died with an `AttributeError` naming an attribute of a class
- * the program never built
- * (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
- *
- * Raising at the CALL is the point where it becomes true, and it is
- * catchable, so a program that legitimately probes for the capability can
- * still say so. Nothing here is a claim that argparse is unimplementable —
- * it is a whole subsystem, the same size class as the pickle engine judged
- * out of scope in dbpickle.md — only that a silent 0 is the wrong answer. */
-#define _MOJO_EXC_TAG_NOTIMPLEMENTEDERROR 108472663
-
-void mojo_raise_not_implemented(char *detail) {
-    char msg[256];
-    snprintf(msg, sizeof msg, "NotImplementedError: %s", detail ? detail : "?");
-    char *heap_msg = strdup(msg);
-    mojo_exc_type_set(_MOJO_EXC_TAG_NOTIMPLEMENTEDERROR);
-    mojo_exc_msg_set(heap_msg);
-    mojo_exc_obj_set(heap_msg);
-    mojo_raise();
-}
-
-/* The codegen's half of the same decision, as ONE runtime entry point so the
- * message cannot drift between the two spellings. `module` is the module name
- * as the program wrote it; `member` is what it called on it. */
-void mojo_module_not_compiled(char *module, char *member) {
-    char msg[256];
-    snprintf(msg, sizeof msg,
-             "%s.%s: module '%s' is not compiled into this binary",
-             module ? module : "?", member ? member : "?",
-             module ? module : "?");
-    mojo_raise_not_implemented(msg);
-}
-
 /* The two ways a tuple refuses to be mutated, as CPython words them. Both
  * share mojo_require_mutable_list's typed-exception mechanism and the same
  * hardcoded-tag derivation as the four raisers above; they live here rather
@@ -8879,14 +7443,12 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
    arrived as address 0 and `mojo_fnptr_call_1((void *)0, ...)` called through
    a null pointer: SIGSEGV, exit 139, no output.
 
-   This is that case's honest answer, and it is a CATCHABLE
-   `NotImplementedError` — the same decision `mojo_module_not_compiled` makes
-   for a method call on a bare-imported module this compile did not include,
-   which is this situation one level out. It used to follow
-   `mojo_unsupported_iter`'s convention instead: print loudly, and let
-   execution continue with the 0 the null pointer would have produced had it
-   survived. That was the wrong trade HERE, and the difference is what the
-   body's own comment says; see the function.
+   This is that case's honest answer, and it follows
+   `mojo_unsupported_iter`'s convention exactly: print loudly, and let
+   execution continue with the same behaviour the null pointer would have
+   produced had it survived — so a program that never CALLS the parameter is
+   completely unaffected, and one that does gets a greppable diagnostic
+   instead of a signal.
 
    ONE function, not a family per arity, because the call reaches it through
    `mojo_fnptr_call_N`'s `int64_t (*)(int64_t...)` cast: a callee that
@@ -8910,36 +7472,15 @@ void mojo_set_unavailable_callable_name(const char *name) {
 }
 
 int64_t mojo_unavailable_callable(void) {
-    /* A CATCHABLE NotImplementedError, not a printed line and a 0. The
-     * stub was originally "loud but continuing", mirroring
-     * `mojo_unsupported_iter`, and that was the wrong trade here: the
-     * difference is that `mojo_unsupported_iter` answers a question the
-     * program asked about its own data (the loop body simply does not run,
-     * and nothing downstream treats the result as a value it computed),
-     * while this is the RETURN VALUE of a call the program made. A 0 handed
-     * back from `g(x)` is indistinguishable from a real 0 the function
-     * could have returned, so every number derived from it is wrong and
-     * exit code says nothing -- `def probe(x, *, g=os.walk): return g(x)`
-     * printed `0` where CPython prints a generator object.
-     *
-     * Raising is the same decision `mojo_module_not_compiled` already makes
-     * for a method call on a bare-imported module this compile did not
-     * include, which is the identical situation one level out: a name that
-     * resolved to nothing here. It is catchable, so a program that
-     * legitimately probes for the capability (`if os.walk is available`)
-     * can still say so, and a program that does not gets a named,
-     * greppable exception instead of a plausible number.
-     *
-     * It is still ONE stub for every arity 0..4, for the reason the
-     * comment above gives. */
-    char msg[256];
-    snprintf(msg, sizeof msg,
-             "%s is a callable that is not available in compiled mode (it "
-             "names an imported module's function, which this translation "
-             "unit may not contain)", _unavailable_callable_name);
-    _unavailable_callable_reported = 1;
-    mojo_raise_not_implemented(msg);
-    return 0;               /* unreachable; mojo_raise does not return */
+    if (!_unavailable_callable_reported) {
+        _unavailable_callable_reported = 1;
+        fprintf(stderr, "mojo_unavailable_callable: '%s' is a callable that is "
+                         "not available in compiled mode (it names an imported "
+                         "module's function, which this translation unit may "
+                         "not contain); calling it returns 0\n",
+                _unavailable_callable_name);
+    }
+    return 0;
 }
 
 void *mojo_unavailable_callable_ptr(void) { return (void *)mojo_unavailable_callable; }
@@ -9040,114 +7581,6 @@ int64_t int_parse_module(int parser) {
 
 /* ── Additional dict/list/set runtime helpers ──────────────────────────── */
 
-/* THE rendering of one dict slot's VALUE, from the (word, kind) pair the store
- * recorded. One implementation, three callers that used to have their own:
- * the codegen's emitted `_mojo_repr_dict` chain (mojo/backend_gimple/
- * module_gen.py), this file's own `_mojo_repr_pairlist`, and the per-slot
- * repr function `mojo_dict_items` records on each pair below. They disagreed:
- * the emitted chain understood every kind, `_mojo_repr_pairlist` had a static
- * three-way guess, and `.items()`'s pair carried NO kind at all — so
- * `sorted({'mid': 0}.items())` printed `[('mid', None)]` and
- * `print({'a': 1.5}.items())` SEGFAULTED (the IEEE-754 bits are a
- * pointer-shaped word, which the generic reader sends to
- * mojo_read_type_tag_safe). The store tags every value; nothing above it was
- * reading the tag.
- *
- * REPR semantics (this is what `print` of a container wants: a str value
- * comes back quoted), and ALWAYS an owned heap string, so every caller frees
- * it the same way.
- *
- * NULL means "this kind is not this function's to render": the two struct
- * kinds, whose rendering is a property of the DICT (`val_repr` — the
- * codegen's shim for the one struct type it knows) rather than of the word,
- * and a kind-0 slot holding a non-zero word, which is a raw int64_t the
- * caller's own generic reader already handles correctly. */
-char *mojo_dict_slot_repr(int64_t v, int64_t kind)
-{
-    switch (kind) {
-        case 1:
-            /* bits -> double through the runtime's helper, never a C cast:
-             * the slot is an `int64_t` in a struct and reading it as a
-             * `double` is a strict-aliasing violation (mojo_dict_slot_double
-             * copies for the same reason). */
-            return mojo_repr_float(mojo_double_from_bits(v));
-        case 2:
-            /* A str value stored with mojo_dict_set_str carries its pointer
-             * in `val`; `mojo_repr_int` on that pointer printed the string's
-             * own address. */
-            return mojo_repr_str((char *)(intptr_t)v);
-        case 3:
-            /* A Python bool: the same 0/1 a real int stores, so only this
-             * per-SLOT tag separates them. */
-            return strdup(v ? "True" : "False");
-        case 4:
-            /* `None` is int64_t 0 with kind 4 — the same word a plain 0
-             * stores, and only this tag tells them apart. */
-            return strdup("None");
-        default:
-            /* kind 0. The word 0 is the INTEGER 0, which the generic reader
-             * cannot say (its `val == 0` arm answers "None", right for the
-             * NULL pointer it was written for) — so it is answered here and
-             * a non-zero kind-0 word is left to that reader. */
-            return v == 0 ? strdup("0") : NULL;
-    }
-}
-
-/* `mojo_dict_slot_repr` in the shape `mojo_list_set_elem_repr` records: a
- * function of the VALUE ALONE, so a heterogeneous dict cannot use one — which
- * is why each `.items()` pair gets the thunk for ITS OWN slot's kind below,
- * and the dict-level `val_repr` (a struct shim) keeps precedence over all of
- * them. Indices are `_DictSlot.kind`; 5/6 have no thunk and are NULL, which
- * `mojo_list_repr_elem`'s contract already treats as "this says nothing". */
-static char *_dict_val_repr_int(int64_t v)    { return mojo_dict_slot_repr(v, 0); }
-static char *_dict_val_repr_double(int64_t v) { return mojo_dict_slot_repr(v, 1); }
-static char *_dict_val_repr_str(int64_t v)    { return mojo_dict_slot_repr(v, 2); }
-static char *_dict_val_repr_bool(int64_t v)   { return mojo_dict_slot_repr(v, 3); }
-static char *_dict_val_repr_none(int64_t v)   { return mojo_dict_slot_repr(v, 4); }
-
-static char *(*const _dict_val_repr_fn[7])(int64_t) = {
-    _dict_val_repr_int,     /* 0 int    */
-    _dict_val_repr_double,  /* 1 double */
-    _dict_val_repr_str,     /* 2 str    */
-    _dict_val_repr_bool,    /* 3 bool   */
-    _dict_val_repr_none,    /* 4 None   */
-    NULL,                   /* 5 struct — the dict's own recorded shim */
-    NULL,                   /* 6 other struct                        */
-};
-
-/* The recorded per-slot value repr for ONE slot of `d`: the thunk for this
- * slot's own kind, or NULL when the slot is a struct (the dict's own
- * `val_repr` covers that, and the caller records that separately) or a kind
- * with no thunk. */
-static char *(*_dict_val_repr_for_slot(MojoDict *d, int64_t i))(int64_t)
-{
-    if (!d || i < 0 || i >= d->cap) return NULL;
-    int64_t kind = d->slots[i].kind;
-    if (kind < 0 || kind > 4) return NULL;
-    return _dict_val_repr_fn[kind];
-}
-
-/* A dict's ONE value kind, when its slots agree — the only case a single
- * list-level repr function can describe, since `mojo_list_set_elem_repr`
- * records one function for every element. -1 when they do not agree, and -1
- * for a struct kind (the dict's own `val_repr` covers that, and the caller
- * sets that separately). */
-static int _dict_uniform_val_kind(MojoDict *d)
-{
-    if (!d || d->used == 0) return -1;
-    int kind = -1;
-    int64_t *order = mojo_dict_order_indices(d);
-    if (!order) return -1;
-    for (int64_t oi = 0; oi < d->used; oi++) {
-        int k = (int)d->slots[order[oi]].kind;
-        if (k < 0 || k > 4) { free(order); return -1; }
-        if (kind < 0) kind = k;
-        else if (k != kind) { free(order); return -1; }
-    }
-    free(order);
-    return kind;
-}
-
 MojoList *mojo_dict_keys(MojoDict *d) {
     /* Walks in insertion order (mojo_dict_order_indices), matching Python's
      * dict.keys() guarantee — not raw hash-slot order. */
@@ -9164,24 +7597,6 @@ MojoList *mojo_dict_values(MojoDict *d) {
     /* Insertion order — see mojo_dict_keys's identical note. */
     MojoList *out = mojo_list_new();
     if (!d) return out;
-    /* This list holds exactly the dict's VALUES, so the dict's struct repr
-     * describes them exactly as `mojo_list_inherit_kinds` carries a list's
-     * own elem repr across a copy: `list(d.values())` printing a raw pointer
-     * decimal where `print(d)` printed `R<a>` would be the same bug one call
-     * away. NULL for every dict that records nothing.
-     *
-     * The VALUE KIND is the other half of the same bargain, and it is what a
-     * bool/float/zero value needs: this list's elements are raw int64_t
-     * words, so `list(d.values())` of `{'a': 0}` printed `None` and of
-     * `{'a': 1.5}` printed the float's own IEEE-754 bits (or faulted). One
-     * function describes the whole list only when the slots AGREE on a kind,
-     * which is why `_dict_uniform_val_kind` returns -1 otherwise rather than
-     * recording a wrong answer. */
-    if (d->val_repr) mojo_list_set_elem_repr(out, (void *)d->val_repr);
-    else {
-        int uk = _dict_uniform_val_kind(d);
-        if (uk >= 0) mojo_list_set_elem_repr(out, (void *)_dict_val_repr_fn[uk]);
-    }
     int64_t *order = mojo_dict_order_indices(d);
     for (int64_t oi = 0; oi < d->used; oi++)
         mojo_list_append_int(out, d->slots[order[oi]].val);
@@ -9219,59 +7634,6 @@ MojoList *mojo_dict_items(MojoDict *d) {
          * TUPLES, so mark them — `print({"a": 1}.items())` printed
          * `[['a', 1]]` without this. */
         mojo_mark_as_tuple(pair);
-        /* The dict's struct repr belongs on the PAIR (slot 1 is the value),
-         * not on the outer list, whose elements are the pairs themselves —
-         * `_mojo_repr_pair` asks the list it walks for its recorded elem repr,
-         * the same first question `_mojo_repr_list` asks. Without this the
-         * value printed as a raw pointer decimal while the same value in the
-         * dict itself printed `R<a>`.
-         *
-         * And the VALUE KIND belongs on it for the same reason and by the
-         * same route: the pair's slot 1 is a raw int64_t word with the kind
-         * discarded, and `mojo_list_repr_elem` — which both pair walkers ask
-         * for slot 1 and ONLY slot 1, because asking it for slot 0 would hand
-         * the char* KEY to a struct shim — is the channel that carries it.
-         * One thunk per pair, chosen by THAT slot's kind, so a dict mixing
-         * an int and a bool describes both correctly; the struct shim still
-         * wins, because a kind-5 value is the one thing `val_repr` knows and
-         * these thunks do not. */
-        if (d->val_repr) mojo_list_set_elem_repr(pair, (void *)d->val_repr);
-        else {
-            char *(*_rf)(int64_t) = _dict_val_repr_for_slot(d, i);
-            if (_rf) mojo_list_set_elem_repr(pair, (void *)_rf);
-        }
-        /* The pair's PER-SLOT KINDS, which is the OTHER of the two channels
-         * the pair walker asks and not a second spelling of the row above: the
-         * emitted `_mojo_repr_pair` tries `mojo_list_repr_elem` first and then
-         * `mojo_repr_slot_kind(pk[_i], _v)`, so a pair needs the thunk AND the
-         * kinds row and is right about its elements with either one alone.
-         *
-         * The reason it cannot be recovered from the word: the value's storage
-         * kind is on `_DictSlot.kind` and a pair slot is a raw `int64_t`, so
-         * without this row `d.items()` on a dict with a 0/None/bool/float value
-         * printed the pair's slot 1 through the generic reader, which answers
-         * "None" for a zero word (right for a null pointer, wrong for the
-         * integer 0 — `sorted({'mid': 0}.items())` printed `[('mid', None)]`)
-         * and hands a float's IEEE-754 bits to the runtime type-tag reader,
-         * which DEREFERENCES them: `print(d.items())` on a dict holding 1.5 was
-         * a SIGSEGV with no output at all.
-         *
-         * Slot 0 is the key, appended as text just above, so it is
-         * MOJO_KIND_STR unconditionally — `mojo_dict_items_int` is the spelling
-         * that carries an integer key, and it records 'i' there instead. Two
-         * bytes, one `strdup` per pair: `mojo_list_set_kinds` stores the
-         * pointer, so a string literal would be handed to code that documents
-         * itself as freeing kinds rows (`_kinds_forget`), and a per-pair
-         * allocation on a method that already allocates a pair is not the cost
-         * anyone is protecting here. */
-        {
-            char pk[3];
-            pk[0] = MOJO_KIND_STR;
-            pk[1] = mojo_dict_kind_byte(d->slots[i].kind);
-            if (!pk[1]) pk[1] = MOJO_KIND_INT;
-            pk[2] = 0;
-            mojo_list_set_kinds(pair, strdup(pk));
-        }
         mojo_list_append_int(out, (int64_t)(intptr_t)pair);
     }
     free(order);
@@ -9293,24 +7655,6 @@ MojoList *mojo_dict_items_int(MojoDict *d) {
                              : (s->key ? (int64_t)strtoll(s->key, NULL, 10) : 0));
         mojo_list_append_int(pair, s->val);
         mojo_mark_as_tuple(pair);
-        /* The value kind, on the same terms as mojo_dict_items above — this
-         * is the same pair shape from the int-keyed reader, and dropping the
-         * kind here would be the same bug in a different door. */
-        char *(*_rf)(int64_t) = (s->kind >= 0 && s->kind <= 4)
-                               ? _dict_val_repr_fn[s->kind] : NULL;
-        if (_rf) mojo_list_set_elem_repr(pair, (void *)_rf);
-        /* ...and the kinds row that reader asks when the thunk is absent. Same
-         * reason and same bargain as in `mojo_dict_items`; slot 0 is
-         * MOJO_KIND_INT here rather than STR, because this is the spelling that
-         * carries an INTEGER key. */
-        {
-            char pk[3];
-            pk[0] = MOJO_KIND_INT;
-            pk[1] = mojo_dict_kind_byte(s->kind);
-            if (!pk[1]) pk[1] = MOJO_KIND_INT;
-            pk[2] = 0;
-            mojo_list_set_kinds(pair, strdup(pk));
-        }
         mojo_list_append_int(out, (int64_t)(intptr_t)pair);
     }
     free(order);
@@ -9319,34 +7663,14 @@ MojoList *mojo_dict_items_int(MojoDict *d) {
 
 void mojo_dict_update(MojoDict *dst, MojoDict *src) {
     if (!dst || !src) return;
-    /* Walks the SOURCE in INSERTION order (mojo_dict_order_indices), not raw
-     * hash-slot order. A dict's iteration order and repr are insertion order,
-     * and each re-inserted pair takes a FRESH sequence number in the
-     * destination (seq = -1 below), so the destination's order became the
-     * source's slot order: `{str(i) + str(j): i for i in range(2) for j in
-     * range(2)}` printed `{'01': 1, '00': 1}` where CPython prints
-     * `{'00': 1, '01': 1}`. `d.update(other)` merges in the source's order for
-     * the same reason. Each pair keeps its own `keykind`/`kind`, so an
-     * integer-keyed pair stays integer-keyed and a string value stays a
-     * string. */
-    int64_t *order = mojo_dict_order_indices(src);
-    int64_t n = order ? src->used : 0;
-    for (int64_t oi = 0; oi < n; oi++) {
-        _DictSlot *s = &src->slots[order[oi]];
-        if (!s->key) continue;
-        if (s->keykind == 2)
-            _dict_set_ik(dst, s->ikey, s->val, s->kind);
-        else
-            _dict_set_raw_seq_kind_k(dst, s->key, s->val, -1, s->kind, s->keykind);
-    }
-    free(order);
-    /* The struct REPR travels with the pairs it renders, on the same terms:
-     * `d.copy()`, `d | other` and `d.update(other)` all come through here,
-     * and a copied dict that rendered its struct values as a field dump (or,
-     * worse, through a stale shim from a different struct) would be the same
-     * bug one call away. The source wins where both have one, matching "src
-     * overwrites dst" for the values themselves. */
-    if (src->val_repr) dst->val_repr = src->val_repr;
+    for (int64_t i = 0; i < src->cap; i++)
+        if (src->slots[i].key) {
+            if (src->slots[i].keykind == 2)
+                _dict_set_ik(dst, src->slots[i].ikey, src->slots[i].val, src->slots[i].kind);
+            else
+                _dict_set_raw_seq_kind_k(dst, src->slots[i].key, src->slots[i].val,
+                                         -1, src->slots[i].kind, src->slots[i].keykind);
+        }
 }
 
 /* dict.setdefault(key, default): return the value for `key`, inserting
@@ -9396,17 +7720,11 @@ static void _dict_remove_slot(MojoDict *d, _DictSlot *sl) {
 }
 
 /* Remove the entry for `key` in the given key DOMAIN (see _DictSlot.keykind)
- * and return its value, or `dflt` when the key is ABSENT (or there is no
- * dict). `dflt` is Python's `d.pop(k, default)` second argument: without it
- * the codegen had no way to express a default at all and every miss answered
- * 0, which is a real value in this model — see bugs/
- * CODEGEN_dict_pop_default_ignored_on_a_miss.md. `d.pop(k)` with no default
- * passes the domain's own absent value (0 / NULL / 0.0), which is the
- * absent-box convention every mojo_dict_get_* already uses. */
-static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind, int64_t dflt) {
-    if (!d) return dflt;
+ * and return its value (0 when absent). */
+static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind) {
+    if (!d) return 0;
     _DictSlot *sl = _dict_lookup_k(d, key, keykind);
-    if (!sl) return dflt;
+    if (!sl) return 0;
     int64_t val = sl->val;
     /* This table is plain linear-probing open addressing with NO tombstones
      * (_dict_find/_dict_lookup stop scanning at the first empty slot), so
@@ -9423,32 +7741,8 @@ static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind, int64_t dflt
     return val;
 }
 
-/* `pop` on a str-keyed dict. Three spellings, one body: a dict slot is one
- * int64_t of bits, so what differs is only how the caller wants it read BACK
- * (an int as-is, a char* straight through, a double through memcpy — never a
- * pointer/int punning cast, which strict-aliasing gcc may reorder) and what a
- * MISS answers (the `dflt` the source wrote). Only the int spelling existed, so
- * a str-valued dict popped its value as a raw pointer decimal
- * (bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md) and no
- * default could be expressed at all
- * (bugs/CODEGEN_dict_pop_default_ignored_on_a_miss.md). */
-int64_t mojo_dict_pop_int(MojoDict *d, char *key, int64_t dflt) {
-    return _dict_pop_k(d, key, 0 /* str key */, dflt);
-}
-
-char *mojo_dict_pop_str(MojoDict *d, char *key, char *dflt) {
-    return (char *)(uintptr_t)_dict_pop_k(d, key, 0 /* str key */,
-                                          (int64_t)(uintptr_t)dflt);
-}
-
-double mojo_dict_pop_double(MojoDict *d, char *key, double dflt) {
-    if (!d) return dflt;
-    _DictSlot *sl = _dict_lookup_k(d, key, 0 /* str key */);
-    if (!sl) return dflt;
-    double v;
-    memcpy(&v, &sl->val, sizeof(v));
-    _dict_remove_slot(d, sl);
-    return v;
+int64_t mojo_dict_pop_int(MojoDict *d, char *key) {
+    return _dict_pop_k(d, key, 0 /* str key */);
 }
 
 MojoDict *mojo_dict_copy(MojoDict *d) {
@@ -9641,16 +7935,6 @@ void mojo_list_extend(MojoList *dst, MojoList *src) {
     mojo_require_mutable_list(dst, "extend");
     for (int64_t i = 0; i < src->len; i++)
         mojo_list_append_int(dst, src->data[i]);
-    /* `dst` now holds every slot `src` held, so `src`'s element repr describes
-     * it — the same argument as `mojo_list_inherit_kinds`, which extend does
-     * not call because the destination is not fresh. Only when `dst` has none:
-     * a destination that was built with its own is the better answer, and a
-     * mixed result (extend a list of P with a list of Q) has no single one,
-     * which is the pre-existing behaviour. */
-    if (!mojo_list_repr_elem(dst, 0)) {
-        _KindRow *sr = _kinds_row((uint64_t)(uintptr_t)src);
-        if (sr && sr->repr_fn) mojo_list_set_elem_repr(dst, (void *)sr->repr_fn);
-    }
 }
 
 /* ── list.sort() / sorted(): ONE ordering primitive ───────────────────────
@@ -10541,99 +8825,9 @@ static char *_int_str_transient(int64_t v) {
     return out;
 }
 
-/* A registered container (a list, or a tuple -- the two are the same
-   MojoList with a marker) used where a C string is needed, which in practice
-   means as a DICT KEY. The string is the container's VALUE, so `(p, 1.0)` keys
-   as "('p', 1.0)" and two separately-built equal tuples key identically.
-
-   Before this, a container word fell to the decimal-of-the-address branch and
-   keyed as "4372863864": equal keys never hit, and a REUSED address could hit
-   a stale entry. That was not only a wrong answer -- the dict layer then grew
-   one entry per lookup and never hit one, which is where the multi-GB growth
-   on `mojoc --dump-full fire.py` came from (see
-   bugs/CODEGEN_tuple_dict_key_hashed_by_address.md).
-
-   This has to live in the runtime because the value arriving here is an
-   untyped WORD: the key's static type is known where the key is written and
-   thrown away by the `int64_t` the dict call takes. Two sources for the text,
-   in this order:
-
-     - a list that carries its own per-slot kinds (`mojo_list_get_kinds`, set
-       for `struct.unpack` of a mixed format and for a heterogeneous list
-       literal) is rendered by the kinds-aware walker, which is the only thing
-       that can read a FLOAT slot correctly;
-     - otherwise each slot is read by RUNTIME type below, which is what a
-       hand-built tuple needs: codegen appends slot by slot through
-       `mojo_list_append_int`, so there is no kinds row to consult, and the
-       kinds walker with no row renders every slot as an integer -- a string
-       slot as the decimal of its own address, so two tuples holding equal
-       strings at different addresses keyed differently and the bug survived
-       the first attempt at this fix (measured, see the doc).
-
-   This mirrors the codegen-emitted `_mojo_repr_list` /
-   `_mojo_generic_elem_repr` pair, which is the same two-source shape for the
-   same reason: what a slot holds is only knowable at runtime. It is a
-   separate copy rather than a shared one because those two are emitted PER
-   TRANSLATION UNIT with this program's own struct-tag table baked in, which
-   the runtime has no way to see.
-
-   Ownership: an ordinary heap string (the walker's own `strdup` /
-   `mojo_str_cat` blocks), so `mojo_cstr_or_int_release` frees it -- see its
-   second branch. Every per-slot string is freed as it is consumed, and the
-   slot walker always returns a heap string (a strdup of `mojo_repr_obj`'s
-   shared buffer where that is the answer) so the caller can free
-   unconditionally instead of tracking which repr helper returns what. */
-static char *_container_key_str(int64_t v);
-
-static char *_key_slot_str(int64_t v) {
-    if (mojo_is_registered_list(v)) return _container_key_str(v);
-    /* A dict slot is a Python TypeError as a key and unreachable in practice;
-       what matters is that it must not reach `strlen` below, since
-       `mojo_boxed_is_str` accepts a dict pointer (it excludes registered
-       LISTS and boxes, not dicts). The address placeholder is this runtime's
-       own honest answer for a value it cannot describe. */
-    if (mojo_is_registered_dict(v)) return strdup(mojo_repr_obj(v));
-    /* `mojo_boxed_is_str`, the model's own discriminator, rather than a shape
-       test of our own: its 2GiB-floor/2^47-ceiling window is what keeps a word
-       that is NOT a pointer out of strlen. A float slot stored raw is the case
-       that makes the difference — `1.0` is the bit pattern 0x3FF0000000000000,
-       pointer-shaped to any `v > 65536` test, and dereferencing it segfaulted
-       (measured, first attempt at this fix). */
-    if (mojo_boxed_is_str(v)) return mojo_repr_str((char *)(intptr_t)v);
-    /* A zero slot is `0`, not `None`. The emitted `_mojo_generic_elem_repr`
-       answers "None" for one, because in a genuinely DYNAMIC list a 0 can be a
-       boxed null and printing it as 0 would then be a lie; a key cannot afford
-       the guess, and cannot afford the disagreement either -- this walker's
-       other branch, `mojo_repr_list_kinds`, reads the same slot as an int, so
-       leaving None to that function's 'n' kind (and only there) is what makes
-       a tuple key the same text whether or not the list happens to carry a
-       kinds row. Measured: with a 0-is-None rule here, `(('x', 0), 'y')`
-       keyed as `(('x', None), 'y')` and disagreed with itself between the two
-       branches. */
-    return mojo_repr_int(v);
-}
-
-static char *_container_key_str(int64_t v) {
-    MojoList *l = (MojoList *)(intptr_t)v;
-    const char *kinds = mojo_list_get_kinds(l);
-    if (kinds) return mojo_repr_list_kinds(l, kinds);
-    int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return strdup(_is_tup ? "()" : "[]");
-    int64_t _n = mojo_list_len(l);
-    char *_buf = strdup(_is_tup ? "(" : "[");
-    for (int64_t _i = 0; _i < _n; _i++) {
-        if (_i > 0) _buf = mojo_str_cat_free(_buf, ", ");
-        char *_s = _key_slot_str(mojo_list_get_int(l, _i));
-        _buf = mojo_str_cat_free(_buf, _s);
-        free(_s);
-    }
-    if (_is_tup && _n == 1) _buf = mojo_str_cat_free(_buf, ",");
-    return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
-}
-
 /* An int64_t being used where a C string is needed (a dict key, an f-string
-   field, ...): return it AS itself when it is really a boxed `char *`, the
-   container's VALUE when it is really a container, else its decimal string.
+   field, ...): return it AS itself when it is really a boxed `char *`, else
+   its decimal string.
 
    The codegen's own test for "is this boxed pointer?" is `_actual_types`,
    which only knows about values it saw TYPE-ERASED at some earlier point.
@@ -10647,37 +8841,6 @@ static char *_container_key_str(int64_t v) {
    ask it here rather than guessing a direction. */
 char *mojo_cstr_or_int_str(int64_t v) {
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
-    if (mojo_is_registered_list(v)) return _container_key_str(v);
-    return _int_str_transient(v);
-}
-
-/* `mojo_cstr_or_int_str` for the caller that already KNOWS the word is an
-   integer, so the question does not have to be asked at all.
-
-   That is not a hypothetical caller. `mojo_boxed_is_str` is a RANGE test (see
-   its own docstring), so it cannot tell an integer from a `char *`: every
-   positive int64 in [2^31, 2^47) is pointer-shaped to it, and
-   `d[3000000000] = 1` was handed to `mojo_dict_set_int(d, (char *)3000000000, 1)`,
-   which `strcmp`ed address 3000000000 and died — SIGSEGV on the runtime unit
-   test, at -O0, -O2 and under AddressSanitizer alike. The ambiguity is
-   information-theoretic in this compiler's scalar body model (a `char *` and
-   an `int64_t` are the same 64 bits with no tag), so the answer has to come
-   from the codegen, which does know it: the emitted call site hands this
-   function the raw integer instead of a word for the runtime to classify.
-
-   Same block, same ownership, same release protocol as
-   `mojo_cstr_or_int_str`'s own int half -- it IS that half, published under
-   a name that states the answer the caller already has. The distinction is
-   that this one never guesses, so it is also right for the integers
-   `mojo_boxed_is_str` cannot see (anything in the 2 GiB .. 2^47 window,
-   which is where every large-but-plausible int -- a nanosecond-ish id, a
-   millisecond timestamp, a 2**40 token count -- lands).
-
-   The DECIMAL, not a pointer round-trip: the dict re-normalises it through
-   `_canon_int`, so `d[5]` and `d["5"]` stay the one integer slot they have
-   always been (see `_canon_int`'s comment), and `d[3000000000] = 1` then
-   `d[3000000000]` finds what it stored. */
-char *mojo_int_str_transient(int64_t v) {
     return _int_str_transient(v);
 }
 
@@ -10694,253 +8857,10 @@ char *mojo_int_str_transient(int64_t v) {
    the unreleased conversion. See doc/MEMORY.html, "Transient keys". */
 void mojo_cstr_or_int_release(int64_t orig, char *s) {
     if ((int64_t)(intptr_t)s == orig) return;     /* a borrowed boxed string */
-    /* A content key is an ordinary heap string from the repr walker, NOT a
-     pool block, and pooling one would hand it out later as an Int key's
-     scratch -- so it is freed outright. `orig` is the discriminator because
-     it is the SAME predicate mojo_cstr_or_int_str chose the branch with: a
-     registered list is the only value that produces this kind of string, so
-     the two cannot disagree about which allocation `s` is. */
-    if (mojo_is_registered_list(orig)) { free(s); return; }
     /* `s` is the decimal `mojo_cstr_or_int_str` made through mojo_str_from_int,
      * i.e. a block from `_int_str_block`: back to the pool it came from. */
     *(char **)s = _int_str_pool;
     _int_str_pool = s;
-}
-
-/* ── A CONTAINER used as a dict key: a CONTENT key, not its address ──────────
- *
- * `d[(p, mtime)]` used to be keyed by the tuple OBJECT'S ADDRESS: the codegen's
- * dict-key conversion (`_char_to_cstr`) falls through to `(char *)value` for any
- * pointer-typed operand, so the key was the tuple's own pointer bits, and every
- * equal tuple built at a different address missed. Not a slow path either — it
- * was ~16 of the 19 GB live on `mojoc --dump-full fire.py`, because each miss
- * re-inserts and the runtime has no GC to reclaim the tuple.
- *
- * The leak hunt fixed the call sites that mattered (string keys, the
- * `_pair_key` convention already in fire_compiler.py) and left the MECHANISM,
- * which is what every remaining tuple-keyed lookup goes through.
- *
- * A tuple is the one container Python lets you key a dict with, because it is
- * the one container it considers hashable — so this is a tuple-only domain, not
- * a general "any container" one. A list / dict / set key is a TypeError in
- * Python and `mojo_dict_key_for` raises rather than inventing a key.
- *
- * How the key is spelled: the tuple's elements, each rendered with its OWN
- * kind, in a length-delimited form so that `('ab', 'c')` and `('a', 'bc')` get
- * DIFFERENT keys. That is the whole requirement — the dict keys on the string,
- * so the string has to be injective in the tuple — and a repr with separators
- * is not (it is exactly the `_repr_pairlist` ambiguity). A leading marker byte
- * keeps the domain apart from an ordinary str key, so `d[('a',)]` and `d["\x01a"]`
- * stay the two distinct entries Python says they are, the same reason keykind 1
- * exists for bytes keys.
- *
- * Ownership: the returned string is MALLOC'd and the caller OWNS it. It is not a
- * `_int_str_block` pool block and must NOT be released through
- * `mojo_cstr_or_int_release` (which links every block onto that pool's free list
- * and would hand a wrongly-sized block to the next `_fmt_int`). The dict copies
- * it with `strdup`, so the caller frees it as soon as its one consuming call
- * returns. */
-
-/* Keykind 3: a container key, `key` holding the rendered content. Distinct from
- * every other keykind so it can never collide with a str key that happens to
- * spell the same characters. */
-#define MOJO_KEY_TUPLE 3
-
-/* Append to the growable key buffer, HEX-ENCODED and length-delimited.
- *
- * Both halves are load-bearing and neither is decoration:
- *
- *  - LENGTH-delimited, because a bare concatenation is ambiguous --
- *    `('ab', 'c')` and `('a', 'bc')` would render identically and two
- *    DIFFERENT tuples would share one dict entry. The prefix is the element's
- *    own byte count, so the reader (which is `strcmp`, i.e. none) never has to
- *    parse it; it exists purely to keep distinct tuples distinct.
- *  - HEX, because a dict key is a NUL-TERMINATED C string: it is strdup'd,
- *    hashed with `_str_hash` and compared with `strcmp`, every one of which
- *    stops at the first NUL. A binary encoding therefore cannot go in this
- *    domain at all -- `('a', 'b')` and `('a\0b',)` and `('a',)` would all
- *    compare EQUAL because the comparison would stop inside the first element.
- *    Two hex digits per byte is the cheapest encoding with no NUL and no
- *    separator ambiguity.
- *
- * The cost is a 2x key, which is the right trade against a hash collision
- * between two different tuples: the dict would then report one entry for two
- * keys, and `d[(a,)] = 1; d[(b,)] = 2` would silently lose one. */
-static const char _KHEX[] = "0123456789abcdef";
-
-static void _kbuf_put(char **buf, size_t *len, size_t *cap, const char *s, size_t n)
-{
-    size_t need = *len + 8 + 2 * n + 1;
-    if (need > *cap) {
-        while (need > *cap) *cap = *cap ? *cap * 2 : 64;
-        *buf = (char *)realloc(*buf, *cap);
-    }
-    char *p = *buf + *len;
-    for (int i = 0; i < 4; i++) {
-        *p++ = _KHEX[(n >> (8 * i)) & 0xf];
-    }
-    for (size_t i = 0; i < n; i++) {
-        *p++ = _KHEX[(unsigned char)s[i] >> 4];
-        *p++ = _KHEX[(unsigned char)s[i] & 0xf];
-    }
-    *len = (size_t)(p - *buf);
-}
-
-/* Raw bytes with no length prefix, for a fixed one-byte tag. */
-static void _kbuf_put_word(char **buf, size_t *len, size_t *cap, const char *tag, size_t n)
-{
-    size_t need = *len + n + 1;
-    if (need > *cap) {
-        while (need > *cap) *cap = *cap ? *cap * 2 : 64;
-        *buf = (char *)realloc(*buf, *cap);
-    }
-    memcpy(*buf + *len, tag, n);
-    *len += n;
-}
-
-/* Render `w` as the bytes of one element, by the element's OWN kind. `k` is the
- * slot kind (mojo_list_slot_kind's alphabet) when the value carries per-slot
- * kinds, else 0 to mean "unknown, ask the codegen's code". `ecode` is the
- * MOJO_EQ_* code the codegen passed; it is what decides a slot the per-slot
- * record says nothing about.
- *
- * The tag byte is part of every arm, so an int 1 and the str "1" render
- * differently — the same reason `_slot_eq` takes an element code rather than
- * comparing raw words. */
-static void _tuple_key_elem(char **buf, size_t *len, size_t *cap, int64_t w,
-                            char k, int ecode)
-{
-    if (ecode == MOJO_EQ_UNKNOWN) ecode = _kind_to_eq(k);
-    char tmp[_INT_STR_BLOCK];
-    if (ecode == MOJO_EQ_DOUBLE) {
-        double d = _eq_as_double(w);
-        int n = snprintf(tmp, sizeof tmp, "%.17g", d);
-        _kbuf_put(buf, len, cap, tmp, (size_t)(n < 0 ? 0 : n));
-    } else if (ecode == MOJO_EQ_STR) {
-        /* A NULL slot is a real `None` element and gets its own tag, so a
-         * tuple containing None does not render like one containing the empty
-         * string. A word that is not pointer-shaped cannot be a string at all
-         * — the erased-operand path can guess STR for a container whose real
-         * elements are not strings, and dereferencing a small integer here
-         * would be a segfault rather than a wrong key. */
-        if (w == 0) { _kbuf_put(buf, len, cap, "N", 1); return; }
-        if (!_mojo_ptr_shaped(w)) { _kbuf_put(buf, len, cap, "?", 1); return; }
-        _kbuf_put(buf, len, cap, (char *)(intptr_t)w,
-                  strlen((char *)(intptr_t)w));
-    } else if (ecode == MOJO_EQ_BYTES) {
-        if (!_mojo_ptr_shaped(w)) { _kbuf_put(buf, len, cap, "?", 1); return; }
-        MojoBytes *b = (MojoBytes *)(intptr_t)w;
-        _kbuf_put(buf, len, cap, (const char *)(b ? b->data : NULL),
-                  b && b->len > 0 ? (size_t)b->len : 0);
-    } else if (ecode == MOJO_EQ_GENERIC) {
-        /* A nested container: recurse, so `((1,2),)` and `(1,2)` are different
-         * keys. Recursion is bounded by the nesting depth of the value, which
-         * for a heap object is bounded by the heap. */
-        int64_t nk = _value_kind(w);
-        if (nk == MOJO_VK_LIST) {
-            _kbuf_put_word(buf, len, cap, "L", 1);
-            char *inner = mojo_dict_key_for(w);
-            if (inner) {
-                _kbuf_put(buf, len, cap, inner, strlen(inner));
-                free(inner);
-            }
-        } else if (nk == MOJO_VK_SET) {
-            _kbuf_put_word(buf, len, cap, "S", 1);
-        } else {
-            _kbuf_put_word(buf, len, cap, "?", 1);
-        }
-        return;
-    } else {
-        /* An int slot that may really be a nested container handle (the same
-         * "an untyped int64_t can be anything" case `_slot_eq`'s INT arm
-         * handles by asking the registries). */
-        if (_value_kind(w) != MOJO_VK_NONE) {
-            _tuple_key_elem(buf, len, cap, w, 'l', MOJO_EQ_GENERIC);
-            return;
-        }
-        char *p = _fmt_int(w, tmp);
-        /* `- 1`: `_fmt_int` leaves the NUL inside the block, so the span it
-         * returns INCLUDES it (which is what `_slot_key` wants — it copies the
-         * NUL as part of the string). A length PREFIX counts content bytes, so
-         * counting the terminator here would render every integer one byte too
-         * long and, worse, put a NUL in the middle of the key where a
-         * `strcmp`-based dict probe stops reading. */
-        _kbuf_put(buf, len, cap, p, (size_t)(tmp + sizeof tmp - p) - 1);
-    }
-}
-
-/* The content key for a container used as a dict key. See the block comment
- * above for the encoding and the ownership contract. Returns NULL for a NULL
- * or non-container `v`, and RAISES for a container Python would refuse as
- * unhashable, which is the honest answer and not a key invented for it. */
-char *mojo_dict_key_for(int64_t v)
-{
-    int k = _value_kind(v);
-    if (k == MOJO_VK_DICT || k == MOJO_VK_SET) {
-        /* CPython's own text, for the same reason the ordering refusal carries
-         * CPython's: a program printing this message prints CPython's message.
-         * Two literals rather than one concatenated one because string-literal
-         * `+` is pointer arithmetic and would drop the prefix. */
-        mojo_raise_type_error(k == MOJO_VK_DICT
-                              ? (char *)"unhashable type: 'dict'"
-                              : (char *)"unhashable type: 'set'");
-        return NULL;
-    }
-    if (k != MOJO_VK_LIST) return NULL;
-    MojoList *l = (MojoList *)(intptr_t)v;
-    /* A LIST is a MojoList that is NOT marked as a tuple, and Python refuses
-     * it as unhashable — `d[[1, 2]]` is a TypeError. Without this the two are
-     * the same C type and the list would quietly get a tuple's content key:
-     * not a wrong ANSWER (it is the right one for a genuinely hashable
-     * container) but a program that CPython rejects running to completion
-     * here, which is how the missing refusal would go unnoticed. */
-    if (!mojo_is_tuple(l)) {
-        mojo_raise_type_error((char *)"unhashable type: 'list'");
-        return NULL;
-    }
-    char *buf = NULL;
-    size_t len = 0, cap = 0;
-    /* The domain marker, so this key can never equal a str key spelling the
-     * same bytes. Printable rather than a control byte: the key is a C string
-     * that flows through hashing, comparison AND (for `.keys()`, a repr, a
-     * `print`) rendering, and a raw 0x01 in a dict key is a trap for whatever
-     * downstream reads it as text. */
-    _kbuf_put_word(&buf, &len, &cap, "T1", 2);
-    /* A tuple's LENGTH, so `(1,)` and `(1, 1)` differ even before the
-     * elements: with elements only, they would both render "1". */
-    char tmp[_INT_STR_BLOCK];
-    char *lp = _fmt_int(l->len, tmp);
-    _kbuf_put(&buf, &len, &cap, lp, (size_t)(tmp + sizeof tmp - lp) - 1);
-    for (int64_t i = 0; i < l->len; i++) {
-        _tuple_key_elem(&buf, &len, &cap, l->data[i],
-                        mojo_list_slot_kind(l, i), MOJO_EQ_UNKNOWN);
-    }
-    if (!buf) { buf = (char *)malloc(1); cap = 1; }
-    buf[len] = '\0';
-    return buf;
-}
-
-/* Free a key `mojo_dict_key_for` returned. A named free rather than leaving the
- * caller to guess: the ownership contract above is the opposite of every other
- * key's (borrowed for a boxed string, pooled for an Int), so "just free it" is
- * right here and wrong one function away, and the symmetry with
- * `mojo_cstr_or_int_release` is what makes the difference visible at the call
- * site. */
-void mojo_dict_key_free(char *s) { if (s) free(s); }
-
-/* Is this word a container that needs a content key rather than the address?
- * The one predicate every `_kw` twin below asks, so "a dict key that is a
- * tuple" cannot be handled at one call site and forgotten at the next — which is
- * exactly how the address-keying survived the leak hunt's call-site fixes. */
-static int _kw_is_container_key(int64_t kw)
-{
-    /* All THREE container registries, not just the list one: a dict or a set
-     * used as a key must reach `mojo_dict_key_for`, which raises Python's
-     * `unhashable type` for it. Testing only lists let those through to the
-     * INTEGER arm, where the key was the address and the answer was a silent
-     * False rather than a refusal. */
-    return mojo_is_registered_list(kw) || mojo_is_registered_dict(kw)
-        || mojo_is_registered_set(kw);
 }
 
 /* ── Dict operations keyed by a raw machine WORD ───────────────────────────
@@ -10969,61 +8889,16 @@ static void _dict_set_ik(MojoDict *d, int64_t k, int64_t val, int64_t kind)
     sl->kind = kind;
 }
 
-/* The three kinds a key WORD can be, and the ONE place that decides which.
- *
- * A word reaching a dict as a key is one of three things: a boxed `char *`, a
- * real integer, or a CONTAINER handle. The third is the one that used to be
- * missing: `_dict_lookup_ik` then looked the tuple's ADDRESS up as an integer,
- * so an equal tuple at a different address missed and re-inserted, and with no
- * GC that leaked the tuple per miss (the ~16 of 19 GB in
- * bugs/PERF_selfhost_memory_leak_hunt.md).
- *
- * One dispatch for all of them, in this order, because the order is not
- * arbitrary: `mojo_boxed_is_str` already excludes a live registered list (see
- * its own comment — a container is pointer-shaped and would otherwise be
- * strcmp'd), so the container test could go first, but putting it first would
- * mean a future change to that predicate silently re-classifying container keys
- * as strings. Boxed str, then container, then integer.
- *
- * `out` receives the CONTENT KEY when the word was a container, and the caller
- * must free it with `mojo_dict_key_free` once its one consuming call returns;
- * `*out` is NULL for the other two kinds, which need no key at all. Every `_kw`
- * twin below follows this same three-arm shape on purpose: the bug was a
- * MISSING arm at every site, so adding the arm at one and not the others is
- * precisely the failure mode this shape makes visible. */
-#define _KW_STR 0
-#define _KW_INT 1
-#define _KW_CONT 2
-static int _kw_kind(int64_t kw, char **out)
-{
-    *out = NULL;
-    if (mojo_boxed_is_str(kw)) return _KW_STR;
-    if (_kw_is_container_key(kw)) { *out = mojo_dict_key_for(kw); return _KW_CONT; }
-    return _KW_INT;
-}
-
 int64_t mojo_dict_get_int_kw(MojoDict *d, int64_t kw)
 {
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_get_int(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        int64_t v = mojo_dict_get_int(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
+    if (mojo_boxed_is_str(kw)) return mojo_dict_get_int(d, (char *)(intptr_t)kw);
     _DictSlot *sl = _dict_lookup_ik(d, kw);
     return sl ? sl->val : 0;
 }
 
 double mojo_dict_get_double_kw(MojoDict *d, int64_t kw)
 {
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_get_double(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        double v = mojo_dict_get_double(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
+    if (mojo_boxed_is_str(kw)) return mojo_dict_get_double(d, (char *)(intptr_t)kw);
     _DictSlot *sl = _dict_lookup_ik(d, kw);
     if (!sl) return 0.0;
     double v;
@@ -11033,38 +8908,20 @@ double mojo_dict_get_double_kw(MojoDict *d, int64_t kw)
 
 char *mojo_dict_get_str_kw(MojoDict *d, int64_t kw)
 {
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_get_str(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        char *v = mojo_dict_get_str(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
+    if (mojo_boxed_is_str(kw)) return mojo_dict_get_str(d, (char *)(intptr_t)kw);
     _DictSlot *sl = _dict_lookup_ik(d, kw);
     return sl ? (char *)(uintptr_t)sl->val : NULL;
 }
 
 void mojo_dict_set_int_kw(MojoDict *d, int64_t kw, int64_t v)
 {
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { mojo_dict_set_int(d, (char *)(intptr_t)kw, v); return; }
-    if (k == _KW_CONT) {
-        mojo_dict_set_int(d, ck, v);
-        mojo_dict_key_free(ck);
-        return;
-    }
+    if (mojo_boxed_is_str(kw)) { mojo_dict_set_int(d, (char *)(intptr_t)kw, v); return; }
     _dict_set_ik(d, kw, v, 0);
 }
 
 void mojo_dict_set_double_kw(MojoDict *d, int64_t kw, double v)
 {
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { mojo_dict_set_double(d, (char *)(intptr_t)kw, v); return; }
-    if (k == _KW_CONT) {
-        mojo_dict_set_double(d, ck, v);
-        mojo_dict_key_free(ck);
-        return;
-    }
+    if (mojo_boxed_is_str(kw)) { mojo_dict_set_double(d, (char *)(intptr_t)kw, v); return; }
     int64_t bits;
     memcpy(&bits, &v, sizeof(bits));
     _dict_set_ik(d, kw, bits, 1);
@@ -11072,160 +8929,29 @@ void mojo_dict_set_double_kw(MojoDict *d, int64_t kw, double v)
 
 void mojo_dict_set_str_kw(MojoDict *d, int64_t kw, char *v)
 {
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { mojo_dict_set_str(d, (char *)(intptr_t)kw, v); return; }
-    if (k == _KW_CONT) {
-        mojo_dict_set_str(d, ck, v);
-        mojo_dict_key_free(ck);
-        return;
-    }
+    if (mojo_boxed_is_str(kw)) { mojo_dict_set_str(d, (char *)(intptr_t)kw, v); return; }
     _dict_set_ik(d, kw, (int64_t)(uintptr_t)v, 2);
-}
-
-/* The remaining three VALUE KINDS' `_kw` twins, same three-arm shape as the
- * three above and for the same reason: they were MISSING, and the codegen's
- * `_KW_DICT_FNS` membership test answers per FUNCTION NAME, so a setter with
- * no twin was not refused — it fell through to the "build the decimal string
- * now" arm, which puts the entry in the plain char* key DOMAIN while the
- * matching `_kw` READ looks it up in the content-keyed one. So
- *
- *     d = {}
- *     d[("a",)] = True
- *     print(d[("a",)])        ->  0, want True
- *
- * stored under the tuple's own address as a decimal string and read the
- * content key: two entries for one source-level assignment whenever the value
- * kind happened to be bool, None or a struct, and the read side saw neither.
- * `_kw_kind`'s own comment names this exact failure mode ("the bug was a
- * MISSING arm at every site, so adding the arm at one and not the others is
- * precisely the failure mode this shape makes visible") — it was missing here
- * too, on the setter side, for the same reason. */
-void mojo_dict_set_bool_kw(MojoDict *d, int64_t kw, int64_t v)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { mojo_dict_set_bool(d, (char *)(intptr_t)kw, v); return; }
-    if (k == _KW_CONT) {
-        mojo_dict_set_bool(d, ck, v);
-        mojo_dict_key_free(ck);
-        return;
-    }
-    _dict_set_ik(d, kw, v, 3);
-}
-
-void mojo_dict_set_none_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { mojo_dict_set_none(d, (char *)(intptr_t)kw); return; }
-    if (k == _KW_CONT) {
-        mojo_dict_set_none(d, ck);
-        mojo_dict_key_free(ck);
-        return;
-    }
-    _dict_set_ik(d, kw, 0, 4);
-}
-
-void mojo_dict_set_struct_kw(MojoDict *d, int64_t kw, void *v)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { mojo_dict_set_struct(d, (char *)(intptr_t)kw, v); return; }
-    if (k == _KW_CONT) {
-        mojo_dict_set_struct(d, ck, v);
-        mojo_dict_key_free(ck);
-        return;
-    }
-    _dict_set_ik(d, kw, (int64_t)(uintptr_t)v, 5);
-}
-
-void mojo_dict_set_other_struct_kw(MojoDict *d, int64_t kw, void *v)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { mojo_dict_set_other_struct(d, (char *)(intptr_t)kw, v); return; }
-    if (k == _KW_CONT) {
-        mojo_dict_set_other_struct(d, ck, v);
-        mojo_dict_key_free(ck);
-        return;
-    }
-    _dict_set_ik(d, kw, (int64_t)(uintptr_t)v, 6);
 }
 
 int mojo_dict_contains_kw(MojoDict *d, int64_t kw)
 {
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) return mojo_dict_contains(d, (char *)(intptr_t)kw);
-    if (k == _KW_CONT) {
-        int hit = mojo_dict_contains(d, ck);
-        mojo_dict_key_free(ck);
-        return hit;
-    }
+    if (mojo_boxed_is_str(kw)) return mojo_dict_contains(d, (char *)(intptr_t)kw);
     return _dict_lookup_ik(d, kw) != NULL;
 }
 
-int64_t mojo_dict_pop_int_kw(MojoDict *d, int64_t kw, int64_t dflt)
+int64_t mojo_dict_pop_int_kw(MojoDict *d, int64_t kw)
 {
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) return mojo_dict_pop_int(d, (char *)(intptr_t)kw, dflt);
-    if (k == _KW_CONT) {
-        int64_t v = mojo_dict_pop_int(d, ck, dflt);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    if (!d) return dflt;
+    if (mojo_boxed_is_str(kw)) return mojo_dict_pop_int(d, (char *)(intptr_t)kw);
     _DictSlot *sl = _dict_lookup_ik(d, kw);
-    if (!sl) return dflt;
+    if (!sl) return 0;
     int64_t val = sl->val;
     _dict_remove_slot(d, sl);
     return val;
 }
 
-char *mojo_dict_pop_str_kw(MojoDict *d, int64_t kw, char *dflt)
-{
-    return (char *)(uintptr_t)mojo_dict_pop_int_kw(d, kw,
-                                                   (int64_t)(uintptr_t)dflt);
-}
-/* The same two steps as mojo_dict_pop_double, over whichever key DOMAIN the
- * `_kw` word selects (see _kw_kind): probe the slot, then remove it. Spelled
- * as its own two steps rather than by re-probing after mojo_dict_pop_int_kw,
- * because a MISS has to answer `dflt` and `0` is a legitimate double — a
- * pop-then-probe ordering cannot tell them apart. */
-double mojo_dict_pop_double_kw(MojoDict *d, int64_t kw, double dflt)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    _DictSlot *sl;
-    if (k == _KW_STR) sl = _dict_lookup_k(d, (char *)(intptr_t)kw, 0);
-    else if (k == _KW_CONT) {
-        sl = _dict_lookup_k(d, ck, 0);
-        mojo_dict_key_free(ck);
-    }
-    else sl = _dict_lookup_ik(d, kw);
-    if (!sl) return dflt;
-    double v;
-    memcpy(&v, &sl->val, sizeof(v));
-    _dict_remove_slot(d, sl);
-    return v;
-}
-
-/* `setdefault` is the one `_kw` twin that asks the dict TWICE (contains, then
- * get or set), and a content key is a fresh string each time — so it is built
- * ONCE and both queries use it. Building it twice would be correct but would
- * render the whole tuple twice for what is one logical key, on a path that runs
- * in a loop. The `d == NULL` early return comes first because `mojo_dict_key_for`
- * can raise, and a `setdefault` on no dict at all should answer the default
- * without raising about the key it was handed. */
 int64_t mojo_dict_setdefault_int_kw(MojoDict *d, int64_t kw, int64_t dflt)
 {
     if (!d) return dflt;
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) {
-        if (mojo_dict_contains_kw(d, kw)) return mojo_dict_get_int_kw(d, kw);
-        mojo_dict_set_int_kw(d, kw, dflt);
-        return dflt;
-    }
-    if (k == _KW_CONT) {
-        int64_t v = mojo_dict_contains(d, ck) ? mojo_dict_get_int(d, ck)
-                                              : (mojo_dict_set_int(d, ck, dflt), dflt);
-        mojo_dict_key_free(ck);
-        return v;
-    }
     if (mojo_dict_contains_kw(d, kw)) return mojo_dict_get_int_kw(d, kw);
     mojo_dict_set_int_kw(d, kw, dflt);
     return dflt;
@@ -11234,19 +8960,6 @@ int64_t mojo_dict_setdefault_int_kw(MojoDict *d, int64_t kw, int64_t dflt)
 char *mojo_dict_setdefault_str_kw(MojoDict *d, int64_t kw, char *dflt)
 {
     if (!d) return dflt;
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) {
-        if (mojo_dict_contains_kw(d, kw)) return mojo_dict_get_str_kw(d, kw);
-        mojo_dict_set_str_kw(d, kw, dflt);
-        return dflt;
-    }
-    if (k == _KW_CONT) {
-        char *v;
-        if (mojo_dict_contains(d, ck)) v = mojo_dict_get_str(d, ck);
-        else { mojo_dict_set_str(d, ck, dflt); v = dflt; }
-        mojo_dict_key_free(ck);
-        return v;
-    }
     if (mojo_dict_contains_kw(d, kw)) return mojo_dict_get_str_kw(d, kw);
     mojo_dict_set_str_kw(d, kw, dflt);
     return dflt;
@@ -11654,30 +9367,6 @@ char *mojo_str_from_double(double v) {
     return out;
 }
 
-/* `printf`-a pointer through a caller-supplied format, for the ONE place a
- * pointer needs `%p` spelled in a literal the code generator owns:
- * `print(f)` on a function object, where CPython prints
- * `<function f at 0x...>`. `sprintf` itself is not a GIMPLE-callable
- * builtin here (the generated code reaches it through the non-GIMPLE
- * prelude), and inlining the format+argument pair at the call site would
- * put a `%p` conversion in generated code -- which is what
- * `TypeLattice.printf_fmt` exists to avoid, since it cannot know a value is
- * a pointer from its C type alone. So the format stays a literal and the
- * conversion happens here.
- *
- * strdup'd because the result is handed straight to `mojo_print`, which
- * treats its argument as its own; the pooled `_int_str_block` families are
- * for transient numeric formatting and are released by their own callers. */
-char *mojo_sprintf_ptr(const char *fmt, void *p) {
-    char tmp[128];
-    int n = snprintf(tmp, sizeof tmp, fmt, p);
-    if (n < 0) n = 0;
-    if ((size_t)n >= sizeof tmp) n = (int)sizeof tmp - 1;
-    char *out = (char *)malloc((size_t)n + 1);
-    memcpy(out, tmp, (size_t)n + 1);
-    return out;
-}
-
 char *mojo_str_from_int(int64_t v) {
     /* A string that is KEPT (concatenated into a result, stored as a dict
      * value, bound to a local) gets an exact-size allocation. The pooled
@@ -12015,52 +9704,6 @@ char *mojo_regex_substr(const char *text, int64_t start, int64_t end) {
     char *out = (char *)malloc((size_t)len + 1);
     memcpy(out, text + start, (size_t)len);
     out[len] = '\0';
-    return out;
-}
-
-/* re.Pattern.split(text) over this file's own engine (the `finditer` scan,
- * accumulated into a list): each match's span is removed, every CAPTURING
- * group that participated in it is emitted between the surrounding pieces
- * (Python's rule -- `re.split(r'(,)', 'a,b')` is ['a', ',', 'b']), and a
- * zero-width match advances one character so the scan terminates.
- *
- * The tail after the last match is appended, so a text ENDING in a separator
- * keeps Python's trailing empty field ("a\nb\n" -> ['a', 'b', '']).
- * `_source_lines` (fire_compiler.py) pops that one itself, which is why this
- * has to be Python's shape and not "no trailing empty".
- *
- * This is the entry point that makes `fire_compiler.py`'s tokenizer work at
- * all self-hosted: `_LINE_TERMINATORS = re.compile(r'\r\n|\r|\n')` is asked
- * for `split(src)` there, and with no lowering for it the compiled path cast
- * the compiled-pattern object to `char *` and called `mojo_str_split` with it
- * as the SEPARATOR -- so every source tokenized as ZERO lines and every dump
- * came out empty (see bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md). */
-MojoList *mojo_regex_split(const ReNode *prog, const ReRange *ranges,
-                           const ReClassInfo *classinfo, int root, int ngroups,
-                           char *src) {
-    MojoList *out = mojo_list_new();
-    if (!src) return out;
-    int64_t slen = (int64_t)strlen(src);
-    int64_t *gstart = (int64_t *)malloc(sizeof(int64_t) * (size_t)(ngroups + 2));
-    int64_t *gend = (int64_t *)malloc(sizeof(int64_t) * (size_t)(ngroups + 2));
-    int64_t last = 0;
-    int64_t pos = 0;
-    int64_t ms = 0, me = 0;
-    while (pos <= slen) {
-        if (!mojo_regex_search(prog, ranges, classinfo, root, ngroups, src, slen,
-                               pos, &ms, &me, gstart, gend))
-            break;
-        mojo_list_append_str(out, mojo_regex_substr(src, last, ms));
-        for (int i = 1; i <= ngroups; i++) {
-            if (gstart[i] >= 0)
-                mojo_list_append_str(out, mojo_regex_substr(src, gstart[i], gend[i]));
-        }
-        last = me;
-        pos = (me == ms) ? ms + 1 : me;
-    }
-    mojo_list_append_str(out, mojo_regex_substr(src, last, slen));
-    free(gstart);
-    free(gend);
     return out;
 }
 

@@ -116,8 +116,6 @@ surfaces downstream as a short buffer rather than as a plausible wrong
 number. A real difference from CPython, recorded here rather than hidden.
 """
 
-from os._syscalls import str_at, str_eq_n
-
 
 # ── the format, as one word per question ─────────────────────────────────────
 # Every helper answers a single scalar, because a scalar is the only thing
@@ -226,173 +224,21 @@ def _width_at(fmt: String, k: Int) -> int:
 
 
 def calcsize(fmt: String) -> int:
-    """Bytes `pack(fmt, ...)` produces. 0 for a format this file will not size.
+    """Bytes `pack(fmt, ...)` produces. 0 for a format not implemented here.
 
     CPython raises `struct.error`; see the docstring's ERRORS.
-
-    **THIS IS A PARSER AND NOT THE TABLE, and that changed because CPython's own
-    `test_struct.py` has `calcsize('iii')`, `calcsize('b')`, `calcsize('l')`,
-    `calcsize('n')` and `calcsize('P')` and every one of them used to answer 0.**
-    A size question with an answer, refused, because `_nvalues` below is a table
-    of the seventeen exact format strings this repository's own callers use and
-    nothing else. That table is the right shape for `pack` and `unpack_from`,
-    which need a BYTE ORDER this file deliberately does not implement; it is
-    the wrong shape for a size, which is a property of the grammar rather than
-    of the corpus. The cases came from generating `test_struct.py` rather than
-    reading it — see `test_formal_hostmods_conformance.py`.
-
-    THE GRAMMAR, IN FULL, because a size is not a byte order:
-
-        [<order>] then items, where an item is [<count>] <code>
-        <order>   `<` `>` `=` `!`  standard sizes, no alignment
-                  `@` or ABSENT   native sizes, native alignment
-
-    and the codes are `x c b B h H i I l L q Q n N P s p ?`. The three places
-    the byte order changes the SIZE and not the meaning:
-
-      * `l` and `L` are 4 bytes standard and 8 native. Every other integer code
-        is the same width either way on this target, which is why CPython's
-        `calcsize('l')` is 8 and `calcsize('<l')` is 4.
-      * `n`, `N` and `P` are NATIVE ONLY: CPython raises `struct.error` for
-        `'<P'` and for `'<2n'`, so the parser answers 0 there rather than a
-        size, and 0 is this module's status for a format it will not answer.
-      * `@` PADS. `calcsize('@xq')` is 16, not 9: the `x` takes byte 0 and the
-        `q` is aligned up to byte 8. Alignment is to the item's own size and is
-        1 for `x`, `s`, `p`, `c` and `?`, which is why `calcsize('@hx')` is 3.
-
-    `s` and `p` are `count` bytes both here and in CPython 3.14 — measured, not
-    quoted, and it is the kind of thing worth measuring because the documented
-    reading of `p` is "length count-1" and this build answers `count`.
     """
-    n = strlen(fmt)
-    i = 0
-    # NO PREFIX IS `@`. That is the one default in this function which is not
-    # obvious, and CPython's own suite pins it twice over: `calcsize('l')` is 8
-    # and `calcsize('<l')` is 4, and `calcsize('si')` is 8 against
-    # `calcsize('si')` with a `<` prefix at 5 — the second one because native
-    # mode PADS, so a format with no prefix is not only native-sized but
-    # native-ALIGNED.
-    native = 1
-    align = 1
-    # `<>!=@`, and the `=` is in the set for the reason the whole set exists:
-    # it was written `<>@!` without it, so `calcsize('=i')` was 0 where CPython
-    # says 4 — a standard-size format silently refused because the prefix that
-    # MEANS "use standard sizes" was the one prefix the test did not ask about.
-    # The grammar walk in `test_struct_formal.py` is what found it, by walking
-    # the cross product rather than a list of formats somebody remembered.
-    if n > 0 and str_at(fmt, 0, "<>!=@") == 1:
-        if str_at(fmt, 0, "@") == 0:
-            native = 0
-            align = 0
-        i = 1
-    total = 0
-    while i < n:
-        # The item is [<count>] <code>, and this loop is both halves: a value
-        # is ONE WORD on this path, so a helper that answered both "how many
-        # bytes" and "how many characters of `fmt` did you read" would have to
-        # pack two answers into one word. It is written out here instead, which
-        # is the same reason `normpath` is not a table of sub-functions.
-        count = 0
-        seen = 0
-        while i < n:
-            d = _fmt_digit(fmt, i)
-            if d < 0:
-                break
-            count = count * 10 + d
-            seen = seen + 1
-            i = i + 1
-        if seen == 0:
-            count = 1
-        if i >= n:
-            return 0                     # digits with no code after them
-        code = _fmt_code_size(fmt, i, native)
-        if code < 0:
-            return 0                     # a format this file will not size
-        a = 1
-        if align == 1:
-            a = _fmt_code_align(fmt, i)
-        if a > 1:
-            pad = a - (total % a)
-            if pad == a:
-                pad = 0
-            total = total + pad
-        total = total + count * code
-        i = i + 1
-    return total
-
-
-# ── the format, parsed ───────────────────────────────────────────────────────
-#
-# The three helpers below answer ONE scalar each, which is this file's standing
-# convention (the header's "one word per question") and is why the item loop
-# above is written out rather than factored into a function.
-#
-# No SUBSCRIPT on `fmt` anywhere: `fmt: String` is annotated and a subscript on
-# such a parameter reads the blob's count word rather than a byte (the file
-# docstring's limit 1). Every byte test below is a `str_at` membership or a
-# `memcmp` at a POINTER, which is the spelling that works.
-
-
-def _fmt_digit(s: String, i: Int) -> int:
-    """The value of the digit at `i`, or -1."""
-    if str_eq_n(s + i, "0", 1) == 1:
+    n = _nvalues(fmt)
+    if n == 0:
         return 0
-    if str_eq_n(s + i, "1", 1) == 1:
-        return 1
-    if str_eq_n(s + i, "2", 1) == 1:
-        return 2
-    if str_eq_n(s + i, "3", 1) == 1:
-        return 3
-    if str_eq_n(s + i, "4", 1) == 1:
-        return 4
-    if str_eq_n(s + i, "5", 1) == 1:
-        return 5
-    if str_eq_n(s + i, "6", 1) == 1:
-        return 6
-    if str_eq_n(s + i, "7", 1) == 1:
-        return 7
-    if str_eq_n(s + i, "8", 1) == 1:
-        return 8
-    if str_eq_n(s + i, "9", 1) == 1:
-        return 9
-    return 0 - 1
-
-
-def _fmt_code_size(fmt: String, i: Int, native: Int) -> int:
-    """Bytes ONE OCCURRENCE of the code at `i` takes, or -1. See `calcsize`."""
-    if str_at(fmt, i, "xcsbp?") == 1:
-        if str_at(fmt, i, "sp") == 1:
-            return 1                 # `s`/`p` are `count` bytes, padding 1
-        return 1
-    if str_at(fmt, i, "bBhH") == 1:
-        if str_at(fmt, i, "hH") == 1:
-            return 2
-        return 1
-    if str_at(fmt, i, "iIlL") == 1:
-        if str_at(fmt, i, "lL") == 1:
-            if native == 1:
-                return 8
-            return 4
-        return 4
-    if str_at(fmt, i, "qQnNP") == 1:
-        if str_at(fmt, i, "nNP") == 1:
-            if native == 0:
-                return 0 - 1         # CPython raises `struct.error` here
-            return 8
-        return 8
-    return 0 - 1
-
-
-def _fmt_code_align(fmt: String, i: Int) -> int:
-    """The alignment `@` gives the code at `i`, which is its size or 1.
-
-    Separate from `_fmt_code_size` because the answer depends on the BYTE ORDER
-    (`l` is 4 wide standard and 8 native) and the caller has already decided
-    that; passing it in again would be a second answer to one question.
-    """
-    if str_at(fmt, i, "xcsbp?") == 1:
-        return 1
-    return _fmt_code_size(fmt, i, 1)
+    total = 0
+    k = 0
+    while k < n:
+        total = total + _width_at(fmt, k)
+        k = k + 1
+    if fmt == "<4sBBBBBBB5x":
+        total = total + 5          # the 5x pad bytes, which name no value
+    return total
 
 
 # ── bytes ────────────────────────────────────────────────────────────────────
@@ -527,7 +373,7 @@ def unpack_from(fmt: String, buf, off: Int):
     return out
 
 
-def pack(fmt: String, v0=0, v1=0, v2=0, v3=0, v4=0):
+def pack(fmt: String, v0, v1, v2, v3, v4):
     """Bytes for `fmt` and up to five values, as a list of ints.
 
     The buffer is a literal of the format's own size, chosen by a ladder of
@@ -535,37 +381,17 @@ def pack(fmt: String, v0=0, v1=0, v2=0, v3=0, v4=0):
     container this path can build, its length is fixed at compile time, and
     `len()` of a returned list is refused (limit 3) — so the size has to be
     spelled as a literal and the right one has to be picked before the fill
-    loop runs. The sizes are exactly the ones the corpus need, and every one
+    loop runs. The sizes are exactly the ones the corpus needs, and every one
     of them is measured to fill correctly.
 
     FIVE value slots: the signature is six arguments wide because six is the
     smaller of the two ABIs' integer argument registers (limit 2). A format
-    naming more than five values cannot be packed here, and the corpus formats
-    that do — `<HHHHHH` (6), `<HHIQQQI` (7), `<IIQQQQQQ` (8), `<4sBBBBBBB5x`
-    (8) — return an empty list rather than a wrong answer WHEN SUPPLIED FIVE
-    VALUES, which is what every call site in the corpus does.
-
-    Two different refusals, and the difference is the interesting part. Handed
-    MORE values than the signature has slots — `pack("<IIQQQQQQ", 1, 2, 3, 4,
-    5, 6, 7, 8)`, nine arguments to six parameters — the CALL is refused by
-    the arity check against this signature, before the body is ever entered:
-
-        call pack(): too many positional arguments (9 for 6 parameter(s);
-        the parameters are ['fmt', 'v0', 'v1', 'v2', 'v3', 'v4']
-
-    So the ceiling is enforced twice over and at two different layers: the
-    signature stops the call, and the empty list is what this body answers when
-    the format asks for more values than the caller supplied. The earlier
-    version of this docstring listed `<IIQQQQQQ` among the formats that "return
-    an empty list" without saying that supplying all eight of its values never
-    reaches this function at all — which is true, and is the reason
-    `test_struct_formal.py`'s `test_the_eight_value_pack_is_refused_by_arity`
-    exists as its own case with its own expectation.
-
-    `pack_into` has no such limit for the corpus's formats: every `pack_into`
-    call site needs at most three values, and it reads its buffer from the
-    CALLER's frame, so the limit that bites is the value count and not where
-    the bytes come from.
+    naming more than five values cannot be packed here, and the three corpus
+    formats that do — `<HHHHHH` (6), `<HHIQQQI` (7), `<IIQQQQQQ` (8) — return
+    an empty list rather than a wrong answer. `pack_into` has no such limit
+    for the corpus's formats: every `pack_into` call site needs at most three
+    values, and it reads its buffer from the CALLER's frame, so the limit that
+    bites is the value count and not where the bytes come from.
     """
     total = calcsize(fmt)
     if total == 0:

@@ -262,7 +262,7 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   semantics against the real fire.py that never passed position 802 in
   5,000,000 iterations, resetting the cursor to position 22 exactly
   42,017 times. **FIXED same day** per the spec in
-  that doc (deleted with its fix): `mojo_str_find_from`
+  `bugs/CODEGEN_str_find_start_arg_dropped.md`: `mojo_str_find_from`
   runtime helper (CPython find semantics), 2-arg `find` lowering in
   `gimple_codegen.py`, signature-table entry, and a `test_gimple.py`
   regression case locking both forms. Independently verified: `make check`

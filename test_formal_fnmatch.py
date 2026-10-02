@@ -42,11 +42,7 @@ import argparse
 import fnmatch
 import os
 import pathlib
-# `subprocess` was imported here and read NOTHING through it. A dead import
-# blocks a file on the formal path for exactly the reason an absent module
-# does, which is why `tools/formal_host_import_shapes.py` gives it a shape
-# (`DEAD`) rather than counting it as a use; see
-# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+import subprocess
 import sys
 import tempfile
 
@@ -84,14 +80,10 @@ _UNMASK = _UNMASK.replace(
             u = _put(out, u, h)""",
     """            u = _put(out, u, 0)""")
 # The store itself is `json.mojo`'s `put_byte` idiom, verbatim: a one-byte
-# buffer, `memset` into it, `memcpy` it out. It was here because a direct
-# `q.value() = b` was REFUSED on this path (an assignment target had to be a
-# plain name), which is why three host modules carried the same four lines
-# rather than one of them carrying a helper the others call. The store exists
-# now — `model.pointer_store_lowering`, the store mirror of the pointer value
-# model's load, on both backends — and these modules can be shortened to
-# `out.value() = b` whenever someone owns that; nothing here depends on the
-# round trip through `malloc`, so leaving it is a cleanup and not a fix.
+# buffer, `memset` into it, `memcpy` it out. A direct `q.value() = b` is refused
+# on this path (an assignment target must be a plain name), which is why three
+# host modules carry the same four lines rather than one of them carrying a
+# helper the others call.
 _UNMASK = ("def _put(out, at, b) -> int:\n"
            "    var one: Pointer[UInt8] = malloc(1)\n"
            "    memset(one, b & 255, 1)\n"
@@ -302,7 +294,7 @@ def group_cross(verbose):
           f"disagree; the corpus is too small to pin the flag")
     # `import pathlib` and a dotted call, NOT `from pathlib import match as
     # pmatch`: a from-import ALIAS is not honoured for a call into another
-    # image (FORMAL_from_import_alias_dangles_the_call), which is a
+    # image (bugs/FORMAL_from_import_alias_dangles_the_call.md), which is a
     # refusal naming a name rather than a wrong answer, and the first version of
     # this group spelled it that way.
     record = (f'        printf("%d=%d/%d{REC}{REC}", k, '

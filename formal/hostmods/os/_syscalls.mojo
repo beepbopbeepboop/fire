@@ -1,7 +1,7 @@
 """The C library this module needs, and nothing else.
 
-Every call into libSystem that `os`, `os.path`, `platform` and `shutil` make is
-spelled here, once, and nowhere else. Three reasons, in the order they mattered while
+Every call into libSystem that `os`, `os.path` and `platform` make is spelled
+here, once, and nowhere else. Three reasons, in the order they mattered while
 writing it.
 
   `platform` is here for the same reason the other two are, and it is worth
@@ -28,24 +28,6 @@ writing it.
    question with a short, complete answer, and it is the answer in this file.
    Every name below was measured to bind on this target before it was relied
    on.
-`shutil` is in the list because it is the one module in `formal/hostmods/`
-  that COPIES BYTES, and the stdio calls are how: `fopen`/`fwrite`/`fread`/
-  `fclose` rather than the three-argument `open`/`write`/`read`, because
-  `fs_open_ro` below says in so many words that this path lowers `open` itself
-  and refuses the C library's own spelling of it — there is no `open(p, flags,
-  mode)` to call. A `FILE *` is a POINTER, so it is a word, and `fopen` takes a
-  MODE STRING, which is the one thing this path does have a literal spelling
-  for. `fs_read`'s docstring says "this path has no `FILE`", which is about the
-  struct and not about the pointer and is worth keeping in mind when reading
-  the two against each other: there is no `FILE` to declare a field on, and
-  every `FILE *` is one word, which is all a descriptor needs to be.
-
-  `signal` is in the list for the same reason and by the same rule, and it is
-  the one case where the collision is not avoidable by renaming the WRAPPER:
-  CPython spells its own wrapper `strsignal`, so the name this tree wants is
-  the name the C library already has, and the two implementations have to live
-  in different units. `fs_strsignal` below is the whole of it.
-
 
 3. THE STRING PRIMITIVES ARE NOT STRING FEATURES. Concatenation, `strip`,
    `replace` and `split` are refused on this path because a string is a bare
@@ -91,37 +73,6 @@ out rather than guessed at:
     that arrived from a call is classified as a word, so `len(p)` on a
     `char *` this module received is refused. `str_len` is `strlen`, which is
     the same computation with no kind to guess.
-
-  * **`p + k` IS BYTE ARITHMETIC, AND THE ONLY THING THAT STOPS IT BEING A
-    SILENT WRONG ANSWER IS THE SUBSCRIPT.** `p[i]` on a base with a declared
-    pointee scales by that pointee's width — that is `p[i]` at the width, and
-    `listdir`'s `b[1 + n]` depends on it — but `p + k` adds the RAW INTEGER, on
-    every architecture, for every pointee width. Measured here, both
-    architectures, over five spellings of the same arithmetic so that the shape
-    of the expression is not what decides it:
-
-        var b: Pointer[Int64] = malloc(8 * 64)      # base
-        b + 1              -> base + 1     (not base + 8)
-        b + n              -> base + n     (not base + 8n)
-        b + 1 + 2 * n      -> base + 1 + 2n
-        b + (1 + 2 * n)    -> base + 1 + 2n
-        b + 8 * (1 + n)    -> base + 8 + 8n
-
-    `bugs/FORMAL_pointer_value_model.md` §9 records this as open with the next
-    step (`_emit_binop` is the hottest site in both backends and scaling there
-    wants its own diff), and what is written there is about a DEREFERENCE: the
-    guard refuses `q = p + k` when the pointee is wider than a byte AND
-    something dereferences `q`. **Passing the same expression as an ARGUMENT is
-    not a dereference, so nothing refuses it** — `memset(b + 1 + 2 * n, 0, 16)`
-    on an `Int64` blob compiles, links, runs, and zeroes sixteen bytes at
-    offset 107 of a blob whose pairs live at 8-byte offsets. That is not a
-    second defect; it is this one with the guard out of the way, and it is worth
-    a paragraph here because the trap is invisible: `formal/hostmods/os/
-    __init__.mojo`'s `environ_set` had that memset for one build and the image
-    corrupted a heap-allocated blob at a word that no line of the source
-    mentions. **So: address a wider-than-byte blob with `b[i]`, never with
-    `b + i`,** and every `memmove`/`memset`/`strchr` call below that offsets a
-    `Pointer[UInt8]` is fine as it stands because byte is the scale there.
 
   * `ord`/`chr`/`str`. There is no builtin by those names here; a call to one
     is an unbound extern, and `str(65)` segfaults.
@@ -214,23 +165,6 @@ def str_append(dst, src) -> str:
     `strcat` for the same reason `str_copy` is `memmove`: the C library's
     algorithm is the answer, and a second implementation of it is a second
     thing to be wrong.
-
-    **IN PLACE, AND THE ROOM IS THE CALLER'S TO PROVIDE.** This writes
-    `strlen(src) + 1` bytes at `dst + strlen(dst)` and nothing checks that they
-    fit, so a `dst` sized for its own string alone is overrun by every byte of
-    `src`. That is not hypothetical and it was in this tree until 2026-10-04:
-    `os/path/__init__.mojo`'s `join` built `str_dup(a)` — a block of
-    `strlen(a) + 1`, room for `a` and its terminator and nothing else — and
-    handed it here to append `b`, so every byte of `b` and its terminator landed
-    past the end of the allocation while `join`'s ANSWER stayed correct and every
-    differential test of it passed. It showed up as a `SIGABRT` from a caller
-    (`formal/hostmods/glob.mojo`'s `**` walk, 10 runs in 10) rather than as a
-    wrong string, which is the usual way a heap overrun presents.
-
-    So: `str_build(a, b)` when the answer is a NEW string, which is the shape
-    almost every caller wants and is what sizes the allocation correctly; and
-    this only when the destination is a buffer with room already reserved for
-    the append.
     """
     strcat(dst, src)
     return dst
@@ -419,167 +353,9 @@ def str_rstrip_len(s, m) -> int:
 
 
 def str_chr_from(s, i, c) -> str:
-    """Pointer to the first `c` at or after `s[i]`, or 0.
-
-    **`c` IS A CHARACTER CODE AND NOT A STRING**, which the signature does not
-    say and which cost an afternoon the first time it was called from another
-    module: `strchr`'s second parameter is an `int`, so `str_chr_from(s, 0, "/")`
-    hands it a `char *` as a character and it finds nothing, EVER — every input
-    answers 0. The one caller in this tree, `os/path/__init__.mojo`'s
-    `normpath`, passes `SLASH = 47` for exactly this reason, and `47` next to
-    `str_chr_from` in that file is the documentation. This docstring is here so
-    that the next reader does not have to find it.
-
-    So the whole of `shutil`'s `PATH` splitting spells `":"` as 58 and `"/"` as
-    47, and `formal/hostmods/shutil.mojo`'s `_has_slash` says why at its own
-    definition.
-    """
+    """Pointer to the first `c` at or after `s[i]`, or 0."""
     return strchr(s + i, c)
 
-
-# The bytes CPython's `str.strip()` removes, as the SET `strspn` wants. Module
-# level because `str_strip` is the only reader and the spelling is the part that
-# has to be right: it is CPython's whitespace set restricted to characters a
-# single byte can hold. `\x1c`-`\x1f` are in it because `Py_UNICODE_ISSPACE`
-# says they are, and `str.isspace()` says so on this host's CPython — measured,
-# `' \t\n\r\v\f\x1c\x1d\x1e\x1f\x85a\x85 \t'.strip()` is `'a'`. `\x85` (U+0085
-# NEL) is deliberately NOT here: in UTF-8 it is the two bytes `\xc2\x85`, and a
-# byte-wise `strspn` cannot see it. That is a RECORDED DIVERGENCE rather than an
-# omission, and no caller in this tree strips a string that can hold one — the
-# only `strip` is `platform`'s, over `uname(3)` fields.
-_STR_WS = " \t\n\r\v\f\x1c\x1d\x1e\x1f"
-
-
-def str_strip(s) -> str:
-    """A fresh copy of `s` with leading and trailing whitespace removed.
-
-    The caller owns the result, as it does for every allocating function in
-    this module — `str.strip()` returns a NEW string in CPython and this is the
-    same contract, not an interior pointer into `s`.
-
-    Why it is written out rather than taken from the C library: `strspn` is
-    already here for `str_at`/`str_lead`, so the two ends are two scans over a
-    set the caller cannot index (`str_at` takes a SET because `strspn` takes a
-    NUL-terminated one), and the alternative — `strcspn` against a negated set,
-    which libc has — is a second spelling of the same question in the same file.
-    The whitespace SET is `str_strip`'s own `_STR_WS`, stated there.
-    """
-    n = str_len(s)
-    i = 0
-    while i < n and str_at(s, i, _STR_WS) == 1:
-        i = i + 1
-    j = n
-    while j > i and str_at(s, j - 1, _STR_WS) == 1:
-        j = j - 1
-    return str_copy(str_alloc(j - i), s + i, j - i)
-
-
-def str_find(s, pat, from_i) -> int:
-    """Index of the first occurrence of `pat` at or after `s[from_i]`, or -1.
-
-    A scan, for the same reason `str_rfind` is one, and the second reason is
-    this path's own: `strstr` returns a POINTER and every caller here wants an
-    OFFSET, and turning one into the other is `p - s` on a bare `char *` — a
-    difference of two words this value model has no shape for. The trap is
-    easy to fall into and was: `str_len(p)` is not the offset, it is the length
-    of the SUFFIX from `p` to the NUL, so `str_len(strstr(s, "bc"))` for
-    `"abcabc"` is 5 and the difference from `str_len(s)` is -1. Measured, on an
-    image built before this docstring said it.
-
-    `strrstr` is absent on this target either (`str_rfind`'s docstring), so one
-    bounded compare at each offset answers both questions, and `memcmp` does
-    bind.
-
-    **An EMPTY `pat` answers `from_i`, which is CPython's `str.find` and not
-    what the scan above would give by accident.** A zero-length compare matches
-    at every offset, so the first one IS `from_i`; saying so is better than
-    leaving it to be rediscovered. `str_count` and `str_replace_all` are the
-    two callers and both refuse an empty needle explicitly, because for THEM
-    CPython's empty-needle rules differ and neither is a scan (see
-    `str_replace_all`)."""
-    n = str_len(s)
-    m = str_len(pat)
-    if m == 0:
-        return from_i
-    i = from_i
-    if i < 0:
-        i = 0
-    while i + m <= n:
-        if str_eq_n(s + i, pat, m) == 1:
-            return i
-        i = i + 1
-    return 0 - 1
-
-
-def str_count(s, pat) -> int:
-    """How many non-overlapping occurrences of `pat` are in `s`.
-
-    Its own pass rather than a `realloc` loop in `str_replace_all`, and the
-    reason is the same one `platform.mojo`'s `_int_value`/`_int_ok` pair gives:
-    a number that cannot be a sentinel and a buffer that has to be sized before
-    it is written are two questions, and one function that answers both has to
-    carry the reallocation with it. This target has `malloc` and no `realloc`
-    worth using through this path, so "count, then allocate once, then fill" is
-    the shape that needs no allocator at all.
-    """
-    n = str_len(s)
-    m = str_len(pat)
-    if m == 0:
-        return 0
-    hits = 0
-    i = 0
-    while i + m <= n:
-        at = str_find(s, pat, i)
-        if at < 0:
-            break
-        hits = hits + 1
-        i = at + m
-    return hits
-
-
-def str_replace_all(s, frm, to) -> str:
-    """A fresh copy of `s` with EVERY occurrence of `frm` replaced by `to`.
-
-    The caller owns the result. EVERY occurrence and not the first: CPython's
-    `str.replace` has no count argument, and the one caller
-    (`platform._platform`) replaces a SINGLE CHARACTER, so a first-only version
-    would be indistinguishable from this one there and wrong everywhere else.
-    That is also why it is a substring replace and not a word-boundary test —
-    `platform` drops the word `unknown` from the MIDDLE of a component as
-    readily as from the whole of one, which is CPython's own behaviour
-    (`platform._platform('unknown-x')` is `'-x'`).
-
-    Occurrences are NON-OVERLAPPING and counted left to right, which is
-    `str.replace`'s rule: `str_replace_all('aaa', 'aa', 'b')` is `'ba'`, and a
-    scan that restarted one byte after a match would say `'ab'`.
-
-    **A RECORDED DIVERGENCE, and it is CPython's `str.replace` that is odd
-    here**: `s.replace("", "x")` in CPython inserts `x` at every position
-    INCLUDING both ends, because an empty needle matches at every offset. That
-    rule is not implemented — an empty `frm` returns `s` unchanged, and
-    `str_find`/`str_count` say so rather than reporting a match at every index.
-    No caller passes one (every needle in this tree is a non-empty literal), and
-    the rule is not expressible as a left-to-right scan of non-overlapping
-    matches at all: at offset 0 the empty match would have to be taken and the
-    scan then restarted one byte later, forever."""
-    n = str_len(s)
-    if str_len(frm) == 0:
-        return str_dup(s)
-    hits = str_count(s, frm)
-    if hits == 0:
-        return str_dup(s)
-    out = str_alloc(n - hits * str_len(frm) + hits * str_len(to) + 1)
-    used = 0
-    i = 0
-    while 1:
-        at = str_find(s, frm, i)
-        if at < 0:
-            used = str_put(out, used, s + i, n - i)
-            break
-        used = str_put(out, used, s + i, at - i)
-        used = str_put(out, used, to, str_len(to))
-        i = at + str_len(frm)
-    return out
 
 
 def fs_cwd() -> str:
@@ -608,31 +384,6 @@ def fs_cwd() -> str:
 def fs_access(p, mode) -> int:
     """`access(p, mode)`. `mode` 0 is F_OK: does the path resolve at all."""
     return access(p, mode)
-
-
-def fs_arc4random(buf, n) -> int:
-    """`arc4random_buf(buf, n)`: `n` random bytes into `buf`. Always 0.
-
-    The C library's own CSPRNG, and the only randomness a formal image has:
-    `arc4random(3)` is in libSystem, so this needs no library outside the one
-    this target links (`FORMAL.md` §1) and no `/dev/urandom` descriptor.
-
-    Here for `formal/hostmods/tempfile.mojo`, which is the one name in this
-    tree that needs a name nothing else has taken — `mkdtemp`'s eight
-    characters. The alternative that was measured and rejected is
-    `arc4random()`, which takes no arguments and returns the value directly: it
-    binds, and every one of five draws on this target came back under 2**32,
-    which is the signature of a 64-bit return read as 32 bits rather than of a
-    53-bit generator. Reading the bytes out of a buffer sidesteps the question
-    entirely, and `n` is a byte count this path can pass.
-
-    **0 rather than the call's own return value**, and that is deliberate: the C
-    function returns `void`, so there is nothing to hand back, and a wrapper
-    that returned whatever happened to be in the result register would be
-    reporting a number this tree cannot vouch for. Callers read the bytes.
-    """
-    arc4random_buf(buf, n)
-    return 0
 
 
 def fs_chdir(p) -> int:
@@ -665,56 +416,6 @@ def fs_getenv(name) -> str:
     return getenv(name)
 
 
-def fs_getpwnam_dir(name) -> str:
-    """`getpwnam(name)->pw_dir`, COPIED, or 0 when there is no such user.
-
-    **The `struct passwd` LAYOUT IS THIS TARGET'S, and it is measured rather
-    than transcribed.**  `pw_dir` is at byte 48, which is word 6 of the struct
-    on LP64:
-
-        pw_name      0      pw_class   32
-        pw_passwd    8      pw_gecos   40
-        pw_uid      16      pw_dir     48      <- this one
-        pw_gid      20      pw_shell   56
-        pw_change   24      pw_expire  64      sizeof(struct passwd) == 72
-
-    `pw_uid` and `pw_gid` are `uid_t`/`gid_t` — 32 bits — and `pw_change` is a
-    `__darwin_time_t` that the compiler aligns to 8, so `pw_gid` at 20 and
-    `pw_change` at 24 are contiguous with no padding between them and the
-    pointers start at 32.  That is macOS's layout and NOT Linux's: a Linux
-    `struct passwd` has no `pw_change`, no `pw_class` and no `pw_expire`, so
-    the same six words would be reading three fields the target does not have.
-    Measured against the C library's own `getpwnam` through `ctypes`, on this
-    machine, for `root`:
-
-        0 "root"   1 "*"   4 ""   5 "System Administrator"
-        6 "/var/root"   7 "/bin/sh"
-
-    which is the table above read back through a `Pointer[Int64]`.
-
-    **WHY THE STRUCT IS READ AS A `Pointer[Int64]` AND NOT AS A FIELD.**  A
-    value on this path is one 64-bit word, so `getpwnam`'s answer is a word
-    whichever way it is declared, and a subscript on a base with a DECLARED
-    pointee is a load at that pointee's width (`_syscalls.mojo`'s byte-read
-    section).  `pw[6]` is therefore one 64-bit load at byte 48 — the pointer —
-    where six one-byte loads would be six bytes of an address.
-
-    **THE COPY IS THE POINT.**  A `struct passwd *` and the strings it points at
-    belong to the C library and are invalidated by the next call to any of the
-    `getpw*` family on the same buffer.  Handing `pw_dir` back as an interior
-    pointer is the `fs_dirent_name` bug in a different function: `expanduser`
-    would answer on a name that changes under the caller.  So this copies,
-    which is what `str_dup` is for.
-    """
-    var pw: Pointer[Int64] = getpwnam(name)
-    if pw == 0:
-        return 0
-    var d: str = pw[6]
-    if d == 0:
-        return 0
-    return str_dup(d)
-
-
 def fs_setenv(name, value, overwrite) -> int:
     """`setenv(name, value, overwrite)`: 0 on success, -1 on failure."""
     return setenv(name, value, overwrite)
@@ -723,78 +424,6 @@ def fs_setenv(name, value, overwrite) -> int:
 def fs_unsetenv(name) -> int:
     """`unsetenv(name)`: 0 on success, -1 on failure."""
     return unsetenv(name)
-
-
-def fs_environ_vec() -> Pointer[Pointer[UInt8]]:
-    """The process's `char **environ`, or 0 when the host will not say.
-
-    THE ONE WAY THIS PATH REACHES THE ENVIRONMENT AS A LIST OF NAMES, and it is
-    here rather than in `os/__init__.mojo` because it is the only place in this
-    file that is not a direct libc call: everything above it is `return f(...)`,
-    and this one computes.  `getenv` answers ONE key and the question "what
-    keys are there" needs the array, so this is where the two halves meet.
-
-    **WHY `dlsym` AND NOT `_NSGetEnviron`.** libSystem has a function that
-    returns this array — `_NSGetEnviron()` — and it is the obvious spelling,
-    and it does not lower on this path: a callee whose name begins with `_`
-    cannot be bound.  `model.libc_source_name` strips the leading underscore
-    before asking the C library whether it provides the name, and macOS's
-    `dlsym` does NOT add the underscore back — measured:
-
-        >>> ctypes.CDLL('/usr/lib/libSystem.B.dylib')._NSGetEnviron   # OK
-        >>> ctypes.CDLL('/usr/lib/libSystem.B.dylib').NSGetEnviron    # dlsym: not found
-
-    so the audit asks about a name that does not exist and refuses the build
-    with "the image would bind 1 symbol(s) that nothing provides:
-    _NSGetEnviron".  The defect is real and it is written down, with its two
-    one-line repairs, in
-    `bugs/FORMAL_libc_call_whose_name_starts_with_an_underscore.md`; this is
-    not that fix and does not touch the linker, because a light change to
-    `_bind_info` on both architectures is not a light change.
-
-    So the array is reached the way every other program reaches a DATA symbol
-    it was not linked against — by asking the dynamic loader for it at RUN
-    time.  `dlopen(0, 0)` is a handle to this very image (`NULL` is the main
-    program, and `0` is the flags), and `dlsym` on that handle searches it and
-    the libraries it was linked against, which includes libSystem; `environ` is
-    a global data symbol libSystem exports.  Measured on both architectures:
-
-        $ python3 fire.py build --formal --no-prove -o p .tmp/probe.mojo
-        $ ./p
-        E0 [MANPATH=…] len=372@@E1 [TERM_PROGRAM=Apple_Terminal] len=27@@
-
-    The alternative spelling `dlsym(-2, name)` — `RTLD_DEFAULT`, a Darwin
-    extension whose value is literally `(void *) -2` — binds too and is one
-    call shorter, and it is not used: a magic negative pointer is a fact about
-    one library's header rather than about the loader, and the handle form says
-    the same thing in a way both platforms spell the same way.
-
-    **THE THREE POINTER TYPES ARE THE WHOLE OF THIS FUNCTION.** `environ` is
-    declared `char **`, so the address of it is `char ***`, and the value is
-    `char **`:
-
-        char ***at_environ = dlsym(handle, "environ");   # the slot
-        char **envp      = *at_environ;                  # the array
-
-    and this path's subscript reads at the width the ANNOTATION says, so the
-    annotation on the local is not documentation: `var q: Pointer[UInt8] =
-    dlsym(…)` then `q[0]` is a ONE-BYTE load and the program dies of SIGSEGV
-    on the first `envp[i]` — measured, arm64, and the image built and ran to
-    get there.  `Pointer[Pointer[Pointer[UInt8]]]` is what says "this word
-    points at a word which points at a word".
-
-    0 rather than a crash when the loader will not name it, which is the same
-    answer `fs_opendir` gives for a directory that is not there, and for the
-    same reason: there is no exception to raise (the note at the top of
-    `formal/hostmods/os/__init__.mojo`).
-    """
-    var h: Pointer[UInt8] = dlopen(0, 0)
-    if h == 0:
-        return 0
-    var at_environ: Pointer[Pointer[Pointer[UInt8]]] = dlsym(h, "environ")
-    if at_environ == 0:
-        return 0
-    return at_environ[0]
 
 
 def fs_lseek(fd, off, whence) -> int:
@@ -822,248 +451,9 @@ def fs_read(fd, buf, n) -> int:
     return read(fd, buf, n)
 
 
-def fs_fopen(p, mode) -> int:
-    """`fopen(p, mode)`: a `FILE *`, or 0.
-
-    THE WRITING PATH, and it goes through the stdio calls rather than through
-    `open(2)` for the reason this file's header gives: `open` on this path is a
-    LOWERED BUILTIN that takes a mode string and refuses any other spelling, so
-    `O_WRONLY | O_CREAT | O_TRUNC` is not available even though libSystem has
-    the function that takes it. `fopen` takes the same information as the
-    spelling this path has, so "wb" here means exactly what `O_WRONLY |
-    O_CREAT | O_TRUNC, 0666` means — with the one difference that matters and is
-    CPython's own: `fopen`'s mode gives NO PERMISSIONS argument, so the file is
-    created with the umask's default (0644 with the usual umask 022), and
-    `shutil.copyfile` therefore produces the same mode CPython's
-    `shutil.copyfile` produces only because CPython also does not chmod. That
-    is measured by `test_formal_shutil.py`, which copies a file both ways and
-    compares the resulting `st_mode`.
-
-    The `FILE *` is carried as an `int`, which is the pointer value model and is
-    what every pointer here is (`fs_readdir`'s docstring says the same).
-    """
-    return fopen(p, mode)
-
-
-def fs_fwrite(f, buf, n) -> int:
-    """`fwrite(buf, 1, n, f)`: items written, which is `n` or fewer.
-
-    The size argument is `1` so the return value is a BYTE COUNT and compares
-    with what the caller asked for; `fwrite(buf, n, 1, f)` would return 0 or 1
-    and say nothing about a short write.
-    """
-    return fwrite(buf, 1, n, f)
-
-
-def fs_fread(f, buf, n) -> int:
-    """`fread(buf, 1, n, f)`: items read — bytes, 0 at end of file.
-
-    The complement of `fs_fwrite`, and the reason `shutil` needs it: `fs_read`
-    works on a bare DESCRIPTOR and this path cannot make a bare descriptor for
-    writing, so the copy loop reads and writes through stdio on both sides.
-    Reading and writing through different interfaces would work too, and would
-    be one function fewer — but it would leave the caller mixing a descriptor
-    and a `FILE *` for the same file, which is the kind of asymmetry that costs
-    an afternoon later.
-    """
-    return fread(buf, 1, n, f)
-
-
-def fs_fclose(f) -> int:
-    """`fclose(f)`: 0 on success. FlUSHES, which is the whole reason stdio is
-    used at all: a `FILE *`'s buffer reaches the filesystem at `fclose`, so a
-    copy that never closes leaves an empty destination and a zero exit status.
-    """
-    return fclose(f)
-
-
-def fs_utimes(p, asec, ausec, msec, musec) -> int:
-    """`utimes(p, {atime, mtime})`: 0 on success, -1 on failure.
-
-    THE `struct timeval` IS BUILT HERE AND NOT BY THE CALLER, because its
-    layout is the ABI's rather than the source's: two `{ time_t tv_sec;
-    suseconds_t tv_usec }`, eight bytes each on a 64-bit target, 32 bytes in
-    total, and a caller that assembled it would be writing four offsets it has
-    no way to check. Same rule as `struct stat` above, for the same reason, and
-    for the same reason the offsets are written out here rather than trusted:
-    the seconds fields are at 0 and 16 and the microsecond fields at 8 and 24.
-
-    `ausec` and `musec` are separate PARAMETERS rather than one nanosecond
-    number because `struct stat`'s time fields are nanoseconds
-    (`st_mtimespec.tv_nsec` at offset 56) while `timeval`'s are microseconds,
-    and a caller reading a stat and setting a timeval has to divide. Doing the
-    division in the caller is honest about where it happens; doing it here would
-    hide a rounding decision inside a wrapper.
-    """
-    var tv: Pointer[UInt8] = malloc(32)
-    memset(tv, 0, 32)
-    _put_time(tv, 0, asec, ausec)
-    _put_time(tv, 16, msec, musec)
-    var rc = utimes(p, tv)
-    free(tv)
-    return rc
-
-
-def _put_time(tv: Pointer[UInt8], at, sec, usec) -> int:
-    """Seconds at `tv + at` and microseconds at `tv + at + 8`, little-endian.
-
-    One byte at a time through `le64` for the reason every other reader in this
-    file is: the source declares no struct, so a load of the field's declared
-    width is what C does and a wider read would be a guess about alignment.
-    """
-    _put_le64(tv + at, sec)
-    _put_le64(tv + at + 8, usec)
-    return 0
-
-
-def _put_le64(tv: Pointer[UInt8], v) -> int:
-    """Little-endian 64-bit STORE of `v` at `tv`, byte by byte.
-
-    THE STORE COUNTERPART of `le64`, and it exists because this file had a
-    reader for every field it wanted and no writer for any of them. A caller
-    cannot write into a `struct` it does not declare any more than it can read
-    one, and this is the same constraint on the other side: `memset` a whole
-    buffer and then set two words in it. It is eight one-byte `memset`s, which
-    is what `le64`'s reader already costs.
-
-    `v >> 8` and `v >> 16` and so on are ARITHMETIC SHIFTS on a 64-bit word, so
-    the byte extracted is the one the platform's `little-endian` means. A
-    big-endian target would need `le64`'s reader mirrored here, and this file's
-    `be64` already says the same thing about its own reader.
-    """
-    memset(tv, v & 255, 1)
-    memset(tv + 1, (v >> 8) & 255, 1)
-    memset(tv + 2, (v >> 16) & 255, 1)
-    memset(tv + 3, (v >> 24) & 255, 1)
-    memset(tv + 4, (v >> 32) & 255, 1)
-    memset(tv + 5, (v >> 40) & 255, 1)
-    memset(tv + 6, (v >> 48) & 255, 1)
-    memset(tv + 7, (v >> 56) & 255, 1)
-    return 0
-
-
-def fs_flock(fd, operation) -> int:
-    """`flock(fd, operation)`: 0 on success, -1 on failure.
-
-    **HERE AND NOT IN `formal/hostmods/fcntl.mojo` BECAUSE OF THE NAME
-    COLLISION RULE AT THE TOP OF THIS FILE**, and it is the rule's first
-    example again: `flock` is a libc function AND the name `fcntl.mojo`'s API
-    wants, so a module that defined `def flock(fd, operation)` and called
-    `flock(fd, operation)` inside it would emit a call to ITSELF with the
-    wrong arity. `getcwd`, `chdir`, `remove` and `rename` are all in the same
-    position and are all wrapped here for the same reason.
-    """
-    return flock(fd, operation)
-
-
-def fs_fcntl(fd, cmd, arg) -> int:
-    """`fcntl(fd, cmd, arg)`: 0 on success, -1 on failure.
-
-    THREE FIXED ARGUMENTS AND NO FOURTH, which is `fcntl(2)`'s own shape once
-    the variadic tail is gone: the command is the second parameter and the
-    argument is the third, and `fcntl` is called with three arguments for every
-    command here. **The variadic ARGUMENT IS A POINTER for `F_SETLK` and
-    friends, and that is not spelt** — see `formal/hostmods/fcntl.mojo`'s
-    `lockf` docstring, which is where the consequence is written down. The
-    commands reachable through this wrapper are the ones whose argument is an
-    integer: `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`.
-    """
-    return fcntl(fd, cmd, arg)
-
-
-def fs_strsignal(sig) -> str:
-    """`strsignal(sig)`: the C library's own description of a signal number.
-
-    **HERE FOR THE NAME COLLISION RULE AT THE TOP OF THIS FILE**, and it is the
-    rule's second kind of case: `strsignal` is a libc function AND the name
-    `formal/hostmods/signal.mojo`'s API wants, because CPython spells its
-    wrapper the same way. A unit that both declares `def strsignal(sig)` and
-    calls `strsignal(sig)` emits a call to ITSELF — measured, not argued: the
-    first version of `signal.mojo` did exactly that and the image died with
-    exit 2 and printed nothing, which is a silent recursion wearing the costume
-    of a crash.
-
-    NOT A TABLE OF STRINGS, which is the other reason it is here rather than
-    written out: on this platform `strsignal(15)` is `"Terminated: 15"` — the
-    number is IN the text — while Linux's is `"Terminated"`, so any table
-    written in this tree would be right on one platform and a plausible wrong
-    answer on the other. A signal number that is not a signal has no answer and
-    the C library's answer for that is the empty string.
-    """
-    return strsignal(sig)
-
-
-def fs_getpid() -> int:
-    """`getpid()`: this process's pid, which is never 0 and never negative."""
-    return getpid()
-
-
-def fs_kill(pid, sig) -> int:
-    """`kill(pid, sig)`: 0 on success, -1 with ESRCH if there is no such process.
-
-    The send half of `signal.raise_signal`, which is what CPython's own source
-    does (`raise_signal` is `kill(getpid(), signum)`), and it is here so that
-    `signal.mojo` contains no libc call of its own and the question "what does
-    this tree ask of the operating system" keeps the short complete answer this
-    file's header promises.
-
-    `SIGKILL` and `SIGSTOP` cannot be caught, blocked or ignored, so a caller
-    that sends one of those to itself ends the image; that is the platform's
-    rule and not a choice this wrapper makes.
-    """
-    return kill(pid, sig)
-
-
 def fs_mkdir(p, mode) -> int:
     """`mkdir(p, mode)`: 0 on success, -1 with EEXIST if it is already there."""
     return mkdir(p, mode)
-
-
-def fs_mkdtemp(tmpl) -> str:
-    """`mkdtemp(tmpl)`: the path of a fresh directory, with `tmpl` REPLACED.
-
-    **`mkdtemp(3)` rather than `mkdir` in a loop**, and the reason is `errno`:
-    CPython's `mkdtemp` retries `TMP_MAX` times when a candidate name is already
-    taken, and telling "already taken" from "could not be made" means reading
-    `__error`, whose leading underscore is not a symbol this path can bind (see
-    this module's own docstring). The C library's call does that retry with the
-    error code to itself, so one call here is EXACT where a loop here could only
-    be an approximation of it.
-
-    A TEMPLATE and not a prefix/suffix pair, because that is the C library's
-    interface: the last six bytes must be `XXXXXX`, the C library replaces them
-    with the name it chose and writes the whole path back through the pointer.
-    So this DUPLICATES the caller's string, calls with the copy, and returns the
-    copy — a fresh writable buffer, which is why `str_dup` and not the input.
-    That is the whole reason this wrapper exists at all: a `char *` the C
-    library rewrites has to be writable, and a string literal on this path is in
-    a read-only text section.
-
-    The empty string when no name could be made, which is what every other
-    failure here is (there is no exception on this path — FORMAL.md phase 7).
-
-    The six random characters are THE C LIBRARY'S, so what comes back is a real
-    answer about a real directory rather than a value this tree chose.
-
-    **AND IT IS NOW SOMEBODY'S BODY**: `formal/hostmods/tempfile.mojo`'s
-    `mkdtemp(prefix)` is one call to this, over a template of `prefix` +
-    `XXXXXX` in the directory `gettempdir` names. It replaced a hand-written
-    loop there that drew eight characters and retried `mkdir`, and the loop
-    could not be right: this path cannot read `errno` (`__error`'s leading
-    underscore, this module's own header), so every failure was a "collision"
-    and a directory that could not be made cost the whole budget
-    (fixed 2026-10-03 in 8c311e87, where `mkdtemp` became one
-    `mkdtemp(3)` call: a loop over `mkdir` here cannot read `errno`, so it retried
-    every failure as if it were a collision).
-    Two consequences recorded where they are paid rather than here: the name is
-    `prefix` + six characters of `[A-Za-z0-9]` where it was `prefix` + eight of
-    CPython's alphabet, and the mode is the platform's `0o700` rather than a
-    literal this tree passes — `test_formal_tempfile.py` reads both back.
-    """
-    b = str_dup(tmpl)
-    if mkdtemp(b) == 0:
-        memset(b, 0, 1)
-    return b
 
 
 def fs_open_ro(p) -> int:
@@ -1629,33 +1019,11 @@ def fs_unlink(p) -> int:
 
 
 def fs_free(p) -> int:
-    """`free(p)`: 0 on success, for a buffer this module allocated that the
-    caller is done with. Nothing above calls it: the strings `os` and `os.path`
-    return are the caller's to keep, and releasing one while a derived string
-    still points into it is the caller's decision, not this module's.
-
-    THE `0` IS NOT DECORATION; IT IS THE FIX.  This used to be
-    `return free(p)`, and `free` is `void`: the return register is whatever the
-    previous call left in it, so `print(fs_free(p))` printed an UNDEFINED value.
-    Measured 2026-10-05, both architectures, under `tools/formal_memcheck.py`'s
-    stack/register poison (0xA5A5... below sp and in every register the ABI
-    lets a function read before writing):
-
-        plain arm64   10485760        plain x86-64   2156285947
-        poison arm64   4194304        poison x86-64   2149996539
-
-    Four different answers to `did this free succeed`, changing with the
-    contents of a register nothing in the program wrote -- and invisible to
-    every oracle this tree has, because no CPython program has an `fs_free` to
-    compare against.  `platform_free` and `os_free` both `return fs_free(p)`,
-    so they inherited it and are fixed by this one change rather than three.
-
-    `free` cannot report failure, so 0 is the only thing here that can be
-    true, and it is what this module's other wrappers report for success --
-    `fs_unlink` above, `fs_close`, `fs_chdir`.
-    """
-    free(p)
-    return 0
+    """`free(p)`, for a buffer this module allocated that the caller is done
+    with. Nothing above calls it: the strings `os` and `os.path` return are
+    the caller's to keep, and releasing one while a derived string still points
+    into it is the caller's decision, not this module's."""
+    return free(p)
 
 
 # ── What the KERNEL says, rather than what the filesystem says ───────────────

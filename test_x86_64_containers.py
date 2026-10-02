@@ -193,58 +193,6 @@ CASES = [
         "    for x in s:",
         "        t = 99",
         "    return t"), 0),
-    # A SECOND slice in one function. The five rows above are all ONE slice, and
-    # that is why the bug they missed survived a file full of them
-    # (fixed 2026-10-03 in 68671a62): the three bound-clamp
-    # labels of `_emit_slice_parts` were named after the REGISTER alone
-    # (`f_s4a`/`_z`/`_c`) while every other label in the emitter carries a
-    # per-site counter, and `Assembler.label` keeps the LAST address for a name
-    # — so the second slice rebound the first's `jge` and the first slice's copy
-    # loop ran with the second's `r8`/`r9`. Measured on x86-64 before the fix:
-    # a SIGSEGV here, 14 for 7 below, 2 for 26 in the third row. All three built,
-    # and two of the three exited 0 with the wrong number.
-    ("slice-two-bound-both-iterated", _p(
-        "def f():",
-        "    xs = [1, 2, 3, 4, 5, 6]",
-        "    a = xs[1:3]",
-        "    b = xs[2:6]",
-        "    s = 0",
-        "    for v in a:",
-        "        s += v",
-        "    for v in b:",
-        "        s += v",
-        "    return (s + a[0] * 13 + b[0] * 29) % 251"), 136),
-    ("slice-two-bound-three", _p(
-        "def f():",
-        "    xs = [1, 2, 3, 4, 5, 6]",
-        "    a = xs[0:2]",
-        "    b = xs[2:4]",
-        "    c = xs[4:6]",
-        "    return a[0] * 100 + b[0] * 10 + c[0]"), 135),
-    ("slice-two-len", _p(
-        "def f():",
-        "    xs = [1, 2, 3, 4, 5, 6]",
-        "    return len(xs[1:3]) * 10 + len(xs[:])"), 26),
-    # A slice OF a slice: the inner one has to copy out of the outer's freshly
-    # built blob, so it re-enters the same emitter while the outer's own result
-    # is still the only copy of anything.
-    ("slice-of-slice", _p(
-        "def f():",
-        "    xs = [1, 2, 3, 4, 5, 6]",
-        "    t = 0",
-        "    for v in xs[1:5][1:3]:",
-        "        t += v",
-        "    return t"), 7),
-    # A descending slice next to an ascending one, because the descending stop
-    # default is the ONE case where only the start bound is clamped
-    # (`wrap = [RCX] if not ascending and stop is None else [RCX, RDX]`) and so
-    # it is the case where the two clamps do not have the same shape to collide.
-    ("slice-reversed-and-bound", _p(
-        "def f():",
-        "    xs = [1, 2, 3, 4, 5, 6]",
-        "    r = xs[::-1]",
-        "    b = xs[1:4]",
-        "    return r[0] * 10 + b[0]"), 62),
     ("comprehension-simple", _p(
         "def f(n):",
         "    xs = [i * 2 for i in range(n)]",

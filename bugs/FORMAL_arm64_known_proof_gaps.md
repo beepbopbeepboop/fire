@@ -1,104 +1,16 @@
 # FORMAL_arm64_known_proof_gaps: the arm64 examples whose proof is a documented gap
 
-**Status: the census below is CORRECTED (2026-10-04, `formal28-2`) by measurement
-on this tree, one example at a time, and the correction is in three directions
-rather than one. `EXPECTED_FAILURES` is still the authority — it is what
-`test_formal.py` reports against — but this file's own numbers about what is red
-had gone stale in three separate ways, and a census that is stale in the
-direction of "more broken than it says" is as wrong as one that is stale the
-other way.**
+The arm64 formal suite is **41 pass / 4 known-gap / 0 fail** (measured
+2026-10-01, `python3 test_formal.py`). The six gaps are listed in
+`EXPECTED_FAILURES` in `test_formal.py`, and that list is the authority on
+whether they are still gaps — a stale entry is reported by the harness's own
+check. This document says *why* each one is hard and what closing it needs,
+which the inline comments do not.
 
-**Measured, `python3 test_formal.py -j 1 <stem>`, one at a time (each is a
-150-300 s Lean run, which is why this is a sample of the corpus and not all of
-it — the full sweep is a heavy run and belongs to the integrator):**
-
-| stem | before this file said | measured 2026-10-04 | owner |
-|---|---|---|---|
-| `fib` | known gap | **KNOWN-GAP** (declared) | this file |
-| `countdown` | known gap | **KNOWN-GAP** (declared) | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` |
-| `wge` | known gap | **KNOWN-GAP** (declared) | same |
-| `subscript_var` | known gap | **KNOWN-GAP** (declared) | `FORMAL_wide_receiver_by_reference.md` |
-| `count` | one of the five UNEXPECTED | **KNOWN-GAP** — it is in `EXPECTED_FAILURES` now, with the return-frame read as its reason | `FORMAL_arm64_x30_is_reloaded_from_the_frame.md` |
-| `pow2` | one of the five UNEXPECTED | **KNOWN-GAP** for the same reason (measured in `EXPECTED_FAILURES`; not re-run) | same |
-| `fact`, `sqsum`, `sum` | the other three of the five | **FAIL** — one at a time, all three with the identical obligation, a read of the stack-floor word at `4294968008` | same |
-| `sum_range` | "2 sorries in a PASSING proof" | **FAIL** — `⊢ match arm64_go_exit … with | some s => s.x0 = mojo n | none => False`, and **it fails identically on `master`** (measured in a clean `git archive master` export with its own `ProofLib.olean`) | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — `loop_cond_flag`'s unsigned order |
-| `sgt8`, `sle8` | not mentioned at all | **PASS** (2026-10-05) — were **FAIL** on `⊢ t32s (t32u (t8s n)) = n`, an obligation FALSE over the theorem's unconstrained `n`; the range hypothesis the obligation needs is now on the theorem | **FIXED**, with its doc deleted |
-| `ug8` | not mentioned at all | **PASS** (2026-10-05) — was **FAIL** on `⊢ t8u n = n`, the same defect on the UNSIGNED spelling | **FIXED**, with its doc deleted |
-| `floordiv`, `udivmod` | not mentioned at all | **FAIL** — reproduced identically on `master`'s `formal/arm64_proof_gen.py` (measured one at a time), so pre-existing and not this file's | `bugs/FORMAL_floordiv_and_udivmod_are_red.md` |
-
-**The three corrections, so a reader does not have to diff the table:**
-
-1. **"There are FIVE MORE red examples … so `test_formal.py` should be
-   reporting five unexpected failures" is no longer true, and the reason is not
-   that they got fixed.** `count` and `pow2` are DECLARED in `EXPECTED_FAILURES`
-   with the return-frame read as their reason, so the harness reports them as
-   gaps; `fact`, `sqsum` and `sum` still fail with the identical obligation and
-   are still undeclared. The FAMILY is unchanged — `count` was re-run here and
-   comes back with the same stack-floor-word read — and the census moved because
-   the marker table moved. That is worth stating because a declared failure is
-   not a fixed one, and the doc's own argument (a gap nobody revisits is a bug
-   quietly reintroduced) applies to `EXPECTED_FAILURES` exactly as it does to a
-   bug doc.
-2. **`sum_range` does not pass with two `sorry`s.** It FAILS, with the
-   `arm64_go_exit … = none` disjunct unproved — and it fails the same way with no
-   change of mine applied, so this is not a regression from anything on this
-   branch. The row in the table below that says "sorries in passing proofs: 2,
-   both in `sum_range`" should be read as "an obligation `sum_range` cannot
-   discharge", and its owner is the same document as `countdown`'s.
-3. ~~**Two examples are missing from this file entirely.** `sgt8` and `sle8`
-   are a TYPED narrow parameter making the universal contract false, they are
-   red, and they have their own document (the narrow-typed one).~~ **RESOLVED
-   2026-10-05: both PASS, and `ug8` with them.**  A narrow typed parameter's
-   universal theorem now carries the RANGE the truncation needs, and the
-   truncation discharges against it — three examples green where three were
-   red, with no `sorry` introduced (`test_formal_call_proof_gen.py`'s
-   `TestANarrowTypedParameterGetsItsRange` asserts the sorries count is 0
-   precisely because "the obligation became admissible" is the failure mode a
-   bound can hide).  The document that owned them is deleted with the fix.
-
-   **Two more examples were missing here too and are now recorded rather than
-   found later**: `floordiv` and `udivmod` are red, were red on `master` before
-   anything of mine, and are not in `EXPECTED_FAILURES` — so they are FAILURES
-   by this file's own argument, and
-   `bugs/FORMAL_floordiv_and_udivmod_are_red.md` is where they are worked from.
-
-**What is still true of everything below, and is why the rest of the file is
-kept as it is:** the four declared gaps are each owned by another document or by
-this one, and the three undeclared `dec1` failures are one fact owned by
-`FORMAL_arm64_x30_is_reloaded_from_the_frame.md`. The narrow-typed failures are
-no longer among them. Nothing in this file is a fix and nothing in it should be
-worked from as one.
-
-
-## The count, corrected (2026-10-03)
-
-`41 pass / 4 known-gap / 0 fail` was measured 2026-10-01 and the "0 fail" has
-not been true since. On this tree:
-
-* `count`, `fact`, `pow2`, `sqsum`, `sum` — the five arm64 examples with a
-  RECURSIVE CALL in the `_dec1_pattern` shape — all fail with the identical
-  obligation, which is a load of a frame slot against the entry state's `x30`
-  where the read's slot is five writes deep and the innermost write is the
-  stack-floor word at an ABSOLUTE address. Measured directly here for `count`
-  (`python3 fire.py build --formal --backend=arm64 -o .tmp/f18/dump/count2.aout
-  formal/examples/count.mojo`, 4.3 GB, one Lean run): the reduced goal is
-  `mem_read_u64 (mem_write_u64 … (<stack-floor>) (st.sp - 1984))
-  (st.sp - 8).toNat = st.x30`, inside `hx30fr_5` of `count_contract`, whose
-  `st` IS a free `Arm64State` — which is why the emitted theorem is false as
-  stated and why the fix is a premise rather than a tactic. All five are
-  UNEXPECTED failures: nothing in `EXPECTED_FAILURES` names them, so they are
-  reported as failures rather than as gaps.
-
-They are a family and not five findings, and they are worth **12 % of the arm64
-corpus**, which is the number that makes this file's census worth correcting
-rather than leaving at "0 fail".
-
-**What this file is NOT the place to fix them.** `fib`, `countdown`, `wge` and
-`subscript_var` are each owned by another document and are not re-derived here;
-the five dec1 failures are owned by
-`FORMAL_arm64_x30_is_reloaded_from_the_frame.md` and its fix needs a premise on a
-Lean contract theorem plus a per-conjunct `FrameOk` tactic, which is a
-generator-and-library change rather than a census edit.
+Per the harness's own contract: an entry here means "known unproven, for the
+stated reason" — **not** "passing". Nothing is ever stubbed with `sorry` to go
+green, because a `sorry` makes Lean accept the theorem, which would assert
+exactly the semantics these examples exist to check.
 
 ## `either` and `both` — FIXED 2026-10-01, the per-path statement it needed
 
@@ -201,17 +113,9 @@ distinct problems, and the counts should not be conflated:
 
 | | count | owner |
 |---|---|---|
-| declared in `EXPECTED_FAILURES` | **7** | read on this tree 2026-10-04: `fib`, `countdown`, `wge`, `subscript_var`, `wide_recv`, `count`, `pow2` |
-| **UNEXPECTED failures among the 13 stems measured here** | **5** | `fact`, `sqsum`, `sum` are one fact (`FORMAL_arm64_x30_is_reloaded_from_the_frame.md`); `sum_range` is another (`CODEGEN_arm64_cmp_flags_and_loop_signedness.md`, the range loop's `loop_cond_flag` stating an UNSIGNED order) |
-| **UNDECLARED and not listed anywhere in this file before 2026-10-04** | **0** | was `2` (`sgt8`, `sle8`); both PASS as of 2026-10-05 and `ug8` with them, so the row is empty rather than moved |
-| sorries in passing proofs | **0 measured**, and the "2 in `sum_range`" row is superseded — `sum_range` does not pass at all, on this tree or on master | — |
-
-**The second row is the one this file was missing, and it is why the "0 fail"
-in the header was wrong.** A gap that is not in `EXPECTED_FAILURES` is
-reported as a FAILURE, which is the correct behaviour and the reason this
-document cannot be a closed list: it is a census of what the harness's table
-says, and anything outside that table is a failure until someone writes the
-entry down.
+| known gaps (fail, documented reason) | 4 | this document (`fib` = 1, `countdown`/`wge` = 1, `subscript_var` = 1); `either`/`both` were 2 more and are fixed |
+| sorries in passing proofs | 2, both in `sum_range` | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` ("Still open 3", item 2: the range loop's `loop_cond_flag` states an UNSIGNED order) |
+| passing proofs carrying no `sorry` at all | 38 of 39 | — |
 
 The `fib` entry above is one of the original three gaps of this document; `countdown`, `wge` and `subscript_var` were added later and are
 recorded in `test_formal.py`'s inline comments with the same contract.

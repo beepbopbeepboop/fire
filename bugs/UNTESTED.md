@@ -17,163 +17,10 @@ equivalent for the 45 example files a cached test is *about*.
 
 ---
 
-## Status, 2026-10-02 (this pass — §3.2's four dead-at-import tests are closed, one of them by becoming real coverage)
-
-§3.2 said four tests die at import naming `mojo/ast_nodes.mojo` and
-`mojo/parser.mojo`, neither of which exists, and called that "the `coro`
-failure verbatim, from CLAUDE.md: the same class, four more files, and the
-`coro` one was found by accident". All four are now closed.
-
-**Three were deleted**, with their `UNREGISTERED` excuses, because there was
-nothing to repair: `mojo/` has no `.mojo` files at all (the tokenizer and
-parser became `fire_compiler.py`, `ast_nodes` was deleted outright), so
-`test_myinterpreter_simple.py`, `test_phase2_parser.py` and
-`test_phase2_parser_simple.py` could only ever have asserted something about
-files that do not exist. §3.2's Tier 3 said deletion is the defensible option
-and named the reason — "a test of a module that no longer exists is not a slow
-test, it is a wrong claim" — and `test_myinterpreter.py` already runs the
-interpreter end to end and passes, so nothing was lost with them. One of the
-three additionally **exited 0 while printing `✗ Failed to load modules`**, so
-they were also three instances of §3.3.
-
-**The fourth was repaired, and it is the one worth having.** §3.2's own words:
-"`test_myinterpreter_validation.py` is the expensive one to delete — it
-validates the interpreter's output against Python's own tokenizer, and that
-check is worth having *somewhere*. It is the strongest cheap parity check in
-the tree and nothing runs it." It now exists and runs.
-
-It compares `fire_compiler.py`'s `py_tokenize` with ITSELF, reached two ways:
-imported directly, and reached **through `myinterpreter.py`'s `Interpreter`
-executing `fire_compiler.py`'s own source** — built exactly the way `fire.py
-run` builds every program it interprets, so the function under test is the
-interpreter's own rendering of that code and not a re-import. The corpus grew
-from eight hand-written snippets to **67 texts: 18 snippets plus 49 whole real
-files** (every `formal/examples/*.mojo`, `fire_compiler.py`,
-`myinterpreter.py`, `gimple_codegen.py`, `version.py`), because a tokenizer's
-hard cases are the ones a snippet never reaches.
-
-It is the only check of its kind, and §3.2 explains why that matters: an
-interpreter bug produces a wrong ANSWER rather than an exception, so the
-compiled path ends up wrong in the same direction and every engine-vs-engine
-diff in the tree stays clean. That is how `@classmethod`'s `cls` binding the
-first real ARGUMENT, and `@deco` being parsed and then never applied at all,
-stayed invisible.
-
-**It found a bug on its first run**, which is the argument for the whole
-exercise: 66 of 67 matched and the 67th raised `NameError: name 'SyntaxError'
-is not defined`. `myinterpreter.py`'s scope defined `Exception`, `ValueError`,
-`TypeError`, `RuntimeError`, `KeyboardInterrupt`, `EOFError` and
-`StopIteration` — and **not `SyntaxError`**, which `fire_compiler.py` raises
-from five sites. So the interpreter's copy of the tokenizer could not REPORT a
-lex error, which is the one thing a tokenizer has to be able to do. Fixed by
-defining the rest of the standard exception hierarchy; the 24 names are now in
-scope.
-
-The comparison also had to grow a second half for that to be visible: it
-compares what each route **did**, not only what it returned, so two routes that
-both raise must raise the same exception TYPE and the same message. A compare
-that returned "both raised" would have reported 67/67 on the day the
-interpreter's scope had no `SyntaxError` in it — which is §3.3's shape one
-level down, a swallowed exception.
-
-Registered as `interp-tokenizer-oracle` in `check`/`gate`, `mem='tiny'` from a
-measured 0.1 GB, `extra` naming both subjects rather than just the test (the
-oracle is "the same function through two engines", so a change to either side
-is an input), 67/67.
-
-### The census, re-measured
-
-    the estate: 141 test files, 85 of them run by a registered spec,
-                54 declared with a reason, 2 undeclared, 0 dangling
-
-The 2 undeclared are `test_formal_read_before_store.py` and
-`test_formal_receiver_spelling.py`, which arrived with a merged branch and are
-`TEST_estate_check_red_on_two_form3_test_files` — another worker's
-claim, and pre-existing on this branch's base.
-
-The census also now counts **both spellings** of "test file", which is
-`“The estate check only sees files named `test_*.py`”` (closed and
-deleted with the fix). Four files were outside the inventory entirely before
-that, and one of them — `formal/x86_64_model_test.py`, the only check on
-`lib/X86.lean` that EXECUTES a machine model instead of typechecking it — ran
-by nothing. It is registered now (`formal-x86-machine-model`) and on its first
-run found a real model bug: `udivmod` disagreed with the hardware, real 4,
-model 7905747460161236410. Filed as its own doc with the emitted bytes, which
-rule out the obvious explanation; the defect was `idiv` writing its quotient
-through `UInt64.ofNat q.toNat`, which is zero for every negative quotient, and
-it was fixed on 2026-10-04 by `e54d2f4e` (one of nine model defects that commit
-found by fuzzing the model against the CPU).
-
-### §5's other items are unchanged
-
-Registering the 50 is done and was not this pass's work; §3.1's cached-test
-hole and §4.1's test-that-writes-to-the-tree were closed on 2026-10-01. §3.3's
-*general* form — a check that a file which reports its verdict in its own
-stdout cannot be relied on for one — is still not written as a mechanism.
-`tools/memcap.py` and `tools/procrun.py` still have no test of their own, and
-`procrun` is still invisible to the orphan walk because neither is a test file
-under either spelling.
-
-## Status, 2026-10-01
-
-Two of the four §5 items are closed and the census has moved; the rest stands.
-
-* **§4.1 — the unregistered test that WRITES bug docs to the tree — is fixed,
-  and so is the `.cpp` it also left behind.**
-  `test_py314_full.py` took a constant destination and wrote
-  `bugs/<CATEGORY>_<path>.md`, so 300 seconds of it produced 25 new bug docs
-  and a `grammar_snippet_gen.cpp` at the repo root. It now takes `--root` (and
-  a missing tree is exit 2, not a zero-file pass that looks green), writes its
-  reports to `--out` — a fresh temp directory by default, printed at the end —
-  and only writes into `bugs/` when `--write-to-bugs` says so. The
-  investigation is unchanged; only the destination moved.
-  **Re-measured 2026-10-03 on the merged tree, the second half of that sentence
-  stopped holding**: the sweep still left a `grammar_snippet_gen.cpp` at the
-  repo root, and it was not the sweep's own write — `test_py314_full.py`
-  mentions the name only in its docstring — but a `fire.py build` of one file in
-  the scanned tree emitting into the process's CWD. `--out` moved the REPORTS;
-  nothing moved the build's own output.
-  **Fixed at the source, 2026-10-04**: `fire.build_executable` now puts every
-  intermediate (the generated `.ci`, the objects, the generator `.cpp`) in a
-  scratch directory derived from `output` and removes it on both returns, so a
-  build cannot write into a directory it was not asked to write in. The sweep
-  needed no change of its own — it hands `-o` a path in a temp directory, which
-  is where the scratch now goes. The collision half was the larger prize and
-  was measured: two builds of `a/prog.mojo` and `b/prog.mojo` at the same time
-  both linked a binary that printed `11`, because they shared one `prog.ci`;
-  with the scratch directory derived from `output` each prints its own value.
-  Pinned by `test_module_cache.py`'s
-  `test_two_builds_of_one_basename_keep_their_own_scratch`.
-* **§3.1 — the cached test that could not see its subject — is fixed** (the
-  `checked_run.py` side landed earlier; the registry now says
-  `extra=['test_examples_parse.py', 'formal/examples']`, so the 46th example is
-  covered the day it is added).
-* **The estate's numbers, re-measured on this tree:** 135 `test_*.py`, 83 run
-  by a registered spec, **54 declared with a reason in
-  `test_suite.py`'s `UNREGISTERED` and 0 undeclared** — so the "50 unregistered,
-  21 red" of §1 has become 54 of which none is undeclared. The
-  "21 exit non-zero" half is still a measurement, not a fact, and re-running
-  54 files is an hour of scheduling somebody should choose rather than a
-  side effect of a doc edit.
-* **§5's other three items are unchanged**: the four tests dead at import
-  (`mojo/ast_nodes.mojo`, `mojo/parser.mojo`) are in another claim's write
-  set; the Tier-2 reds are behaviour work in the async/coroutine code; and the
-  general "does this test still reference anything that exists" check is not
-  statically decidable, for the reason §3.2 gives.
-
-The one thing §2's Tier-1 table is now wrong about is a *number* rather than a
-shape: `test_x86_64_containers.py` is no longer 59/60 x86-64 and 52/60 arm64.
-On 2026-10-01 it measures **59/60 on x86-64**, one `with-statement` refusal,
-and it is `x86-containers` in `x86` with a marker that states the count.
-
----
-
 ## 1. The shape, measured
 
-*Historical: the counts below are the 2026-07-28 measurement this document was
-written from, and the 2026-10-01 re-measurement is in the Status section above.*
-
 | | count | how |
+|---|---|---|
 | `test_*.py` in the repo | **81** | `find . -name 'test_*.py'`, all at the repo root |
 | named by a registered spec's `cmd` | **33** | parse of `suite.REGISTRY`; there is no glob and no discovery, so a file must be spelled out |
 | **unregistered** | **50** | 62% of the estate |
@@ -201,7 +48,7 @@ one at equal severity, because a loud one is already reported.
 |---|---|---|
 | 1 | **`examples-parse` cannot see the 45 files it guards** | It exists because `19bc0dd` took 4 of `formal/examples/*.mojo` out of the parser and the only symptom was a coverage number 4 points low. It is `cache=True` with `extra=['fire_compiler.py', 'test_examples_parse.py']` — and none of the 45 example files is in the key. **Proven, not argued:** `open()` instrumented through `check_key` reads 48 repo files and **0** of them are under `formal/examples/`. A `SyntaxError` in any example cannot move the key, so a recorded PASS replays. The test created to make that loud is gated behind a cache that makes it quiet. §3.1 |
 | 2 | **4 tests dead at import on renamed files** | `test_myinterpreter_simple.py`, `test_myinterpreter_validation.py` (`mojo/ast_nodes.mojo`), `test_phase2_parser.py`, `test_phase2_parser_simple.py` (`mojo/parser.mojo`). **Neither file exists.** This is the `coro` failure verbatim, from `CLAUDE.md`: the same class, four more files, and the `coro` one was found by accident. §3.2 |
-| 3 | **`test_x86_64_containers.py` (59/60 x86-64, 52/60 arm64) and `test_x86_64_examples.py`** | The only files that EXECUTE x86-64 code and check what it computed. `test_x86_64_containers.py` is red today on `with-statement` (`with 7 as y: x = y` binds `y`, and the FORMAL backend refuses the read-before-store — the `with … as` alias is a binding that happens BEFORE the value its body sees, and the scan did not count that; fixed by adding the alias to `_bound_before_first_statement`, which is what the `x86-containers` `expect=` marker names). The arm64 slice and list-concat cases that used to sit beside it were answered in `eeb1baaf` and their doc deleted with them. The `x86` bucket runs `test_formal.py` and a model-coverage sweep; neither answers a question. A two-backend disagreement in a container operation is invisible until one of these runs: that is exactly how the dict-comprehension value bug and the two-backends'-one-program arm64 subscript refusal were found. |
+| 3 | **`test_x86_64_containers.py` (59/60 x86-64, 52/60 arm64) and `test_x86_64_examples.py`** | The only files that EXECUTE x86-64 code and check what it computed. `test_x86_64_containers.py` is red today on `with-statement` (item 1 of `bugs/FORMAL_arm64_slice_concat_and_with_refusal.md`, with the arm64 slice and list-concat cases as items 2 and 3) `bugs/FORMAL_arm64_slice_concat_and_with_refusal.md`. The `x86` bucket runs `test_formal.py` and a model-coverage sweep; neither answers a question. A two-backend disagreement in a container operation is invisible until one of these runs: that is exactly how the dict-comprehension value bug and the two-backends'-one-program arm64 subscript refusal were found. |
 | 4 | **`test_arm64_encoders.py` (221 checks) and `test_x86_64_decode.py`** | Differential: our encoders against `as -arch arm64`, and every x86-64 encoder round-tripped through the decoder. A wrong encoder is a silently wrong instruction and the gate has no other way to see one. |
 | 5 | **`test_ownership_destruct.py`** | It decides which locals get destructors emitted, it is in `cas._COMPILER_SOURCES` so it changes generated C, and its only tests are fixtures nothing runs. A missed destructor is a leak — silent, and unbounded. |
 | 6 | **5 closure-capture files** | `test_transitive_closure_capture.py`, `test_python_source_mut_capture.py`, `test_general_mutable_closure_capture.py`, `test_mutable_async_capture.py`, `test_closure_capture_comptime_func_params.py`. A capture that binds the wrong cell computes a plausible wrong number. `test_general_mutable_closure_capture.py` is by-reference, which is the same frame-address defect `FORMAL.md` assigns to [4] on the *other* backend. |

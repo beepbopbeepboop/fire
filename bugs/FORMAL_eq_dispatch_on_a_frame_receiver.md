@@ -1,328 +1,159 @@
-# FORMAL_eq_dispatch_on_a_frame_receiver: what `==` still does not reach
+# FORMAL_eq_dispatch_on_a_frame_receiver: `a == b` reaches a declared `__eq__`, and what it still does not reach
 
-**Status: shapes 1 and 2 of "the two shapes still open" are now measured and
-CLOSED, and the one that remains is a value-model limit rather than a rewrite.**
-What landed first (the shape-1 `a == b`/call-operand work and the second defect
-it uncovered) is recorded below so a reader does not re-open it; §"The shape that
-remains" is what is left.
+**Status: the multi-field-frame case is FIXED and measured before and after on
+both architectures.** The reproducer in
+`bugs/FORMAL_eq_does_not_dispatch_to_a_user_dunder.md` (filed on
+`work/merge2-formal`) is closed; this document records what landed, the part of
+the filing whose stated premise did not survive re-measurement, and the three
+shapes that are still wrong answers — none of which is reachable through the
+table the fix uses, and each of which is named here so the next session does not
+have to rediscover that they are open.
 
-## What landed: a comparison whose operand is a CALL
+---
 
-The frame case's whole safety argument is that both operands are frame ADDRESSES
-of the same struct, and it was settled by asking the holder table — which is
-keyed by NAME. An operand that is a call was therefore never asked about, and
-the operator stayed a flag-setting compare of two words, which answers "are
-these the same object": CPython's inherited `object.__eq__` for a struct that
-declares none, and a **bypass** for one that does. Measured, both architectures,
-on a field-wise `__eq__` and two DISTINCT objects with equal fields:
+## What landed
 
-```mojo
-struct A:
-    var x: Int
-    var y: Int
+`formal/build.py::_rewrite_eq_on_frame_receivers` and
+`formal/model.py::{dunder_receiver_method, struct_dunder_dispatch_candidates,
+eq_dispatch_candidates_disagree}`.  `a == b` becomes
+`Struct___eq__(a, b)` when both operands are bare names the holder analysis
+believes hold a frame of the SAME single struct and that struct declares the
+dunder; `!=` becomes `Struct___ne__` when the struct declares one and the
+negation of the `__eq__` call when it does not, which is the language's own
+fallback.  A CHAIN (`a == b == c`) becomes the short-circuiting `and` of its
+pairwise comparisons, and only when every operand is a bare name.
 
-    def __eq__(self, other: A) -> Bool:
-        if other.y != self.y:
-            return False
-        return self.x == other.x
+It is the `len` rewrite's shape rather than a new mechanism, deliberately:
+`_rewrite_len_on_frame_receivers` already answers "which struct's `__len__` is
+this" from `hstruct` and `_receiverless_methods` already lowers a rewritten
+method call through the ordinary call path, and `dunder_receiver_method` is now
+the ONE predicate over a dunder's declaration shape that both use.  The two
+differ in one place the filing did not foresee and which is worth stating
+because it was the last thing standing between this and `self.x == other.x`:
 
-def mk(v: Int) -> A:
-    var a = A()
-    a.x = v
-    a.y = v
-    return a
-
-def main(n: Int) -> Int:
-    var t = mk(1)
-    if t == mk(1):        # CPython: True.  This path, before: False.
-        return 7
-    return 0
-```
-
-Nothing refused it, on either backend, and nothing on stderr said anything.
-
-The struct is now read off the callee's own **declared return type**
-(`formal/model.py`'s `call_result_frame_struct`, the shape `_rhs_pointee`
-already uses to read a callee's return annotation for a POINTER — an
-interprocedural fact, not an inference). `!=` follows the same path and negates
-the same way it always did. Pinned by `test_formal_run.py`'s
-`eq_operator_reaches_a_declared_eq_through_a_call_operand` (`eq=1 ne=0 diff=0`
-against CPython).
-
-**A chain's ends may each be a call, and its middle may not.** `mk(1) == t ==
-mk(1)` is two links and each call appears in exactly one of them, so the call is
-evaluated where the source put it. `t == mk(1) == u` is different: the chain
-lowering reads each operand twice, so the same call appears in two links and
-would be evaluated twice where the language evaluates it once. That shape stays
-an address compare and is pinned at today's answer by
-`eq_chain_with_a_call_in_the_middle_stays_an_address_compare` — see §3 below for
-why it is not simply fixed.
-
-### The second defect this uncovered, which is the more important one
-
-Landing the chain needed a second fix, and the reason is worth recording because
-it is a message that was false about the file. `_check_holder_agreements` sorts
-every call site of a frame-valued parameter into "hands it a frame address" and
-"hands it something else", and it recognised only the NAME spelling of the first
-bucket. So the two `A___eq__` call sites in the chain — one with `t`, one with
-`mk(1)` — were read as one of each, and the build refused with
+**`S___eq__(a, b)` hands `b` to the method's SECOND parameter, so the rewrite
+FEEDS the holder fixpoint.** The fixpoint was previously run to saturation once,
+with the two operator rewrites after it, on the argument that each introduces
+one edge (`Struct___len__` with a frame in argument 0) whose parameter is
+already a holder.  That argument is true of `len` and false of `==`: without a
+second saturation, `other` is not a holder, and every `__eq__` that reads the
+field it was handed was refused by name — measured, and the message is the
+pre-existing `model.field_access_refusal`:
 
 ```
-A___eq__() takes a A receiver at argument 0 — 'self' — at t here, and
-something that is not a frame address at mk(1).
+build: Flag___eq__: 'other.x' is a field access through 'other', and this path
+has no way to say what 'other' holds. … 'other' is bound here as a parameter,
+so none of the three is established …
 ```
 
-`mk(1)` returns a frame. The check now asks `_argument_is_frame_address`, which
-covers the other two spellings a frame reaches a parameter through — a
-construction (`f(Pair(3, 4))`) and a call to a function that returns one
-(`f(make())`) — by reusing `_frame_valued_calls`, **the table both emitters
-build their blocks from**, rather than adding a third recogniser for "is this
-call a frame". That check exists to stop a SIGSEGV (`frame_holder_disagreement_
-refusal`'s measured program builds, runs and dies with exit 139), so it has to
-be right about which words are addresses; a second implementation of the
-recogniser would agree with the emitters until the day one of them was edited,
-and the disagreement is a refusal lifted on a word that is not an address.
+`self.x == other.x` is what an equality method is FOR, so a fix that stopped at
+argument 0 would have converted every such program from a wrong answer into a
+refusal.  `_HOLDER_FIXPOINT_ROUNDS` therefore runs saturate-then-rewrite until a
+round neither grows a holder nor moves an operator, with a bound that RAISES
+rather than the alternative, which is a hang in the compiler.
 
-## The two shapes still open
+## Before and after, both architectures
 
-### 0. FIXED (`formal29-2-r2`): a chain with a CALL in the middle
+Every row is a real build, run and compare.  CPython is the oracle and the
+numbers are what it prints for the same text.
 
-`t == mk(1) == u` is the shape the previous status called "deliberately left
-alone". **It is fixed, and at the layer the old text named** — a
-statement-level rewrite, `_hoist_eq_chain_middle_calls`
-(`formal/build.py`), which binds the operand once in the statement that contains
-the chain.
+| program | before (arm64, x86-64) | after (arm64, x86-64) | CPython |
+|---|---|---|---|
+| `__eq__` returning True, `a == b` vs `a.__eq__(b)` | `eq=0 direct=1` | `eq=1 direct=1` | `eq=1 direct=1` |
+| `!=` with only `__eq__` (True) | `ne=1` | `ne=0` | `ne=0` |
+| `!=` with a `__ne__` returning False | `hne=1` | `hne=0` | `hne=0` |
+| `self.x == other.x`, compared through a plain function's parameters | **refused** (`other.x`) | `r=1 back=0`, exit 7 | `r=1 back=0` |
+| chain `a == b == c` on a field-wise `__eq__` | **refused** (`other.x`) | `chain=0 same=1` | `chain=0 same=1` |
+| one name bound to an `A` or a `B`, only `B` declaring `__eq__` | **built**, address compare | refused by name, both backends | — |
 
-The defect it removes is exactly what the old §2 said, with the mechanism added:
-`F.CompareChain` says *each of `operands` is evaluated exactly once* (it is in
-the node's own docstring, which is the language's rule and not this document's),
-and the dispatch lowering turns the chain into the `and` of its links, in which
-the middle operand appears in TWO of them:
+## The premise in the filing that did not survive re-measurement
 
-```
-a == mk(1) == b   →   A___eq__(a, mk(1)) and A___eq__(mk(1), b)
-```
+The filing said the fix needed "the agree-or-refuse over `fn._frame_candidates`
+and the rule for 'the struct does NOT declare `__eq__`, so do not rewrite',
+which is the half that keeps it from changing every comparison in the tree".  Both
+halves are right and both are already how the code works; what the filing did
+not say is that the second half is not a rule at all but the PRE-EXISTING
+lowering being CORRECT.  A frame's address compare answers "are these the same
+object", which is exactly what CPython's inherited `object.__eq__` answers, and
+two live objects of one struct cannot share an address, so all three of `a == a`,
+`a == b` and `a == c` (for two objects holding equal field values) are right
+already.  `eq_no_declared_dunder_stays_identity` exists to hold that in place: a
+rewrite that fired on every comparison would turn the third into 1.
 
-so the callee runs twice. The rewrite declined the shape rather than emit it
-(`lowered = False` at index `i > 0`), the operator stayed an ADDRESS COMPARE, and
-that is a silent wrong answer rather than a refusal: measured, both
-architectures, `t == mk(1) == mk(1)` printed `chain=0` where CPython prints 1,
-because `mk(1)` builds a second object and an address compare asks whether it is
-the first.
+## The three shapes still wrong, and why the table cannot reach them
 
-Three things the fix is, and each of them is a way it could have been wrong:
+All three measured on this tree, both architectures, and all three are
+PRECIOUS wrong answers rather than refusals — which is why they are written down
+rather than left.
 
-* **A hoist, not a guard.** The chain is an EXPRESSION, so the temporary has to
-  be bound in the enclosing statement — which is the statement-level rewrite the
-  old next step asked for, and why `_rewrite_stmt_lists` (the same function
-  `with` lowering uses) is the mechanism. One `CompareChain` node holds ONE node
-  per operand, so replacing `operands[i]` reaches both links: the call is
-  evaluated once and both reads are the same read.
-* **INSIDE the fixpoint, not in front of it.** The temporary is a frame holder
-  only once the holder analysis has seen the binding, so the pass runs in
-  `_frame_receivers`' round loop and its count joins the progress the loop tests.
-  It introduces no dispatch decision — that is still `_rewrite_eq_on_frame_
-  receivers`' alone, one round later, from the tables — which is the constraint
-  the old text named.
-* **ONLY a call that dispatches.** `model.call_result_frame_struct` has to name
-  the struct from the callee's declared return type; an unannotated callee
-  answers None and nothing is hoisted.
+1. **A ONE-FIELD struct's local.**  `class P: var x: Int` with
+   `__eq__` returning True: `a == b` answers the word compare of two field
+   values (0) where CPython says 1.  `struct_is_framed` is False for a one-field
+   struct, `_frame_receivers` is entered over `framed` names only, so `a` is
+   not in `holders` and no candidate list exists for it.  The missing thing is a
+   `{name: struct}` table for a construction whose result is ONE WORD — the
+   mirror of `hstruct`, keyed on what a one-word constructor binds rather than on
+   what a frame constructor binds.  **Next step:** publish it beside
+   `fn._frame_candidates` in `_frame_receivers` (from `_constructor_bindings` over
+   the NON-framed structs, which is the same enumeration one filter wider) and
+   read it in `_eq_dispatch_call` when `hs` has nothing to say.  The safety
+   argument is the one that makes this rewrite safe at all — both operands must
+   be frames of the same struct — and it is stated once, in
+   `_rewrite_eq_on_frame_receivers`'s docstring, so the second reader inherits
+   it.
 
-Measured after, both architectures, against CPython on the same text: `mid=1
-diff=0 ends=1 chain3=0`, where `mid` is True only if the method ran and `diff`
-False only if it ran on the values. The nested shapes are pinned too, because
-each is a way a hoist is wrong on ONE architecture and the single-statement row
-cannot see them: the binding inside a `while` body (`hits=3`, so it re-evaluates
-per iteration the way the expression did — a hoist to the function top answers
-1), a source local spelled `_eq_operand1`, which is the name the hoist hands
-itself (`coll=7`), and a chain in a `return` statement, where the enclosing
-statement has to be SPLIT rather than filled in.
+2. **A comparison against something that is not a frame of the same struct.**
+   `s == None`, `s == 5`, `a == b` where `a` is an `A` and `b` a `B`.  Both
+   operands must be frames of the same struct, so none of these is rewritten and
+   each stays an address compare.  `a == b` for two different structs is a WRONG
+   ANSWER whenever only one of them declares a dunder: CPython asks the right
+   operand's `__eq__` when the left one's returns `NotImplemented`, and this path
+   has no representation for `NotImplemented` to be returned as, so the reflected
+   dispatch cannot be lowered at all.  It is REFUSED rather than left wrong,
+   because `_eq_dispatch_call` sees two candidate lists that do not settle on one
+   struct — which is the correct verdict for the wrong reason, and the message
+   (`compares two FRAME ADDRESSES … does not settle it`) says so.  **Next step:**
+   nothing narrow.  Lowering the reflected operand needs `NotImplemented` as a
+   third answer a dunder can return, which is a value-model change, not an
+   operator-lowering one.
 
-**The evaluation ORDER this changes, stated because it is real:** `a == f() == b`
-runs `f()` between the two links' left operand reads, and the hoist runs it
-before the first link. That is observable only if `f()` mutates something the
-first link's `__eq__` reads, and it is the price of a temporary rather than a
-choice: with no name to hold the value the alternatives are calling it twice
-(what the language does not say) or leaving the comparison an address compare
-(what this did). It is written down in the pass's docstring rather than left to
-a reader of the diff.
+3. **A CHAIN with a call in an operand.**  `a.f() == b.g() == c.h()` is left
+   alone, because the chain lowering re-reads the middle operands and a name read
+   twice is the same load twice while an operand with a call in it would be
+   called twice where the language calls it once.  **Next step:** bind the
+   operands to temporaries in the enclosing statement before rewriting, which is
+   a statement-level rewrite rather than an expression one and needs its own
+   round in the same fixpoint.
 
-### 1. A comparison against something that is not a frame of the same struct
+## What the sweep does
 
-`s == None`, `s == 5`, `a == b` where `a` is an `A` and `b` a `B`. Both operands
-must be frames of the same struct, so none of these is rewritten and each stays
-an address compare. `a == b` for two different structs is a wrong answer whenever
-only one of them declares a dunder: CPython asks the right operand's `__eq__` when
-the left one's returns `NotImplemented`, and this path has no representation for
-`NotImplemented` to be returned as, so the reflected dispatch cannot be lowered at
-all. It is REFUSED rather than left wrong, because `_eq_dispatch_call` sees two
-candidate lists that do not settle on one struct — which is the correct verdict
-for the wrong reason, and the message (`compares two FRAME ADDRESSES … does not
-settle it`) says so.
+Measured with `tools/formal_sweep.py --no-stdlib` before and after, on five
+stdlib files that declare a comparison dunder and on the two repo files the
+related docs name (`mlir.py`, `tools/procrun.py`): **identical verdicts, class
+for class, on every one.**  All seven were already `codegen` or
+`codegen/dependency` for unrelated reasons (a `String` frame address, a nested
+`Atomic` frame, an unbound import chain), so nothing that answered before is
+refused now.  The reverse direction is the real risk and it was checked: a file
+can only move `PASS → codegen` if it compares two locals of a multi-field struct
+whose class declares a dunder, and in the repo scope no `.py`/`.mojo` file
+declares one at all (`type_system.py` is the only hit and it imports
+`dataclasses`).
 
-**Next step: nothing narrow.** Lowering the reflected operand needs
-`NotImplemented` as a third answer a dunder can return, which is a value-model
-change shared with the Lean proof, not an operator-lowering one.
+## Tests
 
-**Re-measured for this status, because the two halves are not the same verdict
-and only one of them is a limit.** `s == None` and `s == 5` are not the same
-shape as `a == b`: a frame address is never 0 and never 5, so the operator the
-lowering leaves there answers False, which is CPython's answer for both (no
-declared `__eq__` means the inherited identity comparison, and the fallback after
-`NotImplemented` IS identity). **Those two are correct as they stand and are not
-work.** `a == b` across two structs is the whole of what remains, and it is
-refused.
+* `test_formal_eq_dispatch.py` — the CPython ORACLE for this construct: it holds
+  no expectations of its own, derives the CPython program from the same text, and
+  requires each architecture's image to match CPython's stdout and exit status
+  byte for byte.  7 cases, 6 of which fail on the pre-change tree (the seventh is
+  the control that must not move) — measured against a clean `git archive HEAD`
+  tree.
+* `test_formal_run.py`'s `EQ_DISPATCH_CASES` — three of the same rows with fixed
+  expected values, in the registered suite job, because a construct nothing in
+  it exercises is a construct nothing in it can regress.
 
-**What a middle call to an UNANNOTATED callee is, since the middle-call fix now
-touches it:** `t == un(1) == un(1)` with `def un(v): …` and no return type stays
-an address compare and answers 0 where CPython answers 1. That is the same limit
-as `t == un(1)` **at either end of a chain**, which the call-operand work left
-alone too, and it is not refusable: the path cannot tell whether the callee
-returns a struct at all, so a chain whose operands are three integers would look
-identical, and refusing it would refuse correct programs. It is a limit of the
-call-operand rule ("the callee's own DECLARED return type, and nothing else"),
-not a gap in the hoist, which is why the hoist declines it by the same test the
-dispatch does.
-
-### 2. FIXED — see §0 above
-
-`t == mk(1) == u` was "the one shape the call-operand work deliberately leaves
-alone". It is bound to a temporary now. What the old next step prescribed —
-*bind the operand to a temporary in the enclosing statement before rewriting, as
-a statement-level rewrite with its own round in `_frame_receivers`' fixpoint* —
-is what landed, and the constraint it named is what the pass respects (it
-introduces a store and no dispatch decision).
-
-### 3. What was NOT re-measured
-
-The `==`/`!=` rows above are real builds and runs on both architectures, in
-`test_formal_run.py`. The **sweep** was not re-run — a whole-tree sweep is not a
-light worker's — so "nothing that answered before is refused now" rests on the
-narrow suites, and not on a class-by-class sweep diff. The direction of risk is
-the one that matters, and the hoist adds one more: it introduces a LOCAL into a
-body the holder analysis has not read yet, so the round after it re-derives the
-holder tables over a function with one more binding in it — which is also why it
-is counted as progress rather than run once. The suites behind this status:
-`test_formal_run.py`'s 159 rows over the eq / both-arch / cross-module /
-by-reference / returned-frame / conditional-arm groups (0 fail), and
-`test_formal_returned_frame.py` 46, `test_formal_frame_len.py` 10,
-`test_formal_cross_module.py` 35, `test_formal_toplevel.py` 116,
-`test_formal_method_param_field.py` 28, `test_formal_value_model.py` 82.
-
-`test_struct_formal.py` is RED on this tree and was red before this change, for
-a reason with nothing to do with it: `from struct import calcsize` is refused by
-`formal/hostmods/os/_syscalls.mojo`'s own string-subscript rule
-(`d[i]` on a string whose text is not ASCII — a documented limit in
-`bugs/FORMAL_string_value_model.md`, and that module's docstrings are full of
-em-dashes). Recorded here because the old status listed that file among the
-suites this claim rests on, and a reader who re-runs it deserves to know which
-of its 163 failures are theirs.
-
-## Status, 2026-10-05 (`formal31-3`): the remaining refusal was RIGHT and its
-## REASON was false, and following the advice could not have fixed it
-
-§1 says of `a == b` across two structs: *"It is REFUSED rather than left wrong,
-because `_eq_dispatch_call` sees two candidate lists that do not settle on one
-struct — which is the correct verdict for the wrong reason, and the message
-(`compares two FRAME ADDRESSES … does not settle it`) says so."*
-
-**It did not say so. The message named a reason that is false about half the
-shapes that reach it, and its advice could not work.** Re-measured, both
-architectures, on the reproducer the section above already describes:
-
-```mojo
-struct A:
-    var x: Int
-    def __eq__(self, other: A) -> Bool:
-        return self.x == other.x
-struct B:
-    var x: Int
-
-def main(n):
-    var a = A()
-    a.x = 1
-    var b = B()
-    b.x = 1
-    if a == b:            # CPython: True.
-        return 1
-```
-
-```
-build: a == b compares two FRAME ADDRESSES, so the answer is the frame's own
-struct's `__eq__` — which means WHICH struct is the whole of the question, and
-A, B does not settle it: A declares one; B declares none. Each name holds a
-different frame on each path that binds it, and this analysis has no path
-sensitivity to say which one is live at this comparison, …  Give each name one
-binding, or give every candidate the same `__eq__`
-```
-
-Every clause of that tail is wrong for this program:
-
-  * **`a` and `b` are each bound once.** There is no path, so "no path
-    sensitivity" is not the obstacle.
-  * **"Give each name one binding"** is impossible — each already has one.
-  * **"Give every candidate the same `__eq__`" makes it WORSE, and this is the
-    part that matters.** `model.struct_dunder_dispatch_candidates`'s decision is
-    `if len(owners) > 1 or have != len(rows): refuse`, so a `B` that declares a
-    `__eq__` too puts two names in `owners` and takes the `len(owners) > 1`
-    arm — the same refusal, with the same message, forever.
-
-A reader who follows this message is sent after a non-bug, which
-`formal/model.py`'s own note on `FRAME_KIND` calls the expensive direction and
-`test_refusal_taxonomy.py` is the standing check for. **This is a defect in its
-own right**, independent of the `NotImplemented` work the section defers.
-
-### What landed
-
-`model.eq_dispatch_candidates_disagree` now takes the two per-side candidate
-SIZES (passed by `formal/build.py::_eq_dispatch_decide`, which already has both
-lists) and answers in **two messages for two different facts**:
-
-  * **a NAME IS NOT PINNED** (`left_count > 1` or `right_count > 1`) — the
-    existing text unchanged, because it is exactly right: which struct is live
-    depends on the path, and giving each name one binding does settle it.
-  * **EACH SIDE IS PINNED AND THEY ARE DIFFERENT STRUCTS** (`1` and `1`) — a new
-    text that says there is no path to be insensitive to, names CPython's
-    REFLECTED dispatch as the reason (`A.__eq__(a, b)` is handed a `B`, which is
-    not a well-typed call in Mojo; CPython's answer is `NotImplemented`, which
-    asks the other operand's `__eq__` and falls back to identity), says the
-    representation for that is absent, **says explicitly that changing the
-    bindings will not fix it and that giving both structs a `__eq__` will not
-    either — two owners is the case that refuses** — and then says what a
-    program CAN do: compare the fields, or make the two sides the same struct.
-    It ends with this document's path, so the next reader arrives here.
-
-### The tests
-
-`test_formal_value_model.py`'s `REFUSALS` already had one row per shape, and its
-needles were the SHARED opening clause and `"does not settle it"` — which is to
-say both rows passed whichever message the rule produced. They are now the two
-halves of the split, which is what pins it:
-
-| row | needle |
-|---|---|
-| `one_name_two_candidate_structs_is_refused` | `no path sensitivity to say which one is live at` |
-| `two_structs_only_one_with_a_dunder_is_refused` | `CPython's REFLECTED dispatch` |
-
-Both on both architectures (that is what a `refuse:` row in this file asserts),
-**83/83 in `test_formal_value_model.py`**, and the eq family in
-`test_formal_run.py` is unaffected — `eq_operator_reaches_a_declared_eq`,
-`eq_no_declared_dunder_stays_identity` and
-`eq_chain_with_a_call_in_the_middle_reaches_a_declared_eq` all still pass, which
-is the control that says the split did not move the DECISION, only the wording
-of one of its two refusals.
-
-The stale clause in that table's header comment — *"The pre-change tree answered
-both of them with a flag-setting compare of two addresses and no diagnostic"* —
-is corrected in place: `cross_struct` did get a diagnostic, it was just
-half-written.
-
-### What is STILL open, and it is the same thing
-
-`NotImplemented` as a dunder's return value is a value-model change shared with
-the Lean proof, and nothing here is a step towards it: `a == b` across two
-structs is refused before and after, on both backends, with a message that now
-says why. §3's standing caveat is unchanged — the sweep was not re-run, so
-"nothing that answered before is refused now" rests on the narrow suites
-(`test_formal_value_model.py` 83, `test_formal_run.py`'s eq rows,
-`test_formal_returned_frame.py` 46, `test_formal_method_param_field.py` 32).
+One measurement belongs here because the CPython oracle depends on it: **this
+backend's string literals do not process `\n`.**  `printf("A[%d]\n", 7)` writes
+`A [ 7 ] \ n`, twelve bytes and no newline, so a format string carrying an
+escape makes the two engines disagree about bytes that have nothing to do with
+the construct.  Every case prints one escape-free line for that reason.  It is a
+separate defect from this one and is not fixed here.

@@ -1,97 +1,8 @@
 # FORMAL_declared_parameter_against_its_call_sites: the 13-file row, split by what each call site actually hands over
 
-**Status: MEASURED AGAIN (2026-10-05, `formal28-3`), and the conclusion is
-UNCHANGED — 0 of the 13 still reach it — but §3's MECHANISM is stale and the
-class mix moved.** The row's own verdict does not depend on either, and the check
-is still live and still load-bearing (a two-field `Cell` reached with a plain
-word refuses identically on both backends, measured today). What moved is which
-wall each file is behind, and the reason §3 gives for the largest group.
-
-## RE-MEASURED 2026-10-05 (`formal28-3`): 0 of 13 still, one class changed, and
-## §3's `String` mechanism is no longer true
-
-Same 13 files, `tools/formal_sweep.py` with the sweep's own argv, arm64:
-
-| class | 2026-10-03 | **2026-10-05** | what it is |
-|---|---|---|---|
-| `codegen/dependency` | 9 | **9** | a module the file IMPORTS is refused first — `_io.mojo`, `constants.mojo`, `_unicode_lookups.mojo` and `std.collections` / `std.memory` / `std.os` all "module exports nothing" |
-| `not-answerable/host-import` | 4 | **3** | the `.py` files importing CPython host modules — now `importlib` ×2 and `copy` ×1 |
-| `codegen` | 0 | **1** | **`elaborate.py`**, which moved: it imports `monomorphize`, which imports `cas.py`, and `cas.py` is refused for `an f-string literal on line 451` — `FORMAL_string_composition_has_no_buffer`'s row, a claim about a construct IN a module it imports, which is a different diagnosis from a host import |
-| **on `frame_declared_parameter_refusal`** | **0** | **0** | — |
-
-**So the row's conclusion is the same and the population's composition is
-not.** The one file that changed class changed it because its import chain
-reached a construct-level refusal rather than a module-level one, and the
-verdict history line says so in the sweep's own words (`codegen/dependency ->
-codegen: 1`, `not-answerable/host-import -> codegen/dependency: 1`,
-`unchanged: 11`). Neither move is this construct's doing.
-
-### §3's `String` mechanism is STALE, and what replaced it
-
-§3's sharpest case says a parameter DECLARED `String` is compiled as a
-**3-slot frame** (`_ptr_or_data`, `_len_or_data`, `_capacity_or_data`) while
-`String()` lowers as a **type CONVERSION** yielding one **word** — "one name is a
-word where it is constructed and a frame where it is declared".
-
-**Measured on this tree, a `String` parameter is a plain WORD and nothing
-refuses the disagreement**, both architectures:
-
-```
-def take(s: String) -> Int:
-    return len(s)
-def main(n: Int) -> Int:
-    var s = String()
-    s = "hello"
-    printf("len=%d", take(s))
-```
-
-→ `Built` on arm64 and x86-64, printing `len=5`, which is CPython's answer.
-`formal/model.py::_parameter_frame_contract`'s own docstring says why: an entry is
-`None` — "an ordinary word" — unless the parameter's name is in the module's
-`declared` table of ITS OWN structs, and `String` is not one. `String` is in
-`IDENTITY_TYPE_CTORS`, so it is a conversion on both sides and there is no
-disagreement to refuse.
-
-**What this does to §3.** The word-versus-frame question it poses is still real
-and still not this construct's to answer — it is now plainly visible in a
-program with no stdlib in it at all, which is a better reproducer than the one
-§3 used:
-
-```
-struct Cell:                      # two fields, so a FRAME on this path
-    var a: Int
-    var b: Int
-def fill(c: Cell) -> Int:         # declared as a frame
-    c.a = 7
-    return c.a * 10 + c.b
-def main(n: Int) -> Int:
-    var raw = 5                   # a plain WORD
-    return fill(raw)
-```
-
-refused identically on both backends: *"`fill()` declares 'c' as Cell, so it is
-compiled with 'c' as the ADDRESS of a frame of 8-byte slots … and every call site
-in this image hands it something else: `fill(raw)` passes a name, 'raw'"*. The
-control is the one-field version — `struct Cell: var v: Int` with the same body
-— which **builds**, because a one-field struct IS a word and there is nothing to
-disagree about (`_parameter_frame_contract`'s `["one-word"]` entry). So the
-refusal is still discriminating correctly, and §3's actual conclusion — that
-closing this needs a **call-site coercion in both emitters** (reserve a block
-per site, copy the value's slots in, pass the address), keyed on the callee's
-published `fn._frame_param_contract` — is unchanged and still worth **0 of these
-13 files**, because every one of them is behind an import.
-
-**What is NOT measured here**, so a reader does not assume it: the call-site
-coercion itself. It is §3's own scoping, and this re-measurement did not attempt
-it — what it did is check that the refusal it would lift is still live and still
-discriminating, which it is.
-
----
-
-**THE ORIGINAL STATUS (2026-10-03), kept because the re-measurement above is
-only a diff against it.** `frame_declared_parameter_refusal`
-(`formal/model.py`, raised from `formal/build.py`'s
-`_check_declared_parameter`) named 13 files in the 630-file arm64 sweep. The
+**Status: MEASURED, and the decidable half is FIXED.** `frame_declared_parameter_refusal`
+(`formal/model.py:7109`, raised from `formal/build.py`'s
+`_check_declared_parameter`) names 13 files in the 630-file arm64 sweep. The
 construct is `construct:declared-param-vs-call-sites`; this doc is its
 measurement and it answers the question the enqueue asked — **"is a row of
 programs that are already wrong a stdlib bug or a compiler gap?"** — with
@@ -104,50 +15,6 @@ things.** One group was a false refusal and is fixed and verified by execution
 group is a real defect in a neighbouring construct, filed separately (§5). The
 largest group is a word-versus-frame representation question that is not this
 construct's to answer (§3).
-
-**THE RE-MEASUREMENT (2026-10-03, this tree), and it is the only thing to read if
-you are picking this up.** §2–§5 below describe the state of the tree they were
-written on, and §4 and §5 have since been fixed by other work; the 13 files are
-now blocked EARLIER than this construct, so none of its per-file conclusions
-can be re-measured on them today. Measured with the sweep's own row tool, over
-exactly these 13 files, arm64:
-
-| class | n | what it is |
-|---|---|---|
-| `codegen/dependency` | 9 | a module the file IMPORTS is refused first — `std/collections/binary_heap.mojo` (8 files) and `std/collections/string/_unicode_lookups.mojo` (1), both refused as "a formal dylib has no public functions". Already recorded as a family in `bugs/FORMAL_known_limits.md` §1.1a; nothing new, and it is the same refusal nine times |
-| `not-answerable/host-import` | 4 | the four `.py` files import CPython host modules (`importlib` ×2, `copy`, `tempfile`) — a fact about the TARGET, not about this check |
-| **on `frame_declared_parameter_refusal`** | **0** | — |
-
-So the construct is correct, load-bearing, and currently unreachable in this
-row: fixing §3's call-site coercion would move 0 of these 13 files. What would
-move them is the §1.1a family (a module of module-level constants and generic
-struct templates exporting nothing under `doc/ABI.md`'s rules), and that is not
-this construct's to answer either.
-
-```console
-$ python3 tools/memslot.py --gb 8 --label row13 -- python3 tools/formal_sweep.py \
-      -j 3 -t 600 -M 4 formal/types.py elaborate.py mojo/middle/closures.py \
-      mojo/middle/offload.py $STD/{random/philox,python/python,base64/base64}.mojo …
-  [arm64] 13 files: PASS=0 not-pass=13
-         codegen/dependency              9
-         not-answerable/host-import      4
-  cas: 0 hit / 13 miss
-  verdict history: previous report 2026-10-01T13:23:35 [arm64], 13 files
-    codegen -> codegen/dependency: 9
-    codegen -> not-answerable/host-import: 4
-```
-
-**§4 and §5 are FIXED on this tree**, measured with the two reproducers §4 and
-§5 describe, both architectures:
-
-| reproducer | §4/§5 measured | now |
-|---|---|---|
-| `struct Python: def import_module(var module: String)`, called `Python.import_module("sys")` | refused as *"declares 'module' as String … passes a name, 'Python'"* — the RECEIVER compared against the first declared parameter | refused with *"too many positional arguments (2 for 1 parameter(s); the parameters are ['module'])"*, **identical on both architectures** — the accurate message, and the one the receiver-rewrite produces |
-| `@staticmethod def one_round(counter: Int)`, reached through an instance `r.one_round(c)` with `c = 3` | rewritten to `R__one_round(self, counter)` — two arguments to a one-parameter function | **computes `6`**, CPython's answer, on both architectures |
-
-So §5's neighbour (`@staticmethod` compiled as an instance method) no longer
-needs its own doc, and §4's "one line of diagnosis-quality work" is done by that
-same work rather than by anything here.
 
 | # | file | callee / parameter / declared | what the call site hands over | group |
 |---|---|---|---|---|
@@ -186,7 +53,7 @@ FILE .../stdlib/std/base64/base64.mojo
 … 13 rows
 ```
 
-**13 files, matching the `b3` round of `bugs/FORMAL_sweep_work_map.md` §2's row
+**13 files, matching `bugs/FORMAL_sweep_work_map_2026-10-01_b3.md` §2's row
 exactly**, on the same tree (`e695183a`), with no build at all. Worth keeping as
 a tool: the sweep's own ledger records only path → class, so the CAUSE text is
 in the per-file `.result` entries and nowhere else.
@@ -297,7 +164,7 @@ sum on purpose: a read at the wrong SLOT says which field moved (43, not 34).
 * **0 of 13 reach `pass`.** So the honest headline is: one false refusal removed
   and verified, thirteen files still blocked, and the reason is not this check.
 
-## 3. Group D — the word/frame question, 9 of the 13, and NOT this construct's to answer — **and, per the re-measurement above, not reachable on this row today**
+## 3. Group D — the word/frame question, 9 of the 13, and NOT this construct's to answer
 
 Nine files hand the parameter something this path **cannot place**, and in most of
 them the thing it cannot place is a **word** where the declaration compiled the
@@ -345,7 +212,7 @@ Until that exists, "this call site hands over a word" is true, and refusing is t
 answer this backend owes rather than a fault at an address it did not mean to
 touch. **The remaining 9 are worth that feature, not a relaxation of this check.**
 
-## 4. Group C — `std/python/python.mojo`: the refusal is TRUE and about the WRONG argument — **FIXED, see the re-measurement above**
+## 4. Group C — `std/python/python.mojo`: the refusal is TRUE and about the WRONG argument
 
 ```
 struct Python:
@@ -381,7 +248,7 @@ this a message-accuracy defect rather than a wrong diagnosis:
 So: one line of diagnosis-quality work, no coverage. Not fixed here; it is a
 property of the method-call rewrite, not of this check.
 
-## 5. Group B — `std/random/philox.mojo`: a `@staticmethod` is compiled as an instance method — **FIXED, see the re-measurement above**
+## 5. Group B — `std/random/philox.mojo`: a `@staticmethod` is compiled as an instance method
 
 ```
 struct Random:
@@ -443,7 +310,7 @@ field read of a `SIMD` field of a framed struct, and the NESTED-frame placement
 the generic `SIMD[.uint32, 4]` rather than a plain struct name. So `philox.mojo`
 is at least two constructs, and the second one is worth its own measurement.
 
-Filed as `FORMAL_staticmethod_is_compiled_as_an_instance_method`.
+Filed as `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md`.
 
 ## 6. What is deliberately NOT changed
 
@@ -480,14 +347,14 @@ $ python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-arm-b3.txt   # the row
 
 ## 8. Related
 
-* `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` §2 — the sibling row this one was
+* `bugs/FORMAL_receiver_stored_in_a_field.md` §2 — the sibling row this one was
   split out of, and the 7-line reproducer this construct's docstring still uses.
   **Its §2 claim that the base64 case is "a contradiction in the source" is
   wrong**, and §3 here is the measurement: `b64encode(input_bytes, result)` with
   `mut result: String` is exactly the declared type at every call site. The
   contradiction is between the WORD `String()` produces and the FRAME `String`
   compiles to, and it is in this compiler's model, not in the stdlib.
-* `FORMAL_field_set_method_name_and_kwarg_blind_spot` — the same
+* `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` — the same
   `struct_field_names` derivation reads `Pointer` as 13 fields and `Span` as 6,
   of which 10 and 2 respectively are METHOD names. Measured here for the same
   two types; it does not change their framed-ness (both have 3+ real fields) but

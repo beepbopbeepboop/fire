@@ -365,10 +365,7 @@ wrong-behaviour bug, not a leak. Not worth the risk for 8%.</p>
 call result reads every element with <code>mojo_list_get_str</code>, so a float slot's bit pattern reaches
 <code>strlen</code> — a SIGSEGV, and the mirror of
 <code>bugs/CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md</code>, which is a different root cause and is
-untouched by any of this work). <strong>Fixed and deleted 2026-10-01</strong>: a callee that returns a
-heterogeneous list is now marked, so the caller's read lowers as a BOXED one and the runtime answers per
-slot — and the box carries the slot's kind byte, so a <code>char *</code> slot is described as the string it
-is rather than as its own address decimal.</p>
+untouched by any of this work).</p>
 <p><strong>A test that was passing vacuously.</strong> <code>test_ptr_registry.py</code> compiles its harness with
 <code>python3-config --cflags</code>, which carries <code>-DNDEBUG</code>: every <code>assert</code> in it was compiled out, so
 the whole file reported PASS for any runtime at all (a deliberately broken delete still passed), and the
@@ -555,9 +552,7 @@ without the fix), <code>gimple_split_result_element_strings_are_owned</code>,
 <code>CODEGEN_container_no_deallocation_unbounded_growth.md</code>,
 <code>CODEGEN_call_result_container_never_freed.md</code>,
 <code>CODEGEN_large_dict_accumulation_exit_crash.md</code>. Filed:
-<code>CODEGEN_list_element_read_defaults_to_str_across_a_call.md</code> (fixed and deleted 2026-10-01: the call
-result of a callee returning a heterogeneous list is read as a BOX, per slot, instead of through the
-element type the joined ctypes imply).</p>
+<code>CODEGEN_list_element_read_defaults_to_str_across_a_call.md</code>.</p>
 
 </body>
 </html>

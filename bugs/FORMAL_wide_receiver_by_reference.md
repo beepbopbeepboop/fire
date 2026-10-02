@@ -17,49 +17,6 @@ five things that are still open.
 Current arm64 baseline: 284 files, `PASS=80`, `codegen=54`,
 `codegen coverage 80/134 = 59.7%`, and **0** of those name this diagnostic.
 
-**Update 2026-10-03: three things this document lists as open are closed, and
-one of them is a premise rather than a feature.**
-
-* **Premise (B1) — a method that stores a CALL into a frame field — is no longer
-  a blanket refusal.** `struct_field_container_writes` treated any call this
-  image cannot see through as "possibly a container constructor", because a
-  container is a bump-allocated region of the CALLEE's scratch and so dies with
-  the callee's activation. A function of the same module whose DECLARED return
-  type is a plain word cannot be one: a `str` here is a `malloc`'d buffer the
-  caller owns for as long as it likes, and a number is a number.
-  `model.plain_word_callee_names` + `publish_plain_word_callees` (published per
-  module beside `publish_placed_frame_structs`, cleared with it) are the
-  narrowing, and they are needed by anything that stores a computed value into a
-  receiver — the case that found it is
-  `formal/hostmods/tempfile.mojo`'s `TemporaryDirectory.__enter__` writing
-  `self.name = mkdtemp(p)`, which is a context manager this path now enters.
-* **`mod.S(...)` — a construction of an IMPORTED struct — reserves its block.**
-  `struct_constructor_sites` read only the BARE spelling, so the layout pass and
-  the emitter disagreed about a dotted construction: the emitter emitted it and
-  the table had reserved nothing, which is its own "the frame layout and the body
-  disagree" refusal. Both spellings reserve now, and
-  `model.dotted_struct_construction` is the one decision both emitters read.
-  Measured population before the change: **zero** — no host module in
-  `formal/hostmods/` declared a struct at all, so no corpus file could reach it.
-* **The `dozens` band's open question — "a function that both recurses and
-  creates wide frames has no stated bound relating the two" — is answered, and the
-  answer is that there is nothing to relate.** A frame block is reserved ONCE per
-  construction SITE in the prologue out of the fixed per-activation scratch
-  (`_SCRATCH`, 128 KiB), so a 263-field struct costs the same per activation as a
-  two-field one. Measured, arm64, a recursive function that builds a 263-field
-  frame per activation: depth 20 answers, depth 100 and 400 exit **2** — the
-  stack-floor guard's documented overflow status — at exactly the same depths as
-  the same function with no frame at all, and x86-64 answers at 400. So the bound
-  is the one `STACK_FLOOR_BUDGET_BYTES` already states, the wide frame spends none
-  of it, and the failure mode is a status a caller can read rather than a SIGSEGV.
-
-Still open, unchanged: no method is proved end to end by the generator (step 6),
-no loop contract for a method, the `work_step_*` aliases are still misnamed
-pending the `_WORK_STEP` rename, and the x86-64 model has still not been re-audited
-for arm64's class of mis-modelled memory form (`bugs/FORMAL_x86_64_model_has_no_
-step_for_a_gpr_to_xmm_move.md` and its siblings, claimed elsewhere). The first
-three are `formal/arm64_proof_gen.py` and `lib/`, which no test in this batch runs.
-
 ## Is the one-word value a true invariant?
 
 **Yes, and the proof side's own account of it is correct.** Verified, not taken
@@ -1208,33 +1165,8 @@ and checked (above), which is the part of it that was missing.
 * **A nested frame deeper than `MAX_NESTED_FRAME_DEPTH = 4` is dropped from the
   layout, not refused.** The block size truncates with it, so it is safe, but a
   program that needs the fifth level gets a nested frame the emitter did not
-  place and a field-of-a-field refusal on the use. The bound is a hang-avoider,
-  not a design.
-  **MEASURED 2026-10-01, so the corpus claim above is a number rather than an
-  impression — and the headroom is two levels, not one.** Walking
-  `model.struct_nested_frame_fields` to its own fixed point over every `.mojo`
-  in this repository and in the new-modular stdlib — **505 structs** (5 here,
-  500 in 190 stdlib files) — the histogram of
-  `max(depth(struct_nested_frame_fields(...)))` is:
-
-  ```
-  depth 0: 478      depth 1: 24      depth 2: 3      depth 3: 0   depth >=4: 0
-  ```
-
-  (walked with a cycle guard on `(child.name, id(child))`, and `depth=None` at
-  every level so the walk is not bounded by the constant it is measuring). The
-  three deepest are `std/python/_cpython.mojo`'s `PyModuleDef`,
-  `std/memory/alloc.mojo`'s `ManagedAllocation` and
-  `std/collections/dict.mojo`'s `_DictKeyIterOwned`, all at 2.
-  **What this buys the next worker:** turning the truncation into a refusal is
-  safe for the corpus — nothing is near the bound — so the change is a pure
-  diagnostic improvement and does not need a sweep to price. **And what it does
-  NOT license:** refusing the whole struct is over-strict, because the bound only
-  truncates the *deepest* struct's own nested fields, so a five-deep chain whose
-  innermost fields are plain integers works today and would stop. The honest
-  shape is to report the CUT (`struct_nested_frame_fields` at depth 0 returning
-  `[]` while the struct has a nested field to place) at the construction site
-  that would have placed it, not to refuse the declaration.
+  place and a field-of-a-field refusal on the use. No struct in the corpus is
+  that deep; the bound is a hang-avoider, not a design.
 * **`Refine.lean` needed no change and that is worth saying.** A method's callee
   contract is `FrameOk_except st st' base n`, and `n` is a slot count — a block
   is contiguous from `base`, so carving the whole block out is the same
@@ -1281,7 +1213,7 @@ says 42.
 
 ## Wave 4 (D4): the hand-off, split by what the callee actually is
 
-`test_formal_run.py`'s `byref_*` cases are the account, and the
+`bugs/FORMAL_frame_receiver_handoff.md` has the full account, the
 measurements and the per-file table. What belongs here is the one-line summary
 and the thing that changes this document's own conclusions.
 
@@ -1586,17 +1518,14 @@ Two boundaries, and the first one is a gap in the round's partitioning:
 
 * **`formal/build.py` is in nobody's write set** and is not in §11.2's
   "Deliberately unowned" list. It is also the file that raises the refusal
-  (`:2423`), so all 18 findings were gated on a line nobody could edit. The
-  request that asked the integrator to assign it, and stated the exact removal,
-  is deleted with its fix — see the Round 3 correction below.
+  (`:2423`), so all 18 findings are gated on a line nobody may edit.
+  `bugs/INTERFACE_REQUEST_4_to_formal_build.md` asks the integrator to assign
+  it and states the exact removal.
 * **The proof-side obligation** is a `lib/Refine.lean` predicate — a callee
   contract variant that carves out the passed-in block rather than the receiver
-  frame, the same additive move as `FrameOk_except`. **That predicate now
-  exists**: `FrameOk_into` and `ReturnsBlockInto` in `lib/Refine.lean` §4c, with
-  the two shape decisions recorded there (the clause is about 8-byte WORDS, and
-  the recovery of the plain `FrameOk` is one-directional because the new clause
-  is not implied by it). The request that asked for the shape is deleted with
-  its answer, so the emitters and the theorem cannot disagree.
+  frame, the same additive move as `FrameOk_except`. That is [3]'s file;
+  `bugs/INTERFACE_REQUEST_4_to_3_contracts.md` states the shape the codegen
+  will be written against, so the emitters and the theorem cannot disagree.
 
 ### What is landed, and what it is worth
 
@@ -1761,11 +1690,11 @@ as long as only one of them was reachable.
 ## Round 3: the codegen landed, and the measured effect was ZERO files reaching `pass`
 
 The section above is the design; this is what happened when it was built.
-The account of that landing — the three decisions, the two bugs the new code
-contained, and the per-file table for the 30 sweep files this cause blocked —
-was kept in a doc of its own, which is deleted with its fix; git history carries
-it. Three things belong here because they correct or complete statements above
-rather than replace them.
+`bugs/FORMAL_returned_frame_caller_owned_block.md` has the diff-shaped account —
+the three decisions, the two bugs the new code contained, and the per-file
+landing table for the 30 sweep files this cause blocked. Three things belong
+here because they correct or complete statements above rather than replace
+them.
 
 **"Why this is blocked, and it is not on the Lean side" is no longer true of
 the first bullet.** `formal/build.py` had an owner by the time this landed and
@@ -1773,9 +1702,9 @@ the gate came down: the returned frame is now built in a block the CALLER owns,
 passed as one hidden trailing argument, and the 19 `returned by its creator`
 findings are **zero**.
 
-**The block is built IN, not copied into.** Round 2 and the interface request
-(which is deleted with its answer, in `lib/Refine.lean` §4d) both say the copy,
-and both are superseded on that one point. A construction inside the returning function
+**The block is built IN, not copied into.** Round 2 and
+`bugs/INTERFACE_REQUEST_4_to_3_contracts.md` both say the copy, and both are
+superseded on that one point. A construction inside the returning function
 writes through the hidden word instead, which removes the one thing that made
 the copy expensive — re-basing the ADDRESS of every nested frame in the block,
 at every depth, into the new block. The convention is otherwise identical: same
@@ -1799,130 +1728,3 @@ behind a documented permanent limit. The 1 is the bug the lift-without-an-
 implementation would have shipped, which is the whole argument for measuring
 with the fix rather than by lifting the check.
 
-
-## Round 4: a CHAIN of nested frames — the read was one hop and the store put every level in the outer block
-
-The layout has been recursive since wave 3 (`struct_frame_block_bytes`,
-`struct_block_children`, `MAX_NESTED_FRAME_DEPTH = 4`), but nothing could
-REACH a second level, and there were three separate reasons, each of which had
-to be fixed before a three-level chain ran at all. All three are measured on
-both architectures.
-
-**The read side followed exactly one hop, however long the chain.** `formal/
-build.py`'s `_frame_receivers` computed `outer_field = parts[-2]`, so
-`o.n0.n1.leaf` was resolved as if it were `o.n0.leaf`: a refusal that is false
-about the file ("`n1` is not a field of the holder's struct" — true of the
-outer struct, false of the file, because `n0`'s declared type types it one
-level down), or a load from the wrong slot. `_frame_nested_slots` then held ONE
-slot per chain, so even a chain the analysis had accepted could only be loaded
-once. It is now a walk: every field between the holder and the last one is
-resolved level by level through the same `_typed_nested_frame` predicate, each
-hop's slot is kept, and the value is the TUPLE of slots — so the emitter's load
-loop and the analysis's walk cannot disagree about which load is which. A hop
-with no slot to load is its own message (`model.nested_frame_hop_unplaced`),
-because it says something different from the two-level refusal: the field is
-agreed to be a nested FRAME and the LAYOUT has no index for it, which adding an
-annotation does not fix.
-
-**The store side put every level's address in the OUTER block.** Both backends
-wrote a nested frame's address into `site[1] + 8·slot` — the site being
-constructed — at every level. At one level that is correct by accident; at a
-second it overwrites the outer frame's own first-level address in slot 1 with
-the inner one, so the first read returns a pointer into the middle of a block.
-Nothing measured it, because a second level could not be reached from a read
-either. The fix is the reason `struct_block_children` now returns FIVE
-elements: the fifth is the offset of the block that DECLARES the field, so the
-address goes into its parent's slot array at every depth, in the constructor
-(`_emit_frame_nested_addresses`) and in the returned-frame COPY
-(`_emit_frame_copy`) alike.
-
-**`_emit_nested_frame_init` unpacked four elements out of a three-element
-list.** Both backends walked `struct_nested_frame_fields`, which does not carry
-an offset, and read one anyway. It raised only for a struct whose OWN
-typed-nested field exists — a second level, unreachable from a read, so no test
-reached it. Both now walk `struct_block_children`, which is the list that
-carries the offsets, computed from the same `struct_frame_bytes` arithmetic the
-reserved block's SIZE comes from.
-
-**And the bound itself was not enforced.** `struct_frame_block_bytes` returned
-the object's own bytes when `depth` ran out and DROPPED the frames below the
-cut, so the reservation came back short by exactly those frames, the blob
-cursor started inside one of them, and the program took a SIGSEGV with no
-diagnostic naming the file — measured at six nested levels on both backends,
-where the same source built and ran correctly at five.
-`MAX_NESTED_FRAME_DEPTH`'s own docstring claimed the bound "is checked in
-`struct_nested_frame_fields` and the refusal names the cycle"; nothing checked
-it anywhere. It is enforced now, in the function that computes the reservation,
-so a declaration CYCLE — the case the bound was written for — is a refusal too.
-
-Measured, both architectures, each level given a DISTINCT value so a lowering
-that put two frames at one address could not pass by printing one number twice:
-
-| levels | hops | before | after |
-|---|---|---|---|
-| 1 | 0 | ran | ran |
-| 2 | 1 | ran | ran |
-| 3 | 2 | refused falsely, or read the wrong slot | ran, all three levels distinct |
-| 4 | 3 | refused falsely | ran |
-| 5 | 4 | refused falsely | ran — this is `MAX_NESTED_FRAME_DEPTH` |
-| 6 | 5 | **SIGSEGV**, no diagnostic | refused, naming the field below the cut |
-| `A{var b: B}` / `B{var a: A}` | — | **SIGSEGV**, no diagnostic | refused, naming the cycle |
-
-Tests: five rows in `test_formal_x86_64_parity.py` — the three-level chain, the
-same chain HANDED TO A CALLEE (the `_emit_frame_copy` half, which the first row
-never exercises), the chain AT the bound, and the two refusals. Measured
-before the change at 0/5 and after at 5/5, with the pre-change failures being
-the pre-existing `ValueError: not enough values to unpack (expected 4, got 3)`
-for the chains and a built binary for both refusals. Full parity 25/25;
-`test_formal_run.py` 656/0; `test_formal_read_before_store.py` 130/0;
-`test_refusal_taxonomy.py` 167/167; `test_formal_value_model.py` 32/0.
-
-**~~Still not done, and stated so rather than left to be found.** A METHOD CALL
-on a nested receiver (`o.n.put(v)`) is still refused by name, on both
-backends, because neither backend lowers a method call on a value — the
-refusal says so and lists the methods that ARE lowered. That is the next wave
-and it is not this one: the frames are now placed and reachable at every level
-the bound allows, which is the precondition it needed.~~ **CLOSED 2026-10-03
-(`work/formal16-8`) — the sentence is FALSE on this tree, measured on both
-architectures:** `formal/build.py`'s `_rewrite_nested_method_calls` turns
-`o.n.put(v)` into `In_put(o.n, v)`, and `In_put`'s receiver is a PLACED NESTED
-FRAME, so the ordinary call path applies and the method's own contract
-(`out self`, `FrameOk_except`) governs the write. `Outer { pad: Int, n: In }`,
-`In { a, b }`, `In.put(out self, v)` writing only `self.a`, and a read of both
-fields plus the getter afterwards: `a=7 b=0` and `77` on arm64 AND on x86-64,
-against CPython. Pinned by `method_call_on_a_nested_frame_receiver` in
-`test_formal_x86_64_parity.py` (44/44 with it), with `b` as the load-bearing
-half: a lowering that read the receiver's slot without going through the method
-would print the right `a` and the wrong `b`.
-
-The reason the item was open is worth recording, because it is the same reason
-the frames took four waves to become reachable: the sentence was written when
-the frames were not yet placed at every level, and nothing has re-read it since.
-**A "still not done" list in a design document is a claim about a tree, and this
-one had gone stale without anything failing.**
-
-**The neighbouring shape is NOT closed, and it is a new finding rather than a
-correction:** a struct whose ONLY field is a typed-nested frame — `Outer { n:
-In }` with nothing else — is refused on both backends, with a message that names
-`o.a`, a field the source never writes (`formal/model.py`'s one-word-receiver
-rewrite collapses `o.n` into `o`, and then `o.a` is a one-hop field access
-through `o`, whose only slot holds a FRAME ADDRESS). Filed as
-commit 03e3b7b6.
-
-**And this did not move the RETURNED-frame failures, which were already red.**
-(The three counts are stale as of 2026-10-03 and are corrected above; measured
-on this tree: `test_formal_returned_frame.py` 42/0 and
-`test_formal_receiver_position.py` 29/0.) `test_formal_returned_frame.py` is
-22/13, `test_formal_receiver_position.py`
-13/3 and `test_formal_specialization.py` 6/1 both before and after this change,
-with the same test names in all three lists — measured by reverting the four
-source files and re-running, not by reading the totals. Two of the thirteen do
-name a different backend, and both are nested-frame cases:
-`returned_frame_carries_its_nested_frame` and
-`a_nested_frame_inside_the_returned_block_is_reachable` used to be reported
-failing on x86-64 and are now reported on arm64, because arm64 now gets past
-the layout and read wall this round fixed and reaches the pre-existing
-returned-frame fault underneath it. Neither number changed, so this is not a
-regression and not a fix; it is the returned-frame convention
-(`“FORMAL_returned_frame_caller_owned_block: `return <frame>` lowers”`) being the next thing in
-the chain, and these two rows are where it will show up first.

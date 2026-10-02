@@ -61,22 +61,6 @@ def _selfhost_fn_reassigns_method(_fn, _pnames=('gen', 'self')) -> bool:
     return False
 
 
-def closure_lifted_name(outer_name: str, inner_name: str) -> str:
-    """The C function name a nested `def` is emitted under.
-
-    ONE definition, because two places must agree on it to the character or
-    a fact recorded about a nested def becomes unlookupable:
-    `discover_closures` builds `ClosureInfo.lifted_name` from it (and the
-    whole emission pipeline keys on that), while the GIMPLE module pass's
-    cross-call string evidence records against it — the `print` ladder's
-    `mojo_cstr_or_int_str` discriminator asks with `gen.current_func_name`,
-    which IS this name while the lifted body is being lowered. Two separate
-    f-strings would silently drift and the evidence would be written to a key
-    nobody reads, which looks exactly like no fix at all.
-    """
-    return f"{outer_name}_{inner_name}"
-
-
 def _gmi_all_stmts_nonfunc(stmts) -> list:
     """Hoisted out of `gen_module_impl._scan_for_closures` (was a
     2-level-deep nested closure) — see `_gmi_prefold_toplevel_comptime`'s
@@ -228,7 +212,7 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
             inner_params = _as_list(inner.params)
             if inner.is_async and not inner.is_generator:
                 continue
-            lifted    = closure_lifted_name(outer_name, _as_str(inner.name))
+            lifted    = f"{outer_name}_{inner.name}"
             # `_as_str` each element: `_used_idents_node` returns a set whose
             # str members erase to boxed int64_t under self-compile, so the
             # `used - inner_declared` difference below misses a declared name
@@ -477,34 +461,10 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                 if not _merged_caps:
                     continue
                 _shared_env = outer_name + "_" + "_".join(sorted(_members)) + "_env"
-                _shared_list = [(_cv, _merged_caps[_cv]) for _cv in sorted(_merged_caps)]
+                _merged_list = [(_cv, _merged_caps[_cv]) for _cv in sorted(_merged_caps)]
                 _shared_mut = frozenset([_mn for _mn in _merged_mut if _mn in _merged_caps])
                 for _mci in _member_cis:
-                    # ONE list object for the whole group, not a `list()` copy
-                    # per member. Every member declares the same C struct, so
-                    # its field list is one fact about that struct; handing
-                    # each member its own copy is what let the group drift
-                    # apart the moment anything appended to it. The
-                    # transitive fixup at the end of this function DOES
-                    # append — a grandchild's capture the parent does not own
-                    # becomes the parent's own capture — and it appends to
-                    # whichever member it walks, so with per-member copies
-                    # only that member learned the new field. The struct
-                    # typedef is emitted from the FIRST member the emission
-                    # loop reaches (`_emitted_structs` dedupes by name), and
-                    # that member's list is what it printed, so a capture the
-                    # first member never learned was a `has no member named
-                    # 'self'` error in both the allocator and the body that
-                    # write it. Measured: `gen_module_impl`'s
-                    # `_is_foreign_main` <-> `_mk_round` call group shares
-                    # `gen_module_impl__is_foreign_main__mk_round_env`, and
-                    # `_mk_round`'s grandchild `_mk` captures `self`, so the
-                    # fixup appended it to `_mk_round` alone — while the
-                    # typedef came out of `_is_foreign_main`, three fields
-                    # and no `self`. With one shared list, whichever member
-                    # the fixup reaches first appends and every member (and
-                    # every env fill emitted from it) sees the field.
-                    _mci.captures = _shared_list
+                    _mci.captures = list(_merged_list)
                     _mci.env_struct = _shared_env
                     _mci.mut_names = _shared_mut
 

@@ -19,8 +19,6 @@ Naming convention mirrors formal/arm64.py: `encode_<mnemonic>_<operands>`,
 import struct
 from enum import Enum
 
-from formal.model import CodegenError
-
 
 class Reg(Enum):
     RAX = 0
@@ -61,20 +59,6 @@ COND_LE = 0xE       # signed less-or-equal
 COND_G = 0xF        # signed greater
 
 
-def cond_negated(cc: int) -> int:
-    """The opposite condition code.
-
-    Every pair above differs in the low bit — O/NO, B/AE, E/NE, BE/A, S/NS,
-    P/NP, L/GE, LE/G — so flipping it negates the condition. Named rather than
-    written `cc ^ 1` at the call site because a construct that needs both
-    polarities of ONE comparison should read as that: the for-range loop's head
-    test leaves the loop and its back edge re-enters it, and the two must be the
-    same comparison or the loop's exit does not agree with its continuation
-    (`formal/x86_64_codegen.py`'s `_emit_loop`).
-    """
-    return cc ^ 1
-
-
 # formal's x86-64 calling convention (System V AMD64 integer argument order).
 # Chosen to match the host ABI so the extern path (printf/exit via dyld or the
 # ELF dynamic linker) needs no thunk.
@@ -104,29 +88,8 @@ def _rm_disp(base: Reg, disp: int) -> tuple:
     x86 addresses a base register either directly (mod=00, no displacement) or
     through a disp8/disp32 (mod=01/10). `[RBP]`/`[R13]` are the two low-
     encodable registers that have no disp=0 form — mod=00 with rm=5 means
-    RIP-relative — so they always carry at least a disp8.
-
-    **R13 is in that list because `mod=00, rm=101` is RIP-relative in 64-bit
-    mode whatever REX.B says**, and the check for that used to name only RBP.
-    So `_rm_disp(R13, 0)` answered `(0, b"")` and `encode_mov_r64_rm64(RBX,
-    R13, 0)` emitted `49 8b 05` — THREE bytes: a RIP-relative load whose disp32
-    was simply absent, so the instruction that follows started four bytes early.
-    Found by `tools/formal_isa_census.py`, whose canonical word for that
-    encoder would not decode (a 3-byte buffer where a 7-byte instruction is
-    claimed). Two independent measurements agree that mod=00/rm=101 is
-    RIP-relative rather than `[r13]`:
-      * `as`: `movq (%r13), %rax` assembles to `49 8b 45 00` — mod=01, disp8=0,
-        not `49 8b 05`;
-      * the CPU: a hand-written `4d 8b 05 00000000` with `r13` pointing at
-        `buf[0] = 0x1111` read `0x200dcaad0`, an address inside the probe stub,
-        i.e. `rip + 0` and nothing to do with `r13`.
-
-    The backend does not use R13 as a memory base today (R11/RBP/RSP are the
-    bases it emits), so no image built before this carried the form; the fuzz
-    harness does use R13 as a base and draws displacement 0, which is where the
-    census found it.
-    """
-    if disp == 0 and base.value not in (Reg.RBP.value, Reg.R13.value):
+    RIP-relative — so they always carry at least a disp8."""
+    if disp == 0 and base.value != Reg.RBP.value:
         return 0, b""
     if -128 <= disp <= 127:
         return 1, bytes([disp & 0xFF])
@@ -232,38 +195,6 @@ def encode_mov_r64_r64(dst: Reg, src: Reg) -> bytes:
     return bytes([rex, 0x89, _modrm(3, src.value & 7, dst.value & 7)])
 
 
-def encode_movq_xmm_rm64(xmm: int, src: Reg) -> bytes:
-    """movq xmm<k>, r64 — 66 REX.W 0F 6E /r, the GPR-to-SSE move.
-
-    **Why this instruction exists at all**, because nothing else on this path
-    crosses that boundary: a value here is one 64-bit word and it lives in a
-    general-purpose register, and the SysV AMD64 ABI hands a `double` to a
-    variadic callee in `XMM0`..`XMM7` and nowhere else. So a `printf("%f", w)`
-    whose word is in `RDI` reads whatever `XMM0` happened to contain — which is
-    why the wrong answer was a DENORMAL and why it CHANGED BETWEEN RUNS of the
-    same binary rather than merely being wrong.
-
-    The encoding is `66 REX.W 0F 6E /r` and the direction matters, because the
-    two moves share a ModRM shape and differ only in which half is the XMM:
-    `0F 6E` is `MOVQ xmm, r/m64` (XMM in the reg field, GPR in r/m — the
-    direction wanted here) and `0F 7E` is `MOVQ r/m64, xmm` (the reverse — now
-    `encode_movq_r64_xmm` above it, so the pair can be read against each other:
-    both assemble, both link, and the wrong one quietly loads whatever was
-    already in XMM0 into RDI).
-    The width modifiers are load-bearing for the same reason: `0F 6E` without
-    REX.W is `MOVD`, which drops all but the low 32 bits and so moves a
-    DIFFERENT VALUE rather than a different placement of the same one.
-
-    `xmm` is the XMM number 0..7 and is the low three bits of ModRM.reg; there
-    is no REX.R because no XMM register is numbered 8 or above in this ABI, and
-    the B bit carries the GPR's own extension.
-    """
-    assert 0 <= xmm <= 7
-    assert isinstance(src, Reg)
-    rex = _rex(w=1, b=1 if src.value >= 8 else 0)
-    return bytes([0x66, rex, 0x0F, 0x6E, _modrm(3, xmm, src.value & 7)])
-
-
 def encode_mov_r64_rm64(dst: Reg, base: Reg, disp: int = 0) -> bytes:
     """mov dst, [base + disp] — REX.W 8B /r."""
     modrm, extra = _mem_modrm(base, disp, dst)
@@ -350,43 +281,6 @@ def encode_mov_rm64_r64(base: Reg, disp: int, src: Reg) -> bytes:
     rex = _rex(w=1, r=1 if src.value >= 8 else 0,
                b=1 if base.value >= 8 else 0)
     return bytes([rex, 0x89, modrm]) + extra
-
-
-def encode_mov_rm32_r32(base: Reg, disp: int, src: Reg) -> bytes:
-    """mov [base + disp], src32 — 89 /r with NO REX.W, so four bytes.
-
-    The 4-byte member of the pointer value model's STORE set, and the store
-    counterpart of `encode_mov_r32_rm32`: the pointee widths are 1, 2, 4 and 8,
-    and this backend had encoders for the byte (`encode_mov_rm8_r8`) and the
-    qword (`encode_mov_rm64_r64`) only, so a `Pointer[Int32]`'s store had to be
-    an 8-byte store — which overwrites the four bytes after the pointee, a
-    silent corruption of a `malloc`'d buffer rather than anything that traps.
-
-    No REX.W, and that omission is the whole instruction: with it this is the
-    same opcode as the 8-byte store and writes eight.  A REX prefix is still
-    needed when either register is r8-r15, because that is what extends the
-    register field, and `_rex` emits exactly that.  Verified against clang:
-    `mov %r11d, (%rax)` = `44 89 18`.
-    """
-    modrm, extra = _mem_modrm(base, disp, src)
-    rex = _rex(r=1 if src.value >= 8 else 0,
-               b=1 if base.value >= 8 else 0)
-    return bytes([rex, 0x89, modrm]) + extra
-
-
-def encode_mov_rm16_r16(base: Reg, disp: int, src: Reg) -> bytes:
-    """mov [base + disp], src16 — 66 89 /r, two bytes.
-
-    The 2-byte member of the same set, and the operand-size prefix `66` is the
-    whole difference from `encode_mov_rm32_r32`: same opcode, same ModRM, two
-    bytes written.  It goes BEFORE the REX prefix, which is the one ordering
-    rule x86-64 has that is easy to get backwards.  Verified against clang:
-    `mov %r11w, (%rax)` = `66 44 89 18`.
-    """
-    modrm, extra = _mem_modrm(base, disp, src)
-    rex = _rex(r=1 if src.value >= 8 else 0,
-               b=1 if base.value >= 8 else 0)
-    return bytes([0x66, rex, 0x89, modrm]) + extra
 
 
 def encode_movabs_r64(reg: Reg, imm: int) -> bytes:
@@ -857,36 +751,6 @@ def encode_jmp_rm64(offset: int) -> bytes:
     return bytes([0xFF, 0x25]) + struct.pack("<I", offset & 0xFFFFFFFF)
 
 
-def encode_call_r64(reg: Reg) -> bytes:
-    """call r64 — an INDIRECT call through a REGISTER, no displacement.
-
-    `FF /2` with mod=11. The sibling of `encode_call_rm64` above, which is the
-    same opcode with mod=00/rm=101 and a disp32 — through MEMORY rather than
-    through a register — and the two are not interchangeable: the register form
-    is what a call through a function VALUE is, because the value is already in
-    a word (a formal value is one 64-bit word, and a function's is its code
-    address), and routing it through a GOT slot would mean inventing a memory
-    location the loader has to fill for a symbol this image already has.
-
-    **No REX.W**, and that is not an omission: in 64-bit mode `call r/m64`'s
-    default operand size is already 64 bits, so `as` emits a bare `ff d2` for
-    `*%rax`. Putting `w` in the REX byte is not merely redundant — it is a
-    different instruction's prefix: measured against clang,
-    `_rex(w=1, b=1)` produced `49 ff d3` where `41 ff d3` is `callq *%r11`, and
-    `49` sets the R (ModRM.reg) extension bit for an operand that has no
-    extension. The extension this operand needs is B, because the register is
-    in the r/m field.
-
-    Two bytes for RAX..RDI and three for R8..R15, both pinned byte-for-byte in
-    `test_x86_64_encoders.py` — which is how the REX mistake above was found,
-    and which is the reason a new encoder gets a case in the same commit as the
-    lowering that calls it.
-    """
-    if reg.value >= 8:
-        return bytes([_rex(b=1), 0xFF, _modrm(3, 2, reg.value & 7)])
-    return bytes([0xFF, _modrm(3, 2, reg.value & 7)])
-
-
 def encode_jne_rel32(offset: int) -> bytes:
     """`jne rel32` — branch if the ZERO flag is clear.
 
@@ -939,37 +803,6 @@ class Assembler:
         self._org = addr
 
     def label(self, name: str):
-        """Bind `name` to the current address — once.
-
-        A SECOND binding of the same name is an error rather than a rebinding.
-        Every branch to a label is patched in `resolve` out of this table, so a
-        later definition silently retargets every earlier reference to it, and
-        what that builds is a branch into the middle of a different instruction
-        sequence. Nothing downstream can see it: the image is well formed, the
-        run exits 0, and the answer is simply a different number.
-
-        That is not hypothetical. Two label names in `x86_64_codegen.py` were
-        built without the per-site counter every other one carries — the three
-        bound-clamp labels of `_emit_slice_parts`, named after the register
-        alone — so a second slice in one function rebound the first slice's
-        `jge` and `xs[1:3]` followed by `xs[2:6]` answered 14 for a sum of 23,
-        or died
-        (fixed 2026-10-03 in 68671a62). The
-        `_emit_range_list` labels collided the same way before that
-        (`bugs/FORMAL_x86_64_end_to_end_proof.md`, "Nested comprehensions"). So
-        a name is required to be unique per emission site, and this is where
-        that is enforced rather than remembered; `arm64.Assembler.label` carries
-        the same check for the same reason.
-        """
-        if name in self.labels:
-            raise CodegenError(
-                f"internal: label {name!r} is defined twice, at 0x"
-                f"{self.labels[name]:x} and at 0x"
-                f"{self._org + len(self.sections['text']):x}. Branch targets "
-                "are patched from this table, so every earlier branch to it now "
-                "lands in the middle of this second block. A label name must "
-                "carry a per-site counter (see every label in "
-                "formal/x86_64_codegen.py, e.g. assert{aid} / sl{sid}).")
         self.labels[name] = self._org + len(self.sections["text"])
 
     def emit(self, data: bytes):
@@ -977,17 +810,7 @@ class Assembler:
 
     def emit_label_rel8(self, label_name: str, here_offset: int = 0):
         """Record a rel8 branch fixup whose displacement byte is at the
-        current position (biased by `here_offset`).
-
-        The SAME convention as `emit_label_rel32` below, and it is stated here
-        because `resolve` does not enforce it: the recorded address is the
-        displacement BYTE, not the instruction, and a rel8 branch is two bytes
-        long, so a caller back-patching the `jcc rel8` it just emitted passes
-        `here_offset=-1`. Passing the rel32 form's `-4` writes four bytes too
-        early, which overwrites the opcode of the branch and the two bytes
-        before it — a silently misdecoded instruction stream rather than a
-        rejected encoding. (Measured while landing the stack-floor guard, which
-        is the first caller of this method.)"""
+        current position (biased by `here_offset`)."""
         self.relocs.append(
             ("j8", label_name,
              self._org + len(self.sections["text"]) + here_offset))
@@ -1106,195 +929,3 @@ class Assembler:
             self.sections["text"][idx:idx + instr_len] = \
                 encode_call_rel32(offset)
 
-
-
-# ── IEEE-754 binary64, the SCALAR SSE2 forms ──────────────────────────────
-#
-# A `double` is one 64-bit word holding its bit pattern, so storage needs no
-# instruction here either — a parameter, a spill slot, a struct field and a
-# return value are all already words, and `MOVQ` is what crosses into and out of
-# the XMM file.  The arithmetic does need them: `ADDSD` rounds to the format and
-# propagates NaN, and `ADD` on two bit patterns adds the patterns.
-#
-# XMM0..XMM7 is the whole reachable set on this path and not an arbitrary cut:
-# SysV AMD64 allocates variadic `double` arguments from exactly those eight, so
-# the arithmetic registers and the call's floating arguments are the same eight
-# and restricting to them removes the REX.R question the general case would
-# raise (`encode_movq_xmm_rm64` states the same bound for the same reason).
-#
-# Every encoding is checked against `clang -arch x86_64` by
-# `test_x86_64_encoders.py`.
-
-#: `(prefix, opcode)` per operation, all `F2 0F` except the compare and the
-#: zeroing xor.  `dst` is the XMM operand in ModRM.reg and `src` the one in
-#: ModRM.rm, matching AT&T's reversed print order.
-X86_SSE_FP_OPS = {
-    "addsd": 0x58,
-    "subsd": 0x5C,
-    "mulsd": 0x59,
-    "divsd": 0x5E,
-}
-
-
-def _sse_fp(op: str, dst: int, src: int) -> bytes:
-    """One `F2 0F <opcode> /r` scalar double operation, `dst op= src`.
-
-    All four read both sources before writing the destination, so `dst` may be
-    either of them.  `subsd` is what a negation must NOT be spelled: `0.0 - 0.0`
-    is `+0.0` where CPython's `-0.0` is `-0.0`.
-    """
-    assert op in X86_SSE_FP_OPS, op
-    assert 0 <= dst <= 7 and 0 <= src <= 7
-    return bytes([0xF2, 0x0F, X86_SSE_FP_OPS[op], _modrm(3, dst, src)])
-
-
-def encode_addsd_xmm(dst: int, src: int) -> bytes:
-    return _sse_fp("addsd", dst, src)
-
-
-def encode_subsd_xmm(dst: int, src: int) -> bytes:
-    return _sse_fp("subsd", dst, src)
-
-
-def encode_mulsd_xmm(dst: int, src: int) -> bytes:
-    return _sse_fp("mulsd", dst, src)
-
-
-def encode_divsd_xmm(dst: int, src: int) -> bytes:
-    return _sse_fp("divsd", dst, src)
-
-
-def encode_ucomisd_xmm(dst: int, src: int) -> bytes:
-    """UCOMISD dst, src — the flag-setting double compare, no result.
-
-    Flags only, like the integer `CMP`, so a conditional branches on them and a
-    value site `SETcc`s from them.
-
-    **The flags on NaN are the whole reason the condition this feeds is not the
-    integer one.**  UCOMISD reports unordered as `ZF=PF=CF=1`, so `SETE` ("ZF=1")
-    would call a NaN equal to everything and `SETBE` ("CF=1 or ZF=1") would call
-    it less-or-equal to everything.  `formal/model.py::float_condition` is where
-    the conditions are chosen from the parity flag and the operand order decided,
-    once, for both backends; the arm64 twin of this decision is
-    `encode_fcmp_dn_dm`'s docstring.
-    """
-    assert 0 <= dst <= 7 and 0 <= src <= 7
-    return bytes([0x66, 0x0F, 0x2E, _modrm(3, dst, src)])
-
-
-def encode_xorpd_xmm(dst: int, src: int) -> bytes:
-    """XORPD dst, src — bitwise, so `xorpd %xmm0, %xmm0` is the constant 0.0.
-
-    The zero a `double` value needs in one instruction.  It is XOR and not
-    `SUBPD` against itself because XOR of a pattern with itself is zero for
-    EVERY pattern including NaN, and the alternative is a load.
-    """
-    assert 0 <= dst <= 7 and 0 <= src <= 7
-    return bytes([0x66, 0x0F, 0x57, _modrm(3, dst, src)])
-
-
-def encode_movq_r64_xmm(dst: Reg, xmm: int) -> bytes:
-    """movq dst, xmm — 66 REX.W 0F 7E /r, the SSE-to-GPR move.
-
-    The reverse of `encode_movq_xmm_rm64`, and the one the codegen's own
-    contract makes mandatory: an expression leaves its value in RAX, so a
-    double-valued expression has to end with this or every caller downstream
-    reads a stale word.  The two directions share a ModRM shape and differ only
-    in which half is the XMM, which is why they are two functions and not one
-    with a flag.
-    """
-    assert 0 <= xmm <= 7
-    assert isinstance(dst, Reg)
-    rex = _rex(w=1, b=1 if dst.value >= 8 else 0)
-    return bytes([0x66, rex, 0x0F, 0x7E, _modrm(3, xmm, dst.value & 7)])
-
-
-def encode_cvtsi2sd_xmm_r64(dst: int, src: Reg) -> bytes:
-    """CVTSI2SD dst, src — the signed 64-bit integer as a double.
-
-    The int-to-float half of `float(x)`.  Rounding is round-to-nearest-even,
-    which is what CPython's `float(2**53 + 1)` answers and what no arithmetic on
-    the bit pattern would.
-    """
-    assert 0 <= dst <= 7
-    assert isinstance(src, Reg)
-    rex = _rex(w=1, r=1 if dst >= 8 else 0, b=1 if src.value >= 8 else 0)
-    return bytes([0xF2, rex, 0x0F, 0x2A, _modrm(3, dst, src.value & 7)])
-
-
-def encode_cvttsd2si_r64_xmm(dst: Reg, xmm: int) -> bytes:
-    """CVTTSD2SI dst, xmm — the double truncated toward zero into an integer.
-
-    The float-to-int half of `int(x)`, and "toward zero" is what makes it
-    CPython's: `int(2.9)` is 2 and `int(-2.9)` is -2.
-
-    The `T` is load-bearing.  `CVTSD2SI` without it consults the MXCSR control
-    word, so with the default rounding mode the SAME double yields a different
-    integer than CPython's `int()`; this backend has no way to read or set
-    MXCSR, so the trapping-free form is the only one whose answer does not
-    depend on state it cannot see.
-    """
-    assert 0 <= xmm <= 7
-    assert isinstance(dst, Reg)
-    # The ModRM halves are the other way round from `encode_cvtsi2sd`'s, and
-    # from `encode_movq_r64_xmm`'s, and that asymmetry is checked against
-    # `clang -arch x86_64` rather than reasoned about: CVTSD2SI is
-    # `CVTTSD2SI r/m64, xmm` in Intel syntax — the GPR is the DESTINATION and
-    # the XMM is the source — so the general register is the `reg` field (REX.R)
-    # and the XMM is the `r/m` field (REX.B), which is the reverse of the two
-    # moves. Getting it the other way round assembles, links, and converts the
-    # XMM's number as if it were the GPR's.
-    rex = _rex(w=1, r=1 if dst.value >= 8 else 0, b=1 if xmm >= 8 else 0)
-    return bytes([0xF2, rex, 0x0F, 0x2C, _modrm(3, dst.value & 7, xmm)])
-
-
-def encode_and_r8_r8(dst: Reg, src: Reg) -> bytes:
-    """and r/m8, r8 — 20 /r, the byte-wise AND with dst in r/m.
-
-    Needed only by the floating compare, and needed for a reason that is worth
-    the one instruction it exists for: `UCOMISD` reports an ORDERED equality as
-    `ZF=1 and PF=0`, and no single SETcc reads the conjunction. So `a == b` on
-    two doubles is `SETE` and `SETNP` and this one instruction, and `a != b` is
-    the same conjunction under `OR`. The 8-bit width is not a choice: `SETcc`
-    writes only a byte, so a 64-bit AND would read the REST of the register —
-    whatever the previous expression left in it — as part of the value.
-    """
-    assert isinstance(dst, Reg) and isinstance(src, Reg)
-    # No REX when neither register needs one: `20 /r` is two bytes for AL/CL and
-    # `40 20 /r` is the same instruction with a null REX, which assembles and is
-    # one byte longer than the reference — and a byte-identity differential
-    # against `clang -arch x86_64` would then fail on an encoding that is
-    # correct. This file's encoders are the short form wherever the short form
-    # exists, which is why `_rex` is called only when it has a bit to set.
-    enc = []
-    if dst.value >= 8 or src.value >= 8:
-        enc.append(_rex(r=1 if src.value >= 8 else 0,
-                        b=1 if dst.value >= 8 else 0))
-    enc += [0x20, _modrm(3, src.value & 7, dst.value & 7)]
-    return bytes(enc)
-
-
-def encode_or_r8_r8(dst: Reg, src: Reg) -> bytes:
-    """or r/m8, r8 — 08 /r. The `!=` half of `encode_and_r8_r8`'s conjunction."""
-    assert isinstance(dst, Reg) and isinstance(src, Reg)
-    enc = []
-    if dst.value >= 8 or src.value >= 8:
-        enc.append(_rex(r=1 if src.value >= 8 else 0,
-                        b=1 if dst.value >= 8 else 0))
-    enc += [0x08, _modrm(3, src.value & 7, dst.value & 7)]
-    return bytes(enc)
-
-
-def encode_setnp(reg: Reg) -> bytes:
-    """setnp r/m8 — 1 when PF=0, i.e. when the last compare was ORDERED.
-
-    The one flag that distinguishes "the two doubles are equal" from "one of
-    them is a NaN": both set ZF, and only the unordered case sets PF. Without
-    it `a == b` is `sete`, which calls a NaN equal to every number.
-    """
-    return _setcc(reg, COND_NP)
-
-
-def encode_setp(reg: Reg) -> bytes:
-    """setp r/m8 — the negation of `encode_setnp`: 1 when the compare was UNORDERED."""
-    return _setcc(reg, COND_P)

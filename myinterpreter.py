@@ -18,7 +18,6 @@ import platform
 import operator
 import math
 import collections
-import builtins
 import threading
 from dataclasses import dataclass
 import fire_compiler as N
@@ -134,87 +133,29 @@ class Scope:
             raise NameError(f"name '{name}' is not defined")
 
 
-def _split_invoker(owner_interp, args) -> tuple:
-    """`(interpreter, args)` for a call that may still carry the interpreter
-    as its first positional argument.
-
-    Three spellings of "call me with the interpreter" reach a `MojoFunction`,
-    and all three have to land on the same answer:
-
-    1. `Interpreter.invoke` (and `MojoInstance`'s `method(interpreter, self)`)
-       volunteer it positionally — the historical, mandatory convention;
-    2. a BUILTIN that received the function as a callback
-       (`sorted(key=f)`, `min(key=f)`, `map(f, xs)`, `list.sort(key=f)`) calls
-       `f(*args)` with no interpreter at all, which used to hand the callee's
-       FIRST REAL ARGUMENT over as the interpreter and die in `_invoke` with
-       "AttributeError: 'int' object has no attribute 'scope'";
-    3. an IMPORTED function, where the caller's interpreter and the one that
-       DEFINED the function are different objects (`fire.py run` gives every
-       imported module its own `Interpreter`, so `main` calling
-       `alpha_module.sb1_probe_amb` arrives with the caller's instance in
-       `args[0]` and the callee records the module's own).
-
-    So the leading argument is recognised by TYPE, not by identity with
-    `owner_interp`: case 3 is exactly the case where identity is the wrong
-    test, and getting it wrong there passed the interpreter through as the
-    function's first real argument — `sb1_probe_amb(x)` computed
-    `<Interpreter> + 111` and died with "unsupported operand type(s) for +:
-    'Interpreter' and 'int'" (test_module_cache.py's SB-1 per-scope-import
-    row, which asserts the interpreter path and the compiled path agree).
-
-    Identity is still consulted as a SECOND test, for a hand-constructed
-    `MojoFunction` nobody recorded an owner on; and a positional fallback
-    keeps the old convention working for one. A Mojo program cannot pass an
-    `Interpreter` as a real argument in any spelling this file supports, so
-    recognising one can never eat a value.
-    """
-    if args and isinstance(args[0], Interpreter):
-        return args[0], args[1:]
-    if owner_interp is not None:
-        return owner_interp, args
-    if args:
-        return args[0], args[1:]
-    return owner_interp, args
-
-
 class MojoFunction:
     """Represents a function defined in Mojo code."""
     def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
-                 is_generator=False, is_async=False, interpreter=None,
-                 comptime_param_defaults=None):
+                 is_generator=False, is_async=False):
         self.name = name
         self.params = params
         self.body = body
         self.closure_scope = closure_scope
-        # The interpreter that DEFINED this function, recorded so `__call__`
-        # does not depend on the caller volunteering it. See `__call__`.
-        self._interp = interpreter
         # Names from `def f[dtype: DType, ...](...)`'s bracketed generic
         # parameter list (see fire_compiler.py's _parse_generic_params_capture)
         # — bound by `__getitem__` when the call site subscripts the
         # function (`f[Int32](...)`, not passed as regular arguments.
         self.comptime_params = comptime_params or []
-        # Declared DEFAULTS for those parameters — `def f[T, y=0, *,
-        # linux=0]()`'s `y=0`/`linux=0`, kept by the parser in
-        # FunctionDef.comptime_param_defaults. Separate from `_pd` (which
-        # holds the RUNTIME parameters' defaults) because the two are
-        # consumed differently: `_pd` is looked up per parameter while
-        # binding call arguments and by `_trailing_default_at`'s positional
-        # offset arithmetic (`len(dflts)` is the count of defaulted RUNTIME
-        # slots), so a comptime default in there would shift every runtime
-        # default's offset. Read in `_invoke` below, next to the `_pd` read,
-        # so there is exactly one place a declared default is applied.
-        self.comptime_param_defaults = comptime_param_defaults or {}
         if param_defaults:
             self._pd = param_defaults
-        # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
+        # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
         # mirrors FunctionDef.is_generator (see fire_compiler.py) — copied
         # onto the MojoFunction at construction time (see
         # execute_FunctionDef/execute_StructDef/execute_TraitDef) so
         # `_invoke` can branch to the generator-construction path without
         # needing the original FunctionDef node around at call time.
         self.is_generator = is_generator
-        # Milestone 3b of INTERP_generator_yield_entirely_unimplemented:
+        # Milestone 3b of bugs/INTERP_generator_yield_entirely_unimplemented.md:
         # mirrors FunctionDef.is_async (see fire_compiler.py) exactly the
         # same way is_generator mirrors FunctionDef.is_generator above —
         # copied onto the MojoFunction at construction time so `_invoke`
@@ -222,69 +163,11 @@ class MojoFunction:
         # the original FunctionDef node around at call time.
         self.is_async = is_async
 
-    def __call__(self, *args, **kwargs):
-        # The interpreter used to be a REQUIRED first positional argument, so
-        # every caller had to know about it: `Interpreter.invoke` threads it
-        # in, and a builtin that takes a callback (`sorted(key=...)`) had no
-        # way to and handed the callee's FIRST REAL ARGUMENT over instead.
-        # That is not a per-builtin bug — `sorted([1,2,3], key=lambda a: -a)`
-        # died in `_invoke` with "AttributeError: 'int' object has no
-        # attribute 'scope'", and every other Python callable that invokes a
-        # value it was handed (`map(f, xs)`, `min(key=...)`, a `list.sort`
-        # key, a callback this compiler never sees) has the same hole.
-        #
-        # So the interpreter is resolved HERE, from the function's own record
-        # of the interpreter that defined it, and the positional convention
-        # `Interpreter.invoke` still uses is recognised by `_split_invoker` —
-        # which also covers the case where the two interpreters are NOT the
-        # same object, which an imported function always is.
-        #
-        # The alternative — making every callback-taking builtin wrap its
-        # callback in `_MojoInvokeWrapper` the way `map[f](...)` already does
-        # — leaves the hole open for every callback site nobody enumerated.
-        interp, args = _split_invoker(self._interp, args)
-        return self._invoke(interp, {}, args, kwargs)
+    def __call__(self, interpreter, *args, **kwargs):
+        return self._invoke(interpreter, {}, args, kwargs)
 
     def __getitem__(self, item):
-        """`f[...]` at a call site: bind the bracket items to the declared
-        comptime parameters BY POSITION (`_parse_generic_params_capture`'s
-        docstring is the rule this implements) and answer a callable that
-        still takes the call-time arguments.
-
-        **An item with no parameter to bind it is REFUSED, and it used to be
-        dropped.** `dict(zip(...))` stops at the shorter of the two, so
-        `add[2, 5](x)` on a two-parameter `add` that declares no comptime
-        parameter at all bound nothing, discarded both items, and went on to
-        call `add(x)` — one argument for two parameters, which
-        `_invoke` then bound as `a=x, b=None` and the body duly computed
-        `x + None`. That is the whole reported symptom — "`add[2, 5](10)`
-        answers None and then dies on `int + None`", the doc for which was
-        deleted with the fix (`test_interp_oracle.py`'s
-        `a_bracket_item_with_no_parameter_to_bind_is_refused` and
-        `missing_required_argument_is_an_arity_error` pin both halves) — and
-        the wrong answer is worse than the error the program deserves: a
-        specialization is a type-level claim, so an item the declaration has
-        nowhere to put is a program whose own signature refutes it, and this
-        engine already refuses that claim on the other two paths —
-        `formal/model.py`'s `value_call_bracket_reading` refuses a tuple index
-        when it has the callee's declaration, and CPython refuses the subscript
-        outright (`'function' object is not subscriptable`).
-
-        The refusal names the function, how many items the bracket supplied and
-        how many comptime parameters it declares, because "too many" is a
-        different mistake from "too few" and the caller can only fix it if it
-        is told which.
-        """
         values = item if isinstance(item, tuple) else (item,)
-        declared = len(self.comptime_params)
-        if len(values) > declared:
-            names = ', '.join(self.comptime_params)
-            if not names:
-                names = 'none'
-            raise TypeError(
-                f"{self.name}[...] supplies {len(values)} specialization "
-                f"argument(s) but {self.name} declares {declared} comptime "
-                f"parameter(s): {names}")
         bindings = dict(zip(self.comptime_params, values))
         return _MojoBoundComptimeFunction(self, bindings)
 
@@ -301,12 +184,7 @@ class MojoFunction:
         # would always find nothing and silently drop every default value,
         # which is exactly the bug this line fixed — see the LambdaExpr
         # handler, whose `lambda x=5: ...` defaults rely on it working).
-        # `self.comptime_param_defaults` is the same lookup for the
-        # parameter list in the BRACKETS (`def f[T, y=0, *, linux=0]()`),
-        # which is the only default source `f[T=Int]()` can have — the
-        # bracket supplies every other value.
         _pdl = getattr(self, '_pd', None)
-        _cpdl = getattr(self, 'comptime_param_defaults', None)
         for cp_name in self.comptime_params:
             if cp_name not in comptime_bindings:
                 _found = False
@@ -315,9 +193,6 @@ class MojoFunction:
                         if _k == cp_name:
                             func_scope.define(cp_name, interpreter.eval_expr(_v))
                             _found = True; break
-                if not _found and _cpdl is not None and cp_name in _cpdl:
-                    func_scope.define(cp_name, interpreter.eval_expr(_cpdl[cp_name]))
-                    _found = True
                 if not _found and cp_name not in func_scope.vars:
                     func_scope.define(cp_name, None)
 
@@ -353,38 +228,8 @@ class MojoFunction:
                         if _k == param:
                             func_scope.define(param, interpreter.eval_expr(_v))
                             _found = True; break
-                # A parameter with NO value and NO declared default is an
-                # ARITY ERROR, and it used to be a silent `None` here. That was
-                # the root cause under the specialization-bracket bug, not the
-                # bracket that found it: `add[2, 5](x)` used to report
-                # "unsupported operand type(s) for +: 'int' and 'NoneType'", and
-                # so did a plain `add(x)` with no bracket at all — the bracket
-                # only supplied the missing argument. A body that runs with an
-                # unbound parameter is the worst of the three answers available
-                # (an error is recoverable, a wrong value is not), and CPython,
-                # which this engine is measured against by
-                # `test_interp_oracle.py`, raises here too.
-                #
-                # The message is CPython's own wording, because that suite
-                # compares the two engines and a reader comparing them should
-                # not have to learn two vocabularies for one mistake. A
-                # keyword-only parameter gets CPython's other phrasing, which
-                # is the same distinction Python draws: naming the parameter
-                # and the way it had to be passed are both in it.
-                #
-                # `test_interp_oracle.py`'s
-                # `missing_required_argument_is_an_arity_error` and
-                # `test_runtime_diff.py`'s `main_takes_a_parameter` pin both
-                # halves of this — the second one because making it an error
-                # is what exposed `fire.py run` invoking `def main(n):` with no
-                # argument at all, which is `_main_entry_args` there.
                 if not _found:
-                    if _seen_star:
-                        raise TypeError(
-                            f"{self.name}() missing required keyword-only "
-                            f"argument: '{param}'")
-                    raise TypeError(
-                        f"{self.name}() missing required argument: '{param}'")
+                    func_scope.define(param, None)
         # Leftover positionals -> `*rest`; leftover keywords -> `**kw`. Built
         # with plain loops rather than a slice/comprehension: this file is
         # itself self-hosted, and plain loops are what that compiler lowers
@@ -411,7 +256,7 @@ class MojoFunction:
             # protocol from both the sync-generator protocol
             # (MojoGeneratorObject: __iter__/__next__/send/throw) and the
             # coroutine protocol (MojoCoroutine: __await__) built for this
-            # milestone — see INTERP_generator_yield_entirely_unimplemented's
+            # milestone — see bugs/INTERP_generator_yield_entirely_unimplemented.md's
             # Milestone 3b report. Deliberately NOT built here: rather than
             # silently picking one of the two existing wrappers (either
             # would behave subtly wrong under `async for`), fail loudly so
@@ -448,7 +293,7 @@ class MojoFunction:
             # unification that got confused by two differently-shaped
             # return statements in the same function (a boxed generic value
             # vs. a directly-constructed local struct type) — see
-            # INTERP_generator_yield_entirely_unimplemented's
+            # bugs/INTERP_generator_yield_entirely_unimplemented.md's
             # Milestone 2 report for the concrete compile errors this
             # produced before the fix.
             result = MojoGeneratorObject(interpreter, func_scope, self.body)
@@ -989,7 +834,7 @@ class MojoCoroutine:
     real-asyncio-compatible: `asyncio.run(mojo_coro)`,
     `asyncio.gather(mojo_coro1, mojo_coro2)`, and `await mojo_coro` from
     ordinary real Python `async def` code all work, validated empirically
-    (see INTERP_generator_yield_entirely_unimplemented's Milestone
+    (see bugs/INTERP_generator_yield_entirely_unimplemented.md's Milestone
     3b report) — including a Mojo body that internally does
     `await asyncio.sleep(...)`, which really suspends on the real event
     loop and really takes real wall-clock time, and `asyncio.gather` of
@@ -1152,16 +997,8 @@ class _MojoBoundComptimeFunction:
         self.func = func
         self.comptime_bindings = comptime_bindings
 
-    def __call__(self, *args, **kwargs):
-        # `f[DType](x)` curried into a callable is handed to builtins as an
-        # ordinary value (`sorted(xs, key=f[Int])`), so — exactly as in
-        # `MojoFunction.__call__` — the interpreter is resolved from the
-        # underlying function's own record rather than demanded positionally,
-        # through the same `_split_invoker` (an imported generic function has
-        # the same two-different-interpreters shape as any other).
-        func = self.func
-        interp, args = _split_invoker(func._interp, args)
-        return func._invoke(interp, self.comptime_bindings, args, kwargs)
+    def __call__(self, interpreter, *args, **kwargs):
+        return self.func._invoke(interpreter, self.comptime_bindings, args, kwargs)
 
 
 class _NoOverloadMatch(TypeError):
@@ -1176,43 +1013,13 @@ class MojoOverloadSet:
     not redefinitions of the same function — real Mojo picks the candidate
     whose signature matches the call site. We can only realistically dispatch
     on argument count and keyword names (the interpreter is untyped, so
-    parameter *types* can't disambiguate); BOTH failure directions are hard
-    errors rather than a silent pick, matching this project's own compiled-path
+    parameter *types* can't disambiguate); no match is a hard error rather
+    than a silent first-pick, matching this project's own compiled-path
     overload-resolution philosophy (see gimple_codegen's "no-match overload
-    returns None" test).
-
-    **Both failure directions are hard errors, and the second one was missing
-    until 2026-10-03.** The no-match case always raised. The AMBIGUOUS case —
-    two or more candidates that `_matches` cannot tell apart — returned the
-    FIRST one, in source order, which is a silent wrong answer whenever the
-    candidates differ in anything `_matches` does not look at: parameter types,
-    parameter conventions (`ref`/`var`/`mut`), or the return type. `peekable`'s
-    two stdlib overloads are exactly that shape
-    (`std/iter/__init__.mojo`: `def peekable(ref iterable: Some[Iterable])` vs
-    `def peekable(var iterable: Some[IterableOwned])`) — same arity, no
-    keywords, differing only in a trait bound and a convention, so
-    `peekable(a_list)` dispatched to whichever the file happened to declare
-    first. The class docstring claimed "no match is a hard error rather than
-    a silent first-pick", which was true of the no-match case and false of this
-    one.
-
-    Refusing is the correct outcome, not a limitation being papered over: a
-    first-pick here is indistinguishable, to the caller, from a correct
-    dispatch, which is strictly worse than an error that names the tie. The
-    same rule the compiled path already follows is `elaborate`'s — an overload
-    the resolver cannot decide is declined, never guessed. What is genuinely
-    unavailable here (and is why this is a refusal rather than a dispatch) is
-    parameter-type information: the interpreter is untyped, and recovering it
-    would mean modelling Mojo's ownership conventions, not adding a comparison.
-    """
-    def __init__(self, name, interpreter=None):
+    returns None" test)."""
+    def __init__(self, name):
         self.name = name
         self.candidates = []  # list of (MojoFunction, required, optional, kwonly, has_var_kwargs)
-        # Same reason as `MojoFunction._interp`, and for the same reason
-        # `__call__` resolves it the same way: a builtin receiving this set as
-        # a `key=`/callback argument invokes it directly, with no interpreter
-        # to thread through.
-        self._interp = interpreter
 
     def add(self, func, required, optional, kwonly, has_var_kwargs):
         self.candidates.append((func, required, optional, kwonly, has_var_kwargs))
@@ -1234,43 +1041,14 @@ class MojoOverloadSet:
                 return False
         return True
 
-    def __call__(self, *args, **kwargs):
-        # `interpreter` used to be a required first positional argument; see
-        # `MojoFunction.__call__` for why it no longer is and how it is
-        # resolved instead. An overload SET's candidates come from one module
-        # and its call sites can come from another, so the two interpreters are
-        # routinely different objects — which is why `_split_invoker`
-        # recognises the leading argument by type.
-        interp, args = _split_invoker(self._interp, args)
-        matching = [spec for spec in self.candidates
-                    if self._matches(spec, args, kwargs)]
-        if len(matching) == 1:
-            func = matching[0][0]
-            return func._invoke(interp, {}, args, kwargs)
-        if not matching:
-            raise _NoOverloadMatch(
-                f"no overload of '{self.name}' matches {len(args)} positional "
-                f"arg(s) and keyword(s) {sorted(kwargs.keys())}"
-            )
-        # More than one candidate survived, so the choice is between
-        # signatures this resolver cannot rank — they differ in parameter
-        # types, parameter conventions, or return type, and dispatching on
-        # argument count and keyword names alone cannot separate them. Naming
-        # the candidates is the point: the caller can see WHICH tie it hit and
-        # add the information, where a first-pick would have hidden it.
-        _shapes = ', '.join(
-            f"({', '.join(spec[1] + spec[2])})"
-            f"{' + ' + str(spec[3]) if spec[3] else ''}"
-            for spec in matching)
+    def __call__(self, interpreter, *args, **kwargs):
+        for spec in self.candidates:
+            if self._matches(spec, args, kwargs):
+                func = spec[0]
+                return func(interpreter, *args, **kwargs)
         raise _NoOverloadMatch(
-            f"AMBIGUOUS call to '{self.name}': {len(matching)} of "
-            f"{len(self.candidates)} overloads match {len(args)} positional "
-            f"arg(s) and keyword(s) {sorted(kwargs.keys())} equally well "
-            f"[{_shapes}]. This interpreter dispatches on argument count and "
-            f"keyword names only, so it cannot choose between them; picking "
-            f"the first would be a silent wrong answer. Disambiguate at the "
-            f"call site (or pass the arguments by keyword where the "
-            f"signatures differ in arity)."
+            f"no overload of '{self.name}' matches {len(args)} positional "
+            f"arg(s) and keyword(s) {sorted(kwargs.keys())}"
         )
 
 
@@ -1339,24 +1117,6 @@ class MojoInstance:
             return method(self._mojo_class.interpreter, self, key, value)
         raise KeyError(key)
 
-    def __call__(self, *args, **kwargs):
-        """An instance of a struct that defines `__call__` IS callable — the
-        `functor` idiom, and the reason a callable OBJECT reaches a builtin's
-        callback slot at all (`sorted(xs, key=ByLength())`).
-
-        Without this the object was simply not callable, so
-        `sorted([1,2,3], key=Callable(10))` raised "TypeError:
-        'MojoInstance' object is not callable" — a hole right next to the one
-        `MojoFunction.__call__` had. Resolved through the SAME
-        `self._mojo_class.methods` table and the same
-        `method(interpreter, self, ...)` shape as `__len__`/`__getitem__`/
-        `__setitem__` above, so `__call__` is bound exactly the way every
-        other dunder on this class is."""
-        method = self._mojo_class.methods.get('__call__')
-        if method is None:
-            raise TypeError(f"object of type '{self._mojo_class.name}' is not callable")
-        return method(self._mojo_class.interpreter, self, *args, **kwargs)
-
 
 class BoundMethod:
     """A struct/class method bound to a specific instance (`self` already filled in)."""
@@ -1366,41 +1126,17 @@ class BoundMethod:
         self.interpreter = interpreter
 
     def __call__(self, *args, **kwargs):
-        return self._invoke_bound({}, args, kwargs)
-
-    def _invoke_bound(self, comptime_bindings, args, kwargs):
-        """Run the body with `comptime_bindings` pre-bound into the body
-        scope. Shared by the plain call (empty bindings) and by the
-        keyword-bracket call `obj.body[f_key=show_k]()`
-        (`_MojoBoundComptimeReceiver`), so the scope push, the `self`
-        binding and the receiver argument are written once — the bracket
-        call used to go through `__getitem__`, which answered the receiver
-        itself and DROPPED every bracketed argument."""
         f = self.bound_func
         old_scope = self.interpreter.scope
         self.interpreter.scope = Scope(parent=self.interpreter.scope)
         self.interpreter.scope.define('self', self.instance)
         try:
-            interp, rest = _split_invoker(f._interp, (self.instance,) + tuple(args))
-            return f._invoke(interp, comptime_bindings, rest, kwargs)
+            return f(self.interpreter, self.instance, *args, **kwargs)
         finally:
             self.interpreter.scope = old_scope
 
     def __getitem__(self, key):
         return self
-
-
-class _MojoBoundComptimeReceiver:
-    """A receiver-bound method with its comptime parameters pre-bound —
-    `obj.body[f_key=show_k]()`, the shape `Dict.mojo`/`counter.mojo` use.
-    Holds the receiver and defers to its `_invoke_bound`, so calling one is
-    the same operation as calling the receiver itself, plus the bindings."""
-    def __init__(self, receiver, comptime_bindings):
-        self.receiver = receiver
-        self.comptime_bindings = comptime_bindings
-
-    def __call__(self, *args, **kwargs):
-        return self.receiver._invoke_bound(self.comptime_bindings, args, kwargs)
 
 
 class BoundClassMethod:
@@ -1430,18 +1166,12 @@ class BoundClassMethod:
         self.interpreter = interpreter
 
     def __call__(self, *args, **kwargs):
-        return self._invoke_bound({}, args, kwargs)
-
-    def _invoke_bound(self, comptime_bindings, args, kwargs):
-        """The `BoundMethod` counterpart — see its docstring; identical, with
-        `cls` and the class as the receiver."""
         f = self.bound_func
         old_scope = self.interpreter.scope
         self.interpreter.scope = Scope(parent=self.interpreter.scope)
         self.interpreter.scope.define('cls', self.cls)
         try:
-            interp, rest = _split_invoker(f._interp, (self.cls,) + tuple(args))
-            return f._invoke(interp, comptime_bindings, rest, kwargs)
+            return f(self.interpreter, self.cls, *args, **kwargs)
         finally:
             self.interpreter.scope = old_scope
 
@@ -1872,7 +1602,7 @@ class MojoComplex:
     the complex values that result from combining one with a real number via
     `+`/`-`. This deliberately does NOT implement the full Python `complex`
     API (no `*`, `/`, `conjugate()`, `abs()`, comparisons, ...) — per
-    PARSE_FAIL_complex_number_literal's scope guidance, construction
+    bugs/PARSE_FAIL_complex_number_literal.md's scope guidance, construction
     + printing + `+`/`-` against int/float/other MojoComplex is enough to
     cover the two real stdlib patterns that motivated this (a complex value
     sitting in a set/list literal, never used in further arithmetic).
@@ -1927,7 +1657,7 @@ class MojoComplex:
         # ("undefined symbol _hash" at link time), and a `int(float_expr)`
         # replacement hit an unrelated existing gimple_codegen miscompile
         # (int() return type inferred as `char *` in this context). Per
-        # PARSE_FAIL_complex_number_literal's scope guidance this
+        # bugs/PARSE_FAIL_complex_number_literal.md's scope guidance this
         # class isn't meant to support full value-equality hashing (e.g.
         # collapsing `{1, 1+0j}` into `{1}` the way real Python's `complex`
         # does) — just construct/print/`+`/`-` without crashing.
@@ -2287,7 +2017,7 @@ def _mojo_simd_width_of(t):
 class _MojoCompilationTarget:
     """Stand-in for real Mojo's `sys.info.CompilationTarget` platform-predicate
     namespace. Answers for *this* interpreter host (macOS/arm64), not
-    whatever `fire build` would actually target — fine for the predicates
+    whatever `mojo build` would actually target — fine for the predicates
     stdlib tests branch on, since we're not cross-compiling."""
     def is_macos(self):
         return sys.platform == 'darwin'
@@ -2371,37 +2101,8 @@ def _mojo_isfinite(x):
     return x == x and (x - x) == 0
 
 
-def _mojo_extreme(items, key, want_max):
-    """The largest/smallest element of `items` by `key` (identity by
-    default). ONE implementation for `_mojo_min` and `_mojo_max`: they differ
-    only in which comparison wins, and a user `key=` makes that the whole
-    behaviour, so a shared walker is what keeps the two from drifting apart
-    again.
-
-    `key` is invoked as `key(x)` on the value itself, deliberately NOT through
-    `Interpreter.invoke`: a `MojoFunction`'s `__call__` resolves the
-    interpreter from its own record now (see its docstring), so a bare call is
-    correct for a user-defined callee, and a plain Python callable needs no
-    threading at all."""
-    result = None
-    best_key = None
-    have_result = False
-    for x in items:
-        k = x if key is None else key(x)
-        if not have_result:
-            result = x
-            best_key = k
-            have_result = True
-        elif (k > best_key if want_max else k < best_key):
-            result = x
-            best_key = k
-    return result
-
-
-def _mojo_minmax(want_max, *args, **kwargs):
-    """Shared body of `_mojo_max` / `_mojo_min`.
-
-    Mojo overloads `max` for SIMD to mean elementwise max, not "pick one
+def _mojo_max(*args, **kwargs):
+    """Mojo overloads `max` for SIMD to mean elementwise max, not "pick one
     of these two whole values" like Python's own builtin. Deliberately
     avoids ever calling the bare name `max(...)`/`min(...)`: this file is
     self-hosted-compiled together with gimple_codegen.py, which has an
@@ -2409,29 +2110,40 @@ def _mojo_minmax(want_max, *args, **kwargs):
     (`max(survivors, key=_score)`) that fixes the self-host compiler's
     static arity inference for the global `max` symbol at 1 argument —
     calling it here with 2 positional args breaks that compile
-    ("too many arguments to function 'mojo_max'").
-
-    `key=` is honoured here rather than delegated to Python's builtin (same
-    reason the two-positional SIMD form cannot be). It was not honoured at
-    all: `min([3, 1, 2], key=lambda a: -a)` returned `1` — the unkeyed
-    minimum — and `max(...)` returned `3`, so both silently answered a
-    different question than the one asked."""
-    scalar_max2 = _scalar_max2 if want_max else _scalar_min2
+    ("too many arguments to function 'mojo_max'")."""
     if len(args) == 2 and not kwargs:
         a, b = args
         if isinstance(a, _MojoSIMD) or isinstance(b, _MojoSIMD):
-            return _mojo_simd_elementwise(a, b, scalar_max2)
-        return scalar_max2(a, b)
+            return _mojo_simd_elementwise(a, b, _scalar_max2)
+        return _scalar_max2(a, b)
     items = args[0] if len(args) == 1 else args
-    return _mojo_extreme(items, kwargs.get('key'), want_max)
-
-
-def _mojo_max(*args, **kwargs):
-    return _mojo_minmax(True, *args, **kwargs)
+    result = None
+    have_result = False
+    for x in items:
+        if not have_result:
+            result = x
+            have_result = True
+        elif x > result:
+            result = x
+    return result
 
 
 def _mojo_min(*args, **kwargs):
-    return _mojo_minmax(False, *args, **kwargs)
+    if len(args) == 2 and not kwargs:
+        a, b = args
+        if isinstance(a, _MojoSIMD) or isinstance(b, _MojoSIMD):
+            return _mojo_simd_elementwise(a, b, _scalar_min2)
+        return _scalar_min2(a, b)
+    items = args[0] if len(args) == 1 else args
+    result = None
+    have_result = False
+    for x in items:
+        if not have_result:
+            result = x
+            have_result = True
+        elif x < result:
+            result = x
+    return result
 
 
 class _MojoSIMD:
@@ -2923,103 +2635,6 @@ class _AutoStubValue(int):
         return 0
 
 
-class _MojoModuleObject(types.SimpleNamespace):
-    """A MODULE OBJECT that is a live view of an imported module's own scope,
-    rather than a `SimpleNamespace` snapshot of it taken the moment the module
-    body finished.
-
-    **The snapshot was a silent wrong answer, and it was wrong in the one place
-    that matters.** `types.SimpleNamespace(**mod_interp.scope.vars)` COPIED the
-    module's top-level bindings, while the module's own functions kept reading
-    and writing `mod_interp.scope.vars` — the live dict. So for any name the
-    module's own code assigns, there were two homes:
-
-        i_lib.mojo:  G = 5
-                     def setg(v): global G; G = v
-                     def get_it(): global G; return G
-        i_prog.mojo: import i_lib
-                     i_lib.setg(9)
-                     print(i_lib.get_it())   # 9 — the live scope
-                     print(i_lib.G)          # 5 — the snapshot
-
-    Two reads of the same module disagreeing inside one program, with no
-    diagnostic and no error: `G = v` visibly did nothing as far as any other
-    reader of `i_lib` was concerned. CPython answers 9 and 9, because a module
-    object's attribute IS its `__dict__` and the module's functions read that
-    same dict.
-
-    So this delegates instead of copying. Every direction Python has:
-
-      * `mod.X` reads `scope.vars['X']` — through the parent chain, so a name
-        the module never declared but inherited from its own enclosing scope
-        still resolves, exactly as `mod_interp.scope.get` would;
-      * `mod.X = v` writes `scope.vars['X']`, which is what the module's own
-        `global X` writes, so an assignment from outside is visible to the
-        module's functions immediately and in the other direction too. Before
-        this, such an assignment created a FOURTH home: an attribute on the
-        snapshot, which no function ever reads;
-      * `del mod.X` removes it from `scope.vars`;
-      * `dir(mod)` lists what the module currently has, so a REPL-ish
-        `dir(mod)` after a `global` write shows the write.
-
-    Subclasses `types.SimpleNamespace` rather than replacing it, for one
-    concrete reason: `_bind_dotted_import` walks a dotted import chain with
-    `isinstance(nxt, types.SimpleNamespace)`, and every other reader of a
-    module object in this file does the same. `SimpleNamespace.__init__` is NOT
-    called, so the instance `__dict__` stays empty, which is what makes
-    `__getattr__` fire for EVERY name instead of shadowing it — and `__setattr__`
-    is overridden so that an assignment cannot quietly land in that `__dict__`
-    and become the fourth home this class exists to remove.
-
-    Two attribute names are therefore NOT delegated, and both are dunder-shaped
-    (`__modvars__`, `__modname__`, trailing underscores so no name mangling
-    applies) because the alternative was worse: Python resolves an instance
-    attribute before it calls `__getattr__`, so any plain name held here would
-    shadow a module global of the same name, and `__slots__` does not help —
-    a subclass of `SimpleNamespace` inherits its `__dict__` regardless. They
-    are excluded from `__dir__` for the same reason. No Mojo source in this
-    repository defines either.
-
-    The reference keeps the module's `Interpreter` alive — the thing whose
-    scope the module's own functions read — which is what makes a write through
-    the module object and a write through `global` the same write.
-    """
-
-    def __init__(self, scope_vars, modname):
-        # Bypass SimpleNamespace.__init__ (which would populate __dict__) and
-        # write the two fields through object.__setattr__ so the overridden
-        # __setattr__ below — which needs __modvars__ to exist — is not
-        # re-entered.
-        object.__setattr__(self, '__modvars__', scope_vars)
-        object.__setattr__(self, '__modname__', modname)
-
-    def __getattr__(self, name):
-        # Only reached for a name NOT in the instance __dict__, which is every
-        # module name, because __init__ deliberately left it empty.
-        try:
-            return self.__modvars__[name]
-        except KeyError:
-            raise AttributeError(
-                f"module '{self.__modname__}' has no attribute '{name}'")
-
-    def __setattr__(self, name, value):
-        self.__modvars__[name] = value
-
-    def __delattr__(self, name):
-        try:
-            del self.__modvars__[name]
-        except KeyError:
-            raise AttributeError(
-                f"module '{self.__modname__}' has no attribute '{name}'")
-
-    def __dir__(self):
-        return sorted(set(self.__modvars__) | set(object.__dir__(self))
-                      - {'__modvars__', '__modname__'})
-
-    def __repr__(self):
-        return f"<module {self.__modname__}>"
-
-
 class _AutoStubNamespace:
     """Auto-stubbing namespace: any attribute access returns AutoStubValue(0)
     which behaves as integer 0 in arithmetic, is callable (returns 0), and
@@ -3038,7 +2653,7 @@ class _SysProxy:
     while forwarding everything else to the real `sys` module. Without this,
     interpreted code that reads `sys.argv` sees the *host* process's live
     argv instead of its own — harmless for most scripts, but fatal for
-    self-referential ones: `fire run fire.py help` would otherwise have the
+    self-referential ones: `mojo run fire.py help` would otherwise have the
     nested interpretation of fire.py re-read the unchanged host argv, take
     the same branch, and re-interpret itself forever."""
     def __init__(self, argv):
@@ -3064,7 +2679,7 @@ class Interpreter:
         self._mojo_module_cache = {}
         self._func_specs = {}
         self._raised_mojo_value = None
-        # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
+        # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
         # per-OS-thread storage for "the yield_fn of the generator whose body
         # is currently running on THIS thread" — see MojoGeneratorObject
         # (each generator body runs on its own dedicated worker thread, so
@@ -3275,6 +2890,7 @@ class Interpreter:
         # unshared cache and recurse forever instead of hitting a cache entry.
         if found in cache:
             return cache[found]
+        cache[found] = types.SimpleNamespace()
 
         with open(found) as f:
             src = f.read()
@@ -3283,18 +2899,10 @@ class Interpreter:
         mod_stmts = Parser(tokens).parse_module()
         mod_interp = Interpreter(filename=found, argv=self.argv)
         mod_interp._mojo_module_cache = cache  # shared, so cycles hit the guard above
-        # The CYCLE GUARD is installed before the body runs and it is the SAME
-        # object the import returns, not a placeholder that is replaced at the
-        # end. That is the fix as much as the copy was: a package that imports
-        # itself must terminate (which is why the slot is marked here at all),
-        # and a placeholder would make a cyclic importer see an empty module
-        # while every other importer saw the live one. Installing the view here
-        # means a cyclic importer sees the same half-built module, which is what
-        # CPython's partially-initialised module object does.
-        namespace = _MojoModuleObject(mod_interp.scope.vars, module_name)
-        cache[found] = namespace
         for stmt in mod_stmts:
             mod_interp.execute(stmt)
+        namespace = types.SimpleNamespace(**mod_interp.scope.vars)
+        cache[found] = namespace
         return namespace
 
     def _bind_dotted_import(self, module_name, mod):
@@ -3412,45 +3020,8 @@ class Interpreter:
         self.scope.define('RuntimeError', RuntimeError)
         self.scope.define('StopIteration', StopIteration)
         self.scope.define('Error', MojoError)
-        # …and the rest of the standard exception hierarchy, which the block
-        # above was missing in a way that turned a diagnostic into a DIFFERENT
-        # one. `fire_compiler.py` — this compiler's own source, which the
-        # interpreter executes whenever it interprets a program — raises
-        # `SyntaxError` from five sites (`replace_multiline_strings`'s
-        # "unterminated string literal", the `yield`/`await`-outside-a-
-        # generator refusal, the for/with target refusal, and two in the
-        # parser), and `SyntaxError` was not in scope. So the interpreter
-        # reached `raise SyntaxError(...)` and raised
-        # `NameError: name 'SyntaxError' is not defined` instead: the
-        # interpreter's copy of the tokenizer could not REPORT a lex error,
-        # which is the one thing a tokenizer has to be able to do.
-        #
-        # Found by `test_myinterpreter_validation.py`, which runs
-        # `fire_compiler.py`'s `py_tokenize` through the interpreter and
-        # compares it with the imported one — that file's reason for existing
-        # is that an interpreter bug produces a wrong answer rather than an
-        # exception, and this one did: 66 of 67 corpus texts matched and the
-        # 67th raised the wrong exception TYPE.
-        #
-        # Names, not aliases of anything Mojo-specific: the interpreter
-        # defines the PYTHON exception class, so `except SyntaxError` in a
-        # program the interpreter runs catches what the raise produced. The
-        # same is already true of the six above, and these are simply the
-        # rest of `builtins` that a real program or the compiler's own source
-        # can name.
-        for _exc_name in ('SyntaxError', 'IndentationError', 'TabError',
-                          'IndexError', 'KeyError', 'AttributeError',
-                          'NameError', 'UnboundLocalError', 'ArithmeticError',
-                          'ZeroDivisionError', 'OverflowError',
-                          'FloatingPointError', 'AssertionError',
-                          'NotImplementedError', 'RecursionError',
-                          'SystemError', 'StopAsyncIteration',
-                          'ImportError', 'ModuleNotFoundError',
-                          'LookupError', 'MemoryError', 'OSError',
-                          'IOError', 'FileNotFoundError', 'SystemExit'):
-            self.scope.define(_exc_name, getattr(builtins, _exc_name))
         # More standard builtins + exceptions that real stdlib files reference
-        # at module scope (found via fault_tolerance.py comparing `fire run`
+        # at module scope (found via fault_tolerance.py comparing `mojo run`
         # to CPython — e.g. keyword.py's frozenset, _pyrepl/types.py's object,
         # dbm/__init__.py's OSError all raised "name X is not defined").
         # Plain Python builtins, same pattern as set/zip/Exception above.
@@ -3783,7 +3354,7 @@ class Interpreter:
             return existing
         if isinstance(existing, MojoFunction):
             prev_spec = self._func_specs.get(id(existing), ([], [], [], False))
-            overload_set = MojoOverloadSet(name, interpreter=self)
+            overload_set = MojoOverloadSet(name)
             overload_set.add(existing, *prev_spec)
             overload_set.add(func, *spec)
             container[name] = overload_set
@@ -3797,11 +3368,9 @@ class Interpreter:
         comptime_params = getattr(node, 'comptime_params', None)
         _pd = getattr(node, 'param_defaults', None)
         _pdv = list(_pd.items()) if _pd else None
-        _cpd = getattr(node, 'comptime_param_defaults', None)
         func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
                              is_generator=getattr(node, 'is_generator', False),
-                             is_async=getattr(node, 'is_async', False), interpreter=self,
-                             comptime_param_defaults=_cpd)
+                             is_async=getattr(node, 'is_async', False))
         spec = self._classify_params(node)
         bound = self._register_function(self.scope.vars, node.name, func, spec)
         # The rebinding a decorator IS: the decorated value replaces the
@@ -3949,11 +3518,9 @@ class Interpreter:
             comptime_params = getattr(m, 'comptime_params', None)
             _pd = getattr(m, 'param_defaults', None)
             _pdl = list(_pd.items()) if _pd else None
-            _cpd = getattr(m, 'comptime_param_defaults', None)
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
-                                       is_generator=getattr(m, 'is_generator', False),
-                                       is_async=getattr(m, 'is_async', False), interpreter=self,
-                                       comptime_param_defaults=_cpd)
+                                        is_generator=getattr(m, 'is_generator', False),
+                                        is_async=getattr(m, 'is_async', False))
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -4052,11 +3619,9 @@ class Interpreter:
                 comptime_params = getattr(m, 'comptime_params', None)
                 _pd = getattr(m, 'param_defaults', None)
                 _pdl = list(_pd.items()) if _pd else None
-                _cpd = getattr(m, 'comptime_param_defaults', None)
                 method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
-                                           is_generator=getattr(m, 'is_generator', False),
-                                           is_async=getattr(m, 'is_async', False), interpreter=self,
-                                           comptime_param_defaults=_cpd)
+                                        is_generator=getattr(m, 'is_generator', False),
+                                        is_async=getattr(m, 'is_async', False))
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -4096,7 +3661,7 @@ class Interpreter:
         # `import sys` is special: the program must see its own argv (see
         # _SysProxy), not the real process argv reinstated by a fresh
         # importlib.import_module('sys'). Re-binding the real module here is
-        # what turned `fire run fire.py help` into unbounded recursion — the
+        # what turned `mojo run fire.py help` into unbounded recursion — the
         # nested interpretation of fire.py would re-read the host's live
         # argv instead of the isolated one and take the same branch forever.
         if module == 'sys' or module.split('.')[0] == 'sys':
@@ -4422,7 +3987,7 @@ class Interpreter:
             # value, matching Python's own semantics and mirroring
             # _bind_comprehension_target's identical before/star/after
             # split for the for-loop-target case.
-            values = self._unpack_source(value)
+            values = list(value) if hasattr(value, '__iter__') and not isinstance(value, (str, bytes)) else [value]
             elements = target.elements
             star_idx = None
             for i, e in enumerate(elements):
@@ -4430,7 +3995,8 @@ class Interpreter:
                     star_idx = i
                     break
             if star_idx is None:
-                self._check_exact_arity(values, elements, value)
+                if len(values) != len(elements):
+                    raise ValueError(f"{self._loc(target)}Cannot unpack {len(values)} values into {len(elements)} targets")
                 for t, v in zip(elements, values):
                     self._assign_target(t, v)
             else:
@@ -4691,7 +4257,7 @@ class Interpreter:
         methods`) is invisible to plain `hasattr`/`getattr`. Route through
         the class's own method table instead for MojoInstance; fall back to
         plain `hasattr` for everything else (native Python-backed runtime
-        objects). See INTERP_with_as_binding_for_loop_keyerror:
+        objects). See bugs/INTERP_with_as_binding_for_loop_keyerror.md:
         `with SomeInterpretedClass() as x:` never actually called the
         interpreted `__enter__`, silently using the un-entered instance
         itself instead — found via a KeyError inside `MojoInstance.
@@ -4963,7 +4529,7 @@ class Interpreter:
         body = [N.ReturnStmt(value=expr.body)]
         defaults = [(p[0], p[1]) for p in expr.params if p[1] is not None]
         return MojoFunction('<lambda>', params, body, self.scope,
-                            param_defaults=defaults or None, interpreter=self)
+                            param_defaults=defaults or None)
 
     def _current_yield_fn(self, expr):
         """The `yield_fn` of the generator/coroutine whose body is
@@ -5041,7 +4607,7 @@ class Interpreter:
         `await asyncio.sleep(...)`), or anything else implementing
         `__await__`, matching real Python `await`'s own actual protocol
         (bytecode-level, not type-based — see
-        INTERP_generator_yield_entirely_unimplemented's Milestone
+        bugs/INTERP_generator_yield_entirely_unimplemented.md's Milestone
         3b report for why this is genuinely real-asyncio-compatible).
 
         This method itself runs on the current Mojo coroutine's OWN worker
@@ -5167,17 +4733,7 @@ class Interpreter:
     def eval_StringLiteral(self, expr: N.StringLiteral):
         """Evaluate string literal."""
         value = expr.value
-        # `expr.is_interpolated`, and NOT "does the value start with `f"`/`t`".
-        # An ordinary literal's value is its BODY and a body may begin with any
-        # two characters, so that test read `s = 'f"n"'` as an f-string and
-        # printed `n` where CPython prints `f"n"`; the compiled path did the
-        # same and the formal path refused the program. The parser decides the
-        # question from the SOURCE TOKEN (`_raw_string_is_ftstring`) and records
-        # it in the node, which is the only place the two spellings differ.
-        # It also settles the UPPERCASE spellings, which this test never matched
-        # at all: `F"n={n}"` interpolated on the compiled path and printed its
-        # own source text here.
-        #
+        is_fstring = value.startswith('f"') or value.startswith("f'")
         # Mojo's `t"..."` template-string literal shares f-string's `{expr}`/
         # `{{`-escape interpolation syntax (see fire_compiler.py's
         # _strip_string_prefix_and_quotes) — real Mojo turns it into a
@@ -5186,7 +4742,8 @@ class Interpreter:
         # Python's own, unrelated PEP 750 t-strings would produce a
         # string.templatelib.Template object instead of a str) gets the same
         # final value without needing to model an intermediate Template type.
-        if getattr(expr, 'is_interpolated', False):
+        is_tstring = value.startswith('t"') or value.startswith("t'")
+        if is_fstring or is_tstring:
             body = value[1:]  # strip the leading f/t prefix
             # Detect a triple-quoted body without ever writing a literal
             # triple-quote substring in this file's own source: fire_compiler's
@@ -5211,7 +4768,41 @@ class Interpreter:
                 # degradation behavior this already had.
                 return MojoString(value)
             return MojoString(result)
-        return MojoString(N.decoded_literal(expr))
+        return MojoString(self._decode_c_escapes(value))
+
+    @staticmethod
+    def _decode_c_escapes(s: str) -> str:
+        r"""Decode C-style backslash escapes (\n, \t, \\, \xHH, ...) the same
+        way the compiled path does. The parser strips a string literal's outer
+        quotes but leaves escape sequences as raw two-character runs (backslash
+        + letter), so `"ab\ncd"` reached here as the 6-char text `ab\ncd`
+        (backslash-n literal) — the interpreter then reported len 6 and wrong
+        indices, while `mojo build` reported 5 (the C compiler decodes the
+        escape in the emitted C literal). This realigns the two: same escape
+        set as gimple_codegen._c_escape passes through to C. Note the compiled
+        path does not preserve raw (r"...") strings either — that's a shared,
+        pre-existing limitation, so decoding here removes an interp-vs-compiled
+        divergence rather than introducing a new one."""
+        if '\\' not in s:
+            return s
+        simple = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"',
+                  "'": "'", '0': '\0', 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
+        out = []
+        i, n = 0, len(s)
+        while i < n:
+            c = s[i]
+            if c == '\\' and i + 1 < n:
+                nxt = s[i + 1]
+                if nxt in simple:
+                    out.append(simple[nxt]); i += 2; continue
+                if nxt == 'x' and i + 3 < n and s[i + 2] in '0123456789abcdefABCDEF' \
+                        and s[i + 3] in '0123456789abcdefABCDEF':
+                    out.append(chr(int(s[i + 2:i + 4], 16))); i += 4; continue
+                # Unknown escape — leave the backslash as-is (Python's own
+                # behavior for e.g. `"\d"`), matching _c_escape's `\\` passthrough.
+                out.append(c); i += 1; continue
+            out.append(c); i += 1
+        return ''.join(out)
 
     def _format_fstring_body(self, body: str) -> str:
         # Parse an f-string body (prefix/quotes already stripped) into its
@@ -5598,7 +5189,7 @@ class Interpreter:
         short-circuits to False (without evaluating any remaining operands)
         the moment one `operands[i] ops[i] operands[i+1]` link fails, and is
         True only if every link holds — `(a < b) and (b < c)`, never `(a <
-        b) < c`. See CHAINED_COMPARISON_WRONG_RESULT."""
+        b) < c`. See bugs/CHAINED_COMPARISON_WRONG_RESULT.md."""
         left = self.eval_expr(expr.operands[0])
         for op, operand_expr in zip(expr.ops, expr.operands[1:]):
             right = self.eval_expr(operand_expr)
@@ -5725,91 +5316,12 @@ class Interpreter:
     def eval_SubscriptExpr(self, expr: N.SubscriptExpr):
         """Evaluate subscript access."""
         obj = self.eval_expr(expr.obj)
-        # A KEYWORD bracket (`f[T=Int, y=5]`, `platform_map[T=Int, "O_APPEND",
-        # linux=0x400]()`) keeps its elements in `attrs` as (name, value)
-        # pairs and leaves `index` as the empty-subscript placeholder
-        # IntLiteral(0) — see fire_compiler.py's "keyword-style bracket"
-        # branch. Indexing that placeholder is not a subscript at all: it
-        # bound the callee's FIRST comptime parameter to 0 and dropped every
-        # bracketed argument, so `f[T=Int, y=5]()` returned a value computed
-        # from `y`'s default (and `f[T=Int]` raised `NameError: T` from the
-        # key `T` being evaluated in the enclosing scope). Bind the
-        # comptime parameters instead — the same model
-        # mojo/backend_gimple/emit_calls.py's `_kw_bracket`/`elems` split
-        # uses for the compiled path, so both engines answer alike.
-        _attrs = getattr(expr, 'attrs', None)
-        if _attrs:
-            _bound = self._bind_bracket_comptime(obj, _attrs, expr)
-            if _bound is not None:
-                return _bound
         idx = self.eval_expr(expr.index)
         if not hasattr(obj, '__getitem__'):
             if hasattr(obj, '__call__'):
                 return obj
             raise TypeError(f"{type(obj).__name__} object is not subscriptable")
         return obj[idx]
-
-    def _bind_bracket_comptime(self, obj, attrs, node):
-        """`f[...]` with keyword-bracket `attrs`: bind `obj`'s declared
-        comptime parameters and return the callable, or None when `obj` has
-        no comptime parameter list to bind (the caller then keeps its own
-        subscript path — a bound method reached as `obj.m[k=v](...)` is
-        handled by `BoundMethod.__getitem__`, which answers the callable
-        itself).
-
-        The two bracket spellings are read exactly as the parser produced
-        them and as emit_calls.py reads them: a `(None, value)` pair is
-        POSITIONAL (the parser's spelling for a literal or a call in the
-        bracket — `f[T=Int, "O_APPEND"]`), a bare `name = value` pair binds
-        that parameter BY NAME, and a bare NAME with no `=` (which the
-        parser keeps under its own name) binds by name too. Positionals fill
-        the remaining parameters in declaration order, which is what makes
-        `platform_map[T=Int, "O_APPEND", linux=..., macos=...]()` —
-        `operation` sitting between two keyword parameters — land on
-        `operation`.
-
-        A parameter with neither a supplied value nor a declared default is
-        an honest TypeError naming it, not a silent None: the bracket is
-        the ONLY place its value can come from.
-
-        `obj` is the callee VALUE, so it is also a method receiver
-        (`obj.body[f_key=show_k]()`); its declared parameters live on
-        `bound_func` there, and the bound value it produces is one that
-        keeps the receiver.
-        """
-        decl = obj
-        if not getattr(decl, 'comptime_params', None):
-            decl = getattr(obj, 'bound_func', None)
-        cps = getattr(decl, 'comptime_params', None)
-        if not cps:
-            return None
-        kws = {}
-        poss = []
-        for pair in attrs:
-            nm = pair[0]
-            if nm is None:
-                poss.append(pair[1])
-            else:
-                kws[nm] = pair[1]
-        dflts = getattr(decl, 'comptime_param_defaults', None) or {}
-        bindings = {}
-        pos_i = 0
-        for cp in cps:
-            given = None
-            if cp in kws:
-                given = kws[cp]
-            elif pos_i < len(poss):
-                given = poss[pos_i]
-                pos_i += 1
-            if given is not None:
-                bindings[cp] = self.eval_expr(given)
-            elif cp not in dflts:
-                raise TypeError(
-                    f"{self._loc(node)}comptime parameter '{cp}' is neither "
-                    f"given in the bracket nor has a default")
-        if decl is not obj:
-            return _MojoBoundComptimeReceiver(obj, bindings)
-        return _MojoBoundComptimeFunction(obj, bindings)
 
     def eval_SliceExpr(self, expr: N.SliceExpr):
         """Evaluate slice expression."""
@@ -5849,20 +5361,8 @@ class Interpreter:
         """A comprehension/generator `for` clause's target is a plain string
         (possibly comma-joined for tuple unpacking, e.g. "a, b" or "(a, b)"
         — see fire_compiler.py's _parse_generator_target), not an Expr node.
-        Mirrors execute-VarDecl's handling of the same comma-joined-string
+        Mirrors execute_VarDecl's handling of the same comma-joined-string
         representation for `var a, b = ...`.
-
-        Whether the pattern UNPACKS at all is `for_target_is_tuple`, the one
-        reader of the difference between `(a,)` and `(a)` — see
-        fire_compiler.py's "Unpacking-target representation" section. Reading
-        it here by hand is what made `for (a,) in [(1,), (2,)]` bind the whole
-        item to `a` and print `1` where CPython prints `(1,)`: the parser used
-        to spell both targets identically, so "is there a comma?" could not
-        tell them apart. Slot splitting is the shared bracket-aware
-        `target_slots` for the same reason a nested target must not be torn
-        into `(b` / `c)` — and for the same reason it drops the empty slot a
-        1-tuple's trailing comma leaves, which is what `for (a,) in [(1,)]`
-        binds `a` to `1` rather than to `(1,)`.
 
         One element of the comma-list may be starred (e.g. "a, *rest" or
         "*rest, a, b" — see fire_compiler.py's _parse_for_target), matching
@@ -5874,36 +5374,13 @@ class Interpreter:
         (e.g. "st.lineno", possibly chained "a.b.c" — see fire_compiler.py's
         _parse_for_target), which SETS an existing object's attribute each
         iteration instead of binding a fresh local; see _bind_single_target."""
-        if not N.for_target_is_tuple(target_str):
-            # `for (a) in ...` — a parenthesised single NAME. The parens are
-            # redundant grouping, so the name bound is what is inside them;
-            # binding the string `"(a)"` would define a variable literally
-            # called `(a)`.
-            self._bind_single_target(
-                N.for_target_single_name(target_str.strip()), value)
-            return
-        t = target_str.strip()
-        inner = N._target_group_inner(t)
-        if inner is not None:
-            t = inner
-        names = N.target_slots(t)
-        if names:
-            # CPython's UNPACK_EX: an item that is a SEQUENCE is unpacked into
-            # its elements, whatever it is made of — a list, a tuple, and a
-            # `str` (into 1-character strings) or `bytes` (into ints, because
-            # that is what indexing a bytes yields). `_unpack_source` is that
-            # rule and the refusal that goes with it, spelled once for both
-            # binders; see its own docstring for the three measured facts.
-            #
-            # The `str`/`bytes` exemption that used to be here made the whole
-            # dict-key family wrong: iterating a dict yields its KEYS, a key is
-            # a `str`, and `for k, *vs in {"abc": 1}` therefore binds the WHOLE
-            # key "abc" to `k` and hands `vs` an empty list, where CPython
-            # gives `k == 'a'` and `vs == ['b', 'c']`. The compiled path
-            # refused the shape rather than disagree with this (see
-            # mojo/backend_gimple/emit_loops.py's `_gen_for_dict`, which now
-            # lowers it) so the two engines could be compared at all.
-            values = self._unpack_source(value)
+        name = target_str.strip()
+        if name.startswith('(') and name.endswith(')'):
+            name = name[1:-1].strip()
+        if ',' in name:
+            names = [n.strip() for n in name.split(',')]
+            values = (list(value) if hasattr(value, '__iter__')
+                      and not isinstance(value, (str, bytes)) else [value])
             # Plain loop, not next()+genexpr: this file is itself compiled by
             # this project's self-hosting gimple_codegen.py, which has no
             # runtime `next()` builtin -- that emitted an undefined-symbol
@@ -5915,21 +5392,8 @@ class Interpreter:
                     star_idx = i
                     break
             if star_idx is None:
-                self._check_exact_arity(values, names, value)
                 for n, v in zip(names, values):
-                    # A NESTED group slot — `for (i, (j,)) in pairs` — is
-                    # itself a pattern, not a variable name, so it recurses
-                    # with that slot's value. Binding it through
-                    # `_bind_single_target` defined a local literally called
-                    # `"(j,)"` and the body's `j` was then a NameError;
-                    # flattening instead (what the codegen's
-                    # `for_target_names` does) would bind `j` to the OUTER
-                    # element. Recursing is what CPython means and what both
-                    # engines now do.
-                    if N.for_target_is_tuple(n):
-                        self._bind_comprehension_target(n, v)
-                    else:
-                        self._bind_single_target(n, v)
+                    self._bind_single_target(n, v)
             else:
                 before, after = names[:star_idx], names[star_idx + 1:]
                 star_name = names[star_idx][1:]
@@ -5943,86 +5407,8 @@ class Interpreter:
                 self.scope.define(star_name, values[n_before:len(values) - n_after])
                 for n, v in zip(after, values[len(values) - n_after:]):
                     self._bind_single_target(n, v)
-
-    def _unpack_source(self, value):
-        """`value` as the list a SEQUENCE target unpacks, or CPython's refusal.
-
-        **The whole of `UNPACK_SEQUENCE` for this path, and the reason it is one
-        function rather than a comprehension at two call sites.** Three facts,
-        each measured against CPython 3.14 rather than argued:
-
-        * **A `str` IS unpacked, into one-character strings.** Iterating a
-          `dict` yields its KEYS, so `for k, *vs in {"abc": 1}` gives the target
-          the key `"abc"` and CPython prints `a ['b', 'c']`. This function used
-          to exempt `str` (and `bytes`) and hand the target the whole key, so
-          the interpreter printed `abc []` — a wrong answer on the shape this
-          project's own dict iteration produces, and a SILENT one: the program
-          ran and printed something plausible. Same for `for k, v in {"ab": 1}`,
-          which binds `('a', 'b')` in CPython and used to bind `k` alone and
-          leave `v` undefined.
-        * **A non-iterable item is a `TypeError`, not a one-element list.**
-          `for a, b in [1, 2, 3]` is `cannot unpack non-iterable int object` in
-          CPython; the `[value]` fallback printed `1 2`, `2 2`, `3 2` — three
-          wrong answers from one loop.
-        * **`bytes` is left alone deliberately, and CPython is why.** It is an
-          ordinary iterable of INTS here, so `for a, b in b'ab'` is
-          `cannot unpack non-iterable int object` in CPython, which falls out
-          of the previous bullet rather than needing a `bytes` case: the item is
-          `97`, which is not iterable, so the refusal is the same refusal.
-
-        `hasattr(value, '__iter__')` and not `isinstance(value, (list, tuple))`,
-        because a `MojoInstance` is iterable and a `range` is iterable and both
-        are ordinary sequences to this rule.
-        """
-        if isinstance(value, str):
-            return list(value)
-        if hasattr(value, '__iter__'):
-            return list(value)
-        kind = type(value).__name__
-        if isinstance(value, MojoInstance):
-            kind = value._mojo_class.name
-        raise TypeError(f"cannot unpack non-iterable {kind} object")
-
-    def _check_exact_arity(self, values, names, item=None) -> None:
-        """Refuse a sequence target whose arity is not the item's length.
-
-        **CPython's `UNPACK_SEQUENCE`, and the reason it is here rather than
-        left to `zip`.** `zip` truncates to the shorter of the two, which turns
-        both arity errors into something the program does not notice:
-
-          * too MANY — `for a, b in [(1, 2, 3)]` is `ValueError: too many
-            values to unpack (expected 2, got 3)` in CPython and `1 2` here;
-          * too FEW — `for a, b in [(1,)]` is `ValueError: not enough values to
-            unpack (expected 2, got 1)`, and the old reading bound `a` and left
-            `b` unbound, so the program died later with `NameError: b` at the
-            USE SITE. That is the worse of the two shapes by this project's own
-            ordering: the diagnostic names a name, not the statement that failed
-            to bind it.
-
-        A crash here is a behaviour CHANGE on a program that used to print
-        something wrong, which is the trade this codebase makes explicitly and
-        which CPython already made.
-
-        `item` is the value the slots are being unpacked OUT of, and it is what
-        makes the "too many" wording CPython's for every kind: measured, a
-        sequence says `(expected 2, got 3)` and a `str` says `(expected 2)` with
-        no count at all — `for a, b in {"abc": 1}` and `for (a,) in {"ab": 1}`
-        both omit it, while `for (a,) in [(1, 2)]` includes it. The "not enough"
-        arm always carries the count, `for a, b in "ab"` being
-        `(expected 2, got 1)`. Passing the item's KIND rather than the value is
-        enough; `item=None` (a caller that has only the derived list) states the
-        sequence form.
-        """
-        got = len(values)
-        want = len(names)
-        if got == want:
-            return
-        counted = "" if isinstance(item, str) else f", got {got}"
-        if got > want:
-            raise ValueError(f"too many values to unpack (expected {want}"
-                             f"{counted})")
-        raise ValueError(f"not enough values to unpack (expected {want}, "
-                         f"got {got})")
+        else:
+            self._bind_single_target(name, value)
 
     def _bind_single_target(self, name, value):
         """Bind one non-starred element of a for-loop/comprehension target
@@ -6170,51 +5556,11 @@ class Interpreter:
         A 'generator' expression is a REAL lazy generator object (see
         `_generator_expression`), not a materialized list.
 
-        A list/set/dict comprehension gets its OWN SCOPE, as CPython's does,
-        and it used to be evaluated in the current scope instead (the same
-        simplification `execute_ForStmt` still makes for a plain `for` loop) —
-        so its loop variables LEAKED into the enclosing function. The
-        measurement that made it a bug rather than a note: `G = 5` /
-        `[G for G in rows]` / `return G + out[0]` printed 3 where CPython
-        prints 6, and both formal images printed 6, so the interpreter — the
-        engine every other parity test uses as the reference — disagreed with
-        the compiled path on a program that is otherwise correct, with no
-        diagnostic. `test_interp_oracle.py`'s
-        `a_comprehension_does_not_shadow_a_module_constant` (interpreter vs
-        CPython) and `test_formal_globals.py`'s case of the same name (arm64,
-        x86_64 and the interpreter) pin it.
-
-        The compiled path had this defect by a different mechanism — it
-        allocated the comprehension's target as a plain local of the enclosing
-        function, under the target's own source name, so that local shadowed
-        the module global for the rest of the body and `fire.py --jit` printed 3
-        where this prints 6. It no longer does: `_compr_bind_target`'s shadow
-        predicate is `module_shared.bare_global_read_plan`, the very decision
-        `_lower_IdentExpr` makes about where a bare name lives, so a target
-        whose name a bare read resolves to a module constant gets its own C
-        variable and the enclosing binding is restored when the comprehension
-        ends. The compiled spelling is `test_runtime_diff.py`'s
-        `comprehension_target_does_not_shadow_a_module_constant`; the case above
-        lives in the oracle rather than in the engine-vs-engine suite because two
-        engines agreeing on a wrong answer is invisible to the latter.
-
-        `_generator_expression` twenty lines below already did this, and the
-        shape is the same one it uses: a child scope for the whole walk, with
-        names the comprehension READS still live through the parent chain.
-        That is a real closure rather than a copy, so the enclosing function's
-        locals and the module's globals both resolve normally from inside —
-        which is why the common case is unchanged and only the BINDING of the
-        loop variable moves.
-
-        The outermost iterable is evaluated inside the child scope too, and
-        that is Python's rule rather than an accident of the placement: in
-        `[... for x in y for y in x]`, `y` is read before `y` is bound, and
-        with the child scope in place that is structural — the first `y` can
-        only resolve to the enclosing one — instead of depending on the order
-        two nested `run` calls happen to bind in.
-
-        Save/push/restore rather than a new `return`, because of the one-return
-        discipline the docstring below explains.
+        Real Python list/set/dict comprehensions get their own scope; this
+        interpreter evaluates those in the *current* scope instead (same
+        simplification execute_ForStmt already makes for a plain `for`
+        loop) — their loop variables leak into the enclosing scope, a known
+        minor fidelity gap.
 
         For a dict comprehension, fire_compiler.py's parser stores the KEY
         expression in `.element` and the VALUE expression in `.key` (yes,
@@ -6250,12 +5596,7 @@ class Interpreter:
                     if all(self.eval_expr(cond) for cond in gen.conditions):
                         run(rest)
 
-            saved = self.scope
-            self.scope = Scope(parent=saved)
-            try:
-                run(expr.generators)
-            finally:
-                self.scope = saved
+            run(expr.generators)
             if expr.kind == 'set':
                 result = set(results)
             elif expr.kind == 'dict':

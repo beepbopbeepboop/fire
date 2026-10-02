@@ -12,8 +12,8 @@ the *verified* limits behind the residue of the formal sweep's codegen classes,
 and for the audit that established which of them are true. It replaces the
 "what is still open" list that used to live at the bottom of
 `FORMAL_module_exports_nothing.md` for the one item that belonged here (the
-Stage 5 generic-template limit); that document has since been resolved and
-`git rm`'d, and §1.2 below owns the limit it pointed here for.
+Stage 5 generic-template limit); that document keeps its own bug and points
+here.
 
 **The rule this document exists to enforce.** A refusal in the sweep is a
 *claim about a file*, and a claim that is false is worse than no claim: it
@@ -35,16 +35,10 @@ export probe dead on any module with a dataclass field carrying a default.
 ## Two open items in the arm64 per-export-contract work (agent [3])
 
 Not part of the sweep families above, and not re-measured by this audit. Both
-were **true** claims. **The first is FIXED** — `lib/Contracts.lean` compiles
-clean with 0 holes, `bodyCert`/`agrees_of_body`/`hreg` are emitted, and
-`bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §1 carries the
-measurement and what landed. **The second is `OPUS-4`** in
-`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`, which names the write set
-(`lib/ProofLib.lean`'s `exportFuel`, `formal/arm64_proof_gen.py`) and the two
-questions with no answer in the code (superclass matching, and what
-`except A as e` binds). The handoff document that used to sit between them —
-`FORMAL_contract_work_handoff.md`, deleted 2026-10-05 — was a finished task's
-notes, not a third owner.
+are **true** claims, both unfinished; the single home for their full state —
+every measurement, every trap hit on the way, and the exact next step — is:
+
+> **`FORMAL_contract_work_handoff.md`** — read §1 and §3 of it to start.
 
 | item | measured | is the claim true? | what closes it |
 |---|---|---|---|
@@ -100,67 +94,14 @@ bind*. The evidence column is what was measured, not what the message says.
 
 | terminal module | files | what the file actually declares | verdict |
 |---|---|---|---|
-| `std/sys/_assembly.mojo` | 17 | one public `def inlined_assembly[…]` (generic, variadic over `*types: AnyType`, body is `__mlir_op.\`pop.inline_asm\``) | **true limit** — its own body is refused for the MLIR construct, which pre-empts the import |
+| `std/sys/_assembly.mojo` | 17 | one public `def inlined_assembly[…]` (generic, variadic over `*types: AnyType`, body is `__mlir_op.\`pop.inline_asm\``) | **true limit** |
 | `std/reflection/function.mojo` | 4 | one `struct ReflectedFn[func_type, func]` (generic); a `comptime reflect_fn[…] = ReflectedFn[func]` alias; two `@staticmethod` methods, `display_name()` concrete and `linkage_name[…]` generic | **true limit** |
-| `std/sys/_io.mojo` | 3 | three `comptime` constants (`stdin`/`stdout`/`stderr`), no declaration at all | **CLOSED — builds** (re-measured 2026-10-01) |
+| `std/sys/_io.mojo` | 3 | three `comptime` constants (`stdin`/`stdout`/`stderr`), no declaration at all | **true limit** |
 | `std/algorithm/backend/tile.mojo` | 2 | four overloads of `def tile[…]`, all generic | **true limit** |
-| `std/collections/string/_unicode_lookups.mojo` | 1 | eight `comptime` lookup tables, no declaration at all | **CLOSED — builds** (re-measured 2026-10-01) |
+| `std/collections/string/_unicode_lookups.mojo` | 1 | eight `comptime` lookup tables, no declaration at all | **true limit** |
 | `std/utils/_select.mojo` | 1 | one `def _select_register_value[…]` — private *and* generic | **true limit**; the message names the privacy, which is the operative rule and is now the only rule it needs |
-| `std/gpu/host/nvidia/__init__.mojo` | 1 | a docstring, no declaration at all | **the file is GONE from the current stdlib** — `tools/formal_sweep.py` reports "no .py/.mojo files found" for it (re-measured 2026-10-01), so this row is a historical measurement |
-| `std/stat/stat.mojo` | 1 | seven `def S_ISxxx[intable: Intable]` | **CLOSED — builds** (re-measured 2026-10-01) |
-
-### RE-MEASURED 2026-10-01: three of the eight are no longer limits, and one is gone
-
-Run per-file with `python3 tools/formal_sweep.py --no-stdlib <file>` against
-the stdlib `module_loader.STDLIB_PATH` resolves to, one file at a time (not a
-sweep — eight files), `cas: 0 hit` on every one so these are fresh builds:
-
-| terminal module | then | now |
-|---|---|---|
-| `std/stat/stat.mojo` | `formal dylib has no public functions` — seven public generics | **PASS** |
-| `std/sys/_io.mojo` | same, three `comptime` constants | **PASS** |
-| `std/collections/string/_unicode_lookups.mojo` | same, eight `comptime` tables | **PASS** |
-| `std/gpu/host/nvidia/__init__.mojo` | same, a docstring | **file absent from this stdlib** |
-| `std/sys/_assembly.mojo` | `__mlir_op` dialect construct | `codegen/dependency` — `_assembly.mojo: MLIR construct` |
-| `std/reflection/function.mojo` | generic struct template | `codegen` (unchanged) |
-| `std/algorithm/backend/tile.mojo` | four generic overloads | `codegen` (unchanged) |
-| `std/utils/_select.mojo` | private and generic | `codegen` (unchanged) |
-
-**So family 1's eight terminal modules are five, of which four are still true
-limits and one (`_assembly.mojo`) has moved to a class the census counts
-separately.** The table above is corrected in place rather than left as a
-historical record, because this document's rule is that a refusal's verdict must
-be true of the file it is reported against — a table calling three files "true
-limits" when they build is exactly the false claim the rule exists to catch.
-
-**Why the three closed, briefly, because it is the export-rule work and not
-this document's subject:** a module with no boundary symbol at all is now built
-through `_namespace_library` — a real MH_DYLIB with no code and an EMPTY export
-trie, with its `comptime` constants recorded under the manifest's `constants`
-and its re-exports under `reexports`. That is the same path a re-export-only
-package takes (`FORMAL_module_exports_nothing.md`, since resolved), and it is
-the right answer for a module whose whole API is compile-time values: there is
-nothing to export as a symbol because there is no function, and a consumer
-materializes the folded constant in its own image rather than reading an
-address for it.
-
-**`stat.mojo` is the interesting one of the three**, because its limit was
-supposed to be the one this backend cannot get past: seven public GENERIC
-functions, which `doc/ABI.md` §Generics says are not a single boundary symbol,
-each instantiation being. §1.2 is where that limit is argued, and it is
-**unchanged and still true** — what changed is that `stat.mojo` builds and runs
-for a reason §1.2 had already reached by a different route: the ceiling of the
-largest chunk of the family was measured at ZERO because 34 of the 35 files it
-headed name `BinaryHeap` nowhere. `stat.mojo`'s one dependent evidently does not
-depend on it the way the others did. **The file building is not Stage 5 and must
-not be read as Stage 5**; it is a real limit that one dependent stopped hitting.
-
-**What is NOT re-measured here, and is the integrator's:** the 30-file count for
-family 1. Closing three terminal modules should move it, but by how much depends
-on which of the 30 were behind each, and the per-file instrument this document
-uses deliberately is not `tools/formal_sweep.py` (the sweep resolves imports
-first and reports the chain's terminal). Quoting a new total here would be a
-number nobody measured.
+| `std/gpu/host/nvidia/__init__.mojo` | 1 | a docstring, no declaration at all | **true limit, but it should not be reached** — see 1.3 |
+| `std/stat/stat.mojo` | 1 | seven `def S_ISxxx[intable: Intable]` | **true limit** |
 
 Measured evidence for all eight, run on this tree:
 
@@ -183,21 +124,8 @@ rule, so a symbol cannot be findable in one backend's dylib and absent from
 the other's. The rule excludes, on purpose and by `doc/ABI.md`: a `_`-prefixed
 name; a generic template (`fn name[…]`, `struct S[T]`); an overloaded name;
 and a `_CLIB_SYMS` name. Every one of the eight above falls under one of those
-four, so **the refusal was true in all eight cases when it was written, and no
-fix to the export rule would have made any of them build.**
-
-**…and that last clause is what the 2026-10-01 re-measurement above corrected.**
-The export RULE is unchanged and still excludes exactly those four names. What
-changed is that three of the eight no longer need a boundary symbol at all: a
-module whose declarations are all excluded (or absent) is now built through
-`_namespace_library` as a real dylib with an EMPTY export trie, with its folded
-constants and re-exports in the manifest. The rule is the same; the refusal is
-not the only honest answer to it any more. **So "the refusal is true" and "the
-module builds" are not in tension here** — which is worth saying because this
-document has spent a lot of space insisting that a true refusal is the only
-correct answer, and it still is: the point is that "this module has no boundary
-symbol" and "this module cannot be built" are different claims, and only the
-second one was ever a limit.
+four, so **the refusal is true in all eight cases**, and no fix to the export
+rule would make any of them build.
 
 **§1.1, corrected (2026-09-27, agent [2]): the `_CLIB_SYMS` question is
 settled, and the argument that this section used to make for changing the rule
@@ -323,12 +251,8 @@ under a different cause entirely and this family read 3 files. **A family's size
 is a function of how far the walk gets before it reaches the question**, so a
 row in this document can be an order of magnitude out of date without anything
 being wrong — the audit table is a measurement of a walk's progress as much as
-of a module's shape. It has now happened a THIRD time on this file, in the
-other direction: the walk got FURTHER (the `List[Self.T]()` and then the
-`len(self._data)` refusals are both gone as of 2026-10-03,
-`work/formal12-binary-heap`) and the family is still this size, because the
-export gate is waiting behind both of them. The re-measurement is
-the `2026-09-30_r2` round of `bugs/FORMAL_sweep_work_map.md` §3.2, and it notes what is NOT
+of a module's shape. The re-measurement is
+`bugs/FORMAL_sweep_work_map_2026-09-30_r2.md` §3.2, and it notes what is NOT
 available: with the 35 files behind it, this family is now the largest single
 cause on the tree that nobody owns, and its ceiling is Stage 5 (§1.2), not a
 bug.
@@ -413,18 +337,6 @@ chains and numbers in `FORMAL_dylib_export_gate_ceiling.md`):
   own body (`len(self._data)` on a `List[Self.T]` slot has no representable
   value), so the module carrying the 35 does not lower today whatever its export
   table says.
-- **Re-measured 2026-10-03 on `work/formal12-binary-heap`, and the probe's
-  prediction held exactly.** The `len(self._data)` value IS representable now —
-  it took three defects, none of them the refusal's own text, and the file no
-  longer refuses on it anywhere (§`bugs/FORMAL_binary_heap_mojo_after_the_len_value.md`
-  §1 names them). Ten of the 165 files behind it were re-swept on BOTH
-  architectures (which agree exactly) and **0 of 10 moved**, with the terminal cause advanced from the export gate to
-  `binary_heap.mojo`'s own next construct, which is what "the refusal advances
-  one level" meant. Then the decisive one: **with every codegen refusal in that
-  file bypassed, the module-dylib build fails at the export gate with the very
-  message the sweep recorded.** So this row has two walls and codegen was only
-  the first — a plan that reads the sweep map's "one file has to lower first"
-  as "and then 164 files move" is wrong about the second half.
 - Deleting the re-export, so `binary_heap.mojo` is not in the closure at all,
   moves **0 of 35** as well: all 35 land on `dtype.mojo`'s MLIR constructs (26)
   or `_assembly.mojo`'s `inlined_assembly` (9), which are §2 and §1.1 — true
@@ -467,88 +379,6 @@ whose measured value on `binary_heap.mojo` is zero*, not as 21 files of
 near-term coverage. What was wrong was the *reporting*, and that is closed —
 see "What wave 5 closed".
 
-### §1.2, RE-MEASURED 2026-10-03: Stage 5 landed for the formal dylib path, and
-### the "0 files for `binary_heap.mojo`" measurement above still stands
-
-`work/formal15-generic-monomorph` implemented the monomorphization this section
-costed, and the implementation is `formal/monomorph.py` (discovery +
-instantiation) with `doc/ABI.md` §Generics amended from "forward-looking — Stage
-5" to the contract it now meets. What it does: a module dylib is compiled for
-the instantiations its importers ask for, each as a concrete declaration under
-`monomorphize.mangle`'s name, compiled into the DEFINING module's own library
-and exported with that module's qualifier.
-
-So the three clauses above change as follows, and it is worth being exact about
-which:
-
-* **(a), (b) and (c) are done** for the construct that needs them — a generic
-  struct template, a generic function template, a mangling, and a demand set
-  that is part of the artifact's identity. `widen[Int](5)` and `Pair[Int]()` now
-  build, run, and are pinned differentially against CPython on both
-  architectures by `test_formal_monomorph.py` (11 cases, 9 s).
-* **The COST line above is wrong in one direction and right in the other.** It
-  says "weeks, not an afternoon"; what landed is a day. It also says the largest
-  single member of the 21 is worth **0 files**, and THAT MEASUREMENT UNCHANGED
-  AND IS NOW THE INTERESTING ONE: `std/collections/binary_heap.mojo` still
-  refuses, at `BinaryHeap.pop()` — a PREP-time `mutating_receiver_return_refusal`
-  that pre-empts everything the monomorphizer would have reached. So the export
-  gate that stood behind it is gone and the 165-file row still does not move,
-  which is the `FORMAL_binary_heap_mojo_after_the_len_value.md` /
-  `FORMAL_sweep_work_map_2026-10-03_b8.md` §4.1 finding restated: two walls, and
-  the second one being removed is not the same as the first one being removed.
-* **"Monomorphizing nothing is still nothing" still holds** for the six
-  permanent rows above, and one of them is now measurably better for a different
-  reason: `std/stat/stat.mojo`'s seven generic `S_ISxxx` are instantiable now, so
-  a caller that writes `S_ISREG(st)` with the bracket a real caller has to write
-  reaches an instantiation, where the bare spelling remains refused — a bare call
-  names no instantiation, so no trie entry can mean it.
-
-The remainders — a type argument in an annotation position, a DOTTED
-application `mod.G[T]()`, a comptime specialization of an imported template, and
-the trait-bound check — are listed with the reason each is not a third line of
-the same commit in **`bugs/FORMAL_generic_monomorph_scope.md`**, which is the
-single home for them from here.
-
-### §1.2, RE-MEASURED 2026-10-04: the gate is a PER-EDGE question, so this family
-### is 3 files instead of 163 — and what is behind it is 123 BARE CALLS
-
-`work/formal18-export-gate` made the export gate per EDGE
-(`formal/imports.py::library_free_edges`, `doc/ABI.md` §Generics "When a module
-dylib is built at all"): an edge that binds no name the dependency could publish
-as one boundary symbol gets no library, and the four binders that keep one are a
-bare `import`, a star import, a function-local `from`, and a **demanded
-instantiation**. Four facts about this family change, and none of them is that
-the limits above were wrong:
-
-* **The family is 3 files, not 163.** All 163 re-measured (one
-  `fire.py build --formal --no-prove` per file, no lean): **3 BUILD**, 130 move
-  off `binary_heap.mojo`'s gate and are still refused, 30 stay at the gate
-  against `std/sys/_io.mojo` (17) and a `constants.mojo` (13) — the
-  constants-only rows this section already calls **permanent and not work**.
-* **The 130 are 123 bare calls to a template whose type arguments are INFERABLE
-  from the call's arguments** — `FormatStruct(writer, "Allocation")` (68,
-  `std/memory/alloc.mojo:450`), `dealloc(allocation^)` (29, `:99`),
-  `is_negative(value)` (13), `PhiloxRandom(seed)` (6), `align_up(x)` (3). One
-  feature, and it is not this section's: the doc is
-  **`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`**.
-  `std/memory/alloc.mojo` carries the first two and is in nearly every stdlib
-  file's closure, which is why those two are large.
-* **The "a bare call still names no instantiation, so no trie entry can mean it"
-  clause above is now the load-bearing limit rather than a footnote**, and its
-  next step is wrong about correct Mojo for all 123: Mojo lets an inferrable
-  type argument be omitted, the stdlib omits it in these places, and
-  `imported_callee_refusal`'s "spell it as `Name[<a type>](…)`" would send a
-  reader to edit working stdlib. That is why the bare call is still refused and
-  why the sentence is the thing to fix with the feature.
-* **The template is still never published under its base name**, and the two pins
-  that say so survive unchanged: `test_formal_imports.py`'s
-  `a generic template is not exported under its base name` (the export set is
-  empty) and its new `a bare call to a template is refused by the export rule`.
-  What was reversed — and was answered rather than routed around, in the same
-  commit — is the third pin, `a module exporting only a generic template is
-  refused`, which existed to stop exactly the thing this row needed. Its
-  replacement asserts the new rule and the absence of any library.
-
 ## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the
@@ -572,22 +402,19 @@ tried; the leaf fallback then finds the importer's own `__init__.mojo`:
 '…/std/gpu/host/__init__.mojo'                 # what `..` means
 ```
 
-The `nvidia/__init__.mojo` refusal was *true* (the file declares nothing) and
-it is a limit that will never close — **though the file is no longer in the
-current stdlib at all** (re-measured 2026-10-01: `tools/formal_sweep.py` reports
-"no .py/.mojo files found" for it, see the §1.1 table). But `tma.mojo` should
-not have been blocked by it, and the same defect inflated the
-`NOT-ANSWERABLE/UNRESOLVED-IMPORT` class too (`…/gpu/memory/__init__.mojo`
-"imports `.memory`", `…/os/path/__init__.mojo` "imports `.path`").
-**This is FIXED (re-measured 2026-10-01):** `formal/imports.py` has
-`_relative_candidates`, tried before the four root passes, which resolves `.`
-and `..` against the importing file's own directory and returns `None` on a
-miss rather than falling through to the leaf fallback. Measured:
-`pkg/sub/leaf.mojo` writing `from .. import top_fn` builds and prints 40,
-where CPython prints 40. The paragraph below is kept because it is the cost
-argument that made the fix safe — the leaf fallback that several real stdlib
-`from .sibling import` statements depend on is untouched, because the relative
-form is tried FIRST.
+The `nvidia/__init__.mojo` refusal is *true* (the file declares nothing) and it
+is a limit that will never close. But **`tma.mojo` should not be blocked by it**,
+and the same defect inflates the `NOT-ANSWERABLE/UNRESOLVED-IMPORT` class too
+(`…/gpu/memory/__init__.mojo` "imports `.memory`", `…/os/path/__init__.mojo`
+"imports `.path`"). This is also recorded as open in
+`FORMAL_module_exports_nothing.md`; it is repeated here because it is a
+*count* correction, not a limit: **fixing `_candidates` removes at least one
+file from family 1 and is a prerequisite for trusting the family's size.**
+Cost: the leaf fallback in the same function is load-bearing for
+`import formal.types` inside `formal/`, so this needs a real fix (compute
+`..`/`.` against the *importing file's directory*, and try the parent before
+the leaf) rather than a special case. Half a day, and it is not in this
+document's lane — it belongs to whoever owns `formal/imports.py`.
 
 ---
 
@@ -740,129 +567,6 @@ is refused by name. The refusal is arch-free text in `formal/model.py`, asked
 through the one reader both backends use, so the two architectures cannot come to
 name different limits for one construct.
 
-### §2.2 corrected 2026-10-02: the rule above is keyed on the PREFIX, and for an
-### operation the property belongs to the OPERATION
-
-The sentence just above — "a name with the `__mlir_` prefix that no template rule
-covers has no representation in a 64-bit word" — is what this section still says
-and it is **false of a measurable subset of the operations**, because it asserts
-about the NAME a property that belongs to what the operation DENOTES. It was
-acceptable for a name no rule covers, because a bare name is by definition not a
-template; it stopped being true when `__mlir_op` was recognised as spelling a
-specific dialect operation and one sentence was kept for all of them.
-
-`formal/model.py`'s `mlir_dialect_op_refusal` now classifies the operation, and
-the measurement behind it is in
-`bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §Correction.
-In short, over the 259 sites / 104 operations in the stdlib: 14 operations / 76
-sites denote **no value at all** (an effect — a store, a trap, an ownership
-marker — where "no representation" remains a true statement), 12 operations /
-38 sites are **elementwise arithmetic**, and for those the operation NAME does not
-decide whether the result is a word; the **operand's type** does. 26 of those 38
-sites have a vector or mask operand, 9 have a word operand, 3 are pointer
-arithmetic.
-
-What did NOT change, and is the reason this section still reads CLOSED: with ONE
-exception taken 2026-10-03 (below), every one of the 259 is still refused, on
-both architectures, with byte-identical text, and none of them links an image.
-What changed is that the refusal says **which** operation and **which** of those
-three facts is missing, instead of asserting a property of the target that was
-false of a quarter of the arithmetic sites. A lowering table keyed on the
-operation NAME is what that correction rules out: `pop.add(a, b)` → `a + b` is
-right for the 9 word-typed sites and WRONG for the 26 vector-typed ones, where
-it would compute a scalar add of two vector-typed words — a plausible-looking
-number rather than a refusal. Pinned by the `CLASSIFIED` rows of
-`test_formal_mlir_precedence.py`, each of which asserts its own class's words on
-both backends and the ABSENCE of another class's.
-
-### The one exception, 2026-10-03: a TRAP used as a statement lowers
-
-**4 of the 259 sites now build**, and the count above is 255 refused rather than
-259. All four are `llvm.intr.trap` or `llvm.intr.debugtrap` whose value is
-DISCARDED — `std/sys/debug.mojo:20`, `std/sys/info.mojo:702`,
-`std/os/os.mojo:242`, `std/_plugin/selector.mojo:74` — and the reason is the
-one distinction the effect class had not drawn: **"denotes no value" is not a
-refusal reason at a statement.** Nothing reads a result there, so there is
-nothing to represent, and what is left to emit is the effect itself, which is the
-divergence `raise` already emits (`_emit_diverge`, one per backend, both callers).
-
-It is not a trap instruction: `brk #0`/`int3` is the better lowering and is the
-one to build once the Lean model has a step for it, but every word in the
-divergence already has a `work_step_*` lemma in `lib/work.lean` and an unmodelled
-`brk` is SKIPPED by `formal/arm64_proof_gen.py`'s `_step_branch_index`. The
-source's observable difference — an exit with a nonzero status rather than a fault
-a debugger sees — is the difference `raise` already has on this path.
-
-**The effect class is not thereby smaller in a way a reader should bank on.** Only
-those two operations, only as a zero-argument call that is the whole value of an
-`F.ExprStmt`, and only when every dialect root in the body is one of those
-(`MLIR_EFFECT_DIVERGENCE_OPS`, `model.mlir_effects_all_lowered`).
-`return __mlir_op.`llvm.intr.trap`()` is still refused with the same sentence, and
-an ownership marker, a store, a fence, an inline asm, a coroutine step and
-`kgen.codegen.reachable` are each still refused for the fact they have beyond the
-missing value — the last of those because its bracket carries two values this path
-COMPUTES, so "emit nothing" is a dropped bracket rather than a no-op.
-
-Only **one file** moves: `std/sys/debug.mojo`, whose whole body is the trap. The
-other three sit behind other modules' refusals
-(`bugs/FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`),
-so they move one refusal along rather than out — which is §2.0's "the next
-terminal is a different construct" again, and the reason the census above is
-corrected by 4 and not re-derived. `test_formal_mlir_precedence.py` pins both
-halves: `a_trap_in_a_value_position_is_still_refused` for the refusal that
-remains, and the `EMITTED` table for the divergence that is emitted.
-
-`formal/model.py`'s tables stay arch-free, so the two architectures cannot
-disagree about what an operation denotes; a per-emitter copy of them is the one
-way to make them, and there is none.
-
-The classification covers **all 259 sites over 104 operations**, with none left
-on the generic fallback, and `test_formal_mlir_precedence.py`'s
-`the_classification_covers_the_whole_corpus` re-measures that on every run —
-reading the class off the MESSAGE rather than off the tables, so a branch that
-exists but is unreachable fails. Measured:
-
-    113  typed-result   the RESULT TYPE is in the bracket (_type=, pred=, bin_op=,
-                         mask=, ordering=, a variant discriminant)
-     75  effect         no value at all — a store, a trap, an ownership marker
-     34  unguarded      a named fact this path lacks (a predicate, a pointee
-                         width, a DECLARED `Bool`, a GEP scale, the Mojo
-                         version)
-     24  elementwise    arithmetic whose word-or-vector answer is the OPERAND's
-     13  vector         over !kgen.simd<N, D> — N lanes, never a word
-
-Three of those classes have a MEMBERSHIP RULE that is measured rather than
-assembled by judgement, which is what keeps the tables from being a pile of
-opinions: **effect** is the 15 operations the corpus uses as a standalone
-statement at every one of their sites (and an operation absent from it is not
-thereby an effect — `pop.atomic.rmw` is read into `var res =` at
-`std/atomic/atomic.mojo:326`); **typed-result** is the 31 operations carrying a
-`_type=`/`pred=`/`bin_op=`/discriminant bracket at every site, a property of the
-spelling; **vector** is the `pop.simd.` prefix, which is structural in the name
-and is why `pop.add` is deliberately not in it.
-
-Two further corrections to the sweep row, both measured the same way and both in
-the census doc:
-
-  * **`std/builtin/simd_length.mojo` has 13 `__mlir_op` sites of its own**, not
-    the "1 of 1 `uses:`, nothing of its own" the row recorded — `uses:` counts
-    how many files a refusing module BLOCKS, not how much work it has. Six of
-    them (`index.add/sub/mul/and/divs/shrs`) are among the only **9 word-typed**
-    dialect sites in the whole stdlib, and the file's own terminal, measured by
-    building it with the `_select` import removed, is `pop.cast_to_builtin` in
-    `__init__` — a `_type=` that is a dialect type, a DIFFERENT missing fact from
-    `pop.select`'s condition. So **closing `_select.mojo` does not close
-    `simd_length.mojo`**, and this cause row shrinks by one file rather than by
-    two — which is what it did: `pop.select` and `__mlir_bool__()` are lowered
-    for a receiver whose DECLARED type says `Bool`
-    (`build._lower_dialect_select`), and `std/utils/_select.mojo` swept
-    `codegen -> pass` on 2026-10-03. It needed the DECLARATION rather than a
-    fifth kind, and
-    `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`
-    records why the kind would have been the wrong tool. It is also the natural
-    first target for the operand-type work, being reachable and mostly word-typed
-    where `std/simd.mojo` is 22 sites of pure vector.
-
 `std/sys/_assembly.mojo` — the module that heads 17 of family 1's 30 files — is
 built out of exactly this construct, so it is refused, and the seventeen files
 behind it are refused on it. **That is the correct end state for them, not a
@@ -870,20 +574,16 @@ gap.** The module's entire purpose is inline assembly, there is no MLIR in a
 freestanding image for an MLIR operation to become, and nothing about the
 `_get_kgen_string` import it also fails on can change that: the body is fatal
 whether or not the import resolves. See `FORMAL_target_query_evaluator.md`
-Blocker 2 for the cycle that is behind that import. The diagnostic it produces
-is `model.imported_callee_refusal`, which **now also covers the BARE spelling**
-— the defect was that an imported generic reached the LINK AUDIT when called as
-`widen(5)` rather than `widen[Int](5)`, because the bare callee was exempt from
-name placement and only the bracketed one was asked afterwards. Fixed 2026-10-01
-(`bug:FORMAL_imported_generic_reported_as_a_module_level_name`), and the
-pre-emption still shadows it for this file, so no reader sees it here at all.
+Blocker 2 for the cycle that is behind that import, and
+`FORMAL_imported_generic_reported_as_a_module_level_name.md` for the
+diagnostic it produces (which the pre-emption now shadows for this file, so the
+output quoted in that doc no longer reproduces — the defect it describes is
+unchanged).
 
 What DID have to change for the message to be the right one is
-`formal/build.py`'s MLIR pre-pass: `NoneType` at `_assembly.mojo:94` used to
+`FORMAL_mlir_refusal_preemption.md`: `NoneType` at `_assembly.mojo:94` used to
 pre-empt `__mlir_op` at line 95, so this module was reported as a missing local
-rather than as the construct it is written in. `first_mlir` now records the
-first MLIR construct a function reaches and raises it before the per-name walk,
-for the bare dialect name as well as the templates.
+rather than as the construct it is written in.
 
 ---
 
@@ -891,9 +591,9 @@ for the bare dialect name as well as the templates.
 
 | shape | files (arm64, stdlib scope) | verdict | evidence / what it should be |
 |---|---|---|---|
-| `constructing X has no representation: this image has no declaration of X` | 3 — `std/testing/prop/{__init__,random,runner}.mojo` (`Error`, at depth). The fourth was the repository-root stub `stdlib_core.mojo` (`StringRef`, direct), and it is **DELETED** (2026-10-03): nothing imported it, it declared no type this repository has, and its only remaining effect on the tree was this row | **refusal TRUE** | `Error` really is 2 fields and `StringRef` is a fat pointer, so neither fits one word, and neither is a struct in these images. The message now says the one thing it has checked — that there is no declaration here to ask — instead of asserting a shape it cannot see |
+| `constructing X has no representation: this image has no declaration of X` | 4 — `stdlib_core.mojo` (`StringRef`, direct) and `std/testing/prop/{__init__,random,runner}.mojo` (`Error`, at depth) | **refusal TRUE** | `Error` really is 2 fields and `StringRef` is a fat pointer, so neither fits one word, and neither is a struct in these images. The message now says the one thing it has checked — that there is no declaration here to ask — instead of asserting a shape it cannot see |
 | `__mlir_attr[...]` assembles an MLIR attribute | 46 | **true limit for the dialect attributes** | §2.1; §2.0 for the target-query half, which is answered |
-| `comptime X = … does not fold to a compile-time constant` | 2 (`std/math/polynomial.mojo`, `std/utils/_serialize.mojo`) | **true limit** for `polynomial.mojo`; the second file was **NOT a limit** and is **CLOSED** (2026-10-02). The arch drift is **CLOSED** (2026-09-27) | `comptime n = len(coefficients)` over a *runtime* parameter, which is genuinely not knowable at compile time — that half of the row stands. The **drift** was that x86-64 refused **earlier and differently** (`unsupported call target on the formal x86-64 path (got SubscriptExpr)` for `polynomial.mojo`, `unsupported statement ComptimeForStmt` for `tile.mojo`), so one construct got two different limits from two architectures that are one language implementation. Closed by giving x86-64 the same `mojo/middle/comptime.py` resolver arm64 uses — that module documents x86-64 as an intended consumer of exactly this seam and it never was one — so both now refuse with `model.comptime_fold_refusal`, byte for byte. Side effect: x86-64 now *builds* a comptime binding that folds, which it used to refuse outright. **The 2026-10-02 correction:** the row's second file was `std/algorithm/backend/tile.mojo`, which has since moved to the bracketed-specialization cause (its own doc), and the file that took its place was `_serialize.mojo` — and THAT one was an over-refusal, not a limit. `comptime _kCompactMaxElemsToPrint = 7` + `comptime _kCompactElemPerSide = _kCompactMaxElemsToPrint // 2` (`_serialize.mojo:16-18`) was refused on both architectures for two reasons, neither of them a limit: `//` was in neither compile-time folder's operator table (both backends lower `//` at RUN time — `_emit_div_shift_pow`, `_emit_div_mod` — and the interpreter folds it, so one source had three answers), and a module-level initializer could not read an earlier module-level name although function scope always could and `comptime_fold_refusal`'s own text promises it. Both closed, plus the uncaught `ZeroDivisionError` a literal-zero divisor raised out of the folder. It does **not** become a swept pass: it moves past this refusal and onto `ptr.unsafe_value()` over an `OptionalPointer` receiver, the same "next terminal is a different construct" shape §2.0 records for `std/sys/info.mojo`. Pinned by `both_arch_comptime_floor_division_folds`, two zero-divisor `refuse:` rows, and three rows in `test_formal_globals.py` |
+| `comptime X = … does not fold to a compile-time constant` | 2 (`std/math/polynomial.mojo`, `std/algorithm/backend/tile.mojo`) | **true limit** — and the arch drift is **CLOSED** (2026-09-27) | `comptime n = len(coefficients)` over a *runtime* parameter, which is genuinely not knowable at compile time. The **drift** was that x86-64 refused **earlier and differently** (`unsupported call target on the formal x86-64 path (got SubscriptExpr)` for `polynomial.mojo`, `unsupported statement ComptimeForStmt` for `tile.mojo`), so one construct got two different limits from two architectures that are one language implementation. Closed by giving x86-64 the same `mojo/middle/comptime.py` resolver arm64 uses — that module documents x86-64 as an intended consumer of exactly this seam and it never was one — so both now refuse with `model.comptime_fold_refusal`, byte for byte. Side effect: x86-64 now *builds* a comptime binding that folds, which it used to refuse outright |
 | `a \`...\` stands where this path needs instructions to emit` | 1 (`std/builtin/len.mojo`) | **true limit**, message **CLOSED** (2026-09-27) | `def len(value: StringSlice) -> Int: ...` has no instructions, and the old message (`unsupported expression EllipsisLiteral on the formal <arch> path`) named an AST node the author never wrote and said nothing about what to do. On x86-64 it was worse than weak: `_unsupported_expr_message` appended "container and string values are not", false of a `...`. Now one arch-free `model.ellipsis_refusal`, naming the language's own no-implementation marker and both repairs. **Measured, both arches, because the old note's scope claim was wrong in a way worth recording:** a `...` in a `trait` method builds, but a `...` in a plain function is refused whether or not anything ever CALLS it — so the distinction is the declaration KIND, not reach |
 | `a Optional receiver is stored in a container` | 1 (`std/iter/__init__.mojo`) | **true limit** | by-reference receiver work; **already pinned** by `byref_refuse_stored_in_a_list` (`test_formal_run.py`). Not duplicated here |
 
@@ -914,7 +614,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 683
+standing in for a shape, and the shape answers the same question for all 546
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -923,26 +623,15 @@ answer, so it is refused *even when a dylib provides the symbol* — the old cod
 let that through. And `mojo_print`, whose every type is a word, is refused only
 because nothing provides it.
 
-| | measured over all 11 headers in `runtime/` |
+| | measured over all 10 headers in `runtime/` |
 |---|---|
-| entry points declared | 683 |
-| every type crossing the boundary is one word | **272** |
-| a box in an argument or the return | 411 |
-| of the 272, refused only for want of a linked library | 272 |
+| entry points declared | 546 |
+| every type crossing the boundary is one word | **223** |
+| a box in an argument or the return | 323 |
+| of the 223, refused only for want of a linked library | 223 |
 
-**272 of 683 is what a link line converts into working code with no backend
-change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
-
-(Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 683
-entry points, 272 word-shaped, 411 with a box. The figures above were right for
-the tree this section was written on and had been drifting since, which is what
-`test_runtime_header_scan.py`'s census check now prevents — it reads each of
-these numbers out of the file and compares it with the live table, so a comment
-cannot be the second copy of a count. `python3 test_runtime_header_scan.py
---fix` is the other half of it: it writes the live figures into every one of
-those sentences, so a runtime declaration added today does not leave five files
-quoting yesterday's number.)
+**223 of 546 is what a link line converts into working code with no backend
+change at all.** For `mojo_sqlite3_*` it is **18 of 22**.
 
 ### Two numbers from the round-1 brief that the headers do not support
 
@@ -951,7 +640,7 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 683 / 510 / 173 by return type alone, and 272
+1. **455 / 352 / 101.** I measure 546 / 406 / 140 by return type alone, and 223
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
@@ -963,14 +652,11 @@ is worth recording because it is a rule, not a typo:
    `_prepare`, and nothing in the *declaration* distinguishes a `void *` a
    program only passes on from a `void *` it iterates — the distinction is in a
    comment. Any rule producing 20/22 is hand-kept, which is the rot phase 2
-   exists to remove. The machine-derivable rule refuses SIX — the four that
-   RETURN a `void *` (`_open`, `_prepare`, `_query`, `_query_dict`) plus
-   `_bind_double` and `_column_double`, whose first parameter is the same
-   `void *stmt` — and calls the other 16 word-shaped, which is the 16 the
-   measured table above states. `test_formal_run.py`'s pre-existing
+   exists to remove. The machine-derivable rule refuses all four
+   (`_open`, `_prepare`, `_query`, `_query_dict`) and calls the other 18
+   word-shaped, and `test_formal_run.py`'s pre-existing
    `gimple_runtime_sqlite_refused` case — which calls `_open` and `_close` — is
-   pinned on the rule rather than on the count, so the count was free to move
-   when the scanner got better at seeing pointer arguments.
+   pinned on that, so 18 is also the number the suite already believed.
 
 ### The scanner this rests on was itself wrong, twice
 
@@ -997,10 +683,10 @@ Neither is closed by a test in the tree, so both are in
 
 A word-shaped call is emitted only when the symbol is on the link line, and the
 executable path (`build --formal`, which every suite drives) has no runtime
-library on its link line at all. So today the 272 are refused *for want of a
+library on its link line at all. So today the 223 are refused *for want of a
 library*, which the new message says plainly instead of claiming there is
 nothing to lower. INTERFACE REQUEST to [1] for the optional-runtime-unit
-registry; it is the only thing between the 272 and working code.
+registry; it is the only thing between the 223 and working code.
 
 ---
 
@@ -1521,7 +1207,7 @@ them:
 | reported instead of the true limit | docs |
 |---|---|
 | `'NoneType' has no home` — a bare TYPE name in a `comptime` type comparison, refused with an enumeration of where a *value* lives (52 stdlib files, up from 35) | `FORMAL_type_name_as_a_value.md` |
-| any unplaced name earlier in the body — the construct-refusal pre-pass is implemented for the bracketed/dotted MLIR spellings and not for the bare `__mlir_op` dialect name, so line order decides the message for 18 of 36 files | **CLOSED** — the pre-pass records the first MLIR construct a function reaches (`first_mlir`) and raises it before the per-name walk, for the bare dialect name as well as the templates; measured 32→38 of the 88 `__mlir_`-mentioning files naming an MLIR construct, 0 changing verdict class. `formal/build.py`'s `first_mlir` and `test_formal_mlir_precedence.py` (7 cases, both architectures) are where it lives now. The residual — files whose MLIR construct sits in a LATER function than the refusal an earlier one earns — was measured and deliberately NOT hoisted: a per-FILE pre-emption converts 3 files and demotes 9 specific-and-true sentences, and on the current stdlib it converts 0 |
+| any unplaced name earlier in the body — the construct-refusal pre-pass is implemented for the bracketed/dotted MLIR spellings and not for the bare `__mlir_op` dialect name, so line order decides the message for 18 of 36 files | `FORMAL_mlir_refusal_preemption.md` — **the pre-emption has landed** (2026-09-30); what is left there is 16 files decided by the order of two FUNCTIONS |
 
 **Both rows above are stale for `std/sys/_assembly.mojo` itself, and that is the
 point of the second one landing.** Re-measured 2026-09-30 on this tree, the

@@ -315,7 +315,7 @@ Phase 4-6 (real calling convention, move-vs-copy, stack allocation).
   Decided against, with numbers: skipping the registry for a stack-homed container (~0.5 ns of 5.8 ns, and
   it needs a never-boxed proof); a half-measure for closures (see the bug doc).
   Still open: containers nested inside a literal; strings whose producer is not provably fresh (`upper`/`strip`/`replace`/`join`)
-  and the strings inside a `split()` list (that doc is deleted with its fix);
+  and the strings inside a `split()` list (bugs/CODEGEN_call_result_container_never_freed.md);
   closure environments / bound methods / boxed mutable locals (bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md);
   struct-method callee tables beyond `self`; storage homing in lifted loop bodies (struct methods, struct instances, small dicts/sets
   and integer-key strings landed 2026-09-29).

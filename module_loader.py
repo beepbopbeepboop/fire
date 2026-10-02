@@ -280,7 +280,7 @@ class ModuleLoader:
     # raises "Only stdlib and test imports supported" for anything not under
     # STDLIB_PATH/TEST_PATH). Callers that already resolved an arbitrary
     # local .mojo file's path themselves (e.g. gimple_codegen.py's sibling-
-    # import fallback for `fire dylib`'s per-module standalone compiles,
+    # import fallback for `mojo dylib`'s per-module standalone compiles,
     # which resolves local project modules via imports.resolve_source /
     # _resolve_test_relative_module instead of this class's stdlib-only
     # resolve_module_path) call this directly, keeping the exact same
@@ -770,7 +770,7 @@ class ModuleLoader:
             # in gimple_codegen.py had no way to know the name even existed,
             # let alone that it needs a real cross-translation-unit
             # reference into the DEFINING module's own storage — the
-            # importing module's own compile (each `fire dylib` module is a
+            # importing module's own compile (each `mojo dylib` module is a
             # fully independent translation unit — see driver.compile_dylib)
             # silently fell through to codegen's "unknown identifier"
             # placeholder (0 / NULL), reading zero or segfaulting on a
@@ -814,11 +814,11 @@ class ModuleLoader:
             # fell straight through to codegen's "undeclared -> 0"
             # placeholder — with or without reflect.py's own same-file-only
             # struct-global gap (a SEPARATE mechanism entirely: this
-            # `load_module_from_path` scan is what `fire dylib`'s per-module-
+            # `load_module_from_path` scan is what `mojo dylib`'s per-module-
             # independent compile actually consults via
             # `_local_sibling_module_exports` / `_emit_imported_global_
             # accessors`, not reflect.py's `collect_exports`/
-            # `_register_link_imports`, which is `fire build`'s link-mode-
+            # `_register_link_imports`, which is `mojo build`'s link-mode-
             # only path). The `(?:=\s*(?P<rhs>.+?))?` group is now optional;
             # a bare `var NAME: Type` (or untyped `var NAME`, though Mojo
             # requires an annotation or initializer) still exports an entry.

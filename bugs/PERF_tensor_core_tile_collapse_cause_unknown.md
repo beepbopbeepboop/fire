@@ -4,42 +4,6 @@
 NOT, and the two obvious explanations are both ruled out.** Recorded so nobody
 builds the wrong fix on top of a plausible-sounding guess.
 
-## Status 2026-10-02 (`work/bugs4-9-c`): the TEXTUAL-AIR blocker is narrowed,
-## and could not be taken the last step on this machine
-
-The "What would settle it" section below ends by saying the tooling is not
-there, and names two things that would change that. One of them is wrong, the
-other is right but blocked here — and both are worth correcting, because
-"nobody has the tooling" is the sentence that stops the next person from trying.
-
-**Verified on this machine, 2026-10-02 (metal 32023.921, Xcode
-`XcodeDefault.xctoolchain`):**
-
-| claim | verdict |
-|---|---|
-| a Metal-capable `llvm-dis` is not present | **TRUE.** No `llvm-dis` in `xcrun --find`, in the default toolchain's `usr/bin` (which has `llvm-objdump`, `llvm-nm`, `llvm-size`, `llvm-cov`, `llvm-dwarfdump` and no `llvm-dis`), and none in `/usr/local/opt/llvm` or `/opt/homebrew/Cellar/llvm`. |
-| `-Xmetal save-temps` is not supported | **TRUE, and it is worse than unsupported — it is silently ignored:** `metal: warning: argument unused during compilation: '-Xmetal' [-Wunused-command-line-argument]`, and no intermediate appears. A flag that warns instead of failing is the kind of thing that reads as "no output" and gets reported as "the tool does not work". |
-| …so textual AIR is unreachable | **WRONG.** `metal --help` documents `-save-temps` — "Save intermediate compilation results", both as a bare flag and as `-save-temps=<value>` — and it works: compiling leaves `f-<hash>.bc.tmp` in the cwd. A `.bc` is an LLVM bitcode file, and the one `llvm-dis` would read. So the missing tool is not missing; it is `llvm-dis`, and `-save-temps` is the flag that feeds it. |
-| reading it back | **UNTESTED, and the reason is machine-specific.** `xcrun -sdk macosx metal -c tiny.metal -o tiny.air -save-temps` cannot compile ANY Metal source on this box: the cryptex-mounted `MetalToolchain-v27.1.266.1.X6riMW` header set is incomplete (`metal_types:12: 'metal_config' file not found`, plus `metal_extended_vector` and `metal_packed_vector`), 156 errors for `-sdk macosx` and `-sdk iphoneos` at every `-std` from default to `metal3.2`. The `xcrun metal` path is a dead end here, which is why the saved `.bc.tmp` is 0 bytes — the compile failed, so there was nothing to save. The project's own benchmarks never notice: `test_llm/gemm_ilp_sweep.m` compiles its MSL at RUNTIME through `newLibraryWithSource:`, which leaves no intermediate on disk (and has a `GEMM_DUMP` env var precisely because it must dump the MSL text to be sure it matches what was compiled). |
-
-**The one lead, and it is only a lead:** the bundled `clang` accepts an AIR
-bitcode path and emits nothing but a triple warning
-(`clang: warning: overriding the module target triple with arm64-apple-macosx26.0.0`),
-so `clang -S -emit-llvm -x ir f-<hash>.bc.tmp -o f.ll` is worth trying on a
-machine whose `metal` driver works. **This has NOT been shown to read Apple's
-AIR:** the only file available here was the 0-byte one, and an empty module
-proves nothing about a real one. It is a lead because the tool accepted the file
-and its warning is about the triple rather than about the bitstream; it is not a
-result because nothing non-empty was ever parsed.
-
-So the next step is unchanged in shape and different in spelling: **get a
-non-empty `f-<hash>.bc.tmp` from a Metal source this machine can compile, then
-try `clang -S -emit-llvm -x ir` on it** (or install `llvm`, which does ship
-`llvm-dis`, and use that). Until one of those works, the cause below remains
-NOT established and 16x16 remains the empirically correct choice.
-
-## Earlier status: OPEN, cause not established
-
 ## The measurement
 
 `test_llm/gemm_ilp_sweep.m`, TM=TN square, one simdgroup per tile, median of 15
@@ -128,21 +92,14 @@ binary, and disassembling it yields host code). Needed: **textual AIR**, so the
 1. ~~the pipeline's occupancy reporting~~ — DONE, and it disproved spilling.
    `[ps maxTotalThreadsPerThreadgroup]` returns 1024, the device max, for every
    grid from 1x1 to 8x8. This is now a permanent part of the benchmark.
-2. **Textual AIR — ATTEMPTED, partly undone.** `xcrun -sdk macosx metal -c
-   f.metal -o f.air` and `-emit-llvm` both emit LLVM **bitcode** (magic
-   `0x0B17C0DE`), and Xcode's `llvm-objdump` rejects it as "not a valid
-   object file". Grepping the bytes yields host-looking garbage, which is how an
-   hour went into looking for a name-mangling bug that does not exist.
-   **Re-checked 2026-10-02, and the conclusion "the tooling is not there" is too
-   strong** — see the Status at the top of this doc: `llvm-dis` really is
-   absent and `-Xmetal -save-temps` really is a silent no-op, but the driver's
-   own documented `-save-temps` DOES save the intermediate bitcode, and there is
-   one bundled tool that may read it back. What is still true is the operational
-   half: on this machine `xcrun metal` cannot compile any Metal source at all
-   (incomplete cryptex-mounted header set), so the saved bitcode is empty and the
-   question is unanswered. Anyone repeating this wants, in order: a `metal` that
-   can compile, then `-save-temps`, then `llvm-dis` (or `clang -S -emit-llvm -x
-   ir` as the fallback).
+2. **Textual AIR — ATTEMPTED, and the tooling is not there.** `xcrun -sdk macosx
+   metal -c f.metal -o f.air` and `-emit-llvm` both emit LLVM **bitcode**
+   (magic `0x0B17C0DE`), and Xcode's `llvm-objdump` rejects it as "not a valid
+   object file" — Apple's AIR is not readable with the bundled tools. Grepping
+   the bytes yields host-looking garbage, which is how an hour went into looking
+   for a name-mangling bug that does not exist. Anyone repeating this needs a
+   Metal-capable `llvm-dis`, or `-Xmetal` save-temps support, neither of which is
+   present here.
 
 Until then 16x16 is the empirically correct choice and is what
 `mojo/middle/offload.py` emits. Do not "improve" it by enlarging the tile, and do

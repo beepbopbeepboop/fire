@@ -1,104 +1,5 @@
 # COMPILE_FAIL: Lib/ctypes/util.py
 
-## Status (2026-10-02 — this file's own errors are down to ONE, and that one is a filed bug in another claim's area)
-
-`python3 fire.py build -o .tmp/util /Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
-under `tools/memslot.py --gb 8` (the machine was carrying several other workers'
-builds, so this took ~50 min wall): exit 1, **521 `error:` lines, of which
-exactly ONE is attributed to `ctypes/util.py`**:
-
-```
-ctypes/util.py:221:10: error: implicit declaration of function 'shutil_which_15d274'
-```
-
-**The three `tempfile` errors the entry below names are GONE** — no
-`tempfile_NamedTemporaryFile_*`, no
-`tempfile__TemporaryFileWrapper_mojo_close`, no pointer-from-int on line 228 —
-and so is the `shutil.which` one except for the single line above. So this doc's
-own error count is 4 → 1, and nothing in this file is left to fix here.
-
-The one that remains is `shutil.which(...)` reached through a BARE
-`import shutil` (this file's line 2), which was filed from this doc and
-**fixed 2026-10-02**: a bare `import X` registered `imported_symbols['X']`
-for the MODULE and nothing for its members, so `_func_mangleable` answered
-False for `X.fn`; the call site now registers the member through
-`funcs_shared.register_imported_symbol` with the DEFINING module's own
-parsed signature, which is what `_func_csym`/`_effective_param_types` need
-to emit the same symbol the defining module did. Pinned by
-`test_link_mode.py`'s
-`test_bare_import_sibling_function_call_through_module` (with the
-`from SIBLING import fn` spelling as its control in the same build). The
-member-classifier half (`_inline_bare_import_struct` now asking
-`_classify_unresolved_export`) is the other half.
-
-```c
-__attribute__((weak)) int64_t deep_fn (...) { mojo_print ((char *)"deep_fn: unavailable in compiled mode"); return (int6…
-  _t2 = deep_fn (1);
-```
-
-So this doc cannot close until that fix lands, and the fix is not in this
-worker's claim.
-
-**What else is in the 521, so nobody re-reads them as this file's problem:**
-34 sibling modules are refused wholesale (the `next(...)`-on-an-unmodelled-
-operand family, plus two container-kind refusals — see
-`bugs/INTERFACE_REQUEST_1_to_middle_infra_infer.md`'s new entry), and the rest
-are ordinary gcc errors in other modules: genericpath 99, ntpath 88, threading
-65, subprocess 58, ctypes/__init__ 55, _osx_support 46, sysconfig 41, os 39,
-and 7 more. None of those is `ctypes/util.py`'s.
-
-## Status (2026-10-01 — this file's own errors are ONE defect, root-caused to a bare-`import` module-qualified call, FIXED 2026-10-02 — see the section below)
-
-Re-measured on this tree, and the file's remaining errors are fewer and
-better understood than the entry below records. `python3 fire.py build
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py` under
-`tools/memslot.py --gb 8` (peak 0.4 GB) gives **4 `error:` lines, all
-this file's**:
-
-```
-ctypes/util.py:221:10: error: implicit declaration of function 'shutil_which_15d274'
-ctypes/util.py:228:10: error: implicit declaration of function 'tempfile_NamedTemporaryFile_100b86'
-ctypes/util.py:228:8:  error: assignment to '_TemporaryFileWrapper *' from 'int' makes pointer from integer without a cast
-ctypes/util.py:246:3:  error: implicit declaration of function 'tempfile__TemporaryFileWrapper_mojo_close'
-```
-
-(One more than the 2026-09-30 entry's three: `shutil_which_15d274` at
-line 221 is the same defect and was not in that count.)
-
-**These are not a `tempfile` symbol-visibility gap.** The entry below
-guessed that `tempfile`'s free function and struct-method symbols were
-never declared; they are declared, and the modules themselves resolve and
-compile — an instrumented `_compile_imported_module` trace shows
-`shutil` → `code=True`, 93 top-level statements, and `tempfile` →
-`code=True`, 48, both reached twice. The real defect is upstream of any
-declaration: **all four are module-qualified calls on a module reached by
-a BARE `import`** — `shutil.which(...)` at 221 (this file's line 2,
-`import shutil`) and `tempfile.NamedTemporaryFile()` / `temp.close()` at
-228/246 (line 203, a function-body `import re, tempfile`). The symbol
-each call site emits is well-formed and module-qualified
-(`shutil_which_15d274`, `tempfile_NamedTemporaryFile_100b86`,
-`tempfile__TemporaryFileWrapper_mojo_close`) — but nothing in this
-translation unit defines any of them, so gcc reports each as an implicit
-declaration.
-
-Reduced to a two-file repro and root-caused, then FIXED: a bare
-`import X` records `imported_symbols['X']` for the MODULE and nothing for
-its members, so `_func_mangleable` answers False for `X.fn` and the call
-lowers to a weak `0`-returning stub. In the reduced case this is a silent
-wrong answer (exit 0, prints 0); here the same mechanism surfaces as
-gcc's implicit-declaration errors because the stub path's guard does not
-fire for the already-mangled name.
-
-Note that `shutil`'s and `tempfile`'s *compiled text* still does not reach
-the output TU despite `code=True` — a second, separate question the
-reduced repro does not raise, recorded there.
-
-Doc kept open, now on a filed and root-caused defect rather than a
-guessed one. **Not attempted here:** the area is not one of this
-worker's claims, and the fix requires answering what `load_module`'s
-export table says about a bare-imported module's members — a question the
-`from X import Y` path already answers and this one never asks.
-
 ## Status (2026-09-30, branch work/compile-fail-stdlib-misc — no longer RSS-bound; 45 `error:` lines, 3 of them this file's, all one cross-module-`tempfile` class)
 
 Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
@@ -415,7 +316,7 @@ return type resolves to `void` — and `print(<void-typed-expr>)` is
 invalid C, producing the two errors above.
 
 This is a variant of the SAME underlying gap already tracked for
-`ctypes/__init__.py` itself (COMPILE_FAIL_ctypes___init__, task
+`ctypes/__init__.py` itself (bugs/COMPILE_FAIL_ctypes___init__.md, task
 #39) — that file's own compile has multiple unresolved issues
 (`__ctype_le__`/`__ctype_be__` dynamic attributes, the CFUNCTYPE varargs-
 packing bug), any of which could be why `ctypes/__init__.py`'s own
