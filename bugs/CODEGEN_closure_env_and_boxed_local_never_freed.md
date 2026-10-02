@@ -1,5 +1,90 @@
 # CODEGEN: closure environments and boxed mutable locals are never freed
 
+## Status (2026-10-01, later — OPEN 1 re-measured and its stated next step is
+## WRONG: there is no bound method in this shape at all)
+
+OPEN 1 still reproduces, at the same rate, and the fix is smaller and differently
+shaped than this document's "Next step" says. Both corrections matter, because
+the stated next step sends a reader to a file that has no bearing on it.
+
+**Measured** with `tools/mem_slope.py` on
+`build/memprobes/nested_def_closure.mojo` (the `helper`/`inner` shape from OPEN
+1, looped):
+
+    n=100000    peak 3.06 MB
+    n=400000    peak 7.66 MB      ->  +16.1 B/iter
+
+which is OPEN 1's 16 B/iter, unchanged.
+
+**What the generated C actually is.** No `MojoBoundMethod`, no
+`mojo_bound_method_new`, no `_reg_bound_method` entry — the nested `def`'s
+environment and a DIRECT call to the lifted function:
+
+```c
+int64_t __GIMPLE helper (int64_t n) {
+  helper_inner_env * _env_inner;
+  ...
+  _env_inner = _alloc_helper_inner_env ();
+  _t1 = n;
+  _env_inner->n = _t1;
+  _t3 = (int64_t)1;
+  _t2 = helper_inner (_env_inner, _t3);      /* direct, not through a value */
+  return _t2;                                 /* and no free anywhere */
+}
+```
+
+So the next step's specific plan — "a `gen._closure_vals` entry survives into
+the CALL, so `mojo_fnptr_call_N`'s emission site (`emit_calls`, the
+`mojo_is_bound_method` dispatch) can free a closure it was handed as a callee" —
+targets a symbol this program never emits. It is not needed and not sufficient:
+what is needed is a plain `free(_env_inner)`, because there is no registry entry
+to drop.
+
+Three further facts that make the real fix smaller than this document implies:
+
+1. **The record already exists.** No new `gen._closure_vals` entry is wanted:
+   `gen._closure_envs[node.name] = env_var` (`emit_funcs.py:169`) is the env var,
+   keyed by the nested def's name, and it already survives into the call —
+   `_lower_closure_call` reads it at `emit_calls.py:4244`.
+2. **The ownership predicate already exists too, modulo one requirement that
+   cannot apply.** `ownership_destruct._lambda_uses_ok(body, name)` asks exactly
+   the right question — "is every mention of this name the CALLEE of a call?" —
+   and answers True for this body. `lambda_value_owned` adds "and the binding
+   must be a `lambda` expression, and there must be exactly one", which is about
+   a callable bound to a LOCAL. A nested `def` binds no local, so the fix is
+   `lambda_value_owned` minus the binding clause, not a new analysis.
+3. **No new runtime cleanup kind is needed.** The unwind entry already exists:
+   `MOJO_CLEANUP_PTR` / `mojo_cleanup_push_ptr`, documented in
+   `fire_runtime.c` as "a plain malloc/calloc block: a struct instance" — which
+   is what a bare env with no bound method is. `mojo_closure_free` (the lambda
+   case's kind) would be wrong here: it frees a bound method and drops its
+   `_reg_bound_method` entry.
+
+**Why it still is not a "free it after the call" change.** The env var is
+declared with `gen._declare_var` at the nested-`def` STATEMENT
+(`emit_funcs.py:104`), i.e. function-scoped, and the same env legitimately backs
+several calls (`return inner(1) + inner(2)`). So the free has to go where the
+lambda case's does — the ownership machinery's scope exits
+(`_owned_free_candidates` / `_scope_register` / `_emit_scope_frees`, plus the
+`mojo_cleanup_push_ptr` thunk at the declaration) — which is also the only place
+that gets `break`/`continue`/`return` right. That is a real piece of work in the
+one subsystem whose failure mode is a use-after-free, and it is why it wants a
+session that can run `gimple_owned_closure_env_is_freed`'s siblings plus the
+gate.
+
+### Regression
+
+`test_gimple_bounded_memory` is the right helper for the fixed shape (the
+existing `gimple_owned_closure_env_is_freed` is exactly that for the lambda
+half), sized so the leak is several times the limit: OPEN 1's own 16 B/iter
+needs ~4M iterations to reach a 64 MB ceiling, and `gimple_owned_closure_env_is_freed`
+already uses a bounded loop, so the same shape works. Pair it with a
+`test_gimple_stdout` case for the multi-call body (`inner(1) + inner(2)`), since
+"the free happened after the first call" is the failure a slope alone would not
+catch — the second call would read freed memory and print garbage, which the
+stdout assertion does catch, and MallocScribble is already on in
+`run_executable_stdout`.
+
 ## Status (2026-10-01 — the CLOSURE half is closed and regression-tested; the nested-`def` and boxed-local halves are OPEN, with measurements)
 
 ### Closed: a capturing lambda bound to a local, and the environment it captured
