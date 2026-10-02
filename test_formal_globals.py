@@ -629,6 +629,32 @@ CASES = [
      "\n"
      "main(0)\n", "hi\n"),
 
+    # The ELEMENT kind of a body-filled blob, and the third row of the same
+    # argument: `declared_type_kind` maps a blob annotation to a blob without
+    # reading its element, so `L = make()` was `list` with no element and
+    # `print(L[0])` was refused — while `l = make()` inside a function has always
+    # been `list:int` on this path, because both backends' `_callee_kind` reads
+    # the RETURN STATEMENTS for a blob annotation and `[3, 14, 0]` states its
+    # elements. Two spellings of one expression, one answer and one refusal, and
+    # which one you got depended on whether the binding was at file level.
+    #
+    # `print`, not `printf`, so the interpreter is the reference for the value
+    # rather than the row's own expectation: an address where `3` belongs is a
+    # decimal in the tens of trillions, and this row is about which of two kinds
+    # the subscript yields.
+    ("a_body_filled_slot_carries_the_callee_s_element_kind",
+     "def make() -> List[Int]:\n"
+     "    return [3, 14, 0]\n"
+     "\n"
+     "L = make()\n"
+     "\n"
+     "def main(n):\n"
+     "    print(L[0])\n"
+     "    print(L[2])\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "3\n0\n"),
+
     # ── module boundaries ──
     # A dylib's `__DATA` is emitted with `emit_startup=False`, so there is no
     # startup stub to run an initializer from: the lazy per-function check is
@@ -782,6 +808,35 @@ REFUSALS = [
      "\n"
      "G = compute()\n",
      "is reachable from the store of 'G' itself"),
+
+    # THE GATE on the element kind, and the direction it has to fail in. A callee
+    # whose return statement is a CALL is a word here, because reading it
+    # precisely means recursing into that callee — which is what both backends'
+    # `_callee_kind` hook does and what the model's reading deliberately does not,
+    # because the answer this path must not give is a confident wrong one. So the
+    # slot falls back to the bare `LIST_PREFIX` and the subscript stays refused.
+    #
+    # `inner()` here returns a list of STRINGS and the outer annotation says
+    # `[Int]`, so a reading that trusted the annotation instead of the returns
+    # would print the interned address of `"a"` as a decimal. The row exists to
+    # keep that refusal: `len(L)` lowers on the same slot (the annotation is
+    # enough to say it is a container) while the element is refused, and those
+    # two answers are about two different questions.
+    ("body_filled_slot_with_an_unfollowable_element_kind_is_refused",
+     "def inner() -> List[String]:\n"
+     "    return [\"a\", \"b\"]\n"
+     "\n"
+     "def make() -> List[Int]:\n"
+     "    return inner()\n"
+     "\n"
+     "L = make()\n"
+     "\n"
+     "def main(n):\n"
+     "    print(L[0])\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n",
+     "print() cannot tell whether SubscriptExpr is a string or a number"),
 ]
 
 

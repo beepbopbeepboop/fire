@@ -19812,6 +19812,16 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
     body_written = module_body_store_names(functions)
     body_sites = module_body_store_sites(functions)
     rets = function_return_types(functions)
+    # `{name: [FunctionDef]}` for the definitions of a name, because the
+    # ELEMENT question `_body_store_shape` asks is a question about every
+    # definition of the callee and not about the last one — `std/builtin/reversed`
+    # is defined eight times over and Mojo overloads are ordinary. Same name-keyed
+    # shape `module_body_store_sites` builds, for the same reason.
+    by_name: dict = {}
+    for fn in (functions or []):
+        nm = getattr(fn, "name", None)
+        if nm:
+            by_name.setdefault(nm, []).append(fn)
     finals: dict = {}
     order: list = []
     for stmt in (stmts or []):
@@ -19832,8 +19842,8 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
     for index, name in enumerate(order):
         stmt = finals[name]
         value = getattr(stmt, "value", None)
-        kind, is_dict = _body_store_shape(value, rets, int_names, string_names,
-                                          dict_names)
+        kind, is_dict = _body_store_shape(value, by_name, rets, int_names,
+                                          string_names, dict_names)
         slots[name] = GlobalSlot(name, index, _static_initializer(value),
                                  site=stmt,
                                  filled_by_body=name in body_written,
@@ -19842,7 +19852,8 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
     return slots
 
 
-def _body_store_shape(value, rets: dict, int_names, string_names, dict_names):
+def _body_store_shape(value, by_name: dict, rets: dict, int_names, string_names,
+                      dict_names):
     """`(kind, is_dict)` for a module-level CALL's value, from its CALLEE.
 
     The third source of a value's shape, beside a folded literal and a container
@@ -19853,11 +19864,19 @@ def _body_store_shape(value, rets: dict, int_names, string_names, dict_names):
     same discipline: a callee this unit does not define, or one with no
     annotation, claims nothing.
 
-    A `List[Int]` answer is the bare `LIST_PREFIX` rather than `list:<elem>`,
-    because `declared_type_kind` maps a blob annotation to a blob without
-    reading its element — and a bare prefix is the honest "a container, and
-    nothing here says what is in it". It is what a container literal of
-    non-word elements already gets, so the two spellings agree.
+    A `List[Int]` answer is the bare `LIST_PREFIX` rather than `list:<elem>`
+    unless the callee's own RETURNS pin an element, which is the one upgrade
+    `declared_type_kind` cannot make (it maps a blob annotation to a blob without
+    reading its element, because an annotation is a statement about a TYPE and
+    the element question is asked of a value). Both backends have always
+    answered that question the other way round — `_callee_kind` takes the
+    annotation for a scalar and the RETURN STATEMENTS for everything else — so
+    `def make() -> List[Int]: return [3, 14, 0]` has been `list:int` for a LOCAL
+    bound from it since before a module-level slot could exist at all, and
+    `print(l[0])` lowering while `print(L[0])` was refused is what that costs.
+    `_callee_blob_elem_kind` is the same question asked of the same evidence for
+    the one spelling that had no `ValueKinds`, and unanimity over every
+    definition of the callee is what keeps it from being a guess.
 
     `is_dict` is the half a kind cannot carry, and it is asked SEPARATELY rather
     than by widening the kind vocabulary because the four container annotations
@@ -19866,7 +19885,9 @@ def _body_store_shape(value, rets: dict, int_names, string_names, dict_names):
     said "dict" would be a lie about the other three. What says it is the
     annotation's BASE NAME, through the one `formal.types` vocabulary both
     backends share (`DICT_TYPE_NAMES`), which is the same evidence
-    `global_slot_is_dict` reads off a dict LITERAL's initializer.
+    `global_slot_is_dict` reads off a dict LITERAL's initializer. A callee that
+    declares NOTHING claims nothing here either, so the dict-vs-sequence question
+    stays refused rather than guessed for the same reason the kind does.
 
     Asked only of a bare `CallExpr` to a name. Anything else — a binop, a
     subscript, a dotted call into another image — claims nothing rather than
@@ -19875,12 +19896,47 @@ def _body_store_shape(value, rets: dict, int_names, string_names, dict_names):
     if not isinstance(value, F.CallExpr) or not isinstance(value.func,
                                                            F.IdentExpr):
         return None, False
-    ann = rets.get(value.func.name)
+    callee = value.func.name
+    ann = rets.get(callee)
     if not ann:
         return None, False
     base = annotation_base_name(ann)
-    return (declared_type_kind(ann, int_names, string_names, None),
-            base is not None and base in dict_names)
+    kind = declared_type_kind(ann, int_names, string_names, None)
+    if kind == list_kind(None):
+        elem = _callee_blob_elem_kind(by_name.get(callee), int_names,
+                                      string_names)
+        if elem is not None:
+            kind = list_kind(elem)
+    return kind, (base is not None and base in dict_names)
+
+
+def _callee_blob_elem_kind(candidates, int_names, string_names):
+    """The element kind the callee's own `return` statements state, or None.
+
+    `ValueKinds.return_kind` for a callee of this unit, read WITHOUT the
+    `func_kind` hook, and that omission is the safety argument rather than a
+    shortcut: the hook resolves a call in a return position by recursing into the
+    callee, so a no-hook reading of `def a() -> List[Int]: return b()` is a word
+    where a hooked one would be `list:str`. Undecidable is the direction that
+    refuses, and a bare `LIST_PREFIX` is exactly the answer a container of
+    unstated elements already gets — so the one shape this gets less precise
+    about is the one that was already refused.
+
+    UNANIMITY over every definition of the name, or nothing, for the rule every
+    flow-insensitive map in this file uses: a definition whose returns do not
+    classify as a list at all disagrees with the others about what the call
+    produces, and a module-level `L = make()` has to be one word for the whole
+    program. `list_elem_kind` of a bare prefix is None, so a callee that agrees
+    its elements are unstated also claims nothing, rather than claiming the bare
+    prefix as if it were an element."""
+    elems = set()
+    for fn in (candidates or ()):
+        kind = ValueKinds(fn, int_names=int_names,
+                          string_names=string_names).return_kind
+        if not is_list_kind(kind):
+            return None
+        elems.add(list_elem_kind(kind))
+    return elems.pop() if len(elems) == 1 else None
 
 
 def _is_container_literal(value) -> bool:
