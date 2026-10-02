@@ -390,8 +390,8 @@ def _load_formal_build():
 
 def _parse_arm64_module(src: str, filename: str) -> list:
     """Parse source with fire_compiler for the arm64 backend path."""
-    from fire_compiler import py_tokenize, Parser
-    return Parser(py_tokenize(src, filename)).with_filename(filename).parse_module()
+    from fire_compiler import py_tokenize_named, Parser
+    return Parser(py_tokenize_named(src, filename)).with_filename(filename).parse_module()
 
 
 def _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr):

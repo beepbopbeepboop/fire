@@ -405,27 +405,35 @@ def _truth_go(e, param: str, env: dict, vtypes: dict, call_types: dict,
     return f"({_expr_go(e, param, env, vtypes, call_types, scope)} \u2260 0)"
 
 
-def _collect_conds(fn, param: str, env: dict, vtypes: dict = None,
-                   call_types: dict = None, scope=None) -> list:
-    """Collect the if-statement conditions of a function body (pre-order),
-    as normalized Lean terms used for `by_cases`."""
-    conds = []
-    vtypes = vtypes or {}
-    call_types = call_types or {}
+def _cond_nodes(fn, param: str, vtypes: dict = None, call_types: dict = None,
+                scope=None):
+    """`(node, env)` for every condition `_collect_conds` renders, in ITS order.
 
-    def walk(stmts):
+    The walk is the single definition of "which conditions does this function
+    have, and in what order" — `_collect_conds` renders these and the proof
+    generator decomposes them, and the two must not be able to disagree about
+    the pairing with a CFG block, which is by position.
+
+    `env` is the environment the condition must be rendered in, carried per
+    node because a `for i in range(...)` head is `i < end` with `i` bound to
+    its start value rather than to the parameter.  `param`/`vtypes`/
+    `call_types`/`scope` are the caller's rendering context, needed only for
+    that binding.
+    """
+    out = []
+    base = {param: param}
+
+    def walk(stmts, env):
         for st in stmts:
             if isinstance(st, IfStmt):
                 _c0, _tb0, _eb0 = _if_expand(st)
-                conds.append(_norm_uint(
-                    _cmp_go(_c0, param, env, vtypes, call_types, scope)))
-                walk(_tb0)
-                walk(_eb0)
+                out.append((_c0, env))
+                walk(_tb0, env)
+                walk(_eb0, env)
             elif isinstance(st, WhileStmt):
-                conds.append(_norm_uint(
-                    _cmp_go(st.condition, param, env, vtypes, call_types, scope)))
-                walk(st.body)
-                walk((st.else_body or []))
+                out.append((st.condition, env))
+                walk(st.body, env)
+                walk((st.else_body or []), env)
             elif isinstance(st, ForStmt):
                 # Loop-top condition `i < end`, with the counter bound to its
                 # initial (start) value: the universal walk meets this cbz at
@@ -433,19 +441,26 @@ def _collect_conds(fn, param: str, env: dict, vtypes: dict = None,
                 _rs, _re, _rs_ = _range_bounds(_range_args_of(st))
                 _env2 = dict(env)
                 _tname = _target_name(st)
-                _env2[_tname] = _expr_go(_rs, param, env, vtypes, call_types, scope)
-                _cond = BinOp(op="<", left=Var(name=_tname), right=_re)
-                conds.append(_norm_uint(
-                    _cmp_go(_cond, param, _env2, vtypes, call_types, scope)))
-                walk(st.body)
-                walk((st.else_body or []))
-            elif isinstance(st, Return):
-                pass
-            elif isinstance(st, (Assign, ExprStmt, AugAssign)):
-                pass
+                _env2[_tname] = _expr_go(_rs, param, env, vtypes or {},
+                                         call_types or {}, scope)
+                out.append((BinOp(op="<", left=Var(name=_tname), right=_re),
+                            _env2))
+                walk(st.body, env)
+                walk((st.else_body or []), env)
 
-    walk(fn.body)
-    return conds
+    walk(fn.body, base)
+    return out
+
+
+def _collect_conds(fn, param: str, env: dict, vtypes: dict = None,
+                   call_types: dict = None, scope=None) -> list:
+    """Collect the if-statement conditions of a function body (pre-order),
+    as normalized Lean terms used for `by_cases`."""
+    vtypes = vtypes or {}
+    call_types = call_types or {}
+    return [_norm_uint(_cmp_go(node, param, node_env, vtypes, call_types, scope))
+            for node, node_env in _cond_nodes(fn, param, vtypes, call_types,
+                                              scope)]
 
 
 def _pow_model(l: str, r: str, e) -> str:
@@ -2092,6 +2107,103 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
                     sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
     return addrs
+
+
+def _sc_merge_hsrc(bi: int, sc: dict, op: str, taken: bool) -> list:
+    """The lines stating `hsrc` for the MERGE block of a short-circuit `and`/`or`.
+
+    The merge block's register holds ONE operand of the chain, so its own
+    `hcond` gives a fact about that operand (`op`), and the fact about the
+    other one arrived from the chain's own branch as `sc["lfname"]`. What the
+    rest of the walk expects is a fact about the WHOLE condition — false on the
+    taken edge, true on the fallthrough — and combining the two is what a short
+    circuit means:
+
+      * `or`  — the whole condition is `L ∨ R`, so a true `L` settles it and a
+        false one defers to `R`;
+      * `and` — the whole condition is `L ∧ R`, so a false `L` settles it and a
+        true one defers to `R`.
+
+    `sc["edge"]` is which entry path this is: `taken` is the chain's own branch,
+    whose taken edge SKIPS the right operand, so the register holds `L`; `fall`
+    went through the right operand, so it holds `R`. Two of the eight
+    combinations are contradictions — an `or` whose short circuit fired always
+    leaves the loop test true, and an `and` whose short circuit fired never
+    continues — and those close by `absurd` rather than by walking a path the
+    machine cannot take.
+
+    The operand's fact (`hscR`) is stated as its own `have` because the only
+    route from the branch condition back to it goes through `¬¬`, which a
+    one-liner cannot: `op` is a `≠ 0` proposition, so `hcond.mpr`'s `¬op` and
+    `op` are not the same shape and Lean will not elaborate `h h'` across them.
+    """
+    lf = sc["lfname"]
+    taken_edge = sc["edge"] == "taken"
+    whole = sc["whole"]
+    lines = []
+    negop = None
+    if not taken:
+        negop = f"hscR_{bi}"
+        lines.append(f"have {negop} : ({op}) := by")
+        lines.append(f"  by_cases h2 : ({op})")
+        lines.append("  · exact h2")
+        lines.append(f"  · exact absurd (hc_{bi} (hcond_{bi}.mpr h2)) (by simp)")
+    posop = f"(hcond_{bi}.mp hc_{bi})"
+    # Every combination closes with `absurd` rather than by APPLYING one fact
+    # to another, and that is forced by the shape of an operand: `L` is
+    # `(X ≠ 0)`, a `Ne`, so `¬L` is `¬¬(X = 0)` rather than `X = 0` and Lean
+    # will not let one be applied to the other. `absurd a (¬a)` needs each side
+    # as a hypothesis, which they both are.
+    if taken:
+        if sc["kind"] == "or":
+            # `Or` has no projection, and the short-circuit edge makes the
+            # branch unreachable anyway: the register held the left operand and
+            # the chain's own branch already said it was truthy, so the merge's
+            # own `¬op` contradicts that rather than saying anything about the
+            # right operand.
+            # No `False.elim` here: this arm's target is `¬(L ∨ R)`, a
+            # function, so the lambda's return type is already pinned to
+            # `False` and adding `elim` leaves it a metavariable.
+            term = (f"fun (_ : ({whole})) => absurd {lf} {posop}"
+                    if taken_edge else
+                    f"fun h => Or.elim h (fun (hl : ({sc['l']})) => absurd hl {lf}) "
+                    f"(fun (hr : ({sc['r']})) => absurd hr {posop})")
+        else:
+            term = (f"fun h => absurd h.1 {lf}" if taken_edge
+                    else f"fun h => absurd h.2 {posop}")
+        lines.append(f"have hsrc_{bi} : ¬({whole}) := {term}")
+    else:
+        if sc["kind"] == "or":
+            term = f"Or.inl {lf}" if taken_edge else f"Or.inr {negop}"
+        else:
+            # `absurd` takes the proposition and its negation in that order,
+            # and here the operand HOLDS while the left operand does not, so
+            # the operand's fact comes first. No lambda: the target is the
+            # conjunction itself, and the contradiction is what produces it.
+            term = (f"False.elim (absurd {negop} {lf})"
+                    if taken_edge else f"⟨{lf}, {negop}⟩")
+        lines.append(f"have hsrc_{bi} : ({whole}) := {term}")
+    return lines
+
+
+def _cset_registers(block, words: dict) -> set:
+    """The destination registers of the CSETs in `block`.
+
+    `CSET Xd, cond` puts its `Rd` in bits [4:0] (`_step_rhs` for index 30
+    reads it there), so the set is a plain decode.  It exists because "which
+    condition does this block branch on" (`_cset_cond`, which reads the `cond`
+    field in bits [15:12]) and "which register holds that condition's 0/1"
+    are two different questions: a claim about the register is only true when
+    the block wrote it, and a block can hold a CSET for a different operand of
+    the same condition — or none at all, which is what a merge block after a
+    short-circuit `and`/`or` looks like.
+    """
+    out = set()
+    for pc in block["instrs"]:
+        w = words.get(pc)
+        if w is not None and _step_branch_index(w) == 30:
+            out.add(w & 0x1f)
+    return out
 
 
 def _cset_cond(block, words: dict):
@@ -3918,10 +4030,74 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # Map each conditional-branch block to its source condition by block (pc
     # order), not by emission order: a block reached from several paths is
     # emitted once per path, so a running counter desyncs.
+    #
+    # The blocks are the ones whose terminator the CODEGEN recorded as an
+    # `if`/`while`/range test (`info["cond_branches"]`), not every conditional
+    # block.  A short-circuit `and`/`or` in a condition emits a conditional
+    # branch of its own — `_emit_truthy_word` recurses into both operands and
+    # branches between them — so the i-th cbz block is that one and the whole
+    # condition used to be attributed to it.  The register it tests holds the
+    # chain's LEFT operand there, not the chain's value, so the emitted
+    # `hcond`/`hsrc` pair was a statement about the wrong thing: `if a or b:`
+    # was read as `if a:`, and `bv_decide` returned the counterexample rather
+    # than a proof.  Measured on `formal/examples/either.mojo` and `both.mojo`
+    # (the two short-circuit examples), whose `cond_branches` names one pc each
+    # — the `if`'s own branch, the one after the merge.
+    #
+    # `cond_branches` is a strict filter and the fallback keeps the old
+    # behaviour, because an empty recording must degrade to weaker proofs
+    # rather than to wrongly attributed ones.
+    _cond_blocks = [b for b in blocks
+                    if b["kind"] == "cbz" and cond_branches
+                    and b["instrs"][-1] in cond_branches]
+    if not _cond_blocks and cond_branches:
+        _cond_blocks = [b for b in blocks if b["kind"] == "cbz"]
+    _cond_pairs = []
     _cbz_src_map = {}
-    for _i, _bpc in enumerate(sorted(b["start"] for b in blocks if b["kind"] == "cbz")):
+    for _i, _b in enumerate(sorted(_cond_blocks, key=lambda b: b["start"])):
         if _i < len(_ast_conds):
-            _cbz_src_map[_bpc] = _ast_conds[_i]
+            _cbz_src_map[_b["start"]] = _ast_conds[_i]
+            _cond_pairs.append((_b["start"], _ast_conds[_i]))
+
+    # A SHORT-CIRCUIT `and`/`or` used as a condition: `_emit_truthy_word`
+    # recurses into both operands and branches between them, so there are two
+    # conditional branches — the chain's own (CBNZ for `or`, CBZ for `and`),
+    # whose TAKEN edge skips the right operand, and the `if`'s own, in the merge
+    # block that both paths reach.  The merge block's register holds the LEFT
+    # operand's cset on the taken edge and the RIGHT one's on the fallthrough,
+    # so one proposition per block cannot describe it: `arm64_reg r <merge> = 0`
+    # is `¬(left)` on one path and `¬(right)` on the other, and the WHOLE
+    # condition needs the fact about the other operand to combine.
+    #
+    # The chain's own branch is found structurally rather than by position: it
+    # is the conditional block whose TAKEN target is the merge block's start,
+    # which is exactly what `_emit_truthy_word`'s `skip`/`join` labels make.
+    # Keyed by the merge block's start; `l`/`r` are the operands rendered the
+    # way `_cmp_go` renders a chain (`_truth_go` each side).
+    _sc_by_merge = {}
+    if fn is not None and fn.params:
+        _sp = fn.params[0][0]
+        _senv = {fn.params[0][0]: fn.params[0][0]}
+        _svt = tc["vtypes"] if tc else None
+        _sct = tc["call_types"] if tc else None
+        for _i, (_node, _nenv) in enumerate(_cond_nodes(fn, _sp, _svt, _sct)):
+            if not (isinstance(_node, BinOp) and _node.op in ("and", "or")):
+                continue
+            if _i >= len(_cond_pairs):
+                continue
+            _merge_pc, _whole = _cond_pairs[_i]
+            _sblk = next((b for b in blocks if b["kind"] == "cbz"
+                          and b["targets"][1] == _merge_pc), None)
+            if _sblk is None:
+                continue
+            _sc_by_merge[_merge_pc] = {
+                "m": _merge_pc,
+                "s": _sblk["start"],
+                "kind": "and" if _node.op == "and" else "or",
+                "l": _norm_uint(_truth_go(_node.left, _sp, _nenv, _svt, _sct)),
+                "r": _norm_uint(_truth_go(_node.right, _sp, _nenv, _svt, _sct)),
+                "whole": _whole,
+            }
 
     # Variable -> callee-saved register (same allocation the codegen used), so
     # nested-condition value flow can name the prior-block register carrying a
@@ -4085,11 +4261,30 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # here: the generator was asserting a fact about a register the
             # compiler stopped writing.
             _ent_idx = None
-            for _b in blocks:
-                if _b["kind"] == "cbz" and _b["instrs"]:
-                    _ent_idx = _step_branch_index(words[_b["instrs"][-1]])
-                    break
-            _emittable = _ent_idx in (16, 17)
+            if _entry_bi is not None and blocks[_entry_bi]["instrs"]:
+                _ent_idx = _step_branch_index(
+                    words[blocks[_entry_bi]["instrs"][-1]])
+            # …and only when a `cset` in THIS block wrote the register it
+            # claims a fact about.  The claim is
+            # `arm64_reg r <this block's exit> = 0 ↔ ¬(<source condition>)`,
+            # which is true exactly when the word in `r` at the branch is the
+            # source condition's own 0/1 — and a short-circuit condition breaks
+            # that.  `_emit_truthy_word` lowers `a or b` in a condition to its
+            # own CBNZ plus a merge block, so the `if`'s own branch sits in a
+            # block with NO cset at all and its register holds whichever
+            # operand the path selected: the left one when the short circuit
+            # was taken, the right one's cset otherwise.  Reading the index off
+            # the SELECTED block matters for the same reason — a short-circuit
+            # condition puts a second conditional branch ahead of the `if`'s,
+            # and the two are the two different encodings.
+            #
+            # `formal/examples/either.mojo` measured it: the theorem was emitted
+            # against the merge block and `bv_decide` returned the
+            # counterexample `n = 2^64 - 1`.  Being referenced by nothing, its
+            # only effect is to fail the build.
+            _emittable = (_ent_idx in (16, 17)
+                          and entry_reg in _cset_registers(
+                              blocks[_entry_bi], words))
             if _emittable:
                 A(f"theorem {name}_entry_cond (n : UInt64) :")
                 A(f"    arm64_reg {entry_reg} ({entry_exit}) = 0 ↔ ¬({entry_condition}) := by")
@@ -4752,9 +4947,35 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # Source-level condition implemented by this conditional branch
             # (from the AST, in program order).  The tested register holds the
             # condition flag; reg = 0  <=>  not condition.
+            #
+            # Three shapes, and they do not share a polarity:
+            #  * the chain's OWN branch (a short-circuit `and`/`or`): the
+            #    register holds the LEFT operand, and which of `left`/`¬left`
+            #    the taken edge means depends on the operator — a CBNZ is taken
+            #    when the left is TRUTHY, a CBZ when it is falseY;
+            #  * the merge block of that chain, reached from both: the register
+            #    holds whichever operand the path selected, and the whole
+            #    condition comes from combining that with the fact the chain's
+            #    own branch left behind;
+            #  * an ordinary branch: `reg = 0 ↔ ¬(source condition)`.
             _src = None
             if not is_contract:
                 _src = _cbz_src_map.get(block["start"])
+            _sc_self = next((v for v in _sc_by_merge.values()
+                             if v["s"] == block["start"]), None)
+            _sc_ctx = ctx.get("sc")
+            _hcond_neg = True
+            if _sc_self is not None:
+                # The chain's own branch.  `_src` is the LEFT operand and the
+                # statement's sense follows the operator; the fact it yields is
+                # what lets the merge block state the WHOLE condition.
+                _src = _sc_self["l"]
+                _hcond_neg = _sc_self["kind"] == "and"
+            elif _sc_ctx is not None and _sc_ctx["m"] == block["start"]:
+                # The merge block, on one specific entry path.  The register
+                # holds the operand that path selected, and that operand's own
+                # condition is what the machine's answer is about.
+                _src = _sc_ctx["l"] if _sc_ctx["edge"] == "taken" else _sc_ctx["r"]
             if _src is not None:
                 _hsid = list(reversed(ctx["flow_hsid"])) if ctx["flow_hsid"] else []
                 _bdefs = list(ctx["flow_defs"])
@@ -4765,12 +4986,29 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 _path_blocks = ctx.get("flow_blocks") or [bi]
                 _all_instrs = [p for b in _path_blocks for p in blocks[b]["instrs"]]
                 _Xs = _frame_read_addrs({"instrs": _all_instrs}, words, _init) if _bdefs else []
-                _cnd = _cset_cond(blocks[bi], words)
+                # Which block's cset wrote the register this branch tests.
+                # Usually `bi` itself.  NOT `bi` after a short-circuit `and`/`or`
+                # in the condition: `_emit_truthy_word` lowers the chain to its
+                # own branch plus a merge, so the `if`'s own branch lands in the
+                # merge block, which contains no cset at all, and the register
+                # holds whichever operand the path selected — the left one's
+                # cset on the short-circuit path, the right one's otherwise.
+                # Searched backwards along THIS path, so the value flow follows
+                # the machine rather than the block order.
+                _cset_bi = None
+                for _cand in [bi] + list(reversed(ctx.get("flow_blocks") or [])):
+                    if r in _cset_registers(blocks[_cand], words):
+                        _cset_bi = _cand
+                        break
+                if _cset_bi is None:
+                    _cset_bi = bi
+                _cset_blk = blocks[_cset_bi]
+                _cnd = _cset_cond(_cset_blk, words)
                 _fl_map = {0: "arm64_flag_eq", 1: "arm64_flag_ne", 2: "arm64_flag_ge",
                            3: "arm64_flag_lt", 8: "arm64_flag_gt", 9: "arm64_flag_le",
                            10: "arm64_flag_ge_s", 11: "arm64_flag_lt_s",
                            12: "arm64_flag_gt_s", 13: "arm64_flag_le_s"}
-                _fls = [_fl_map.get(c) for c in _cset_conds(blocks[bi], words)]
+                _fls = [_fl_map.get(c) for c in _cset_conds(_cset_blk, words)]
                 _fls = [f for f in _fls if f is not None]
                 _fl = _fl_map.get(_cnd)
                 if not _Xs or _fl is None:
@@ -4819,8 +5057,37 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
                                 _hpriors.append(_hp)
-                    A(f"{IND}have hcond_{bi} : ({_condtxt}) ↔ ¬({_src}) := by")
-                    if _hpriors:
+                    _hcond_stmt = (f"({_condtxt}) ↔ ¬({_src})" if _hcond_neg
+                                  else f"({_condtxt}) ↔ ({_src})")
+                    A(f"{IND}have hcond_{bi} : {_hcond_stmt} := by")
+                    if _cset_bi != bi:
+                        # The cset is in a PRIOR block on this path, so this
+                        # block's own `qT` chain ends in that block's exit local
+                        # and every block between has to be unfolded for the
+                        # register's value to be the cset's. The whole prefix is
+                        # unfolded in one term — measured against the
+                        # alternative the prior-block loop above takes (one
+                        # fact per block, each its own term, for kernel recursion
+                        # depth): on `either.mojo`'s fallthrough path that is the
+                        # chain's own branch plus the right operand's block, 21
+                        # instructions, and it elaborates. Unfolding only the
+                        # cset's own block was tried first and leaves the
+                        # register unreduced (`bv_decide` reports
+                        # `arm64_reg 0 {…}` as an opaque variable and the
+                        # operand's spill read unresolved), because the operand
+                        # is read back out of a slot the chain's own branch
+                        # pushed and the rewrite that peels it needs the
+                        # earlier block's store.
+                        _cs_defs = (list(reversed(ctx["flow_hsid"]))
+                                    + list(ctx["flow_defs"]))
+                        A(f"{IND}  rw [hsid_{bi}]")
+                        A(f"{IND}  simp only [arm64_reg_pc]")
+                        A(f"{IND}  simp only [{', '.join(list(def_names) + _cs_defs + _hpriors + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition'])}]")
+                        A(f"{IND}  try rw [{', '.join(_hcond_mem_rws(_all_instrs, blocks[bi]['instrs'] + blocks[_cset_bi]['instrs'], words, _init))}]")
+                        A(f"{IND}  by_cases h : ({_src}) <;> simp ["
+                          + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
+                          + "] <;> bv_decide")
+                    elif _hpriors:
                         # The prior block is opaque here (`s_{pb}`), so the
                         # current block's spill addresses are relative to that
                         # exit local, not to the expanded initial state.
@@ -4858,8 +5125,25 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             if cbz_force is None:
                 A(f"{IND}·")
             BIND = IND if cbz_force is not None else IND + "  "
-            if _src is not None:
+            # `hsrc` is the fact about the WHOLE source condition, and the
+            # three shapes get it three ways: an ordinary branch from its own
+            # `hcond`; the chain's OWN branch carries nothing at all (its fact
+            # is about the left operand and travels as `sc` instead, because
+            # the generator's taken/fall sense is the `if`'s, not the chain's);
+            # and the merge block combines the operand its register holds with
+            # that travelling fact.
+            _is_sc_self = _sc_self is not None
+            _is_sc_merge = (_sc_ctx is not None and _src is not None
+                            and _sc_ctx["m"] == block["start"])
+            if _src is not None and not _is_sc_self and not _is_sc_merge:
                 A(f"{BIND}have hsrc_{bi} : ¬({_src}) := hcond_{bi}.mp hc_{bi}")
+            elif _is_sc_merge:
+                for _ln in _sc_merge_hsrc(bi, _sc_ctx, _src, True):
+                    A(f"{BIND}{_ln}")
+            elif _is_sc_self:
+                A(f"{BIND}have hscL_{bi} : "
+                  + (f"¬({_src})" if _hcond_neg else f"({_src})")
+                  + f" := hcond_{bi}.mp hc_{bi}")
             if _taken_dead:
                 _hsid_rev = list(reversed(ctx.get("flow_hsid") or []))
                 _bdefs = list(ctx.get("flow_defs") or [])
@@ -4903,7 +5187,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     else:
                         _ct = dict(ctx)
                         _ct["conds"] = ctx["conds"] + [(f"hc_{bi}", True, r)]
-                        if _src is not None:
+                        if _is_sc_self:
+                            _ct["sc"] = dict(_sc_self, edge="taken",
+                                           lfname=f"hscL_{bi}")
+                            _ct["branch_src"] = f"hscL_{bi}"
+                            _ct["branch_srcs"] = list(ctx.get("branch_srcs", [])) + [f"hscL_{bi}"]
+                        elif _src is not None:
                             _ct["branch_src"] = f"hsrc_{bi}"
                             _ct["branch_srcs"] = list(ctx.get("branch_srcs", [])) + [f"hsrc_{bi}"]
                         emit_block(tgt_bi, f"({{ {s_cur} with pc := {taken} }})",
@@ -4911,7 +5200,27 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # fall branch
             if cbz_force is None:
                 A(f"{IND}·")
-            if _src is not None and not is_contract:
+            if _is_sc_self:
+                A(f"{IND}  have hscL_{bi} : "
+                  + (f"({_src})" if _hcond_neg else f"¬({_src})")
+                  + " := by")
+                if _hcond_neg:
+                    # Target IS `_src`, which is a `≠ 0` proposition, so
+                    # `by_cases` hands back the two cases in the right shape.
+                    A(f"{IND}    by_cases h2 : ({_src})")
+                    A(f"{IND}    · exact h2")
+                    A(f"{IND}    · exact absurd (hc_{bi} (hcond_{bi}.mpr h2)) (by simp)")
+                else:
+                    # Target is `¬_src`, a function, so `intro` types the
+                    # binder AS `_src` — which is the whole difficulty: a `fun`
+                    # lambda's binder would be `X = 0`, and `hcond.mpr` wants
+                    # `¬(X ≠ 0)`.
+                    A(f"{IND}    intro hx")
+                    A(f"{IND}    exact hc_{bi} (hcond_{bi}.mpr hx)")
+            elif _is_sc_merge:
+                for _ln in _sc_merge_hsrc(bi, _sc_ctx, _src, False):
+                    A(f"{IND}  {_ln}")
+            elif _src is not None and not is_contract:
                 _fb = IND + "  "
                 A(f"{_fb}have hsrc_{bi} : ({_src}) := by")
                 A(f"{_fb}  by_cases h : ({_src})")
@@ -4954,7 +5263,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     else:
                         _cf = dict(ctx)
                         _cf["conds"] = ctx["conds"] + [(f"hc_{bi}", False, r)]
-                        if _src is not None:
+                        if _is_sc_self:
+                            _cf["sc"] = dict(_sc_self, edge="fall",
+                                              lfname=f"hscL_{bi}")
+                            _cf["branch_src"] = f"hscL_{bi}"
+                            _cf["branch_srcs"] = list(ctx.get("branch_srcs", [])) + [f"hscL_{bi}"]
+                        elif _is_sc_merge or (_src is not None and not is_contract):
                             _cf["branch_src"] = f"hsrc_{bi}"
                             _cf["branch_srcs"] = list(ctx.get("branch_srcs", [])) + [f"hsrc_{bi}"]
                         emit_block(tgt_bi, f"({{ {s_cur} with pc := {fall} }})",
@@ -5393,7 +5707,44 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  simp +decide only [h8, {_vsimps}]")
                 A(f"{IND}  all_goals rfl")
             else:
-                A(f"{IND}  simp only [{', '.join(list(defs_acc) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition', 'Arm64State.init'])}]")
+                # A `B.cond` forced branch.  The step lemma leaves the branch
+                # as `if <flag test> then <taken> else <fall>`, and deciding
+                # it is a VALUE-FLOW obligation, not arithmetic: the state has
+                # to be folded back down the block chain to the entry state,
+                # the flags have to be bridged to the comparison that set
+                # them (`_COND_LEMMA` for this branch's raw condition field),
+                # and only then does the contract's own hypothesis decide it --
+                # `x0 = 0` in the base case, `x0 = arg` with `arg ≠ 0` in the
+                # step case.  The old script here unfolded the flags and
+                # stopped: with no `hsid` in the simp set `s_n` never became
+                # `st`, so the `if` could not be resolved and the obligation
+                # fell to a `sorry` in EVERY recursion contract -- 5 of the 7
+                # holes the arm64 census reported (count, fact, pow2, sqsum,
+                # sum), all of them the same two leaves.
+                _flag = _COND_LEMMA.get(_cset_cond(block, words))
+                A(f"{IND}  have h8 : (8 : UInt64) = UInt64.ofNat 8 := rfl")
+                _hne = None
+                if ctx.get("cbz_force") == "taken":
+                    _hne = f"hne_{n}"
+                    A(f"{IND}  have {_hne} : arg ≠ 0 := by "
+                      f"intro h; rw [h] at hk; simp at hk")
+                _fset = (", ".join(list(hsids_acc) + list(defs_acc)
+                                   + ['arm64_reg', 'arm64_set_reg', _VSP,
+                                      'u64_sub_zero']
+                                   + ([_flag] if _flag else []) + ['hx0']
+                                   + ([_hne] if _hne else [])))
+                A(f"{IND}  all_goals try (simp +decide only [h8, {_fset}])")
+                if _hne:
+                    # The condition came out of the bridge as a Prop, and a
+                    # `simp only` set that happens to contain the fact does not
+                    # rewrite the `ite`; say which side was proved.
+                    A(f"{IND}  all_goals try rw [if_pos {_hne}]")
+                A(f"{IND}  all_goals try rfl")
+                # Unchanged fallback, so a condition the value flow does not
+                # reach still reports itself as a hole rather than a failure.
+                # `all_goals`-guarded because the value flow may already have
+                # closed the goal, and a bare tactic on no goals is an error.
+                A(f"{IND}  all_goals try (simp only [{', '.join(list(defs_acc) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition', 'Arm64State.init'])}])")
                 A(f"{IND}  all_goals try rfl")
                 A(f"{IND}  all_goals try grind")
                 A(f"{IND}  all_goals (first | done | sorry)")
@@ -5854,7 +6205,20 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
             rn = w & 0x1f
             tactics.append(f"unfold arm64_step")
             tactics.append(f"simp [h, hinsn, {fact_names}, hb]")
-            tactics.append(f"by_cases hp : s.x{rn} {('=' if idx == 16 else '≠')} 0")
+            # Split on `= 0` for BOTH encodings, not on the encoding's own
+            # sense.  The model does not keep the sense either: simp rewrites
+            # `arm64_reg rn s ≠ 0` into `arm64_reg rn s = 0` (via
+            # `not_ne_iff_eq`) as soon as `arm64_reg` is unfolded, so the goal
+            # a CBNZ leaves behind is guarded by an `= 0` test while a `by_cases
+            # … ≠ 0` has already fixed the case the other way round and cannot
+            # retire it.  Measured on `formal/examples/either.mojo` (the
+            # short-circuit `or`, whose CBNZ is the first branch whose sense is
+            # inverted relative to the `if`'s own): the `≠ 0` split left
+            # `if s.x0 = 0 then some … else some … = some (if s.x0 = 0 then …)`
+            # unsolved in `either_sr_18`, so the step-RESULT lemma for the
+            # branch itself did not typecheck — the failure named the model's
+            # `if`, with nothing pointing at the branch's polarity.
+            tactics.append(f"by_cases hp : s.x{rn} = 0")
             tactics.append(
                 f"all_goals simp [hp, arm64_reg, arm64_set_reg]")
         else:
@@ -6576,7 +6940,18 @@ def generate_arm64_proof(prog, code, info) -> str:
         conds = _collect_conds(fn, param, env)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
-        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo"
+        # `sKey` is ProofLib's sign-flip, i.e. how `evalExpr` renders a signed
+        # comparison, and it has to be in the simp set or the `by_cases`
+        # hypothesis is not the goal's `if` test: `_cmp_go` spells the
+        # condition as the expanded `(l ^^^ 0x8000…) < (r ^^^ 0x8000…)` while
+        # `evalExpr` (lib/ProofLib.lean) writes `sKey l < sKey r`.  Two
+        # renderings of one comparison never meet definitionally, so the `if`
+        # inside the AST evaluation cannot be discharged by the hypothesis
+        # that decided it, and every `if n > 0:`-shaped body was unprovable
+        # (10 of the 45 examples: absval, bigconst, condassign, condassign2,
+        # deepif, elif3, ifonly, ifonly2, ifparam, twoifs).  The x86-64
+        # generator has had `sKey` in this set for the same reason.
+        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
         if len(conds) == 0:
             eval_eq_mojo_proof = f"simp +decide [{simp_lems}]"
         else:

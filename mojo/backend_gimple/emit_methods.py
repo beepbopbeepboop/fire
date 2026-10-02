@@ -3398,6 +3398,21 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         'startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
         'split', 'join', 'replace', 'find', 'lower', 'upper',
         'format', 'encode', 'count',
+        # The SEARCH methods, which had `find` and `count` above but not
+        # their backward/raising siblings. A boxed receiver — which is what a
+        # list element read at a non-constant index is, since its element
+        # type is unknowable statically — fell through to the generic
+        # `int64_t.<method>() stubbed` arm below, which returns 0. That is
+        # not a wrong ANSWER so much as a wrong ARITHMETIC once the 0 is
+        # used: `a[a.rfind(';') + 1:]` became `a[a + 1]`, and the slice's
+        # `mojo_cstr_cmp` then walked off the end of the string. Measured as
+        # a SIGBUS in the self-hosted binary on a two-line program, from
+        # emit_infra.py's `_dedup_variadic_externs._boundaries_preserve_parse`
+        # (which this list's own `find`/`split` entries already covered, one
+        # line away). All three have a real lowering in `_lower_str_method`
+        # (`mojo_str_rfind`, and `rindex` deliberately mapped to it), so the
+        # only thing missing here was the name.
+        'index', 'rfind', 'rindex',
     ):
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)

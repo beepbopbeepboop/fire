@@ -55,26 +55,6 @@ LEAN_TIMEOUT = 600
 # the entry must be removed (see the stale check in main), so the list cannot
 # quietly drift from reality.
 EXPECTED_FAILURES = {
-    # `if n > 10 or n == 0:` — a short-circuit `and`/`or` lowers to a CBZ/CBNZ
-    # of its own, which closes a basic block exactly like the `if`'s own
-    # branch.  The merge block therefore has TWO entry paths carrying
-    # DIFFERENT values in the condition register (the left operand on the
-    # short-circuit path, the right operand's CSET on the fallthrough), so a
-    # single `arm64_reg 0 <state> = 0` statement cannot describe it — the
-    # entry condition has to be stated per path, which the generator's per-block
-    # `def` chain cannot yet express.  The CFG metadata that identifies the
-    # real `if` branch is in place (`info["cond_branches"]` in
-    # formal/arm64_codegen.py, consumed by _gen_universal_e2e_cfg); what is
-    # missing is the path-split statement.
-    "either": "short-circuit `or` condition: entry condition needs a per-path "
-              "statement (merge block has two entries with different values in "
-              "the condition register)",
-
-    # Same shape as `either`, with `and`: `if n > 0 and n < 10:`.
-    "both": "short-circuit `and` condition: entry condition needs a per-path "
-            "statement (merge block has two entries with different values in "
-            "the condition register)",
-
     # `fib(n) = fib(n-1) + fib(n-2)` — tree recursion, one goal left.  The
     # caller's FrameOk window read sits over the callee's store stack, whose
     # addresses the frame canonicalisation's `u64_sub_add` splits into

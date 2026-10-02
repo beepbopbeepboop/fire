@@ -6079,6 +6079,10 @@ def _article_join(items) -> str:
 # it passed the mode STRING as the flags word.
 BUILTIN_FUNCTIONS = {
     "open": "file_open",
+    # `debug_assert` is here rather than in an emitter's own `if name == ...`
+    # arm because BOTH spellings have to be recognised by the SAME rule and the
+    # rule is a language fact: see `debug_assert_call` and `debug_assert_is_call`.
+    "debug_assert": "debug_assert",
 }
 
 
@@ -6086,6 +6090,137 @@ def builtin_function(name: str):
     """How a call to the bare name `name` lowers, or None if it is not one of
     the builtins this model represents."""
     return BUILTIN_FUNCTIONS.get(name)
+
+
+# ── `debug_assert` ──────────────────────────────────────────────────────────
+#
+# A builtin of the LANGUAGE, in `myinterpreter.py:3010` in six lines, with no
+# lowering at all on either backend. Both spellings failed, for two unrelated
+# reasons, and neither of them was about the brackets:
+#
+#   * `debug_assert(cond, msg)` fell through every check and emitted a
+#     `BL debug_assert` — an extern nothing defines. The link audit caught the
+#     dangling symbol, so it was a refusal rather than a wrong image, but it
+#     caught it by ordering accident, and 33 of the call sites in the new-modular
+#     stdlib are spelled this way.
+#   * `debug_assert[assert_mode="safe"](cond, msg)` was refused by
+#     `specialization_call_refusal`, which is TRUE in general (a bracket needs a
+#     declaration to bind to, and there is none) and FALSE here: `debug_assert`
+#     is a builtin, so its declaration is a fact of the language rather than
+#     something this image has to compile.
+#
+# WHAT IT MEANS, and it is small: evaluate the condition; on falsy, report and
+# exit non-zero. The interpreter's version raises `AssertionError`, so the
+# observable contract is the exit status and a message on stderr — and this
+# backend has one output stream, so the status is the whole of what it can
+# carry, exactly as it is for `AssertStmt` (whose arm says the same thing about
+# its own message: "the nonzero exit status is the signal").
+#
+# WHAT IS NOT HERE, and each omission is a decision rather than a gap:
+#
+#   * `assert_mode`. The real `debug_assert` runs only when the ASSERT mode
+#     matches, so `assert_mode="none"` (the DEFAULT) means the check is COMPILED
+#     OUT and `assert_mode="safe"` means it is on. This path has no `ASSERT`
+#     build setting to resolve that against, so the bracket cannot select
+#     between them. It is read as the comptime argument it is and the check is
+#     emitted either way: a lowered `debug_assert` that fires is the interpreter's
+#     answer for every program written for this engine, and one that is silently
+#     DROPPED is the `specialization_call_refusal` failure mode this section
+#     exists to end. Refusing the bracket instead would have bought the same
+#     refusal as before with a longer message.
+#   * the variadic messages. `*messages: *Ts` with `write_to` on each element is
+#     a variadic of values and belongs to `FORMAL_string_value_model.md`. The
+#     arguments are still EVALUATED (they are ordinary Python argument
+#     expressions, and evaluating them is what keeps a side effect from being
+#     dropped), but nothing is formatted from them. `bugs/FORMAL_ast_module_
+#     subset.md` and `FORMAL_known_limits.md` §1.1 are that neighbourhood.
+#
+# The two spellings are ONE construct with one predicate, because two private
+# copies of "is this a debug_assert call" is how two architectures come to
+# disagree about one call — which has happened on this backend more than once
+# (see `run_cpython_pair_case`'s docstring).
+
+# The bracket parameters `debug_assert` declares, as `std/builtin/debug_assert.mojo`
+# declares them. Named because the bracket has to BIND against a declaration, and
+# an unknown parameter name is a different call than the one this lowers: it is
+# the refusal below rather than a silent accept of whatever the source wrote.
+DEBUG_ASSERT_COMPTIME_PARAMS = ("assert_mode", "cpu_only", "_use_compiler_assume")
+
+
+def debug_assert_callee(func) -> bool:
+    """Whether `func`, a call's CALLEE, is `debug_assert` in either spelling.
+
+    `debug_assert(cond, m)` and `debug_assert[assert_mode="safe"](cond, m)` are
+    one construct: the bracket binds the builtin's comptime parameters and does
+    not change what the call does on this path.
+
+    Split out from `debug_assert_is_call` because `build.py`'s bracketed-callee
+    scan holds the SUBSCRIPT and has no parent to find the call through, so it
+    cannot ask the call-level question — and a reader who found only the
+    call-level one would re-derive this rule beside it, which is how two
+    architectures come to disagree about one construct.
+    """
+    if isinstance(func, F.IdentExpr):
+        return func.name == "debug_assert"
+    if isinstance(func, F.SubscriptExpr):
+        base = func.obj
+        return isinstance(base, F.IdentExpr) and base.name == "debug_assert"
+    return False
+
+
+def debug_assert_is_call(call) -> bool:
+    """Whether `call` is a call to `debug_assert`, in EITHER spelling.
+
+    The one entry point for a caller that holds the CALL. Keyed on the call
+    rather than on a callee name because `iter_nodes` has no parent, and a
+    name-based test would also match `len(debug_assert)`, which is not this
+    construct.
+    """
+    func = getattr(call, "func", None)
+    if func is None:
+        return False
+    return debug_assert_callee(func)
+
+
+def debug_assert_bracket_refusal(func) -> str | None:
+    """Why `debug_assert[…]` cannot bind its brackets, or None when they can.
+
+    Asked by BOTH backends and by `build.py`'s bracketed-callee scan, and it is
+    the one place that decides, because the failure it prevents is the exact one
+    `specialization_call_refusal` was written for: a bracket the build cannot
+    account for would otherwise be dropped, and `debug_assert[assert_mode="safe"]`
+    dropping its bracket is the same silently-wrong image as `plain[3](5)`
+    emitted as `plain(5)`.
+
+    A bracket is refused when it binds a parameter `debug_assert` does not
+    declare, or when it is a POSITIONAL bracket — `debug_assert[Int](c, m)`.
+    Positional is refused rather than read as `assert_mode` because the
+    declaration puts `Cond` first and a type is not a value; accepting it would
+    mean inventing a binding the language does not have.
+    """
+    if not isinstance(func, F.SubscriptExpr):
+        return None
+    base = func.obj
+    if not (isinstance(base, F.IdentExpr) and base.name == "debug_assert"):
+        return None
+    attrs = getattr(func, "attrs", None)
+    if attrs is None:
+        return (f"debug_assert[…] binds its brackets positionally, and this "
+                f"path cannot bind them: `assert_mode`, `cpu_only` and "
+                f"`_use_compiler_assume` are the parameters `debug_assert` "
+                f"declares, and a positional bracket has no declaration to "
+                f"bind against here. Write the bracket by name "
+                f"(`debug_assert[assert_mode=\"safe\"](…)`), which is the "
+                f"spelling every call site in the stdlib uses")
+    for name, _value in attrs:
+        if name not in DEBUG_ASSERT_COMPTIME_PARAMS:
+            return (f"debug_assert[…] binds {name!r}, which is not a parameter "
+                    f"of `debug_assert`: the builtin declares "
+                    f"{', '.join(DEBUG_ASSERT_COMPTIME_PARAMS)}. Refused rather "
+                    f"than ignored, because a bracket this path cannot account "
+                    f"for is dropped silently and a dropped bracket is a call "
+                    f"that returns an answer the source never wrote")
+    return None
 
 
 # ── Where a frame ADDRESS may be handed off, and why not ───────────────────
@@ -6233,6 +6368,23 @@ FRAME_VALUE_ONLY_CALLS = {
     "list", "dict", "set", "tuple", "slice", "range", "enumerate", "zip",
     "sorted", "reversed", "sum", "min", "max", "abs", "round", "divmod",
     "chr", "ord", "hex", "oct", "bin", "any", "all",
+    # `debug_assert` is here rather than in `FRAME_VARIADIC_BUILTIN_CALLS`
+    # beside `print`, and the two rows answer DIFFERENT questions about it, so
+    # the placement is worth stating. It is a builtin that reads the VALUE it is
+    # handed — the CONDITION's truthiness, via `_emit_truthy_word` — so a frame
+    # address is a category error for the first argument exactly as it is for
+    # `len`: what would be tested is the ADDRESS. Its MESSAGE arguments are the
+    # variadic half, but this path does not format them yet (see
+    # `debug_assert_is_call`), so a frame there is not yet rendering as a
+    # decimal address, and putting the name in the variadic set would refuse a
+    # shape on the strength of a formatting that does not exist yet.
+    #
+    # Measured: without this row `std/collections/interval.mojo`'s
+    # `debug_assert(self.overlaps(other), "…'", self, "' and '", other, "'")`
+    # was refused as "`debug_assert()` … is a name with no definition in hand in
+    # this image", which is false — it is a builtin this path compiles, and the
+    # refusal sent the reader looking for a missing callee.
+    "debug_assert",
 }
 
 # Calls by bare name that reach the C library and take the struct's STORAGE —
@@ -6504,11 +6656,23 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
         until something instantiates it.  Nothing is missing.
       * `__get_mvalue_as_litref` — a compiler intrinsic that yields MLIR.
       * a name reachable only through `from M import *` — the star import binds
-        whatever M EXPORTS, which is a fact about a library this pass has not
-        built, so "nothing binds it" would be false wherever M does export it
-        (22 files of the standard library write one).
+        whatever M EXPORTS, so "nothing binds it" is only true once the link
+        line has been asked and does not publish the name (22 files of the
+        standard library write a star import).
       * the rest — genuinely unbound, which is what the old sentence said and
         is the only one of the five it was true of.
+
+    **The two imported arms are now REACHABLE ONLY WHEN THE LINK LINE DID NOT
+    ANSWER**, and that is the whole of what changed for them. A frame address
+    handed to a function compiled in another module was refused here because
+    this pass could not know whether that compilation made the parameter a frame
+    holder; it can now, because each export carries the per-parameter
+    frame-holder contract in its manifest (`frame_params`) and
+    `check_imported_frame_handoffs` decides the hand-off from it — following the
+    address when the callee's struct is the one this image has, and refusing
+    with a named disagreement when it is not. So these arms describe what is
+    left after that comparison has been made and has come out with nothing to
+    compare, not the shape of the construct.
 
     The order is the order the question is decided in: a name that is not a
     function, then a name that is a parameter, then a name from another module
@@ -6582,26 +6746,22 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"lacks one: it imports {callee} (`from {imported_from} import "
             f"{callee}`), so {callee} IS compiled — by {imported_from}, into a "
             f"library of its own, when that module builds at all. That is "
-            f"not by itself a reason to "
-            f"refuse — a frame address is exactly what a method of the "
-            f"receiver's own struct wants, and the cross-module METHOD case is "
-            f"followed across the boundary — but the fact that decides it is a "
-            f"fact about THAT compilation: whether it made the parameter this "
-            f"argument lands in a frame holder against this struct's field "
-            f"list. A module is compiled with its own call sites and this one "
-            f"is not among them, so this pass cannot know, and a wrong answer "
-            f"here is a wrong answer in the callee rather than a crash here. "
-            f"Measured in the smallest program with the shape: the same "
-            f"`def take_it(p: Pair)` beside its caller builds, runs and returns "
-            f"7, and split across two modules the callee module cannot be "
-            f"built at all — there `p` is a parameter with no call site to "
-            f"establish it and `p.a` is refused as a field access through a "
-            f"base nothing establishes. So the hand-off needs the callee's "
-            f"per-parameter contract — which parameters are frame holders, and "
-            f"of which struct — to travel in that module's manifest, which "
-            f"carries exported SYMBOL names and nothing else. "
-            f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
-            f"what is still open about it")
+            f"not by itself a reason to refuse — a frame address is exactly "
+            f"what a method of the receiver's own struct wants, and the "
+            f"cross-module METHOD case is followed across the boundary. It used "
+            f"to be a reason, and this sentence is what it said: the fact that "
+            f"decides the hand-off is whether THAT compilation made the "
+            f"parameter this argument lands in a frame holder, and a module is "
+            f"compiled with its own call sites, so this pass could not know. "
+            f"That module now PUBLISHES it — the per-parameter frame-holder "
+            f"contract each export carries in its manifest (`frame_params`, "
+            f"written by `formal/build.py`'s `_export_frame_contract`) — and "
+            f"`check_imported_frame_handoffs` compares that against the struct "
+            f"this image has, so the hand-off is followed when the two agree and "
+            f"refused with the disagreement when they do not. This arm is now "
+            f"only reached when the callee is NOT resolved through the link "
+            f"line, and the message says so. "
+            f"bugs/FORMAL_callee_no_def_ceiling_zero.md has the measurement")
     if star_imported_from:
         return (
             f"a {who} receiver is passed to {callee}(), which is a name with no "
@@ -6610,16 +6770,15 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"thing that can bind a name like that here is a "
             f"`from {star_imported_from} import *`, and what such a statement "
             f"binds is {star_imported_from}'s EXPORT SET — which is not a fact "
-            f"about this file at all: it is a library this pass has not built, "
-            f"because `_resolve_imports` compiles the modules and the frame "
-            f"analysis runs first, from the statements alone. So two questions "
-            f"are open and neither is answerable from here: whether "
-            f"{star_imported_from} exports {callee} at all, and whether its "
-            f"compilation made the parameter this argument lands in a frame "
-            f"holder against this struct's field list. The second is the one "
-            f"that decides the hand-off, and it is the same question "
-            f"`formal.imports`' manifest cannot answer today: it records "
-            f"exported SYMBOL names and no parameter contract. "
+            f"about this file at all. Both of the questions this used to call "
+            f"unanswerable are now answered, from the link line rather than "
+            f"from the statements: whether {star_imported_from} exports "
+            f"{callee} is what its manifest's export table says, and whether "
+            f"its compilation made the parameter this argument lands in a frame "
+            f"holder is the `frame_params` contract that table now carries. "
+            f"This arm is reached when the link line settles NEITHER — so "
+            f"{callee} is not among the names any library on it publishes, and "
+            f"there is no contract to compare. "
             f"bugs/FORMAL_callee_no_def_ceiling_zero.md has the measurement")
     return (f"a {who} receiver is passed to {callee}(), which is a name with no "
             f"definition in hand in this image: this module defines no FUNCTION "
@@ -6793,9 +6952,280 @@ def frame_holder_disagreement_refusal(callee: str, position, param,
             f"so a field read through it is a load at `base + 8k` — and at the "
             f"other call site there is no frame there at all. Measured on both "
             f"architectures with nothing lifted: the two-call-site shape builds, "
-            f"runs, and dies with SIGSEGV (exit 139). Give {param!r} one kind "
-            f"of value at every call site — pass the frame address everywhere, "
-            f"or nowhere")
+f"runs, and dies with SIGSEGV (exit 139). Give {param!r} one kind "
+             f"of value at every call site — pass the frame address everywhere, "
+             f"or nowhere")
+
+
+# ── The cross-image half: a frame address handed to an IMPORTED function ─────
+#
+# `frame_holder_disagreement_refusal` above is the same disagreement decided
+# from ONE image: every call site of the parameter is visible, so "one kind of
+# value at every call site" is a checkable rule. Across a module boundary the
+# other side's call sites are not in this image at all — they are in a dylib
+# this build linked and then cannot read — so the same question needs a
+# different piece of evidence, and that is what the dylib MANIFEST now carries.
+#
+# `_dylib_frame_contracts` publishes, for every exported function, which of its
+# parameters its own compilation made frame holders and of which struct. That
+# is a fact about a compilation this process did not perform, so it cannot be
+# re-derived here; publishing it is the only honest way for a consumer to ask.
+# The three refusals below are the answers that can come back, and they are
+# three because "the contract says no" is not one fact:
+#
+#   * the contract says the parameter IS a frame holder, of a DIFFERENT struct
+#     than the argument here — a real disagreement, and the worst of the three,
+#     because both sides are now certain and they differ;
+#   * the contract says the parameter is NOT a frame holder — a real
+#     disagreement of the other kind, and the one that used to be invisible;
+#   * the contract says nothing — a limit of the ANALYSIS again, and the only
+#     one of the three that is not a statement about the program.
+#
+# All three keep the clause `which is a name with no definition in hand`, for
+# the reason `frame_undefined_callee_refusal`'s docstring gives: two taxonomies
+# key on that substring, and it is what keeps this family counted as one.
+
+
+def cross_image_frame_disagreement_refusal(
+        callee: str, position, contract_struct, argument_structs,
+        argument_spelling) -> str:
+    """The callee's own manifest says the parameter in `position` is a frame
+    holder — of a struct other than the one handed to it here.
+
+    Both sides are now certain and they disagree, which is what makes this the
+    worst of the three cross-image answers: nothing here is missing, and the
+    program is wrong rather than unknown.  `base + 8k` means slot 0 for one
+    struct and some other field for the other, so the callee would read — or
+    write — the caller's object through ITS OWN field list.
+
+    Measured on this tree, with the contract published and the name comparison
+    REMOVED — `resolve_frame_parameter_contract` returning `(True, None)` with no
+    lookup, which is the one line of this construct that has to be right for
+    this refusal to be worth anything.  The two modules differ only in the order
+    their structs declare their fields (`Q(v, pad)` against `P(pad, v)`), which
+    is exactly the disagreement `model.struct_frame_slot_candidates` documents
+    and the reason layouts are compared by NAME rather than by count: the
+    program builds, runs, exits 0, and returns **213** where CPython says 312,
+    because `Q.v` is slot 0 and the caller's slot 0 is `P.pad`.
+    """
+    return (
+        f"a {contract_struct} receiver is passed to {callee}() at argument "
+        f"position {position}, and {callee}'s own manifest says the parameter "
+        f"in that position is a frame holder of {contract_struct}: the module that "
+        f"defines {callee}() compiled it that way, so a field read through it "
+        f"is a load at `base + 8k` for {contract_struct}'s field list. This "
+        f"call hands it {argument_spelling}, whose frame is "
+        f"{_who(argument_structs)}. One struct's address read as another's "
+        f"fields is a wrong answer rather than a failure, and it is why the "
+        f"contract is compared rather than believed. Give the parameter the "
+        f"struct the frame actually has, or pass {contract_struct} here")
+
+
+def cross_image_plain_parameter_refusal(
+        callee: str, position, argument_structs,
+        argument_spelling) -> str:
+    """The callee's own manifest says the parameter in `position` is an
+    ordinary word.
+
+    The inverse of the refusal above, and the one that was invisible before the
+    manifest carried the contract: nothing in this image says the parameter is
+    a holder, `known` and `all_holders` both lack the callee, and the old
+    answer was "this pass cannot know".  Now it can — and what it finds is that
+    the parameter is compiled as a plain word, so a frame address arriving in
+    it is a number the callee will read as a value and then dereference.
+
+    This is `frame_holder_disagreement_refusal` across an image boundary, and
+    the same consequence, MEASURED on this tree rather than inherited: the
+    identical program with the call in ONE file builds and runs, and returns
+    the FRAME'S OWN ADDRESS added to the callee's other operand — 42 and 58 on
+    two consecutive runs of the same binary on arm64, 250 on x86-64, because
+    the low byte of a stack address is not a constant. So the single-file shape
+    is not a crash either; it is a wrong answer that MOVES, which is the harder
+    of the two to notice and the reason the word has to be refused rather than
+    followed.
+
+    (CPython rejects the shape outright — `P + int` is a `TypeError` — so
+    there is no "right answer" to compare against here, and the claim being
+    made is only that the backend must not invent a number at all.)
+    """
+    who = _who(argument_structs)
+    return (
+        f"a {who} receiver is passed to {callee}() at argument position "
+        f"{position}, and {callee}'s own manifest says the parameter in that "
+        f"position is an ordinary word, NOT a frame holder: nothing in "
+        f"{callee}'s module ever hands it an address, so it was compiled to "
+        f"read the word as a value. Handing it {argument_spelling} puts a frame "
+        f"address where {callee}() expects a value, so {callee}() computes on "
+        f"the ADDRESS — measured on this tree, the same program with the call "
+        f"in ONE file builds, runs, and returns the frame's own address added "
+        f"to the other operand: 42 and 58 on two consecutive runs of the same "
+        f"arm64 binary, 250 on x86-64, where CPython rejects the shape "
+        f"outright. A wrong answer that moves between runs is why the word is "
+        f"refused rather than followed. Pass the field the callee reads "
+        f"({argument_spelling}.a), or give the parameter a declared struct type "
+        f"so both sides agree it is a frame")
+
+
+def cross_image_contract_absent_refusal(callee: str, position,
+                                        argument_structs,
+                                        argument_spelling, why_absent) -> str:
+    """No contract for this callee in any manifest on the link line.
+
+    A limit of the ANALYSIS, and the only cross-image answer that is not a
+    statement about the program — so it says so, and names the reason the
+    contract is missing rather than asserting a mechanism that is not
+    operating.  `why_absent` is which of the four it is:
+
+      * `not-exported` — the callee is in the export table but the contract is
+        shorter than the argument index, so this argument lands on no
+        parameter.  Usually an arity or a naming disagreement, which the link
+        audit will say about separately.
+      * `not-a-callee` — the library carries no per-parameter contract (built
+        before the field existed, or written by something that does not), or has
+        a contract with no entry for this position.
+      * `no-manifest` — no manifest on this image's link line mentions the
+        callee at all, so the question cannot even be asked of it.
+
+    `why_absent` is one of `CONTRACT_ABSENT_REASONS`' sentences, and that
+    constant is the enumeration of them; there is no fourth and none is
+    unreachable, which is why the list lives in one place rather than at three
+    call sites.
+    """
+    return (
+        f"a {_who(argument_structs)} receiver is passed to {callee}() at "
+        f"argument position {position}, and {callee} is compiled into another "
+        f"module, so whether ITS analysis made the parameter in that position "
+        f"a frame holder is a "
+        f"fact about that module's compilation. Nothing on this image's link "
+        f"line settles it: {why_absent}. This is a limit of the ANALYSIS and "
+        f"not a fact about the program — the frame belongs to the function "
+        f"that created it, that function is an ancestor of the callee, so a "
+        f"read or a write through the parameter would be in the right place. "
+        f"The word is refused rather than followed, because following it "
+        f"without the contract is a program that builds, runs, and returns a "
+        f"number the source never wrote. "
+        f"bugs/FORMAL_callee_no_def_ceiling_zero.md records the measurement")
+
+
+# The THREE reasons a contract can be missing, as SENTENCES. A named constant
+# each rather than a bare string at the one call site, so the three are
+# enumerable — a reader can see the whole set of "why not" answers at once —
+# and every one of them is emitted by `resolve_frame_parameter_contract` below.
+#
+# Three and not four. A fourth — "two libraries on the line publish a contract
+# for it and they disagree" — was drafted here and deleted, because it is not a
+# thing that can happen: `dylib_export_lookup` resolves a bare callee through
+# the flat `by_name` table with `setdefault` in LINK ORDER, so two libraries
+# exporting the same name is decided, and it is decided the same way the emitted
+# call binds. Publishing a reason nothing can reach would be a fourth "why not"
+# a reader could look for and never find, which is the defect this whole family
+# of messages exists to stop.
+CONTRACT_ABSENT_REASONS = {
+    "not-exported": (
+        f"the manifest for the module it came from does not list it as an "
+        f"export, so its compilation never published a contract for it"),
+    "not-a-callee": (
+        f"the library it resolves to carries no per-parameter contract — "
+        f"either built before the manifest carried one, written by something "
+        f"that does not, or holding a contract with no entry for this "
+        f"argument's position"),
+    "no-manifest": (
+        f"no manifest on this image's link line mentions it, so the question "
+        f"cannot be asked of anything"),
+}
+
+
+def resolve_frame_parameter_contract(candidates, position, argument_structs,
+                                    argument_spelling, callee: str):
+    """`(follow, refusal)` for a frame address reaching an imported callee.
+
+    THE decision, and it is in this file beside the three refusal texts it
+    prints, because it is a question about the LANGUAGE — what a frame address
+    means to a callee compiled in another module — and because both the build
+    pass and anything else that has to answer it must get one answer. The
+    three refusal builders are its only outputs; there is no fourth path and no
+    flag that says "decided but unsure".
+
+    `candidates` is what the link line offers for this callee, and it is a LIST
+    rather than a single entry so that "which library does this bind to" is
+    visibly a question this function does NOT answer: the caller passes what
+    the resolver that binds the CALL found, in link order, and this function
+    reads element 0 — the same first-wins precedence `load_dylib_manifests`'
+    `map` and `dylib_syms` use. Taking one here would be a second resolution
+    that could pick a different library's `f` from the one the emitted call
+    binds, which is the silently-wrong binding the module-identity mechanism
+    exists to prevent. An empty list is `no-manifest`.
+
+    The list is a list and not a single entry for the same reason, and it is why
+    there is no "ambiguous" answer in `CONTRACT_ABSENT_REASONS`: the ambiguity
+    is settled by that precedence before this function is called, which is why it
+    is not a state this function can be in.
+
+    `argument_structs` is the SET of struct NAMES the caller's own argument is
+    a frame of, and it is compared against the contract's names rather than
+    against a struct object: the two sides of the boundary are different
+    compilations of different `StructDef` trees, so the only thing they can be
+    compared on is the name the layout was derived from. That is enough, and it
+    is what makes following the address sound — `base + 8k` means the same thing
+    on both sides only because both computed it from the same field list, and
+    the importer read that struct from the module's OWN source
+    (`formal.imports.imported_struct_defs`), so it is the same
+    `struct_field_names` over the same class body.
+
+    `position` is the argument index. Out of range of the contract — a
+    variadic tail, or a call whose arity the callee's export disagrees with —
+    is `not-exported`, because "this argument lands on no parameter" is a fact
+    about the export rather than about the contract.
+
+    **Follow is only ever `True` when the contract says the parameter is a
+    holder of one of the structs this image actually has.** That is the whole
+    safety argument: a struct of the right NAME in a different module with a
+    different field list is a real possibility on this path — nothing stops two
+    modules each declaring a `Pair` — and comparing counts instead of names
+    would follow it silently.
+
+    An EMPTY `argument_structs` does not follow, and cannot: the caller cannot
+    say what its own argument is a frame OF, so it cannot show the layouts
+    agree, and following on no evidence is the outcome the contract exists to
+    prevent.
+    """
+    if not candidates:
+        return (False, cross_image_contract_absent_refusal(
+            callee, position, argument_structs,
+            argument_spelling, CONTRACT_ABSENT_REASONS["no-manifest"]))
+    entry = candidates[0]
+    contract = entry.get("frame_params")
+    if contract is None:
+        return (False, cross_image_contract_absent_refusal(
+            callee, position, argument_structs,
+            argument_spelling, CONTRACT_ABSENT_REASONS["not-a-callee"]))
+    if position >= len(contract):
+        return (False, cross_image_contract_absent_refusal(
+            callee, position, argument_structs,
+            argument_spelling, CONTRACT_ABSENT_REASONS["not-exported"]))
+    holders = contract[position]
+    if not holders or holders == ["one-word"]:
+        # `None` is an ordinary word: the callee was compiled to read the slot
+        # as a value, so a frame address arriving there is the disagreement
+        # `frame_holder_disagreement_refusal` reports within one image, with the
+        # same consequence. `["one-word"]` is a one-field struct, whose
+        # receiver IS its field — the wrong CATEGORY rather than the wrong
+        # layout, and the same refusal rather than a fourth sentence.
+        return (False, cross_image_plain_parameter_refusal(
+            callee, position, argument_structs,
+            argument_spelling))
+    mine = set(argument_structs or ())
+    if not mine:
+        return (False, cross_image_contract_absent_refusal(
+            callee, position, argument_structs,
+            argument_spelling, CONTRACT_ABSENT_REASONS["not-a-callee"]))
+    if mine & set(holders):
+        return (True, None)
+    # Both sides are certain and they differ: the worst of the three, because
+    # nothing is missing and the answer is wrong rather than unknown.
+    return (False, cross_image_frame_disagreement_refusal(
+        callee, position, ", ".join(holders),
+        argument_structs, argument_spelling))
 
 
 def frame_declared_parameter_refusal(callee, position, param, struct_name,
@@ -7498,6 +7928,110 @@ def variadic_named_args(symbol: str):
     two spellings (the source's, and the Mach-O one) and a mismatch here is
     indistinguishable from "not variadic"."""
     return VARIADIC_LIBC.get(symbol.lstrip("_"))
+
+
+# ── The symbol a C name binds to on THIS TARGET ───────────────────────────
+#
+# One call to `readdir(3)` is two different functions, and which one the source
+# means is decided by the TARGET and not by the source at all. macOS's C library
+# exports the whole directory-and-stat entry-point family TWICE: once for a
+# 32-bit `ino_t` (`readdir`) and once for a 64-bit one (`readdir$INODE64`), with
+# a `struct dirent` / `struct stat` laid out to match. `<sys/dirent.h>` picks
+# between them with `#if __DARWIN_64_BIT_INO_T`, so a C program compiled for a
+# 64-bit target — which is every program clang builds for arm64 AND for
+# x86_64 — calls the `$INODE64` one and never sees the other. A Mojo source
+# spells the bare name and there is no header to redirect it, so the BINDING is
+# this backend's job, and getting it wrong is a silent wrong answer rather than
+# a link error: both symbols exist on x86_64, so the image loads and runs.
+#
+# Measured, on this tree, for `readdir` on a directory holding three files:
+#
+#     x86_64, `_readdir`         38bf3e03 0c00 0401 2e000000 37bf3e03 ...
+#     x86_64, `_readdir$INODE64` 38bf3e03 0000 0000 00000000 2000 0100 042e ...
+#
+# which is `struct dirent`'s two layouts exactly: 4-byte `d_ino`, `d_reclen` at
+# 4, `d_type` at 6, `d_namlen` at 7, `d_name` at 8 for the first, and 8-byte
+# `d_ino`, `d_seekoff`, `d_reclen` at 16, `d_namlen` at 18, `d_type` at 20 and
+# `d_name` at 21 for the second (the `__DARWIN_STRUCT_DIRENTRY` spelling in the
+# same header). `os.listdir` read `d_name` at 21 and got `.` for the 12th byte
+# of the other layout, so it returned `cc.txt` where CPython returns `ccc.txt`
+# and a count one too high — `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_
+# pointer_reads_the_wrong_bytes.md`, whose first three candidate causes (the
+# byte read, the element read, the copy) were all measured and all wrong.
+#
+# WHY IT IS x86_64-ONLY and why the table is not applied on arm64: arm64 has no
+# 32-bit `ino_t`, so libsystem_c exports no `$INODE64` twin there and the bare
+# name IS the 64-bit-inode function — measured by the linker, which refuses
+# `_readdir$INODE64` for `arm64-macos` ("Undefined symbols for architecture
+# arm64"), and by every arm64 stat case agreeing with CPython. Emitting the
+# `$INODE64` spelling there would trade a silent wrong answer for a link
+# failure. `libsystem_kernel` is the exception that proves the rule by
+# exporting both for arm64 — the bare `stat` there is an alias of the
+# `$INODE64` one — which is why this is a table of names rather than a rule.
+#
+# The set is what `libSystem.B.tbd` exports with a `$INODE64` twin for the
+# `x86_64-macos` target, both libraries' lists together, so it cannot go stale
+# for a host module that starts calling one of them:
+#
+#     SDK/usr/lib/libSystem.B.tbd, every `- targets: [ … x86_64-macos … ]`
+#     block whose `symbols:` list holds a `$INODE64` name
+#
+# The `_b` spellings are libsystemc's Block-walking internals and no Mojo source
+# can name them; they are here because the table is the platform's fact and a
+# partial copy of a fact is how the next one goes wrong.
+INODE64_DUAL_LIBC = frozenset({
+    # libsystem_c.dylib
+    "opendir", "opendir2", "readdir", "readdir_r", "readdir_unlocked",
+    "rewinddir", "seekdir", "telldir", "fdopendir", "scandir", "scandirat",
+    "scandir_b", "scandirat_b", "alphasort", "fdscandir", "fdscandir_b",
+    "fts_open", "fts_open_b", "fts_read", "fts_close", "fts_children",
+    "fts_set", "glob", "glob_b", "ftw", "nftw", "getmntinfo",
+    "getmntinfo_r_np", "fstatx_np", "lstatx_np", "statx_np",
+    # libsystem_kernel.dylib
+    "stat", "lstat", "fstat", "fstatat", "statfs", "fstatfs",
+})
+
+INODE64_SUFFIX = "$INODE64"
+
+
+def target_libc_symbol(name: str, arch: str, fmt: str) -> str:
+    """The symbol an unbound C callee spelled `name` binds to on this target.
+
+    `name` arrives as the SOURCE spells it (a bare C identifier), `arch` and
+    `fmt` as `formal.build._make_codegen` was called with. The answer is `name`
+    unchanged except where the platform spells the same function two ways — see
+    `INODE64_DUAL_LIBC` above, which is the whole of that.
+
+    `fmt` is a parameter rather than an `os.uname()` test because the ELF image
+    this backend also emits targets a C library with no such duality (glibc has
+    one `readdir` and one `stat`, both 64-bit-ino), and a `sys.platform` probe
+    would silently disable the fix on the machine that needed it most.
+
+    A name this does not recognise is returned untouched, which is the right
+    answer for every C function outside the table: only the names listed have a
+    second spelling to choose between."""
+    if fmt != "macho" or arch != "x86_64":
+        return name
+    return name + INODE64_SUFFIX if name in INODE64_DUAL_LIBC else name
+
+
+def libc_source_name(symbol: str) -> str:
+    """The name the SOURCE spells for a symbol this tree may have re-spelled.
+
+    The inverse direction of `target_libc_symbol`, and needed because the two
+    questions "is this symbol one the C library provides?" and "which function
+    did the source mean?" are asked by DIFFERENT processes about the same
+    string: the linker audit asks a host `dlsym`, which can only answer for the
+    host's architecture. Asked about `readdir$INODE64` on an arm64 host — where
+    that symbol does not exist, because arm64 has no 32-bit `ino_t` — the
+    answer is "nothing provides this", which is false about the machine the
+    image will run on. So the audit strips the suffix and asks about the name
+    the source used, which every macOS host does provide under one spelling or
+    the other."""
+    bare = symbol.lstrip("_")
+    if bare.endswith(INODE64_SUFFIX):
+        return bare[:-len(INODE64_SUFFIX)]
+    return bare
 
 
 # ── print() ───────────────────────────────────────────────────────────────
@@ -8360,19 +8894,22 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str,
 
 
 def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
-                        forwarded: dict = None) -> str:
+                        forwarded: dict = None, aliases: dict = None) -> str:
     """The boundary symbol an unbound callee `name` is emitted against.
 
     THE ONE implementation, shared by both backends' `_extern_symbol`, which
     were two copies of the same decision and therefore two places for them to
     disagree about what a dotted name binds.
 
-    Two spellings, and the second is why this is a function rather than a
-    `dict.get`:
+    THREE spellings, and the second and third are why this is a function rather
+    than a `dict.get`:
 
       * a BARE name — what `from mod import f` binds — is answered by the
         flat `{name: symbol}` map, first library on the line winning, which is
         `load_dylib_manifests`'s own precedence and stays it;
+      * a bare name that is an IMPORT ALIAS — what `from mod import f as g`
+        binds — is answered by the export table of the module the alias came
+        from, never by the flat map (`dylib_aliased_export`);
       * a DOTTED name — what `import mod` binds, spelled `mod.f` — is
         answered ONLY by the export table of the library built for `mod`, or by
         what that module forwards (`dylib_export_tables`' `forwarded`). Falling
@@ -8380,21 +8917,36 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
         other library's `f`, which is the silently-wrong binding the whole
         module-identity mechanism exists to prevent.
 
-    A dotted name whose module is linked but which that module does not publish
-    — by definition or by re-export — is REFUSED, naming both halves and
-    listing what the module does publish. It used to fall through to the bare
-    name, which produced a BL against a symbol nothing defines and an image
-    that died in dyld — the failure this whole mechanism was built to make a
-    build-time error instead. It is also what a namespace library's empty trie
-    used to produce: a package whose whole API is re-exported had no table to
-    consult, so `pkg.f` found nothing, was not refused (there was nothing to
-    report), and reached the link audit as a dangling symbol.
+    A name that cannot be bound is REFUSED, and the two refusals are different
+    facts with different messages. A bare ALIAS whose module does not publish
+    the defining name is `dylib_aliased_export_refusal`'s: falling back to the
+    local spelling would bind a symbol nothing defines, and the bind audit would
+    report it with no idea why. A DOTTED name whose module is linked but does
+    not publish the leaf is the message below, which names both halves and lists
+    what the module does publish. Both used to fall through to the bare name,
+    which produced a BL against a symbol nothing defines and an image that died
+    in dyld — the failure this whole mechanism was built to make a build-time
+    error instead. It is also what a namespace library's empty trie used to
+    produce: a package whose whole API is re-exported had no table to consult,
+    so `pkg.f` found nothing, was not refused (there was nothing to report), and
+    reached the link audit as a dangling symbol.
 
     The module is identified by `dylib_export_module`, which knows that a
     manifest keys a package submodule by its ABI prefix (`os.path` → `os_path`)
     — which is what makes `os.path.join(...)`, the spelling 532 measured call
     sites in this tree are written with, resolve at all."""
     if "." not in name:
+        entry = dylib_aliased_export(by_name, by_module, name, aliases)
+        if entry is not None:
+            return entry.get("symbol") or name
+        if is_import_alias(name, aliases):
+            # An ALIAS whose module does not export the name it stands for.
+            # Falling back to the flat map would bind `g` itself, and the bind
+            # audit would report an unbound symbol with no idea why. A plain
+            # `from m import f` is NOT this case and keeps the audit's own
+            # message, which is the one that was always right for it.
+            raise CodegenError(dylib_aliased_export_refusal(
+                name, aliases, by_module))
         return (syms or {}).get(name, name)
     entry = dylib_export_lookup(by_name, by_module, name, forwarded)
     if entry is not None:
@@ -8420,6 +8972,55 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
             f"different gap, written down in "
             f"bugs/FORMAL_module_state_no_storage.md")
     return (syms or {}).get(name, name)
+
+
+def dylib_module_reference(node, imported) -> str:
+    """The module a dotted chain reads THROUGH, or None if it is not one.
+
+    THE ONE recogniser of the shape, and it answers a different question from
+    every other reader of a dotted name here. `dylib_export_lookup` answers
+    "which EXPORT does this callee bind"; this answers "is the ROOT of this
+    chain a module, or is it a value?" — and the second question is what
+    `check_module_symbols` needs, because a module root has no register and
+    needs none: it is a library on the link line, named by a manifest.
+
+    It walks a `MemberExpr` / `SubscriptExpr` chain down to its `IdentExpr`
+    root, the same root the callee exemption collects, and then asks whether
+    that root names a module THIS UNIT IMPORTS. Returns the root's name so the
+    caller can exempt the root by node identity, exactly as the callee
+    exemption does — never by name, because `iter_nodes` has no parent and the
+    same spelling is a module root in one position and a genuine local in
+    another.
+
+    The gate accepts a PACKAGE PREFIX as well as an exact match, and that is
+    the same rule the callee gate uses: `import os.path` binds the name `os`,
+    so `os.path.join(…)` roots at a name that is not itself on the list. A name
+    that is a dotted PREFIX of an imported module cannot be a value either —
+    locals, parameters and module-level names are all bare, and nothing in this
+    language puts an attribute on one — so accepting the prefix cannot exempt a
+    value read.
+
+    `imported` is `imports.imported_modules(stmts)` — the modules that must be
+    on the link line — NOT the export tables. That is deliberate and it is the
+    gate `check_module_symbols` already applies to a dotted CALLEE: a target
+    with no module mechanism (an ELF image: no dylib form, nothing to link)
+    resolves no imports, and exempting a module root there would let an image be
+    emitted with a member read of something nothing provides. Empty/None
+    imported means the answer is None for every chain, which is the old
+    behaviour."""
+    parts = []
+    cur = node
+    while isinstance(cur, (F.MemberExpr, F.SubscriptExpr)):
+        if isinstance(cur, F.MemberExpr):
+            parts.append(cur.member)
+        cur = cur.obj
+    if not isinstance(cur, F.IdentExpr):
+        return None
+    root = cur.name
+    for mod in (imported or ()):
+        if root == mod or str(mod).startswith(f"{root}."):
+            return root
+    return None
 
 
 def _module_is_linked(by_module: dict, forwarded: dict, module: str) -> bool:
@@ -8511,6 +9112,108 @@ def constant_literal_node(value, line: int = 0, col: int = 0):
         return F.StringLiteral(value=value, line=line or 0, col=col or 0,
                                is_bytes=False)
     return F.IntLiteral(value=value, line=line or 0, col=col or 0, raw="")
+
+
+# ── A bare callee bound by an import's `as` ALIAS ──────────────────────────
+
+
+def is_import_alias(callee: str, aliases: dict) -> bool:
+    """Whether `callee` is bound by an `as` in an import, rather than by its
+    defining name.
+
+    The distinction decides which refusal applies when the name cannot be bound.
+    A plain `from m import f` that cannot be resolved is the long-standing
+    "nothing on this link line provides it" case, reported by the bind audit,
+    and it is still reported there — re-deriving it here would give a second
+    message for one condition. Only a genuine ALIAS is this function's business,
+    because the flat `{bare: symbol}` map is keyed by the defining name and so
+    cannot say anything about the local one at all.
+
+    `from m import f as f` is not an alias: it binds the same name, and the flat
+    map answers it exactly as it answers the unaliased spelling.
+    """
+    target = (aliases or {}).get(callee)
+    return bool(target) and target[1] != callee
+
+
+def dylib_aliased_export(by_name: dict, by_module: dict, callee: str,
+                         aliases: dict):
+    """The export a bare callee reaches THROUGH an import alias, or None.
+
+    `aliases` is `formal/imports.py`'s `import_bindings` table: `{local name:
+    (module as spelled, defining name)}`, so `from os.path import exists as
+    pe` is `{"pe": ("os.path", "exists")}`.
+
+    Two questions, and they are asked in this order because the second is the
+    weaker one:
+
+      1. **Does the module the name was imported FROM export it?** That module's
+         export table, not the flat one: the flat table cannot say which module
+         owns a name, so a local alias that happened to collide with another
+         library's export would bind that other library's function. The alias is
+         a statement about where `pe` came from, so it is resolved against that
+         module and nowhere else.
+
+      2. **Does ANY library on the line export the DEFINING name?** This is the
+         re-export case, and it is the same name-based dispatch `from m import
+         f` — with no alias at all — already uses: a package `__init__` is a
+         namespace library with an EMPTY export table (`_namespace_library`),
+         so `from pkg import bump` has to be answered by the submodule's
+         library under `bump`. Asking it by the DEFINING name and not by the
+         local one is what keeps it from being a hole: `bump` is a real export
+         somewhere on the line, where `b` is a name only this file ever used.
+
+    `None` means neither can bind it, which is the caller's cue to raise
+    `dylib_aliased_export_refusal`. Falling back to the LOCAL spelling — what
+    the code did before any of this — is what produced a BL against a symbol
+    nothing defines.
+    """
+    target = (aliases or {}).get(callee)
+    if not target:
+        return None
+    module, defined = target
+    entry = dylib_export_module(by_module, module).get(defined)
+    if entry is not None:
+        return entry
+    if "." in defined:
+        return dylib_export_lookup(by_name, by_module, defined)
+    return by_name.get(defined)
+
+
+def dylib_aliased_export_refusal(callee: str, aliases: dict,
+                                 by_module: dict) -> str:
+    """Why an aliased callee has no symbol to bind, or "" if that is not it.
+
+    Three answers and three different facts, one of which is an error in the
+    PROGRAM rather than in the module, so they cannot share a message:
+
+      * the module is LINKED and exports the defining name — the lookup found
+        it, "" is returned, and the caller uses it;
+      * the module is LINKED but exports neither the defining name nor anything
+        by that bare name anywhere on the line — `doc/ABI.md`'s export rule
+        excluded it, which is a fact about the module and is reported as one,
+        exactly like the dotted-callee case;
+      * the module is NOT on the link line at all — the import did not resolve
+        to anything this image carries, and saying "it exports no such name"
+        would send the reader to a module that is not even here.
+    """
+    module, defined = (aliases or {}).get(callee, ("", callee))
+    if not dylib_export_module(by_module, module):
+        return (
+            f"{callee}(): it is bound by an import from {module!r}, but no "
+            f"library for that module is on this image's link line, so the "
+            f"name it refers to cannot be bound. An import is a DEPENDENCY: "
+            f"if the module has no source this backend can compile, the build "
+            f"reports that at the import itself rather than here.")
+    return (
+        f"{callee}(): it is bound by `from {module} import … as {callee}`, and "
+        f"neither `{module}` nor any other library on this image's link line "
+        f"exports `{defined}`, so the call has no symbol to bind. A name "
+        f"`doc/ABI.md`'s export rule excludes (a leading `_`, a generic "
+        f"template, an overload, or a C library symbol such as `exit` or "
+        f"`write`) is not advertised — and an alias does not make a name "
+        f"exposable that was not already, since the alias is a property of "
+        f"this file and not of the library.")
 
 
 def _target_names(target):
@@ -9252,6 +9955,37 @@ def struct_field_name(field) -> object:
     return None
 
 
+# `comptime NAME = expr` in a struct body is a CLASS-SCOPE BINDING, and it is in
+# `StructDef.comptime_aliases` rather than in `StructDef.fields` — the parser puts
+# it there (`fire_compiler._parse_struct`, a `ComptimeVarStmt` is neither a
+# `VarDecl` nor an `AssignStmt`), the interpreter reads it when it builds the
+# class (`myinterpreter.execute_StructDef`: `comptime_aliases[name] = eval_expr(...)`
+# — once, at struct-definition time, with no instance in hand), and the compiled
+# path read it through `gimple_codegen`'s `_struct_comptime_aliases`. NOTHING on
+# the formal path read it: `grep -rn comptime_aliases formal/` finds this comment
+# and nothing else, so a `comptime` class member was in no table here at all —
+# not the field census, not `struct_class_constants`, not the constant-substitution
+# rewrite. The consequence was measured and is a silent WRONG ANSWER, not a
+# refusal, because the receiver sweep below counts any name a method reaches as a
+# field: a one-word struct whose method reads `self.LIMIT` where `comptime LIMIT = 10`
+# measures ONE field, reads the slot nothing ever writes, and prints 0 where the
+# source says 10 (both architectures). See `struct_class_constants` for where the
+# names are classified, and `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`.
+#
+# The accessor, because the dict is read from the class-constant split, the
+# substitution's site census and a diagnostic, and three `getattr(…, None) or {}`
+# spellings of the same default is three places to keep in step.
+def struct_comptime_aliases(struct_def) -> dict:
+    """`{name: value node}` — the class body's `comptime NAME = expr` bindings.
+
+    In declaration order, which is the order the dict was built in and the order
+    a class body writes them in. Not a field list and not a constant list: what
+    a name in here IS — a class value, or per-instance state the program
+    overwrites — is decided by `_split_declaration`, which is the one place that
+    asks."""
+    return dict(getattr(struct_def, "comptime_aliases", None) or {})
+
+
 # The class-level assignment that DECLARES fields rather than making one, and
 # the two names a `__slots__` tuple may carry that are not storage at all
 # (Python adds them itself to a class that wants weak references or a
@@ -9297,6 +10031,38 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
     callee is not descended into, while its arguments still are (a method can
     be handed `self.x` as an argument, which is a real field access).
 
+    **The same is true of a method call THROUGH BRACKETS**, `self.helper[T](x)`,
+    and getting that wrong was a silent wrong answer on the stdlib's most-used
+    type rather than a refusal. A generic's comptime parameters are written as a
+    subscript on the callee, so the callee of that call is a `SubscriptExpr`
+    over the very `MemberExpr` this guard tests, and the guard did not match:
+    the walk fell through to the generic arm, found `MemberExpr(self,
+    helper)`, and added `helper` to the field set. The name is a METHOD, so
+    nothing ever writes the slot it now occupies, and every read of that slot is
+    zero.
+
+    Measured on `std/collections/optional.mojo`, where `Optional` has exactly one
+    instance field (`_value`) and one private method reached through brackets:
+
+        self._write_to[is_repr=False](writer)      # write_to's body
+        ->  struct_field_names(Optional) == ['_value', '_write_to']
+        ->  struct_field_count 2, so struct_is_framed True
+
+    and the consequence was that `Optional` — a ONE-word value whose receiver IS
+    its field — became a two-field struct, so every `Optional` receiver became a
+    frame address and the 13-file `builtin_slice.mojo` row was refused for a
+    struct-typed field the source says is a single slot
+    (`bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`).
+    `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` records the
+    census of the SIBLING shape — a bare `self.helper` in VALUE position, which
+    is genuinely ambiguous and is deliberately not touched by this change.
+
+    The subscript's own base is unwrapped for the guard and the brackets are
+    then walked, so a subscript on a FIELD (`self.items[0]`) still contributes
+    `items`: only the callee position is exempt. The bracket expressions and the
+    call arguments are walked as before, because a method can be handed
+    `self.x` in any of the three positions.
+
     A nested `FunctionDef` is not descended into either: its `self`, if it has
     one, is a different binding from the struct's receiver.
 
@@ -9313,14 +10079,23 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
         return
     if isinstance(node, F.FunctionDef):
         return
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr) \
-            and isinstance(node.func.obj, F.IdentExpr) \
-            and node.func.obj.name in receivers:
-        for a in node.args or []:
-            _self_field_names(a, out, receivers)
-        for _k, v in (node.kwargs or []):
-            _self_field_names(v, out, receivers)
-        return
+    if isinstance(node, F.CallExpr):
+        # `method_callee_base` is the ONE recogniser for "this call's callee is
+        # a member of a receiver", over both spellings — the same relationship
+        # `formal/build.py`'s `_method_call_target` walks when it rewrites the
+        # call, so the field set and the rewrite cannot come to disagree about
+        # which calls are method calls.
+        base = method_callee_base(node)
+        if isinstance(base, F.MemberExpr) and isinstance(base.obj, F.IdentExpr) \
+                and base.obj.name in receivers:
+            if not isinstance(node.func, F.MemberExpr):
+                for br in _subscript_brackets(node.func):
+                    _self_field_names(br, out, receivers)
+            for a in node.args or []:
+                _self_field_names(a, out, receivers)
+            for _k, v in (node.kwargs or []):
+                _self_field_names(v, out, receivers)
+            return
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr) \
             and node.obj.name in receivers:
         out.add(node.member)
@@ -9329,6 +10104,46 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
         if fname in ("line", "col"):
             continue
         _self_field_names(getattr(node, fname, None), out, receivers)
+
+
+def method_callee_base(call):
+    """The member a call reaches, over BOTH spellings of a method call.
+
+    `recv.m(x)` and `recv.m[T](x)` are the same call — the second is the first
+    with a generic's comptime parameters written as brackets on the callee — so
+    anything asking "is this call a method call?" has to answer the same for
+    both. It was `formal/build.py`'s `_method_call_target` alone, and a name walk
+    recognising only the bare spelling therefore read the bracketed one as a
+    FIELD access (`_self_field_names`, where the effect was `Optional` measuring
+    two fields because of `self._write_to[is_repr=False](writer)`).
+
+    Returned UNWRAPPED, so each caller decides what the brackets mean: a call
+    rewrite passes them on as the callee's leading comptime arguments, and a
+    field walk skips them because the member itself is what it was looking for.
+    """
+    func = getattr(call, "func", None)
+    if isinstance(func, F.SubscriptExpr):
+        func = func.obj
+    return func
+
+
+def _subscript_brackets(sub) -> list:
+    """The expressions inside a subscript's brackets, flattened, in source order.
+
+    `a[x]`, `a[x, y]` and `a[k=v]` all land here: `SubscriptExpr` keeps the
+    positional index in `index` and the keyword ones in `attrs`, and a field
+    read can be written in either. One flat list, because the caller is walking
+    "everything a node reaches" and one shape to iterate is what keeps the three
+    positions from being handled three times.
+    """
+    out = []
+    for node in (getattr(sub, "index", None),
+                 *(getattr(sub, "attrs", None) or [])):
+        if isinstance(node, tuple):
+            out.extend(x for x in node if x is not None)
+        elif node is not None:
+            out.append(node)
+    return out
 
 
 def _decorator_names(method) -> set:
@@ -9370,14 +10185,31 @@ def struct_receivers(struct_def) -> set:
     form is treated as HAVING a receiver."""
     out = {"self"}
     for m in struct_methods(struct_def):
-        if "staticmethod" in _decorator_names(m):
-            continue
-        params = list(getattr(m, "params", None) or [])
-        if params and isinstance(params[0], (tuple, list)) and params[0]:
-            first = params[0][0]
-            if isinstance(first, str):
-                out.add(first)
+        name = method_receiver_name(m)
+        if name is not None:
+            out.add(name)
     return out
+
+
+def method_receiver_name(method) -> object:
+    """The name ONE method binds its receiver to, or None if it takes none.
+
+    The per-method half of `struct_receivers`, and a function rather than an
+    inline copy of its loop because a caller that needs the receiver of the
+    method it is looking at — not of the struct, which has as many methods as it
+    has receiver spellings — must not answer a slightly different question. It
+    answers the receiverless case too, which is the one the class-wide set
+    cannot: `def first():` declares a method with no receiver at all, and
+    nothing about it is a member access.
+    """
+    if "staticmethod" in _decorator_names(method):
+        return None
+    params = list(getattr(method, "params", None) or [])
+    if params and isinstance(params[0], (tuple, list)) and params[0]:
+        first = params[0][0]
+        if isinstance(first, str):
+            return first
+    return None
 
 
 def struct_declared_names(struct_def) -> list:
@@ -9439,6 +10271,9 @@ def struct_declared_names(struct_def) -> list:
 #      materializing rewrite in formal/build.py would have to reach the
 #      receiver spelling too. Keeping the name a field gets it right for free,
 #      and the existing `struct_default_word_int` case is that program.
+#      …and this clause is the one a `comptime` binding is exempt from, for the
+#      reason the carve-out at the end of this section gives: a `comptime`
+#      binding has no word behind it, so there is no slot to keep.
 #   3. Nothing in the translation unit WRITES it through any object —
 #      `obj.NAME = …`, `obj.NAME += …`, `for obj.NAME in …`, `del obj.NAME`
 #      (see `unit_field_evidence`). This is the load-bearing clause, and the
@@ -9467,6 +10302,21 @@ def struct_declared_names(struct_def) -> list:
 #      initializer is the one shape in which "nothing writes it" is a statement
 #      about the PROGRAM rather than about the DECLARATION.
 #
+# And the rule has a SECOND input, which is not one of the class-level names
+# above: a `comptime NAME = expr` binding, which the parser keeps out of
+# `StructDef.fields` entirely and which was therefore classified by nothing until
+# this. It is a class value by the language's own construction — one value,
+# evaluated once at struct-definition time, identical for every instance — so it
+# is a constant unless clauses 3 and 5 say this program stores into it, and when
+# they do it is a FIELD with a slot, because then the value really is
+# per-instance. Clause 2 does not apply to it, and the reason is the whole
+# point: a `self.NAME` read of a `comptime` member is a read of the CLASS's
+# value rather than of storage, so the receiver spelling is a read site the
+# substitution materializes (or refuses by name) instead of a slot to count.
+# Left to the receiver sweep below it was counted as a field and read as the zero
+# an unwritten slot gives — measured, a one-word struct printing 0 where the
+# source says 10, on both architectures. See `struct_comptime_aliases`.
+#
 # Two things this deliberately does NOT do. It does not resolve a bare read:
 # `X` inside a method does not see the class body's scope in Python or Mojo, so
 # a bare read is a global (or a local), never this rule's constant — there is
@@ -9480,6 +10330,45 @@ def struct_declared_names(struct_def) -> list:
 # NOT buy is a receiver that has real instance state: `GimpleGen` has 248 of
 # those, so the sixteen files refused on it are still refused, and the honest
 # summary of that half is in the sweep's own numbers rather than here.
+#
+# ── The one name this rule does NOT decide: a `comptime` binding ───────────
+#
+# `comptime NAME = …` in a class body is not one more class-level name for this
+# rule to weigh. The PARSER has already decided it, in the shape of the tree:
+# `fire_compiler.py`'s `_parse_struct` moves every `ComptimeVarStmt` of the body
+# into `StructDef.comptime_aliases` and leaves it out of `StructDef.fields`
+# entirely, so the name is not in any of the tables above even before this
+# rule runs — it is in no table at all, which is the defect
+# `struct_comptime_aliases` below exists to close.
+#
+# Two consequences follow, and they are why this is a carve-out rather than a
+# clause:
+#
+#   * CLAUSE 2 does not apply to it. Clause 2 keeps a name that a method reaches
+#     through the receiver (`self.NAME`) a FIELD, because for a class-level
+#     assignment the receiver may BE the field — a one-field struct's receiver is
+#     its field, `struct_default_word` put the value there, and demoting the name
+#     would leave the read falling to a slot nothing writes. A `comptime` binding
+#     has no such word: there is no slot for it, which is exactly why the parser
+#     kept it out of `fields`, and a `self.NAME` read of one is the binding's
+#     value (myinterpreter's `_eval_member_of` resolves `obj._mojo_class.
+#     comptime_aliases[member]` for exactly that name, after the instance fields
+#     and the methods and before raising). So the alias is decided by the
+#     LANGUAGE here, not by evidence, and the evidence rule takes over only for
+#     the direction the rule is lopsided towards: a unit that WRITES the name, or
+#     one whose writes cannot be read at all, still gets it as a field.
+#   * Its VALUE is not necessarily a literal. `comptime rank = Self.element_types
+#     .length` and `comptime is_flat = Self.rank == Self.flat_rank` are both real
+#     new-modular stdlib (`utils/coord.mojo:214,220`), and a computation is not
+#     something a read can inline without a comptime evaluator this path has not
+#     got. So "is a class-level constant" and "can a read of it be answered" stay
+#     two separate questions: the first is answered here, the second by
+#     `class_constant_word` at the read, which refuses by name.
+#
+# A name in BOTH places — `comptime X = 1` in a body that also declares
+# `var X: Int` — is a FIELD. The declaration is the stronger evidence, it is what
+# the positional-constructor rule fills slots from, and it is the direction every
+# doubt in this section resolves.
 
 # The name-less attribute writers, and what to do about each. `setattr` and
 # `delattr` with a string LITERAL name are readable, and the name is added to
@@ -9699,16 +10588,178 @@ def _split_declaration(struct_def):
                 fields.append(name)
             else:
                 constants.append((name, getattr(field, "value", None)))
+    # A `comptime NAME = expr` binding, which the parser put in
+    # `comptime_aliases` and NOT in `fields` (see the carve-out at the end of the
+    # rule above). It is appended AFTER the declared names, so every ordering
+    # this file guarantees — declaration order for a positional constructor, and
+    # the per-method order of the loop below — is unchanged by its presence; a
+    # name that moves position in a diagnostic is a change nobody asked for.
+    #
+    # It is a class value by construction: evaluated once, at struct-definition
+    # time, in the class body's own scope, with no instance in hand. So the only
+    # question the rule above has to answer about it is whether this PROGRAM
+    # stores into it, and that is clauses 3 and 5 verbatim: a name written
+    # through any object in this unit, or any unit with a write whose name cannot
+    # be read, keeps the alias as a FIELD, because then the value is
+    # per-instance and the slot the write lands in is the only copy of it. The
+    # reference engine agrees about which of the two it is: an instance read
+    # consults the instance dict BEFORE the alias table (`myinterpreter`'s member
+    # read), so `obj.A = 5` really does change what `obj.A` says, and folding
+    # the declared 10 into it would be a wrong answer rather than a refusal.
+    #
+    # **Clauses 3 and 5 decide it and clause 2 does NOT**, and the difference
+    # between the two loops is the whole point: `reached` is what this method's
+    # body spells as `self.NAME`, and for a `comptime` binding that spelling is a
+    # READ of the binding rather than of a field, so consulting it here would put
+    # back exactly the refusal this closes. A unit that ASSIGNS the name
+    # (`self.rank = …`, `o.rank += 1`, `setattr(o, "rank", v)`,
+    # `Point(rank=1)`) still gets a FIELD, and that arrives through `written` —
+    # the same clause 3 that carries the rest of the rule, and the direction
+    # every doubt here resolves.
+    #
+    # **NO evidence, no claim**, and that is the rule rather than an omission: a
+    # struct this function returns None for — a module parsed without the unit's
+    # write census — is not asked the question at all, and
+    # `_pre_rule_field_names` below counts every DECLARED name as a field and
+    # knows nothing of a `comptime` binding, so a read of one there is a
+    # refusal ("Coord has no field 'rank'") rather than a read of a slot whose
+    # value nothing wrote. Counting the binding as a field instead would have
+    # manufactured the 0 that clause 3's own reasoning above is careful never to
+    # substitute, and `attach_field_evidence`'s docstring says why the two must
+    # not disagree.
+    for name, value in struct_comptime_aliases(struct_def).items():
+        if not isinstance(name, str) or name in seen:
+            # already a field or a constant: the class body declared the name
+            # twice, and the `fields` spelling above won, which is the order
+            # this table has always used.
+            continue
+        seen.add(name)
+        if dynamic or name in written:
+            fields.append(name)
+        else:
+            constants.append((name, value))
     # Per method, not globally sorted, so that the field list is byte-for-byte
     # the list `_pre_rule_field_names` produces for a struct with no evidence:
     # a name that moves position in a diagnostic is a change nobody asked for.
+    # An alias name is in `seen` by the loop above, so a method that reaches
+    # `self.LIMIT` does not put `LIMIT` back into the field list: the read is a
+    # read of the class's value, and the substitution materializes it (or
+    # refuses by name) rather than leaving it to a slot nothing writes.
     for method in struct_methods(struct_def):
         touched = _receiver_names(getattr(method, "body", None), receivers)
         for name in sorted(touched):
-            if name not in seen:
-                seen.add(name)
-                fields.append(name)
+            if name in seen:
+                continue
+            seen.add(name)
+            fields.append(name)
     return (fields, constants)
+
+
+def struct_comptime_aliases(struct_def) -> dict:
+    """The struct's `comptime NAME = …` bindings: `{name: value node}`.
+
+    One value for every instance, published by the class and stored nowhere —
+    which is what makes a `comptime` binding a class-level CONSTANT in the sense
+    `struct_class_constants` means, and is why the two tables cannot be derived
+    from different places. The parser has said so in the shape of the tree rather
+    than in a convention anyone has to remember: `fire_compiler.py`'s
+    `_parse_struct` collects every `ComptimeVarStmt` of the class body into
+    `StructDef.comptime_aliases` and leaves it out of `StructDef.fields`, and
+    `myinterpreter.execute_StructDef` evaluates the dict once at
+    class-definition time — so a read is answered from it, through the receiver
+    as well as through the class name
+    (`myinterpreter._eval_member_of`, after the instance fields and the methods
+    and before the `AttributeError`).
+
+    Before this existed the names were in NO table on this path, and each of the
+    three that should have had one answered consistently and wrongly:
+    `struct_field_names` (they are not in `fields`), `struct_class_constants`
+    (which walked `fields`), and the constant-substitution rewrite in
+    `formal/build.py` (which reads that table). A read of one therefore arrived
+    at the member-access lowering as a name the struct does not have, and was
+    refused with a sentence about a run-time `AttributeError` in a program that
+    does not raise — `res._InjectedValues` in `std/iter/__init__.mojo`, declared
+    fourteen lines above the read. That is
+    `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`, and this
+    function is the whole of the fix's first half.
+
+    NOT the whole of it: whether a read can be ANSWERED is still
+    `class_constant_word`'s question, asked at the read. A binding's value may be
+    a computation (`comptime rank = Self.element_types.length`,
+    `utils/coord.mojo:214`), and a `comptime` binding whose right-hand side
+    mentions a runtime parameter is refused by name rather than inlined — which
+    is the same verdict a non-literal class-level constant already gets, and for
+    the same reason."""
+    return dict(getattr(struct_def, "comptime_aliases", None) or {})
+
+
+def struct_derived_names(struct_defs, name: str) -> set:
+    """Every struct in `struct_defs` whose BASE CLOSURE contains `name`.
+
+    Transitive, because a question about inheritance has to be: `struct
+    GrandChild(Child)` where `struct Child(Base)` derives from `Base` through a
+    level this function never looks at, and a rule that answered "nothing
+    derives from `Base`" about that would be answering a question about a
+    different program. The closure is a fixed point rather than one pass for the
+    same reason — the fixed point is the set, and one pass over the direct bases
+    is a prefix of it.
+
+    Returns struct NAMES, so a caller with a list of StructDefs can index it."""
+    derived, grew = set(), True
+    names = [getattr(st, "name", None) for st in struct_defs or []]
+    while grew:
+        grew = False
+        for st in struct_defs or []:
+            own = getattr(st, "name", None)
+            if own in derived or own is None:
+                continue
+            if any(b == name or b in derived
+                   for b in (getattr(st, "bases", None) or [])):
+                derived.add(own)
+                grew = True
+    return {n for n in derived if n in set(names)}
+
+
+def struct_is_derived_from(struct_defs, name: str) -> bool:
+    """True when some struct in `struct_defs` names `name` in its `bases`.
+
+    The one question a `comptime` binding's VALUE cannot be asked without, and
+    the reason the substitution in `formal/build.py` stops at the base class.
+
+    `struct Child(Base)` overrides `Base`'s `comptime rank` for every instance
+    of `Child` — `myinterpreter.execute_StructDef` merges the bases' aliases in
+    first and the child's own second, so the child's value is the one a read of
+    `self.rank` inside a method `Base` declares resolves to when the receiver is
+    a `Child`. Substituting `Base`'s literal at that read would print the parent's
+    value for a child, which is a wrong answer and not a refusal.
+
+    It cannot be checked the other way round either, because the interpreter also
+    copies the base's METHODS onto the child: a method `Base` declares is called
+    with a `Child` receiver (`_method_owners` dispatches by name and no struct in
+    this unit inherits the method into its own `methods` list), so "the method is
+    declared on `Base`" says nothing about which alias table the receiver's class
+    has.
+
+    Which is why the disqualification is per NAME and not per struct:
+    `formal/build.py` withholds exactly the bindings a subclass REDECLARES, so a
+    `Child(Base)` that overrides `rank` makes `self.rank` unanswerable inside a
+    method `Base` declares while leaving every other name of `Base` answerable.
+    A subclass that inherits the name cannot change it — the interpreter merges
+    the bases' aliases into the child and the child adds its own, so an inherited
+    binding reads exactly as the base declared it.
+
+    Use `struct_derived_names` for the transitive closure; this is the direct
+    question and it is what the docstring above is about.
+
+    A limitation worth stating rather than hiding: `struct Child(Base)` is the
+    only inheritance this parser records, and the base may arrive from an IMPORTED
+    module, where `struct_defs` holds the imported declarations too — so a
+    derivation from a module this unit never parsed is not visible here. That is
+    not a hole in the rule but a fact about where the tables come from, and it is
+    the direction the answer already takes: a struct whose bases this function
+    cannot read is not disqualified by anything it cannot read."""
+    return any(name in (getattr(st, "bases", None) or [])
+               for st in struct_defs or [])
 
 
 def _receiver_names(node, receivers) -> set:
@@ -9723,7 +10774,17 @@ def struct_class_constants(struct_def) -> list:
 
     The complement of `struct_field_names`, and empty for every struct with no
     evidence attached — where nothing can be told apart, so everything stays a
-    field and there is no constant to speak of."""
+    field and there is no constant to speak of.
+
+    Two things count as a class-level constant and only one of them is spelled
+    `NAME = value` in `StructDef.fields`: a `comptime NAME = …` binding, which the
+    parser keeps in `comptime_aliases` and never puts in `fields` at all, is
+    stored nowhere per instance and so is exactly as much a constant as the other
+    kind. `struct_comptime_aliases` is the accessor and the note above
+    `_split_declaration` is the rule; the two are kept apart because "is a
+    constant" (this function) and "can this read be answered"
+    (`class_constant_word`, asked at the read) are different questions, and only
+    the first is answered here."""
     split = _split_declaration(struct_def)
     return list(split[1]) if split is not None else []
 
@@ -9779,9 +10840,17 @@ def _pre_rule_field_names(struct_def) -> list:
 
     What `struct_field_names` returns for a struct with no evidence attached,
     and what it returned for every struct before this rule existed. Kept as its
-    own function rather than inlined so the two derivations cannot drift apart
-    in their handling of `__slots__` and of `self.<name>` — the parts that are
-    not about constants at all."""
+own function rather than inlined so the two derivations cannot drift apart
+    in their handling of `__slots__` and of `self.<name>` — the parts that
+    are not about constants at all.
+
+    It knows NOTHING of a `comptime` binding, deliberately. With no evidence
+    there is no clause 3 to ask, and the two answers available are a field —
+    whose slot nothing writes, so a read of it fabricates a 0 — and a constant,
+    which cannot be substituted without the write census that is exactly what is
+    missing. The refusal is the honest answer, so a binding stays invisible here
+    and a struct nobody attached evidence to reports the read as a name it does
+    not have."""
     names, seen = [], set()
 
     def add(name):
@@ -12612,24 +13681,6 @@ def struct_construction_plan(struct_def, call, decls: dict,
     if kwargs:
         return (None, construction_keyword_refusal(
             name, [k for k, _v in kwargs]))
-    if not args:
-        # The existing shape.  Deliberately NOT re-decided here: `S()`'s
-        # refusal for a non-literal default belongs to
-        # `struct_frame_representable` / `struct_default_word` and has its own
-        # message, and a second copy of the decision is a second thing to keep
-        # in step with the first.
-        #
-        # It is ALSO where premise (B2) still lives, and the two are the same
-        # decision: a declared `__init__` is only inlined where the call has
-        # ARGUMENTS to bind to it, so `S()` on a struct whose `__init__` takes
-        # none still brings every field up at its class-level default and does
-        # not run the body.  That is a real, and now the only, way this path
-        # disagrees with the language about a constructor, and it is written
-        # down rather than fixed here because the fix is a behaviour change
-        # with a sweep-sized blast radius and no test would be able to tell a
-        # correct one from a lucky one; see
-        # `bugs/FORMAL_zero_arg_init_not_inlined.md`.
-        return ((CONSTRUCTION_DEFAULT,), None)
     # A DECLARED `__init__` outranks everything below, and it has to: with one,
     # `S(a, b)` is a call to it, so every message underneath — the arity one
     # included — is describing a construct the source does not contain.
@@ -12643,7 +13694,35 @@ def struct_construction_plan(struct_def, call, decls: dict,
     # blanket refusal is the two facts the inline genuinely needs and cannot
     # supply — an arity that selects exactly one overload, and a body that is
     # only those stores.
+    #
+    # READ BEFORE the zero-argument case, and that ordering is the whole of
+    # premise (B2)'s removal.  `S()` used to return `CONSTRUCTION_DEFAULT`
+    # before this lookup, so a declared `__init__` was inlined only where the
+    # call had ARGUMENTS to bind to it — and `S()` on a struct whose
+    # constructor takes none came up at its class-level defaults with the body
+    # never run.  Measured: `struct Z(a=8, b=9)`, `var z = Z()` then `z.a`,
+    # returned 0 where CPython returns 8, on BOTH architectures, with nothing
+    # refused and nothing printed.
+    #
+    # "THE COUNT SELECTS NOTHING" was the stated reason for the early return
+    # and it is answered here rather than avoided: `init_overload_for_arity` is
+    # the same function that selects an overload for every other count, it
+    # admits a count of 0 exactly when some declared overload takes no required
+    # parameter, and it answers `ambiguous` — a refusal — when two of them
+    # would.  So `S()` is decided by the same rule as `S(1)` and neither of the
+    # two holes the early return was avoiding is open.  A `__init__` that
+    # REQUIRES a parameter is the other half and is now what the language
+    # says: `Bag4()` against `def __init__(out self, n, m)` is a `TypeError`,
+    # and it is refused as one, naming the declared overloads.
     shapes = struct_init_shapes(struct_def)
+    if not args and not shapes:
+        # The existing shape, for a struct that declares no constructor at all:
+        # every field at its own default, and every placed nested frame brought
+        # up.  Deliberately NOT re-decided here: `S()`'s refusal for a
+        # non-literal default belongs to `struct_frame_representable` /
+        # `struct_default_word` and has its own message, and a second copy of
+        # the decision is a second thing to keep in step with the first.
+        return ((CONSTRUCTION_DEFAULT,), None)
     if shapes:
         shape, why = init_overload_for_arity(shapes, len(args))
         if why is not None:
@@ -12862,10 +13941,11 @@ def _frame_source_structs(arg, candidates: dict):
 #        (B1) — a non-literal class-level DEFAULT — is already refused, by
 #        `struct_frame_representable`, and is deliberately NOT re-decided
 #        below; see `frame_field_premise`.
-#   (B2) `S()` does not run `__init__`.  Every slot's value is the class-level
-#        DEFAULT, not what the constructor of the language would assign, so the
-#        `self.items = List[Self.T]()` in every container-shaped `__init__` in
-#        the corpus never executes.
+#   (B2) `S()` does not run `__init__` on a struct whose constructor takes NO
+#        REQUIRED PARAMETER, and that is now a refusal rather than a silent
+#        zero.  A struct that declares NO constructor at all is premise-free:
+#        there is no body to run.  Every slot's value for a refused `S()` is
+#        still nothing, because nothing runs.
 #
 # The two have quite different standing and the check below says so:
 #
@@ -12873,14 +13953,21 @@ def _frame_source_structs(arg, candidates: dict):
 #     runs, so `self.items = List[Self.T]()` inside it puts a blob in a slot
 #     today, and the refusal is the point.  This is the one the value-method
 #     work must keep true.
-#   * (B2) is an ENABLING PREMISE, asserted by the emitter (`_emit_struct_
-#     constructor` emits no call and refuses `S(x)`) and reported by name.  It
-#     is not something this check can prove, and a check that appeared to
-#     prove it would be the worst kind of check.
+#   * (B2) is an ENABLING PREMISE for the `CONSTRUCTION_DEFAULT` shape, which is
+#     what a struct that DECLARES no constructor lowers to.  It is reported by
+#     name so a reader is told which premise a refusal rests on.  It is not
+#     something this check can prove, and a check that appeared to prove it
+#     would be the worst kind of check.  A struct that DOES declare a
+#     constructor is not under (B2) at all — `S()` goes down the same
+#     `CONSTRUCTION_INIT` path as `S(args)`, and the confinement argument in
+#     the next paragraph is what keeps that safe.
 #
-# `S(args)` is the FOURTH door and it is neither premise: a construction with
-# arguments DOES run the constructor, because a constructor does not have to be
-# called to be run — `init_body_stores` inlines the body's stores at the site.
+# `S(args)` — and now `S()` on a struct whose `__init__` takes no required
+# parameter — is the FOURTH door and it is neither premise: such a construction
+# DOES run the constructor, because a constructor does not have to be called to
+# be run — `init_body_stores` inlines the body's stores at the site, and the
+# argument COUNT (zero included) is what `init_overload_for_arity` reads to pick
+# the overload, exactly as it does for every other count.
 # That cannot put an unreclaimable word in a slot, and the reason is the
 # confinement argument above rather than (B2): the inlined body runs in the
 # CONSTRUCTING function, whose scratch holds the block it writes into and
@@ -12899,13 +13986,17 @@ def _frame_source_structs(arg, candidates: dict):
 # sees one word per slot either way.
 FRAME_FIELD_BLOB_PREMISE_B1 = \
     "no executed method writes a container into a field"
-# (B2) is now a statement about the ZERO-ARGUMENT construction only, and the
-# wording says so, because "S() does not run __init__" read as a claim about
-# every construction and stopped being one when `S(args)` began inlining the
-# body.  What the text is FOR is telling a reader which of the two premises a
-# refusal rests on, and a reader who is told the wrong one is sent to look for
-# a violation of a rule that is not what stopped the build.
-FRAME_FIELD_BLOB_PREMISE_B2 = "a zero-argument S() does not run __init__"
+# (B2) is now a statement about a construction of a struct that DECLARES NO
+# CONSTRUCTOR, and the wording says so, because "S() does not run __init__"
+# read as a claim about every construction and stopped being one twice over:
+# when `S(args)` began inlining the body, and then when `S()` on a struct whose
+# `__init__` takes no required parameter began inlining it too.  A struct with
+# no constructor has no body to run, so its fields are the class-level defaults
+# and the word "run" is not the question.  What the text is FOR is telling a
+# reader which of the two premises a refusal rests on, and a reader who is told
+# the wrong one is sent to look for a violation of a rule that is not what
+# stopped the build.
+FRAME_FIELD_BLOB_PREMISE_B2 = "a struct that declares no __init__ has no body to run"
 
 
 def _is_container_value(value, containers: set) -> str:
@@ -12954,6 +14045,13 @@ def _container_binding_names(node, receivers, out: set) -> None:
     Deliberately ONE hop and deliberately local: the point is to catch
     `tmp = [...]; self.x = tmp`, not to compute a value kind.  A name bound in
     another function, or a parameter, is the stated gap above.
+
+    **`var tmp = [...]` was missing and it is the spelling most of the corpus
+    uses**, so the one hop it exists to make did not happen for a `var` binding
+    and the write-through it was written to catch went uncaught: `var xs =
+    [1, 2]; self.items = xs` reads to a reader as covered and is not.  A
+    `VarDecl` binds its name in `.name`, not in `.target`, which is the whole
+    difference; `frame_binding_target` is the one reader of that.
     """
     if isinstance(node, list):
         for x in node:
@@ -12961,11 +14059,10 @@ def _container_binding_names(node, receivers, out: set) -> None:
         return
     if isinstance(node, F.FunctionDef):
         return
-    target = getattr(node, "target", None)
-    if isinstance(target, F.IdentExpr) \
-            and isinstance(getattr(node, "value", None),
-                           (F.ListExpr, F.TupleExpr, F.DictExpr)):
-        out.add(target.name)
+    target = frame_binding_target(node)
+    if target and isinstance(getattr(node, "value", None),
+                             (F.ListExpr, F.TupleExpr, F.DictExpr)):
+        out.add(target)
     for fname in getattr(node, "__dataclass_fields__", {}):
         if fname in ("line", "col"):
             continue
@@ -13247,6 +14344,41 @@ def iter_nodes(node):
         yield from iter_nodes(getattr(node, name))
 
 
+def struct_block_children(struct_def, decls: dict, base: int = 0,
+                          depth=None) -> list:
+    """`[(field, slot, child_struct, offset)]` — the nested frames in this
+    struct's BLOCK and where each one sits, to EVERY depth the model places.
+
+    The offset arithmetic `struct_frame_block_bytes` performs, made a function
+    rather than an inline loop, because two readers need the answer and the
+    bytes reserved have to be the bytes addressed: `struct_constructor_sites`
+    uses it to lay a site out, and the emitters use it to bring the frames up.
+    Written twice, one of them would place a nested frame at an offset the other
+    had reserved a different one for, and the first field read of it would be a
+    read of whatever else is there.
+
+    `base` is added to every offset, so `base=0` answers "relative to this
+    struct's own block" — which is what a caller that hands the block over
+    wants, since the block it is building into is not at a compile-time offset
+    in the callee's frame at all.
+
+    The recursion's depth bookkeeping is `struct_frame_block_bytes`'s exactly:
+    children come from `struct_nested_frame_fields(st, decls, depth)` and their
+    own sizes from `struct_frame_block_bytes(child, decls, depth - 1)`.  Two
+    functions walking one layout with two different depth rules is how a block
+    ends up half its size.
+    """
+    depth = MAX_NESTED_FRAME_DEPTH if depth is None else depth
+    out = []
+    inner = base + struct_frame_bytes(struct_def)
+    for fname, slot, child in struct_nested_frame_fields(struct_def, decls,
+                                                          depth):
+        out.append((fname, slot, child, inner))
+        out.extend(struct_block_children(child, decls, inner, depth - 1))
+        inner += struct_frame_block_bytes(child, decls, depth - 1)
+    return out
+
+
 def struct_constructor_sites(fn, structs_by_name) -> dict:
     """`{id(call): (struct, offset, nested)}` — this function's receiver BLOCKS.
 
@@ -13299,26 +14431,19 @@ def struct_frame_block_layout(struct_def, decls: dict, depth=None):
     order, immediately above the object's own slots.  `total_bytes` is the
     block's whole size, which is what a caller has to reserve for it.
 
-    ONE function for the layout, and both of its consumers read it: the
-    constructor sites (which turn the relative offsets into absolute ones by
-    adding the site's base) and the returned-frame COPY (which uses the
-    relative offsets directly, because the destination block is reserved by
-    `struct_returned_frame_sites` with the same rules and therefore has the same
-    internal layout).  Two walks of the nested-field list would agree until the
-    day one of them was edited, and a returned frame copied with a stale layout
-    stores one struct's nested address in another struct's slot — which is the
-    silent wrong number, not a crash.
+    A reader of `struct_block_children` and not a second walk of the nested-field
+    list, because three consumers of that list have to agree about it down to
+    the last byte: the constructor sites turn the relative offsets into absolute
+    ones by adding the site's base, the emitters use them to bring the frames up,
+    and the returned-frame COPY uses them directly, because the destination block
+    is reserved by `struct_returned_frame_sites` with the same rules and
+    therefore has the same internal layout.  Two walks agree until the day one
+    of them is edited, and a returned frame copied with a stale layout stores one
+    struct's nested address in another struct's slot — which is the silent wrong
+    number, not a crash.
     """
-    depth = MAX_NESTED_FRAME_DEPTH if depth is None else depth
-    nested, inner = [], struct_frame_bytes(struct_def)
-    total = struct_frame_bytes(struct_def)
-    if depth > 0:
-        for fname, slot, child in struct_nested_frame_fields(struct_def, decls,
-                                                             depth):
-            nested.append((fname, slot, child, inner))
-            inner += struct_frame_block_bytes(child, decls, depth - 1)
-    total = inner
-    return nested, total
+    return (struct_block_children(struct_def, decls, 0, depth),
+            struct_frame_block_bytes(struct_def, decls, depth))
 
 
 # ── A frame that OUTLIVES the function that built it ─────────────────────
@@ -13394,7 +14519,19 @@ def struct_returned_frame_sites(fn, structs_by_name, returns_frame) -> dict:
         if not isinstance(node, F.CallExpr) \
                 or not isinstance(node.func, F.IdentExpr):
             continue
-        st = returns_frame(node.func.name)
+        # `q = make()`, `var q = make()` and the annotated `q: Point = make()`
+        # are the same binding: an annotated target is still an AssignStmt
+        # (fire_compiler.py:474) and `var q = …` is a VarDecl — see
+        # `frame_binding_target`, which is the one reader of that question.
+        #
+        # The bound NAME is handed to the predicate where there is one and
+        # `None` where there is not, because a call in a position that binds no
+        # name still needs a block (`return make()`, `make().size()`,
+        # `f(make())` — all three dereference the frame immediately, which is
+        # exactly the lifetime this block is sound for) and
+        # `frame_returning_predicate`'s contract is two arguments.
+        name = frame_binding_target(node)
+        st = returns_frame(node.func.name, name)
         if st is None:
             continue
         block = struct_frame_block_bytes(st, structs_by_name)
@@ -13437,7 +14574,197 @@ def returns_on_every_path(stmts) -> bool:
     return returns_on_every_path(rest)
 
 
-def returned_frame_convention_refusal(callee, n_source_args: int) -> str:
+def frame_binding_target(node):
+    """The plain NAME a `VarDecl` / `AssignStmt` binds, or None.
+
+    The one reader of "is this statement a binding of a single name", and it is
+    one function because four readers needed it and three of them had grown
+    their own version: `struct_constructor_bindings` (which locals hold a
+    frame), `struct_returned_frame_sites` (which call sites reserve a block for
+    a frame a callee hands back), and the returned-frame fixpoint that reads
+    the same table out of `_frame_receivers`.  A
+    version that answered for `AssignStmt` but not for `VarDecl` is exactly the
+    gap that let `var q = make()` reserve no block while `q = make()` did — a
+    caller and a callee disagreeing about the same binding.
+
+    `MultiAssignStmt` (`a, b = f()`) and any non-`IdentExpr` target answer None:
+    they bind a tuple, and a frame holder in a tuple position is a different
+    question — and a refusal — rather than a block to reserve.
+    """
+    if isinstance(node, F.VarDecl):
+        return node.name
+    if isinstance(node, F.AssignStmt) and isinstance(node.target, F.IdentExpr):
+        return node.target.name
+    return None
+
+
+def frame_binding_value(node):
+    """The value a `VarDecl` / `AssignStmt` binds, or None for anything else.
+
+    The companion to `frame_binding_target` and for the same reason: the two
+    have to agree about which statements are bindings, or a caller reserves a
+    block for a statement the callee does not treat as one.
+    """
+    if isinstance(node, (F.VarDecl, F.AssignStmt, F.MultiAssignStmt)):
+        return getattr(node, "value", None)
+    return None
+
+
+def struct_constructor_bindings(fn, framed, functions=()) -> dict:
+    """`{name: [struct, …]}` for locals bound from a framed struct's constructor.
+
+    A LIST per name, and that is the fix for a miscompile rather than a
+    refinement: `x = A()` on one path and `x = B()` on another is one name with
+    two frame layouts, and a dict that kept the last binding computed a slot
+    index from that one alone — so on the `A` path `x.v` read `A`'s idea of
+    where `v` is, which is generally not where `A` puts it. Every candidate is
+    kept and `struct_frame_slot_candidates` decides whether they agree.
+
+    The empty list is meaningful and not an oversight: a name bound from a
+    constructor this path does NOT frame holds a plain word, and remembering
+    that is what stops a later `x.f` from being read as a frame slot.
+
+    In the model rather than in `formal/build.py` because four readers need it
+    and they must not be able to disagree: the holder fixpoint asks "which names
+    in this function hold a frame", `formal/build.py`'s `_constructor_bindings`
+    is a delegate, the returned-frame fixpoint asks "which of them does this
+    function build and hand back", and `frame_binding_target`/
+    `frame_binding_value` are the one reader of which STATEMENT binds.  A second
+    copy of this walk would be a caller reserving a block for one struct and a
+    callee building another.
+
+    **`call_lowers_as_framed_construction`, and that is the guard that makes
+    this list agree with the emitters.** Being in `framed` is necessary and not
+    sufficient: a call to a name the emitters route to a type CONVERSION before
+    they reach `_emit_struct_constructor` produces a plain word, and recording
+    it as a construction binding would make the name a three-slot frame HOLDER
+    anyway — so `x.f = v` becomes a store at `[word + 8·slot]`. Measured, both
+    architectures, from a green build:
+
+    ```
+    struct String:                        # three fields, exactly as the stdlib has it
+        var _ptr_or_data: Pointer[UInt8]
+        var _len_or_data: Int
+        var _capacity_or_data: Int
+        def size(self) -> Int: return self._len_or_data
+    def main(n: Int) -> Int:
+        var a = String()
+        a._len_or_data = 5
+        return a.size()
+    ```
+
+    → SIGBUS, exit 138, in read-only `__TEXT`, because the store's base is the
+    address of an interned `""`.  With the guard the name is a plain word, and
+    `a._len_or_data = 5` is `field_access_refusal` — a build error naming the
+    field and the name, which is the answer this backend owes rather than a
+    fault at an address it did not mean to touch.
+
+    `functions` is the image's compiled function names, which the predicate reads
+    for the one case where a name is both a function and a struct: the emitters
+    skip the type-constructor interception for a name they compiled, so the call
+    IS a construction there, and a pass that disagreed on that would refuse a
+    program that builds. Empty means "every name in `framed` is a struct", which
+    is the answer for a reader that has no image — the guard can only be too
+    strict then, never too permissive."""
+    out = {}
+    for node in iter_nodes(getattr(fn, "body", None)):
+        target = frame_binding_target(node)
+        value = frame_binding_value(node)
+        if not target or not isinstance(value, F.CallExpr):
+            continue
+        if isinstance(value.func, F.IdentExpr) and value.func.name in framed:
+            if not call_lowers_as_framed_construction(
+                    value.func.name, framed,
+                    len(value.args or []) + len(value.kwargs or []),
+                    functions):
+                continue
+            # De-duplicated, order kept: `x = A()` twice on two paths is ONE
+            # candidate, and a refusal that printed "a A, A receiver" because it
+            # counted a binding twice would be reporting the walk rather than
+            # the program.
+            got = out.setdefault(target, [])
+            st = framed[value.func.name]
+            if st not in got:
+                got.append(st)
+    return out
+
+
+def frame_returning_predicate(table):
+    """`(callee, bound_name) -> struct or None` over a `{callee: struct}` table.
+
+    **`struct_returned_frame_sites` takes a TWO-argument predicate, and
+    `dict.get` is not one.**  `dict.get` takes `(key, default)`, so handing it
+    over as the predicate makes a MISSING callee answer with the second
+    argument — which is the bound NAME — and every call in a module that
+    declares a multi-field struct is then treated as returning a frame.  The
+    consequence is five extra instructions per call (a zero-byte block whose
+    address is pushed as a ninth argument into a register the callee never
+    reads), so the program's ANSWERS are unchanged and the image is not: and in
+    a module that also has an eight-argument call the ninth push crosses the ABI
+    limit and the program is refused for an argument it never had.  Measured,
+    both:
+
+        # `dict.get` as the predicate
+        call wide(): 9 arguments exceeds the 8 the formal arm64 ABI passes in
+        registers (one of which is the block this callee returns a frame in)
+
+    — for `def wide(a, b, c, d, e, f, g, h)` bound with `var r = wide(...)` in a
+    module that also declares a two-field struct.  The landed
+    `test_returned_frame_layout.py` did not catch it because its `_returns`
+    helper is a real two-argument closure.
+
+    So the predicate is built here, by the function whose contract states the
+    arity, rather than at each of the two call sites that supply one.
+    """
+    def _predicate(callee, _bound_name):
+        return table.get(callee)
+    return _predicate
+
+
+
+
+def returned_frame_container_writes(fn, holder) -> list:
+    """`[(field, why)]` — containers this function writes into the block it
+    RETURNS.
+
+    The one hole the returned-frame convention opens that the by-reference
+    receiver does not.  Premise (B1) says a frame slot never holds a blob,
+    because a blob is bump-allocated in the function that made it, and it is
+    enforced for METHODS (`check_frame_field_blob_premises`).  A returned block
+    outlives the function that made it, so the same reasoning applies with the
+    sign flipped: a blob written into that block names scratch the caller is
+    already using, and the first `q.items.append(1)` after the return writes into
+    the callee's reclaimed stack.
+
+    `holder` is the returned NAME, so this reads the body the same way
+    `struct_field_container_writes` reads a method — one hop of name propagation
+    (`tmp = [1]; p.items = tmp`) and the same three decidable shapes, so a
+    program this cannot decide about is not refused here.
+    """
+    body = getattr(fn, "body", None)
+    containers: set = set()
+    found: list = []
+    _container_binding_names(body, {holder}, containers)
+    _container_write(body, {holder}, found, containers)
+    return found
+
+
+
+
+
+
+# How many source arguments a frame-returning callee may take. Six, because
+# that is what the SMALLER of the two ABIs on this path passes in registers
+# (see `returned_frame_convention_refusal`), and the hidden word is one of
+# them. Named rather than written at each use because the two backends have to
+# apply the same number: a build that answers "8 is fine" on arm64 and
+# "8 is not fine" on x86-64 is a two-backend disagreement about one program.
+RETURNED_FRAME_MAX_ARGS = 6
+
+
+def returned_frame_convention_refusal(callee, n_source_args: int,
+                                      arg_regs: int = RETURNED_FRAME_MAX_ARGS
+                                      ) -> str:
     """The returned-frame convention cannot be applied to this callee.
 
     The copy needs ONE word: the address of the caller's block. Getting it to
@@ -13464,46 +14791,61 @@ def returned_frame_convention_refusal(callee, n_source_args: int) -> str:
        once.
     3. **A trailing argument on the returning function** (chosen). The
        returning function gains one hidden word, and `return <frame>` becomes
-       "copy the block to that word, return that word". This reuses the
-       by-reference receiver convention that already exists — a frame address
-       is one word and the receiver is already passed as one — so it needs no
-       new register, no new calling-convention section, and it leaves the
-       value model, `MojoFunc`, `evalFunc`, `evalBodyEnv` and the machine model
-       untouched. That is the same property the by-reference design was chosen
-       for, and it is why this is a codegen change rather than an ABI one.
+       "build the object in the block that word names, and return that word".
+       This reuses the by-reference receiver convention that already exists — a
+       frame address is one word and the receiver is already passed as one — so
+       it needs no new register, no new calling-convention section, and it
+       leaves the value model, `MojoFunc`, `evalFunc`, `evalBodyEnv` and the
+       machine model untouched. That is the same property the by-reference
+       design was chosen for, and it is why this is a codegen change rather
+       than an ABI one.
 
        The cost is a limit this has to refuse rather than approximate: the
-       hidden word is one more argument, and the SMALLER of the two argument
-       budgets is the one that binds.  Six, not eight, and the reason is
-       x86-64's six integer argument registers rather than anything about the
-       copy — arm64 could carry one more.  A threshold of eight would make the
-       two machines answer differently about one source file, which is the one
-       thing this pair of backends is not allowed to do, so the shared number
-       is the smaller one and the refusal says which budget it is."""
-    if n_source_args >= RETURNED_FRAME_MAX_ARGS:
+       The cost is a limit this has to refuse rather than approximate: the
+       hidden word is an argument register, and this path has a fixed number of
+       them — eight on arm64, six on x86-64, which is why `arg_regs` is a
+       parameter and the message quotes the number it was given. A callee that
+       already takes that many arguments cannot be given the word, and a
+       program that does that is refused HERE, by name, instead of being handed
+       a dropped argument and a frame written into scratch nobody reserved.
+
+       **THE DEFAULT IS THE SMALLER OF THE TWO, and that is a decision rather
+       than an oversight.** The build pass raises this refusal from a DECLARED
+       parameter list (`_check_returned_frame_budget`), before any backend has
+       been chosen, so it cannot quote a per-architecture budget. A build that
+       answered "8 is fine" there and then refused at emission on x86-64 would
+       be a two-backend disagreement about one source file, which is the one
+       thing this pair is not allowed to do — so the shared default is
+       `RETURNED_FRAME_MAX_ARGS` (six), each backend passes its own `arg_regs`
+       when it is the one asking, and the message says which budget it quoted.
+
+       **The block is COPIED into the caller's, not built in place**, and the
+       copy is what a frame that arrived as a PARAMETER needs: `def fwd(r):
+       return r` has no object of its own to build, and the only sound thing it
+       can hand back is a copy taken while its caller's frame is still live. A
+       build-in-place convention is cheaper — it never re-bases a nested
+       frame's ADDRESS into the new block — and it is the right answer for every
+       frame the callee BUILDS. It cannot answer for one it RECEIVED, which is
+       why this tree copies.  `formal-frame-escape` built the build-in-place
+       convention and recorded the shape it cannot cover in
+       `bugs/FORMAL_returned_frame_received_is_still_refused.md`; that doc is
+       deleted because on this tree the received half computes —
+       `test_formal_returned_frame.py`'s `a_received_frame_handed_on` is 7 on
+       both architectures — and the copy is what makes that possible.
+    """
+    if n_source_args >= arg_regs:
         return (
             f"{callee} returns a frame address, so it needs one hidden word "
-            f"for the caller's block — and it already takes {n_source_args} "
-            f"argument(s), which is this path's whole argument budget on the "
-            f"machine with the smaller one: x86-64 passes integer arguments in "
-            f"RDI, RSI, RDX, RCX, R8 and R9 and no more, and the hidden word "
-            f"has to be in a register like every other argument. (arm64's "
-            f"X0..X7 could carry one more, and a limit of eight would let the "
-            f"two machines disagree about the same program, which is worse "
-            f"than refusing a few correct ones.) Copy the struct's fields out "
-            f"instead of returning the object, which is the same program with "
-            f"a lifetime this analysis can follow, or reduce the callee's "
-            f"parameter count")
+            f"for the caller's block — and it already takes "
+            f"{_count_word(n_source_args)} argument"
+            f"{'' if n_source_args == 1 else 's'}, which is this path's whole "
+            f"argument budget: this ABI passes values in "
+            f"{_count_word(arg_regs)} argument registers, and this backend "
+            f"already drops arguments past that for compile-only fidelity. "
+            f"Copy the struct's fields out instead of returning the object, "
+            f"which is the same program with a lifetime this analysis can "
+            f"follow, or reduce the callee's parameter count")
     return ''
-
-
-# How many source arguments a frame-returning callee may take. Six, because
-# that is what the SMALLER of the two ABIs on this path passes in registers
-# (see `returned_frame_convention_refusal`), and the hidden word is one of
-# them. Named rather than written at each use because the two backends have to
-# apply the same number: a build that answers "8 is fine" on arm64 and
-# "8 is not fine" on x86-64 is a two-backend disagreement about one program.
-RETURNED_FRAME_MAX_ARGS = 6
 
 
 def frame_return_mixed_refusal(owner, frame_spelling, word_spelling,
@@ -13576,6 +14918,43 @@ def frame_return_candidates_refusal(owner, rows) -> str:
             f"with one width per name")
 
 
+def frame_return_overloads_disagree_refusal(name, rows) -> str:
+    """An OVERLOADED name whose definitions disagree about returning a frame.
+
+    The same question `frame_return_mixed_refusal` asks, one level out: there the
+    two answers were two paths of ONE body, and here they are two definitions of
+    ONE name — which is what a Mojo overload is, and it is ordinary (`reversed`
+    is declared eight times in `std/builtin/reversed.mojo`). A call site carries
+    a name and nothing else, so "does `f(...)` hand back a frame address, and
+    whose" has to be one answer for the whole image, and here it is not one.
+
+    Both wrong answers are silent, which is why this is a refusal and not a
+    choice:
+
+      * answer "frame" for every call, and the definition that returns a word
+        leaves the caller's reserved block unwritten — the caller then reads
+        whatever the scratch held;
+      * answer "word", and the definition that returns a frame writes through a
+        block address its caller never reserved.
+
+    Every row is spelled out, because the reader's next question is which
+    definition to change and the file's own text is the only thing that can
+    answer it.
+    """
+    parts = []
+    for spelling, answer in rows:
+        parts.append(f"`{spelling}` returns {answer}")
+    return (f"{name} is declared more than once in this module and its "
+            f"definitions disagree about whether they return a frame address: "
+            f"{'; '.join(parts)}. A call `{name}(...)` names both, so this "
+            f"path cannot tell whether to reserve a block for the result — "
+            f"reserve one and the word-returning definition leaves it "
+            f"unwritten, do not and the frame-returning one copies through a "
+            f"block address its caller never passed. Give the overloads one "
+            f"return convention (return a field from both, or the frame from "
+            f"both), or give the disagreeing ones different names")
+
+
 def entry_frame_return_refusal(entry) -> str:
     """The ENTRY function returning a frame.
 
@@ -13624,6 +15003,65 @@ def dylib_frame_return_refusal(module, names) -> str:
             f"argument register held. Return a field, or a copy of one; that "
             f"is the same program across a boundary with a lifetime both ends "
             f"can see")
+
+
+
+_COUNT_WORDS = {0: "no", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+                6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+
+
+def _count_word(n: int) -> str:
+    """`n` as a word, because a diagnostic is read rather than parsed.
+
+    Falls back to the digits for anything outside the table rather than
+    inventing a word: an argument count above ten is already a refusal about
+    the count, and spelling it wrongly would be a second thing to be wrong
+    about.
+    """
+    return _COUNT_WORDS.get(n, str(n))
+
+
+
+def returned_frame_library_refusal(name: str) -> str:
+    """A dylib cannot export a function that returns a frame.
+
+    The convention needs the CALLER to reserve the block, and the caller is a
+    compilation this build does not perform: an importer gets the symbol and
+    nothing else, so it would have to reserve a block for a callee whose
+    returned width it cannot see. Refusing here is the honest answer rather
+    than emitting a function whose every importer gets wrong."""
+    return (f"{name} returns a frame address, so it cannot be compiled into a "
+            f"dylib: the returned-frame convention needs the CALLER to reserve "
+            f"the block the object is built in, and an importer of this library "
+            f"is a compilation this build does not perform — it binds the "
+            f"symbol and has no way to learn the width of the block it must "
+            f"reserve. Build it into the program image instead, where the "
+            f"caller and the callee are compiled together")
+
+
+
+
+def returned_frame_blob_refusal(fn_name: str, holder: str, field: str,
+                                spelling: str) -> str:
+    """A CONTAINER written into the block this function hands back.
+
+    The one hole the convention opens that the by-reference receiver does not:
+    premise (B1) says a frame slot never holds a blob, and it is enforced for
+    METHODS (`check_frame_field_blob_premises`) because a blob is bump-allocated
+    in the function that made it. A returned block outlives the function that
+    made it, so a blob in one would be an address into scratch the caller is
+    already using for its own frames — and a later `q.items.append(1)` would
+    write into the callee's reclaimed stack. The program builds, runs, and
+    returns a number nobody wrote."""
+    return (f"{fn_name} returns {holder!r}, whose block outlives this "
+            f"function, and it assigns {spelling} to {holder}.{field} — a list "
+            f"or a dict on this path is a bump-allocated region of the "
+            f"function's OWN scratch, so the slot would name bytes this "
+            f"function is about to give back and a later append through it "
+            f"would write into reclaimed stack. Copy the elements out into the "
+            f"returned block's own fields, which is the same program with a "
+            f"lifetime this analysis can follow")
+
 
 
 # What a FRESH one-word value has to hold, and whether this path can produce it.
@@ -13844,6 +15282,72 @@ def _slot_rows(candidates, name):
     return [(st.name, struct_frame_slot(st, name)) for st in (candidates or ())]
 
 
+def ambiguous_method_specialization_refusal(chain, member, owners) -> str:
+    """`recv.m[T](x)` where two structs in this image declare `m`.
+
+    A refusal whose stated reason was **entirely false**, which is the defect
+    class §4 of `bugs/FORMAL_frame_receiver_handoff.md` is three examples of.
+    It was refused as `b.run names 'run', which is a METHOD of Box … a
+    value-position method reference is a bound method`, which is a claim about a
+    program that has no such reference in it: `b.run[3](4)` is a CALL, the
+    brackets bind `run`'s comptime parameter, and the sentence told the reader to
+    add parentheses to a program that already had them.
+
+    The reason it cannot be lifted is narrower than any of the sentences that
+    replaced it, and it is a fact about THIS MODULE'S DECLARATIONS rather than
+    about the backend's capabilities:
+
+      * `_rewrite_method_calls` dispatches by NAME, because a receiver's type is
+        not inferred on this path, so `run` has no single owner to lift to;
+      * and `Box` and `Other` both declare it, so picking either would compile
+        the callee against one struct's field list and call it with a receiver
+        that may be the other — a wrong answer with exit 0.
+
+    So the reader's next step is in their own source, and this says which of the
+    two things they can do about it.  `bugs/FORMAL_frame_receiver_handoff.md`
+    §18 measured the shape across the corpus: it is what still refuses
+    `std/runtime/_asyncrt.mojo` and `std/utils/index.mojo` of the eight files the
+    sweep reported as value-position method references.
+
+    **`owners` is every struct that declares `member`, and the message names all
+    of them rather than the receiver's own** — deliberately.  Nothing here
+    establishes which struct `{chain.split('.')[0]}` holds: a receiver's type is
+    not inferred on this path, which is the premise of the whole refusal. So a
+    version that said "whose type is Box — the receiver's OWN struct" would be
+    asserting the very thing it cannot know, and it would be asserting it in the
+    clause that decides the verdict.
+
+    **The advice is a RENAME and nothing else, and that is measured rather than
+    guessed.**  Qualifying the call with the owning struct — `Box.run[...](...)` —
+    reads as the obvious fix and does not work: a specialization of a DOTTED
+    callee is not `recv.m(x)`, so `_rewrite_method_calls` has no receiver to
+    prepend and no parameter list to read, and it lands on
+    `frame_opaque_position_refusal`'s `callee_shape` arm instead.  Measured on
+    this very program with the qualification added: refused with "The callee of
+    this call is Box.run[3], which names no function this pass has a parameter
+    list for".  That is the fifth shape
+    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` records, and offering
+    it here would send the reader into a second refusal with the first one
+    closed.  A rename is enough: with one `run` in the image the name
+    dispatches, and the lift is the ordinary one.
+    """
+    names = ", ".join(st.name for st in owners)
+    holder = chain.split(".")[0]
+    return (
+        f"{chain}[…](…) is a method CALL — the brackets bind a generic's "
+        f"comptime parameters, so this is `{chain}(...)` and not a subscript of "
+        f"a value — and {member!r} is declared by {names}. It cannot be lifted "
+        f"because all of them declare it: dispatch on this path is by NAME, "
+        f"since a receiver's type is not inferred, so there is no one function "
+        f"to lift this call to, and binding any of them would compile the "
+        f"callee against that struct's field list and call it with a receiver "
+        f"that may be a different one — a wrong answer rather than a failure. "
+        f"Rename one of them, so that the name dispatches to a single "
+        f"declaration; writing the call out (`{holder}.{member}[...]` becomes "
+        f"`{owners[0].name}_{member}[...]({holder}, ...)`) also works"
+    )
+
+
 def member_read_without_a_field(chain, holder, name, candidates) -> str:
     """Why `holder.<name>` has no slot: a message, for the three real shapes.
 
@@ -13876,6 +15380,20 @@ def member_read_without_a_field(chain, holder, name, candidates) -> str:
     for, and that is the whole of what changed: the class of program that
     refuses is identical and the sentence about why is no longer a description
     of a disagreement that did not happen.
+
+    **What is deliberately NOT a fourth shape here**, and its absence is a
+    measurement rather than an oversight.  A METHOD CALL this pass could not lift
+    — `b.run[3](4)` with `Box` and `Other` both declaring `run` — used to arrive
+    at this function and be reported by the second bullet above, which is false
+    about it in every clause: it is a call and not a value-position reference,
+    and `run` is a method of the receiver's OWN struct, which is the hand-off
+    `bugs/FORMAL_frame_receiver_handoff.md` §1 measures to be sound.  It has its
+    own message, `ambiguous_method_specialization_refusal`, reached from
+    `formal/build.py`'s `check_module_symbols` instead — which is where the
+    BRACKET is examined, and therefore the only place the ambiguity is knowable
+    (`iter_nodes` has no parent, so nothing here can tell a call's subscript from
+    a subscript of a value).  A flag on this function carrying that fact would
+    have been an argument the caller does not have.
     """
     owners = structs_declaring_method(candidates, name)
     if owners:
@@ -13887,6 +15405,42 @@ def member_read_without_a_field(chain, holder, name, candidates) -> str:
             f"nothing to store it in, so this path has no representation for it. "
             f"Call it (`{holder}.{name}(...)`), which is a receiver and a call "
             f"and lowers, or write the operation out where it was used"
+        )
+    # NO candidate has the field, as against SOME having it and some not. Both
+    # reach here as `disagree`, because `struct_frame_slot_candidates` reports
+    # "these candidates do not agree on a slot for `name`" and "no candidate has
+    # one" with the same `(None, (True, rows))` — the second is a special case of
+    # the first, and its docstring says so. The single-candidate case below
+    # already reads correctly ("`W1` has no field `x`"), so this branch is only
+    # for TWO OR MORE candidates, and it exists because with several the old
+    # sentence claimed a conflict that does not exist.
+    #
+    # Measured on `std/io/io.mojo`, whose `buffer.unsafe_mut_cast` produced
+    # "_FlushingWriteBuffer has no such field; _FixedWriteBuffer has no such
+    # field" and then "the shapes do not agree on where 'unsafe_mut_cast'
+    # lives". They agree perfectly — neither has it, and `unsafe_mut_cast` is a
+    # method of `Pointer` — so the reader was sent to two structs' layouts
+    # instead of to the receiver's type. The method branch above cannot catch
+    # it, because that searches the CANDIDATE structs and `Pointer` is not one:
+    # the candidates are what `buffer`'s own bindings are, not the types its
+    # members come from.
+    rows = _slot_rows(candidates, name)
+    if len(candidates) > 1 and all(sl is None for _sn, sl in rows):
+        return (
+            f"{chain} is a field of {holder}, and NO candidate has field "
+            f"{name!r} — "
+            + "; ".join(f"{sn}: {struct_field_summary(cand)}"
+                        for (sn, _sl), cand in zip(rows, candidates))
+            + ". So this is not a disagreement between layouts, which is what "
+              "the candidates-not-agreeing case would say: there is nothing to "
+              "disagree about, and no slot index is being chosen between them. "
+              f"{name!r} is something the receiver's own structs do not spell "
+              f"out at all — a method of the receiver's type rather than one of "
+              f"its fields, or a field reached through a base this path does not "
+              f"flatten — or the program raises at run time, since in Python a "
+              f"missing attribute is an AttributeError. Refused rather than read "
+              f"a word it cannot place: a frame slot holds one 64-bit word and "
+              f"there is no `k` to read"
         )
     if len(candidates) == 1:
         st = candidates[0]
@@ -14569,8 +16123,30 @@ def folded_literal_node(folded, template):
     return F.IntLiteral(value=folded, line=line, col=col, raw="")
 
 
-def _imported_names(stmt) -> list:
-    """`[(bound name, module)]` for one module-level import statement."""
+def import_bindings(stmt) -> list:
+    """`[(local name, module as spelled, name defined there)]` for one import.
+
+    THE reader of what an import binds in this file, and the three pieces are
+    all of them load-bearing somewhere:
+
+      * the LOCAL name, which is what every read and every call site spells —
+        `from m import f as g` binds `g`, and a compiler that resolves `g` by
+        itself produces a BL against a symbol nothing defines;
+      * the MODULE AS SPELLED, because that is the key the linked library's
+        manifest is filed under. `model.dylib_export_module` falls back to
+        `abi_module_name(spelling)`, so `os.path`, `._syscalls` and
+        `.._syscalls` each reach the one library that was built for them —
+        including the relative spellings, whose manifests are keyed by the dot
+        flattened (`__syscalls`);
+      * the DEFINING name, which is only ever different from the local one when
+        there is an `as`, and which is the name the export table is keyed by.
+
+    A module binding (`import m`, `import m as n`) has no function to define,
+    so its "defined name" is the module name itself: `n.f` is spelled
+    `n.f` and reaches `f` of the module, which is `dylib_export_lookup`'s
+    question and not this one's. `import a.b` binds `a`, which is why the
+    bound name is the FIRST dotted component.
+    """
     kind = type(stmt).__name__
     if kind == "ImportStmt":
         mod = getattr(stmt, "module", None) or getattr(stmt, "name", None)
@@ -14579,18 +16155,17 @@ def _imported_names(stmt) -> list:
             part = part.strip()
             if not part:
                 continue
-            out.append((part.split(".")[0], part.split(".")[0]))
+            out.append((part.split(".")[0], part, part))
             # `import a.b` binds `a`, and `a.b` is a module the dylib resolver
             # owns; the alias `as` form binds the alias.
             alias = getattr(stmt, "asname", None)
             if alias:
-                out.append((alias, part))
+                out.append((alias, part, part))
         return out
     if kind == "FromImportStmt":
         mod = getattr(stmt, "module", None) or getattr(stmt, "name", None)
-        names = getattr(stmt, "names", None) or []
         out = []
-        for pair in names:
+        for pair in (getattr(stmt, "names", None) or []):
             if isinstance(pair, (tuple, list)):
                 orig = pair[0]
                 alias = pair[1] if len(pair) > 1 else None
@@ -14598,9 +16173,14 @@ def _imported_names(stmt) -> list:
                 orig, alias = pair, None
             if not isinstance(orig, str):
                 continue
-            out.append((alias or orig, str(mod)))
+            out.append((alias or orig, str(mod), orig))
         return out
     return []
+
+
+def _imported_names(stmt) -> list:
+    """`[(bound name, module)]` for one module-level import statement."""
+    return [(bound, module) for bound, module, _defined in import_bindings(stmt)]
 
 
 # The dunders and module attributes a bare read may legitimately name. Small on
@@ -14791,6 +16371,64 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
             f"Write the operation in this module, or call a public function "
             f"that does it — which is the same program with a definition this "
             f"image can bind")
+
+
+def module_attribute_refusal(spelling: str, module: str, leaf: str,
+                             fn_name: str, published) -> str:
+    """The diagnostic for reading `module.leaf` as a VALUE.
+
+    A DIFFERENT fact from `module_global_refusal`'s "imported" arm, and the
+    difference is the whole of this function. That arm is raised about a BARE
+    name — `from sys import argv`, then `argv` — and it says "this name's value
+    is a real global with nowhere to live". It is true there, because `argv`
+    genuinely is a global of `sys`.
+
+    Here the name being refused is a MODULE (`sys`), and a module is not a
+    global, not a variable, and not a value with nowhere to live: it is the
+    library on the link line, and the thing being read is its ATTRIBUTE `argv`.
+    Saying "there is no storage for a variable called `sys`" is a claim about a
+    variable that does not exist, and it sends the reader to look for storage for
+    the one name in the program that needs none — measured, this is what
+    `t_argv.mojo`, `mojo.mojo`, `tools/ab_filelist.py`, `tools/audit_determinism.py`,
+    `tools/ci_line.py` and `tools/detach.py` were each refused with, on both
+    architectures, all six of them naming `sys`.
+
+    So the sentence is about the ATTRIBUTE and it says what the boundary can
+    publish, which is the same fact `dylib_extern_symbol` states for a dotted
+    CALL: a dylib exports functions (as symbols) and module-level names the
+    build FOLDED TO A LITERAL (as values, because a literal needs no storage to
+    cross). `sys.argv` is neither — it is a list, and §(4) of
+    `bugs/FORMAL_module_state_no_storage.md` records that the command line is
+    gone before the first statement runs, so there is nothing in it either.
+
+    `published` is the list of what the module DOES publish, so a reader can see
+    in one line whether the name they wrote is one of the module's own or a
+    capability it does not have. That is `dylib_extern_symbol`'s own device,
+    reused rather than reinvented."""
+    who = f"{fn_name}: " if fn_name else ""
+    shown = ", ".join(sorted(published)[:8])
+    if len(published) > 8:
+        shown += ", …"
+    if not shown:
+        shown = ("nothing under a name a caller can bind — every name it "
+                 "publishes is re-exported, and the modules it re-exports from "
+                 "publish none of this one")
+    return (f"{who}{spelling} reads {leaf!r} out of the imported module "
+            f"`{module}`, and a module is not a value this path can place: "
+            f"there is no register, frame slot or `__DATA` word for it because "
+            f"it is not one — it is the library on this link line, and what a "
+            f"dylib publishes is its FUNCTIONS (as symbols, so "
+            f"`{module}.fn(...)` lowers) and its module-level names the build "
+            f"FOLDED TO A LITERAL (as values, so `{module}.K = 1` lowers — "
+            f"there is exactly one value of a folded module-level name in a "
+            f"whole program, so the importer materializes the same one). What "
+            f"it cannot publish is a VARIABLE, and `{leaf}` is one: a list, an "
+            f"object or a stream has no representation as a word on the other "
+            f"side of the boundary, because every value a formal program can "
+            f"name lives in a function's own stack scratch, which is reclaimed "
+            f"when the function returns. What `{module}` publishes: {shown}. "
+            f"`bugs/FORMAL_module_state_no_storage.md` records the design and "
+            f"what would have to be true to close it, and §(2) is this shape")
 
 
 def module_global_refusal(name: str, sym, fn_name: str) -> str:
@@ -15642,6 +17280,16 @@ def subscript_chain_text(expr) -> str:
     idx = expr.index if isinstance(expr, F.SubscriptExpr) else None
     if isinstance(idx, (F.TupleExpr, F.ListExpr)):
         inner = ", ".join(expr_spelling(e) for e in (idx.elements or []))
+    elif isinstance(idx, F.IntLiteral) and getattr(idx, "raw", None) == "":
+        # A PLACEHOLDER index, and the source had no 0 there: the parser keeps
+        # `IntLiteral(value=0, raw='')` for a subscript whose contents it does
+        # not keep in `index` — an empty `x[]`, a star-unpacked `Tuple[*Ts]`,
+        # and a keyword-attribute subscript (see `_parse_subscript`'s three
+        # `raw=''` constructions). Spelling it `Tuple[0]` states that the file
+        # contains a 0, which is the kind of false claim this function exists to
+        # avoid, so it is spelled as the placeholder it is — the same `{…}`
+        # convention a dict display already uses here.
+        inner = "…"
     else:
         inner = expr_spelling(idx)
     if isinstance(base, F.IdentExpr):
@@ -15666,8 +17314,21 @@ def expr_spelling(node) -> str:
     a model function must not reach up into the build pass for a string."""
     if isinstance(node, F.IdentExpr):
         return node.name
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
-        return f"{node.func.name}({', '.join(expr_spelling(a) for a in (node.args or []))})"
+    if isinstance(node, F.CallExpr):
+        # The callee is spelled by the same two helpers as any other position,
+        # so `TypeList.reduce[Self._mapper]()` and `Intrinsics.read[0]()` come
+        # out as themselves. Restricting this arm to a bare `IdentExpr` callee
+        # printed `CallExpr` — a bare placeholder, in a diagnostic whose whole
+        # job is to name the thing — for every specialization in the new-modular
+        # stdlib (`_integral_type_of[Self.dtype]()`, 100+ of them).
+        return (f"{expr_spelling(node.func)}"
+                f"({', '.join(expr_spelling(a) for a in (node.args or []))})")
+    if isinstance(node, F.UnaryOp):
+        # `-1` is an IntLiteral inside a UnaryOp, and `type(node).__name__` is
+        # what the fallback below said about it — "UnaryOp" in a sentence about
+        # a class attribute whose value the reader is being sent to look at.
+        word = "not " if node.op == "not" else node.op
+        return f"{word}{expr_spelling(node.operand)}"
     if isinstance(node, F.MemberExpr):
         return member_chain_text(node)
     if isinstance(node, F.SubscriptExpr):
@@ -15680,6 +17341,19 @@ def expr_spelling(node) -> str:
         inner = ", ".join(expr_spelling(e) for e in (node.elements or []))
         return (f"[{inner}]" if isinstance(node, F.ListExpr)
                 else f"({inner})")
+    if isinstance(node, F.StringLiteral) and isinstance(node.value, str):
+        # QUOTED, and that is the whole of this arm: the `("value", "name")`
+        # loop below prints `str("a")`, which is `a` — a bare name the file does
+        # not contain, where the source wrote `"a"`. A diagnostic that
+        # reproduces the file with a token missing sends the reader looking for
+        # an identifier, and this function's contract is that its output is the
+        # source's own spelling. `repr` is the closest available rendering for
+        # the general case (it is what the source would have to write for the
+        # same characters) and `b'…'` is kept for the bytes form so a bytes
+        # literal is not quoted as text.
+        if getattr(node, "is_bytes", False):
+            return "b" + repr(node.value.encode("utf-8", "surrogateescape"))
+        return repr(node.value)
     if isinstance(node, F.DictExpr):
         return "{…}"
     for attr in ("value", "name"):

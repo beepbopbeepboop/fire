@@ -2414,8 +2414,11 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             obj_type, obj_val = gen.lower_expr(obj_expr)
             eq = gen._isinstance_one_type(obj_type, obj_val, type_name)
             if node.op == 'is not':
-                neg = gen._new_val('_Bool', f'!{eq}')
-                return '_Bool', neg
+                # `_bool_not`, not `f'!{eq}'`: GIMPLE has no `!` operator, so
+                # the literal spelling is a hard parse error in every
+                # `__GIMPLE`-tagged body ("'!' not valid in GIMPLE before '!'
+                # token"). `eq` is a `_Bool` temp by construction.
+                return '_Bool', gen._bool_not('_Bool', eq)
             return '_Bool', eq
 
     if node.op == '//':

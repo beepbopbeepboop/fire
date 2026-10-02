@@ -90,22 +90,28 @@ class Case:
     """
 
     def __init__(self, name, source, expect=None, oracle=None, refusal=None,
-                 archs=None):
+                 archs=None, archs_reason=None):
         self.name = name
         self.source = source
         self.expect = expect
         self.oracle = oracle
         self.refusal = refusal
-        # Which architectures this case can run on, or None for all of them.
-        # One case needs it: anything that imports `os`/`os.path` builds a
-        # module dylib that calls the C library, and such a dylib is arm64-only
-        # on this backend — the loader refuses it under x86-64 with
-        # `main executable failed strict validation`
-        # (bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md, and
-        # the note at the top of `formal/hostmods/os/__init__.mojo`). The cases
-        # that are pure BACKEND constructs run on both, because that agreement
-        # is the evidence they exist for.
+        # Which architectures this case can run on, or None for all of them, and
+        # WHY when the list is short. The reason is a constructor argument and
+        # not a sentence in the runner because this file used to carry ONE
+        # reason for every skip, printed for all of them, and it was false:
+        # "an `os` dylib that calls the C library is arm64-only on this
+        # backend" (and a `bugs/` doc that does not exist). It was false in the
+        # direction that hides defects — it is the only reason
+        # `os.listdir` answered wrongly on x86-64 for as long as it did, because
+        # the case that would have caught it was skipped for a fiction. An
+        # `os`-importing program builds and RUNS under `arch -x86_64` on this
+        # backend, measured: `os.getcwd` prints the right directory, and so do
+        # `os.listdir` and every `os.path` field once the C names macOS spells
+        # two ways bind to the right one (`model.target_libc_symbol`). One case
+        # here is still arm64-only and says so with the refusal it hits.
         self.archs = archs
+        self.archs_reason = archs_reason
 
 
 # ── 1. `s[i]` on a String-annotated parameter ──────────────────────────────
@@ -282,9 +288,17 @@ def main(n):
     {"a": "[hAllZ]"},
 ))
 
-# x86-64 REFUSES an augmented assignment through a subscript outright
-# (`augmented assignment target must be a plain name`), which is an honest
-# refusal rather than a wrong answer and is not what this case is about.
+# An augmented assignment THROUGH A SUBSCRIPT — the read-modify-write, which is
+# a separate emitter from the plain-name one because the address has to be
+# computed once and kept across the evaluation of both the element and the
+# right-hand side. x86-64 used to REFUSE this outright
+# (`augmented assignment target must be a plain name`), which made this case
+# arm64-only and left the construct unpinned on one architecture;
+# `formal/x86_64_codegen.py` now lowers it as `_emit_subscript_aug`, arm64's
+# twin, so the `archs=["arm64"]` that documented the refusal is gone. The wider
+# coverage of the construct — every operator, a byte element, a list element, an
+# index that is a call — is in `test_formal_x86_64_parity.py`, which checks both
+# architectures against CPython rather than against a constant written here.
 CASES.append(Case(
     "pointer_subscript_augmented",
     '''\
@@ -299,7 +313,6 @@ def main(n):
     return 0
 ''',
     {"a": "15", "b": "21"},
-    archs=["arm64"],
 ))
 
 # A NEGATIVE index moves the address backwards, which is C's subscript and is
@@ -389,7 +402,6 @@ def main(n):
     return 0
 ''',
     {"a": "1", "b": "0", "c": "1", "d": "1", "e": "1"},
-    archs=["arm64"],
 ))
 
 CASES.append(Case(
@@ -692,10 +704,24 @@ def build(src, out, arch):
 
 
 def run(out, arch):
+    """`(rc, stdout, stderr)` for one image, a HANG reported rather than raised.
+
+    A timeout is a FAILURE of the case, not of the suite: a formal image that
+    never terminates is one of the wrong answers this file exists to catch, and
+    the way it showed up before was `subprocess.TimeoutExpired` escaping `main`
+    and taking the remaining twenty-odd cases with it — so the one case that
+    hangs is reported and every other case still runs. `rc` is the shell's
+    timeout convention (124) and stderr names the timeout, so the caller sees a
+    case that failed with a reason rather than a case that vanished.
+    """
     argv = [out]
     if arch == "x86_64" and sys.platform == "darwin":
         argv = ["arch", "-x86_64", out]        # Rosetta 2
-    p = subprocess.run(argv, capture_output=True, text=True, timeout=RUN_TIMEOUT)
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=RUN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 124, "", f"the image did not finish within {RUN_TIMEOUT}s"
     return p.returncode, p.stdout, p.stderr
 
 
@@ -837,8 +863,7 @@ def build_stat_case(path, tmpdir):
     src = STAT_PROGRAM.replace("@@PATH@@",
                                path.replace("\\", "\\\\").replace('"', '\\"'))
     return Case("stat_" + os.path.basename(path).replace(".", "_"),
-                src, None, oracle=lambda: _stat_oracle(path),
-                archs=["arm64"])
+                src, None, oracle=lambda: _stat_oracle(path))
 
 
 def main():
@@ -870,7 +895,7 @@ def main():
         cases.append(build_stat_case(os.path.join(fixture, "no-such"),
                                      tmpdir))
 
-        cases.append(Case("listdir_and_walk", "", None, archs=["arm64"]))
+        cases.append(Case("listdir_and_walk", ""))
         names = args.cases or [c.name for c in cases]
         by_name = {c.name: c for c in cases}
         for n in names:
@@ -882,10 +907,7 @@ def main():
             if case.name == "listdir_and_walk":
                 for arch in archs:
                     if arch not in (case.archs or archs):
-                        print(f"SKIP {n} [{arch}]  (an `os` dylib that calls "
-                              f"the C library is arm64-only on this backend: "
-                              f"bugs/FORMAL_x86_64_dylib_with_an_extern_call_"
-                              f"does_not_load.md)")
+                        print(f"SKIP {n} [{arch}]  ({case.archs_reason})")
                         continue
                     total += 1
                     ok, detail = run_listdir_case(arch, tmpdir, fixture,
@@ -897,10 +919,7 @@ def main():
                 continue
             for arch in archs:
                 if case.archs is not None and arch not in case.archs:
-                    print(f"SKIP {n} [{arch}]  (an `os` dylib that calls the C "
-                          f"library is arm64-only on this backend: "
-                          f"bugs/FORMAL_x86_64_dylib_with_an_extern_call_"
-                          f"does_not_load.md)")
+                    print(f"SKIP {n} [{arch}]  ({case.archs_reason})")
                     continue
                 total += 1
                 ok, detail = run_case(case, arch, tmpdir, args.verbose)

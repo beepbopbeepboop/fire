@@ -1,3 +1,87 @@
+## Status (2026-10-01 — "Still open 3" re-measured; the loop MODELS are still the whole of it)
+
+`test_formal.py` (arm64) on this tree: **`PASS=39 KNOWN-GAP=6 FAIL=0`**, and the
+arm64 `sorry` census is **2** — both in `sum_range`, none in `countdown`/`wge`
+(they are in `EXPECTED_FAILURES`, so their proof failing is not a hole; the
+census only counts declarations in a proof that Lean accepted). The 6 gaps are
+`both`, `countdown`, `either`, `fib`, `subscript_var`, `wge`, and two of the
+seven sorries the 2026-09-26 entry counted are gone for an unrelated reason
+(the recursion contract's forced `B.cond`, `8c1011ae`).
+
+**"Still open 3" below is unchanged and is still the only unfinished thing in
+this document.** What is new is that the CODEGEN half is now *measured* rather
+than argued, which pins the work to the model side and nothing else:
+
+```
+$ cat .tmp/cases/negloop3.mojo
+def negloop3():
+    n = 0 - 3
+    while n > 0:
+        n = n - 1
+    return n
+$ python3 fire.py build --formal --no-prove -o .tmp/cases/negloop3.aout --backend=arm64 …
+Built: .tmp/cases/negloop3.aout  [arm64/macho]
+$ .tmp/cases/negloop3.aout ; echo $?      # the return value is the exit status
+253
+$ python3 -c '…same function…'            # -3, and -3 & 0xff = 253
+-3
+```
+
+So a negative counter really does leave `while n > 0` immediately and is
+returned unchanged, and `countdown_go`'s `= 0` is the wrong answer for exactly
+the inputs the sign bit selects. The lowering needs no work; the MODEL does.
+
+### The three sites, and what each one has to become
+
+`Still open 3` names the fix in the abstract. These are the concrete places,
+all in `formal/arm64_proof_gen.py`, and a session should start here rather than
+re-deriving them.
+
+1. **`_go_defs_for`, the `_dec_while_pattern` arm (~line 1091).** Emits
+   `def {f}_go : Nat → UInt64 | 0 => 0 | k + 1 => {f}_go k` and
+   `{f}_go_zero : ∀ n, {f}_go n = 0` (proved by induction). The model has to
+   become `fun m => if m < 9223372036854775808 then 0 else
+   UInt64.ofNat (m % 18446744073709551616)`, and `_go_zero` becomes
+   `∀ m, m < 9223372036854775808 → {f}_go m = 0`. **Every current caller of
+   `_go_zero` passes it as a whole simp set** — `{f}_go_zero` is closed over by
+   the exit-x0 leaf of `_gen_countdown_loop` (~line 3211), by the loop
+   contract's instantiation (~line 3313), by the CFG walk's terminal value flow
+   (~line 4590) and by `_gen_dec_while_block` itself (lines 6352, 6403); it is
+   also collected by name at 1413/1419. So each of those is a site that must
+   now supply the sign fact, and 1413/1419 need no change (a name, not a
+   signature). Grep for `_go_zero`, not for the model.
+2. **`_gen_dec_while_block` (~line 6228), the `runF` bridge.** `pred_iff` states
+   the source predicate `_PRED` (which `lib/ProofLib.lean`'s `evalExpr` reads
+   **signed**, as `sKey l < sKey r`) and proves it with the **unsigned**
+   `UInt64.lt_iff_toNat_lt` / `le_iff_toNat_le`. Those agree only for
+   `m < 2^63`. This is the reported failure, verbatim from the run:
+
+   ```
+   ⊢ (if sKey 0 < sKey (UInt64.ofNat m) then 1 else 0) = if 0 < UInt64.ofNat m then 1 else 0
+   ```
+
+   `_PRED` needs the `m < 2^63` conjunct the sign bit forces, proved from
+   `(UInt64.ofNat m).toNat = m % 2^64` (the `prelude`'s `ofNat_toNat_mod`
+   already exists for exactly this), and `prog_correct`'s `Nat.eq_zero_or_pos
+   (m % S)` split needs a third case for `m % 2^64 ≥ 2^63` — one
+   `runF_while_false` step plus the identity, which is what the new model says.
+   `NE` (`wdiff`) is signedness-independent and must keep its `exact Iff.rfl`;
+   `wdiff` passes today and is the canary for "the change did not leak into the
+   unsigned case".
+3. **`_gen_countdown_loop` (~line 2976), the machine loop contract.** Its
+   exit-x0 leaf closes with `simp [mojo, {f}_go_zero]`, which is right only
+   because `_go_zero` was unconditional. With the split model the same leaf
+   needs a `by_cases` on `arg < 2^63`: below it, the old simp; above it, the
+   argument is that the loop never ran and `hcondDone` already pins the exit
+   `x0` to the original `done` value, i.e. to `arg` — so the leaf becomes
+   `arg = mojo arg` discharged by `UInt64.ofNat_toNat`. That is the shape to
+   aim for; the machine half itself is already sound (the measurement above).
+
+The reusable piece, as this document already said, is a signed-order lemma
+bridge from `Nat` to the two's-complement word. `lib/ProofLib.lean`'s `sKey`
+and its `arm64_flag_*_s` lemmas are the right shape and only need that bridge;
+`UInt64.toNat_ofNat'` and `Nat.mod_eq_of_lt` are what carry `m % 2^64`.
+
 ## Status (2026-09-27 — NOT ATTEMPTED: the only remaining work here is `formal/`, and that was out of scope this session)
 
 Recorded so the next session with a `formal/` budget does not re-derive this.

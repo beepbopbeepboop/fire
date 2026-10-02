@@ -11,6 +11,17 @@ value with a source this path does not have (`sys.argv`'s command line). Read
 this document was written on (`ca6e758`) and the landed half is described with
 its own.**
 
+**The DIAGNOSIS half of (2) landed 2026-10-01** (`construct:module-name-as-a-value`,
+commit `663f174d`): a dotted READ of a module — `sys.argv`, `sys.stderr` — was
+refused with a STORAGE claim about the module itself, and every clause of that
+sentence was false about the name it named. It now names the attribute, states
+what the boundary publishes, and prints what the module does publish. **No file
+moved to pass and no capability was added** — the ceiling on folding these reads
+is 0 of 6, measured per use, because none of the six uses is a compile-time fact
+and `argv`'s source does not exist on this path. The measurement is the
+"Re-measured 2026-10-01" block in "What moved"; the reword, and why the member
+refusal is load-bearing rather than cosmetic, are in §(2).
+
 Found while writing the `sys` module for the formal backend (2026-09-29, the
 `module:sys` claim). Every measurement in "Measured" and "What this costs" is
 from that tree; the sweep in "What moved" was re-measured on the landed tree and
@@ -108,6 +119,42 @@ reason below. `sys.argv` (a list), `sys.stderr` (an object) and `sys.modules` (a
 dict) are all in that set, and the refusal message now says which of the two
 kinds it is — a dylib publishes FUNCTIONS and folded CONSTANTS, and what it
 cannot publish is a VARIABLE.
+
+**The DOTTED spelling of this same boundary got its own message, and the reason
+is that the old one was false about the name it named** (2026-10-01,
+`construct:module-name-as-a-value`, commit `663f174d`). `sys.argv` was refused
+as *"**`sys`** is imported from `sys`, and it is a module-level name of another
+module … there is no storage for one here"*. Every clause is wrong about `sys`:
+it is not a module-level name of `sys` — it **is** `sys`, the library on the
+link line — and it is not a variable with nowhere to live, because a module is
+not a value at all. The name with no representation is the ATTRIBUTE. The
+refusal now names `sys.argv`, states what the boundary publishes, and prints
+what the module DOES publish, so a reader can tell a capability `sys` lacks from
+a name it simply does not have.
+
+That is a re-wording of a REFUSAL, not a capability: 0 of the 6 files moved to
+pass, and the next refusal is §(3)/(4) below in every case. What moved is that
+the diagnostic is true, which is what the rest of this document is for.
+
+A dotted CALL through a module already resolved by module identity before this
+(`sys.exit(3)` is refused by `doc/ABI.md`'s export rule, not by a storage
+story), so the read side was the only asymmetry, and it is one recogniser
+(`model.dylib_module_reference`) asked one question later. **The member refusal
+is load-bearing**: exempting the root alone is a SILENTLY WRONG ANSWER —
+`ARM64Codegen._emit_expr` on `MemberExpr(IdentExpr('sys'), 'argv')` finds no
+frame slot for `"sys.argv"` and falls to its "no object model, so the field
+reads as 0" arm, so `print(sys.argv)` would build, print 0 and exit 0.
+Pinned structurally in `test_formal_module_attr.py`.
+
+The same pass found a real defect in the half that DID land: a published
+constant was readable in only some positions. `_apply_imported_constant_sites`
+re-entered the node walk on a store's value side instead of applying
+`_rewrite_dotted_child` — the one test — to it, so `print(mod.K)` lowered while
+`x = mod.K`, `var x = mod.K` and `x += mod.K` were refused with the sentence
+above, about a name that is a folded CONSTANT the manifest already carries.
+Fixed in the same commit; all three store kinds are pinned, and the store's
+TARGET is still left alone (`mod.K = 5` writes another module's state, and
+substituting it would trade a refused store for a dropped one).
 
 **(3) A tuple cannot cross a dylib boundary — and the failure is a
 use-after-frame, not a refusal.** A module returning `(3, 14, 0)`, printed by the
@@ -351,6 +398,65 @@ stops earlier at `_f.write()` (a name classified as `int` where the C library's
 `write(2)` needs a descriptor), and `analyze_benchmarks_types.py` stops at a
 name that "holds a frame address in more than one shape". Both are real
 findings and both are somebody else's construct.
+
+**Re-measured 2026-10-01** (`construct:module-name-as-a-value`, commit
+`663f174d`), the six files the re-sweep's `other refusal` bucket made visible,
+on BOTH architectures and with the message verbatim rather than re-derived:
+
+    $ python3 tools/formal_sweep.py --no-stdlib mojo.mojo t_argv.mojo \
+        tools/ab_filelist.py tools/audit_determinism.py tools/ci_line.py tools/detach.py
+    [arm64] 6 files: PASS=0 not-pass=6      <- codegen  x6
+
+Before: all six refused with ONE message, naming `sys`, claiming no storage.
+After: all six still refused, with the message naming the ATTRIBUTE and
+printing what `sys` publishes:
+
+| file | refused at | attribute | and the next refusal is |
+|---|---|---|---|
+| `mojo.mojo` | `main:` | `argv` | §(4) — the command line is gone before the first statement |
+| `t_argv.mojo` | `main:` | `argv` | §(4), same |
+| `tools/ci_line.py` | `__module_body__:` | `argv` | §(4), same |
+| `tools/detach.py` | `main:` | `argv` | §(4), same |
+| `tools/ab_filelist.py` | `__module_body__:` | `stderr` | (2)+(3) — an object is a pair of words |
+| `tools/audit_determinism.py` | `__module_body__:` | `argv` | §(4), same |
+
+`tools/formal_sweep_causes.py` now files these under their own row, "a module's
+ATTRIBUTE read as a value, across a dylib boundary", with `names: argv x5,
+stderr x1` — previously they were filed as "a module-level name of ANOTHER
+module is not exported as a word", whose `names:` column was empty of
+attributes because the message never named one. Both rows are live: the bare
+spelling (`from sys import argv` then `argv`) still produces the old message and
+still belongs to the old row.
+
+**WHICH OF THE SIX USES ARE COMPILE-TIME? None of them — and that is the
+measurement that decides between the two repairs, so it is recorded per use
+rather than as a total.** Grepped from the six files, not from this document:
+
+| file | every `sys.` use | compile-time? |
+|---|---|---|
+| `mojo.mojo` | `len(sys.argv)`, `sys.argv[1]`, `sys.argv[2]` | no — a list, and §(4) says its SOURCE is gone |
+| `t_argv.mojo` | `len(sys.argv)`, `sys.argv[0]`, `sys.argv[1]` | no — same |
+| `tools/ci_line.py` | `len(sys.argv)`, `sys.argv[1]`, `sys.argv[2]`, `sys.exit(1)` | no — and `sys.exit` is a CALL, already answered by the export rule |
+| `tools/detach.py` | `len(sys.argv)`, `sys.argv[1]`, `sys.argv[2:]`, `sys.stderr`, `sys.exit(main())` | no — and `sys.exit` likewise |
+| `tools/ab_filelist.py` | `sys.path.insert(0, REPO)`, `sys.stderr` | no — a mutable list in another module; an object |
+| `tools/audit_determinism.py` | `sys.exit(main(sys.argv[1:]))` | no — a slice of `argv`, and `exit` is a call |
+
+So the "fold the member read into the import" repair — substitute the value at
+the read because a folded constant needs no storage — has a ceiling of **0 of
+these 6**, and it is 0 for a reason no amount of compiler work changes: the
+value is not known before the program runs, and for `argv` there is nothing in
+it to know (§(4)). Folding would produce a well-formed WRONG answer, which is
+the failure mode this whole backend's refusals exist to prevent. That is why
+what landed is the diagnostic and the one recogniser, and why the honest next
+step is unchanged.
+
+Also measured, because it is what a reader would otherwise assume was tried:
+`sys.exit(...)` was ALREADY resolved by module identity before this commit —
+`sys.exit(3)` is refused by `doc/ABI.md`'s export rule ("`sys` is a linked
+module but it exports no `exit` … What it does export: api_version, byteorder,
+…"), not by anything about storage. So the dotted CALL side of this boundary
+has been working; only the dotted READ side did not, which is exactly the
+asymmetry `model.dylib_module_reference` removed.
 
 ## The exact next step, for whoever takes it
 

@@ -28,6 +28,7 @@ because it costs milliseconds and the build it guards costs minutes. The
 build half is the historical one.
 """
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -272,11 +273,92 @@ def run_produced_binary(exe: str, td: str) -> tuple:
             text.count("unavailable in compiled mode"))
 
 
+def pinned_prototypes_match_their_definitions() -> bool:
+    """Every hand-written C DECLARATION of a self-host function must match it.
+
+    Generated code `#include`s `runtime/fire_runtime.h`, so a declaration in
+    it is what gcc checks every call against — and it is reached BEFORE the
+    closure's own forward declaration. A function in
+    `GimpleGen._NO_OVERLOAD_MANGLE` keeps its bare C name, so those are the
+    ones a caller can reach by that name, and a mismatch is a hard error twice
+    over: "too many arguments" at every call site, and "conflicting types" at
+    the definition.
+
+    Nothing notices when the definition grows a parameter. Measured: giving
+    `py_tokenize` a defaulted `filename` changed its C arity from one to two,
+    and because the self-host MATERIALIZES a default at every call site it
+    emitted `py_tokenize (src, 0)` for all 45 callers in the closure while
+    the header still said one — 25 "too many arguments to function
+    'py_tokenize'; expected 1, have 2", plus the "conflicting types", and the
+    whole self-host build down. A DEFAULT parameter is the sharp case: at
+    every call site it looks like nothing changed.
+
+    `GimpleGen._KNOWN_SIGS` is deliberately NOT checked, because its
+    parameter list is not a declaration. Its only two readers use it to
+    coerce ARGUMENT TYPES at a call site (`emit_infra.py`'s `_emit_call`) and
+    to take a RETURN type (`emit_exprs.py`); neither emits a prototype, so a
+    stale arity there is a coercion imprecision and not a build break —
+    `interpret_and_execute` is one today (2 in the table, 3 defined) and has
+    been harmless for the whole table's life.
+
+    Only declarations that RESOLVE to a definition in the closure are
+    checked, and this is a parse plus a dict lookup for the same reason the
+    coroutine check is: the thing it guards costs minutes to find out the
+    hard way.
+    """
+    sys.path.insert(0, REPO)
+    import cas
+    import gimple_codegen
+    from fire_compiler import Parser, py_tokenize
+
+    # Real definitions: name -> declared parameter count, over the closure.
+    defs = {}
+    for name in cas.selfhost_inputs():
+        if not name.endswith('.py'):
+            continue
+        path = os.path.join(cas.HERE, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding='utf-8', errors='replace') as f:
+            src = f.read()
+        for s in Parser(py_tokenize(src)).with_filename(path).parse_module():
+            if getattr(s, 'name', None) and hasattr(s, 'params'):
+                defs.setdefault(s.name, len(s.params))
+
+    # Every declaration in the header, as (name -> parameter count).
+    table = {}
+    hdr = os.path.join(cas.HERE, 'runtime', 'fire_runtime.h')
+    pinned = gimple_codegen.GimpleGen._NO_OVERLOAD_MANGLE
+    with open(hdr, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            m = re.match(r'\s*\S+\s*\**\s*(\w+)\s*\(([^)]*)\)\s*;', line)
+            if not m:
+                continue
+            fname, params = m.group(1), m.group(2).strip()
+            if fname not in pinned or fname not in defs or params in ('void', ''):
+                continue
+            table[fname] = len([p for p in params.split(',') if p])
+
+    offenders = []
+    for name, declared in table.items():
+        if defs[name] != declared:
+            offenders.append((name, declared, defs[name]))
+    print(f"  self-host closure: {len(defs)} functions, {len(table)} of them "
+          f"declared in fire_runtime.h under a pinned C name; every such "
+          f"declaration matches its definition: {not offenders}")
+    for name, declared, actual in sorted(offenders):
+        print(f"  ✗ {name}: fire_runtime.h declares {declared} parameter(s), "
+              f"fire_compiler.py defines it with {actual} — generated code "
+              f"will not compile against it")
+    return not offenders
+
+
 def run() -> tuple:
     """(static_ok, build_ok). The static half first and separately, so its
     verdict is a line of its own in the tally rather than a `False` that
     reads like a build failure."""
-    static_ok = closure_coroutines_are_lowerable()
+    static_ok = closure_coroutines_are_lowerable() and \
+        pinned_prototypes_match_their_definitions()
     cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as td:
         os.chdir(td)

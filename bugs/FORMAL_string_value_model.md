@@ -227,6 +227,32 @@ this: *a `char *` to `__TEXT,__text` has static storage duration, so the
 frame-escape rule is sound for a struct whose fields live in a frame and unsound
 as applied to it.*
 
+## Re-measured on the new-modular tree (2026-10-01), and the ceiling of the whole family
+
+The 16 files above were measured on the OLD stdlib (294 files) and are the
+`a String receiver is returned…` / `…passed to a call in a position…` families.
+The 2026-10-01 x86-64 sweep of the new-modular stdlib (252 files) files the
+RELATED family — `frame address passed where a value is wanted` — in four parts,
+and only one of them is this collision:
+
+| shape | files | what it is |
+|---|---|---|
+| `String(<a String frame>)` | **6** | the collision this section is about: `benchmark/bencher.mojo`, `builtin/error.mojo`, `collections/string/string.mojo`, `compile/compile.mojo`, `pathlib/path.mojo`, `testing/assert_aborts.mojo` |
+| `Error(<a String frame>)` | 6 | **not** this collision, and not a frame problem at all. `Error` is in `model.UNREPRESENTABLE_TYPE_CTORS`: a `String` and an `Optional[StackTrace]` is not one word, so there is no argument to give it, frame or otherwise. Measured with the LITERAL argument instead of the frame: `Error("boom")` is refused too, with a different and equally accurate message ("constructing Error has no representation on this path … it is not a struct in this module or in anything it imports") — which is the point. A frame address is not what stops these six; the type has no representation whichever you hand it |
+| `list(<frame>)`, `isinstance(<frame>, T)` | 3 | value-taking callees. `list(x)` on a struct is an ITERATION-PROTOCOL rewrite (`list(x)` = `list(x.__iter__())`, and `_OrderedNames` in `mojo/middle/boundnames.py` is the shape: its `__iter__` returns `iter(self._list)`), which is a new construct and not a lowering of this one |
+| `print(<a SourceLocation frame>)` | 1 | `std/os/os.mojo`, variadic — the true refusal, and the measured consequence is already quoted above |
+
+**The ceiling of the 6 is zero, measured with the value-only refusal suppressed
+IN-PROCESS** (a scratch probe in `.tmp/`, no edit to the tree): all six land on a
+*second* frame refusal, not on a build. The `String` copy construction itself is
+lowerable — `struct_construction_plan`'s `CONSTRUCTION_COPY` is measured correct
+on a two-field struct (`Pair(p)` copies, and reading through the copy gives the
+source's values and writing through the copy leaves the original alone) — so the
+blocker is the interception, not the copy: the emitters turn `String(…)` into a
+`char *` conversion before the construction plan is consulted, which is what
+`formal/build.py`'s `_park_construction_mismatches` exists to park. The next
+step is unchanged, and is D2's and D4's as above.
+
 ## Wave 5 (E4): the two named items closed, and the class around them is wider
 
 Both items D3 named are fixed, and both turned out to be two holes in one

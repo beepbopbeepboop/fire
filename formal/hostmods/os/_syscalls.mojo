@@ -1,7 +1,18 @@
 """The C library this module needs, and nothing else.
 
-Every call into libSystem that `os` and `os.path` make is spelled here, once,
-and nowhere else. Three reasons, in the order they mattered while writing it.
+Every call into libSystem that `os`, `os.path` and `platform` make is spelled
+here, once, and nowhere else. Three reasons, in the order they mattered while
+writing it.
+
+  `platform` is here for the same reason the other two are, and it is worth
+  being explicit about why it is NOT a second copy. `formal/hostmods/
+  platform.mojo` needs the string primitives below for its own reasons — a
+  kernel string lives in a buffer the C library fills and a caller cannot keep
+  — so it imports from here either way, and the moment it did, a second
+  `str_alloc` in `platform.mojo` would be a second implementation of a routine
+  whose whole value is being the same one everywhere. `uname(3)` and
+  `sysctlbyname(3)` therefore joined the set below rather than appearing
+  beside it.
 
 1. A NAME COLLISION IS A SILENT RECURSION. A call is extern exactly when the
    name is not a function of the unit being compiled
@@ -32,16 +43,20 @@ and nowhere else. Three reasons, in the order they mattered while writing it.
 WHAT IS NOT HERE, AND WHY — each measured on this target before it was left
 out rather than guessed at:
 
-  * ARM64 ONLY TODAY, and not because of anything in this source. A module
-    dylib that makes a call into the C library is arm64-only on this backend:
-    the same two-line module builds and RUNS with `--backend=arm64` and
-    produces an image the loader refuses with ``main executable failed strict
-    validation`` under `--backend=x86_64``, which is the unclaimed-trailing-byte
-    failure `formal/macho_linker.py`'s `_assert_no_unclaimed_bytes` exists for.
-    Every function below needs the C library, so all of them are arm64-only
-    until that is fixed; `test_formal_os.py` skips a non-arm64 host and the
-    reason it has to is here. Filed as
-    `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`.
+  * BOTH BACKENDS TODAY, and not because of anything in this source. This used
+    to say a module dylib that makes a call into the C library is arm64-only on
+    this backend, and it was false: every function below builds and RUNS under
+    `--backend=x86_64`, which is what `test_formal_os_backing.py` measures on
+    both architectures with CPython as the arbiter. The one thing the x86-64
+    backend has to get right, and now does, is the SYMBOL each call binds:
+    macOS exports `readdir`, `opendir`, `stat` and the rest of this file's
+    entry points twice — once for a 32-bit `ino_t` and once for a 64-bit one —
+    and on x86-64 the bare name is the 32-bit function, whose `struct dirent`
+    and `struct stat` are laid out differently. `formal/model.py`'s
+    `target_libc_symbol` is that table;
+    `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes.md`
+    records what reading the wrong one of the two costs. A host with no x86-64
+    support at all still skips the x86-64 half of the suites.
 
   * BYTE READS. `p[0]` on a `Pointer[UInt8]` is a one-byte load now. It used to
     take the blob path in `_emit_subscript_addr`, which reads a COUNT from
@@ -234,6 +249,25 @@ def str_starts(s, p) -> int:
     return 0
 
 
+def str_cmp(a, b) -> int:
+    """`strcmp(a, b)`: <0, 0 or >0 — the lexicographic order of `a` and `b`.
+
+    Python's `<` on `str` is a compare by CODE POINT and the C library's
+    `strcmp` is a compare by UNSIGNED CHAR, and the two agree on every input a
+    program can hand this: for UTF-8 the byte order IS the code point order,
+    which is what makes UTF-8 self-synchronizing, so `a < b` in Python is
+    `strcmp(a, b) < 0` here for every code point including everything above
+    ASCII.
+
+    This is the one way two strings are ORDERED on this path. `==` and `!=` on
+    two `str` values are refused or wrong (see
+    `bugs/FORMAL_string_equality_of_two_unclassified_words.md`), and `os.path`
+    needed no ordering at all, so this arrived with `platform.system_alias`,
+    which is nothing but two string comparisons and one rewrite.
+    """
+    return strcmp(a, b)
+
+
 
 def str_at(s, i, chars) -> int:
     """1 if `s[i]` is one of the bytes of `chars`.
@@ -395,6 +429,26 @@ def fs_unsetenv(name) -> int:
 def fs_lseek(fd, off, whence) -> int:
     """`lseek(fd, off, whence)`."""
     return lseek(fd, off, whence)
+
+
+def fs_read(fd, buf, n) -> int:
+    """`read(fd, buf, n)`: bytes read, 0 at end of file, -1 on failure.
+
+    THE MISSING THIRD of the descriptor calls, and the one every other
+    descriptor function above is waiting for: `fs_open_ro`, `fs_lseek` and
+    `fs_close` can open a file and find its size and cannot read a byte of it,
+    which is why `io`'s streams, `platform.architecture` and `libc_ver` are all
+    absent (the first and last two are named at the definitions that want them,
+    and the stream argument is `bugs/FORMAL_glob_copy_collections_io_not_
+    attempted.md`). Three fixed arguments and no fourth, which is `read(2)`'s
+    own signature: the C library's `fread` takes a `FILE *` and this path has no
+    `FILE`, and `read` is the call that works on a bare descriptor.
+
+    A short read is not an error and is not retried: `n` bytes is what the
+    caller asked for and this is what arrived, which is the same contract C has.
+    The caller loops.
+    """
+    return read(fd, buf, n)
 
 
 def fs_mkdir(p, mode) -> int:
@@ -589,6 +643,188 @@ def le64(b: Pointer[UInt8], i) -> int:
     k = 0
     while k < 8:
         v = v + b[i + k] * (1 << (8 * k))
+        k = k + 1
+    return v
+
+
+MACHO_WIDTH = 0
+MACHO_EXECUTABLE = 1
+
+
+def fs_macho_field(p, which) -> int:
+    """One fact about the Mach-O at `p`, chosen by `which`.
+
+    `which` is `MACHO_WIDTH` (32, 64, or 0 when `p` is not a Mach-O at all) or
+    `MACHO_EXECUTABLE` (1 or 0). ONE function and a parameter rather than two
+    functions, because the answer to either needs the other's work: a FAT
+    header has to be walked to reach either, and two walkers are two things to
+    be wrong about a slice table.
+
+    THE WIDTH, read rather than assumed, from the magic at offset 0 of each
+    header:
+
+        0xFEEDFACF   64-bit   -> 64
+        0xFEEDFACE   32-bit   -> 32
+        0xCAFEBABE   a FAT binary: several Mach-Os, each with its own header
+        0xCAFEBABF   the 64-bit-offset FAT
+        anything else         -> 0
+
+    THE FAT CASE IS NOT A CORNER, it is `/bin/ls`, `/bin/cat` and every other
+    system tool on an Apple Silicon macOS: `/bin/ls` is "Mach-O universal binary
+    with 2 architectures: [x86_64:Mach-O 64-bit executable x86_64] [arm64e:
+    Mach-O 64-bit executable arm64e]", and calling that "not a Mach-O" would
+    make `platform.architecture("/bin/ls")` disagree with CPython on the most
+    ordinary path a caller can name. So a fat header is walked: the slice count
+    at offset 4, then one `struct fat_arch` per slice, and each slice's own
+    header read at the offset that entry gives.
+
+    The rule for the WIDTH of a fat binary is CPython's own: its `architecture`
+    looks for `'32-bit'` anywhere in `file -b`'s output before it looks for
+    `'64-bit'`, and for a fat binary that output is one line per slice — so 32
+    if ANY slice is 32-bit, else 64 if any is 64-bit, else 0.
+
+    `MACHO_EXECUTABLE` IS NOT "IS A MACHO-O", and the difference is CPython's
+    parser being older than `file(1)`. CPython accepts a file whose `file -b`
+    output contains the word `executable` or the phrase `shared object`:
+
+        if 'executable' not in fileout and 'shared object' not in fileout:
+            return bits, linkage          # the presets, unchanged
+
+    and this macOS's `file` prints "Mach-O 64-bit dynamically linked shared
+    library" for a dylib — never the phrase `shared object` — so CPython
+    answers `architecture(dylib)` as `('64bit', '')` here, MEASURED, and
+    `'Mach-O'` for an executable. Emulating that is this function's whole
+    reason: the module that reads it, `platform.architecture`, is a MIRROR of
+    CPython's, and a dylib answered `'Mach-O'` would be a right answer that
+    disagrees with the thing being mirrored. It reads the header's `filetype`
+    field (offset 12; `MH_EXECUTE` is 2), which is where `file` reads it too.
+
+    LITTLE-ENDIAN SLICES ONLY, and stated rather than implied: the slice headers
+    are read with `le32`, so a big-endian slice reads as its byte-reverse and is
+    not recognised. That is not a gap on this target — both architectures
+    `formal` emits are little-endian and no macOS slice is big-endian — but it IS
+    a fact about the answer rather than about the world, and a reader should not
+    have to derive it from the `le32`. The FAT HEADER, by contrast, is
+    big-endian on disk (see `be32`).
+
+    0 for anything that is not a Mach-O — a text file, a directory, a path that
+    is not there — and that is the answer the caller needs rather than an error:
+    it is what makes `architecture` fall back to CPython's own "format not
+    supported" branch instead of claiming a width it did not read. The file is
+    opened, read and closed here rather than handed back, because a descriptor
+    cannot cross a dylib boundary and neither can the header it read.
+    """
+    var fd = fs_open_ro(p)
+    if fd < 0:
+        return 0
+    var buf: Pointer[UInt8] = str_alloc(8)
+    var n = fs_read(fd, buf, 4)
+    if n < 4:
+        fs_close(fd)
+        return 0
+    var m = le32(buf, 0)
+    if m == 4277009103 or m == 4277009102:
+        # One header, not a table: read its `filetype` and answer both.
+        var exe = 0
+        if which == MACHO_EXECUTABLE:
+            if fs_lseek(fd, 12, 0) < 0:
+                fs_close(fd)
+                return 0
+            if fs_read(fd, buf, 4) < 4:
+                fs_close(fd)
+                return 0
+            if le32(buf, 0) == 2:
+                exe = 1
+        fs_close(fd)
+        if which == MACHO_EXECUTABLE:
+            return exe
+        if m == 4277009103:
+            return 64          # 0xFEEDFACF
+        return 32              # 0xFEEDFACE
+    var wide = 0
+    if m == 3199925962:
+        wide = 0               # 0xCAFEBABE, read little endian
+    elif m == 3215774410:
+        wide = 1               # 0xCAFEBABF, the 64-bit-offset FAT
+    else:
+        fs_close(fd)
+        return 0
+    # The slice count, BIG endian: a fat header is written by a tool that had
+    # to be readable on a big-endian machine, so this one field is read the
+    # other way round from every other header here. The bytes are the same
+    # either way; only the order differs.
+    n = fs_read(fd, buf, 4)
+    if n < 4:
+        fs_close(fd)
+        return 0
+    var count = be32(buf, 0)
+    # One `struct fat_arch` is 20 bytes, or 32 for the 64-bit-offset FAT, and
+    # `offset` is its THIRD field — cputype and cpusubtype come first — so the
+    # read seeks to entry+8 rather than to the entry.
+    var step = 20
+    if wide == 1:
+        step = 32
+    var best = 0
+    var exe = 0
+    var k = 0
+    while k < count and k < 64:
+        if fs_lseek(fd, 8 + step * k + 8, 0) < 0:
+            break
+        var at = 0
+        if wide == 1:
+            n = fs_read(fd, buf, 8)
+            if n < 8:
+                break
+            at = be64(buf, 0)
+        else:
+            n = fs_read(fd, buf, 4)
+            if n < 4:
+                break
+            at = be32(buf, 0)
+        if fs_lseek(fd, at, 0) < 0:
+            break
+        n = fs_read(fd, buf, 16)
+        if n < 16:
+            break
+        var sm = le32(buf, 0)
+        if sm == 4277009102:
+            best = 32          # a 32-bit slice wins, as CPython's scan does
+        elif sm == 4277009103 and best == 0:
+            best = 64
+        if le32(buf, 12) == 2:
+            exe = 1
+        k = k + 1
+    fs_close(fd)
+    if which == MACHO_EXECUTABLE:
+        return exe
+    return best
+
+
+def be16(b: Pointer[UInt8], i) -> int:
+    """The big-endian 16-bit field at byte `i` of `b`. See `le16`."""
+    return 256 * b[i] + b[i + 1]
+
+
+def be32(b: Pointer[UInt8], i) -> int:
+    """The big-endian 32-bit field at byte `i` of `b`.
+
+    BIG ENDIAN, and the reason this exists at all: a FAT Mach-O header is
+    written by a tool that had to be readable on a big-endian machine, so its
+    slice count and every `struct fat_arch` offset are big-endian while the
+    slice's own header is not (`fs_macho_bits` reads that one with `le32`).
+    Two byte orders in one header, which is exactly the kind of thing a
+    transcription gets wrong silently — so the reader is named for what it does
+    rather than left as an expression.
+    """
+    return 16777216 * b[i] + 65536 * b[i + 1] + 256 * b[i + 2] + b[i + 3]
+
+
+def be64(b: Pointer[UInt8], i) -> int:
+    """The big-endian 64-bit field at byte `i` of `b`. A LOOP, as `le64` is."""
+    var v = 0
+    var k = 0
+    while k < 8:
+        v = v * 256 + b[i + k]
         k = k + 1
     return v
 
@@ -788,3 +1024,133 @@ def fs_free(p) -> int:
     the caller's to keep, and releasing one while a derived string still points
     into it is the caller's decision, not this module's."""
     return free(p)
+
+
+# ── What the KERNEL says, rather than what the filesystem says ───────────────
+#
+# Two C library calls, both of which `formal/hostmods/platform.mojo` needs and
+# both of which belong here for the reason at the top of the file: this is the
+# auditable answer to "what does this backend ask of the operating system".
+#
+#   * `uts_str(field)` is `uname(3)`, which is five NUL-TERMINATED `char[256]`
+#     fields in the caller's buffer. It is read FIELD BY FIELD one byte at a
+#     time for the same reason `struct stat` is (`fs_stat_layout_ok` and the
+#     `ST_DEV` block above): the source declares no struct, so the offsets are
+#     the ABI's, and an offset that is wrong reads a neighbouring field
+#     rather than failing.
+#
+#   * `kern_str(name)` is `sysctlbyname(3)`, the other way to ask the kernel a
+#     question that has no syscall of its own.
+
+def uts_field_bytes() -> int:
+    """The size of one `uname(3)` field on this target: 256.
+
+    MEASURED, not assumed. Five fields at 256 bytes each is what
+    `<sys/utsname.h>` on this SDK declares, and the measured answer agrees:
+    reading a filled `utsname` at offsets 0, 256, 512, 768 and 1024 yields
+    `Darwin`, the node name, the release, the version string and `arm64` —
+    which is `os.uname()`'s own order — and offset 1280 is past the end and
+    empty. It is a FUNCTION rather than a module-level constant because a
+    module-level name is not exported as a word (`formal/hostmods/sys.mojo`'s
+    docstring), and a caller that needs the number has to be able to ask for it.
+    """
+    return 256
+
+
+def uts_str(field) -> str:
+    """Field `field` of `uname(3)`, in a `malloc`'d copy the caller owns.
+
+    `field` is 0 for the system name, 1 for the node name, 2 for the release,
+    3 for the version and 4 for the machine — the order `os.uname()` returns
+    them in, which is the order CPython's `platform.uname()` reads them from.
+
+    A COPY, not an interior pointer. The C library fills a buffer the CALLER
+    supplies, so a pointer into it would hand back something the caller has to
+    keep alive and knows nothing about; a `malloc`'d copy is a string the caller
+    owns and releases with `platform.free_string` (or `os.os_free`, which is the
+    same `free`).
+
+    THE TERMINATOR IS CHECKED, and that check is the reason the field loop
+    exists at all. POSIX says each field is NUL-terminated, so the natural
+    spelling is `str_dup(base + 256 * field)` — and if a field ever were not
+    terminated, `strlen` would walk off the end of a 1280-byte buffer into
+    whatever follows it in the heap and return a number nobody can check. So
+    the field is scanned for its own NUL within its 256 bytes first, and a
+    field without one yields `""`: an honest wrong-looking answer for an
+    impossible layout beats an unbounded read.
+
+    The scan is a one-byte load and is spelled `q: Pointer[UInt8] = f + n`
+    then `q.value()` — an EXPRESSION cannot be asked for a pointee it does not
+    declare, which is the same fact `json.mojo`'s `byte_at` is written around
+    and the reason this is not `(f + n).value()`.
+
+    One `uname(3)` call per invocation, because this path has nowhere to keep
+    the answer between calls (there is no module storage, so CPython's
+    `_uname_cache` has nowhere to live) and a stale kernel answer would be a
+    wrong one anyway.
+    """
+    var w = uts_field_bytes()
+    var b: Pointer[UInt8] = malloc(w * 5)
+    memset(b, 0, w * 5)
+    if uname(b) != 0:
+        free(b)
+        return ""
+    if field < 0:
+        free(b)
+        return ""
+    if field > 4:
+        free(b)
+        return ""
+    var f = b + w * field
+    var n = 0
+    var ok = 0
+    while n < w:
+        var q: Pointer[UInt8] = f + n
+        if q.value() == 0:
+            ok = 1
+            break
+        n = n + 1
+    var out = ""
+    if ok == 1:
+        out = str_copy(str_alloc(n), f, n)
+    free(b)
+    return out
+
+
+def kern_str(name) -> str:
+    """The value of the kernel string MIB `name`, or `""` if there is no such.
+
+    `sysctlbyname(name, …)` with the two-call idiom: ask once with no buffer to
+    learn the size, then once into a buffer of exactly that size. The size is a
+    run-time value, so the buffer cannot be a literal-sized one, and a fixed
+    256 would be a module that silently truncates a long value — which is the
+    failure `time.mojo`'s docstring calls a wrong `time.time()`, and the reason
+    a probe is done here rather than a guess.
+
+    The reported size INCLUDES the terminator, so the returned buffer is cut
+    to one byte shorter: what the kernel wrote is a string and the answer is
+    the string, not the string plus its own length.
+
+    `""` for a name the kernel does not have, which is `sysctlbyname`'s own
+    failure (it returns non-zero and writes nothing) and is also CPython's
+    answer for an unknown version: `platform.mac_ver()` returns `''` when it
+    cannot read the product version. There is no error to raise on this path
+    (FORMAL.md phase 7), and a caller distinguishing "no such name" from "an
+    empty value" is asking a question this target cannot answer.
+    """
+    var np: Pointer[Int64] = malloc(8)
+    np[0] = 0
+    if sysctlbyname(name, 0, np, 0, 0) != 0:
+        free(np)
+        return ""
+    var sz = np[0]
+    if sz < 1:
+        free(np)
+        return ""
+    var v = str_alloc(sz)
+    np[0] = sz
+    var rc = sysctlbyname(name, v, np, 0, 0)
+    free(np)
+    if rc != 0:
+        return v
+    return str_trunc(v, sz - 1)

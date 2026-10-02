@@ -3,16 +3,15 @@
 The spelling is CPython's `os.path` for every function below, with two
 deviations that are properties of this target and are stated on each one:
 
-  * ARM64 ONLY TODAY, and not because of anything in this source. A module
-    dylib that makes a call into the C library is arm64-only on this backend:
-    the same two-line module builds and RUNS with `--backend=arm64` and
-    produces an image the loader refuses with ``main executable failed strict
-    validation`` under `--backend=x86_64``, which is the unclaimed-trailing-byte
-    failure `formal/macho_linker.py`'s `_assert_no_unclaimed_bytes` exists for.
-    Every function below needs the C library, so all of them are arm64-only
-    until that is fixed; `test_formal_os.py` skips a non-arm64 host and the
-    reason it has to is here. Filed as
-    `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`.
+  * BOTH BACKENDS TODAY, and not because of anything in this source. A module
+    dylib that makes a call into the C library builds and runs under
+    `--backend=x86_64` as well as arm64 — measured, and `formal/hostmods/os/
+    __init__.mojo` gives it at length with the evidence. The claim this replaces
+    was false, and it had a cost: `test_formal_os_backing.py` used to skip its
+    `os.path` cases on x86-64 for this reason, which is where a silently wrong
+    `stat` field survived. What the x86-64 backend has to get right is the
+    symbol each call binds, and `formal/model.py`'s `target_libc_symbol` is the
+    table that says so.
 
   * A RESULT IS EITHER AN INTERIOR POINTER OR A `malloc`'d BUFFER. A string
     here is a bare NUL-terminated `char *` with no growable buffer of its own

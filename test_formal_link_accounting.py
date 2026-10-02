@@ -286,6 +286,8 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "pathlib": "test_formal_pathlib.py",
     "io": "test_formal_small_hosts.py",
     "typing": "test_formal_small_hosts.py",
+    "platform": "test_formal_platform.py",
+    "fnmatch": "test_formal_fnmatch.py",
 }
 
 
@@ -579,11 +581,22 @@ def test_sorry_note():
 
 # ── 5. the hostmods directory is visible to ONE resolver ─────────────────────
 
-# The three modules this backend has written for CPython's, and the check names
-# of a test rather than the modules themselves: what has to hold is that a
-# module NAME with a Mojo source somewhere in this tree does not capture the
-# name everywhere else, and the next one written is covered by the same loop.
-HOST_MODULE_NAMES = ('os', 'sys', 'struct')
+# The modules this backend has written for CPython's that a file in this tree
+# imports BY THEIR CPython NAME, and the check names of a test rather than the
+# modules themselves: what has to hold is that a module NAME with a Mojo source
+# somewhere in this tree does not capture the name everywhere else, and the next
+# one written is covered by the same loop.
+#
+# These four and not every file in `formal/hostmods/`, and the difference is
+# the point of the list: `argparse`, `ast`, `hashlib`, `json`, `pathlib`, `re`,
+# `time` and `typing` are CPython module names too, but no source in this tree
+# imports them under that spelling today, so the negative below would be
+# vacuous for them — a resolver asked about a name nothing imports still
+# answers. A name added here has to be one a swept file really wants, which is
+# also why `platform` is on it: thirty swept files import it, so four resolvers
+# capturing a Mojo `platform` would be a real regression and not a hypothetical
+# one.
+HOST_MODULE_NAMES = ('os', 'sys', 'struct', 'platform')
 
 
 def _short_repr(value, limit=120):

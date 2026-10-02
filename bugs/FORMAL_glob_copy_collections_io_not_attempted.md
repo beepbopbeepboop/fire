@@ -1,6 +1,36 @@
 # FORMAL_glob_copy_collections_io_not_attempted: `glob`, `copy` and `collections`, re-measured 2026-09-30
 
 **Status: OPEN for `glob`, `copy` and `collections`, and CLOSED for `io`.**
+
+> **RE-MEASURED 2026-10-01 — the numbers in `glob` and `collections` below are
+> STALE and the recommendation they end on has changed. Read
+> `bugs/FORMAL_platform_reachable_row_measured.md` §3 and §4 first.**
+>
+> What is still true: none of the three was written, for the reasons given, and
+> `collections` is worth **zero** files — which was measured again, by stub, and
+> again comes out zero.
+>
+> What is now false, and both corrections change what to do next:
+>
+>  * **`collections`: "three of the four are waiting on `re`" is wrong.** `re`
+>    landed. Re-stubbed on 2026-10-01, all five files (the count was 4 here, 5
+>    in the 2026-10-01 sweep) walk PAST `re` and land on `shutil`,
+>    `subprocess`, `concurrent.futures` and `importlib.util` — all permanent.
+>  * **`glob`: "blocked on `os.listdir`, not on `glob`" is wrong.**
+>    `formal/hostmods/os/__init__.mojo` now has `listdir` and `walk` as exact
+>    run-time blobs, so the listing is available and is no longer the blocker.
+>    §`glob`'s "the remaining work is `has_magic` and `escape` — a day's worth —
+>    plus the listing, which is Phase 6" is therefore an over-estimate of what is
+>    left and an under-estimate of what is hard: the listing is done, and what
+>    remains is the pattern walk and `**`.
+>
+> The old §`glob` advice to ship the pattern half alone is **withdrawn**: with a
+> stub `glob` on the search root, 9 files convert from "out of reach, with an
+> owner" into "refused by the export map", which is a fact about the target
+> dressed as a gap in the backend. `bugs/FORMAL_platform_reachable_row_measured.md`
+> §3 has the nine-file table and what a real `glob` is worth (5 files to
+> permanent, 4 into real codegen findings, 0 to PASS).
+
 Re-measured on this tree (2026-09-30, the `module:copy+collections+io+json+
 pathlib+typing+builtins` claim) with `python3 tools/formal_sweep.py` on each
 terminal file, so every number below is from a run and not from the 2026-09-29
@@ -202,6 +232,13 @@ Different from the 2026-09-29 list, and each item says what it is worth:
 1. **`glob`'s pattern half** (`has_magic`, `escape`), reusing
    `pathlib.match`. Moves 4 files to a codegen refusal naming `os.listdir`.
    Half a day. Still the best of the four.
+
+   **WITHDRAWN 2026-10-01.** `os.listdir` landed, so the listing is not the
+   blocker any more; and shipping `glob` without `glob.glob` converts 9 files
+   from a reachable gap into an export-map refusal, which is the wrong label
+   for a fact about the target. See
+   `bugs/FORMAL_platform_reachable_row_measured.md` §3 for the measurement and
+   for what a real `glob` is worth.
 2. **One bug doc for `clone` + a constructible type**, covering `copy` AND
    `collections` together. Zero files, but it is the root cause of two of the
    three and the two are the same capability. Not a module-shaped piece of work

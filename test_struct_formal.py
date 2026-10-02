@@ -362,8 +362,14 @@ def test_unpack_from_round_trip(tmpdir):
     ]
     for i, (fmt, values) in enumerate(cases):
         size = struct.calcsize(fmt)
+        # THREE value slots, because that is `pack_into`'s signature — padded
+        # with 0s rather than left off, and never past the third. Padding to
+        # five used to build here only because a call across a dylib boundary
+        # silently DROPPED the arguments past the callee's arity; it is a
+        # refusal now, which is the language's answer and the right one.
+        values = list(values[:3])
         args = ", ".join(str(v) for v in values)
-        while len(values) < 5:
+        while len(values) < 3:
             args += ", 0"
             values = list(values) + [0]
         zeros = ", ".join(["0"] * size)
@@ -564,7 +570,17 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
     pins that it does.
     """
     for fmt in UNSERVABLE:
+        # `pack` has FIVE value slots. A format with more values than that is
+        # the case under test, so the call must not simply hand it every value:
+        # the extra words would be past the callee's arity, and a call across a
+        # dylib boundary refuses that now rather than dropping them (it used to
+        # drop them, which is how this generator came to emit an 8-argument call
+        # to a 6-parameter function and still build). The module answers the
+        # format it is asked about from `_nvalues(fmt)`, not from how many
+        # arguments arrived, so padding to five says exactly the intended
+        # thing: five values supplied, more wanted.
         values = [1] * len(struct.unpack(fmt, bytes(struct.calcsize(fmt))))
+        values = list(values[:5])
         args = ", ".join(str(v) for v in values)
         while len(values) < 5:
             args += ", 0"

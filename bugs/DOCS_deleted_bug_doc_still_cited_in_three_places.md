@@ -1,5 +1,49 @@
 # A deleted bug doc is still cited in two places, and one of them is a test
 
+## SECOND INSTANCE, 2026-10-01 — eleven places, and this one hid a real bug
+
+`bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md` is cited **11
+times** and **does not exist**:
+
+    $ ls bugs/ | grep x86_64_dylib
+    (nothing)
+    $ grep -rn "FORMAL_x86_64_dylib_with_an_extern_call_does_not_load" \
+          --include=*.py --include=*.mojo --include=*.md .
+    formal/hostmods/os/__init__.mojo:29
+    formal/hostmods/os/_syscalls.mojo:55
+    formal/hostmods/os/path/__init__.mojo:15
+    formal/hostmods/argparse.mojo:116
+    formal/hostmods/ast.mojo:194
+    formal/hostmods/hashlib.mojo:48
+    formal/hostmods/time.mojo:19
+    test_formal_os_backing.py:104
+    test_formal_argparse.py:705
+    test_formal_x86_64_dylib.py:179
+    tools/suite.py:2138
+    (+ bugs/FORMAL_no_elf_shared_object_emitter.md:38,
+       bugs/FORMAL_x86_64_hostmods_that_do_not_build.md:15,53)
+
+Seven of those are in `formal/hostmods/`, and **every one of them uses the
+citation to justify the claim that a module dylib which calls the C library is
+arm64-only.** That claim was measured FALSE on 2026-10-01: a program importing
+`os` and calling `getcwd` builds with `--backend=x86_64` and runs under
+`arch -x86_64`, printing the right answer. So this instance is not cosmetic —
+it is a deleted doc being cited as the authority for seven stale claims, and one
+of those claims is why `test_formal_os_backing.py` skips its `listdir_and_walk`
+case on x86-64, which is why
+`bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes.md`
+(a silent wrong answer in `os.listdir` on x86-64) has been invisible.
+
+**Exact next step:** correct the seven `formal/hostmods/` claims first (they are
+the ones that are false, and the measurement is in that bug doc), then delete
+the citation wherever the corrected text no longer needs it, and add the check
+this file asks for at the bottom — a `bugs/*.md` path mentioned in a `.py`, a
+`.mojo` or another `.md`, verified to exist. Seven of the eleven are in files
+one claim owns; the rest are spread across claims that are not mine, which is
+why it is recorded here rather than fixed.
+
+---
+
 Found 2026-09-30 while merging `work/mod-re` (merge `14648b5a`). **Not caused
 by that work and not a live defect** — nothing computes anything from these
 strings — but it is a dangling reference in a file that exists to be believed,

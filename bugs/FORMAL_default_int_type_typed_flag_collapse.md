@@ -1,7 +1,19 @@
 # `formal/`: `DEFAULT_INT_TYPE` became signed `Int`, and the `typed` model flag went vacuous with it
 
-**Status: OPEN, not fixed, and deliberately not fixed by the agent that found
-it** (`19bc0dd` is the owner; the merge `ae9877d` is how it arrived). It is not
+**Status: item 3 of "Next step, in order" is FIXED (`003a4696`, 2026-10-01);
+items 1, 2 and 4 are still open.** Measured on this tree after that commit:
+`test_formal.py` (arm64) **`PASS=39 KNOWN-GAP=6 FAIL=0`** — the 10 FAILs named
+below are gone — and the arm64 `sorry` census is **2**, both in `sum_range`
+(was 7). What the fix was: the bridge's `by_cases` hypothesis and
+`evalExpr`'s own `if` test are two renderings of one signed comparison
+(`(l ^^^ 0x8000…) < (r ^^^ 0x8000…)` versus `sKey l < sKey r`), and
+`eval_eq_mojo`'s simp set did not carry `sKey`, so the two never met and the
+bridge was unprovable for every comparison-only body. One entry in
+`formal/arm64_proof_gen.py`'s `eval_eq_mojo` simp set, with
+`test_formal_eval_eq_mojo_bridge.py` pinning it. See "Next step" below.
+
+**Originally: OPEN, not fixed, and deliberately not fixed by the agent that
+found it** (`19bc0dd` is the owner; the merge `ae9877d` is how it arrived). It is not
 one of the two regressions agent G1 was given, and it is not a string problem,
 but it is the reason `make check-formal` does not read `41/4/0` even with
 `@spec` parsing again. Written down rather than fixed because the fix is in
@@ -15,11 +27,12 @@ bottom of `FORMAL_string_value_model.md`: `@spec(name; …)` no longer parses
 
 ## The numbers, measured, with the `@spec` fix in place
 
-| | at `1824fa2` | at `4b9dd2a` before this fix | with the `@spec` fix |
-|---|---|---|---|
-| `test_formal.py` (arm64) | `PASS=41 KNOWN-GAP=4 FAIL=0` | `PASS=26 KNOWN-GAP=6 FAIL=13` | **`PASS=29 KNOWN-GAP=6 FAIL=10`** |
-| `test_formal.py --backend x86_64` | `PASS=45 KNOWN-GAP=0 FAIL=0` | `PASS=40 KNOWN-GAP=0 FAIL=5` | **`PASS=44 KNOWN-GAP=0 FAIL=1`** |
-| `formal/x86_64_model_test.py` | `agree 45 WRONG 0 NO-RUN 0 build-fail 0` | `agree 40 WRONG 1 build-fail 4` | **`agree 44 WRONG 1 NO-RUN 0 build-fail 0`** |
+| | at `1824fa2` | at `4b9dd2a` before this fix | with the `@spec` fix | after `003a4696` (this item 3) |
+|---|---|---|---|---|
+| `test_formal.py` (arm64) | `PASS=41 KNOWN-GAP=4 FAIL=0` | `PASS=26 KNOWN-GAP=6 FAIL=13` | `PASS=29 KNOWN-GAP=6 FAIL=10` | **`PASS=39 KNOWN-GAP=6 FAIL=0`** |
+| `test_formal.py --backend x86_64` | `PASS=45 KNOWN-GAP=0 FAIL=0` | `PASS=40 KNOWN-GAP=0 FAIL=5` | `PASS=44 KNOWN-GAP=0 FAIL=1` | not re-measured (arm64-only change) |
+| `formal/x86_64_model_test.py` | `agree 45 WRONG 0 NO-RUN 0 build-fail 0` | `agree 40 WRONG 1 build-fail 4` | `agree 44 WRONG 1 NO-RUN 0 build-fail 0` | not re-measured |
+| arm64 `sorry` census | — | — | 7 declarations | **2** (both `sum_range`) |
 
 Every `formal/examples/*.mojo` (45 of 45) parses. The 5 x86-64 `build-fail`s
 and 4 of the arm64 FAILs were `fact`/`fib`/`sum`/`count` and are gone. What is
@@ -27,12 +40,13 @@ left is this document.
 
 The residual sets, by name:
 
-- **arm64, 10 FAIL**: `absval`, `bigconst`, `condassign`, `condassign2`,
-  `deepif`, `elif3`, `ifonly`, `ifonly2`, `ifparam`, `twoifs`.
+- **arm64, 0 FAIL** (was 10: `absval`, `bigconst`, `condassign`, `condassign2`,
+  `deepif`, `elif3`, `ifonly`, `ifonly2`, `ifparam`, `twoifs` — all fixed by
+  `003a4696`, see Mechanism 3).
 - **arm64, 6 KNOWN-GAP**: `both`, `countdown`, `either`, `fib`, `subscript_var`,
-  `wge`. (Two of these — `subscript_var`, `wge` — were already gaps; the other
-  four are new, and `fact`/`sum`/`count` now pass only with a `sorry` each,
-  per the census.)
+  `wge`. (`fact`/`sum`/`count` no longer pass *with* a `sorry` either: the
+  recursion contract's forced `B.cond` was the other hole and `8c1011ae` closed
+  it, so the census is 2, both in `sum_range`.)
 - **x86-64, 1 FAIL**: `wide_recv`.
 - **`x86_64_model_test.py`, 1 WRONG**: `udivmod`
   (`real=4 model=7905747460161236410`).
@@ -127,10 +141,10 @@ happened to agree with a *wrong* Lean machine model, and the merge's 281-line
 positive that an improvement exposed**, not a new machine bug.
 
 ## Mechanism 3: the arm64 FAILs are the two halves of the model disagreeing
-about signedness
+about signedness — **FIXED, `003a4696`**
 
 The x86-64 side does not have this problem because it never had a typed/untyped
-split of the same shape. The arm64 failures are all one family. Representative,
+split of the same shape. The arm64 failures were all one family. Representative,
 `condassign`:
 
 ```
@@ -148,12 +162,29 @@ a proof that fails, it is a proof of something FALSE — and Lean accepts it as
 long as the generator can find a closing tactic". The `by_cases` side and the
 `sKey`-based model side now agree with each other; the `MojoExpr` evaluation
 side (the `match (if sKey 0 < sKey n then (some 1, …) …)` term, which is the
-step-certificate/environment shape from `lib/ProofLib.lean`) does not reduce to
-the same branch, and `native_decide` finds the counterexample. The same shape
-appears in `absval`, `bigconst`, `condassign2`, `deepif`, `elif3`, `ifonly`,
-`ifonly2`, `ifparam`, `twoifs`. `formal/lean.py`, `formal/types.py` and
-`formal/arm64_proof_gen.py` all changed in the same commit; the `by_cases` /
-model / `MojoExpr` triple is where the remaining disagreement is.
+step-certificate/environment shape from `lib/ProofLib.lean`) did not reduce to
+the same branch. The same shape appeared in `absval`, `bigconst`, `condassign2`,
+`deepif`, `elif3`, `ifonly`, `ifonly2`, `ifparam`, `twoifs`. `formal/lean.py`,
+`formal/types.py` and `formal/arm64_proof_gen.py` all changed in that commit;
+the `by_cases` / model / `MojoExpr` triple was where the disagreement was.
+
+**The diagnosis was half a diagnosis.** The two renderings were not
+*disagreeing about a value*; they were two spellings of one term that `simp`
+could not see as equal, because the arm64 `eval_eq_mojo` simp set did not
+include `sKey` — the definition of the sign flip `evalExpr` uses. So the fix is
+one entry in the list (`formal/arm64_proof_gen.py`, the `simp_lems` of the
+`not _is_recursive and not _has_while` arm), and all 10 FAILs closed with it.
+`evalExpr`'s signed comparison renders as `sKey l < sKey r` while `_cmp_go`
+renders the expanded `(l ^^^ 0x8000…) < (r ^^^ 0x8000…)`; the `by_cases`
+hypothesis is the second and the goal's `if` is the first. The x86-64
+generator has carried `sKey` in that set all along, which is why it had 0 of
+these failures — the two generators were not disagreeing, one of them was
+incomplete. `test_formal_eval_eq_mojo_bridge.py` now pins the entry, pins the
+`lib/ProofLib.lean` side it depends on, and typechecks three shapes.
+
+Worth keeping from the original text: the warning about a mismatch being "a
+proof of something FALSE" is exactly what `8c1011ae` ran into five lines away
+in the same file. It is also why nothing here is a `sorry`.
 
 ## Next step, in order
 
@@ -174,9 +205,10 @@ model / `MojoExpr` triple is where the remaining disagreement is.
    next function with a call in it from producing a false proof silently.
    **This is the cheap half and it is worth doing first** — it is a correctness
    guard, not a coverage improvement, and it is independent of (1).
-3. Then take the arm64 signedness triple (`by_cases` hypothesis / `_cmp_go`
-   model term / `MojoExpr` step evaluation) in `formal/arm64_proof_gen.py` and
-   `lib/ProofLib.lean`. That is the 10 arm64 FAILs, and it is real work.
+3. ~~Then take the arm64 signedness triple~~ — **DONE, `003a4696`**, and it was
+   not "real work": one entry in a simp set (see Mechanism 3). Read this as the
+   standing warning it is — a shape that looks like a semantic disagreement is
+   usually a missing rewrite.
 4. `udivmod`'s `x86_64_model_test.py` WRONG is very likely the same
    `DEFAULT_INT_TYPE` flip seen from the Python machine model rather than the
    Lean one — `def udivmod(n): return (n / 7) + (n % 7)` is all-unannotated, so
@@ -187,6 +219,7 @@ model / `MojoExpr` triple is where the remaining disagreement is.
 
 `formal/` was explicitly another wave's lane, with four agents live in
 `formal/model.py`, `formal/build.py` and both backends. A wrong edit there is
-expensive to untangle and the fix is not a one-liner. Everything outside
-`formal/` that this regression touched has been fixed and is recorded in
-`FORMAL_string_value_model.md`.
+expensive to untangle. (It is also, in hindsight, why item 3 sat open: a change
+in `formal/` is expensive to *review* as well, and item 3 turned out to be one
+line.) Everything outside `formal/` that this regression touched has been fixed
+and is recorded in `FORMAL_string_value_model.md`.

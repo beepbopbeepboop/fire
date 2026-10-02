@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 import cas
 import formal_sweep as S
+import procrun
 
 # ── The messages this classifies, verbatim ───────────────────────────────────
 # The host-import and unresolved-import wordings are the two ImportBuildError
@@ -336,6 +337,23 @@ class TestDyldProbe(unittest.TestCase):
             raise AssertionError(
                 f"expected the bind audit's refusal, got: "
                 f"{cls.bogus_refusal[-400:]}")
+        # A RELATIVE import, which is the shape whose symbols begin with an
+        # underscore: `abi_module_name('._helper')` is `__helper`, so every
+        # export of the imported module is `__helper_<name>_<hash>` and every
+        # bind name the image records starts with `_`. The probe used to
+        # `lstrip("_")` the name before handing it to dlsym, which turned
+        # `__helper_twice_…` into `helper_twice_…` and reported a load failure
+        # for an image that loads — measured on both `formal/hostmods/os`
+        # hosts, both of which build, link and run. See
+        # bugs/FORMAL_relative_submodule_abi_prefix_off_by_one.md.
+        os.makedirs(os.path.join(d, "relpkg"), exist_ok=True)
+        with open(os.path.join(d, "relpkg", "_helper.mojo"), "w") as f:
+            f.write("fn twice(a: Int) -> Int:\n    return a + a\n")
+        with open(os.path.join(d, "relpkg", "__init__.mojo"), "w") as f:
+            f.write("from ._helper import twice\n\n"
+                    "fn main() -> Int:\n"
+                    "    var x: Int = twice(21)\n    return x\n")
+        cls.relative_img = cls._fire("relpkg/__init__.mojo", "arm64")
         # The image the post-build probe still has to be able to catch, built
         # the way a dylib-path build produces one: one external bind, and a
         # dylib that IS on the link line and loadable but does not define the
@@ -420,6 +438,23 @@ class TestDyldProbe(unittest.TestCase):
         self.assertEqual(err, "", f"dyld refused a resolvable image: {err}")
         self.assertEqual(rc, 5, "main() returns add(2, 3)")
 
+    def test_a_relative_imports_underscored_symbol_resolves_and_the_image_runs(self):
+        # The `lstrip("_")` regression, end to end and settled by dyld.
+        #
+        # A relative import's ABI prefix begins with an underscore, so this
+        # image's bind names do too — that is the precondition, asserted rather
+        # than assumed, because if it stops holding the test would pass for the
+        # wrong reason and stop covering anything.
+        names = [name for _ordinal, name in S._binds(self.relative_img)]
+        self.assertTrue(names, "precondition: the image binds something")
+        self.assertTrue(all(n.startswith("_") for n in names),
+                        f"precondition: every bind name is underscore-prefixed, "
+                        f"got {names}")
+        self.assertEqual(S._unresolved_imports(self.relative_img), [])
+        rc, err = self._runs(self.relative_img, "rel")
+        self.assertEqual(err, "", f"dyld refused a resolvable image: {err}")
+        self.assertEqual(rc, 42, "main() returns twice(21)")
+
     def test_an_image_nothing_defines_is_reported_and_dyld_agrees(self):
         # The true positive, and the check that the probe is not simply
         # answering "yes" to everything now.
@@ -494,14 +529,85 @@ class TestDyldProbe(unittest.TestCase):
         # dyld would refuse the image; the probe must not read past the end of
         # the load-command list and fall off into "resolvable". The same
         # lookup for an ordinal the image DOES have is the control.
+        #
+        # `_resolvable` returns (state, foreign, why) and only the triple
+        # ("resolved", None, "") is success, so a caller cannot mistake a
+        # partial answer — including "this host cannot find out" — for one.
         from formal import macho_linker as ML
         only_libsystem = [S._LIBSYSTEM]
-        self.assertNotEqual(
-            S._resolvable(9, "printf", only_libsystem, ML.CPU_TYPE_ARM64), "")
         self.assertEqual(
-            S._resolvable(1, "printf", only_libsystem, ML.CPU_TYPE_ARM64), "")
-        self.assertNotEqual(
-            S._resolvable(1, "printf", [], ML.CPU_TYPE_ARM64), "")
+            S._resolvable(9, "printf", only_libsystem, ML.CPU_TYPE_ARM64)[0],
+            "unresolved")
+        self.assertEqual(
+            S._resolvable(1, "printf", only_libsystem, ML.CPU_TYPE_ARM64),
+            ("resolved", None, ""))
+        self.assertEqual(
+            S._resolvable(1, "printf", [], ML.CPU_TYPE_ARM64)[0], "unresolved")
+
+    def test_a_foreign_architecture_dylib_is_unprovable_not_unloadable(self):
+        # The 2026-10-01 false finding. An x86-64 image with correct x86-64
+        # dylibs on its link line, probed from an arm64 process: dlopen cannot
+        # load an x86-64 dylib into an arm64 process, and that failure says
+        # NOTHING about whether the x86-64 image's own dyld could. Reporting it
+        # as a load failure filed 7 correct images as unanswerable and made the
+        # x86-64 sweep's pass count a floor rather than a number.
+        from formal import macho_linker as ML
+        self.assertEqual(S._host_cputype(), ML.CPU_TYPE_ARM64,
+                         "this case is written for an arm64 host; the sweep "
+                         "does run on x86-64 and the other direction is the "
+                         "same code path with the roles swapped")
+        other = [os.path.join(S._LIBSYSTEM)]
+        fake = os.path.join(tempfile.gettempdir(), "sweep_foreign_probe.dylib")
+        with open(fake, "wb") as f:
+            # A real Mach-O header claiming x86_64, with no content: enough for
+            # _macho_cputypes, and nothing else is consulted because the host
+            # check fires before the dlopen.
+            f.write(b"\xcf\xfa\xed\xfe" + b"\x07\x00\x00\x01" + b"\x00" * 24)
+        try:
+            state, foreign, why = S._loadable_for(fake, ML.CPU_TYPE_X86_64)
+        finally:
+            os.unlink(fake)
+        self.assertEqual(state, "unprovable",
+                         "an x86-64 dylib on an x86-64 image is not unloadable; "
+                         "this host simply cannot check it")
+        self.assertEqual(foreign, "x86_64")
+        self.assertIn("HOST cannot dlopen", why)
+        self.assertIn("Not a finding about the image", why)
+
+    def test_a_dylib_of_the_HOST_architecture_is_still_a_real_answer(self):
+        # The conservative direction must not have been taken one step too far:
+        # when the library IS this host's architecture, dlopen's verdict is a
+        # fact about the image and is reported as a load failure if it fails.
+        from formal import macho_linker as ML
+        state, foreign, _ = S._loadable_for(S._LIBSYSTEM, ML.CPU_TYPE_X86_64)
+        # libSystem is answered from the host, so it is loadable whatever the
+        # image's arch — that is the documented exception, and it is the case
+        # that must not be swept up in the new state.
+        self.assertEqual((state, foreign), ("loadable", None))
+
+    def test_a_file_whose_imports_are_all_unprovable_gets_no_verdict(self):
+        # Not a finding, and not a pass: the class is `tool`, the cause is its
+        # own, and nothing is cached. A `pass` would be inventing coverage the
+        # probe never established; an `unresolved-extern` would be accusing a
+        # correct image of a broken link line.
+        from formal import macho_linker as ML
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "x.mojo")
+            with open(path, "w") as f:
+                f.write("def f():\n    return 1\n")
+            saved = S._unresolved_imports
+            S._unresolved_imports = lambda binary: [
+                S.Missing("helper_add", "…is built for x86_64, which this "
+                          "arm64 HOST cannot dlopen…", True, "x86_64")]
+            try:
+                v = S.run_one(path, 30, S.build_flags("x86_64"), mem_gb=0)
+            finally:
+                S._unresolved_imports = saved
+        self.assertEqual(v.cls, S.CLASS_TOOL)
+        self.assertEqual(v.cause, S.CAUSE_FOREIGN_ARCH)
+        self.assertIn("x86_64 host", v.detail)
+        self.assertIn("would load", v.detail)
+        self.assertFalse(v.cached)
 
 
 class TestChainedDependencyRefusal(unittest.TestCase):
@@ -649,28 +755,37 @@ class TestReport(unittest.TestCase):
     that decides whether a reader can trust the number.
     """
 
-    def _main(self, rows, prev=None, cas_state=(3, 2)):
+    def _main(self, rows, prev=None, cas_state=(3, 2), argv=None):
         """rows: [(rel, ok, detail, cause)]. Returns (stdout, exit, ledger)."""
         import formal_sweep as mod
         files = [os.path.join(mod.REPO, r) for r, _ok, _d, _c in rows]
         by_path = {os.path.join(mod.REPO, r): (ok, d, c) for r, ok, d, c in rows}
         saved = {n: getattr(mod, n) for n in
-                 ("run_one", "load_ledger", "publish_ledger", "find_source_files")}
+                 ("run_one", "load_ledger", "publish_ledger", "find_source_files",
+                  "_claim_arch")}
 
-        def fake_run_one(path, timeout, flags):
+        # mem_gb is accepted and ignored: it is a bound on a build, and there is
+        # no build here. Accepting it is the point — run_one grew this parameter
+        # when the per-file ceiling landed, and a stub with the old signature
+        # would fail on arity and read as a defect in the sweep.
+        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB):
             ok, detail, cause = by_path[path]
             return mod.Verdict(ok, detail, cause, True,
                                *mod.classify(ok, detail, cause, "import os\n"))
 
-        def fake_publish(arch, f, v):
+        def fake_publish(arch, f, v, partial=False):
             published.update(v)
-        published = {}
+            published_partial.append(partial)
+        published, published_partial = {}, []
         mod.run_one = fake_run_one
         mod.load_ledger = lambda arch, f: prev
         mod.publish_ledger = fake_publish
         mod.find_source_files = lambda roots: files
+        # The arch lock is stubbed to always granted: these cases are about the
+        # report, and TestSweepLock is where the lock itself is under test.
+        mod._claim_arch = lambda arch, files: True
         mod.cas.stats.update(hits=cas_state[0], misses=cas_state[1])
-        old_argv, sys.argv = sys.argv, ["formal_sweep.py", "--no-stdlib"]
+        old_argv, sys.argv = sys.argv, argv or ["formal_sweep.py", "--no-stdlib"]
         buf, code = io.StringIO(), None
         try:
             with redirect_stdout(buf), redirect_stderr(io.StringIO()):
@@ -683,6 +798,7 @@ class TestReport(unittest.TestCase):
             for n, v in saved.items():
                 setattr(mod, n, v)
             cas.reset_stats()      # cas.stats is process-global
+        buf.published_partial = published_partial
         return buf.getvalue(), code, published
 
     def test_classes_sum_to_the_file_count(self):
@@ -843,9 +959,15 @@ class TestCacheContract(unittest.TestCase):
         cas.reset_stats()
 
     def _key(self):
+        # The key `run_one` will compute, argument for argument — including the
+        # import-closure digest. A stored entry under a DIFFERENT key is not a
+        # cached verdict, it is a miss with an entry beside it, and a test that
+        # published one and asserted a hit would be asserting that the key
+        # function ignores an input it takes.
         with open(self.path) as f:
             return cas.formal_build_key(f.read(), self.path, self.flags,
-                                        S._criteria_id())
+                                        S._criteria_id(),
+                                        imports=S._imports_digest(self.path))
 
     def test_the_stored_bytes_carry_no_class(self):
         # The first half of the contract, structurally: only `ok` and the
@@ -907,11 +1029,14 @@ class TestCacheContract(unittest.TestCase):
         # and the crash stays a miss.
         import formal_sweep as mod
         err = "build: 'X' object has no attribute 'y'\n" + TB_BACKEND
-        proc = mod.subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr=err)
+        proc = mod.BuildRun(1, "", err, False, None)
         published = []
-        with mock.patch.object(mod.subprocess, "run",
-                               return_value=proc), \
+        # `_run_build` itself, not `subprocess.run` under it: how the sweep
+        # spawns a build (and kills its tree on a timeout) is the sweep's
+        # business, and a mock of the spawning library underneath it silently
+        # stops intercepting the moment that changes — which is how this test
+        # came to be running a REAL build while believing it had stubbed one.
+        with mock.patch.object(mod, "_run_build", return_value=proc), \
              mock.patch.object(mod.cas, "lookup", return_value=None), \
              mock.patch.object(mod.cas, "publish",
                                side_effect=lambda *a, **k: published.append(a)):
@@ -941,6 +1066,363 @@ class TestLedgerKey(unittest.TestCase):
         self.assertEqual(
             S.ledger_key("arm64", [os.path.abspath(__file__)]),
             S.ledger_key("arm64", [os.path.abspath(__file__)]))
+
+
+class TestPerFileMemoryCeiling(unittest.TestCase):
+    """One file's build is bounded, and a file that hits the bound is a file
+    the sweep classifies and moves past — not a file that ends the run.
+
+    This is the mechanism behind bugs/FORMAL_sweep_killed.md: the arm64 sweep of
+    2026-10-01 was SIGKILLed with nothing but its 5-line header in the output,
+    and the structural reason a single file could do that is that nothing was
+    between one build and the machine.
+    """
+
+    def test_the_build_runs_under_memcap_not_bare(self):
+        argv = S._build_argv("/x/y.mojo", "/tmp/o", ("--formal",), 4.0)
+        self.assertEqual(argv[1], S.MEMCAP)
+        self.assertIn("--limit-gb", argv)
+        self.assertEqual(argv[argv.index("--limit-gb") + 1], "4.0")
+        # memcap takes `--` and then the command; getting that wrong makes it
+        # report usage and never run the build at all.
+        self.assertEqual(argv[argv.index("--") + 1:],
+                         [sys.executable, S.FIRE, "build", "--formal",
+                          "-o", "/tmp/o", "/x/y.mojo"])
+
+    def test_it_is_the_shared_memcap_not_a_second_watchdog(self):
+        # A private RSS-threading-and-killing copy here would be a second
+        # implementation of the tree walk procrun.py already owns, and a second
+        # set of ways to get it wrong. The ceiling is the SHARED tool, and
+        # procrun.memcap_verdict is what reads its verdict — one parser, already
+        # shared with tools/suite.py and tools/ab_run_one.py.
+        self.assertTrue(os.path.exists(S.MEMCAP))
+        self.assertIs(S.procrun, procrun,
+                      "the sweep must use the same procrun module, not a copy")
+
+    def test_zero_means_no_ceiling_rather_than_an_instant_kill(self):
+        # memcap treats a limit of 0 as "kill at once", so a caller passing 0
+        # has to be served the uncapped build it asked for — otherwise the
+        # natural spelling of "no cap" is the one spelling that kills everything.
+        argv = S._build_argv("/x/y.mojo", "/tmp/o", ("--formal",), 0)
+        self.assertNotIn(S.MEMCAP, argv)
+        self.assertEqual(argv[1], S.FIRE)
+
+    def test_a_breach_is_caught_and_carries_the_peak(self):
+        breach = ("memcap: BREACH  4.1 GB > 4.0 GB ceiling (102%), 3 procs -- "
+                  "killing y.mojo\nmemcap: peak observed before the kill: "
+                  "4.1 GB\nmemcap: this is a RESOURCE failure, not a verdict "
+                  "on the thing under test -- the process was killed for "
+                  "memory before it finished.\n")
+        # A run that exited 125 BY ITSELF is not a memory kill, and reading the
+        # exit code instead of memcap's own words is how a real failure gets
+        # filed under a machine problem. procrun.memcap_verdict is what refuses
+        # that conflation; this asserts the sweep goes through it.
+        killed, peak = procrun.memcap_verdict(breach)
+        self.assertTrue(killed)
+        self.assertAlmostEqual(peak, 4.1)
+        killed, _ = procrun.memcap_verdict("memcap: done, peak 0.1 GB, child exit 0")
+        self.assertFalse(killed)
+
+    def test_a_memory_kill_is_tool_class_and_not_a_codegen_finding(self):
+        # The fallback for a silent non-zero exit is deliberately the FINDING
+        # side (a `codegen` row). A SIGKILLed build is silent, so without an
+        # explicit check it would be filed as a gap in the backend — a machine
+        # fact reported as a finding about the file, which is the most expensive
+        # misclassification this tool can make.
+        detail = "killed at the 4 GB per-file ceiling (peak 4.1 GB)"
+        cls, reason = S.classify(False, detail, S.CAUSE_MEMORY, "x = 1\n", "x.py")
+        self.assertEqual(cls, S.CLASS_TOOL)
+        self.assertEqual(reason, S.CAUSE_MEMORY)
+        self.assertIn(S.CLASS_TOOL, S.DIRTY, "a file nobody answered for fails the run")
+
+    def test_a_memory_kill_is_not_a_timeout(self):
+        # The two are in the same class and need OPPOSITE responses: a timeout
+        # says raise -t, a memory kill says this build is a different shape and
+        # running it wider will not help. Folding them together would tell a
+        # reader to raise -t for a file that does not fit in the ceiling.
+        self.assertNotEqual(S.CAUSE_MEMORY, S.CAUSE_TIMEOUT)
+        self.assertEqual(S.classify(False, "timeout (> 30s)", S.CAUSE_TIMEOUT)[0],
+                         S.CLASS_TOOL)
+        self.assertEqual(
+            S.classify(False, "killed at the 4 GB ceiling", S.CAUSE_MEMORY)[1],
+            S.CAUSE_MEMORY)
+
+    def test_a_memory_kill_is_never_published(self):
+        # The ceiling is a flag on THIS run, so a verdict published under this
+        # key would pin the file at "memory-killed" in a store whose key says
+        # nothing about which flag set it. Same rule as a timeout, same reason.
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "big.mojo")
+            with open(path, "w") as f:
+                f.write("def f():\n    return 1\n")
+            published = []
+            saved = S.cas.publish
+            S.cas.publish = lambda *a, **k: published.append(a)
+            try:
+                v = S.run_one(path, 30, S.build_flags("arm64"), mem_gb=0)
+            finally:
+                S.cas.publish = saved
+            # With the ceiling at 0 the build really runs, so this only proves
+            # the plumbing; the breach path is covered by
+            # test_a_breach_does_not_publish, which forces one.
+            self.assertIsInstance(v, S.Verdict)
+            del published
+
+    def test_a_breach_does_not_publish(self):
+        # Forced rather than provoked: provoking a real 4 GB breach would make
+        # this test a memory hog, which is the thing it exists to argue against.
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "big.mojo")
+            with open(path, "w") as f:
+                f.write("def f():\n    return 1\n")
+            published = []
+            saved_pub, saved_run = S.cas.publish, S._run_build
+            S.cas.publish = lambda *a, **k: published.append(a)
+            S._run_build = lambda *a, **k: S.BuildRun(
+                125, "memcap: BREACH  4.1 GB > 4.0 GB ceiling\n"
+                     "memcap: peak observed before the kill: 4.1 GB\n", "",
+                True, 4.1)
+            try:
+                v = S.run_one(path, 30, S.build_flags("arm64"), mem_gb=4.0)
+            finally:
+                S.cas.publish, S._run_build = saved_pub, saved_run
+        self.assertEqual(v.cause, S.CAUSE_MEMORY)
+        self.assertIn("4.1 GB", v.detail)
+        self.assertFalse(v.cached)
+        self.assertEqual(published, [], "a memory kill must publish nothing")
+
+    def test_a_breach_outranks_the_silent_death_fallback(self):
+        # The build's own message is gone (the tree was SIGKILLed), so whatever
+        # the child printed before dying must not be read as a refusal. This
+        # drives _run_build directly so the ordering is what is under test, not
+        # a real build.
+        saved = S._run_build
+        S._run_build = lambda *a, **k: S.BuildRun(
+            125, "memcap: BREACH  4.1 GB > 4.0 GB ceiling\n"
+                 "memcap: peak observed before the kill: 4.1 GB\n",
+            "build: some.construct cannot be lowered: ...", True, 4.1)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                path = os.path.join(td, "big.mojo")
+                with open(path, "w") as f:
+                    f.write("def f():\n    return 1\n")
+                v = S.run_one(path, 30, S.build_flags("arm64"), mem_gb=4.0)
+        finally:
+            S._run_build = saved
+        self.assertEqual(v.cls, S.CLASS_TOOL)
+        self.assertEqual(v.cause, S.CAUSE_MEMORY)
+        self.assertNotIn("cannot be lowered", v.detail)
+
+
+class TestResultsSurviveAnInterruptedRun(unittest.TestCase):
+    """A run that is stopped keeps what it classified.
+
+    The 2026-10-01 arm64 sweep produced a 5-line header and no classifications
+    because the results were printed after the pool drained. Streaming is the
+    fix, and these are the two halves of it that a unit test can pin: the line
+    is written as the verdict arrives (not at the end), and a partial run says
+    how much of the scope it reached instead of claiming the whole denominator.
+    """
+
+    def test_a_row_is_printed_before_the_next_file_is_built(self):
+        # Interleaving is the mechanism, so the test asserts the ORDER of the
+        # writes: a stub that records "built X" and a collector that records
+        # "printed Y" must show the print happening between two builds, with the
+        # sweep not yet finished.
+        import formal_sweep as mod
+        events = []
+        results = {}
+
+        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB):
+            events.append(("built", mod.rel(path)))
+            # A non-PASS so there is a line to print at all.
+            return mod.Verdict(False, "build: refused", None, True,
+                               mod.CLASS_CODEGEN, "other refusal")
+
+        saved = mod.run_one
+        mod.run_one = fake_run_one
+        try:
+            files = [os.path.join(mod.REPO, "a.py"), os.path.join(mod.REPO, "b.py")]
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                mod._stream_results(files, 1, 30, ("--formal",), 4.0, results)
+        finally:
+            mod.run_one = saved
+        out = buf.getvalue()
+        # Both rows are on the output, and the file that was built FIRST is
+        # printed while the SECOND was not yet built — so stopping the sweep
+        # between the two would still leave the first row on disk.
+        self.assertIn("CODEGEN: a.py", out)
+        self.assertIn("CODEGEN: b.py", out)
+        self.assertEqual(sorted(events), [("built", "a.py"), ("built", "b.py")])
+        self.assertEqual(len(results), 2)
+
+    def test_a_pass_prints_nothing_but_is_still_recorded(self):
+        import formal_sweep as mod
+        results = {}
+        saved = mod.run_one
+        mod.run_one = lambda p, t, f, mem_gb=mod.MEMCAP_GB: mod.Verdict(
+            True, "", None, True, mod.CLASS_PASS, "")
+        try:
+            files = [os.path.join(mod.REPO, "ok.py")]
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                mod._stream_results(files, 1, 30, ("--formal",), 4.0, results)
+        finally:
+            mod.run_one = saved
+        self.assertEqual(buf.getvalue(), "")
+        self.assertEqual(results[files[0]].cls, mod.CLASS_PASS)
+
+    def test_a_partial_run_says_how_much_it_reached(self):
+        # A partial run that printed "623 files: PASS=113" would be claiming a
+        # denominator it does not have. The reached count and the total are two
+        # separate numbers for exactly that reason.
+        import formal_sweep as mod
+        files = [os.path.join(mod.REPO, "a.py"), os.path.join(mod.REPO, "b.py"),
+                 os.path.join(mod.REPO, "c.py")]
+        results = {
+            files[0]: mod.Verdict(True, "", None, True, mod.CLASS_PASS, ""),
+            files[1]: mod.Verdict(False, "killed at the 4 GB per-file ceiling",
+                                 mod.CAUSE_MEMORY, False, mod.CLASS_TOOL,
+                                 mod.CAUSE_MEMORY),
+        }
+        published, partial_flags = {}, []
+        saved = mod.publish_ledger
+        mod.publish_ledger = lambda a, f, v, partial=False: (
+            published.update(v), partial_flags.append(partial))
+        err = io.StringIO()
+        try:
+            with redirect_stderr(err):
+                mod._report_partial("arm64", files, results)
+        finally:
+            mod.publish_ledger = saved
+        text = err.getvalue()
+        self.assertIn("INTERRUPTED: 2 of 3 files classified", text)
+        self.assertIn("nothing is claimed about them", text)
+        # The memory kills are named as their own count, not folded into a
+        # generic tool tally that reads as "raise -t".
+        self.assertIn("1 hit this tool's per-file memory ceiling", text)
+        self.assertEqual(published, {"a.py": mod.CLASS_PASS, "b.py": mod.CLASS_TOOL})
+        self.assertEqual(partial_flags, [True],
+                         "a partial run must publish under its own key")
+
+    def test_a_partial_ledger_is_not_readable_as_a_complete_run(self):
+        # The extension, not a flag inside the payload, is what keeps a partial
+        # run out of the next run's history: load_ledger looks for LEDGER_EXT
+        # and a partial is published as LEDGER_PARTIAL_EXT, so the two cannot be
+        # confused even if the payload is read by hand.
+        import formal_sweep as mod
+        self.assertNotEqual(S.LEDGER_EXT, S.LEDGER_PARTIAL_EXT)
+        files = [os.path.join(mod.REPO, "a.py")]
+        published, looked_up = [], []
+        saved_pub, saved_look = mod.cas.publish, mod.cas.lookup
+        mod.cas.publish = lambda key, ext, data: published.append(ext)
+        mod.cas.lookup = lambda key, ext=".o": looked_up.append(ext) or None
+        try:
+            mod.publish_ledger("arm64", files, {"a.py": "pass"}, partial=True)
+            mod.publish_ledger("arm64", files, {"a.py": "pass"})
+            mod.load_ledger("arm64", files)
+        finally:
+            mod.cas.publish, mod.cas.lookup = saved_pub, saved_look
+        self.assertEqual(published, [mod.LEDGER_PARTIAL_EXT, mod.LEDGER_EXT],
+                         "a partial run must publish under its own extension")
+        self.assertEqual(looked_up, [mod.LEDGER_EXT],
+                         "load_ledger must only ever ask for a COMPLETE ledger")
+
+
+class TestSweepLock(unittest.TestCase):
+    """One sweep per architecture at a time, and different architectures are
+    independent.
+
+    The lock is here because two same-arch sweeps share the formal module-dylib
+    output directory and the ledger, and a manifest in that directory is
+    rewritten IN PLACE (`write_dylib_manifest` opens it `w`), so a reader in one
+    sweep can observe the other's half-written JSON. That is what the
+    `json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)` in
+    bugs/FORMAL_sweep_tool_json_decode_error.md is; the lock stops the pair from
+    running together rather than trying to make the shared write safe.
+    """
+
+    def test_a_second_sweep_of_the_same_arch_is_refused(self):
+        with tempfile.TemporaryDirectory() as cas_dir:
+            self._with_cas(cas_dir, lambda: self._assert_serialised("arm64"))
+
+    def test_two_architectures_do_not_block_each_other(self):
+        # The owner's own two-at-once run was an arm64 sweep and an x86-64 one,
+        # and they completed. Those two are independent — separate dylib
+        # directories, separate cache keys — so a lock that refused them would
+        # be refusing a legitimate use, which is why the key is the ARCH and not
+        # the cache as a whole.
+        with tempfile.TemporaryDirectory() as cas_dir:
+            self._with_cas(cas_dir, lambda: self._assert_serialised("x86_64"))
+
+    def _assert_serialised(self, arch):
+        import formal_sweep as mod
+        # Real pipes, not sys.stdout/sys.stdin: unittest replaces those, and a
+        # handshake over the replaced objects would test the harness rather than
+        # the lock. Two fds, one direction each, is all this needs.
+        down_r, down_w = os.pipe()      # child -> parent: "I hold it"
+        up_r, up_w = os.pipe()          # parent -> child: "let go"
+        first = os.fork()
+        if first == 0:
+            os.close(down_r)
+            os.close(up_w)
+            try:
+                # The child holds the lock and waits to be told to let go, so
+                # the parent's attempt is against a LIVE holder rather than
+                # against a stale lock file — which is the distinction that
+                # makes this a test of flock and not of the file's existence.
+                if mod._claim_arch(arch, ["a.py"]):
+                    os.write(down_w, b"held\n")
+                    os.read(up_r, 1)
+            finally:
+                os._exit(0)
+        os.close(down_w)
+        os.close(up_r)
+        try:
+            self.assertEqual(os.read(down_r, 5), b"held\n",
+                             "the forked child failed to take the lock")
+            self.assertFalse(mod._claim_arch(arch, ["a.py"]),
+                             "a second claim of the same arch must be refused")
+        finally:
+            os.write(up_w, b"\n")
+            os.close(up_w)
+            os.waitpid(first, 0)
+            os.close(down_r)
+        # Released: the kernel drops an flock when the holder dies, so a killed
+        # sweep cannot wedge the next one. That is why this is a fork and not a
+        # mock — the crash-safety is the property being claimed, and a mock
+        # would be asserting that the mock released it.
+        self.assertTrue(mod._claim_arch(arch, ["a.py"]),
+                        "the lock must be free once the holder is gone")
+
+    def test_the_lock_names_the_holder(self):
+        # "Another sweep is running" is a worse message than "another sweep is
+        # running, and here is its pid", and the pid is free: the lock is a
+        # lockFILE, which is why it is not the ledger (that gets replaced).
+        import formal_sweep as mod
+        with tempfile.TemporaryDirectory() as cas_dir:
+            self._with_cas(cas_dir, lambda: None)
+            self.assertTrue(mod._claim_arch("arm64", ["a.py"]))
+            with open(mod.sweep_lock_path("arm64")) as f:
+                body = f.read()
+        self.assertIn(str(os.getpid()), body)
+        self.assertIn("a.py", body)
+
+    def _with_cas(self, cas_dir, body):
+        """Point cas.CAS_DIR at a temp dir for the duration of `body`."""
+        import formal_sweep as mod
+        saved = mod.cas.CAS_DIR
+        mod.cas.CAS_DIR = cas_dir
+        saved_held = mod._HELD_LOCK
+        mod._HELD_LOCK = None
+        try:
+            body()
+        finally:
+            mod.cas.CAS_DIR = saved
+            if saved_held is not None:
+                os.close(saved_held)
+            mod._HELD_LOCK = None
 
 
 if __name__ == "__main__":

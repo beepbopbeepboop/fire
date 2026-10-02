@@ -81,7 +81,23 @@ calls that raise are documented return values:
     for `with_suffix`, an argument that is not a suffix at all. Unchanged is
     the one answer a caller can act on, and it is stated at each definition
     rather than left to be found as a surprising string.
+
+THE MATCHER IS `fnmatch`'s
+--------------------------
+Inside one component the pattern language IS `fnmatch`'s — `*`, `?`, `[seq]`,
+`[!seq]` — and the code that reads it is `formal/hostmods/fnmatch.mojo`'s
+`match_core`, called from `match_seg` below with the flag that keeps `*` inside
+the component. It USED to be this file's own `match_seg`/`match_bracket`, which
+was a second implementation of one bracket matcher: the `[seq]` rule, the range
+rule and the literal-`]`-first rule are the same code in both, and two copies of
+them are two places for them to disagree about what `[a-c]` means. The move
+changed one answer, and the one it changed was WRONG here: an unterminated `[`
+is a literal `[` in CPython, and this copy answered 0 for every pattern ending
+in one (`match("a[", "a[")` was 0 where CPython says True). That is
+`fnmatch.mojo`'s own measurement, at its `match_core`.
 """
+
+from fnmatch import match_core
 
 # ── byte helpers ───────────────────────────────────────────────────────────
 #
@@ -598,83 +614,18 @@ def match_path(a, an, b, bn) -> int:
 def match_seg(a, ai, an, b, bi, bn) -> int:
     """One component against one: `fnmatch`, with no `/` inside either.
 
-    A backtracking walk, and the only recursive function in this file. Each
-    step consumes at least one character of the pattern, so the depth is the
-    pattern COMPONENT's length — a property of the input rather than a
-    constant somebody had to choose, which is why there is no depth guard here
-    where `json.mojo`'s scanner has one.
+    A THIN WRAPPER, and that is the whole change: the walk it used to contain is
+    `formal/hostmods/fnmatch.mojo`'s `match_core`, called with `cross` 0 so that
+    `*` does not cross a `/`. The two arguments are this file's component spans
+    — `match_path` above computed them — and the flag is redundant for them,
+    because a component contains no `/` by construction; it is passed because it
+    is the honest description of what `PurePath.match`'s pattern language is, and
+    because `match_core` is also `fnmatch`'s entry with the flag on.
+
+    The recursion, and therefore the depth, is now `match_core`'s: one level per
+    pattern byte consumed, which inside a component is a COMPONENT's length.
     """
-    if bn == 0:
-        # The pattern is exhausted AND so must the input: a component match is
-        # whole-component on both sides, and returning 1 here with input left
-        # over is what made `match("a/b.py", "[!]]")` answer 1 where CPython
-        # answers 0 — the set matched the `b` and the `.py` had nowhere to go.
-        if an == 0:
-            return 1
-        return 0
-    if an == 0:
-        # Only a pattern of nothing but `*` can still match nothing.
-        if byte_or(b, bi) == 42:
-            return match_seg(a, ai, an, b, bi + 1, bn - 1)
-        return 0
-    var bc = byte_or(b, bi)
-    if bc == 42:
-        var k = 0
-        while k <= an:
-            if match_seg(a, ai + k, an - k, b, bi + 1, bn - 1) == 1:
-                return 1
-            k = k + 1
-        return 0
-    if bc == 63:
-        return match_seg(a, ai + 1, an - 1, b, bi + 1, bn - 1)
-    if bc == 91:
-        return match_bracket(a, ai, an, b, bi, bn)
-    if bc != byte_or(a, ai):
-        return 0
-    return match_seg(a, ai + 1, an - 1, b, bi + 1, bn - 1)
-
-
-def match_bracket(a, ai, an, b, bi, bn) -> int:
-    """A `[...]` set at `b[bi]` against the byte at `a[ai]`.
-
-    `[!...]` and `[^...]` both negate, which is CPython's `fnmatch` spelling,
-    and a `]` IMMEDIATELY after the `[` or the `!` is a literal — the two rules
-    that make `[]]` and `[!]]` mean what a program means by them. An
-    unterminated `[` is a literal `[`, again as in `fnmatch`.
-    """
-    # `j` and `end` are ABSOLUTE indices into `b` and `bn` is a LENGTH, and
-    # keeping those two on the same scale is the whole of this function: the
-    # first version compared an index against a length, which happened to work
-    # while the bracket was the first thing in its component and broke the
-    # moment it was not — `match("a/b.py", "b[.]py")` answered 0.
-    var end = bi + bn
-    var j = bi + 1
-    var neg = 0
-    if j < end and byte_or(b, j) == 33:
-        neg = 1
-        j = j + 1
-    var c = byte_or(a, ai)
-    var hit = 0
-    if j < end and byte_or(b, j) == 93:
-        if c == 93:
-            hit = 1
-        j = j + 1
-    while j < end and byte_or(b, j) != 93:
-        if j + 2 < end and byte_or(b, j + 1) == 45:
-            if c >= byte_or(b, j) and c <= byte_or(b, j + 2):
-                hit = 1
-            j = j + 3
-        else:
-            if c == byte_or(b, j):
-                hit = 1
-            j = j + 1
-    if j >= end and c == 91:
-        hit = 1
-    if neg == 1:
-        hit = 1 - hit
-    if hit == 0:
-        return 0
-    return match_seg(a, ai + 1, an - 1, b, j + 1, end - j - 1)
+    return match_core(a, ai, an, b, bi, bn, 0)
 
 
 # ── the one whose answer never changes ─────────────────────────────────────

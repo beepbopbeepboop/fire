@@ -158,10 +158,11 @@ replacing nine specific and true sentences with one coarser true one — a
 regression in precision paid for a gain in truthfulness, which is not a trade
 this document's refusals are trying to make.
 
-**The exact next step, for whoever wants it:** hoist `first_mlir` from the
-function to the unit, and apply it ONLY against the two rows that are symptoms
-rather than constructs — the placement refusal (`model.unresolved_name_refusal`
-and its module-global sibling) and the imported-module-level-name refusal
+**The exact next step, for whoever wants it — DONE, AND IT IS A NO-OP ON THE
+NEW STDLIB. Do not implement it.** Hoist `first_mlir` from the function to the
+unit, and apply it ONLY against the two rows that are symptoms rather than
+constructs — the placement refusal (`model.unresolved_name_refusal` and its
+module-global sibling) and the imported-module-level-name refusal
 (`model.module_global_refusal`'s `imported` branch). Both are decidable by which
 reader produced the sentence, so the rule is mechanical rather than a judgement
 about wording: **a refusal that names a construct is not pre-empted; a refusal
@@ -171,3 +172,16 @@ source did not use, and the construct that owns that judgement is the generic's
 explicit-parameter list, which
 `bugs/FORMAL_env_family_next_terminal.md` §2 and `FORMAL_known_limits.md` §1.2
 already file.
+
+**Superseded 2026-10-01: the paragraph above was implemented and measured, and
+it converts 0 files on the new-modular stdlib.** The rule is right and the
+population is gone — three of the four files whose verdict the hoist would change
+have no dialect construct in any position a pre-emption scans (their `__mlir_`
+is `__mlir_index__` / `__mlir_i1__`, a METHOD name on a value), and the fourth's
+is in a return-type annotation this path treats as inert, so acting on it would
+be the demotion the section above rules out. Full census, the four files, and the
+three positions that actually need work are in
+[`FORMAL_mlir_unit_hoist_is_unreachable_on_the_new_stdlib.md`](FORMAL_mlir_unit_hoist_is_unreachable_on_the_new_stdlib.md).
+The measurement that made this a no-op was taken on `../new-modular`; the
+paragraph's "converts 3 files" was measured on `../modular`, and the difference
+is the tree, not the rule.

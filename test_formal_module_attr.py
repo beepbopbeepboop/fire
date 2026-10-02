@@ -29,6 +29,17 @@ that module — and all four were refused or mis-bound:
     symbol when the module had a table to be missing from, and a bracketed
     callee (`f[x](...)`) was reported as a READ with no storage — a false
     statement about a call.
+  * a dotted READ of a module — `sys.argv`, `sys.stderr`, `mod.K` in a value
+    position — was refused as a STORAGE problem about the module ROOT:
+    "'sys' is imported from `sys`, and it is a module-level name of another
+    module … there is no storage for one here". Every clause is false about
+    `sys`: it is not a module-level name of `sys`, it IS the module, and a
+    module is not a variable with nowhere to live — it is the library on the
+    link line, with a manifest. The name that has no representation is the
+    ATTRIBUTE, and that is what the message now says. Six files were refused
+    with the old wording on both architectures, which is what
+    `tools/formal_sweep_causes.py` files under the cause "a module-level name of
+    ANOTHER module is not exported as a word".
 
 What is asserted here, and why each one is a separate test:
 
@@ -39,9 +50,9 @@ What is asserted here, and why each one is a separate test:
      cannot have is one architecture answering differently from the other
      (measured, repeatedly: the same source returned 10 on arm64 and 0 on
      x86-64 where it says 5).
-  2. the three shapes that must STAY refused stay refused, each for its own
-     reason and with a message that names it: a STORE to another module's
-     constant, a module-level LIST (a real global with nowhere to live,
+  2. the shapes that must STAY refused stay refused, each for its own reason
+     and with a message that names it: a STORE to another module's constant, a
+     module-level LIST (a real global with nowhere to live,
      `bugs/FORMAL_module_state_no_storage.md`), and a name the module does not
      publish.
   3. the manifest is the contract, and it says what the consumer needs: which
@@ -52,7 +63,15 @@ What is asserted here, and why each one is a separate test:
   4. a module OBJECT still has no storage: `len(mylib)` is refused, because
      exempting a call's root must not exempt a read of the same name. That is
      the test that would catch the fix being scoped to the name instead of to
-     the call position.
+     the call position — and it is the sibling of the ATTRIBUTE-read cases, so
+     the two halves of the scoping are adjacent.
+  5. an attribute READ is refused as the attribute, from `main` AND from a
+     module body, and is never reported as a variable — plus the structural
+     half, that such a chain never reaches the emitter unrefused, because the
+     emitter would emit `#0` for it and the program would print 0 and exit 0.
+  6. a folded constant is readable in EVERY position. `print(mod.K)` lowered
+     while `x = mod.K` was refused, from one walk and one message, because the
+     store's value side re-entered the node walk instead of being tested.
 
 Invoked directly:
     python3 test_formal_module_attr.py [-v]
@@ -615,6 +634,277 @@ def test_a_module_object_read_is_still_refused(tmpdir, _shared, verbose):
               f"with no storage: {text.strip()[-300:]}")
 
 
+# ── the module's ATTRIBUTE read as a value (the `sys.argv` shape) ───────────
+#
+# Everything above reaches a module through a CALL or through a name the build
+# folded. This section is the shape the work map's row "a module-level name of
+# ANOTHER module is not exported as a word" actually held: `sys.argv`,
+# `sys.stderr`, `mod.K` in a value position — where the ROOT is a module and the
+# thing being read is its ATTRIBUTE.
+#
+# The bug this pins is a DIAGNOSIS that was false about the name it refused, and
+# the reason it is a test rather than a reword is that the false version was
+# load-bearing in two directions at once: it sent the reader after storage for a
+# name that needs none, and it was the reported failure for six files on both
+# architectures.
+
+def test_a_module_attribute_read_is_refused_as_an_attribute(
+        tmpdir, _shared, verbose):
+    """`mylib.ITEMS` — the refusal names the ATTRIBUTE, not the module.
+
+    Before this, `sys.argv` was refused as "'sys' is imported from `sys`, and
+    it is a module-level name of another module … there is no storage for one
+    here". Every clause of that is false about `sys`: `sys` is not a module-level
+    name of `sys`, it IS the module, and a module is not a variable with nowhere
+    to live — it is the library on the link line, with a manifest that says what
+    it publishes. The name with no representation is `ITEMS`.
+
+    Asserted on both halves, because either alone would pass a message that got
+    the shape right and the reason wrong: the message must name the attribute,
+    and it must print what the module DOES publish, so a reader can tell a
+    capability the module lacks from a name it simply does not have."""
+    lib = "ITEMS = [1, 2, 3]\n\n\ndef addup(a, b):\n  return a + b\n"
+    prog = ("import mylib\n\n"
+            "def main():\n"
+            "  printf(\"%d\", mylib.ITEMS[1])\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "attribute_read")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": lib, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("mylib.ITEMS" in text and "'ITEMS'" in text,
+              f"{arch}: the refusal must name the dotted attribute the source "
+              f"wrote, not the module root: {text.strip()[-400:]}")
+        check("addup" in text,
+              f"{arch}: the refusal must print what the module DOES publish, "
+              f"so a reader can see `ITEMS` is not one of them: "
+              f"{text.strip()[-400:]}")
+        check("FORMAL_module_state_no_storage.md" in text,
+              f"{arch}: the design note this shape belongs to must be cited: "
+              f"{text.strip()[-400:]}")
+
+
+def test_a_module_root_is_not_reported_as_a_variable(tmpdir, _shared, verbose):
+    """The negative of the above, stated as its own test because it is the one
+    that can pass while the positive one is green.
+
+    `mylib.ITEMS` must NOT be refused with the bare-name message — "'mylib' is
+    imported from `mylib`, and it is a module-level name of another module …
+    there is no storage for one here". That sentence is the bug: it is about a
+    storage question for a name that is a module, and a reader who believes it
+    goes looking for a `__DATA` slot for the module itself. `formal_sweep_causes.py`
+    keys a whole CAUSE on that wording, so a file still classified under it is
+    evidence the old message is still being produced somewhere."""
+    lib = "ITEMS = [1, 2, 3]\n\n\ndef addup(a, b):\n  return a + b\n"
+    prog = ("import mylib\n\n"
+            "def main():\n"
+            "  printf(\"%d\", mylib.ITEMS[1])\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "attribute_not_variable")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": lib, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("'mylib' is imported from" not in text,
+              f"{arch}: the module root was still reported as a module-level "
+              f"name of another module with nowhere to live, which is a "
+              f"storage claim about a name that is a module: "
+              f"{text.strip()[-400:]}")
+
+
+def test_a_module_attribute_read_is_never_a_silent_zero(tmpdir, _shared,
+                                                       verbose):
+    """The safety property, and the reason the refusal is not optional.
+
+    Exempting the module ROOT from the name-placement walk is what makes
+    `mod.K` reachable at all — and on its own it is a SILENTLY WRONG ANSWER
+    rather than a failure. `ARM64Codegen._emit_expr` on
+    `MemberExpr(IdentExpr('mod'), 'attr')` finds no frame slot for `"mod.attr"`,
+    falls to its "no object model, so the field itself reads as 0" arm,
+    evaluates `_load_var('mod')` and emits `#0`. So `printf("%d", mod.attr)`
+    would print 0 and exit 0, with a green build and no refusal anywhere.
+
+    So this asserts the STRUCTURAL half — that a rooted member chain never
+    reaches the emitter unrefused — rather than only that this program is
+    refused. It is checked in-process on the check itself, because a build-level
+    assertion cannot tell "refused" from "refused for an unrelated reason later
+    in the file": the point is that the REFUSAL IS THIS ONE, at the attribute.
+    """
+    import formal.build as B
+    import formal.model as M
+    import fire_compiler as F
+
+    src = ("import mylib\n\n"
+           "def main():\n"
+           "  var x = mylib.ITEMS\n"
+           "  return 0\n")
+    stmts = F.Parser(F.py_tokenize(src)).with_filename("t").parse_module()
+    fns, structs, syms, _slots = B._prepare_functions(stmts, synthetic=False)
+    M.publish_module_symbols(syms)
+    refused = ""
+    try:
+        B.check_module_symbols(fns, {s.name: s for s in structs},
+                               imported_module_names=("mylib",))
+    except Exception as e:            # CodegenError, by its message
+        refused = str(e)
+    check(bool(refused),
+          "a module-rooted member read reached codegen unrefused, which is the "
+          "silently-wrong-zero case: the emitter has no frame slot for it and "
+          "emits #0, so this program would build, print 0 and exit 0")
+    check("mylib.ITEMS" in refused,
+          f"the refusal must be about the attribute, not the root: "
+          f"{refused[:300]}")
+
+
+def test_a_published_constant_is_readable_in_every_position(tmpdir, _shared,
+                                                            verbose):
+    """`x = mylib.CONST` — the shape that was refused while `print(mylib.CONST)`
+    built.
+
+    `_apply_imported_constant_sites` re-entered the NODE walk on a store's value
+    side instead of applying `_rewrite_dotted_child` — the ONE test — to it, so
+    the value was never itself tested as a dotted constant. Measured: `print(K)`,
+    `return K`, `f(K)`, an `if K:`, an f-string and a subscript index all
+    lowered; `x = K`, `var x = K` and `x += K` were refused with the message
+    that claims a dylib cannot publish a VARIABLE — about a name that is a
+    folded CONSTANT the module's own manifest already carries. Same construct,
+    same walk, two verdicts, and the one that got it wrong said the opposite
+    thing.
+
+    Two of the three store kinds the walk handles are here — `=` and `+=`. The
+    third, `var y: int = mod.K`, cannot appear in this file's programs at all:
+    the CPython oracle runs the SAME TEXT, and `var` is Mojo syntax CPython
+    cannot parse, so a case using it would compare against an oracle that
+    cannot run rather than against CPython's answer. `test_the_store_value_side
+    _goes_through_the_one_test` below covers that shape by asking the rewriter
+    directly, which needs no oracle.
+
+    Pinned as a RUNNING comparison against CPython over the same program text,
+    on both architectures, because "it builds" is not the property — the value
+    substituted has to be the module's, which is a different failure from a
+    refusal and a worse one."""
+    prog = ("import mylib\n\n"
+            "def main():\n"
+            "  x = mylib.CONST\n"
+            "  printf(\"%d|\", x)\n"
+            "  x += mylib.CONST\n"
+            "  printf(\"%d|\", x)\n"
+            "  printf(\"%s|\", mylib.S)\n"
+            "  return x\n")
+    root = os.path.join(tmpdir, "constant_store")
+    os.makedirs(root)
+    files = write_tree(root, {"mylib.mojo": LIB, "prog.mojo": prog})
+    agrees_with_cpython(root, "prog", files, prog, verbose)
+
+
+def test_the_store_value_side_goes_through_the_one_test(tmpdir, _shared,
+                                                        verbose):
+    """`var y: int = mod.K` — every store kind, asked of the rewriter directly.
+
+    The third store kind, which cannot go through the CPython oracle because
+    `var` is Mojo syntax (`test_a_published_constant_is_readable_in_every_
+    position` says so). Asked of `_apply_imported_constant_sites` directly, so
+    the assertion is about the REWRITE — that the node standing in a store's
+    value slot is itself tested, not merely walked into — and not about whether
+    a backend happens to lower the result.
+
+    This is the structural form of a defect that no build-level test can see:
+    a rewrite that recurses into a node instead of testing it reports success
+    (`return n` still returns a count) and rewrites nothing. So the assertion
+    is that the VALUE became a literal, read back off the tree, and that the
+    store's TARGET was left alone — `mod.K = 5` writes another module's state
+    and is still refused by name elsewhere, so substituting it would trade a
+    refused store for a dropped one."""
+    import fire_compiler as F
+    import formal.build as B
+
+    tables = {"mylib": {"CONST": 41, "S": "hello"}}
+    shapes = {
+        "assign":    "  x = mylib.CONST\n",
+        "augassign": "  x = 1\n  x += mylib.CONST\n",
+        "vardecl":   "  var x: int = mylib.CONST\n",
+    }
+    for label, body in shapes.items():
+        src = "import mylib\n\ndef main():\n" + body + "  return 0\n"
+        stmts = F.Parser(F.py_tokenize(src)).with_filename("t").parse_module()
+        fns, _structs, _syms, _slots = B._prepare_functions(
+            stmts, synthetic=False)
+        done = B._apply_imported_constant_sites(
+            fns[0].body, tables, B._names_bound_in(fns[0]))
+        check(done == 1,
+              f"{label}: a store whose VALUE is `mod.CONST` rewrote {done} "
+              f"site(s), expected 1 — 0 means the value was walked into "
+              f"rather than tested, which is the defect (and reported success "
+              f"while doing nothing)")
+        stmts_after = [n for n in B.M.iter_nodes(fns[0].body)
+                       if type(n).__name__ in ("AssignStmt", "AugAssignStmt",
+                                               "VarDecl")]
+        values = [getattr(n, "value", None) for n in stmts_after]
+        check(any(isinstance(v, F.IntLiteral) and v.value == 41
+                  for v in values),
+              f"{label}: no store's value is the module's literal, so the "
+              f"constant did not cross: {values!r}")
+
+    # …and the TARGET of a store to another module is still not rewritten.
+    src = "import mylib\n\ndef main():\n  mylib.CONST = 5\n  return 0\n"
+    stmts = F.Parser(F.py_tokenize(src)).with_filename("t").parse_module()
+    fns, _structs, _syms, _slots = B._prepare_functions(stmts, synthetic=False)
+    done = B._apply_imported_constant_sites(
+        fns[0].body, tables, B._names_bound_in(fns[0]))
+    target = fns[0].body[0].target
+    check(done == 0 and isinstance(target, F.MemberExpr),
+          f"a store to another module's name was rewritten ({done} site(s)), "
+          f"which drops a write that should be refused rather than performed: "
+          f"{target!r}")
+
+
+def test_a_module_attribute_read_from_the_module_body_is_refused_too(
+        tmpdir, _shared, verbose):
+    """The other shape the six files had, and the reason both are in this file.
+
+    Three of the six refused at `main:` and three at `__module_body__:` — the
+    same construct in a different function, because the sweep walks a module
+    body as its own function. A fix scoped to `def main` would have moved three
+    files and left three, and the work map's count would not have changed."""
+    lib = "ITEMS = [1, 2, 3]\n\n\ndef addup(a, b):\n  return a + b\n"
+    prog = ("import mylib\n\n"
+            "printf(\"%d\", mylib.ITEMS[1])\n")
+    root = os.path.join(tmpdir, "attribute_in_body")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": lib, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("mylib.ITEMS" in text,
+              f"{arch}: the module-body shape must be refused by name too: "
+              f"{text.strip()[-400:]}")
+
+
+def test_a_local_shadowing_a_module_name_is_still_the_local(tmpdir, _shared,
+                                                            verbose):
+    """`def main(mylib): mylib.ADDUP(1, 2)` — a parameter named like a module.
+
+    The scoping test for the exemption itself. The member-read arm is gated on
+    the root naming an imported module, and a PARAMETER of that name shadows it
+    in exactly the way the shadowing rule says: the read is of a local, whose
+    attribute is a frame slot, not a module attribute. Exempting the root by
+    NAME rather than by node identity would exempt this one too, and it would
+    then be refused with a message about the module — refusing a program whose
+    answer is a local's."""
+    prog = ("import mylib\n\n"
+            "def main(mylib):\n"
+            "  return mylib.ADDUP(1, 2)\n")
+    root = os.path.join(tmpdir, "shadowing_local")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": LIB, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("imported from `mylib`" not in text,
+              f"{arch}: a parameter that shadows the module name must be read "
+              f"as the local it is, not refused as a module attribute: "
+              f"{text.strip()[-400:]}")
+
+
 # ── the manifest is the contract ──────────────────────────────────────────
 
 def test_the_manifest_names_its_module_and_its_constants(tmpdir, _shared, verbose):
@@ -681,6 +971,20 @@ TESTS = [
      test_a_bracketed_call_to_a_private_name_is_refused_as_an_export_gap),
     ("`len(mylib)` — a read of the module object — is still refused",
      test_a_module_object_read_is_still_refused),
+    ("`mylib.ITEMS` is refused as the ATTRIBUTE, naming what the module does",
+     test_a_module_attribute_read_is_refused_as_an_attribute),
+    ("a module root is never reported as a variable with no storage",
+     test_a_module_root_is_not_reported_as_a_variable),
+    ("a module-attribute read never reaches the emitter as a silent zero",
+     test_a_module_attribute_read_is_never_a_silent_zero),
+    ("a published constant reads in EVERY position, including a store's value",
+     test_a_published_constant_is_readable_in_every_position),
+    ("every store kind tests its VALUE side, and a module store stays a store",
+     test_the_store_value_side_goes_through_the_one_test),
+    ("the same attribute read is refused from a module BODY too",
+     test_a_module_attribute_read_from_the_module_body_is_refused_too),
+    ("a local that shadows a module name is read as the local it is",
+     test_a_local_shadowing_a_module_name_is_still_the_local),
     ("the manifest names its module, its constants and its forwarding",
      test_the_manifest_names_its_module_and_its_constants),
 ]

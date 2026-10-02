@@ -158,12 +158,22 @@ def _returns(callee_names, struct_by_name):
     contract `struct_returned_frame_sites` documents: the build pass's fixpoint
     decides this, and a second answer to the same question inside the
     model is the disagreement that produces a wrong number instead of a
-    refusal.  ONE argument, because the landed version took the bound name as
-    well and used it to decide whether the call site's result was kept — the
-    function now reserves a block for EVERY call of such a callee, so the
-    parameter had no meaning left and keeping it would have suggested a
-    restriction that is not there."""
-    def _p(callee):
+    refusal.
+
+    TWO arguments, because the model's contract is two: `(callee, bound_name)`.
+    The bound name is what tells `dict.get` — whose second parameter is a
+    DEFAULT — from this predicate, and handing `dict.get` over makes a missing
+    callee answer with the bound name, so every call in the module is treated as
+    returning a frame.  See `model.frame_returning_predicate`, which is where
+    the real one is built and carries the measurement; `b2cec6f0` is the commit
+    that found it.
+
+    The bound name is IGNORED here, and deliberately: the function now reserves
+    a block for EVERY call of a frame-returning callee, so a position that binds
+    no name is covered too.  A one-argument closure would pass the cases below
+    and then raise a `TypeError` on the first call, which is why this comment
+    exists rather than the signature being the obvious one."""
+    def _p(callee, _bound_name=None):
         if callee not in callee_names:
             return None
         return struct_by_name.get(callee)

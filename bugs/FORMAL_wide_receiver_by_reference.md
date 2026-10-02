@@ -1683,3 +1683,48 @@ The general lesson, which is the one worth keeping: **a convention that adds a
 word to a call is also a change to the register allocator**, and the arm64
 prologue's two homes for a value are two pieces of code. They had been one for
 as long as only one of them was reachable.
+
+
+---
+
+## Round 3: the codegen landed, and the measured effect was ZERO files reaching `pass`
+
+The section above is the design; this is what happened when it was built.
+`bugs/FORMAL_returned_frame_caller_owned_block.md` has the diff-shaped account —
+the three decisions, the two bugs the new code contained, and the per-file
+landing table for the 30 sweep files this cause blocked. Three things belong
+here because they correct or complete statements above rather than replace
+them.
+
+**"Why this is blocked, and it is not on the Lean side" is no longer true of
+the first bullet.** `formal/build.py` had an owner by the time this landed and
+the gate came down: the returned frame is now built in a block the CALLER owns,
+passed as one hidden trailing argument, and the 19 `returned by its creator`
+findings are **zero**.
+
+**The block is built IN, not copied into.** Round 2 and
+`bugs/INTERFACE_REQUEST_4_to_3_contracts.md` both say the copy, and both are
+superseded on that one point. A construction inside the returning function
+writes through the hidden word instead, which removes the one thing that made
+the copy expensive — re-basing the ADDRESS of every nested frame in the block,
+at every depth, into the new block. The convention is otherwise identical: same
+caller-side block, same hidden word, `return <p>` still returns that word. The
+Lean predicate the interface request asks for is unchanged by this, because it
+is stated over the convention and not over the copy.
+
+**A forwarder forwards.** `def twice(a): var q = make(a); return q` builds
+nothing, so redirecting construction sites does not apply to it; it hands its
+own caller's block down to `make` instead. A chain of forwarders therefore
+builds one object in the outermost caller's scratch and no copy is ever taken,
+which is why the shape most real code has needed a rule of its own.
+
+**And the measured value is 0 files reaching `pass`, which the section above's
+framing would not have predicted.** The instruction was to measure by hacking
+the refusal away and re-sweeping, and that measurement reports **1** — and the
+one file is refused by the finished change for a real reason: its entry function
+returns the frame and the startup stub, which passes one word, has no block to
+give it. Every other file in the family is behind another row of the map or
+behind a documented permanent limit. The 1 is the bug the lift-without-an-
+implementation would have shipped, which is the whole argument for measuring
+with the fix rather than by lifting the check.
+

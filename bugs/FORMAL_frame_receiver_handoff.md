@@ -24,7 +24,18 @@ The short answer, and every clause of it is a measurement below:
 | a genuinely cross-module free function (`discover_closures`, `__get_mvalue_as_litref`) | refused, soundly | there is no definition in hand, whatever the argument |
 | a struct CONSTRUCTOR (`R(r)`, `Repeat(x)`, `StringSlice(x)`) | refused, soundly — and it was reported as an *invisible callee*, which is false twice over | `S()` takes no arguments on this path, so a one-argument construction has no lowering at all; verified by lifting the refusal and watching the constructor refuse it by name |
 | a non-first argument position | refused, soundly — and "a position whose meaning this path cannot see" was a statement about the analysis in a message a reader takes to be about the program | all three things under it are wrong answers without the check; each was built and run |
-| a frame address RETURNED | refused, soundly — and "returned from the function that created it" is **false** for a frame that arrived as a first parameter, which is the larger half of the family | the creator is the caller, and nothing here establishes the caller is still on the stack |
+| a frame address RETURNED — the frame this function **BUILT** | **it can — the object is built in a block the CALLER reserved** (`bugs/FORMAL_returned_frame_caller_owned_block.md`); the 19 findings are zero | the by-reference convention with one hidden trailing word: the caller owns the block, so the creator's lifetime is the caller's and never enters into it |
+| a frame address RETURNED — a frame that arrived as a parameter | refused, soundly — and "returned from the function that created it" is **false** for it, which is why it has its own message | the creator is the caller, and nothing here establishes the caller is still on the stack |
+
+> **WAVE 9 (returned frame).** The RETURNED row above was one row for two
+> constructs and is now two. A frame the function BUILT is built in a block the
+> CALLER owns — one hidden trailing argument, the object's lifetime is the
+> caller's — and that half's 19 sweep findings are zero; see
+> `bugs/FORMAL_returned_frame_caller_owned_block.md`. A frame that arrived as a
+> parameter is a different construct with no caller to reserve anything, and it
+> stays refused; see
+> `bugs/FORMAL_returned_frame_received_is_still_refused.md`. Everything else in
+> the table, and every section below it, stands as written.
 
 Nothing in this repository newly compiles, and the honest reason is in
 "Still open": the binding fix unblocked eleven files to a CPython host import
@@ -1281,3 +1292,258 @@ decision rather than a patch.
 | the only gate on the constructor half | `formal/model.py` `_constructed_struct_name` |
 | the four-way answer, and the emitter that acts on it | `formal/build.py` `_typed_nested_frame`, `model.struct_nested_frame_fields` |
 | the spelling the diagnostics share | `formal/model.py` `member_chain_text` / `subscript_chain_text` / `expr_spelling` — which is where `formal/build.py`'s three private copies went; `build.py` keeps the names as aliases so its two call sites read the same |
+
+---
+
+<!-- Appended at the END rather than in wave order, for the reason the Wave 6
+     section states: its own `##` numbering continues from 27, so nothing in the
+     file has two numbers. -->
+
+# Wave 12: the "no representation" row was not about representation, and the six
+# files that are are somebody else's construct
+
+Row 5 of the work map — "value with no representation on this path", 15 files —
+was measured here rather than assumed, and the measurement says the row is
+**three different constructs wearing one message**, of which the largest is a
+refusal for a reason that was not operating. That is §4's defect class again,
+and the fifth time this family has produced one.
+
+## 28. The 15 files are three constructs, and the brief's guess was the tail
+
+The row's own worked examples — `to_bits`, `StringRef`, `check_temporal_monotonicity`
+— are a poor guide to its middle, and taking them as the shape to build is how
+the row would have been misread. Counted by reading the refused EXPRESSION in
+each file rather than the message:
+
+| construct | files | which |
+|---|---|---|
+| **a comptime-specialized METHOD call**, `recv.m[T](args)` | **6** | `val.to_bits[uint_type]()` (`memory/_poison.mojo`), `new_data.to_bits[.uint64]()` (`hashlib/_ahash.mojo`), `resized_from.test_range[False, lo=Self.size]()` (`collections/bitset.mojo`), `handle._get_ctx[_AsyncContext]()` (`runtime/_asyncrt.mojo`), `self.lib.call["Py_Initialize"]()` (`python/_cpython.mojo`), `a.get[i]()` (`utils/index.mojo`) |
+| a genuinely unrepresentable TYPE constructor | 6 | `Error(...)` in `os/_macos.mojo`, `os/_linux_x86.mojo`, `os/_linux_aarch64.mojo`, `pwd/_linux.mojo`, `pwd/_macos.mojo`, `subprocess/subprocess.mojo` |
+| a construction of an undeclared type | 1 | `constructing StringRef` (`stdlib_core.mojo`) |
+| a genuine value-position method reference — **correctly refused** | 2 | `checker.check_temporal_monotonicity` (`run_type_system_tests.py`), `job.excl` (`tools/suite.py`) |
+
+`StringRef` — the one the brief named — is **1 file of 15**, and it is the
+smallest of the three groups. It is also not a representation question: the
+message says the image "has no declaration of StringRef to construct", which is
+a NAME this unit cannot resolve, and `stdlib_core.mojo` is a 20-line
+hand-written file of `StringRef`-typed signatures. Building it is a
+name-resolution question about that file, not a value-model change.
+
+## 29. The six that were misreported, and what the message said instead
+
+Every one of the six was refused as a **value-position method reference**:
+
+```
+val.to_bits names 'to_bits', which is a METHOD of SIMD rather than one of its
+fields: a value-position method reference is a bound method, and a method is
+not a word — there is no slot to read it out of and nothing to store it in, so
+this path has no representation for it. Call it (`val.to_bits(...)`), …
+```
+
+Read that against the source and **every clause is false**. `val.to_bits[uint_type]()`
+is a **call**: the brackets bind `to_bits`'s comptime parameter, exactly as
+`f[T](x)` binds `f`'s. It arrived at the frame analysis as a field read because
+`formal/build.py`'s `_rewrite_method_calls` recognised `recv.m(x)` — a callee
+that is a `MemberExpr` — and not `recv.m[T](x)`, whose callee is a
+`SubscriptExpr` **over that same `MemberExpr`**. The walk descended into the
+bracket, found `val.to_bits` in value position, and asked for a slot. The
+advice — "Call it (`val.to_bits(...)`)" — asks the reader to add parentheses to
+a program that already has them.
+
+It is the same shape §19 found for the **bare-name** specialization
+(`_reduce_generator[…]`, `BitSet_union[…]`), one level out, and it survived
+because §19's fix was `model.call_callee_name` — a recognizer for a callee that
+is a **name**. A `MemberExpr` under a bracket is not a name.
+
+**What landed, and why it is a rewrite.** `formal/build.py`'s
+`_method_call_target` is now the one recognizer for both spellings, and the
+brackets **stay on the callee**:
+
+    recv.m(a)      ->  Struct_m(recv, a)
+    recv.m[T](a)   ->  Struct_m[T](recv, a)
+
+Keeping them is the whole of what a specialization is on this path and it needed
+no new decision: `model.incoming_args` puts a generic's comptime parameters
+FIRST, and arm64's `_emit_call` passes the bracket expressions first
+(`_specialization_args`). Both spellings therefore deliver the same words to the
+same parameters, and **the emitter is unchanged** — the same argument §14 makes
+for `len(h)`, and the reason one recognizer rather than two paths.
+
+Measured on the terminal construct, `p.combine[6](7)` against
+`def combine[T](self, k)`:
+
+```
+before: build: p.combine names 'combine', which is a METHOD of Pair …  a
+        value-position method reference is a bound method …
+after:  Built [arm64/macho], exit 223 = 4000 + 50 + 7 + 6
+```
+
+223 is CPython's answer for the same program with the specialization written
+out. **The order is pinned separately** (`specialized_method_call_binds_comptime_
+then_runtime_arguments`), because a lift that transposed the receiver and the
+comptime arguments produces a *different number* rather than a failure.
+
+## 30. The two that are still refused, and one of them for a NEW reason
+
+The other two of the eight — `run_type_system_tests.py`, `tools/suite.py` — are
+genuine bound-method VALUES (`checker.check_temporal_monotonicity` passed as an
+argument) and the old sentence is right about them. Still refused, deliberately.
+
+**Two of the corpus's six were refused for a third reason**, which the old
+message also got wrong, in the opposite direction:
+
+    b.run names 'run', which is a METHOD of Box … a value-position method
+    reference is a bound method …
+
+`b.run[3](4)` is a call, and it cannot be lifted because **`Box` and `Other`
+both declare `run`** — dispatch here is by NAME, since a receiver's type is not
+inferred, so there is no one function to lift it to. That is a fact about the
+module's DECLARATIONS rather than about the backend, and it is the reason the
+ambiguity needs its own message:
+`model.ambiguous_method_specialization_refusal` names the conflict and the two
+remedies.
+
+It is reachable from the corpus, though **not** as these two files' terminal
+finding: `runtime/_asyncrt.mojo`'s `_get_ctx` is declared by both `Coroutine`
+and `RaisingCoroutine`, and `utils/index.mojo`'s `get` by `StaticTuple`,
+`Counter`, `Dict`, `Task` and `IndexList` — but the sweep shows both files
+landing on a **frame-lifetime** refusal instead (`a StaticTuple receiver is
+stored in the field 'self.data'`, and `a Pointer receiver is stored in
+self.task_group`), so the ambiguous call is behind that one rather than in
+front of it. The shape is measured on its own program; the corpus reachability
+is a separate fact and is recorded as the fact it is.
+
+**One of the two remedies was measured and rejected before being written down.**
+The obvious advice — qualify the call, `Box.run[3](b, 4)` — **does not work**:
+a specialization of a DOTTED callee has no receiver for `_rewrite_method_calls`
+to prepend, so it is refused again by `frame_opaque_position_refusal`'s
+`callee_shape` arm, with "The callee of this call is Box.run[3], which names no
+function this pass has a parameter list for". That is the fifth shape
+`FORMAL_method_call_on_a_subscripted_receiver.md` records. Offering it would have
+closed one refusal by opening another, so the message offers a **rename** and the
+**written-out call** (`Box_run[3](b, 4)`, built and run: 305 = 3*100 + 4 + 1)
+instead. `the_advice_the_ambiguity_refusal_gives_works` pins that the advice
+works, so a later reword into the dotted form fails a test.
+
+**`_call_receivers` had to learn the same look-through**, and its omission was
+the reason the ambiguous case still reported a call as a value reference after
+the lift landed. A node is in a call position if it is under a call's
+callee, subscript or not — which is what `model.call_callee_name` already did
+for the same reason.
+
+## 31. The `Error` six are NOT this family's construct, and closing them is a
+## different decision
+
+The other six files of the row are `raise Error("unable to stat '", path, "'")`,
+refused as "a String frame address is passed to `Error()`, and `Error` is a real
+type this path has no representation for at all". That sentence is **true**, and
+measured rather than argued:
+
+* `std/builtin/error.mojo:134` declares `struct Error` with **two** fields —
+  `_error: String` and `_stack_trace: Optional[StackTrace]`;
+* a formal value is one 64-bit word, and `Optional[StackTrace]` is a two-word
+  niche whose unwrap this path cannot answer (`self.step.or_else() is an
+  Optional unwrap`, the limit `FORMAL_string_value_model.md` and
+  `FORMAL_struct_construction_shapes.md` both record);
+* so `Error` cannot be brought up as a frame until the `Optional` niche has a
+  representation, and the `String` field is the separate collision
+  `FORMAL_string_value_model.md` is about.
+
+Measured, by removing one variable at a time rather than by argument:
+
+| the program | verdict |
+|---|---|
+| `struct Err: var msg: Int; var code: Int`, `Err(3, 4)` in `main` | **PASS** |
+| …and `raise Err(3, 4)` | **PASS** |
+| …and one argument a `String` | **PASS** |
+| …and a `*args` `__init__` as `Error` declares, called with 3 arguments | `constructing Err with 3 argument(s) does not match its fields (2 field(s))` |
+| …and `raise` inside a function whose receiver is a frame, returning `Err` | `a field access through 'e', and this path has no way to say what 'e' holds` |
+| …and one argument a `String` parameter, so a frame address reaches it | `constructing Err with argument 's' is a COPY CONSTRUCTION` |
+
+So the receiver hand-off itself is **not** what stops these: the shape lowers
+wherever the fields are plain words and the arity matches, and each failure
+above is about the field TYPES (`String`, `Optional`), the arity, or a
+returned frame — the three limits
+`bugs/FORMAL_string_value_model.md` and `FORMAL_struct_construction_shapes.md`
+already carry. None of them is reachable by changing what a receiver may be
+handed to.
+
+**This is why the row's file count is not a work estimate, and it is the third
+time this document has had to say so.** The row is 15 files; the part of it
+that was a defect in *this* family was 6, and it is now 0. The remaining 9 are
+a name-resolution question about one 20-line file, an `Optional` niche, and two
+correct refusals.
+
+## 32. What it moved, and the x86-64 half that does not move
+
+Sweep over the **8** files of the `to_bits`/`excl`/`test_range`/`call`/`get`
+group, arm64, before and after:
+
+| | before | after |
+|---|---|---|
+| PASS | 0 | **0** |
+| class | 8 × `codegen` | 6 × `codegen`, **2 × `codegen/dependency`** |
+| `codegen by family` | member read of a method used as a value **x8** | other refusal **x3**, member read of a method used as a value **x2**, receiver passed as an argument **x1** |
+
+**Every one of the 8 moved off the false message**, which is the whole of what
+this change was for, and **0 files gained a PASS and 0 lost one**. Where each
+landed — read off the sweep, not inferred:
+
+| file | after |
+|---|---|
+| `collections/bitset.mojo` | a `BitSet` receiver passed to `….fields` — the receiver-position family again, a different construct |
+| `hashlib/_ahash.mojo` | `codegen/dependency`: `binary_heap.mojo`'s `List` has no home |
+| `memory/_poison.mojo` | `codegen/dependency`: the same, through `std.builtin.dtype` |
+| `python/_cpython.mojo` | an `Optional` receiver stored in `self.method_name` — a **frame-lifetime** refusal, not a layout one |
+| `runtime/_asyncrt.mojo` | a `Pointer` receiver stored in `self.task_group` — likewise |
+| `utils/index.mojo` | a `StaticTuple` receiver stored in `self.data` — likewise |
+| `run_type_system_tests.py`, `tools/suite.py` | **unchanged, and correctly so**: a genuine value-position method reference |
+
+Two of the eight went to `codegen/dependency` — out of the `codegen`
+denominator **without becoming answerable**, which is the direction of drift
+that flatters a number. Three more moved from a *layout* question to a
+*lifetime* question, which is what §6's three-way split predicts sits behind a
+position finding.
+
+**x86-64 still refuses, and that refusal must stay.** `p.combine[6](7)` on
+x86-64: `unsupported call target on the formal x86-64 path (got SubscriptExpr)`.
+It inherits `FORMAL_x86_64_comptime_specialization_abi.md`'s missing **call-site**
+half — the callee prologue reserves a register per comptime parameter (shared
+`incoming_args`) and the caller does not pass one. That message is true, and
+answering it by teaching the name alone would put the receiver in the comptime
+register and produce a wrong image with exit 0.
+`test_formal_specialized_method_call.py`'s `x86_abi_refusal_is_load_bearing`
+asserts **both** halves — arm64 builds, x86-64 refuses naming the missing ABI —
+so a change that made x86-64 "work" here fails rather than passing quietly.
+
+## 33. The suites
+
+| command | baseline (pre-change) | after |
+|---|---|---|
+| `test_formal_run.py` | `PASS=472 FAIL=5` | **`PASS=472 FAIL=5`** — the failure SET byte-identical, all five pre-existing (empty-container ctors, a module global) |
+| `test_formal_imports.py` | `PASS=41 FAIL=0` | **unchanged** |
+| `python3 -m unittest test_formal_sweep_truth` | `31 tests, OK` | **unchanged** |
+| `test_formal_link_accounting.py` | `160 passed, 0 failed` | **unchanged** |
+| `test_formal_specialized_method_call.py` | `PASS=4 FAIL=6` | **`PASS=10 FAIL=0`** |
+
+**Byte-identical Mach-O on both architectures** for a program that already
+worked — two methods on one struct, one calling the other, no specialization
+anywhere: arm64 51088 bytes identical, x86-64 51280 bytes identical.
+
+**And the same trap as §10, hit again and worth repeating.** The first attempt
+reported **121 bytes differing on arm64 and 306 on x86-64**, and every one was
+the **dylib id string** — the output *path* is embedded in the image, and the
+two runs used different names (`id2.before.arm64` vs `id2.after.arm64`). With
+the **same output filename** for both runs, both are byte-identical. "121 bytes
+differ" read exactly like a codegen change, and it was not one.
+
+## 34. Where the code is
+
+| what | where |
+|---|---|
+| both spellings of a method call, one recognizer | `formal/build.py` `_method_call_target` |
+| the lift, brackets kept on the callee | `formal/build.py` `_rewrite_method_calls` |
+| "this node is in a call position", subscript or not | `formal/build.py` `_call_receivers` |
+| the ambiguity, asked of the declarations | `formal/build.py` `_ambiguous_method_owners` |
+| the two messages | `formal/model.py` `ambiguous_method_specialization_refusal`, and `member_read_without_a_field`'s value-position arm (which is now reachable only by a real one) |
+| the cases | `test_formal_specialized_method_call.py` — 10, of which **6 fail before the change**; 2 labelled GUARDs and the advice case are correct before and after |
