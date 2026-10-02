@@ -8034,9 +8034,125 @@ C().sort()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_dict_union_right_operand_is_converted_at_runtime():
+        """`dict | x` with `x`'s type unresolved must convert, not cast.
+
+        `mojo_dict_union` takes two `MojoDict *`. When the right operand's
+        static type is one, nothing to do. When it is not — an unannotated
+        parameter — the old code passed it straight into the `MojoDict *`
+        slot, which is a hard compile error:
+
+            passing argument 2 of 'mojo_dict_union' makes pointer from
+            integer without a cast
+
+        Real: `Lib/collections/__init__.py:1192`'s `UserDict.__ior__`'s
+        `self.data |= other`.
+
+        The obvious fix — cast the scalar — is the wrong one and is
+        deliberately NOT taken: a scalar slot may hold a real dict pointer
+        or an unrelated value, and a cast hands `mojo_dict_union` whatever
+        bits were there. So the conversion is a runtime test against the
+        runtime's own `mojo_is_registered_dict` predicate, with the
+        non-dict case becoming a fresh empty dict — which is Python's own
+        answer for a union with a non-mapping.
+
+        The assertion is on CPython's stdout, and the program returns the
+        union INLINE rather than through a function: an unannotated
+        function's return type is int64_t on this backend and a returned
+        container then prints as its address, which is a separate filed bug
+        (CODEGEN_unannotated_function_returning_container_prints_its_
+        address.md) and would otherwise make this test fail for the wrong
+        reason — or, worse, pass on a tree where the coercion is still
+        broken.
+
+        Both operand orders are in the program because the coercion is
+        applied to whichever side is unresolved. The merges are kept to
+        ONE application each: a second `|=` reorders the left operand's
+        keys, which is a separate runtime bug in `mojo_dict_update`
+        (RUNTIME_dict_update_discards_insertion_order.md, filed, verified
+        present with this change reverted) and is not what this test is
+        for."""
+        global _PASS, _FAIL
+        name = "dict_union_right_operand_is_converted_at_runtime"
+        src = '''\
+class D:
+    def __init__(self):
+        self.data = {'z': 9}
+    def merge(self, other):
+        self.data |= other
+        return self
+
+class E:
+    def __init__(self):
+        self.data = {'z': 9}
+    def merge(self, other):
+        return other | self.data
+
+d = D()
+d.merge({'a': 1})
+print(d.data)
+e = E()
+e.merge({'a': 1})
+print(e.data)
+print({'p': 1} | {'q': 2})
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'dict_union.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'du_{mode}.c')
+                exe = os.path.join(td, f'du_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_cursor_advance_has_no_cast_operand_in_gimple()
     test_scalar_arity_min_max_params_are_not_containers()
     test_list_sort_in_a_method_body_is_gimple_legal()
+    test_dict_union_right_operand_is_converted_at_runtime()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()
