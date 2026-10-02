@@ -4221,13 +4221,14 @@ ASSIGNED_TYPE_CASES = [
     # `in1` is DECLARED (`var in1: Inner`) and `__init__` stores a word.  It used
     # to be the other way round — `fn __init__(self): self.in1 = Inner()` with no
     # declaration — which made `Outer()` a zero-argument construction of a struct
-    # whose `__init__` takes no required parameter, so the body RUNS and the
-    # nested frame construction in it is refused by name (`model.init_body_stores`:
-    # the nested block is reserved per construction SITE, and a body inlined into
-    # a construction has no such site).  See
-    # `bugs/FORMAL_assigned_type_evidence_unreachable_after_zero_arg_init.md` for
-    # what that did to the evidence source itself.  The guard for the spelling
-    # this replaced is `assigned_type_refuse_a_nested_frame_constructed_in_init`.
+    # whose `__init__` takes no required parameter, so the body RUNS.  It used
+    # to refuse the nested frame construction in it by name
+    # (`model.init_body_stores`: the nested block is reserved per construction
+    # SITE, and a body inlined into a construction has no such site); the store
+    # is now dropped instead, because the field's placement already made it.
+    # The guard for the spelling this replaced is
+    # `assigned_type_nested_frame_constructed_in_init`, which is now a POSITIVE
+    # case rather than a refusal.
     ("assigned_type_nested_frame_method_call",
      "struct Inner:\n"
      "    var a: Int\n"
@@ -4340,24 +4341,31 @@ ASSIGNED_TYPE_CASES = [
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
-    # THE SPELLING THAT IS NO LONGER ANSWERED, and it is here rather than
-    # deleted because it is the one the sweep named.  `Outer()` on a struct whose
-    # `__init__` takes no required parameter RUNS the body, and a body that
-    # constructs a FRAMED struct of this module is refused by name
-    # (`model.init_body_stores`): that nested block is reserved per construction
-    # SITE in the prologue of the function naming the call, and a body inlined
-    # into a construction has no such site.  Before that change the store never
-    # ran, so this program built and answered 128 — a placed `Inner` frame with
-    # 1, 2, 3 in it, read through `Inner.total`.
+    # THE SHAPE THAT WAS REFUSED AND IS NOW THE POSITIVE CASE, and it is here
+    # rather than deleted because it is the one the sweep named.
+    # `Outer` DECLARES NOTHING and its `__init__` assigns `self.in1 = Inner()`,
+    # which is the only shape that says a field holds a nested frame without
+    # declaring it — the assigned-type evidence source
+    # (`model.struct_field_assigned_type`) with no other route.
     #
-    # What that costs is the ASSIGNED-TYPE evidence this whole group is named
-    # for, and the two facts are the same fact: the only shape that says a field
-    # holds a nested frame without declaring it is this one.  It is written down
-    # rather than papered over in
-    # `bugs/FORMAL_assigned_type_evidence_unreachable_after_zero_arg_init.md`, and
-    # the evidence itself is still pinned, directly, by
-    # `test_struct_formal.py`'s `struct_init_field_types` cases.
-    ("assigned_type_refuse_a_nested_frame_constructed_in_init",
+    # `Outer()` on a struct whose `__init__` takes no required parameter RUNS
+    # the body, and a body that constructed a FRAMED struct was refused by name:
+    # "its block is reserved per call SITE in the prologue of the function whose
+    # body names the call, and a body inlined into a construction elsewhere has
+    # no such site". Before that refusal, the store never ran and this program
+    # built and answered 128 with 1, 2, 3 nowhere in it.
+    #
+    # The store is now DROPPED rather than refused, which is the same program:
+    # `struct_nested_frame_fields` places an `Inner` frame in the object under
+    # construction's OWN block (the evidence classifies `in1` as an `Inner`
+    # precisely because the constructor assigns one), the `CONSTRUCTION_INIT`
+    # lowering brings it up, and `Inner()` is `Inner`'s default value — so the
+    # store wrote over a slot that already held that frame's address. What it
+    # bought is the assigned-type evidence itself: with this shape refused,
+    # `struct_init_field_types` had no end-to-end program left at all. 128 is
+    # CPython's answer and is the only one that says the frame
+    # the constructor promised is the frame `o.in1` reads.
+    ("assigned_type_nested_frame_constructed_in_init",
      "struct Inner:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -4382,8 +4390,7 @@ ASSIGNED_TYPE_REFUSALS = [
      "    o.in1.a = 1\n"
      "    o.in1.b = 2\n"
      "    o.in1.c = 3\n"
-     "    return o.go()\n",
-     "refuse:a construction of a struct whose receiver is a frame", None),
+     "    return o.go()\n", 128, None),
     # The GUARD on the precedence rule, and the one most likely to be quietly
     # dropped: a DECLARATION still wins over a contradicting `__init__`
     # assignment.  `Outer` declares `var in1: Inner` and `__init__` assigns
@@ -4394,6 +4401,67 @@ ASSIGNED_TYPE_REFUSALS = [
     # constructor's right-hand side, refused by name.  So the rule is now stated
     # as a refusal instead of as a silently-correct answer, which is the stronger
     # of the two claims and the one a reader can act on.
+    # The two NEGATIVES of the drop above, and they are what make it a rule
+    # rather than an omission. Both are stores into a field the layout PLACED,
+    # and both are refused with the nested-slot refusal that has always named
+    # them — a word over a frame is a word over a frame whether the store was
+    # dropped or not, and the drop is only for the store that IS the placement.
+    ("assigned_type_a_word_over_a_placed_nested_frame_is_refused",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = 5\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    return o.go()\n",
+     "refuse:whose receiver is a frame", None),
+    # …and a construction of the right struct WITH an argument, which is the
+    # same struct and a different value: `Inner(7)` fills `a` with 7 where the
+    # placement brings the frame up at its defaults. Dropping it would answer
+    # with the defaults, so it is refused instead.
+    ("assigned_type_an_argument_over_a_placed_nested_frame_is_refused",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    fn __init__(self, x: Int):\n"
+     "        self.a = x\n"
+     "        self.b = 0\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 10 + self.b\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = Inner(7)\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    return o.go()\n",
+     "refuse:a construction of a struct whose receiver is a frame", None),
     ("assigned_type_a_declaration_still_wins",
      "struct Inner:\n"
      "    var a: Int\n"
@@ -10267,15 +10335,14 @@ def check_comptime_alias_census(verbose=False):
 
 
 # The four rules `model.struct_init_field_types` is, asked of `formal.model` and
-# nothing else. `ASSIGNED_TYPE_CASES` above used to cover them end to end and
-# cannot any more: its evidence shape, `self.<f> = T()` for a `T` of this unit
-# whose receiver is a frame, is exactly the shape `model.init_body_stores`
-# refuses now that a zero-argument `S()` RUNS a zero-required `__init__` (see
-# `assigned_type_refuse_a_nested_frame_constructed_in_init` and
-# `bugs/FORMAL_assigned_type_evidence_unreachable_after_zero_arg_init.md`). A
-# rule nothing can reach is a rule nothing tests, so it is asked directly here
-# — and directly is the honest level for it: the value of the inference is what
-# it infers from a parsed class, not what an image does with the answer.
+# nothing else, and they are here as well as end to end: the evidence shape,
+# `self.<f> = T()` for a `T` of this unit whose receiver is a frame, is now
+# reachable (`assigned_type_nested_frame_constructed_in_init`), so this is no
+# longer the ONLY level at which the rule is asked. It stays asked directly
+# because directly is the honest level for it: the value of the inference is
+# what it infers from a parsed class, not what an image does with the answer,
+# and the direct probes cover the disagreeing and no-decls rows that a built
+# program cannot express.
 _ASSIGNED_TYPE_PROBES = [
     # The positive row: a nested frame the class body never declares.
     ("a nested frame is read off __init__'s construction of it",

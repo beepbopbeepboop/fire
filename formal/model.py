@@ -13303,6 +13303,12 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
     receivers = struct_receivers(struct_def)
     framed_names = {name for name, s in (decls or {}).items()
                     if struct_is_framed(s)}
+    # The fields this struct's own layout ALREADY brings up as a nested frame,
+    # and the store that would be redundant against one — the drop this walk
+    # does, and the thing its third refusal arm was standing in front of.
+    placed = {field: child.name
+              for field, _slot, child
+              in struct_nested_frame_fields(struct_def, decls)}
     stores = []
     for stmt in (getattr(method, "body", None) or []):
         if isinstance(stmt, F.PassStmt):
@@ -13320,6 +13326,31 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
             return (None, construction_init_body_refusal(
                 struct_def.name, _init_statement_spelling(stmt)))
         field = target.member
+        if field in placed and _init_store_is_redundant(stmt.value,
+                                                        placed[field]):
+            # The store is the SAME program as no store at all, and dropping it
+            # is what makes the class that assigns a nested frame in its
+            # constructor lower again. `struct_nested_frame_fields` already
+            # placed that frame in the object under construction's OWN block and
+            # the `CONSTRUCTION_INIT` lowering brings it up, so `self.in1 =
+            # Inner()` writes over a slot that already holds that frame's
+            # address — the same value, from the same place, by a longer route.
+            #
+            # It is dropped rather than refused because the alternative is
+            # refusing a program whose object is already correct: this construct
+            # is what `scripts/stage2_mojo_interpreter.mojo` and several stdlib
+            # classes are written in, and it is the ONLY shape that says a field
+            # holds a nested frame without declaring it, so refusing it takes
+            # the assigned-type evidence source out of reach entirely.
+            #
+            # Narrow on purpose, and the narrowness is the whole safety of
+            # dropping a store the language requires. The store must name the
+            # struct the placement made (`placed[field]`) and take no
+            # arguments: a construction of a DIFFERENT struct is a different
+            # value, and one with arguments fills fields the placement's
+            # defaults do not. Both fall through to the checks below, which
+            # refuse them by name.
+            continue
         slot = struct_frame_slot(struct_def, field)
         if slot is None:
             return (None, construction_init_body_refusal(
@@ -13344,6 +13375,42 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
             return (None, refusal)
         stores.append((field, slot, value))
     return (stores, None)
+
+
+def _init_store_is_redundant(value, placed_struct: str) -> bool:
+    """Is this `self.<placed nested frame> = …` the store the placement already made?
+
+    True only for a construction of `placed_struct` — the struct
+    `struct_nested_frame_fields` put in that slot — with NO arguments, which is
+    `self.in1 = Inner()`.
+
+    Both halves are load-bearing and each refuses something real:
+
+      * naming `placed_struct` is what makes it the SAME frame. A construction of
+        a different struct is a different value, and dropping it would leave the
+        field holding the declared type's frame while the source put another
+        one there — the two can share a field count and a field list, which is
+        exactly `bugs/FORMAL_declared_parameter_against_its_call_sites.md`'s
+        subject, so "the layout happens to match" is not available as a test.
+        `assigned_type_a_declaration_still_wins` is the program that measures
+        it: `Outer` declares `var in1: Inner` and `__init__` assigns
+        `Other()`.
+      * no arguments is what makes it a DEFAULT construction. The placement
+        brings the frame up at its defaults; `Inner(7)` fills fields those
+        defaults do not, so the store is not redundant even when it names the
+        right struct.
+
+    A zero-argument construction of the right struct is the frame the placement
+    made and nothing else, because `struct_nested_frame_fields` places by the
+    field's DECLARED type (or, for an undeclared field, by the type its
+    `__init__` assigns — `model.struct_field_assigned_type`, which is the
+    evidence source this restores) and `T()` is `T`'s default value.
+    """
+    return (isinstance(value, F.CallExpr)
+            and isinstance(value.func, F.IdentExpr)
+            and value.func.name == placed_struct
+            and not (value.args or [])
+            and not (value.kwargs or []))
 
 
 def _init_statement_spelling(stmt) -> str:
@@ -13830,6 +13897,13 @@ def struct_construction_plan(struct_def, call, decls: dict,
                       struct_def, decls)}
         for field, _slot, value in stores:
             if field in placed:
+                # A field the layout PLACED, still being assigned. It cannot be
+                # the redundant store `init_body_stores` drops — that one never
+                # reaches here — so it is a word over a frame, which is the
+                # corruption this refusal has always named. Kept as its own
+                # check rather than folded into the one above because it is a
+                # different question: "may this store exist" was answered yes
+                # and dropped; "may this store overwrite a placed frame" is no.
                 return (None, construction_nested_slot_refusal(
                     name, field, value, placed[field]))
         # A field the body does NOT assign keeps its class-level default, and
