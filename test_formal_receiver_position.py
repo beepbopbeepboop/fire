@@ -34,9 +34,8 @@ that §4 exists to police.
 BOTH ARCHITECTURES NOW AGREE, and getting there took THREE halves rather than
 the one the filing named.  `f[1](3, 7)` returned 307 on arm64 and was REFUSED on
 x86-64 with "unsupported call target on the formal x86-64 path (got
-SubscriptExpr)"; `bugs/FORMAL_x86_64_comptime_specialization_abi.md` filed that
-and correctly said the fix was not a one-line delegation of `_callee_symbol`.
-Measured, in the order they had to land:
+SubscriptExpr)", and the filing correctly said the fix was not a one-line
+delegation of `_callee_symbol`.  Measured, in the order they had to land:
 
   1. the CALL SITE passes the bracket expressions ahead of the call-time
      arguments (`comptime_eval.specialization_args`, the shared reader);

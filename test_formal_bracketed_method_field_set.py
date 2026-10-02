@@ -94,7 +94,8 @@ BACKENDS = ("arm64", "x86_64")
 # compared. The differential cases here are NOT re-pointed at x86-64 on the
 # strength of that one construct: each is a separate program and has to be run
 # before it can be claimed, which is what `test_formal_x86_64_parity.py` is for.
-# The measurement is in bugs/FORMAL_x86_64_comptime_specialization_abi.md.
+# `X86_ABI_PARITY` below is the one construct here that IS claimed on both
+# machines, because it was the one that was measured on both.
 COMPTIME_ABI = "arm64"
 
 # ── the differential cases ──────────────────────────────────────────────────

@@ -362,9 +362,16 @@ def _callee_symbol(func) -> str | None:
     `model.incoming_args`, comptime first) and a call site that passed only
     the runtime arguments, `f[1](3, 7)` would have built an image in which `x`
     read 7 and `y` read whatever was in RSI before — a wrong number with exit
-    0. See bugs/FORMAL_x86_64_comptime_specialization_abi.md, which is why this
-    arm and the `_specialization_args` call below landed together rather than
-    one at a time.
+    0. Which is why this arm and the `_specialization_args` call below landed
+    together rather than one at a time: each of the three halves on its own is
+    either a loud refusal or a silently wrong image, and the pair that matters
+    is the NAME and the CALL SITE.  The regression that keeps them together is
+    `test_formal_receiver_position.py`'s `COMPTIME_ABI_CASES` and
+    `test_formal_specialized_method_call.py`'s `x86_abi_specialized_method_call_
+    on_both`, which run every spelling on BOTH machines — reverting only the
+    prologue half makes all three fail on a WRONG NUMBER rather than on a
+    refusal, which is precisely the failure a refusal-shaped expectation
+    cannot see.
     """
     if isinstance(func, F.SubscriptExpr):
         return comptime_eval.specialization_name(func)
