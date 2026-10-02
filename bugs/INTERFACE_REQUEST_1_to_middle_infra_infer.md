@@ -1,3 +1,62 @@
+## Status (2026-10-02 — the refusal this request unblocks is LIVE, and the two failures that are live today are NOT the class this request describes)
+
+Measured while closing `bugs/COMPILE_FAIL_ctypes_util.md`: the R2 container-kind
+refusal is not a proposal any more. It fires on real stdlib modules today, and
+the modules are dropped from the closure — exactly what this request's BLOCKS
+section predicted for the self-host.
+
+```
+# ERROR: compiling imported module 'argparse' from .../Lib/argparse.py:
+  cannot coerce MojoList * to MojoDict * (incompatible container kinds)
+  at .../Lib/argparse.py: value='_t238' dest='args'
+# ERROR: compiling imported module '._compiler' from .../Lib/re/_compiler.py:
+  cannot coerce MojoBytes * to MojoList * (incompatible container kinds)
+  at .../Lib/re/_compiler.py: value='_t387' dest='data'
+```
+
+**And neither is the class this request asks for.** `dest='args'` is a LOCAL in
+`argparse._match_argument`, and the traceback puts the refusal in
+`_gen_stmt_AssignStmt` → `_safe_coerce_emit`, not in a call's argument
+coercion: that one name is assigned a dict literal at argparse.py:2131 and list
+literals at 2189 and 2207, so it is a local bound to three container kinds in
+one function. Same shape for `re/_compiler.py`'s `data`. This request's rule is
+"a PARAMETER observed at two or more CALL SITES"; the INTEGRATOR NOTE below is
+right that the rule cannot live in `infra_infer.py` and right that it would live
+in `module_gen.py`'s caller walk — and neither half of that is what is breaking
+stdlib modules today.
+
+**The principle is the same one this tree has already applied twice**: a name is
+not a read, so `_declare_var`'s first-decl-wins is wrong for it. §4.3 of
+`bugs/PARTIAL_WORK_HANDOFF.md` did it for a `for` target (`_declare_var(force=…)`
+in `_gen_for_set`), and this is the assignment form of the same fix.
+
+**On the two sites this request names**, measured as far as a light worker can:
+`compile_to_gimple(ownership_check.py)` is CLEAN today (1 s, 8721 lines of
+output), so the `state = {}` versus `MojoDict *` disagreement does not reproduce
+in the only measurement available without a whole-closure self-host build. The
+second site, `cpp_async.py`'s `known_structs`, is inside the compiler's own
+closure and cannot be measured at all without `fire.py build fire.py`, which a
+light worker must not run. **So this request's premise — that the cast at
+`emit_infra.py` stays until those two sites stop disagreeing — is now the
+smaller half of the problem**, and the call-site cast at `emit_infra.py:1974`
+is still there with its comment still pointing here.
+
+**What would actually move it, cheapest first:**
+
+1. the LOCAL-rebind class above, in `_gen_stmt_AssignStmt`: when an assignment's
+   value kind disagrees with the destination's already-declared container kind,
+   re-declare rather than coerce (mirroring `_gen_for_set`'s `_fl_retype`). That
+   un-blocks `argparse` and `re/_compiler` today, and it is one pass;
+2. then this request's parameter rule, which is still wanted and whose home is
+   unchanged (`module_gen.py`'s caller walk, beside `_scalar_obs`/`_struct_obs`);
+3. only then the cast at `emit_infra.py:1974`, whose comment says it goes with
+   them.
+
+Not attempted by the worker that measured this: `emit_stmts.py` and
+`module_gen.py` are both mid-merge under other claims, and this is one of the
+places where a wrong choice is a silent wrong value in a stdlib module rather
+than a build failure.
+
 INTERFACE REQUEST  from=[1]  to=[owner of mojo/middle/infra_infer.py]  file=mojo/middle/infra_infer.py
 
 WHAT: `_infer_param_types` should not commit to a CONTAINER KIND for a
