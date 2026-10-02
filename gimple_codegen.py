@@ -2070,6 +2070,10 @@ class GimpleGen:
         self._global_literal_slot_ctypes: dict = {}
         self._local_def_param_types: dict = {}
         self._param_elem_types: dict = {}
+        # The dict-VALUE twin of the row above: callee -> {pname -> the dict
+        # value ctype its call sites agree on}. Read at the same place (see
+        # emit_funcs.gen_func / _gen_struct_method), into `_dict_val_types`.
+        self._param_dict_val_types: dict = {}
         # Per-function maps that `_reset_func` (a MODULE function in
         # gimple_gen_infra.py, taking `gen`) re-initialises with real
         # `dict[str, str]` annotations the `class GimpleGen` field-type

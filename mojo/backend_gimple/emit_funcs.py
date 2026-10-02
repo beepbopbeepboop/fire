@@ -2493,6 +2493,21 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             gen._elem_types[bare] = e
             if ne:
                 gen._nested_elem_types[bare] = ne
+    # ...and the dict-VALUE half of the same contract, for the same reason and
+    # beside it. A dict parameter has no binding site inside the callee, so
+    # without this every `d[k]` / `d.items()` in the body fell to the
+    # `int64_t` default and read a `char *` slot through `mojo_dict_get_int` --
+    # the stored pointer's own bits, printed as a decimal, exit 0 (measured:
+    # `f({"x": "1"})` printed an address where CPython prints `1`, while the
+    # same call with the literal bound to a local first was already correct).
+    _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
+    for bare in _pdv:
+        # '' is the conflicting-call-sites marker (see _record_param_dict_val),
+        # and an unseeded slot is already the `int64_t` default, so both are
+        # no-ops here -- deliberately, rather than seeding a lie.
+        _pdv_v = _as_str(_pdv[bare])
+        if _pdv_v:
+            gen._dict_val_types[bare] = _pdv_v
     # Seed local container element types too, so return inference can see
     # through nested subscripts on locals (e.g. `return bodies[0][0]` where
     # bodies is a local list-of-double-lists). Lowering re-derives the same.
@@ -3578,6 +3593,13 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             gen._elem_types[_mbare] = _me
             if _mne:
                 gen._nested_elem_types[_mbare] = _mne
+    # ...and the dict-VALUE half, same reason, same qualified key. Without it a
+    # method handed a `{'k': 'v'}` reads that slot back as an integer.
+    _mpdv = getattr(gen, '_param_dict_val_types', {}).get(_mkey, {})
+    for _mbare2 in _mpdv:
+        _mpdv_v = _as_str(_mpdv[_mbare2])
+        if _mpdv_v:
+            gen._dict_val_types[_mbare2] = _mpdv_v
     _mloc_elem, _mloc_nested, _mloc_dict_val = gen._scan_container_elems(node.body)
     for _mv in _mloc_elem:
         gen._elem_types.setdefault(_as_str(_mv), _as_str(_mloc_elem[_mv]))

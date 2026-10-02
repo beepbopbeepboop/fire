@@ -5165,15 +5165,13 @@ def _list_literal_slot_kind(gen, el, et) -> str:
 def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
     t = gen._new_temp('MojoDict *')
     gen._emit_container_new(t, 'MojoDict *')
-    # Infer value type from first pair (for subscript / iteration dispatch)
-    if node.pairs:
-        vt_sample = gen._quick_type(node.pairs[0][1])
-        if vt_sample in gimple_ctypes._FLOAT_TYPES:
-            gen._dict_val_types[t] = 'double'
-        elif vt_sample == 'char *':
-            gen._dict_val_types[t] = 'char *'
-        else:
-            gen._dict_val_types[t] = 'int64_t'
+    # Infer value type from the first pair (for subscript / iteration
+    # dispatch). The rule itself is `gimple_exprtypes.dict_literal_val_ctype`
+    # — shared, because the cross-call dict-value contract in
+    # `module_gen.py` stamps the same answer onto a callee PARAMETER from a
+    # literal written at the call site, and two copies of this rule could
+    # type the parameter one way while the literal stores another.
+    gen._dict_val_types[t] = gimple_exprtypes.dict_literal_val_ctype(gen, node.pairs)
     for key_expr, val_expr in node.pairs:
         _emit_dict_pair_store(gen, t, key_expr, val_expr)
     gen._note_fresh_result(t)

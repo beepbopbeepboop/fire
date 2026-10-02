@@ -6056,6 +6056,29 @@ def gen_module_impl(self, stmts):
                 self._func_param_defaults[_mangled] = list(_dflts)
 
     self._param_elem_types: dict[str, dict[str, tuple]] = {}
+    # The dict-VALUE twin of the table above: callee -> {pname -> the dict
+    # value ctype every one of its call sites agrees on}. A dict is stored
+    # as one `int64_t` slot per key plus a per-slot `kind` tag, so a callee
+    # that only ever receives `{'x': '1'}` reads that slot back through
+    # `mojo_dict_get_str`, and one that receives `{'x': 1}` through
+    # `mojo_dict_get_int` -- both without a static type anywhere to consult.
+    # There is no binding SITE inside the callee to record it (unlike a
+    # local `d = {...}`, which `_lower_dict_literal` types as it lowers it),
+    # so it has to come from the call sites. Read by `gen_func` /
+    # `_gen_struct_method` at the same `_param_elem_types` seeding, into
+    # `gen._dict_val_types`. `''` means the call sites disagreed, which the
+    # reader treats as "unknown" exactly as `(None, None)` does for the
+    # element contract.
+    self._param_dict_val_types: dict[str, dict[str, str]] = {}
+    # ...and the raw per-call-site OBSERVATIONS behind it, kept apart exactly
+    # as `_scalar_obs` is kept apart from `_inferred_param_types`: a call site
+    # holding `{'x': 2}` contributes `int64_t`, which is the table's default
+    # answer and therefore worthless on its own — but its SILENCE next to a
+    # sibling site's `{'x': '1'}` is what makes the pair a disagreement
+    # instead of a vacuous agreement. Collapsing that into one table at
+    # collection time is what made `f({'x': '1'}); f({'x': 2})` resolve to
+    # `char *` and read the integer through `mojo_dict_get_str`.
+    self._param_dict_val_obs: dict[str, dict[str, set]] = {}
     _free_params: dict = {}
     for _fp_s in all_functions:
         if not isinstance(_fp_s, FunctionDef):
@@ -6100,6 +6123,74 @@ def gen_module_impl(self, stmts):
             d[pname] = (None, None)   # conflicting call sites → unknown
         else:
             d[pname] = (e, ne)
+
+    def _record_param_dict_val(callee, pname, vt):
+        """Record ONE call site's dict-value ctype for one parameter.
+
+        The dict-value twin of `_record_param_elem`, collecting into a SET
+        rather than collapsing to a value: `int64_t` is this table's default
+        answer and so carries no information by itself, but a sibling call
+        site holding `{'x': '1'}` must still be able to disagree with it. The
+        scalar contract faces the identical asymmetry and resolves it by
+        keeping `_scalar_obs` as sets until its own application loop; this is
+        that, spelled for dict values. Resolution happens in
+        `_resolve_param_dict_vals`, once both walks are done.
+        """
+        callee = _as_str(callee)
+        pname = _as_str(pname)
+        # Split the chained setdefault so the intermediate result has a static
+        # type -- the same trap the two sibling `_record_*` blocks below the
+        # collection loop already document.
+        _dv_inner = self._param_dict_val_obs.setdefault(callee, {})
+        _dv_set = _dv_inner.setdefault(pname, set())
+        _dv_set.add(_as_str(vt))
+
+    def _resolve_param_dict_vals():
+        """Turn the collected observations into the contract codegen reads.
+
+        Only a UNANIMOUS observation resolves, and an `int64_t` one resolves
+        to the `int64_t` default the reader already had -- i.e. it is a no-op,
+        recorded only so that a mixed set collapses to unknown rather than to
+        whichever side happened to be seen first.
+        """
+        for _callee, _pm in self._param_dict_val_obs.items():
+            _dst = self._param_dict_val_types.setdefault(_callee, {})
+            for _pname, _types in _pm.items():
+                if len(_types) == 1:
+                    _dst[_pname] = _as_str(next(iter(_types)))
+                else:
+                    _dst[_pname] = ''      # disagreeing call sites → unknown
+
+    def _static_arg_dict_val(a, dict_val, caller_name=None):
+        """The dict-VALUE ctype provable for one call argument, or None.
+
+        `dict_val` is the caller body's own pre-scanned local-dict map (the
+        third thing `_scan_container_elems` returns, previously discarded at
+        both call sites). A dict LITERAL written in place is decidable on the
+        spot through the SAME rule `_lower_dict_literal` stores it with, and a
+        bare name defers to the caller's scan -- the same two shapes
+        `_static_arg_elems` accepts, and deliberately the same two: an
+        argument that is neither has no value type to propagate, and guessing
+        one is what makes the pre-existing sibling contracts refuse instead.
+
+        `caller_name` adds the one shape the local scan structurally cannot
+        see: a name that is a PARAMETER of the caller, so its type came from
+        the caller's own contract rather than from a binding site. That is a
+        forwarding chain (`def g(d): return f(d)`), which is why the
+        collection loop runs to a bounded fixpoint for this table alone --
+        the same reason the scalar and element contracts iterate.
+        """
+        if isinstance(a, gimple_ctypes.DictExpr):
+            return gimple_exprtypes.dict_literal_val_ctype(self, a.pairs)
+        if isinstance(a, gimple_ctypes.IdentExpr):
+            _n = _gmi_as_str(a.name)
+            if _n in dict_val:
+                return _gmi_as_str(dict_val[_n])
+            if caller_name is not None:
+                _fwd = self._param_dict_val_types.get(_as_str(caller_name), {})
+                if _n in _fwd and _fwd[_n]:
+                    return _fwd[_n]
+        return None
 
     def _literal_arg_elems(a):
         """`(elem, nested)` C types for a container LITERAL passed as a call
@@ -6235,7 +6326,7 @@ def gen_module_impl(self, stmts):
         return None, None
 
     for caller_name, body in _caller_bodies:
-        elem, nested, _ = self._scan_container_elems(body)
+        elem, nested, dval = self._scan_container_elems(body)
         calls = []
         self._calls_in_stmts(body, calls)
         for call in calls:
@@ -6251,6 +6342,10 @@ def gen_module_impl(self, stmts):
                 _fe, _fne = _static_arg_elems(a, elem, nested)
                 if _fe is not None:
                     _record_param_elem(callee, pnames[i], _fe, _fne)
+
+                _dv = _static_arg_dict_val(a, dval, caller_name)
+                if _dv is not None:
+                    _record_param_dict_val(callee, pnames[i], _dv)
 
                 st = _arg_scalar_type(caller_name, a)
                 if not st:
@@ -6304,22 +6399,61 @@ def gen_module_impl(self, stmts):
             # Keyword arguments name the parameter directly, so the element
             # contract reads them the same way — `show(data=[1.5, 2.5])` is
             # the same call as `show([1.5, 2.5])` and used to inherit exactly
-            # as little. Only the literal branch is added here: the scalar and
-            # struct-pointer observations above are a separate pre-existing
-            # contract with its own coverage, and widening those is not this
-            # change's business.
+            # as little. The dict-value contract reads them the same way for
+            # the same reason; the scalar and struct-pointer observations
+            # above are a separate pre-existing contract with its own
+            # coverage, and widening those is not this change's business.
             for _kw in (getattr(call, 'kwargs', None) or []):
                 _kwn = _as_str(_kw[0])
                 for _ki in range(len(pnames)):
                     if pnames[_ki] == _kwn:
                         _note_literal_arg_elems(callee, _kwn, _kw[1])
+                        _kwdv = _static_arg_dict_val(_kw[1], dval, caller_name)
+                        if _kwdv is not None:
+                            _record_param_dict_val(callee, _kwn, _kwdv)
                         break
 
+    # A CONSTRUCTOR call is a `CallExpr` whose callee is a bare `IdentExpr`
+    # (`C({...})`), so the MemberExpr-only walk below cannot see it -- which is
+    # why the `_ctor_lit_param_types` pass exists separately for this
+    # contract's scalar half. The dict-value half had no such fallback, and a
+    # constructor is THE way a dict reaches a user class (`self.d = d`), so
+    # without it every method's `self.d[k]` read the slot through
+    # `mojo_dict_get_int` and printed the stored `char *`'s own digits.
+    # Keyed `<Struct>___init__`, the same key `_method_caller_bodies` uses for
+    # that method and therefore the same key `_gen_struct_method` reads its
+    # seeds from -- one key, one consumer.
+    _ctor_init_by_struct: dict = {}
+    for _cs in (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])):
+        if not isinstance(_cs, StructDef):
+            continue
+        for _cm in (_cs.methods or []):
+            if _as_str(_cm.name) == '__init__':
+                _ctor_init_by_struct[_as_str(_cs.name)] = _cm
+                break
+
     for caller_name, caller_struct, cbody in _method_caller_bodies:
-        _melem, _mnested, _ = self._scan_container_elems(cbody)
+        _melem, _mnested, _mdval = self._scan_container_elems(cbody)
         _mcalls = []
         self._calls_in_stmts(cbody, _mcalls)
         for _mcall in _mcalls:
+            if isinstance(_mcall.func, IdentExpr):
+                _minit = _ctor_init_by_struct.get(_as_str(_mcall.func.name))
+                if _minit is None:
+                    continue
+                _mcallee0 = _as_str(_mcall.func.name) + '___init__'
+                _mpn0 = []
+                for _pn0, _ in (_minit.params or []):
+                    _pn0 = _as_str(_pn0)
+                    if _pn0 != 'self' and not _pn0.startswith('*'):
+                        _mpn0.append(_pn0)
+                for _mi0, _ma0 in enumerate(_mcall.args):
+                    if _mi0 >= len(_mpn0):
+                        break
+                    _mdv0 = _static_arg_dict_val(_ma0, _mdval, caller_name)
+                    if _mdv0 is not None:
+                        _record_param_dict_val(_mcallee0, _mpn0[_mi0], _mdv0)
+                continue
             if not isinstance(_mcall.func, MemberExpr):
                 continue
             _mrecv = _mcall.func.obj
@@ -6365,6 +6499,36 @@ def gen_module_impl(self, stmts):
                 _me, _mne = _static_arg_elems(_ma, _melem, _mnested)
                 if _me is not None:
                     _record_param_elem(_mcallee, _mpn[_mi], _me, _mne)
+                _mdv = _static_arg_dict_val(_ma, _mdval, caller_name)
+                if _mdv is not None:
+                    _record_param_dict_val(_mcallee, _mpn[_mi], _mdv)
+
+    # ...and resolve the collected dict-value observations into the contract
+    # codegen reads, then re-run the collection once so a FORWARDING chain
+    # (`def g(d): return f(d)`) resolves through the hop this pass just
+    # settled. One extra round, not a loop to a fixpoint: `g` can only forward
+    # a dict value type that some call site of `g`'s already proved, so a
+    # second pass settles every chain that exists and a third would add
+    # nothing. `_calls_in_stmts` is memoized, so the repeat is cheap.
+    _resolve_param_dict_vals()
+    for caller_name, body in _caller_bodies:
+        elem, nested, dval = self._scan_container_elems(body)
+        calls = []
+        self._calls_in_stmts(body, calls)
+        for call in calls:
+            if not isinstance(call.func, IdentExpr):
+                continue
+            callee = _as_str(call.func.name)
+            pnames = _free_params.get(callee)
+            if not pnames:
+                continue
+            for i, a in enumerate(call.args):
+                if i >= len(pnames):
+                    break
+                _dv = _static_arg_dict_val(a, dval, caller_name)
+                if _dv is not None:
+                    _record_param_dict_val(callee, pnames[i], _dv)
+    _resolve_param_dict_vals()
 
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks

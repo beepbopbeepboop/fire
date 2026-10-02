@@ -188,6 +188,44 @@ def test_gimple_stdout_repeated(name: str, mojo_src: str, expected_stdout: str,
                     pass
 
 
+def dict_param_reader_is_str(name: str, mojo_src: str, fn: str, want: bool):
+    """Assert whether the generated C for `fn` reads a dict slot through
+    `mojo_dict_get_str`; return the reader calls it found.
+
+    The stdout assertions cannot see this axis at all: an UNTYPED dict slot is
+    read through `mojo_dict_get_int`, so a `char *` value comes back as the
+    stored pointer's own digits — an ASLR address that differs run to run and
+    no equality assertion can pin. What IS pinnable is which accessor the
+    generated C chose, and that is the entire content of the cross-call
+    dict-value contract, so both its positive and its negative case are
+    asserted this way."""
+    global _PASS, _FAIL
+    from gimple_codegen import compile_to_gimple
+    try:
+        c = compile_to_gimple(mojo_src, do_imports=False, filename='dvt.py')
+        # The mangled DEFINITION, not the forward declaration: `c.index(f'{fn}_')`
+        # finds the prototype first, whose `\n}`-terminated "body" is some
+        # unrelated function that follows it.
+        m = re.search(rf'^[^\n]*\b{fn}_[0-9a-f]+ \([^;]*\)\n\{{', c, re.M)
+        if m is None:
+            raise AssertionError(f'no definition of {fn}_ found in the generated C')
+        body = c[m.end():c.index('\n}', m.end())]
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+        return []
+    reads = [ln.strip() for ln in body.splitlines() if 'mojo_dict_get' in ln]
+    got = any('mojo_dict_get_str' in r for r in reads)
+    if got != want:
+        print(f"FAIL  {name}: {fn} {'does' if want else 'does not'} read its "
+              f"dict slot as a string, wanted {want} (reader calls: {reads})")
+        _FAIL += 1
+        return reads
+    print(f"PASS  {name}")
+    _PASS += 1
+    return reads
+
+
 def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
     """Test that mojo code compiles to GIMPLE, executes, and prints exactly
     `expected_stdout`. Unlike test_gimple_execution's exit-code check, this
@@ -6648,6 +6686,100 @@ def show(rows):
 def main():
     show([[1, 2], [3, 4]])
 """, "1\n2\n3\n4\n")
+
+    # A dict's VALUE type is a compile-time fact at the call site, and there is
+    # no binding site inside the callee to record it -- so before the cross-call
+    # dict-value contract (`_param_dict_val_types`, seeded at the same
+    # Pass-1.3d site as the scalar and element contracts and read by
+    # `gen_func` / `_gen_struct_method` beside `_param_elem_types`), the
+    # callee's `d[k]` fell to the `int64_t` default and read a `char *` slot
+    # through `mojo_dict_get_int`: the stored pointer's own bits, printed as a
+    # decimal, exit 0. Two spellings that MUST agree are asserted side by
+    # side, because the same program with the literal bound to a local first
+    # was already correct -- so a test of only one of them would pass on the
+    # broken tree for the wrong reason.
+    test_gimple_stdout("gimple_dict_param_value_type_from_the_call_site", """\
+def via_next(d):
+    a, b = next(iter(d.items()))
+    print(b)
+
+def via_for(d):
+    for k, v in d.items():
+        print(v)
+
+def via_subscript(d):
+    print(d["x"])
+
+def via_get(d):
+    print(d.get("x"))
+
+def via_alias(d):
+    e = d
+    print(e["x"])
+
+def main():
+    via_next({"x": "1"})
+    via_for({"x": "1"})
+    via_subscript({"x": "1"})
+    via_get({"x": "1"})
+    via_alias({"x": "1"})
+""", "1\n1\n1\n1\n1\n")
+
+    # The constructor carrier, which is not a MemberExpr callee at all and so
+    # needs its own observation to reach `_gen_struct_method` — a dict reaches
+    # a user class through `self.d = d` more often than through any other
+    # shape. Both the field read in another method and a `show()` driven
+    # through a free function's receiver are asserted, because the receiver
+    # spelling goes through a different resolution.
+    test_gimple_stdout("gimple_dict_param_value_type_reaches_a_constructor", """\
+class Box:
+    def __init__(self, d):
+        self.d = d
+    def show(self):
+        print(self.d["x"])
+
+def drive(b):
+    b.show()
+
+def main():
+    Box({"x": "1"}).show()
+    drive(Box({"x": "1"}))
+""", "1\n1\n")
+
+    # A float-valued dict takes the same contract through the `double` lane,
+    # which is a DIFFERENT reader (`mojo_dict_get_double`) from the string one.
+    test_gimple_stdout("gimple_dict_param_float_value_type_from_the_call_site", """\
+def f(d):
+    print(d["x"])
+def main():
+    f({"x": 1.5})
+""", "1.5\n")
+
+    # DISAGREEMENT, asserted on the generated C rather than on stdout: the
+    # honest answer for `f({'x': '1'}); f({'x': 2})` is the `int64_t` default,
+    # and its observable consequence at the string call site is the stored
+    # pointer's own digits — an ASLR address, which no equality assertion can
+    # pin. So what is asserted is the absence of the accessor the contract
+    # would otherwise have chosen. The agreeing program is asserted FIRST, so
+    # the disagreeing one cannot pass by the generator never producing that
+    # call at all.
+    _agree_src = '''\
+def f(d):
+    print(d["x"])
+def main():
+    f({"x": "1"})
+    f({"x": "1"})
+'''
+    dict_param_reader_is_str(
+        'gimple_dict_param_value_type_agreement_types_the_slot', _agree_src, 'f', True)
+    dict_param_reader_is_str(
+        'gimple_dict_param_value_type_disagreement_stays_untyped', '''\
+def f(d):
+    print(d["x"])
+def main():
+    f({"x": "1"})
+    f({"x": 2})
+''', 'f', False)
 
     # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
     # cross-module constructor call whose only field-type evidence is an

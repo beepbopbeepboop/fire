@@ -649,6 +649,17 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
             gen._elem_types[tname] = gen._elem_types[v]
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
+        # The dict-value twin of the arm above. Without it this function's
+        # `dst != 'int64_t'` block had exactly ONE container arm, so the one
+        # alias shape whose type lives in `_dict_val_types` rather than
+        # `_elem_types` fell off the end of it: `e = d` inside a function
+        # read `e[k]` through `mojo_dict_get_int` even with `d`'s value type
+        # known (`f(d)` where every call site passes `{'x': '1'}` printed an
+        # address, while the same call reading `d[k]` directly printed `1`).
+        if dst == 'MojoDict *' and v in gen._dict_val_types:
+            gen._dict_val_types[tname] = gen._dict_val_types[v]
+            if v in gen._dict_nested_val_types:
+                gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
         return
     if v in gen._actual_types:
         gen._actual_types[tname] = gen._actual_types[v]
@@ -664,6 +675,17 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
                 gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
     elif vtype == 'char':
         gen._actual_types[tname] = 'char'
+    # `e = d` where `d` is a BOXED dict parameter: `vtype` is `int64_t`
+    # because the parameter is declared `int64_t`, so the
+    # `vtype.endswith(' *')` arm above cannot fire — yet `_dict_val_types`
+    # holding an entry for `v` is itself proof that `v` is a dict, which is
+    # all this carry needs. Measured: with `f(d)`'s value type known from its
+    # call sites, reading `d[k]` in `f` printed the string while the alias's
+    # `e[k]` one line earlier printed the pointer's digits.
+    if v in gen._dict_val_types:
+        gen._dict_val_types[tname] = gen._dict_val_types[v]
+        if v in gen._dict_nested_val_types:
+            gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
     if v in gen._struct_field_owners:
         gen._struct_field_owners[tname] = list(gen._struct_field_owners[v])
     if tname in gen._actual_types:
@@ -1323,6 +1345,18 @@ def _gen_stmt_AssignStmt(gen, node):
             # read temp). Keyed by the struct owning the field.
             _dsn = gimple_exprtypes._struct_name_of(ot)
             gen._field_dict_val_types.setdefault(_dsn, {})[node.target.member] = _dv
+        elif v in gen._dict_val_types:
+            # `self.d = d` where the RIGHT-HAND SIDE's dict value type is
+            # already known — a dictionary literal passed straight to the
+            # constructor, or a parameter the cross-call contract resolved.
+            # Same carry as the annotation arm above, same table, same reader:
+            # without it the field is left untyped, so `self.d[k]` in every
+            # OTHER method reads the slot through `mojo_dict_get_int` and
+            # hands back the stored `char *`'s own bits. Gated on `v` already
+            # being a recorded dict, which is itself proof the value is one.
+            _dsn2 = gimple_exprtypes._struct_name_of(ot)
+            if _dsn2:
+                gen._field_dict_val_types.setdefault(_dsn2, {})[node.target.member] = gen._dict_val_types[v]
         if ot in ('int', 'int64_t', 'void *'):
             # Opaque Python object (e.g. `s.field = val` where `s`'s
             # static type isn't narrowed past a runtime isinstance()

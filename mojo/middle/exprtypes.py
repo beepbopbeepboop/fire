@@ -10,7 +10,7 @@ module-level constants are byte-identical to their originals.
 """
 from __future__ import annotations
 import re
-from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG
+from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _FLOAT_TYPES
 import dataclasses
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _signed_int64
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
@@ -1177,6 +1177,35 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
             elif ctype != t:
                 return None
     return ctype
+
+def dict_literal_val_ctype(gen, pairs) -> str:
+    """The dict VALUE ctype a `{k: v, ...}` LITERAL stores under, by the
+    first-pair sample rule the dict-literal lowering has always used.
+
+    ONE definition of that rule, because two callers need it and they must
+    not drift: `_lower_dict_literal` (which stamps the answer onto the temp
+    it allocates) and `module_gen.py`'s cross-call dict-value contract
+    (which stamps the same answer onto a CALLEE's unannotated parameter, from
+    a literal written at the call site instead — `f({"x": "1"})`). With two
+    copies, a call site's contract and the literal's own lowering could
+    disagree about the very dict they describe, and the parameter would be
+    typed one way while the argument is stored another.
+
+    Deliberately still a single SAMPLE rather than a join over every pair:
+    this dict representation has one `int64_t` slot plus a per-slot `kind`
+    tag, so a heterogeneous `{'x': 1, 'y': 's'}` has no single value type to
+    record anyway, and widening it to a join would be a decision about that
+    representation rather than about type inference.
+    """
+    for _pair in (pairs or ()):
+        _vt = gen._quick_type(_pair[1])
+        if _vt in _FLOAT_TYPES:
+            return 'double'
+        if _vt == 'char *':
+            return 'char *'
+        return 'int64_t'
+    return 'int64_t'
+
 
 def _struct_name_of(ctype: str) -> str:
     """Extract the bare struct name from a C type like 'const Foo *' → 'Foo'."""
