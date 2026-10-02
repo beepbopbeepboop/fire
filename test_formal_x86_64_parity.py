@@ -400,101 +400,24 @@ CASES = [
      "    p = Pair()\n"
      "    sys.stdout.write(\"%d\" % p.shrink())\n"
      "    return 0\n"),
-    # ── THE STACK-ARGUMENT CONVENTION, WHICH IS WHERE THE TWO REGISTERS DISAGREE
-    # about the ANSWER and not only about the arity ──────────────────────────────
+    # ── THE STACK-ARGUMENT CONVENTION ───────────────────────────────────────────
     #
     # AAPCS passes arguments 0..7 in registers and the rest in the caller's frame;
-    # SysV AMD64 passes 0..5 and the rest in the caller's frame.  So a SEVEN-
-    # argument function is a program that travels in a register on one
-    # architecture and in the CALLER'S FRAME on the other, and a defect in either
-    # half of that convention — the caller's `SUB`/`store`/`ADD`, or the callee's
-    # `[RBP + 16 + 8k]` load — is invisible on the machine that does not use the
-    # frame at all.  That is why these rows are here rather than in one backend's
-    # own suite: before the convention x86-64 REFUSED this program and arm64
-    # answered it, which is the two-architecture disagreement about one source
-    # file this file exists to end.
+    # SysV AMD64 passes 0..5 and the rest in the caller's frame, so a SEVEN-
+    # argument function travels in a register on one architecture and in MEMORY on
+    # the other.  Both conventions are implemented now
+    # (`formal/x86_64_codegen.py`'s `_load_home_from_stack`/`_emit_call` and
+    # `_MAX_INCOMING_ARGS` on both backends), which is what
+    # `bugs/FORMAL_x86_64_argument_registers.md` asked for; before that x86-64
+    # REFUSED the program and arm64 answered it, which is the two-architecture
+    # disagreement about one source file this file exists to end.
     #
-    # `a6` is the argument the two conventions disagree about, and the answer is
-    # built from it: `a6 * 1000000 + a0` reads it twice over (once scaled, once
-    # not), so a slot holding the right CONSTANT but the wrong argument still
-    # fails, and 7000001 is not reachable from any of the neighbouring offsets.
-    ("seven_arguments_arrive",
-     "def seven(a0: int, a1: int, a2: int, a3: int,\n"
-     "          a4: int, a5: int, a6: int) -> int:\n"
-     "    return a6 * 1000000 + a0\n\n"
-     "def main() -> int:\n"
-     "    printf(\"seven=%d\", seven(1, 2, 3, 4, 5, 6, 7))\n"
-     "    return 0\n",
-     "import sys\n\ndef seven(a0, a1, a2, a3, a4, a5, a6):\n"
-     "    return a6 * 1000000 + a0\n\ndef main():\n"
-     "    sys.stdout.write(\"seven=%d\" % seven(1, 2, 3, 4, 5, 6, 7))\n"
-     "    return 0\n"),
-    # NINE arguments and SIXTEEN, and the reason for the second is the SHAPE of
-    # the outgoing area rather than the count.  SysV spacing is 8 bytes per
-    # argument, so an ODD number of them leaves the area 8 bytes short of the
-    # 16-byte alignment the `call` itself requires: seven arguments round up to
-    # sixteen bytes with the padding at the HIGH end so `a6` is still at
-    # `[rsp+0]`, and sixteen fill it exactly.  A convention that reserved
-    # `8 * n` without the rounding misaligns every odd-arity call, which faults
-    # in a callee that uses SSE and silently corrupts one that does not — and
-    # `a8 * 10000` and `a15 + a8 * 10` read the LAST stack slot of each, which is
-    # where a padding byte placed at the wrong end lands.
+    # THE LADDER ITSELF — 7, 9 and 16 arguments, a stack argument arriving from a
+    # caller's parameter, and a nested call in argument position — is in
+    # `test_formal_run.py`'s `BOTH_ARCH_CASES`, which is REGISTERED as
+    # `formal-run` and so runs in every gate; these two rows are the shapes that
+    # ladder does not have, and neither is duplicated there.
     #
-    # 107 is 15 + 8 * 10 + 1 in CPython's arithmetic, and the three terms are
-    # three different arguments at three different offsets.
-    ("nine_and_sixteen_arguments_arrive",
-     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "          a5: int, a6: int, a7: int, a8: int) -> int:\n"
-     "    return a8 * 10000 + a0\n\n"
-     "def wide(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
-     "         a6: int, a7: int, a8: int, a9: int, a10: int, a11: int,\n"
-     "         a12: int, a13: int, a14: int, a15: int) -> int:\n"
-     "    return a15 + a8 * 10 + a0\n\n"
-     "def main() -> int:\n"
-     "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n"
-     "    printf(\" wide=%d\", wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))\n"
-     "    return 0\n",
-     "import sys\n\ndef nine(a0, a1, a2, a3, a4, a5, a6, a7, a8):\n"
-     "    return a8 * 10000 + a0\n\n"
-     "def wide(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11,\n"
-     "         a12, a13, a14, a15):\n"
-     "    return a15 + a8 * 10 + a0\n\ndef main():\n"
-     "    sys.stdout.write(\"nine=%d\" % nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n"
-     "    sys.stdout.write(\" wide=%d\" % wide(1, 2, 3, 4, 5, 6, 7, 8, 9,\n"
-     "                                         10, 11, 12, 13, 14, 15, 16))\n"
-     "    return 0\n"),
-    # THE STACK ARGUMENT AS A CALLER'S PARAMETER, which is the direction a
-    # compiler can get wrong by FOLDING: the value that lands in the outgoing
-    # slot is whatever the caller held at run time, not a constant the emitter
-    # could have checked against the callee's declaration.
-    #
-    # And a NESTED CALL in the ninth position, which is the direction it can get
-    # wrong by ORDER: an argument expression that itself calls pushes and pops
-    # around RSP, so the outgoing slots have to be reserved BEFORE it is
-    # evaluated and the store has to survive the call.  Storing the register
-    # arguments first puts the six `_SLOT` pushes between the reservation and the
-    # store, and the seventh argument then reads as zero — the one answer a callee
-    # cannot tell from a caller who passed zero.
-    ("a_stack_argument_from_a_parameter_and_a_nested_call",
-     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "          a5: int, a6: int, a7: int, a8: int) -> int:\n"
-     "    return a8 * 10000 + a0\n\n"
-     "def one() -> int:\n"
-     "    return 7\n\n"
-     "def call_it(w: int) -> int:\n"
-     "    return nine(1, 2, 3, 4, 5, 6, 7, 8, w)\n"
-     "\n"
-     "def main() -> int:\n"
-     "    printf(\"param=%d\", call_it(9))\n"
-     "    printf(\" nested=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n"
-     "    return 0\n",
-     "import sys\n\ndef nine(a0, a1, a2, a3, a4, a5, a6, a7, a8):\n"
-     "    return a8 * 10000 + a0\n\ndef one():\n"
-     "    return 7\n\ndef call_it(w):\n"
-     "    return nine(1, 2, 3, 4, 5, 6, 7, 8, w)\n\ndef main():\n"
-     "    sys.stdout.write(\"param=%d\" % call_it(9))\n"
-     "    sys.stdout.write(\" nested=%d\" % nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n"
-     "    return 0\n"),
     # A VARIADIC EXTERN CALL whose seventh argument is in the caller's frame,
     # and it is here because libc is the one caller of this convention whose
     # code this project does NOT own: `printf` reads that argument out of
@@ -506,8 +429,8 @@ CASES = [
     # a variadic callee with arguments past the register file is refused there
     # (`formal/arm64_codegen.py`'s `_emit_call`, because its `...` tail is laid
     # out in a separate stack area), so a nine-value printf cannot be a
-    # two-backend case.  `len_of_every_operand_shape` above still splits its
-    # seven-value printf in two, and it can stop doing that now.
+    # two-backend case at all.  `len_of_every_operand_shape` above used to split
+    # its seven-value printf in two for the same reason and does not any more.
     ("a_variadic_printf_with_an_argument_in_the_frame",
      "def main():\n"
      "    printf(\"%d %d %d %d %d %d %d\", 1, 2, 3, 4, 5, 6, 7)\n"
@@ -515,15 +438,19 @@ CASES = [
      "import sys\n\ndef main():\n"
      "    sys.stdout.write(\"%d %d %d %d %d %d %d\" % (1, 2, 3, 4, 5, 6, 7))\n"
      "    return 0\n"),
-    # A STACK ARGUMENT ALONGSIDE A FRAME RECEIVER, in METHOD position, for the
-    # shape rather than the count.  A parameter with no register home is loaded
-    # into R11 — the scratch `_store_var` uses on the spill path — and then
-    # stored, so a load that borrowed that scratch for the ADDRESS would
-    # overwrite the value before the store; and a method's receiver is the
-    # parameter whose home assignment is the most complicated thing in the
-    # prologue.  `self.a` is READ as well as the arguments passed, so a frame
-    # read that landed on the outgoing area shows up in the answer instead of
-    # passing quietly.
+    # A STACK ARGUMENT ALONGSIDE A FRAME RECEIVER, in METHOD position.  A
+    # parameter with no register home is loaded into R11 — the scratch
+    # `_store_var` uses on the spill path — and then stored, so a load that
+    # borrowed that scratch for the ADDRESS would overwrite the value before the
+    # store; and a method's receiver is the parameter whose home assignment is
+    # the most complicated thing in the prologue.  `self.a` is READ as well as
+    # the arguments passed, so a frame read that landed on the outgoing area
+    # shows up in the answer instead of passing quietly.
+    #
+    # The method is spelled INSIDE the struct, which is not a style choice: at
+    # module level `self` is a name and `wide` is a free function, and the
+    # receiver-position rules say so by name (measured — "not one of those
+    # methods of those receivers").
     ("a_stack_argument_on_a_method_with_a_frame_receiver",
      "struct P:\n"
      "    var a: int\n"

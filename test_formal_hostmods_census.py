@@ -26,20 +26,21 @@ itself is printed:
 
   1. **Every module builds on arm64.**  arm64 is the corpus backend, and a host
      module that does not lower there is a hole in the language this tree
-     implements.  There is no exemption on this side and there never should be:
-     a known failure gets a row in `KNOWN_X86_64_ONLY` with a reason, and a row
-     there is a claim that has to be true TODAY.
+     implements.  There is no exemption on this side and there never should be.
   2. **x86-64 is a SUBSET of arm64.**  A module that builds on x86-64 and not on
      arm64 is a two-architecture divergence, which is the one thing two
      architectures of one language implementation may not do — and it is the
      failure mode that a per-backend test cannot see, because the backend under
      test is the one that changed.
 
-`KNOWN_X86_64_ONLY` is the repo's `expect=` discipline applied to a census, and
-the anti-rot half is what makes it worth having: **a row there that BUILDS is a
-FAILURE**, reported as a stale marker, exactly as `tools/suite.py` reports an
-`expect=`-marked test that starts passing.  A known failure nobody revisits is a
-bug quietly reintroduced.
+Property 3 is `KNOWN_X86_64_ONLY`, the repo's `expect=` discipline applied to a
+census: a module that refuses on x86-64 and not on arm64 is recorded there with
+the words it has to refuse with and the filing that owns it, and **a refusal
+that is not recorded there fails the census**.  It is EMPTY today, which is the
+point of the table — it held `fnmatch.mojo` and `pathlib.mojo` until both
+ABIs grew a stack-argument convention, and the check that caught them going
+green was itself removed with its last row, because a check over no rows is not
+a check.
 
 ## Why a COLD CAS per row
 
@@ -96,31 +97,30 @@ def hostmod_modules():
 # The x86-64 rows that are KNOWN not to build, each with the words the build has
 # to refuse with and the filing that owns it.
 #
-# There is one, and one module inherits it: SysV x86-64 passes six integer
-# arguments in registers, so a function with a seventh parameter is refused by
-# the emitter rather than spilled.  That is the right policy — a wrong spill
-# would be worse than a refusal — but it means a module written for one backend
-# has no reason to know the other's limit, and the real fix is a stack-argument
-# convention on BOTH ABIs rather than an annotation on one of them.  See
-# `bugs/FORMAL_x86_64_argument_registers.md`.
+# IT IS EMPTY, and it was not: it held `fnmatch.mojo` and `pathlib.mojo`, both
+# refused because SysV x86-64 passed six integer arguments in registers and had
+# no stack area, so `match_core(7)` had nowhere to go.  Both conventions have
+# one now (`formal/x86_64_codegen.py`'s `_load_home_from_stack` and `_emit_call`
+# on x86-64, `_MAX_INCOMING_ARGS` on both), which is what
+# `bugs/FORMAL_x86_64_argument_registers.md` asked for, so the rows are deleted
+# rather than re-needleed.
 #
-# `pathlib` is here for a reason that is NOT its own: it imports `fnmatch`, so
-# its refusal is a chained one and its own body is never reached.  It is listed
-# separately, with the importer named in the needle, because a single row saying
-# "pathlib fails" would be true for a week after fnmatch is fixed and then
-# quietly untrue.
-KNOWN_X86_64_ONLY = {
-    "fnmatch.mojo": (
-        "match_core: 7 parameters exceeds the 6 the formal x86-64 ABI passes "
-        "in registers",
-        "bugs/FORMAL_x86_64_argument_registers.md",
-    ),
-    "pathlib.mojo": (
-        "imports 'fnmatch', which cannot be built either",
-        "bugs/FORMAL_x86_64_argument_registers.md (through fnmatch, not its "
-        "own body)",
-    ),
-}
+# `test_known_x86_64_failures_are_still_failing` went with them.  It existed to
+# make a row here a claim about TODAY — a row that BUILDS is a failure, exactly
+# as `tools/suite.py` reports an `expect=`-marked test that starts passing — and
+# a table with no rows has nothing for it to check.  `test_no_unrecorded_x86_64_
+# failures` is the half that stays meaningful with an empty table and is the
+# reason the deletion is safe: a refusal that is NOT recorded here fails the
+# census, so the next x86-64-only gap has to arrive with a row rather than
+# quietly.
+#
+# The two rows are named in that commit because a census row is a per-module
+# build and this table is the only place the shape of the loss was written down:
+# `pathlib` was listed SEPARATELY from `fnmatch`, with the importer in the
+# needle, because its refusal was chained — it imports `fnmatch`, so its own body
+# was never reached, and one row saying "pathlib fails" would have been true for
+# a week after fnmatch was fixed and then quietly untrue.
+KNOWN_X86_64_ONLY: dict = {}
 
 
 def build_module(path, backend, tmpdir, cas_root):
@@ -223,31 +223,6 @@ def test_x86_64_is_a_subset_of_arm64(rows):
           "divergence:\n    " + "\n    ".join(bad))
 
 
-def test_known_x86_64_failures_are_still_failing(rows):
-    """The anti-rot direction: a known row that BUILDS is a FAILURE.
-
-    The same rule `tools/suite.py` applies to an `expect=`-marked test, and for
-    the same reason: a marker nobody revisits is a bug quietly reintroduced.  The
-    needle is checked too, so a refusal that changed its subject fails here
-    rather than passing as "still red" — a row that is red for a NEW reason is
-    not the row anybody recorded.
-    """
-    for rel, (needle, why) in sorted(KNOWN_X86_64_ONLY.items()):
-        if (rel, "x86_64") not in rows:
-            continue
-        v, _r = rows[(rel, "x86_64")]
-        if v == "BUILD":
-            raise TestFailure(
-                f"{rel} BUILDS on x86-64.  It is in KNOWN_X86_64_ONLY because "
-                f"of {why}, so either the refusal is gone (good — delete the row "
-                f"and say so in the commit) or the marker is stale.  Either way "
-                f"this row is now a lie.")
-        check(needle in v,
-              f"{rel} is recorded as failing on x86-64 for {why}, so the build "
-              f"has to refuse with {needle!r}, and it said: {v!r}.  A row that "
-              f"is red for a DIFFERENT reason is not the row anybody recorded.")
-
-
 def test_no_unrecorded_x86_64_failures(rows):
     """Property 1's mirror on x86-64: an unrecorded refusal is a FAILURE.
 
@@ -273,8 +248,6 @@ def test_no_unrecorded_x86_64_failures(rows):
 TESTS = [
     ("every hostmod builds on arm64", test_every_hostmod_builds),
     ("x86-64 is a subset of arm64", test_x86_64_is_a_subset_of_arm64),
-    ("the known x86-64 failures are still failing",
-     test_known_x86_64_failures_are_still_failing),
     ("no unrecorded x86-64 failure", test_no_unrecorded_x86_64_failures),
 ]
 
