@@ -16,6 +16,75 @@ All measured with the gimple backend (compile -> `gcc -fgimple` -> link
 `fire_runtime.c` + the A3 coroutine objects -> run) against `exec`-ing the
 identical text as Python. Every one of the three exits 0 with wrong output.
 
+## Status (2026-10-02, `work/bugs4-2`) — item 1's proposed next step is INSUFFICIENT, and the reason is now located: the two passes that answer "what does this generator yield" never see each other, and only ONE of them has a refusal
+
+Re-measured on this tree; all three shapes reproduce exactly as below (item 1
+compiled `0 1 1 2` where CPython prints `0 1.5 1 2.5`; item 2 printed the key's
+heap address where CPython prints `k`).
+
+The doc's own framing — "a generator's `for <t> in <param>:` and its own value
+slot are decided by two independent inferences that never see each other" — is
+right, and item 1 names one of the two. What is newly established is **which**
+two, and that the fix item 1 proposes lands the value slot's KIND on the
+A3 side only, which makes the compiled answer WORSE rather than honest.
+
+### Item 1's next step was tried, and it is not enough
+
+`_static_env`'s for-loop arm now handles the two-slot `enumerate(<x>)` target
+(slot 0 is the index, slot 1 is `<x>`'s element kind — both statically known,
+so there is no reason to skip the pair). Measured, that arm alone gives:
+
+```
+env(_static_env(rows)) = {'data': ('list', 'd'), 'i': 'i', 'r': 'd'}   ✓
+_generator_value_kind(rows) = (None, 'mixed float / non-float yields (v0)')   ✓ refusal
+```
+
+The refusal is real, and on the A3 path a refusal is what the doc predicted.
+**But `rows` is compiled through the C++20 emitter, not the A3 pass**, and that
+emitter does not consult `_generator_value_kind` at all. It asks
+`mojo/middle/exprtypes.py::_generator_yield_ctype`, which resolves each
+`yield <expr>` with `_infer_simple_expr_ctype(n.value, known, ...)` — and
+`known` is the generator's PARAMETER map (`_gen_cpp_generator_unit`'s
+`self._cpp_list_local_elem_types` lineage), which contains no loop targets.
+So `yield r` resolves `r` to nothing, becomes `int64_t`, `yield i` is
+`int64_t`, the two agree, and the value slot is `int64_t`:
+
+```
+before the arm:  0 1 1 2
+after  the arm:  0 <raw IEEE-754 bits> 1 <raw IEEE-754 bits>       WORSE
+```
+
+Reverted. The change is not in the tree, and this is the write-up of why: the
+A3 pass's answer and the C++20 emitter's answer to the SAME question are two
+separate inference passes, and only one of them can refuse.
+
+### So the fix has two halves, in this order
+
+1. **`_generator_yield_ctype`'s `known` map has to carry the loop targets the
+   emitter itself types.** The emitter ALREADY types them — `_cpp_for_stmt`
+   declares `double r;` and emits `r = mojo_list_get_double(...)` (this is in
+   the doc's own analysis) — so the information exists at the point of use and
+   is simply not published to the yield-kind inference. That is a much smaller
+   change than the refusal route and it is strictly better: it makes item 1
+   CORRECT (`0 1.5 1 2.5`) instead of refused, and it is the same fix as item
+   3's "the outer loop's target is typed `MojoList *` but never inherits the
+   iterable's NESTED element ctype".
+2. **Item 2 then needs no refusal at all.** Its doc says "either the loop
+   target's type has to become an input to the value-slot choice, or a
+   generator whose value slot and loop target provably disagree has to be
+   refused. The refusal is the smaller change and is the honest direction" —
+   but that reasoning was written while only one pass could refuse, and (1)
+   makes the first option available: a dict-typed parameter's loop target is
+   `char *` from `mojo_dict_iter_key`, so the value slot follows from the
+   target instead of being decided beside it. The remaining risk is a dict/list
+   parameter whose target kind is NOT statically known (the same one-C-type-per-
+   -slot limitation the doc already records for item 3), and THAT is where a
+   refusal belongs — not here.
+
+Nothing else in this doc is addressed: the heterogeneous-call-site limitation
+and the loop-target-rebind refusal are both already-correct behaviour and stay
+as they are.
+
 ## 1. A tuple loop target is not in `_static_env` — the element truncates
 
 ```mojo

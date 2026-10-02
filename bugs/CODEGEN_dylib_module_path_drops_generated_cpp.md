@@ -1,6 +1,43 @@
 # The dylib module compile throws away `generated_cpp`, so a generator in any dylib module silently loses its definitions
 
-## Status
+## Status (2026-10-02, `work/bugs4-2`) — candidate 2 (REFUSE) is LANDED and pinned; candidate 1 (the real fix) is not
+
+`build_stdlib_dylib.compile_module_to_c` now raises when
+`gen.generated_cpp` is non-empty, so `build()`'s existing per-module error
+path prints `skip <module>: ...` and the client falls back to source. The
+exception is a named class (`_DylibGeneratedCppError`) rather than a bare
+`RuntimeError`, so a caller that DOES know how to link a companion object can
+tell it apart from a genuine compile failure — candidate 1 is exactly that
+caller, and it should not have to match on a message.
+
+Pinned by `test_selfhost.py::dylib_module_path_refuses_a_generated_cpp`, which
+is deliberately the OTHER half of `closure_coroutines_are_lowerable`: that check
+asserts the exposure is ABSENT for the two module lists that ship, and an
+assertion that the exposure is absent is not a refusal when it is not. It
+compiles a decorated generator (the shape the A3 stack-switch pass refuses, so
+the C++20 emitter takes it and `generated_cpp` is the only place the
+definitions exist) and requires the refusal, and then compiles a
+generator-FREE module and requires that it still compiles — the second half is
+what keeps the refusal from costing anything on the module lists that ship.
+
+Cost on this tree: **zero `skip` lines**, measured two ways.
+`closure_coroutines_are_lowerable` still reports 61 modules / 0 unlowered, and
+the production stdlib is 249 modules / 0 real generator-or-async defs (the
+entry above's own census, re-confirmed by the refusal not firing for a plain
+generator module either — which is the sharper statement, because a plain
+generator is exactly what the C++20 emitter accepts). So the sequencing advice
+this doc gives stands, and candidate 1 now has a measurement to not increase:
+the skip count the refusal adds.
+
+What candidate 1 still needs is unchanged and is the doc's own open decision:
+route `compile_module_to_c` through `gimple_codegen._run_pipeline` (so it stops
+being a second front door into `gen_module`), and give `_compile_one_object` a
+companion that compiles `generated_cpp` into a second object. The new
+`_DylibGeneratedCppError` is the seam to do that behind — a caller that wants
+the object can catch it, and a caller that does not is already correct.
+
+## Earlier status
+
 
 **Open. Root cause of the 2026-10-01 `mojoc` / `selfhost` / `bootstrap-stage2-cc`
 red, which is fixed at the call site, not here.** One `@contextlib.contextmanager`

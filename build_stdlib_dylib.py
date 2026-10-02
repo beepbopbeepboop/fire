@@ -369,6 +369,14 @@ def stdlib_modules() -> list:
 _OBJ_FLAGS = ('-fgimple', '-fPIC', '-D__MOJO_STDLIB_MODE__', f'-I{RUNTIME}')
 
 
+class _DylibGeneratedCppError(RuntimeError):
+    """`compile_module_to_c` produced a C++20 coroutine translation unit it has
+    no way to hand to the dylib link. Named so a caller that DOES know how to
+    link one (`compile_module_to_c_given_gen`, used by the executable path) can
+    tell it apart from a genuine compile failure. See
+    bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md."""
+
+
 def compile_module_to_c(src: str, path: str, module_name: str) -> str:
     """Transpile one library module to GIMPLE C with no main/entry points.
 
@@ -392,6 +400,51 @@ def compile_module_to_c(src: str, path: str, module_name: str) -> str:
             gen = GimpleGen(emit_entry_points=False, module_name=module_name)
             gen._current_filename = path
             box['c'] = gen.gen_module(Parser(py_tokenize(src)).parse_module())
+            box['cpp'] = getattr(gen, 'generated_cpp', '')
+            # A generator / `async def` the C++20 emitter accepted leaves its
+            # DEFINITIONS in a second artifact, `gen.generated_cpp`, and this
+            # function can only return `box['c']`. Nothing downstream reads it:
+            # not the return value, not the CAS key, not `_compile_one_object`'s
+            # object bytes. The module's `.c` still carries the `extern`
+            # declarations and the calls, so the object references
+            # `_mojogen_<module>_<fn>_start/_resume/_value/_destroy` with nothing
+            # defining them anywhere on the link line.
+            #
+            # It is silent in a dylib and FATAL in an executable, which is why
+            # it went unnoticed: `build()` links a production dylib with
+            # `undefined=True` (`-undefined dynamic_lookup`), so a module with
+            # dangling coroutine symbols still loads, and both of CLAUDE.md's
+            # silent-verdict steps are blind to it by construction — the
+            # `stdlib-dylib` skip count does not move and `stdlib-syntax` only
+            # checks that the `.c` parses. `fire.py build fire.py` links
+            # `mojoc` against that dylib with every symbol resolved, and the
+            # undefined entry points land in the program's undefined set
+            # straight away.
+            #
+            # So this REFUSES instead: `build()`'s existing per-module error
+            # path prints `skip <module>: ...` and the client falls back to
+            # source, which is the same honest degradation the dylib already
+            # uses for a module it cannot compile. It does not compile the
+            # generator — that is candidate 1 in the doc, and it changes what
+            # every dylib module's link line looks like — but it converts a
+            # silent hole into a visible one, and the skip count it adds is
+            # exactly the measurement candidate 1 has to not increase.
+            #
+            # Measured exposure on this tree is ZERO for both module lists
+            # that ship (249 production stdlib modules and the 61-module
+            # self-host closure: 0 real generator/async defs before lowering,
+            # 0 after — `test_selfhost.py::closure_coroutines_are_lowerable`
+            # pins the second), so this costs no `skip` line today. It is
+            # `mojo dylib` over a project's own Python-family modules where it
+            # bites, which is a tree whose `.py` files are not in either list.
+            # See bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md.
+            if box.get('cpp'):
+                raise _DylibGeneratedCppError(
+                    f"{module_name}: {len(box['cpp'])} bytes of C++20 coroutine "
+                    f"definitions (gen.generated_cpp) that this path cannot "
+                    f"link; a dylib module's generator would ship as a dangling "
+                    f"_mojogen_* reference. Compile this module as an executable "
+                    f"(fire.py build), or fall back to source.")
         except BaseException as e:   # propagate to the caller's thread
             box['err'] = e
 

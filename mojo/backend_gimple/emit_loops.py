@@ -1991,16 +1991,15 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     _is_pair_var = (not is_tuple) and (it_val in gen._dict_items_val_elems)
     _had_pair = _is_pair_var and var in gen._dict_item_pair_vars
     _saved_pair = gen._dict_item_pair_vars.get(var, '')
-    # The pair is a real 2-element `MojoList` — slot 0 the key (always a
-    # string; `mojo_dict_items` appends it with append_str) and slot 1 the
-    # dict's own value type — and the variable was carrying NO evidence of
-    # that, so `print(v)` / `str(v)` / an f-string reached the scalar
-    # `mojo_str_from_int` path with a `MojoList *` in hand and printed the
-    # pair's HEAP ADDRESS (a different decimal every run, which is also what
-    # breaks bootstrap's stage2-vs-stage3 byte-identity check). Recording the
-    # per-slot ctypes is the same evidence `_lower_tuple_literal` records for
-    # a tuple literal, and it is what routes the value to the kinds-aware
-    # `mojo_repr_list_slotkinds`. See
+    # The pair IS a 2-element `MojoList` — slot 0 the key (always a string;
+    # `mojo_dict_items` appends it with append_str) and slot 1 the dict's own
+    # value type — and the variable carried no evidence of that, so
+    # `print(v)` / `str(v)` / an f-string reached the scalar `mojo_str_from_int`
+    # path with a `MojoList *` in hand and printed the pair's HEAP ADDRESS: a
+    # different decimal every run, which is also exactly what breaks
+    # bootstrap's stage2-vs-stage3 byte-identity check. Recording the two slot
+    # ctypes is the same evidence a tuple literal records, and it is what
+    # routes the value to the kinds-aware `mojo_repr_list_kinds`. See
     # bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md.
     _pcv = gen._cname(var) if _is_pair_var else ''
     _saved_pc = ((gen._elem_types.get(_pcv),
@@ -2023,8 +2022,10 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     # exact under its uniform helper; a pair is not, and that uniform case is
     # a separate piece of missing evidence — the same one `v.value` on a
     # container-valued dict needs).
-    if _is_pair_var and it_val not in gen._dict_items_int_keys:
+    _pair_str_keyed = _is_pair_var and it_val not in gen._dict_items_int_keys
+    if _is_pair_var:
         gen._dict_item_pair_vars[var] = gen._dict_items_val_elems[it_val]
+    if _pair_str_keyed:
         gen._elem_types[_pcv] = 'MojoList *'
         gen._struct_slot_kinds[_pcv] = ['str', _gmi_slot_kind_long(
             gen._dict_items_val_elems[it_val])]
@@ -2048,6 +2049,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             gen._dict_item_pair_vars[var] = _saved_pair
         else:
             gen._dict_item_pair_vars.pop(var, None)
+    if _pair_str_keyed:
         # Same scoping discipline as the pair-var registration above: these
         # three describe THIS loop's target, and a same-named variable in an
         # enclosing or sibling scope is a different value.

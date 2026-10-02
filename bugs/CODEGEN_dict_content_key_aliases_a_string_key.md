@@ -1,5 +1,10 @@
 # A dict's CONTENT key aliases a plain string key, and a content key is not Python's `==`
 
+**See the Status section at the end (2026-10-02) first: item 1 is now known to
+be the same change that fixes a float key and a bool key, which were measured
+while working on `CODEGEN_dict_comprehension_repr_is_separately_broken.md`,
+and one more repr defect was located here — it is item 2's runtime half.**
+
 Found 2026-10-01 while fixing
 `bugs/CODEGEN_tuple_dict_key_hashed_by_address.md` (deleted with that fix).
 **NOT the address bug** — a container key is now keyed by its VALUE, which is
@@ -115,3 +120,77 @@ has been rendered. `items()` likewise pairs the text with the value.
 The regression tests for the fixed halves are
 `gimple_tuple_dict_key_is_content_keyed` and
 `gimple_dict_container_keys` (the runtime group in `test_ptr_registry.py`).
+
+## Status (2026-10-02, `work/bugs4-2`) — the `keykind` value is now the whole of items 1 and 2, and one more key kind needs it
+
+None of the four is fixed. What this session established is that the fix is
+**smaller and more uniform than the doc's four items suggest**, and that one of
+them is already half-built.
+
+### Item 1 is ONE new `keykind` value, and a float/bool key needs it too
+
+`_DictSlot.keykind` is already `0 = a str key, 1 = a bytes key, 2 = an
+INTEGER key`. Every problem in this doc — (1) a content key aliasing a string
+key, (3) a struct instance in a tuple keying by address, and two more
+measured here — is the same shape: **the dict cannot tell what KIND of Python
+object the key was, so it falls back on "it is text"**, and then either quotes
+it or compares it by whatever text it can render.
+
+A fourth value is all the mechanism needs, and the `_kw` dispatch table
+already has the three-arm shape to extend (`_kw_kind`: `mojo_boxed_is_str` ->
+str, `_kw_is_container_key` -> container, else int). Measured 2026-02-02 on
+this tree, from the two other dict-repr bugs' repro programs:
+
+```
+print({1.5: "x"})      CPython {1.5: 'x'}    compiled {'1.5': 'x'}
+print({True: 1})       CPython {True: 1}     compiled {'True': 1}
+print({k: 1 for k in [(0, 0), (0, 1)]})
+                       CPython {(0, 0): 1, (0, 1): 1}
+                       compiled {'(None, None)': 1, '(None, 1)': 1}
+```
+
+The float and bool cases are NOT in any existing doc and are the same defect:
+`_canon_int` cannot read `"1.5"` or `"True"`, so both become `keykind == 0`
+(str) slots and the repr quotes them. A `keykind == 3` for "a float key" and a
+`keykind == 4` for "a bool key" — or, better, ONE rule that a key whose text
+is not the repr of a str is stored under its own kind — is what makes
+`_mojo_repr_dict`'s single `if (keykind == 2)` into the general form.
+
+The third line is this doc's item 1/3 seen from the repr side: the key IS a
+container's content text (that part is fixed — it used to be the tuple's heap
+ADDRESS, ASLR-varied, which is worse than a stable wrong answer), and it is
+still quoted and still renders a `0` slot as `None`.
+
+### Item 2's runtime half is `_key_slot_str`, and it is the `0 -> None` too
+
+`mojo_dict_key_for` renders a container key with `_container_key_str`, which
+walks the inner list slot by slot through `_key_slot_str`. That function reads
+**every slot as an integer** — which is exactly this doc's item 2 (`1` and
+`1.0` in the same position are different keys, because a float slot becomes its
+IEEE-754 bits) — AND it applies the `0 -> None` heuristic, which is why the
+comprehension case above prints `'(None, None)'` for the tuple `(0, 0)`.
+
+So item 2 has TWO halves in the same function, and only the first was named:
+the missing element kinds (`mojo_list_set_kinds`, which
+`_lower_tuple_literal` already emits for a heterogeneous literal) and the
+sentinel. A tuple of ints is a `keykind`-uniform list, so `mojo_list_get_kinds`
+answers NULL for it and the walker still has nothing to read slots by; that is
+the gap `mojo_repr_list_slotkinds`'s `kinds` ARGUMENT already solves for the
+repr (the codegen knows the pattern statically there, from
+`gen._tuple_slot_types`), and the same `kinds` string handed to
+`_container_key_str` would solve it for the key.
+
+### Ordering
+
+1. **`_mojo_repr_dict`'s key `if`** — already extended once for `keykind == 2`
+   (see `CODEGEN_dict_comprehension_repr_is_separately_broken.md`'s Status). It
+   is the one line that has to learn about every new kind, so it is the last
+   thing to change, not the first.
+2. **`_kw_kind` + the `_kw` twins' fourth arm**, and
+   `mojo_dict_set_*_ckey` / `_get_*` / `_contains_*` / `_pop_*` / `_setdefault_*`
+   for it. That is what closes this doc's (1) and (3).
+3. **`_key_slot_str` taking the inner list's `kinds`**, which closes this doc's
+   (2) and the comprehension repr's remaining `None`s together.
+4. (4) `keys()`/`items()` returning the key VALUE is still the largest and is
+   unchanged: it means the dict has to STORE the original key, not only its
+   text, which is a different data model from everything above.

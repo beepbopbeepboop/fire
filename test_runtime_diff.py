@@ -498,6 +498,64 @@ BUILTIN_PROGRAMS = {
             print(struct_pointer_live())
             print(char_star_live())
     """),
+    # A dict value slot the runtime TAGGED as a plain int went through the
+    # generic element repr, whose 0-is-the-None-sentinel rule turned a real
+    # int 0 into `None` (`{i: i for i in range(2)}` printed `{'0': None, '1': 1}`).
+    # `_DictSlot.kind` is `0` for a plain int64_t (see its own comment: 1 =
+    # double bit-cast, 2 = char *, 3 = a Python bool), so the tag IS the
+    # evidence and `kind == 0` is `mojo_repr_int(val)`. The `kind == 1` arm is
+    # added in the same place: a double's IEEE-754 bits went to `mojo_repr_str`
+    # as a `char *`, and that pattern is pointer-shaped, so it printed garbage
+    # or faulted. See bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md.
+    #
+    # INTEGER KEYS are all this case uses, and they are all STRINGS on purpose:
+    # `{1: "a"}` prints `{'1': 'a'}`, and that needs the slot to remember
+    # whether the key ARRIVED as an integer or as the string "1" (`_canon_int`
+    # deliberately makes those one entry, as CPython does). Pinning either
+    # spelling here would make this case stop describing its own fix; the
+    # discriminator is written down at the missing arm in `module_gen.py`'s
+    # `_mojo_repr_dict` template. The last two lines are the controls: a dict
+    # LITERAL and a hand-built dict whose entries arrive by SUBSCRIPT STORE
+    # rather than through a comprehension, so the case is not measuring only
+    # one lowering.
+    #
+    # A double stored by SUBSCRIPT (`d["j"] = 1.5; print(d)` -> `{'j': 1}`) is
+    # also absent, and that one is a store-side tag the subscript-store
+    # lowering does not set -- it is recorded in the bug doc rather than pinned
+    # here, because pinning it would make this case describe two fixes.
+    "dict_repr_zero_value_is_not_the_none_sentinel": textwrap.dedent("""\
+        def main():
+            print({"k" + str(i): i for i in range(2)})
+            print({"k" + str(i): i * 1.5 for i in range(2)})
+            print({"k" + str(i): i + 1 for i in range(2)})
+            print({"a": 1, "b": 0})
+            d = {}
+            d["k"] = 0
+            d["j"] = 1
+            print(d)
+    """),
+    # `getattr(o, name, default)` computed the default-selection ternary
+    # correctly -- `_mojo_getattr_missed` was set, `_t9 = missed ? dflt : raw`
+    # was emitted -- and then BOXED the whole expression as `int64_t`, so
+    # `print` read it with the numeric path and printed the string's own heap
+    # address. The default's own C type is the domain both answers share, so
+    # the result is presented there; a `char *` default makes the expression a
+    # `char *`. The int default and the `hasattr` probe beside it are the
+    # controls: neither involves the cast. See
+    # bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md.
+    "getattr_default_on_a_miss": textwrap.dedent("""\
+        class C:
+            pass
+
+        def main():
+            o = C()
+            print(getattr(o, "nope", "dflt"))
+            print(getattr(o, "nope", 7))
+            o.y = "set"
+            print(getattr(o, "y", "dflt"))
+            print(o.y)
+            print(hasattr(o, "nope"), hasattr(o, "y"))
+    """),
     # An EMPTY container literal asserts no element type, and one place
     # believed otherwise: `_lower_list_literal` /
     # `_lower_tuple_literal` recorded `_infer_list_elem_type([])`'s
@@ -1121,6 +1179,8 @@ CPYTHON_COMPARABLE = {
     "for_target_one_tuple_dict_and_nested",
     "comprehension_target_shadows_an_enclosing_local",
     "comprehension_result_elem_type_across_a_branch",
+    "dict_repr_zero_value_is_not_the_none_sentinel",
+    "getattr_default_on_a_miss",
 }
 
 

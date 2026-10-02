@@ -48,6 +48,7 @@ from mojo.middle.stmts_shared import (
     _handler_exc_name, _is_except_as_member_target, _is_genexp, _isinstance_narrow_struct, _iter_ast, _narrow_key_for_expr,
     _pair_key, _seed_genexp_list_narrowing, _with_item_alias_name
 )
+from mojo.middle.types import _is_empty_container_literal
 
 
 def gen_stmt(gen, node):
@@ -2192,7 +2193,35 @@ def _gen_stmt_ReturnStmt(gen, node):
         # heap addresses in the native .ci). Just checking `v` is a tracked
         # container is enough — the returned value's element type is what
         # matters, regardless of how the value's own C type reads.
-        if v in gen._elem_types:
+        #
+        # NOT for an EMPTY container literal. `_lower_list_literal` /
+        # `_lower_tuple_literal` / `_lower_dict_literal` record their temp's
+        # element type from `_infer_list_elem_type`, whose answer for an empty
+        # literal is `'int64_t'` — a STORAGE default (the list variable needs a
+        # declaration), not evidence about what it holds. Publishing it as the
+        # FUNCTION's return element type is a false claim with real
+        # consequences: this write is last-write-wins, so
+        #
+        #     def f(i):
+        #         if i: return [t for t in ["a", "b"]]
+        #         return []
+        #
+        # published `int64_t` from the trailing `[]` (the comprehension
+        # contributes nothing of its own — its loop target is not in
+        # `_prepass_local_elems`, so `_quick_container_elem` answers None for
+        # it), and `print(f(1))` routed to `mojo_repr_list_ints`, which reads
+        # each slot with the integer accessor, and printed both `char *` slots
+        # as pointer decimals. The same program WITHOUT the trailing
+        # `return []` was already right, which is what made the `if` look like
+        # the trigger instead of the empty literal. See bugs/
+        # CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md.
+        #
+        # The element-type table itself still gets its `'int64_t'`: `l = []`
+        # followed by `l.append(x)` — including through a module-level global,
+        # where nothing else seeds the table — reads it there, and removing it
+        # regressed `test_gimple_runner.py`'s
+        # `gimple_genexp_struct_receiver_still_correct`.
+        if v in gen._elem_types and not _is_empty_container_literal(node.value):
             gen._return_elem_types[gen.current_func_name] = gen._elem_types[v]
         # A `return` whose value is a container of a DIFFERENT kind than an
         # earlier `return` in this same function: the function has no single
@@ -2572,8 +2601,12 @@ def _gen_stmt_DelStmt(gen, node):
         if ot == 'MojoDict *':
             key_type, key_val = gen.lower_expr(target.index)
             key_type, key_val = gen._char_to_cstr(key_type, key_val, True, True)
+            # `del d[k]` — a removal whose VALUE is discarded, so the
+            # absent-box default (0) is the whole answer it needs from the
+            # new `dflt` parameter `d.pop(k, default)` requires.
             gen._emit_call('int64_t', '', 'mojo_dict_pop_int',
-                             [('MojoDict *', ov), (key_type, key_val)])
+                             [('MojoDict *', ov), (key_type, key_val),
+                              ('int64_t', '0')])
         elif ot == 'MojoList *':
             idx_type, idx_val = gen.lower_expr(target.index)
             idx64 = gen._to_int64(idx_type, idx_val)
@@ -2604,7 +2637,8 @@ def _gen_stmt_DelStmt(gen, node):
             dkey_type, dkey_val = gen.lower_expr(target.index)
             dkey_type, dkey_val = gen._char_to_cstr(dkey_type, dkey_val, True, True)
             gen._emit_call('int64_t', '', 'mojo_dict_pop_int',
-                             [('MojoDict *', dp), (dkey_type, dkey_val)])
+                             [('MojoDict *', dp), (dkey_type, dkey_val),
+                              ('int64_t', '0')])
             gen._emit(f"  goto {bb_after};")
             gen._emit_label(bb_list)
             lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)

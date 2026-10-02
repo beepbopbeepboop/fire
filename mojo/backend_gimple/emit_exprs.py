@@ -4996,24 +4996,14 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # otherwise route it through mojo_repr_list_ints (no None-sentinel
     # check), silently misprinting that `None` as `0`.
     #
-    # An EMPTY literal records nothing at all, and that is the same class of
-    # answer: `[]` holds no elements, so `int64_t` is not what it holds, it
-    # is `_infer_list_elem_type`'s no-evidence default. Claiming it anyway is
-    # load-bearing-bad here because `_gen_ReturnStmt` publishes whatever the
-    # returned temp's element type is as the FUNCTION's return element type
-    # (emit_stmts.py, `_return_elem_types[current_func_name]`), last write
-    # wins. So `def f(i): if i: return [<a str comprehension>]; return []`
-    # published `int64_t` from the trailing `[]` — the comprehension's own
-    # element type is not tracked through `_quick_container_elem`, so it
-    # published nothing to join against — and `print(f(1))` routed to
-    # `mojo_repr_list_ints` and printed both `char *` slots as pointer
-    # decimals. Same program without the trailing `return []` is right, which
-    # is what made the `if` look like the trigger instead of the empty
-    # literal. The set literal lowering beside this one already declines to
-    # claim `int64_t` at all (`if elem != 'int64_t'`, `_lower_SetLiteral`);
-    # see bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md.
-    if node.elements and not (elem == 'int64_t'
-                              and gen._literal_elements_include_none(node.elements)):
+    # An EMPTY literal records `'int64_t'` here, and that is a STORAGE
+    # default, not evidence — `_elem_types` is what the list's own later
+    # consumers read, and `l = []` followed by `l.append(x)` (also through a
+    # module-level global, where nothing else seeds the table) depends on it.
+    # It is the RETURN-side publish that must not treat it as evidence, and
+    # that is `_gen_ReturnStmt`'s own guard; see bugs/
+    # CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md.
+    if not (elem == 'int64_t' and gen._literal_elements_include_none(node.elements)):
         gen._elem_types[t] = elem
     # Every element is itself a tuple/list literal with a homogeneous,
     # non-default element type: record that INNER slot type so a later
@@ -5349,10 +5339,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # `None` element (`(x, None)`) must not be tagged elem-type
     # int64_t, or _list_repr_fn would route it through
     # mojo_repr_list_ints and silently misprint that `None` as `0`.
-    # An empty tuple records nothing, for the same reason and with the same
-    # reasoning as in `_lower_list_literal` just above.
-    if node.elements and not (elem == 'int64_t'
-                              and gen._literal_elements_include_none(node.elements)):
+    if not (elem == 'int64_t' and gen._literal_elements_include_none(node.elements)):
         gen._elem_types[t] = elem
     # Every element is itself a tuple/list literal with a homogeneous,
     # non-default element type: record that INNER slot type so a later

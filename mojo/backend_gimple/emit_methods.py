@@ -73,7 +73,6 @@ from mojo.middle.methods_shared import (
     _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _is_selfhost_source_file, _sms_key
 )
 from mojo.middle.resolve_shared import _is_none_literal
-from fire_compiler import _ptr_slot_in_range
 
 # The value DOMAIN a dict slot's C type lives in, and the runtime helper
 # suffix that reads it back. A `MojoDict` stores every value as one raw
@@ -91,18 +90,6 @@ _DICT_VAL_DOMAIN = {'char *': 'char *', 'MojoStr *': 'char *',
                     '_Bool': 'int64_t', '': 'int64_t'}
 _DICT_POP_RT = {'char *': ('str', 'char *'), 'double': ('double', 'double'),
                 'int64_t': ('int', 'int64_t')}
-
-
-def _elem_slot_is_set(gen, name):
-    """Whether `gen._elem_types` has a USABLE element-type claim for `name` —
-    i.e. not absent, not an empty string, and not the erased-sentinel word the
-    compiled path can leave behind (see `_ptr_slot_in_range`'s own docstring)."""
-    if name not in gen._elem_types:
-        return False
-    _v = gen._elem_types[name]
-    if _as_str(_v) == '':
-        return False
-    return _ptr_slot_in_range(_v)
 
 
 def _dict_val_domain(ctype):
@@ -4299,21 +4286,6 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                 av = gen._coerce_to_type(at, 'int64_t', av)
                 at = 'int64_t'
             gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
-            if not _elem_slot_is_set(gen, ov):
-                # Appending an INTEGER is the evidence that makes the receiver
-                # an int list, and it used to be recorded nowhere: the
-                # empty-accumulator idiom `out = []` then `out.append(x)` got
-                # its `_elem_types` entry from `_lower_list_literal`'s
-                # `_infer_list_elem_type([])` default. That default is not
-                # evidence — it is what made an empty literal publish its own
-                # function's return element type and route a str-valued
-                # result to `mojo_repr_list_ints`
-                # (bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md)
-                # — so the empty literal no longer claims one, and the append
-                # has to. ESTABLISHES only, never overwrites: `l = ['a'];
-                # l.append(1)` is a heterogeneous list whose `char *` claim is
-                # the correct one to keep.
-                gen._elem_types[ov] = 'int64_t'
             if at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *')):
                 actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem
