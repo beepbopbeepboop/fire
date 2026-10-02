@@ -390,6 +390,75 @@ def twice_same():
 
 
 def run_tests():
+    # A comprehension's `for` target that SHADOWS a live local of the same name
+    # must get its own C variable, and the element's own type must be the one
+    # it is assigned through. Both halves were the same one missing argument:
+    # `_compr_list_loop` called `_declare_var` WITHOUT
+    # `force=_compr_target_is_shadowed(...)` — the argument its three sibling
+    # comprehension loops all pass — so (1) first-decl-wins kept the enclosing
+    # variable and the loop wrote into it, and (2) the `target_type` read a few
+    # lines below saw the ENCLOSING type, took the "cast to int64_t if target
+    # is opaque" branch, and emitted `t = (int64_t)mojo_list_get_str (...)`
+    # into a `struct Token *`. That is gcc's "non-trivial conversion in
+    # 'var_decl'", which is how this was found (fire_compiler.py's own
+    # `_parse_comptime`; bugs/CODEGEN_comprehension_target_shadows_struct_local.md),
+    # and it took out `make mojoc`, `selfhost` and `bootstrap-stage2-cc` at
+    # once.
+    #
+    # Asserted on the generated C, not on the answer, because the answer was
+    # never the point: the shape did not compile. The `char *` declaration of
+    # the shadow is the load-bearing substring — it is what proves the element
+    # type reached the declaration, and `(int64_t)` on the `mojo_list_get_str`
+    # line is the exact text the bug put there.
+    test_c_shape("comprehension_target_shadowing_a_struct_local_gets_its_own", """\
+class Token:
+    def __init__(self, kind: String):
+        self.kind = kind
+
+def pick(s: String) -> Token:
+    return Token(s)
+
+def names() -> List:
+    var t = pick("outer")
+    var i: Int = 0
+    while i < 2:
+        t = pick("loop")
+        i = i + 1
+    return [t for t in ["a", "b"]]
+""", must_have=["char * _shadow", "_shadow1_t = ", "mojo_list_get_str"],
+       must_not_have=["(int64_t) _t", "t = (int64_t)"])
+
+    # The same site with a `char *` local shadowed instead of a struct pointer.
+    # Before the fix this one COMPILED and printed the two string ADDRESSES as
+    # decimals, because the enclosing `char * t` declaration won and the
+    # comprehension's list element — a `char *` — was cast to int64_t and then
+    # handed to a `char *` variable; the aliasing was invisible precisely
+    # because the two types happened to agree in width. Asserting the shadow
+    # exists is what pins "a fresh binding", which is the property, rather than
+    # this particular type pair.
+    test_c_shape("comprehension_target_shadowing_a_char_star_local_gets_its_own", """\
+def outer(s: String) -> String:
+    return s
+
+def names() -> List:
+    var t = outer("outer")
+    var i: Int = 0
+    while i < 2:
+        t = outer("loop")
+        i = i + 1
+    return [t for t in ["a", "b"]]
+""", must_have=["char * _shadow", "_shadow1_t = "],
+       must_not_have=["(int64_t) _t"])
+
+    # A comprehension target that shadows NOTHING still declares the plain
+    # name, with no shadow. The `force=` argument is false in that case and the
+    # generated C has to be byte-identical to before, so this is the guard on
+    # the fix's blast radius: the common case must not grow a `_shadow` local.
+    test_c_shape("comprehension_target_shadowing_nothing_keeps_the_plain_name", """\
+def names() -> List:
+    return [t for t in ["a", "b"]]
+""", must_have=["  char * t;", "  t = _t"], must_not_have=["_shadow1_t"])
+
     # A vetted struct constructor bound to an owned local is initialised in frame storage.
     test_c_shape("owned_struct_local_is_initialised_in_the_frame", """\
 struct P:

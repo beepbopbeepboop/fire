@@ -3705,7 +3705,30 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         gen._emit_label(bb_after)
         return
     elem = _as_str(gen._elem_of(_iv))
-    gen._declare_var(_as_str(gen0.target), elem)
+    # `force=_compr_target_is_shadowed(...)`, the same argument the range, set
+    # and generator comprehension loops already pass, and this one site was
+    # the odd one out. It matters twice over, and the second time is the one
+    # that makes it a compile error rather than a silent aliasing bug:
+    #
+    #   1. A comprehension's target is a FRESH binding, so it must not share
+    #      the enclosing function's C variable. `_declare_var` is
+    #      first-decl-wins, so without `force` a target that shadows an
+    #      already-live name was written straight into that variable.
+    #   2. `target_type = gen._type_of(...)` below is read AFTER this call, so
+    #      a forced declaration also makes the element's OWN type the one the
+    #      assignment below coerces to. Without it, a `char *` element whose
+    #      target name happened to be a live `struct Token *` local took the
+    #      "cast to int64_t if target is opaque" branch and emitted
+    #      `t = (int64_t)mojo_list_get_str(...)` into a `struct Token *` —
+    #      gcc's "non-trivial conversion in 'var_decl'", which is how this was
+    #      found (fire_compiler.py's own `_parse_comptime`, whose multi-target
+    #      comprehension named `t` while a `Token *` local `t` was live;
+    #      bugs/CODEGEN_comprehension_target_shadows_struct_local.md).
+    #
+    # False in the common case — a target name that is not already live — so
+    # the single-comprehension program is byte-identical to before.
+    gen._declare_var(_as_str(gen0.target), elem,
+                     force=_compr_target_is_shadowed(gen, gen0.target))
     # FRESH `char *` view of the loop-target C name: `gen0.target` (an AST
     # str field) erases to int64_t on the self-hosted path, so a bare
     # `f'  {gen0.target} = ...'` LVALUE emitted a raw ASLR pointer decimal
