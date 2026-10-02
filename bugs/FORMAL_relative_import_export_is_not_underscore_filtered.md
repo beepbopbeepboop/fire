@@ -1,13 +1,21 @@
 # A relative import's dylib export is not underscore-prefixed, and the dyld probe's own precondition fails
 
-**Status: OPEN. Pre-existing on `24068a01`, reproduced on a pristine `git archive
-HEAD`, and NOT caused by the admitted-contract work.**
+**Status: OPEN. Pre-existing on `24068a01` — the commit this branch started at —
+and NOT caused by the admitted-contract work.**
 
 ## What I ran
 
-    git archive HEAD | tar -x -C .tmp/head
-    cd .tmp/head && python3 -m unittest test_formal_sweep.TestDyldProbe.\
-        test_a_relative_imports_underscored_symbol_resolves_and_the_image_runs
+    git archive 24068a01 | tar -x -C .tmp/opencode/base
+    cd .tmp/opencode/base && python3 test_formal_sweep.py TestDyldProbe
+
+**`24068a01` and not `HEAD`, and the difference is worth recording**: my first
+attempt used `git archive HEAD`, which archived *my own branch* — HEAD is this
+branch's tip, so the "pristine" tree contained the admitted-contract work and the
+comparison proved nothing. `master` is no use either: it moved from `24068a01` to
+`7f76a844` while this branch was being written, and `origin/master` is `0b6394ab`,
+a state with no `formal/` directory at all. The commit the worktree was checked
+out at is the only honest baseline, and pinning it by SHA is what makes the claim
+checkable later.
 
 ## What I saw
 
