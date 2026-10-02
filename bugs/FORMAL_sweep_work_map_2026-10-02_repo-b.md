@@ -214,6 +214,14 @@ asserting that a one-armed store before a trailing loop is **still** refused,
 because a fix that dropped the edge carelessly — or turned the header's IN into
 a union — would pass the answered cases and fail those.
 
+**The safety property, measured** — removing an intersection can only ever
+*lower* the number of refusals, so the direction that could lose a true positive
+needs a number and not a claim. Over every function of the 14 modules under
+`formal/hostmods/` plus `re.mojo` — 5 888 CFG blocks — the orphan count (a
+non-entry block with no predecessor at all) is **0 before the change and 0
+after**. The fix subtracts a false edge and never creates an unreachable region,
+which is the only way it could have lost a refusal.
+
 **What it exposed** — `re.mojo` had never compiled, so 14 checks in
 `test_re_formal.py` had never run. Seven of them are wrong answers in the regex
 engine (`` never matches in any position; `re.VERBOSE` is accepted and
