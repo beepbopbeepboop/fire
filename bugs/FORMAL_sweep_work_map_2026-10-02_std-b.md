@@ -34,6 +34,12 @@ The 2 pass files are `std/math/constants.mojo` and `std/os/pathlike.mojo`; the
 sweep counts passes without printing them, so both were identified by elimination
 against the per-directory class counts.
 
+**Runs B, C and P were measured before fix (c) landed**, so run C's table is the
+pre-(c) state. Fix (c) changes no class in this slice: `std/os/env.mojo` was
+already `codegen/dependency` (on `binary_heap.mojo`), and its own in-file refusal
+was never the class — it is what run P's 3-row `env.mojo` group was measuring.
+`50cadc5a`'s own commit message carries that measurement.
+
 **The coverage rate went DOWN from 5.3 % to 5.0 %, and that is the tool working.**
 The two files that moved were in `backend-crash`, which is in no rate at all
 because a crash is a compiler bug and produced no verdict; they now have a real
