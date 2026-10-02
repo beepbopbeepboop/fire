@@ -1,5 +1,71 @@
 # COMPILE_FAIL: Tools/cases_generator/analyzer.py
 
+## Status 2026-10-01 — the `var_decl` error below is STILL this file's own; but its `194: expected expression before '('` sibling is NOT, and belongs to a same-bare-name STRUCT collision
+
+Fresh `python3 fire.py build .tmp/ca/cases_generator/analyzer.py` (sources
+copied from `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/`),
+arm64: **11 `error:` lines**, of two distinct families.
+
+### Family A (this file's own, unchanged): the `var_decl` loop-variable store
+
+```
+.tmp/ca/cases_generator/analyzer.py:723:1: error: non-trivial conversion in 'var_decl'
+```
+
+Byte-identical to the entry below, including its raised-on C. Not attempted;
+that entry's analysis stands (the `char * tkn` loop variable against
+`stmt.contents`' unknown element type — the list-element-typing family).
+
+### Family B (NOT this file's): `194: expected expression before '(' token`
+
+```
+.tmp/ca/cases_generator/analyzer.py:194:10: error: expected expression before '(' token
+  194 |         print(indent, self.stack, ", ".join([str(c) for c in self.caches]))
+```
+
+This LOOKS like a comprehension-inside-`str.join` lowering bug and is not.
+Compiling `analyzer.py` directly — `do_imports=True` and
+`do_imports=False`, both dumped and read — produces a `Uop_dump` that is
+entirely correct:
+
+```c
+_t21 = mojo_list_get_int (_t17, _t19);
+_t24 = CacheEntry___str__ (_t23);
+_t25 = (_t23 ? _t24 : _slit_10035);
+mojo_list_append_str (_t16, _t25);
+...
+_t28 = mojo_str_join (_t15, _t16);
+```
+
+every temp correctly typed, the comprehension correctly turned into an
+indexed loop, the `? :` None-guard present. The minimal fixtures
+(`", ".join([str(c) for c in self.caches])` with and without a class
+receiver, and the generator-expression spelling) all compile.
+
+It fails only under `fire.py build`, which compiles the whole
+`Tools/cases_generator` sibling set into one unit — where `parser.py`'s
+errors are present:
+
+```
+parser.py:48:3:  error: too many arguments to function
+                        'fire_compiler_Parser___init__'; expected 2, have 3
+parser.py:52,58,67,68,72,74,75: implicit declaration of function
+                        'fire_compiler_Parser_{next,getpos,setpos,peek,
+                                              definition,eof,backup}'
+```
+
+`cases_generator/parsing.py:333` declares `class Parser(PLexer)` and
+`parser.py:1` re-exports it across a module boundary, while
+`fire_compiler.py:2869` declares its own `class Parser` with a different
+`__init__`. Root-caused (two independent bare-name-keyed tables, one merged
+C struct layout and one forced `fire_compiler_` method qualifier) in
+`bugs/CODEGEN_user_class_named_Parser_merged_with_fire_compiler_Parser.md`.
+
+**This entry exists so the two families are not confused.** Family A is
+this doc's subject and is unfixed; Family B is fixed nowhere and is not
+this file's to fix — `fire.py build`'s one-unit-per-Tools-subtree policy is
+what makes a sibling's failure surface as this file's error.
+
 ## Status (2026-09-30, branch work/compile-fail-stdlib-misc — own-file errors 4 → 1; the three gone were a C-style cast used as a GIMPLE operand, which is now the tree's one `_inc_val`)
 
 Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
