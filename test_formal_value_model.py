@@ -256,6 +256,49 @@ CASES = [
      "    print(\"v:\", L[0])\n"
      "    return 0\n",
      "v: x\n"),
+    # ── what a CONSTRUCTION puts in a field ──
+    #
+    # The same shape of question as the two above, one level down: a field's
+    # kind, where the DECLARATION is usually silent.  `class_jit.mojo` is this
+    # case exactly — a two-field class whose fields are annotated nowhere, built
+    # from literals, and read through `print`.
+    #
+    # The evidence is the construction, because that is where the VALUE is: the
+    # store `init_body_stores` is going to perform is what the kind is read off,
+    # so the two cannot disagree.  `struct_field_kind`'s own gate — a kind is a
+    # claim about the VALUE in the slot, and `S()` leaves every slot at its
+    # class default — is right about `S()` and irrelevant about a frame this
+    # function built with arguments.  Measured before this, on both
+    # architectures: refused with "print() cannot tell whether MemberExpr is a
+    # string or a number".
+    ("a_constructed_field_prints",
+     "class Point:\n"
+     "    def __init__(self, x, y):\n"
+     "        self.x = x\n"
+     "        self.y = y\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = Point(3, 4)\n"
+     "    print(\"p:\", p.x, p.y)\n"
+     "    return 0\n",
+     "p: 3 4\n"),
+    # AND THE STRING ROW, which is the dangerous direction and so the one that
+    # has to be in the oracle's file rather than only in a suite: a kind claimed
+    # for a field that holds a `char *` is what `%s` dereferences, so a wrong
+    # one here is a fault or an address printed as text rather than a wrong
+    # number.  Both fields in one `print` so the two conversions are in the same
+    # image and the integer half cannot be quietly rendering the string one.
+    ("a_constructed_string_field_prints",
+     "class Pair:\n"
+     "    def __init__(self, s, n):\n"
+     "        self.s = s\n"
+     "        self.n = n\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = Pair(\"hi\", 7)\n"
+     "    print(\"p:\", p.s, p.n)\n"
+     "    return 0\n",
+     "p: hi 7\n"),
 ]
 
 # ── the tuple-store target shapes ──
@@ -702,6 +745,90 @@ REFUSALS = [
      "    print(\"v:\", d[\"a\"])\n"
      "    return 0\n",
      "cannot tell whether SubscriptExpr"),
+    # ── the four gates on a field kind read off a construction ──
+    #
+    # Each of these is a case where claiming a kind from `p = S(args)` would be
+    # a claim the source does not support, and each is a REFUSAL rather than a
+    # number because the wrong answer is a fault: `run_refusal` builds BOTH
+    # architectures and requires the identical message from each, and that is
+    # the only instrument that can see a defect both backends share.
+    #
+    # The one that is not theoretical is the first.  The construction says what
+    # went into the slot WHEN THE OBJECT WAS BUILT, and a statement after it in
+    # the same function puts something else there; measured on both
+    # architectures from a GREEN build, with the classification claiming a
+    # string and the store making it the integer 5:
+    #
+    #     p = P("hi", 7)
+    #     p.s = 5
+    #     print("s:", p.s)        ->  SIGSEGV, exit 139
+    #
+    # which is the same fault `a_percent_s_of_an_integer_is_refused` exists to
+    # keep out, reached through a field rather than through a name.
+    ("a_field_written_after_its_construction_is_refused",
+     "class P:\n"
+     "    def __init__(self, s, n):\n"
+     "        self.s = s\n"
+     "        self.n = n\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = P(\"hi\", 7)\n"
+     "    p.s = 5\n"
+     "    print(\"s:\", p.s)\n"
+     "    return 0\n",
+     "cannot tell whether MemberExpr"),
+    # The argument is one of this function's own unannotated PARAMETERS: a word
+    # arriving from a caller, which this model calls an integer everywhere else
+    # but which says nothing about what `p.s` holds, and the two hops from the
+    # caller to a struct field are exactly where a "a word is an integer"
+    # default becomes a wrong number rather than a harmless one.
+    ("a_field_built_from_an_unannotated_parameter_is_refused",
+     "class P:\n"
+     "    def __init__(self, s, n):\n"
+     "        self.s = s\n"
+     "        self.n = n\n"
+     "\n"
+     "def main(q):\n"
+     "    var p = P(q, 7)\n"
+     "    print(\"s:\", p.s)\n"
+     "    return 0\n",
+     "cannot tell whether MemberExpr"),
+    # A METHOD writes the field, so the constructor's argument is a statement
+    # about the past.  `ValueKinds` is flow-INsensitive by construction, so
+    # without this gate `p.s` would answer the same everywhere in the function
+    # including after the setter ran.
+    ("a_field_written_by_another_method_is_refused",
+     "class P:\n"
+     "    def __init__(self, s, n):\n"
+     "        self.s = s\n"
+     "        self.n = n\n"
+     "    def set_s(self, v):\n"
+     "        self.s = v\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = P(\"hi\", 7)\n"
+     "    p.set_s(\"bye\")\n"
+     "    print(\"s:\", p.s)\n"
+     "    return 0\n",
+     "cannot tell whether MemberExpr"),
+    # TWO constructions that disagree, on two arms of the same `if`.  Flow
+    # insensitivity is what makes this the right question: one name, one slot,
+    # two stated kinds, so the slot is undecided rather than whichever arm the
+    # reader happened to look at first.
+    ("a_field_whose_constructions_disagree_is_refused",
+     "class P:\n"
+     "    def __init__(self, s, n):\n"
+     "        self.s = s\n"
+     "        self.n = n\n"
+     "\n"
+     "def main(k):\n"
+     "    if k:\n"
+     "        var p = P(\"hi\", 7)\n"
+     "    else:\n"
+     "        var p = P(3, 7)\n"
+     "    print(\"s:\", p.s)\n"
+     "    return 0\n",
+     "cannot tell whether MemberExpr"),
 ]
 
 

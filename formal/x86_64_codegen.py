@@ -5566,7 +5566,8 @@ class X86_64Codegen:
             string_names=STRING_TYPE_NAMES,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
-            declared_kind=self._declared_kind_for(name))
+            declared_kind=self._declared_kind_for(name),
+            ctor_field_value=self._ctor_field_value_for(name))
         self._vkinds_cache[name] = vk
         return vk
 
@@ -5636,6 +5637,50 @@ class X86_64Codegen:
             return None
 
         return kind_of_slot
+
+    def _ctor_field_value_for(self, fn_name):
+        """`ctor_field_value` bound to `fn_name`, for `ValueKinds`.
+
+        The hook that answers "what did the construction put in this field",
+        and the whole of it is `model.struct_ctor_field_value` asked with THIS
+        UNIT'S struct table. That table is the only reason a hook exists at all:
+        `ValueKinds` reads one function's source and has no way to know that
+        `Point` is a struct, what its `__init__` stores, or which of its methods
+        write a field — and a backend that asked those questions itself would be
+        a second implementation of `init_body_stores`, which is the one function
+        the emitters build a construction from.
+
+        Three gates, and each is a refusal rather than a guess:
+
+          * the callee must be a struct THIS unit declares. A struct of another
+            module has no `__init__` here to read, and a name that is a
+            function rather than a type is not a construction at all.
+          * it must be a FRAMED struct (more than one field). A one-word
+            struct's receiver IS its field, which `_declared_kind_for` answers
+            from the declaration, and this hook must not be a second opinion
+            about the same word.
+          * no OTHER method may write the field
+            (`struct_field_written_outside_init`). The kind is about the slot,
+            and a setter that ran between the construction and the read makes
+            the constructor's argument a statement about the past.
+
+        `fn_name` is accepted and unused, deliberately: the two `ValueKinds`
+        hooks have the same signature because both are per-FUNCTION questions,
+        and a hook that ignored the function it was asked about would be the
+        kind of thing that looks right until two functions in one module
+        disagree.
+        """
+        structs = self._structs
+
+        def ctor_field_value(struct_name, call, field):
+            st = structs.get(struct_name)
+            if st is None or not M.struct_is_framed(st):
+                return None
+            if M.struct_field_written_outside_init(st, field):
+                return None
+            return M.struct_ctor_field_value(st, call, field, structs)
+
+        return ctor_field_value
 
     def _slot_declared_annotation(self, expr):
         """`(annotation, kind)` a frame slot's field DECLARES, or None.

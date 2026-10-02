@@ -10420,11 +10420,25 @@ EQ_DISPATCH_CASES = [
      "    return bump()\n",
      "refuse:G is read in bump() at `G + 1`", None),
     # The sibling the filing did not mention: the same name WRITTEN through a
-    # `global` declaration, which the language allows and the value model has
-    # nowhere for.  There is no storage a write could outlive a frame in, so both
-    # emitters treat the declaration as a no-op — CPython answers 6 and 6 where
-    # this path answered 10601485 and 5 on arm64 and 11 and 5 on x86-64.
-    ("a_mutated_module_global_is_refused",
+    # `global` declaration.  It USED to expect a refusal here — "there is no
+    # storage a write could outlive a frame in", which was true and which both
+    # emitters enforced by treating the declaration as a no-op, so CPython
+    # answered 6 and 6 where this path answered 10601485 and 5 on arm64 and 11
+    # and 5 on x86-64.  That sentence stopped being true when
+    # `formal-module-globals` gave a written module-level name a `__DATA` slot,
+    # and the row was left asserting a refusal the backend no longer owes —
+    # red on `master` as well as on the branch that found it, which is what
+    # `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
+    # recorded before this row was decided.  Option 1 of that doc's two, and the
+    # one the tree's behaviour already implements: the program is RIGHT, so the
+    # row asserts the number.
+    #
+    # 12 is CPython's: `G` goes 5 -> 6 and both reads see 6.  Measured on both
+    # backends on this tree, and the same number from `python3`.  The exit
+    # status is the assertion and the empty stdout is the other half of it —
+    # `main` RETURNS the sum rather than printing it, so an image that printed
+    # something and exited 0 would not pass.
+    ("a_mutated_module_global_is_read_back_from_its_slot",
      "G = 5\n"
      "def bump():\n"
      "    global G\n"
@@ -10434,7 +10448,7 @@ EQ_DISPATCH_CASES = [
      "    return G\n"
      "def main(n):\n"
      "    return bump() + rd()\n",
-     "refuse:G is declared `global` in bump() and assigned there", None),
+     12, ""),
 ]
 
 
