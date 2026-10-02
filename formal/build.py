@@ -3394,9 +3394,26 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # the same reason `hstruct` is a set rather than one struct — a set of
         # one is the ordinary case and a set of two is a disagreement the
         # consumer is entitled to see.
+        # `_fn_key(fn)` on all four reads, and that is the whole fix: every one
+        # of these tables is FILLED by `_fn_key` (`params_of`, `holders`,
+        # `hstruct`, `declared_holders` are all `{_fn_key(fn): …}`), so reading
+        # them by `fn.name` returned `None` for every function — `_fn_key` is
+        # `id(fn)`, so a name is a key only by accident.  `params` then arrived as
+        # `()`, `_parameter_frame_contract` iterates `params`, and the published
+        # contract was `[]` for EVERY export of EVERY module.  A consumer
+        # (`model.resolve_frame_parameter_contract`) reads that positionally, so
+        # `position >= len(contract)` was `0 >= 0` and it answered
+        # "the manifest does not list it as an export" — a statement about the
+        # manifest that is false, because the manifest lists the export and
+        # publishes a contract; the contract is empty.  Every cross-module frame
+        # hand-off on this path was refused by that sentence.  The regression is
+        # the four `byref_*` cases in `test_formal_run.py`, which assert
+        # EXECUTION on both architectures rather than "it builds".
         fn._frame_param_contract = _parameter_frame_contract(
-            fn, params_of.get(fn.name) or (), holders.get(fn.name) or (),
-            (hstruct.get(fn.name) or {}), declared_holders.get(fn.name) or {})
+            fn, params_of.get(_fn_key(fn)) or (),
+            holders.get(_fn_key(fn)) or (),
+            (hstruct.get(_fn_key(fn)) or {}),
+            (declared_holders.get(_fn_key(fn)) or {}))
         # `by_name` itself, published, and the reason is a CONSTRUCTION rather
         # than a field read: a copy construction `S(x)` needs to know what `x`
         # IS, and the holder analysis is the only thing in the compiler that
