@@ -429,6 +429,95 @@ def twice_same():
         _FAIL += 1
 
 
+def test_rebound_container_local_is_the_box():
+    """A local rebound to a different CONTAINER KIND is not a retyping either.
+
+    The container half of the rule `rebound_local_returns_the_box_not_its_
+    first_struct` states for structs, and it is the one that took the
+    self-host closure down: a `MojoDict` and a `MojoSet` are distinct
+    runtime structs with distinct slot layouts (DESIGN.html R2), so no
+    container pointer describes a name that has held both.
+
+    The store site reads the local's DECLARED type and declarations are
+    first-decl-wins, so `mixed` was first declared `MojoDict *` from its
+    first store and the set store then reached `_sce_simple_emit`'s
+    container-kind chokepoint — the one that refuses rather than
+    reinterpreting one struct's memory as another's — and the whole
+    MODULE failed to compile:
+
+        cannot coerce MojoSet * to MojoDict * (incompatible container
+        kinds) at mojo/backend_gimple/module_gen.py: value='_t17778'
+        dest='_lens'
+
+    Real instance: `gen_module_impl`'s `_lens` is a dict at line 1257
+    (`self._device_launch_lengths.get(_nm) or {}`) and a set at line 6114
+    (`_lens = {len(e.elements) for e in _els}`) — one function, one name,
+    two kinds. Verified against master's own module_gen.py, which is in
+    the self-host closure.
+
+    Also asserted: a name bound to ONE container kind keeps that real
+    pointer type, because the box is a cost (every later read goes through
+    dynamic dispatch) and must only be paid by a name that has earned it.
+    """
+    global _PASS, _FAIL
+    name = "rebound_container_local_is_the_box"
+    try:
+        ok, c_src, stderr = gimple_compiles("""\
+def mixed(n: Int):
+    c = {}
+    if n > 0:
+        c = {n, n + 1}
+    return c
+
+
+def dict_only(n: Int):
+    c = {'a': n}
+    return c['a']
+
+
+def set_only(n: Int):
+    c = {n, n + 1}
+    return len(c)
+""")
+    except TypeError as e:
+        # The codegen REFUSES the mixed slot rather than miscompiling it —
+        # `_sce_simple_emit`'s container-kind chokepoint. That refusal is the
+        # build failure this test exists to prevent, and it arrives as an
+        # exception rather than as gcc stderr, so it is reported here
+        # instead of taking the whole suite down with it.
+        print(f"FAIL  {name}: the codegen refused the module outright: {e}")
+        _FAIL += 1
+        return
+    def declared(fname, local):
+        """The C type of `local`'s declaration inside `fname`'s emitted body.
+        Scoped to the function, because all three shapes below use the same
+        local name and still have to be told apart; the emitted symbol is
+        the mangled `fname_<hash>`, hence the prefix match."""
+        m = re.search(r'^\S[^\n;]*\b' + re.escape(fname) + r'_[0-9a-f]+'
+                      r'[^\n;]*\n\{\n(.*?)^\}$', c_src, re.M | re.S)
+        if m is None:
+            return ''
+        d = re.search(r'^  (\S+(?: \S+)*?) ' + re.escape(local) + r';$',
+                      m.group(1), re.M)
+        return d.group(1) if d else ''
+    mixed_t = declared('mixed', 'c')
+    dict_t = declared('dict_only', 'c')
+    set_t = declared('set_only', 'c')
+    if ok and mixed_t == 'int64_t' and dict_t == 'MojoDict *' \
+            and set_t == 'MojoSet *':
+        print(f"PASS  {name}  (mixed={mixed_t}, "
+              f"dict_only={dict_t}, set_only={set_t})")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiles={ok} mixed={mixed_t!r} "
+              f"dict_only={dict_t!r} set_only={set_t!r} "
+              f"(want 'int64_t' / 'MojoDict *' / 'MojoSet *')")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
 def run_tests():
     # A vetted struct constructor bound to an owned local is initialised in frame storage.
     test_c_shape("owned_struct_local_is_initialised_in_the_frame", """\
@@ -529,6 +618,8 @@ def main():
     test_gimple_operators_are_actually_gimple()
     # A local rebound to a different struct has no single pointer type.
     test_return_type_of_a_rebound_local_is_the_box()
+    # ... and neither does one rebound to a different CONTAINER kind.
+    test_rebound_container_local_is_the_box()
 
 
     # 1. Empty void function (pass body)
