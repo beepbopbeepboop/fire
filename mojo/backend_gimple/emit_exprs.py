@@ -4709,6 +4709,27 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # go through the runtime to learn the kind, and this value is one
         # where that is possible — see gen._maybe_kinds_vals.
         gen._maybe_kinds_vals.add(t)
+    # Record how to REPR one element, for the same reason and independently of
+    # the kinds above: a list of a REGISTERED STRUCT has one element ctype, so
+    # no kinds row is recorded, and the runtime walker then reads each slot
+    # through `_mojo_generic_elem_repr`, which finds no type tag on a
+    # struct-allocated value and prints the raw pointer decimal where CPython
+    # prints the object. The element's type is known HERE, where the list is
+    # built; the shim name is `_mojo_elem_repr_<Struct>`, emitted beside that
+    # struct's `_mojo_repr_<Struct>` (module_gen.reflect_structs) and
+    # forward-declared with it.
+    #
+    # Only for a struct this compile REFLECTS (one with at least one field),
+    # because the shim is emitted only for those — naming a shim that does not
+    # exist would be an undefined-function reference at C link time. A
+    # field-less struct has nothing for a field dump to say anyway; its
+    # `__repr__`, if it has one, goes unreached here exactly as it does for
+    # every other container repr.
+    _elem_repr = _struct_elem_repr_shim(gen, elem)
+    if _elem_repr:
+        gen._emit_call('void', '', 'mojo_list_set_elem_repr',
+                       [('MojoList *', t),
+                        ('void *', gen._new_val('void *', _elem_repr))])
     gen._note_fresh_result(t)
     return 'MojoList *', t
 
@@ -4718,6 +4739,33 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
 # lowered type, which is the same int64_t every other integer has; everything
 # else is the shared element-type mapping (TypeLattice.slot_kind_byte), the
 # same one the sorters and the per-slot readers use.
+def _struct_elem_repr_shim(gen, elem_type: str) -> str:
+    """`_mojo_elem_repr_<Struct>` for a container element ctype, else ''.
+
+    The one decision behind `mojo_list_set_elem_repr`: is this element a
+    REGISTERED STRUCT this compile emitted a repr shim for? A shim exists for
+    every struct with at least one field (module_gen.reflect_structs emits it
+    beside `_mojo_repr_<Struct>` and forward-declares it), which is exactly
+    `struct_field_types[struct]` being non-empty — the same condition
+    `reflect_structs` itself filters on, restated rather than queried so this
+    needs no new cross-module table.
+
+    Returns the shim's NAME, which the caller hands to the runtime as a
+    function pointer; the runtime calls it with the slot's word. Empty string
+    for every other element type (int, str, bytes, a nested list, a dict), where
+    the runtime's own per-slot reader is already right — that is what makes
+    this a strict improvement and not a new dispatch to get wrong.
+    """
+    if not elem_type or not elem_type.endswith(' *'):
+        return ''
+    sn = elem_type[:-2].strip()
+    if not sn or not gimple_exprtypes._struct_name_of(elem_type):
+        return ''
+    if not gen.struct_field_types.get(sn):
+        return ''
+    return f'_mojo_elem_repr_{sn}'
+
+
 def _list_literal_slot_kind(gen, el, et) -> str:
     if isinstance(el, (gimple_ctypes.NoneLiteral,)) or (
             isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None'):
@@ -4946,6 +4994,28 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
         gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+    # The ELEMENT REPR, exactly as `_lower_list_literal` records it and for
+    # exactly the same reason: a tuple is the same MojoList with a marker, so a
+    # tuple of structs printed `(4347419344,)` where CPython prints `(R<a>,)`.
+    # A tuple that mixes slot ctypes is per_element, and then the joined `elem`
+    # is not the element type at all -- so the shim is looked up per slot and
+    # recorded only when every slot that HAS one agrees, which is the same
+    # unanimity rule the constructor evidence uses. A mixed tuple whose slots
+    # disagree records nothing and keeps the runtime's own per-slot reader.
+    _tshim = ''
+    for _tsl in range(len(lowered)):
+        _tct = _as_str(lowered[_tsl][1])
+        _tsh = _struct_elem_repr_shim(gen, _tct)
+        if not _tsh:
+            continue
+        if _tshim and _tsh != _tshim:
+            _tshim = ''
+            break
+        _tshim = _tsh
+    if _tshim:
+        gen._emit_call('void', '', 'mojo_list_set_elem_repr',
+                       [('MojoList *', t),
+                        ('void *', gen._new_val('void *', _tshim))])
     # Mark as a tuple AFTER the elements are in, not before. The mark is
     # what makes this value a tuple rather than a list (see
     # mojo_mark_as_tuple's doc comment in runtime/fire_runtime.c), and since

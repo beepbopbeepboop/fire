@@ -673,6 +673,16 @@ typedef struct {
     uint64_t addr;    /* the MojoList address; 0 = empty slot */
     char    *kinds;   /* one byte per slot, or NULL */
     void   **boxes;   /* lazily allocated, one entry per list element */
+    /* How to REPR one element of this list, or NULL. Same "the information
+     * travels with the value" bargain as `kinds`, and for the same reason: the
+     * codegen knows a literal's element type where it BUILDS the list and has
+     * no way to tell a runtime walker later, because a struct-allocated value
+     * carries no type tag for `_mojo_dispatch_repr` to find (that is the whole
+     * of bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
+     * container_spellings.md). One pointer per row, and only for a list whose
+     * elements are a registered struct. Not copied either: it is a function
+     * address in this image. */
+    char   *(*repr_fn)(int64_t);
 } _KindRow;
 
 static struct {
@@ -757,6 +767,7 @@ const char *mojo_list_get_kinds(MojoList *l)
 
 static void _kinds_forget(uint64_t addr);
 
+
 void mojo_list_set_kinds(MojoList *l, const char *kinds)
 {
     if (!l) return;
@@ -781,12 +792,62 @@ char mojo_list_slot_kind(MojoList *l, int64_t i)
 /* `dst` is a fresh list built slot-for-slot out of `src`: it holds the same
  * values, so it describes them the same way. Every list->list copy in this
  * file calls this; that is the whole reason `list(mixed_tuple)` and
- * `m[:]` are right rather than only the original. */
+ * `m[:]` are right rather than only the original.
+ *
+ * The ELEMENT REPR travels with it for the same reason and by the same route:
+ * a copy holds the same values, so it reprs them the same way, and
+ * `list(mixed_tuple)` printing a raw pointer decimal while the original prints
+ * `R<a>` would be the same bug one call away. Renamed from nothing — this
+ * function already existed under this name and this contract; the second line
+ * is the addition. */
 void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
 {
     if (!dst || !src) return;
     const char *k = mojo_list_get_kinds(src);
     if (k) mojo_list_set_kinds(dst, k);
+    _KindRow *sr = _kinds_row((uint64_t)(uintptr_t)src);
+    if (sr && sr->repr_fn) mojo_list_set_elem_repr(dst, (void *)sr->repr_fn);
+}
+
+/* ── The per-list ELEMENT REPR ────────────────────────────────────────────
+   `mojo_list_set_elem_repr` records how to render one element of this list;
+   `mojo_list_repr_elem` is what a repr walker asks per slot and gets NULL from
+   when the list says nothing (so the walker's own generic reader still runs,
+   and a list this was never called for is exactly as it was).
+
+   Why a function pointer on the VALUE rather than a global type->repr table:
+   the element's static type is known where the list is built and is thrown away
+   by the time anything walks it, and the two ways to recover it both fail —
+   `_mojo_dispatch_repr` needs a runtime type TAG, which a struct-allocated
+   local does not carry (its first word is its first field), and a global
+   address->type registry would go stale the moment a frame is reused, handing a
+   later struct at the same address another struct's repr. Recording the
+   function on the list has neither failure mode: it is set once, from the
+   compile-time type, and it dies with the list.
+
+   Emitted by the codegen beside the `mojo_list_set_kinds` call for the same
+   literal (mojo/backend_gimple/emit_exprs.py's `_lower_list_literal`), for a
+   homogeneous literal whose element type is a registered struct — the case the
+   kinds table deliberately leaves alone, since one accessor is already exact
+   for reading and says nothing about REPR.
+*/
+void mojo_list_set_elem_repr(MojoList *l, void *fn)
+{
+    if (!l) return;
+    uint64_t addr = (uint64_t)(uintptr_t)l;
+    int fresh = 0;
+    _KindRow *r = _kinds_row_for_write(addr, &fresh);
+    r->repr_fn = (char *(*)(int64_t))fn;
+    if (fresh && !fn) _kinds_forget(addr);
+}
+
+/* The recorded element repr, or NULL. The walker decides what a NULL means —
+   that is the point of returning NULL rather than a generic answer here. */
+char *mojo_list_repr_elem(MojoList *l, int64_t v)
+{
+    _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
+    if (!r || !r->repr_fn) return NULL;
+    return r->repr_fn(v);
 }
 
 static void _kinds_forget(uint64_t addr)
@@ -1785,6 +1846,19 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
      * has ONE slot array and no single correct answer, so nothing is
      * recorded rather than something wrong. The repeated string is a fresh
      * allocation because the source's is shared with every copy of it. */
+    /* The element repr propagates on the same terms as the kinds string
+     * below: recorded on ONE side and nothing on the other, or recorded on
+     * both and the SAME function. Two lists of different struct types
+     * concatenated record nothing, because one slot array cannot describe
+     * both -- which leaves the generic reader, exactly as before. */
+    {
+        _KindRow *ra = _kinds_row((uint64_t)(uintptr_t)a);
+        _KindRow *rb = _kinds_row((uint64_t)(uintptr_t)b);
+        char *(*rfa)(int64_t) = ra ? ra->repr_fn : NULL;
+        char *(*rfb)(int64_t) = rb ? rb->repr_fn : NULL;
+        if (rfa && !rfb) mojo_list_set_elem_repr(r, (void *)rfa);
+        else if (rfa && rfb && rfa == rfb) mojo_list_set_elem_repr(r, (void *)rfa);
+    }
     {
         const char *ka = mojo_list_get_kinds(a);
         const char *kb = mojo_list_get_kinds(b);
@@ -6567,6 +6641,16 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
            (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). The one branch
            that does not own a heap string is 'n' (None), a literal. */
         char *_s;
+        /* The list's own ELEMENT REPR wins over every kind byte below: it is
+           the codegen saying what this list's elements actually ARE, which is
+           strictly more information than a slot's storage kind ('i' for a
+           struct pointer is as true as 'i' for a small int and as useless). */
+        char *_re = mojo_list_repr_elem(l, mojo_list_get_int(l, _i));
+        if (_re) {
+            _buf = _cat_free(_buf, _re);
+            free(_re);
+            continue;
+        }
         if (_k == 'd') {
             _s = mojo_repr_float(mojo_list_get_double(l, _i));
         } else if (_k == 's') {
@@ -7975,6 +8059,16 @@ void mojo_list_extend(MojoList *dst, MojoList *src) {
     mojo_require_mutable_list(dst, "extend");
     for (int64_t i = 0; i < src->len; i++)
         mojo_list_append_int(dst, src->data[i]);
+    /* `dst` now holds every slot `src` held, so `src`'s element repr describes
+     * it — the same argument as `mojo_list_inherit_kinds`, which extend does
+     * not call because the destination is not fresh. Only when `dst` has none:
+     * a destination that was built with its own is the better answer, and a
+     * mixed result (extend a list of P with a list of Q) has no single one,
+     * which is the pre-existing behaviour. */
+    if (!mojo_list_repr_elem(dst, 0)) {
+        _KindRow *sr = _kinds_row((uint64_t)(uintptr_t)src);
+        if (sr && sr->repr_fn) mojo_list_set_elem_repr(dst, (void *)sr->repr_fn);
+    }
 }
 
 /* ── list.sort() / sorted(): ONE ordering primitive ───────────────────────

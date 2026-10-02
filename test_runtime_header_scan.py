@@ -242,7 +242,13 @@ def test_every_declaration_is_seen():
     # merge had. One name, and it is the whole delta -- which is exactly why the
     # number is read off the call and never added up: 531 + 1 is right here and
     # would have been wrong on any other pair of sides.
-    for header, want in (('fire_runtime.h', 532),
+    # 532 -> 534 (2026-10-01, container element repr): `mojo_list_set_elem_repr`
+    # and `mojo_list_repr_elem`, the per-list record of how to render one
+    # element and the accessor a repr walker asks. Taken from the call: the
+    # codegen emits `mojo_list_set_elem_repr` on every list/tuple literal whose
+    # element type is a registered struct, and both walkers call
+    # `mojo_list_repr_elem` per slot.
+    for header, want in (('fire_runtime.h', 534),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

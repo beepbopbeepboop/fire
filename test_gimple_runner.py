@@ -5495,6 +5495,52 @@ print([1, 2])
 print({"a": 1})
 """, "S<a>\nS<a>\nS<a>\nQ<b>\nQ<b>\nR<a>\nR<a>\nQ<b>\n1\nx\n[1, 2]\n{'a': 1}\n")
 
+    # A container of structs prints its ELEMENTS through the element's own
+    # `__repr__` — the container rows of
+    # bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
+    # container_spellings.md, which printed a raw pointer decimal where CPython
+    # prints the object (and the decimal moves run to run, so no value
+    # comparison could pass).
+    #
+    # The mechanism: the codegen records, ON THE VALUE, how to render one
+    # element (`mojo_list_set_elem_repr(t, _mojo_elem_repr_P)`), because the
+    # element's static type is known where the list is built and is
+    # unrecoverable later — `_mojo_dispatch_repr` needs a runtime type TAG,
+    # which a struct-allocated value does not carry. The shim prefers the
+    # user's `__repr__` and falls back to the generated field dump, so a struct
+    # with no dunder reprs as `P(x='a')`, which is what it already printed on
+    # its own.
+    #
+    # Every spelling here is one where the element's type IS visible at the
+    # literal: a parameter, a local, a slice, a copy, a concatenation. The two
+    # shapes where it is not are filed, because each needs a type recorded
+    # somewhere it currently is not: an unannotated MODULE-LEVEL binding read
+    # at module level (boxed into an int64_t with no type anywhere), and a
+    # struct-typed FIELD inside another struct's field dump (the field's
+    # semantic type is not in `struct_field_types`, so the dump formats the
+    # slot as an integer). See the Status section of the bug doc.
+    test_gimple_stdout("gimple_container_element_repr_uses_the_struct_dunder", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+def containers(p: P):
+    print(repr([p]))
+    print(repr((p,)))
+    print(repr([p, p]))
+    print(repr([[p]]))
+    print(repr([p][0:2]))
+    print(repr(list([p])))
+    print(repr([p] + [p]))
+
+def main():
+    containers(P("a"))
+main()
+""", "[R<a>]\n(R<a>,)\n[R<a>, R<a>]\n[[R<a>]]\n[R<a>]\n[R<a>]\n"
+       "[R<a>, R<a>]\n")
+
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.

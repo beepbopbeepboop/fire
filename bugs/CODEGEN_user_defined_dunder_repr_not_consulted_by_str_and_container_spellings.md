@@ -177,3 +177,85 @@ answer is the generated field dump, which exists and is correct"). It is
 a runtime-table change plus a tag on stack-allocated structs, i.e. a real
 project rather than a patch, and per the gate rules it would owe
 `mojoc`/bootstrap like everything else in `runtime/`.
+
+## Status (2026-10-01) — the LIST and TUPLE element reprs are FIXED; two narrower residuals are filed separately
+
+Re-measured the doc's table on this tree before acting, through
+`gimple_codegen.compile_to_gimple` + `gcc -fgimple` +
+`runtime/fire_runtime.c`. Rows 1 and 2 (`repr(p)`, `str(p)`, `%r`, `%s`) were
+already fixed by the earlier commit this doc records. Rows 3 and 4 — `repr([p])`
+and `repr((p,))` printing a raw pointer decimal — reproduced exactly, and are
+now correct wherever the element's static type is visible where the container is
+BUILT:
+
+```
+CPython  : [R<a>]  (R<a>,)  [R<a>, R<a>]  [[R<a>]]  [R<a>]  [R<a>]  [R<a>, R<a>]
+compiled : [R<a>]  (R<a>,)  [R<a>, R<a>]  [[R<a>]]  [R<a>]  [R<a>]  [R<a>, R<a>]
+```
+
+for a parameter, a local, a nested list, a slice, a `list()` copy and a `+`
+concatenation. Regression test
+`gimple_container_element_repr_uses_the_struct_dunder` in
+`test_gimple_runner.py`, whose expected text is CPython's own (run there too).
+
+**The mechanism is neither of this doc's two routes, and it is smaller than
+either.** Neither the global table (route 1) nor a codegen-built element repr
+loop (route 2) is needed, because the information the walker lacks is not a type
+tag — it is a FUNCTION, and the codegen can hand it over at the one moment it
+still knows the element's type:
+
+* `runtime/fire_runtime.c`'s per-list side table (the one that already carries
+  the per-slot `kinds` string) gains a `char *(*repr_fn)(int64_t)` field, with
+  `mojo_list_set_elem_repr` / `mojo_list_repr_elem`. Same bargain as `kinds`,
+  for the same reason: the type is known where the list is built and
+  unrecoverable later, because a struct-allocated value has no runtime type tag
+  for `_mojo_dispatch_repr` to find — and a global address->type registry, the
+  alternative, goes stale the moment a frame is reused.
+* `mojo/backend_gimple/module_gen.py`'s reflection preamble emits one shim per
+  reflected struct, `_mojo_elem_repr_<Struct>(int64_t)`, beside that struct's
+  `_mojo_repr_<Struct>` and forward-declared with it. A shim rather than a cast
+  of the real symbol into `char *(*)(int64_t)`, because calling
+  `char *(Foo *)(void)` through that pointer type is undefined behaviour. The
+  shim prefers the user's `__repr__` and falls back to the field dump, which is
+  CPython's order for a container element (a list reprs its elements with
+  `repr`) and is why the element is right rather than merely non-crashing.
+* `mojo/backend_gimple/emit_exprs.py` records it: `_lower_list_literal` for the
+  literal's joined element type, `_lower_tuple_literal` per slot with the same
+  unanimity rule the constructor evidence uses (a tuple that mixes two struct
+  types records nothing).
+* The runtime carries it across derivations where the kinds string already
+  travelled: `mojo_list_inherit_kinds` (so `list(t)` and `t[:]`),
+  `mojo_list_concat` (one side recorded, or both recorded and equal), and
+  `mojo_list_extend`.
+
+**Two residuals are filed as their own docs** rather than left here, because each
+needs a type recorded somewhere this codegen does not record it, which is a
+different problem from the container repr:
+
+* `bugs/CODEGEN_module_scope_struct_binding_has_no_type.md` — a container whose
+  element is an unannotated MODULE-LEVEL binding read at module level. That
+  binding is boxed into an `int64_t` global, `_quick_type` says `int64_t`, the
+  slot appends through `mojo_list_append_int`, and there is no type at any point
+  for any of this to consult. The doc's own original reproducer is in this
+  shape, which is why its `repr([p])` row is fixed only for the shapes listed
+  above.
+* `bugs/CODEGEN_struct_typed_field_reprs_as_an_integer.md` — a struct-typed
+  FIELD inside another struct's generated field dump (`Holder(p=P(...))` prints
+  `Holder(p=4381809120, ...)`). `struct_field_types` says `int64_t` for that
+  field and `struct_boxed_fields` does not list it, so the dump's
+  `_mojo_generic_elem_repr` arm never fires for it either.
+
+**A dict's value repr is unchanged** and is left that way deliberately: a dict's
+slots carry a `kind` already (`_DictSlot.kind`), so recording a repr function
+per dict is the same one-line extension of the same side table, but nothing in
+the codegen currently knows a dict's value type at the store site for the
+general case, and the row (`{"k": p}` printing `{'k': P(x='a')}` instead of
+`{'k': R<a>}`) needs that first. It is the third row of this doc's table and it
+is still open.
+
+**A dunder-less element is still a divergence, deliberately not frozen in the
+test:** CPython prints `<__main__.X object at 0x...>`, this codegen prints the
+generated field dump. The shim's fallback is the field dump because this doc's
+last paragraph calls it "the honest answer"; that preference is not CPython's,
+and asserting either answer in a test would hide the disagreement rather than
+record it.
