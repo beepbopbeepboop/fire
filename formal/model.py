@@ -1150,6 +1150,75 @@ def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
     return bool(structs_by_name) and name in structs_by_name
 
 
+def subscript_is_a_type_application(e, structs_by_name=None,
+                                    callee_defs=None) -> bool:
+    """True when `e`'s bracket list NAMES an instantiation rather than a value.
+
+    `subscript_index_is_a_comptime_parameter_list`'s question plus
+    `external_call`'s own, and nothing else: those are the two bracket lists in
+    the language whose elements are compile-time by construction. It is what
+    makes the property below transitive — the elements of a TYPE APPLICATION are
+    themselves types, all the way down.
+
+    Kept apart from `subscript_index_is_a_comptime_parameter_list` because that
+    one is asked about a bracket list this image might have to READ as a value,
+    and answering "yes" there is a refusal while answering "yes" here is an
+    exemption. Two questions, one predicate, rather than one predicate asked
+    twice with the meaning of its answer depending on which reader called it.
+    """
+    if not isinstance(e, F.SubscriptExpr):
+        return False
+    if is_external_call_template(e):
+        return True
+    return subscript_index_is_a_comptime_parameter_list(
+        e, structs_by_name, callee_defs)
+
+
+def type_position_nodes(root, structs_by_name=None, callee_defs=None) -> set:
+    """`{id(node)}` for every node of `root` that sits in a TYPE position.
+
+    A type position is REACHED, never guessed from the spelling. The roots are
+    the two bracket lists the language makes compile-time by construction
+    (`subscript_is_a_type_application`), and from each root the property is
+    transitive down the index: the arguments of a type application are types, so
+    `external_call["getenv", _CPointer[UInt8, UntrackedOrigin[mut=False]]]`
+    puts `_CPointer[…]` and everything under it in a type position.
+
+    **Why the walk has to know.** `iter_nodes` has no parent, so a pass that
+    visits every subscript in a body and asks "what does this bracket list mean
+    at RUNTIME" reaches the inner `_CPointer[…]` as if it stood alone, and gets
+    a true answer about the wrong question: it IS a comptime parameter list, and
+    it is also not a runtime subscript, so nothing needs to be said about it.
+    Measured before this, on `std/os/env.mojo`'s own three functions:
+    `_CPointer[UInt8, UntrackedOrigin[…]] is a compile-time explicit-parameter
+    list on a generic, not a subscript`, for a program the backend lowers
+    correctly the moment the walk stops asking about a type as a value
+    (`bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`).
+
+    **What it does not do.** It does not widen `_base_name`, and it does not
+    exempt a subscript whose BASE is a value: `h.tag[Int, s]` is a genuine index
+    of a genuine value, it is not in a type position, and answering "type
+    application" for it would drop a real frame-escape check
+    (`bugs/FORMAL_dotted_base_bracket_list_is_not_classified.md`). Every
+    bracket list that is not one of the two compile-time ones keeps today's
+    answer, refusal included — "possibly wrong" is the direction this backend
+    refuses in everywhere else."""
+    out: set = set()
+
+    def absorb(node):
+        for n in iter_nodes(node):
+            if id(n) in out:
+                continue
+            out.add(id(n))
+            if subscript_is_a_type_application(n, structs_by_name, callee_defs):
+                absorb(n.index)
+
+    for node in iter_nodes(root):
+        if subscript_is_a_type_application(node, structs_by_name, callee_defs):
+            absorb(node.index)
+    return out
+
+
 def multi_index_kind(e, base_is_dict: bool = False,
                      generic_callee=None, structs_by_name=None,
                      callee_defs=None) -> str:

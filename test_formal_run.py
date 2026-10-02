@@ -6606,6 +6606,24 @@ SUBSCRIPT_CASES = [
      "    v = pick[1, 2]\n"
      "    return 0\n",
      "refuse:is a compile-time explicit-parameter list on a generic", None),
+    # A bracket list NESTED INSIDE another subscript's index, where the outer
+    # one is a runtime index. This is the boundary of `model.type_position_nodes`
+    # and it is here because that function exempts a bracket list from the
+    # runtime question when it sits in a TYPE position, and "nested in a
+    # subscript" is not what makes it one: `a`'s base is a list, so
+    # `b[c, d]` is a two-dimensional index of a value and stays refused. The
+    # other direction — a type application's own arguments, which ARE compile
+    # time by construction — is `external_call["getenv", _CPointer[UInt8,
+    # UntrackedOrigin[mut=False]]]`, pinned by execution in
+    # `test_formal_external_call.py`'s `env_round_trip`.
+    ("sub_multi_index_nested_in_a_runtime_index",
+     "def main(n):\n"
+     "    a = [[1, 2], [3, 4]]\n"
+     "    b = [(0, 1), (0, 2)]\n"
+     "    c = 0\n"
+     "    d = 1\n"
+     "    return a[b[c, d]]\n",
+     "refuse:is a subscript whose index is a tuple", None),
     # The construct that actually blocks 36 stdlib files, named for what it
     # is. `std/sys/info.mojo` has 27 of these and nothing else the backend
     # reaches first; the old text called it a "multi-index subscript", which

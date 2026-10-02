@@ -2179,23 +2179,19 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
 # memcap's own report rounds to 0.1 GB and eight of these ten are under it.
 
 # `external_call["sym", RetType](...)`: the construct that was the terminal
-# refusal behind the largest single family in the sweep residue. 29 cases, and
+# refusal behind the largest single family in the sweep residue. 30 cases, and
 # the needle half of the file is as load-bearing as the answer half: a refusal
 # that stops being made is a wrong program, so both directions are pinned.
 #
-# RED, and registered red rather than excused, for the same reason
-# `formal-struct` above is. 1 of 29: `env_round_trip` declares its `getenv`
-# return type as `_CPointer[UInt8, UntrackedOrigin[mut=False]]`, and the tuple
-# subscript in THAT ANNOTATION is refused as a value subscript before the
-# `external_call` itself is ever read. The construct is right — a two-argument
-# subscript on a type is not a two-dimensional index — and it is being asked the
-# question at the wrong moment; see
-# bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md.
+# NOT red any more. It carried `expect=` for one case — `env_round_trip`, which
+# declares its `getenv` return type as `_CPointer[UInt8, UntrackedOrigin[mut=False]]`,
+# where the tuple subscript in THAT ANNOTATION was refused as a value subscript
+# before the `external_call` itself was ever read. The construct was right and
+# it was being asked the question at the wrong moment: `model.type_position_nodes`
+# now tells the module-symbols walk which brackets sit in a TYPE position, so it
+# stops asking what they mean at runtime.
 test('formal-external-call', [PY, 'test_formal_external_call.py'],
      mem='tiny', deps=['preflight'],
-     expect='bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md '
-            '— 1 of 29: a two-argument type subscript inside the external_call '
-            'bracket is refused as a value subscript',
      extra=['test_formal_external_call.py', 'formal/build.py',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='external_call[sym, RetType]: both the answers and the refusals')

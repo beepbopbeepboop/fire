@@ -7369,6 +7369,16 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # symptom. Recorded by the identity of the ROOT IdentExpr, because
         # `M.iter_nodes` has no parent and the two spellings nest.
         bracket_callee_roots = _bracket_callee_roots(fn.body)
+        # Every node of every TYPE position in the body, so the loop below is
+        # not asking a runtime question about a type. `external_call`'s own
+        # bracket is the root the corpus reaches it through, and the name
+        # placement above already collects that bracket's type argument for its
+        # own reason; this is the same set read for a second reason, and both
+        # come from `model` so the two cannot drift. See
+        # `model.type_position_nodes` for what a type position is and, more
+        # usefully, what it is not.
+        type_positions = M.type_position_nodes(fn.body, structs_by_name,
+                                               _callee_defs(functions))
         bracketed = {}
         exempt_roots = set()
         first_mlir = None
@@ -7425,7 +7435,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                                 and M.empty_blob_constructor(root_ident.name))
             why = M.mlir_template_refusal(sub)
             if why is None and isinstance(sub, F.SubscriptExpr) \
-                    and not type_application:
+                    and not type_application and id(sub) not in type_positions:
                 why = M.multi_index_refusal_for(sub, False,
                                                 _callee_defs(functions),
                                                 structs_by_name)
