@@ -1,9 +1,10 @@
 # TEST: `imports: every real entry point imports first` is red — `mojo.backend_gimple.module_gen` closes a cycle nothing declares
 
 **Found 2026-10-02 by `bugs4-9`** while closing
-`bugs/TEST_estate_check_red_on_two_form3_test_files.md` (deleted with its fix):
-`test_suite.py` has a second failure, on the same run, that is pre-existing on
-`bc17a62b` and belongs to nobody. Measured on a pristine
+the same run as a third failure that was pre-existing on `bc17a62b` and belongs
+to nobody (that third one — two test files in neither the registry nor
+`UNREGISTERED` — was fixed in the same pass and its doc deleted, so this is the
+only one of the three that is still open). Measured on a pristine
 `git archive bc17a62b` extraction, so it is not a change in flight.
 
 ## What was run

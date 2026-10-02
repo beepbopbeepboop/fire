@@ -777,7 +777,9 @@ def test_the_eight_value_pack_is_refused_by_arity(tmpdir):
     and folding them together would make that indistinguishable.
 
     Recorded here because it used to be in the fixture and was lost with it:
-    bugs/TEST_formal_struct_expect_marker_outlived_its_failure.md."""
+    a bug doc since deleted with the fix that closed it — which also recorded
+    that the `expect=` marker this file's suite row had been carrying for these
+    two checks was already gone by then, so only the coverage hole was left."""
     fmt = "<IIQQQQQQ"
     nvals = len(struct.unpack(fmt, bytes(struct.calcsize(fmt))))
     params = ["fmt"] + [f"v{i}" for i in range(5)]

@@ -2417,12 +2417,15 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 #
 # It DOES build and run images (`fire.py build --formal` per case), so it is the
 # shape the ~15 files carrying `_FORMAL_SUITE_REASON` in `test_suite.py`'s
-# `UNREGISTERED` describe — and the decision recorded in
-# bugs/TEST_estate_check_red_on_two_form3_test_files.md is to REGISTER it rather
-# than excuse it, on the measurement rather than on the shape: 6.0 s and 0.1 GB,
-# which is the same order as the four formal host-module suites already in
-# `check` (4-7 s, 0.04-0.06 GB). `formal`/`formal-run`/`formal-globals` pay
-# minutes; this pays seconds. `proofs` names it too, so that bucket stays the
+# `UNREGISTERED` describe — and the decision, which was recorded in a bug doc
+# since deleted with its fix, is to REGISTER it rather than excuse it, on the
+# measurement rather than on the shape: 6.0 s and 0.1 GB, which is the same
+# order as the four formal host-module suites already in `check` (4-7 s,
+# 0.04-0.06 GB). `formal`/`formal-run`/`formal-globals` pay minutes; this pays
+# seconds. What the doc added, and what is worth keeping here, is that a file
+# with no gate is a file nobody runs: `suite-self-test`'s estate check counts a
+# registered-but-unbucketed file as COVERED, which is how both of these sat in
+# the tree with the check reporting them and nothing executing them. `proofs` names it too, so that bucket stays the
 # whole formal picture in one list — expansion schedules each test once per run,
 # so naming a cheap test twice costs nothing (the reason `formal-os` and
 # friends are named twice).
@@ -2654,9 +2657,8 @@ BUCKETS = {
                # images. Both measured green one at a time before being named
                # (10.9 s / 0.0 GB and 6.0 s / 0.1 GB), and both cost less than the
                # four formal host-module suites already in this list. Registering
-               # rather than marking is the project's own rule; the doc that asked
-               # for it (bugs/TEST_estate_check_red_on_two_form3_test_files.md) is
-               # deleted with this.
+               # rather than marking is the project's own rule; the bug doc that
+               # asked for it is deleted with this.
               'formal-read-before-store', 'formal-receiver-spelling',
                # The ten the batch merge left unregistered, so `proofs` is
                # where the whole formal picture is and these were the ten
