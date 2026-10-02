@@ -55,6 +55,34 @@ _TEMP_SLACK = 256
 # high 8 are padding.
 _SLOT = 16
 
+# How many incoming arguments this backend passes IN TOTAL — six in registers
+# plus a stack area for the rest.  SysV AMD64 passes arguments 0..5 in
+# RDI/RSI/RDX/RCX/R8/R9 and arguments 6 and up in the CALLER's frame at
+# `[RSP + 0]`, `[RSP + 8]`, … as the callee enters, so a seventh argument is an
+# ordinary load rather than a hole.  The refusal that used to sit at
+# `len(ARG_REGS)` on both ends was true about the register count and wrong
+# about the consequence: `fnmatch.mojo`'s `match_core(7)` — and every file that
+# imports it — is a program this ABI can express.
+#
+# The bound is a FRAME bound and not an ABI one: every parameter past the sixth
+# needs a home (a callee-saved register or a spill slot) and the spill area is
+# finite.  Eighteen stack arguments is far past any call in this corpus and well
+# inside `_TEMP_SLACK`, so the number is a backstop rather than a design choice.
+# It is `formal/arm64_codegen.py`'s `_MAX_INCOMING_ARGS` and not a re-derivation:
+# the two backends have to agree about how many arguments a function may take,
+# because a source file that builds on one and not the other is the disagreement
+# this project cannot have.
+_MAX_INCOMING_ARGS = 24
+
+# Where a STACK argument sits, relative to the frame pointer the callee's own
+# prologue established: the saved RBP at `[RBP+0]`, the return address the CALL
+# pushed at `[RBP+8]`, and the caller's outgoing area from there.  One
+# definition, read by both ends of the convention — the callee that loads
+# `[RBP + _STACK_ARG_OFF + 8k]` and the call site that stores to `[RSP + 8k]` at
+# a moment when its own RSP is at the bottom of the reserved area — because two
+# spellings of the same ABI number is one more thing to keep in step.
+_STACK_ARG_OFF = 16
+
 # Bytes of frame reserved for container blobs (list/tuple/dict pair blobs,
 # comprehension results, slice views). A blob is [count:i64][element…], built
 # in the frame rather than on a heap — formal has no allocator — and lives
@@ -990,24 +1018,31 @@ class X86_64Codegen:
         # question asked in the same order rather than a second rule.
         params = M.incoming_args(f)
 
-        if len(params) > len(ARG_REGS):
+        if len(params) > _MAX_INCOMING_ARGS:
+            # The other end of the same refusal. `_emit_call` catches a call
+            # SITE with too many arguments, but a function can also be REACHED
+            # without one — a dylib export, a reflection-resolved call, an
+            # imported module's function — and a callee reached that way read
+            # past the register file.  Refusing here means the arity is
+            # rejected whichever way the function is entered.
+            #
+            # The limit is `_MAX_INCOMING_ARGS` and not `len(ARG_REGS)` because
+            # the seventh argument onwards is a STACK argument, not an error:
+            # SysV AMD64 puts arguments 0..5 in the argument registers and the
+            # rest in the caller's frame at ascending offsets from the RSP the
+            # callee enters with.  See `_load_home_from_stack` below, the other
+            # half of the same convention as `_emit_call`'s `SUB`/`ADD`.
             raise CodegenError(
                 f"{f.name}: {len(params)} parameters exceeds the "
-                f"{len(ARG_REGS)} the formal x86-64 ABI passes in registers")
+                f"{_MAX_INCOMING_ARGS} the formal x86-64 ABI passes "
+                f"({len(ARG_REGS)} in registers and "
+                f"{_MAX_INCOMING_ARGS - len(ARG_REGS)} on the stack)")
         for i, (pname, ptype) in enumerate(params):
             ptype_t = parse_type_name(ptype) or DEFAULT_INT_TYPE
-            if pname in self._var_regs:
-                home = self._var_regs[pname]
-                self.asm.emit(encode_mov_r64_r64(home, ARG_REGS[i]))
-                # Normalize the incoming bits to the parameter's declared
-                # width: values are supposed to arrive already extended (the
-                # caller does it), but an extern caller need not, and a stale
-                # high word would poison every later comparison.
-                self._emit_extend(home, ptype_t)
+            if i < len(ARG_REGS):
+                self._move_incoming_home(pname, ARG_REGS[i], ptype_t)
             else:
-                self.asm.emit(encode_mov_r64_r64(Reg.R11, ARG_REGS[i]))
-                self._emit_extend(Reg.R11, ptype_t)
-                self._store_var(pname, Reg.R11)
+                self._load_home_from_stack(pname, i, ptype_t)
         # The RETURNED-FRAME hidden word, in the register the caller passed it
         # in.  It is moved home and NOT extended: it is an address, and
         # narrowing it would be a pointer into the low half of a stack.
@@ -1058,6 +1093,60 @@ class X86_64Codegen:
         """Pop a 16-byte slot into `reg` and release it."""
         self.asm.emit(encode_mov_r64_rm64(reg, Reg.RSP, 0))
         self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT))
+
+    def _move_incoming_home(self, name: str, src: Reg, ptype_t) -> None:
+        """Put the incoming word in `src` into parameter `name`'s home.
+
+        One rule for BOTH halves of the SysV argument convention, which is why
+        the register path and `_load_home_from_stack` below both end here: a
+        seventh argument must be normalized and stored by exactly the code a
+        sixth one is, and a second copy of the rule is a second answer.
+
+        A register home MOVs and is then normalized; a spill home is written by
+        `_store_var`, which does its own narrowing. Either way the incoming bits
+        are normalized to the parameter's declared width: values are supposed to
+        arrive already extended (the caller does it), but an extern caller need
+        not, and a stale high word would poison every later comparison.
+        """
+        if name in self._var_regs:
+            home = self._var_regs[name]
+            if home != src:
+                self.asm.emit(encode_mov_r64_r64(home, src))
+            self._emit_extend(home, ptype_t)
+        else:
+            if src != Reg.R11:
+                self.asm.emit(encode_mov_r64_r64(Reg.R11, src))
+            self._emit_extend(Reg.R11, ptype_t)
+            self._store_var(name, Reg.R11)
+
+    def _load_home_from_stack(self, name: str, index: int, ptype_t) -> None:
+        """`[RBP + 16 + 8·(index - 6)]` → parameter `name`'s home, the stack
+        half of SysV AMD64.
+
+        The counterpart of `_move_incoming_home` for the arguments that have no
+        register.  The offset is `[RBP + 16 + 8k]` and not `[RSP + 8k]` because
+        the prologue above has already moved RSP past the whole frame, and the
+        frame POINTER is what still names where the caller put them: 16 is the
+        saved RBP at `[RBP+0]` plus the return address at `[RBP+8]`.  Every one
+        of these offsets is ABOVE RBP and every spill slot is below it, so a
+        parameter's home can never land on the argument it is being loaded from
+        — the same property arm64 gets from `[X29 + 16 + 8k]`.
+
+        R11 is the address scratch `_store_var` uses on the spill path, so the
+        load goes into R11 and the home assignment follows; it never borrows the
+        scratch for the address itself, which would overwrite the value before
+        the store.  The displacement grows at 8 bytes per argument and crosses
+        127 at the FIFTEENTH stack argument — parameter index 20, measured:
+        index 19 encodes `4c 8b 5d 78` and index 20 `4c 8b 9d 80 00 00 00` —
+        so `formal/x86_64.py`'s `_rm_disp` emits a disp32 for the last four
+        parameters a 24-argument function can have, and needs no change to do
+        it.  Nothing HERE has a step lemma for that load;
+        `bugs/FORMAL_x86_64_stack_argument_past_the_twentieth_needs_a_disp32_
+        lemma.md` is the gap and the instruction it affects.
+        """
+        self.asm.emit(encode_mov_r64_rm64(
+            Reg.R11, Reg.RBP, _STACK_ARG_OFF + 8 * (index - len(ARG_REGS))))
+        self._move_incoming_home(name, Reg.R11, ptype_t)
 
 
     def _saved_reg_off(self, index: int) -> int:
@@ -6261,43 +6350,89 @@ class X86_64Codegen:
             if ct_params:
                 args = self._specialization_args(e, ct_params) + list(args)
 
-        if len(args) > len(ARG_REGS):
+        # SysV AMD64 splits the arguments: the first six in
+        # RDI/RSI/RDX/RCX/R8/R9 and the rest in the caller's frame at ascending
+        # offsets from the RSP the callee enters with.  Both halves are
+        # implemented, so the refusal below is a FRAME bound rather than the
+        # ABI's register count — it used to be `len(args) > len(ARG_REGS)`,
+        # which was true about the six registers and wrong about the
+        # consequence: `fnmatch.mojo`'s `match_core(7)` is a program this ABI
+        # can express, and the alternative the refusal protected against
+        # (evaluate the extra arguments, drop them, and branch) builds an image
+        # that reads a dropped argument as whatever the register held — a wrong
+        # value being strictly worse than a refusal, but so is a refusal to a
+        # program the ABI can express.
+        n_stack = max(0, len(args) - len(ARG_REGS))
+        if len(args) > _MAX_INCOMING_ARGS:
             raise CodegenError(
                 f"call {name}(): {len(args)} arguments exceeds the "
-                f"{len(ARG_REGS)} the formal x86-64 ABI passes in registers")
+                f"{_MAX_INCOMING_ARGS} the formal x86-64 ABI passes "
+                f"({len(ARG_REGS)} in registers and "
+                f"{_MAX_INCOMING_ARGS - len(ARG_REGS)} on the stack)")
         # A callee that RETURNS A FRAME takes one hidden trailing word: the
         # address of the block this function reserved for the result
         # (`model.struct_returned_frame_sites`, the same prologue-reserved
-        # layout a local constructor gets).  It is pushed and popped exactly
-        # like a source argument, so it is the LAST register loaded and no
-        # earlier argument is disturbed by it, and it is counted in the budget
-        # below because it is an argument.
+        # layout a local constructor gets).  It is loaded exactly like a source
+        # argument, so it is the LAST register loaded and no earlier argument is
+        # disturbed by it.
         sret_site = self._ret_frame_sites.get(id(e))
-        nargs = len(args) + (1 if sret_site is not None else 0)
-        if nargs > len(ARG_REGS):
-            # A refusal rather than a drop: dropping the hidden word hands the
-            # callee whatever the register held, and the callee copies the
-            # frame there.  The build pass refuses the CALLEE for this (one
-            # function, many call sites); this is the same decision asked
-            # again at the site that would have dropped it.
+        # The hidden word IS an argument — the callee reads it out of the
+        # register after the last source one — so six source arguments to a
+        # frame-returning function is a SEVEN-argument call.  It has to land in
+        # a REGISTER: the callee moves it home by the register path and has no
+        # stack convention for it, so this is the one case the split above
+        # cannot absorb and it keeps the construct's OWN sentence rather than a
+        # count the reader cannot account for.  A refusal rather than a drop:
+        # dropping the hidden word hands the callee whatever the register held,
+        # and the callee copies the frame there.  The build pass refuses the
+        # CALLEE for this (one function, many call sites); this is the same
+        # decision asked again at the site that would have dropped it.
+        if sret_site is not None and len(args) >= len(ARG_REGS):
             raise CodegenError(
                 M.returned_frame_convention_refusal(name, len(args))
                 or f"calling {name}() needs one hidden word for the caller's "
                    f"block and there is no argument register left for it")
+        nargs = len(args) + (1 if sret_site is not None else 0)
+        # The outgoing-argument area, reserved FIRST and as a multiple of 16 so
+        # RSP is still 16-byte aligned at the call — the same reason every other
+        # RSP movement in this backend is a multiple of 16.  SysV spacing is 8
+        # bytes per argument, so an ODD number of them rounds up and the
+        # padding lands at the HIGHER addresses: argument 6 must be at `[RSP+0]`,
+        # which is what the callee's `[RBP + 16 + 8k]` reads after its own
+        # prologue.  Reserving before anything is evaluated is what makes the
+        # slots safe: an argument expression that itself CALLS pushes and pops
+        # symmetrically, so it works strictly below the area this reserved and
+        # cannot land in it.
+        stack_bytes = 0
+        if n_stack:
+            stack_bytes = _SLOT * ((n_stack + 1) // 2)
+            self.asm.emit(encode_sub_r64_imm32(Reg.RSP, stack_bytes))
+        # The STACK arguments, each stored into the slot the callee will read it
+        # from.  FIRST is load-bearing and not a style preference: the register
+        # arguments below are spilled with a `_SLOT` push each, so evaluating
+        # them first would move RSP 96 bytes down and every `[RSP + 8k]` above
+        # would land in the register spill area instead of the reserved outgoing
+        # slots — the dropped-argument-as-zero answer, arriving by a different
+        # road.  Storing them before the register spills is also what makes a
+        # nested call in a stack argument safe: with the area reserved and
+        # nothing else pushed yet, that nested call pushes strictly below it.
+        for k in range(n_stack):
+            self._emit_expr(args[len(ARG_REGS) + k])
+            self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 8 * k, Reg.RAX))
         # Evaluate left to right onto the stack, then pop in reverse into the
         # argument registers: evaluating argument i+1 clobbers RAX and every
         # caller-saved register, including the ones argument i belongs in.
         # POP only ever targets RAX, so each popped value is moved across
         # after the pop — including argument 0, whose register is RDI and not
         # RAX the way the arm64 ABI's X0 would have been.
-        for arg in args:
+        for arg in args[:len(ARG_REGS)]:
             self._emit_expr(arg)
             self._push_slot(Reg.RAX)
         if sret_site is not None:
             self._emit_blob_base(self._blob_base + self._ret_frame_base
                                  + sret_site[1], Reg.RAX)
             self._push_slot(Reg.RAX)
-        for i in range(nargs - 1, -1, -1):
+        for i in range(min(nargs, len(ARG_REGS)) - 1, -1, -1):
             self._pop_slot(Reg.RAX)
             self.asm.emit(encode_mov_r64_r64(ARG_REGS[i], Reg.RAX))
 
@@ -6311,6 +6446,14 @@ class X86_64Codegen:
         else:
             self.asm.emit(encode_call_rel32(0))
             self.asm.emit_label_rel32(name, here_offset=-4)
+        # The outgoing area is released HERE and not by the callee: SysV AMD64
+        # is caller-cleanup, and this backend's own callee proves the point —
+        # its epilogue is `leave; ret`, which restores RSP from RBP and so
+        # leaves a stack-argument area exactly as it found it.  `leave` is also
+        # why the callee reads its stack arguments through RBP rather than RSP
+        # (`_load_home_from_stack`): RSP has moved a whole frame by then.
+        if stack_bytes:
+            self.asm.emit(encode_add_r64_imm32(Reg.RSP, stack_bytes))
         if ext_return is not None:
             self._emit_extern_return(ext_return)
 

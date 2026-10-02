@@ -4675,6 +4675,126 @@ BOTH_ARCH_CASES = [
      "    x = 7\n"
      "    x //= 0\n"
      "    return x\n", 1, None),
+    # ── THE ARITY LADDER, which used to be REFUSALS in `REFUSAL_CASES` and is
+    # here because it is the one construct the two backends put arguments in
+    # DIFFERENT PLACES for ──────────────────────────────────────────────────────
+    #
+    # AAPCS passes arguments 0..7 in registers and the rest in the caller's
+    # frame; SysV AMD64 passes 0..5 and the rest in the caller's frame.  Both
+    # conventions are implemented now (`_MAX_INCOMING_ARGS` on both backends),
+    # which means a SEVEN-argument call is a program that travels in a register
+    # on one architecture and in memory on the other — and a defect in either
+    # half of that convention is invisible on the machine that does not use the
+    # frame.  A `run_case` row builds the HOST's architecture, so these rows
+    # could not live there even once they were answerable.
+    #
+    # They were refusals until 2026-10-02 (arm64) and were refused on BOTH
+    # backends for the nine-argument rows until the x86-64 stack area landed the
+    # same day; the history and the measurement are in
+    # `bugs/FORMAL_x86_64_argument_registers.md` (deleted — it asked for exactly
+    # this) and `bugs/FORMAL_struct_pack_over_eight_arguments.md`.
+    #
+    # `seven` is the row the whole subject is: `a6` is the FIRST stack argument
+    # on x86-64 and the LAST register argument on arm64, and the answer is built
+    # from it twice over (`a6 * 1000000 + a0`) so a slot holding the right
+    # CONSTANT but the wrong argument still fails.
+    ("both_arch_seven_arguments_arrive",
+     "def seven(a0: int, a1: int, a2: int, a3: int,\n"
+     "          a4: int, a5: int, a6: int) -> int:\n"
+     "    return a6 * 1000000 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"seven=%d\", seven(1, 2, 3, 4, 5, 6, 7))\n"
+     "    return 0\n", 0, "seven=7000001"),
+    # The ninth argument, which is arm64's first stack slot and x86-64's third.
+    # Nine rather than seven so a fix that implemented only the first stack
+    # argument of each convention is caught by the count as well as the value.
+    ("both_arch_nine_arguments_arrive",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n"
+     "    return 0\n", 0, "nine=90001"),
+    # SIXTEEN arguments, which is the SHAPE of the outgoing area rather than the
+    # count: SysV spaces arguments 8 bytes and AAPCS 8 bytes, so an ODD number
+    # leaves the area short of the 16-byte alignment the `call` requires and the
+    # padding has to go at the HIGH end so the first stack argument is still at
+    # offset 0.  `a15 + a8 * 10 + a0` reads the last stack slot of each, which is
+    # where a padding byte at the wrong end lands.
+    ("both_arch_sixteen_arguments_arrive",
+     "def wide(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int, a8: int, a9: int,\n"
+     "          a10: int, a11: int, a12: int, a13: int, a14: int,\n"
+     "          a15: int) -> int:\n"
+     "    return a15 + a8 * 10 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"wide=%d\", wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))\n"
+     "    return 0\n", 0, "wide=107"),
+    # The stack argument arriving from a CALLER'S PARAMETER rather than from a
+    # literal, which is the direction a compiler can get wrong by FOLDING, and a
+    # NESTED CALL in the ninth position, which is the direction it can get wrong
+    # by ORDER: an argument expression that itself calls pushes and pops around
+    # RSP, so the outgoing slots must be reserved BEFORE it is evaluated and the
+    # store must survive the call.  With the register arguments spilled first,
+    # the seventh argument reads as ZERO — indistinguishable from a caller who
+    # passed zero, which is the answer the original refusal existed to prevent.
+    ("both_arch_a_stack_argument_from_a_parameter_and_a_nested_call",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def one() -> int:\n"
+     "    return 7\n\n"
+     "def call_it(w: int) -> int:\n"
+     "    return nine(1, 2, 3, 4, 5, 6, 7, 8, w)\n\n"
+     "def main() -> int:\n"
+     "    printf(\"param=%d\", call_it(9))\n"
+     "    printf(\" nested=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n"
+     "    return 0\n", 0, "param=90001 nested=70001"),
+    # RECURSION, which is the one caller whose outgoing area is the SAME
+    # function's own incoming arguments: `f`'s ninth argument lives in its
+    # caller's frame at `[rbp + 16 + 16]`, and the recursive call inside `f`
+    # reserves its own outgoing area BELOW `f`'s own RSP \u2014 so the two cannot
+    # overlap, which is exactly what a convention that put the outgoing area
+    # above RSP would get wrong.  37 is 2 + 5*7: the base case doubles `a0` and
+    # every level adds `a6`, so a stack argument read as zero rather than 7
+    # answers 2 and one read as a neighbour answers something in between.
+    ("both_arch_stack_arguments_survive_recursion",
+     "def dbl(v: int) -> int:\n"
+     "    return v * 2\n\n"
+     "def f(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "      a5: int, a6: int, a7: int, n: int) -> int:\n"
+     "    if n <= 0:\n"
+     "        return dbl(a0)\n"
+     "    return f(a0, a1, a2, a3, a4, a5, a6, a7, n - 1) + a6\n\n"
+     "def main() -> int:\n"
+     "    printf(\"rec=%d\", f(1, 2, 3, 4, 5, 6, 7, 8, 5))\n"
+     "    return 0\n", 0, "rec=37"),
+    # A DEFAULTED parameter past the sixth, which is the direction the convention
+    # is most likely to be got wrong by FOLDING rather than by dropping: the
+    # value in the outgoing slot is the DEFAULT the callee's own declaration
+    # names, filled in by `bind_call_args` rather than by any call site, and the
+    # two printfs differ only in whether the caller supplies those two at all.
+    # Both answers are stated: `def=87` is 8*10+7, the defaults, and `870` is the
+    # explicit 80 and 70 \u2014 so a convention that made the defaulted call read
+    # the caller\u0027s register leftovers fails the first and not the second.
+    ("both_arch_a_defaulted_stack_argument",
+     "def f(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
+     "      a6: int = 7, a7: int = 8) -> int:\n"
+     "    return a7 * 10 + a6\n\n"
+     "def main() -> int:\n"
+     "    printf(\"def=%d\", f(1, 2, 3, 4, 5, 6))\n"
+     "    printf(\" %d\", f(1, 2, 3, 4, 5, 6, 70, 80))\n"
+     "    return 0\n", 0, "def=87 870"),
+    # SIX arguments still work, and it is here as the boundary from the other
+    # side: the fix is a stack argument PAST the register file, not a smaller
+    # register file.  Without this row a change that cut either convention to the
+    # other's limit would pass every row above on one architecture.
+    ("both_arch_six_arguments_still_work",
+     "def six(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int) -> int:\n"
+     "    return a5 * 10 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"six=%d\", six(1, 2, 3, 4, 5, 6))\n"
+     "    return 0\n", 0, "six=61"),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -11253,79 +11373,26 @@ TYPE_ARGUMENT_LIST_ABSENT_CASES = [
 # they no longer say what this paragraph says about them; they are here
 # because the diagnosis they record is a diagnosis about a refusal.
 REFUSAL_CASES = [
-    # THE ARITY LADDER, and it used to be two REFUSALS above the boundary.
-    #
-    # A function of NINE parameters read its ninth as ZERO: the callee's
-    # prologue `break`ed out of the argument loop at i == 8 and `_emit_call`
-    # dropped the extra arguments after evaluating them for side effects.
-    # `nine(1,...,9)` returned 1 where the source says 90001.  Zero is the
-    # worst possible wrong answer here, and the reason is structural: a callee
-    # cannot tell a dropped argument from a caller who passed zero, so the
-    # value was not merely wrong but INDISTINGUISHABLE from a legitimate one.
+    # The ARITY LADDER rows below were REFUSALS here and are ANSWERED ones in
+    # `BOTH_ARCH_CASES` now, so they no longer say what the paragraph this group
+    # used to open with says about them.  What is left of that history is worth
+    # one paragraph, because it is the reason the answered rows are where they
+    # are: a function of NINE parameters read its ninth as ZERO — the callee's
+    # prologue stopped moving arguments at the register count and `_emit_call`
+    # dropped the rest after evaluating them for side effects, so
+    # `nine(1,...,9)` returned 1 where the source says 90001.  Zero is the worst
+    # possible wrong answer here and the reason is structural: a callee cannot
+    # tell a dropped argument from a caller who passed zero, so the value was
+    # not merely wrong but INDISTINGUISHABLE from a legitimate one.
     #
     # The refusal that replaced it was RIGHT about the register count and wrong
-    # about the consequence.  AAPCS passes arguments 0..7 in X0..X7 and the rest
-    # in the caller's frame at ascending offsets from the SP the callee enters
-    # with; the convention was not implemented, so argument 8 was refused
-    # instead of being loaded from `[X29 + 16]`.  That refusal is what made
+    # about the consequence: both ABIs put arguments past the register file in
+    # the CALLER's frame, and neither convention was implemented, so argument 8
+    # (arm64) and argument 6 (x86-64) were refused instead of loaded from it.
     # `formal/hostmods/struct.mojo`'s own "a format I cannot serve returns an
-    # empty list" contract unreachable — `pack(fmt, v0..v7)` is nine arguments —
-    # and it kept `test_struct_formal.py`'s registered `formal-struct` job red
-    # on 2 of its 148 checks (`bugs/FORMAL_struct_pack_over_eight_arguments.md`,
-    # which has the whole measurement).
-    #
-    # Four rows because the convention has four corners and a fix that got one
-    # of them wrong would be the same defect again: the ninth argument itself,
-    # that argument arriving from a CALLER'S PARAMETER rather than a literal,
-    # SIXTEEN arguments so the outgoing area is more than one slot, and a nested
-    # call in an argument expression — the last one because a nested call pushes
-    # and pops around SP, and the outgoing slots have to survive that.
-    #
-    # These rows build with no `--backend`, so they are arm64 by construction,
-    # which is the platform whose convention landed. x86-64's SysV stack area
-    # is still unimplemented and its ninth-argument refusal is pinned as a
-    # STATED limit in `test_formal_x86_64_parity.py`'s `X86_ONLY_REFUSALS`.
-    ("nine_arguments_arrive",
-     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
-     "    return a8 * 10000 + a0\n\n"
-     "def main() -> int:\n"
-     "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n    return 0\n",
-     0, "nine=90001"),
-    # The stack argument arriving as a CALLER'S PARAMETER rather than as a
-    # literal, which is the direction a compiler could have got wrong by
-    # folding: `bind_call_arguments` fills a defaulted parameter from the
-    # callee's own table, and the value the ninth slot ends up holding is
-    # whatever the caller had at run time. A row that passed only literals
-    # would not notice a stack slot that read the right CONSTANT.
-    ("a_stack_argument_arrives_from_a_caller_parameter",
-     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
-     "    return a8 * 10000 + a0\n\n"
-     "def call_it(w: int):\n"
-     "    return nine(1, 2, 3, 4, 5, 6, 7, 8, w)\n\n"
-     "def main() -> int:\n"
-     "    printf(\"nine=%d\", call_it(9))\n    return 0\n",
-     0, "nine=90001"),
-    ("sixteen_arguments_arrive",
-     "def wide(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "          a5: int, a6: int, a7: int, a8: int, a9: int,\n"
-     "          a10: int, a11: int, a12: int, a13: int, a14: int,\n"
-     "          a15: int) -> int:\n"
-     "    return a15 + a8 * 10 + a0\n\n"
-     "def main() -> int:\n"
-     "    printf(\"wide=%d\", wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))\n"
-     "    return 0\n",
-     0, "wide=107"),
-    ("a_nested_call_in_a_stack_argument_arrives",
-     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
-     "    return a0 + a8\n\n"
-     "def one() -> int:\n"
-     "    return 7\n\n"
-     "def main() -> int:\n"
-     "    printf(\"nested=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n    return 0\n",
-     0, "nested=8"),
+    # empty list" contract was unreachable because of it — `pack(fmt, v0..v7)` is
+    # nine arguments — and so was `formal/hostmods/fnmatch.mojo`'s
+    # `match_core(7)`, which took `pathlib` and four files in `tools/` with it.
     # ── THE IMPORT DIAGNOSIS OUTRANKS A FRAME REFUSAL ──────────────────────────
     #
     # `_prepare_functions` runs BEFORE `_resolve_imports`, and every frame
@@ -11372,16 +11439,12 @@ REFUSAL_CASES = [
      "    p.b = 4\n"
      "    return p.zz + n\n",
      "refuse:P has no field 'zz'", None),
-    # EIGHT arguments is the boundary and it must still WORK: the fix is a
-    # stack argument past the limit, not a smaller limit. Without this row a
-    # fix that cut the ABI to 6 to match x86-64 would pass the two above.
-    ("eight_arguments_still_work",
-     "def eight(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
-     "          a5: int, a6: int, a7: int) -> int:\n"
-     "    return a7 * 1000 + a6 * 100 + a5 * 10 + a0\n\n"
-     "def main() -> int:\n"
-     "    printf(\"eight=%d\", eight(1, 2, 3, 4, 5, 6, 7, 8))\n    return 0\n",
-     0, "8761"),
+    # EIGHT arguments used to be this row's subject — the boundary arm64
+    # answered and x86-64 refused, so it ran on one architecture and could not
+    # see the divergence.  Both conventions have a stack area now, and the whole
+    # ladder (7, 9, 16 arguments, a stack argument from a caller's parameter, a
+    # nested call in argument position, and 6 as the boundary from the other
+    # side) is in `BOTH_ARCH_CASES`, where every row builds and runs on both.
     # A name read before anything in the function stores it. CPython raises
     # UnboundLocalError; this path cannot, because the emitted image has no
     # way to mean "unbound" — the allocator gave the name a register (the

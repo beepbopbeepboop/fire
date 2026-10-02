@@ -43,8 +43,9 @@ things that can are a `memcap` ceiling and the OS.
 * **Not `struct.mojo`'s wide-format decline.** `calcsize` is not `pack`, and
   `<HHIQQQI` names seven values with an EIGHT-argument `calcsize(fmt)` call —
   well inside the ABI limit, unlike the two cases
-  `bugs/FORMAL_struct_pack_over_eight_arguments.md` is about. It is not that
-  doc's bug and fixing that would not touch this.
+  `bugs/FORMAL_struct_pack_over_eight_arguments.md` was about (that filing is
+  deleted as of 2026-10-02; both ABIs have a stack area since). It was not that
+  doc's bug and fixing that did not touch this.
 
 * **Not a truncated artifact from the shared CAS.** `cas.publish`
   (cas.py:608) writes a private temp, `fsync`s and `os.replace`s it, and its
@@ -94,8 +95,9 @@ things that can are a `memcap` ceiling and the OS.
    the call site only past eight arguments, so these are inside the limit and
    the module's own decline should be what happens. A format walk that can loop
    on a format `struct.calcsize` accepts is a real bug whatever triggered the
-   hang, and `bugs/FORMAL_struct_pack_over_eight_arguments.md` already has the
-   emitter side of it.
+   hang, and the emitter side of it was in
+   `bugs/FORMAL_struct_pack_over_eight_arguments.md` (deleted 2026-10-02, with
+   both conventions landed).
 
 ## Why the harness had to be fixed for this to be reportable at all
 

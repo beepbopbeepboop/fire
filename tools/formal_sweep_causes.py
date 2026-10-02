@@ -406,27 +406,37 @@ CAUSES = (
      (("lowers to the C library's write(2)",),)),
     ("a method on a multi-field struct where a descriptor is meant",
      (("is a method on a Writer",),)),
-    # TWO wordings of ONE construct, and the second is the largest
-    # per-architecture difference in the whole sweep: 56 files on x86-64 and 0
-    # on arm64, all of them one ABI constant. `formal/arm64_codegen.py`
-    # interpolates `_ABI_ARG_REGS` (AAPCS64's x0..x7, so 8) and
-    # `formal/x86_64_codegen.py:865` interpolates `len(ARG_REGS)` (SysV's
-    # RDI..R9, so 6) into the SAME sentence — which is why this row's markers
-    # quote the ABI NAME and not the number: a table keyed on "exceeds the 8"
-    # cannot see a target that passes six, and reading a 56-file row as part of
-    # `other refusal` is how the previous map had to identify it by hand.
-    # Not a bug — it is the two ABIs. It is still the largest single-file
-    # difference between the backends, and the host module it costs is
-    # `fnmatch.mojo` — `match_core(7)` is the one over-wide function left in
-    # `formal/hostmods` (both `re.mojo` and `hashlib.mojo` had theirs narrowed,
-    # so the "51 files behind `re.mojo` alone" figure this comment used to
-    # quote is no longer measurable).  See
-    # `bugs/FORMAL_x86_64_argument_registers.md` for the limit and its
-    # measurement, and `test_formal_hostmods_census.py` for the per-module,
-    # per-backend table it produces.
+    # TWO wordings of ONE construct, and it was the largest per-architecture
+    # difference in the whole sweep: 56 files on x86-64 and 0 on arm64, all of
+    # them one ABI constant.  The markers quote the ABI NAME and never the
+    # number, which is the property that matters here — a table keyed on
+    # "exceeds the 8" cannot see a target that passes six.
+    #
+    # **The ceiling in the NAME is a 2026-10-01 measurement and no longer
+    # fires.**  Both backends implement their ABI's stack-argument convention
+    # now (`_MAX_INCOMING_ARGS` = 24 in each, a FRAME bound: every parameter
+    # past the register file needs a home), so this sentence appears at
+    # twenty-five arguments on BOTH machines instead of at nine on arm64 and
+    # seven on x86-64, and the register counts it names are the REGISTER half
+    # of a split rather than the limit.  The name is left alone deliberately:
+    # it is the key every sweep log and every dated work-map table in
+    # `bugs/` is written against, and renaming it under the round's other
+    # sweeps would leave their tables naming a cause the tool no longer emits.
+    # The markers below are therefore the live ones — `the formal <arch> ABI
+    # passes`, with no `in registers` — which match BOTH wordings, so a sweep
+    # taken before the convention and one taken after it classify the same
+    # construct into the same row.  Dropping `in registers` is what makes the
+    # x86-64 half of that true: the new message ends `...(6 in registers and 18
+    # on the stack)`.
+    #
+    # What it cost while it was the register count, for the record: the host
+    # module `formal/hostmods/fnmatch.mojo` — `match_core(7)`, the one
+    # over-wide function left in `formal/hostmods` — and everything importing
+    # it, which is `pathlib` and then four files in `tools/`.
+    # `test_formal_hostmods_census.py` is the per-module, per-backend table.
     ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
-     (("the formal arm64 ABI passes in registers",),
-      ("the formal x86-64 ABI passes in registers",))),
+     (("the formal arm64 ABI passes",),
+      ("the formal x86-64 ABI passes",))),
     # A NUMBER compared with a STRING. Not the `==` row further down: that one
     # is about a comparison between two values no call site classified, and
     # this one is about the OPERANDS being of kinds that cannot be compared

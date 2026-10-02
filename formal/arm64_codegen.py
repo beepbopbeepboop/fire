@@ -66,8 +66,10 @@ _ABI_ARG_REGS = 8
 # than a hole.  The refusal that used to sit at `_ABI_ARG_REGS` on both ends was
 # true about the register count and wrong about the consequence: it meant
 # `struct.pack("<IIQQQQQQ", v0..v7)` could not reach its own module's documented
-# "a format I cannot serve returns an empty list" contract, which is
-# `bugs/FORMAL_struct_pack_over_eight_arguments.md` in full.
+# "a format I cannot serve returns an empty list" contract.  That filing is
+# deleted — it asked for exactly this and for the same convention against
+# x86-64's register file, which `formal/x86_64_codegen.py` now has too, so the
+# two backends are the one number rather than two.
 #
 # The bound is a FRAME bound and not an ABI one: every parameter past the
 # eighth needs a home (a callee-saved register or a spill slot), and the spill

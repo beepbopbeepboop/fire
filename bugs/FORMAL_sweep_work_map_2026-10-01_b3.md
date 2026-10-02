@@ -449,7 +449,7 @@ measurement instruction attached:
 | row | claim that holds it |
 |---|---|
 | 93, `debug_assert[…]` | `formal2-assert-imports` |
-| 57, register ABI (x86-64) | `FORMAL_x86_64_argument_registers.md` (the census that first measured it is now `test_formal_hostmods_census.py`) |
+| 57, register ABI (x86-64) | `FORMAL_x86_64_argument_registers.md` — **deleted 2026-10-02, fixed**: both ABIs grew a stack-argument convention, so this row is 0 files at any arity below 25 (the census that first measured it is `test_formal_hostmods_census.py`, whose two recorded x86-64 rows are gone with it) |
 | 28, callee has no definition | first-layer, integrated; `FORMAL_callee_no_def_ceiling_zero.md` |
 | 24, MLIR dialect | `formal2-mlir-comptime` + `formal-mlir-gpu` |
 | 24, receiver at argument position 0 | `formal-receiver-novalue` |
