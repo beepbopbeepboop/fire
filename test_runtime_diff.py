@@ -797,6 +797,53 @@ BUILTIN_PROGRAMS = {
             print((a | b).get("B"))
             print(m.get("A", "dflt"))
     """),
+    # INSERTION ORDER across a merge. `mojo_dict_update` (and so
+    # `mojo_dict_copy`, and `mojo_dict_union` through it) walked the source's
+    # HASH SLOT array and gave every re-inserted key a FRESH sequence number,
+    # so the destination came out in slot order rather than the source's
+    # insertion order. Every key and every value was right, which is why it
+    # read as a regression in whatever change was in flight. It first shows
+    # on the SECOND merge: one key of source order happens to coincide with
+    # one slot, two do not — `{'z': 9}` then `| {'a': 1}` prints
+    # `{'z': 9, 'a': 1}` either way, and the next merge moves `z` behind `a`.
+    #
+    # Three shapes, because they are three different guarantees and a fix that
+    # keeps only one of them would still be wrong:
+    #   * `|` twice into a field — the repro, the reordering shape;
+    #   * `update()` — the same runtime entry point by a second name;
+    #   * an update that OVERWRITES an existing key — CPython keeps that key
+    #     where it was, so a merge must not renumber it either.
+    # Key order is read through three of the four spellings that share one
+    # ordering implementation (`mojo_dict_order_indices`): `repr`, `.keys()`
+    # and `for k in d`.
+    "dict_update_preserves_insertion_order": textwrap.dedent("""\
+        class D:
+            def __init__(self):
+                self.data = {"z": 9}
+
+            def merge(self, other):
+                self.data = self.data | other
+
+            def show(self):
+                print(self.data)
+                print(list(self.data.keys()))
+                for k in self.data:
+                    print(k)
+
+        def main():
+            d = D()
+            d.merge({"a": 1})
+            d.show()
+            d.merge({"b": 2})
+            d.show()
+            e = {"z": 9, "a": 1}
+            e.update({"b": 2})
+            print(e)
+            e.update({"z": 8})
+            print(e)
+            e.update({"m": 5, "y": 6, "z": 7})
+            print(e)
+    """),
     # `@classmethod` binds the CLASS. The interpreter had NO classmethod
     # support at all: `C.m(...)` returned the raw unbound MojoFunction, so
     # the call bound the first REAL ARGUMENT to the `cls` parameter —
@@ -1068,6 +1115,7 @@ CPYTHON_COMPARABLE = {
     "for_target_one_tuple_vs_paren_name",
     "for_target_one_tuple_dict_and_nested",
     "comprehension_target_shadows_an_enclosing_local",
+    "dict_update_preserves_insertion_order",
 }
 
 
