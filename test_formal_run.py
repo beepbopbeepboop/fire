@@ -11659,6 +11659,84 @@ REFUSAL_CASES = [
      "        printf(\"p=%d\", p)\n"
      "    return 0\n",
      0, "p=11"),
+    # ── a `finally` is emitted at every point the body LEAVES EARLY ──────────
+    #
+    # `_flush_pending_finally` walks the pending frames and emits a clause's
+    # statements AT the `return`/`raise`/`break`/`continue` site, so the clause
+    # reads the frame as it stood THERE. `formal/model.py`'s CFG gives the clause
+    # that set of predecessors; it used to be "the arms' fall-through, or the
+    # body's FIRST block", on the reasoning that "the body may have raised" —
+    # and these backends have no unwinder to raise into it (`_emit_try` skips
+    # the handler arms outright and `RaiseStmt` flushes and then `exit(1)`s).
+    #
+    # The program below is one CPython REJECTS — `UnboundLocalError` for
+    # `n > 0`, which is the value the startup stub passes — and BOTH backends
+    # used to build it and RUN it:
+    #
+    #     $ ./finally.arm64
+    #     8432255232          # sink's argument: a word nobody wrote
+    #     exit 100            # CPython: UnboundLocalError, exit 1
+    #
+    # which is the failure mode no exit code reports: right-looking, status 0,
+    # and a number that changes with the build. It is a `refuse:` case rather
+    # than an expected answer because there is no answer to expect.
+    ("finally_runs_where_the_body_leaves_early_not_at_its_end",
+     "def sink(v):\n"
+     "    printf(\"v=%d\", v)\n"
+     "    return 0\n\n"
+     "def f(n):\n"
+     "    try:\n"
+     "        if n > 0:\n"
+     "            return 100\n"
+     "        v = 7\n"
+     "    finally:\n"
+     "        sink(v)\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    return f(n)\n",
+     "refuse:'v' is read at line 11 before anything in this function stores it",
+     None),
+    # …and the CONTROL, which is the direction a fix like that gets wrong: the
+    # same clause, with the store before every early exit. `n` is 10, so the
+    # `return 100` is the path taken, the clause is emitted there, and `v` is 7.
+    # Without this row the `refuse:` above is satisfied by a rule that refuses
+    # every `finally` that reads anything.
+    ("finally_after_every_early_exit_reads_the_stored_value",
+     "def sink(v):\n"
+     "    printf(\"v=%d\", v)\n"
+     "    return 0\n\n"
+     "def f(n):\n"
+     "    try:\n"
+     "        v = 7\n"
+     "        if n > 0:\n"
+     "            return 100\n"
+     "    finally:\n"
+     "        sink(v)\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    return f(n)\n",
+     100, "v=7"),
+    # …and the dead code after an always-terminating body: `_emit_try`
+    # suppresses the clause's own fall-through once an early exit has flushed
+    # the frame (`need_fallthrough = False`), so nothing follows the statement.
+    # The old rule judged the unreachable `printf` on the state at the body's
+    # FIRST block, which refused `try: … total = … / finally: cleanup` then
+    # `print(total)` — the single most common reason to write a `finally` at
+    # all — on seven files of this repository.
+    ("dead_code_after_a_finally_is_not_judged_on_the_bodys_state",
+     "def f(n):\n"
+     "    try:\n"
+     "        total = 1\n"
+     "        if n > 0:\n"
+     "            total = 2\n"
+     "        return 0\n"
+     "    finally:\n"
+     "        printf(\"done=%d\", total)\n"
+     "    printf(\"total=%d\", total)\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    return f(n)\n",
+     0, "done=2"),
     # A `for` target STAYS bound after its loop, because the target is a
     # definition in the loop's HEADER and the join is reached from the header's
     # exit edge — so `range(0, 100)` with an immediate break is legal and

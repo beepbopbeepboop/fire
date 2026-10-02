@@ -2157,9 +2157,19 @@ class _Block:
     needs it (`_match_case_binds`), and it is a separate field rather than more
     `defs` precisely because `defs` is visible to every successor and `seed` is
     not — see `_match_case_binds` for why one case's capture must not be in
-    scope in another case's arm."""
+    scope in another case's arm.
 
-    __slots__ = ("index", "stmts", "succs", "preds", "defs", "kills", "seed")
+    `leaves` is set on a block that holds a `return`/`raise` (or a `break`/
+    `continue` out of a loop ENCLOSING whatever is asking), which is the set a
+    `finally` clause's predecessors are collected from — see `_leaves_early`.
+    It is a property of the block's statements rather than of the block's edges
+    (`succs` is empty for all of them), because the question is asked by a
+    statement OUTSIDE the block: "does control ever get from here to me?".
+    `breaks_at` is the `loops`-stack index such a `break`/`continue` targets,
+    and `-1` for the `return`/`raise` case, which leaves unconditionally."""
+
+    __slots__ = ("index", "stmts", "succs", "preds", "defs", "kills", "seed",
+                 "leaves", "breaks_at")
 
     def __init__(self, index, stmts):
         self.index = index
@@ -2169,6 +2179,8 @@ class _Block:
         self.defs: set = set()
         self.kills: set = set()
         self.seed: set = set()
+        self.leaves = False
+        self.breaks_at = -1
 
     def __repr__(self):
         return (f"<block {self.index}: {len(self.stmts)} stmt(s), "
@@ -2621,13 +2633,16 @@ def _build_cfg(body) -> tuple:
                 t = first([s], pending)
                 pending = [t.index]
                 cur = None
-                # The body's FIRST block, which is where the "the body raised"
-                # path starts: nothing in `try:` itself evaluates anything, so
-                # this is the earliest point that can raise. See the `finally`
-                # note below for what it is an edge from.
-                body_first = len(blocks)
+                # `loops` depth, which decides whether a `break` inside this
+                # statement LEAVES it: see the `finally` note below, where the
+                # clause is entered at every point control leaves early, and a
+                # `break` out of a loop INSIDE the body does not leave the
+                # statement at all.
+                outer_loops = len(loops)
+                body_start = len(blocks)
                 body_exits = run(getattr(s, "body", None) or [], loops,
                                  [t.index])
+                body_end = len(blocks)
                 arm_exits = list(body_exits)
                 for h in (getattr(s, "handlers", None) or []):
                     arm_exits += run(getattr(h, "body", None) or [], loops,
@@ -2660,8 +2675,14 @@ def _build_cfg(body) -> tuple:
                 # an `else` after a body that always returns or raises gets an
                 # unreachable block — whose IN set the fixpoint initializes
                 # from the top, which is the direction that cannot refuse.
+                else_start = None
+                else_end = None
+                else_exits: list = []
                 if getattr(s, "else_body", None) is not None:
-                    arm_exits += run(s.else_body, loops, body_exits)
+                    else_start = len(blocks)
+                    else_exits = run(s.else_body, loops, body_exits)
+                    else_end = len(blocks)
+                    arm_exits += else_exits
                 # The `finally` clause runs on every way OUT of the try, so it
                 # is entered from the ARMS and the statement after the whole
                 # statement is reached only through it. Modelling that
@@ -2678,40 +2699,84 @@ def _build_cfg(body) -> tuple:
                 # `run` on an empty run returns the exits that reach it, so
                 # the arms' exits and the finally's exits are the same list.
                 #
-                # "…and the body may have RAISED" is the one way out of the
-                # statement that the arms do not carry, and the OLD answer was
-                # `arm_exits or [t.index]` — a fallback used only when the body
-                # has no fall-through exit, which is a body that always
-                # `return`s or `raise`s. Two things are wrong with the header it
-                # pointed at, and both are fixed here:
+                # ── WHAT ENTERS THE CLAUSE, and why it is every point control
+                # LEAVES EARLY rather than "the body may have raised" ────────
                 #
-                #   * the header is not a point that can raise at all. Nothing
-                #     in `try:` evaluates anything before the body, so the
-                #     earliest point that can is the body's FIRST block, and a
-                #     store in it dominates the clause. `tools/mem_slope.py`
-                #     is the measured case: `try: exes = []; …; return 0 /
-                #     finally: unlink(e) for e in exes` is a legal program and
-                #     was refused for `exes`.
-                #   * it is a real path, so it cannot simply be dropped either:
-                #     a store LATER in the body is skipped by it, which is why
-                #     the edge stays for every other shape.
+                # The rule this replaced was `arm_exits or [body_first]`: the
+                # arms' fall-through, or — when the body has no fall-through
+                # exit — the body's first block, on the reasoning that "the
+                # body may have raised". That reasoning is about an EXCEPTION
+                # and this backend has none. `_emit_try` in
+                # `formal/arm64_codegen.py:1916` and
+                # `formal/x86_64_codegen.py:1868` skip the handler arms
+                # outright, and `RaiseStmt` flushes the pending finallys and
+                # then `exit(1)`s (`arm64_codegen.py:1628`) — so no edge from a
+                # raise site into the clause, or out of it, exists. A store LATER
+                # in the body is therefore not "skipped by the path that
+                # raises", and the refusal for it was resting on a path the
+                # emitted image does not have.
                 #
-                # The narrower form is also the only affordable one. Adding this
-                # edge UNCONDITIONALLY — the shape that would close the
-                # soundness hole below — was measured on this repository and
-                # cost 6 more refusals than it removed (7 files): `try: …
-                # total = … / finally: cleanup` then `print(total)` is the
-                # single most common reason to have a `finally` at all, and
-                # every one of those 7 is a program CPython runs. Whether an
-                # intervening statement can raise is the question that decides
-                # it, and no statement-level reader here answers it. So the hole
-                # stays, in
-                # `bugs/FORMAL_read_before_store_the_body_may_have_raised.md`.
+                # What the emitter DOES do is emit the clause at every point
+                # the body LEAVES EARLY: `_flush_pending_finally` walks the
+                # pending frames and emits their statements at the `return` /
+                # `raise` / `break` / `continue` site, with `depth` 0 for a
+                # return. So the clause is entered from the arms' fall-through
+                # AND from every block of the body and the `else` that holds
+                # such a statement — which is what `_leaves_early` collects.
+                #
+                # That is not a tidier restatement; it is a different graph,
+                # and the difference is a silent wrong answer. Measured, on the
+                # program CPython rejects:
+                #
+                #     def probe(n):
+                #         try:
+                #             if n > 0:
+                #                 return 100
+                #             v = 7
+                #         finally:
+                #             sink(v)
+                #         return 0
+                #
+                # `body_exits` is non-empty here (the `if`'s false arm falls
+                # through), so the old rule added no edge at all and the build
+                # accepted it. arm64:
+                #
+                #     $ ./t1.arm64
+                #     8432255232            # sink's argument: a word nobody wrote
+                #     exit 100              # CPython: UnboundLocalError, exit 1
+                #
+                # The clause is emitted at `return 100`, before `v = 7`, so the
+                # register holds whatever the caller left in it — which is the
+                # worst outcome this path has, an answer that is BUILD-DEPENDENT
+                # and exits 0. `test_formal_read_before_store.py`'s
+                # `finally_clause_runs_at_every_point_the_body_leaves_early`
+                # pins the analysis and
+                # `test_formal_run.py`'s `finally_reads_a_later_store_*` pins
+                # the refusal against the binary, on both architectures.
+                #
+                # The clause's OWN fall-through reaches the statement after the
+                # try, and it is emitted only where the body falls through —
+                # `_emit_try` suppresses it once a `return`/`raise` has flushed
+                # the frame (`need_fallthrough = False`). So when neither the
+                # body nor the `else` can fall through, `pending` is empty and
+                # the code after the statement is unreachable, which
+                # `_definitely_stored`'s top-initialization already answers the
+                # safe way. That is the class the old rule could not express: it
+                # made the clause reachable from the body's first block and so
+                # judged the DEAD code after it on the state at that block,
+                # which is what `bugs/FORMAL_read_before_store_what_is_left.md`
+                # measured as `try: … total = … / finally: cleanup` then
+                # `print(total)` refused on seven files.
                 fin = getattr(s, "finally_body", None)
                 if fin is not None:
-                    fin_exits = run(fin, loops,
-                                    arm_exits or [body_first])
-                    pending = fin_exits
+                    early = _leaves_early(blocks, body_start, body_end,
+                                           outer_loops)
+                    if else_start is not None:
+                        early += _leaves_early(blocks, else_start, else_end,
+                                               outer_loops)
+                    fin_exits = run(fin, loops, arm_exits + early)
+                    pending = (fin_exits
+                               if (body_exits or else_exits) else [])
                 else:
                     pending = arm_exits
                 cur = None
@@ -2752,14 +2817,30 @@ def _build_cfg(body) -> tuple:
                         loops[-1]["exits"].append(b.index)
                     else:
                         loops[-1]["continues"].append(b.index)
+                # `leaves`, and the loop it escapes: `_flush_pending_finally`
+                # is given the loop's own `fin_depth`, so a `break` out of a
+                # loop INSIDE a `try` body does not flush that `try`'s clause —
+                # control stays in the body and reaches it by falling through.
+                # A `break` that ESCAPES the statement does flush it, and the
+                # emitters do exactly that (`arm64_codegen.py:1665`,
+                # `_flush_pending_finally(self._loops[-1]["fin_depth"])`). The
+                # block records WHICH loop, and `_leaves_early` compares that
+                # against the depth its caller was entered at.
+                if loops:
+                    b.leaves = True
+                    b.breaks_at = len(loops) - 1
                 # With no loop around it this is a syntax error CPython
                 # catches, so there is no target: control does not fall
                 # through, and inventing a successor would be an edge to a join
                 # the program cannot reach.
                 return []
             if kind in ("ReturnStmt", "RaiseStmt"):
-                open_block([s], pending)
-                # No successor: control leaves the function.
+                b = open_block([s], pending)
+                # No successor: control leaves the function, and BOTH emitters
+                # flush every enclosing `finally` at this point before they do
+                # — so this is one of the entries into a clause that encloses
+                # this statement. See the `finally` note in the `TryStmt` arm.
+                b.leaves = True
                 return []
             b = take()
             b.stmts.append(s)
@@ -2867,6 +2948,32 @@ def _build_cfg(body) -> tuple:
             if d is not None and 0 <= d < len(blocks):
                 blocks[d].preds.append(b.index)
     return blocks, entry.index
+
+
+def _leaves_early(blocks: list, start: int, end: int, outer_loops: int) -> list:
+    """Indices in `blocks[start:end]` at which control leaves the statement
+    that emitted them — the entries a `finally` clause is reached from.
+
+    `start`/`end` are the block indices one `run` call added, which is how the
+    `try` arm bounds the question to its OWN body or `else` (a nested
+    statement's `run` lands in the same range, and its own clause consumes its
+    own leaves first, so the range is read after the fact and every `leaves`
+    inside it belongs to this clause too). `outer_loops` is the loop depth the
+    `try` was entered at, and it is what separates the two kinds of `break`:
+    one targeting a loop at or below that depth escapes the statement — and so
+    flushes the clause, which is what `_flush_pending_finally(depth)` does in
+    both emitters — while one targeting a loop the body opened stays inside it
+    and reaches the clause by falling through.
+
+    A `return`/`raise` is in the answer at any depth. Both are terminal for the
+    FUNCTION, and both flush every enclosing clause on the way out
+    (`_flush_pending_finally()` with no argument, `arm64_codegen.py:1636` and
+    `x86_64_codegen.py:1447`), which is the edge that had no modelling and no
+    test behind it — see the `finally` note in `_build_cfg`'s `TryStmt` arm for
+    the build that measured it.
+    """
+    return [b.index for b in blocks[start:end]
+            if b.leaves and b.breaks_at < outer_loops]
 
 
 def _definitely_stored(blocks: list, entry: int, seed: set) -> dict:
