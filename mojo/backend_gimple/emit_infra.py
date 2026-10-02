@@ -1533,12 +1533,25 @@ def _list_unpack_name(elem: str) -> str:
     return _gmi_glue._c_unpack_name(elem)
 
 
-def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
+def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
+               arg_nodes: list = None) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
 
     arg_pairs: list of (ctype, varname) for each argument.
     For each argument, if the declared parameter type differs from the
     passed type, emit an intermediate temp with the correct cast.
+
+    `arg_nodes` is the call site's `CallExpr.args`, POSITIONALLY aligned with
+    `arg_pairs`, for the callers that have it. Optional because most of the
+    ~130 `_emit_call` sites emit a runtime helper or a synthesized call with no
+    `CallExpr` behind it; where it is absent the coercions that need to know
+    what an ARGUMENT MEANT (today: only the bool-vs-int question in
+    `_stringify_value`) fall back to the lowered C type, which is the
+    pre-existing behaviour. Alignment holds for `_apply_kw_keys` (one pair in,
+    one out) and for the vararg packing (which only fires for a callee that
+    declares `*args`, whose string parameter is never the interesting case);
+    a `f(*xs)` spread expands AFTER this point, so a spread argument simply
+    arrives with no node.
     """
     fname, arg_pairs = _apply_kw_keys(gen, fname, arg_pairs)
     # Rename certain C library functions to mojo_* wrappers with void* params
@@ -1678,7 +1691,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             else:
                 gen._emit(f'  {ct} = (int64_t){aval};')
             coerced_args.append(ct)
-        elif ptype == 'char *' and atype in ('int', 'int64_t', 'char'):
+        elif ptype == 'char *' and atype in ('int', 'int64_t', 'char', 'double', '_Bool'):
             # A raw single char whose DECLARED type was widened to
             # int64_t (joining another assignment site in the same
             # function — e.g. `qch = stmt[i]` in fire_compiler.py's own
@@ -1707,15 +1720,29 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                 coerced_args.append(sv)
             else:
-                vp = gen._new_temp('void *')
-                cp = gen._new_temp('char *')
-                if atype in ('int',):
-                    ip = gen._new_val('int64_t', f'(int64_t){aval}')
-                    gen._emit(f'  {vp} = (void *){ip};')
-                else:
-                    gen._emit(f'  {vp} = (void *){aval};')
-                gen._emit(f'  {cp} = (char *){vp};')
-                coerced_args.append(cp)
+                # A genuine SCALAR where a `char *` is expected. Python's
+                # answer is `str(value)`, and that is also the only answer
+                # that is not a wild pointer: the `else` branch this
+                # replaces reinterpreted the integer's BITS as an address,
+                # so `class D: __init__(self, w: str)` called as `D(5)`
+                # stored address 5 in a `char *` field and the first
+                # `mojo_print` of it walked to it and SIGSEGV'd — while
+                # `D(2.5)` did not even compile ("cannot convert to a
+                # pointer type"). The comment above this branch already
+                # makes exactly this argument for a `char`; an `int` is the
+                # same case with a wider byte value.
+                #
+                # `_stringify_value` is the chokepoint for "stringify this
+                # typed value" and is what `str()`, f-strings and `%s` all
+                # go through, so this reuses it rather than adding a fourth
+                # spelling. It is also what makes the boxed case safe: an
+                # `int64_t` that really holds a `char *` pointer is answered
+                # by its `_actual_types` entry as a cast, not as a decimal.
+                _anode = None
+                if arg_nodes is not None and i < len(arg_nodes):
+                    _anode = arg_nodes[i]
+                coerced_args.append(
+                    gen._stringify_value(actual_atype, aval, _anode))
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain
             # scalar-typed value. TWO unrelated situations reach this one

@@ -4513,8 +4513,9 @@ class GimpleGen:
         return ginf._emit_str_cat(self, lv, rv, free_left, free_right)
     def _is_fresh_operand(self, node, val: str) -> bool:
         return ginf._is_fresh_operand(self, node, val)
-    def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
-        return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs)
+    def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
+                    arg_nodes: list = None) -> None:
+        return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs, arg_nodes)
     def _declared_int_ctype(self, val: str) -> str | None:
         return ginf._declared_int_ctype(self, val)
     def _ensure_local(self, ctype: str, val: str) -> str:
@@ -4632,8 +4633,8 @@ class GimpleGen:
         return grsl._new_val(self, ctype, rhs)
     def _inc_val(self, base: str) -> str:
         return grsl._inc_val(self, base)
-    def _call_expr(self, ret_type: str, fname: str, arg_pairs: list) -> str:
-        return grsl._call_expr(self, ret_type, fname, arg_pairs)
+    def _call_expr(self, ret_type: str, fname: str, arg_pairs: list, arg_nodes: list = None) -> str:
+        return grsl._call_expr(self, ret_type, fname, arg_pairs, arg_nodes)
     def _bool_not(self, ctype: str, val: str) -> str:
         return grsl._bool_not(self, ctype, val)
     def _bool_and(self, left: str, right: str) -> str:

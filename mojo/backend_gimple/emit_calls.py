@@ -6204,7 +6204,9 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
 
     if ret_type == 'void':
         return gen._void_call(fname, arg_pairs)
-    t = gen._call_expr(ret_type, fname, arg_pairs)
+    # `node.args` positionally, so an argument coercion can tell what each
+    # argument MEANT (see `_emit_call`'s `arg_nodes`).
+    t = gen._call_expr(ret_type, fname, arg_pairs, node.args)
     # A multi-value return's per-slot types, carried across the call (see
     # gen._return_slot_types's declaration). Same reason and same shape as
     # the `_return_elem_types` block just below: the callee's slot types are
@@ -6334,6 +6336,10 @@ def _lower_struct_constructor(gen, struct_name: str,
     # _struct_method_signatures entry — see ~line 2672) fall through to
     # the single-signature path below unchanged; cross-module overload
     # resolution is a separate follow-on (elaborate.py extension).
+    # The leading None lines the receiver pair up with the call site's own
+    # `args`, so an argument coercion can still tell what each argument MEANT
+    # (see `_emit_call`'s `arg_nodes`).
+    _arg_nodes = [None] + list(args) if args else None
     _init_candidates = gen._struct_method_signatures.get(_sms_key(struct_name, '__init__'))
     if _init_candidates:
         _chosen = gen._resolve_overload(_init_candidates, args, kwargs)
@@ -6343,7 +6349,7 @@ def _lower_struct_constructor(gen, struct_name: str,
                 gen._build_call_args_for_candidate(
                     _chosen, args, kwargs,
                     gen._struct_init_defaults.get(struct_name, {}))
-            gen._emit_call('void', '', init_fname, arg_pairs)
+            gen._emit_call('void', '', init_fname, arg_pairs, _arg_nodes)
             return ctype, t
         # No candidate could be resolved — either no candidate's arity fits
         # this call at all, or (same arity, but every candidate erases to
@@ -6452,7 +6458,7 @@ def _lower_struct_constructor(gen, struct_name: str,
                     _cv = gen._new_temp(_want)
                     gen._safe_coerce_emit(_have_t, _want, _have_v, _cv)
                     arg_pairs[_ai] = (_want, _cv)
-        gen._emit_call('void', '', init_fname, arg_pairs)
+        gen._emit_call('void', '', init_fname, arg_pairs, _arg_nodes)
     if (not _did_init_call) and (_n_kw > 0 or _n_args > 0):
         # Positional args + keyword args — assign fields by position then by
         # name. Iterate `gen.struct_field_types[struct_name]` (a real dict)

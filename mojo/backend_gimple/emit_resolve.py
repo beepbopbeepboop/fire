@@ -1774,10 +1774,13 @@ def _inc_val(gen, base: str) -> str:
     return gen._new_val('int64_t', f'{base} + 1LL')
 
 
-def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list) -> str:
-    """Emit a call and return the result temp."""
+def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list, arg_nodes: list = None) -> str:
+    """Emit a call and return the result temp.
+
+    `arg_nodes` is forwarded to `_emit_call` (see its docstring for what it
+    is and why it is optional)."""
     t = gen._new_temp(ret_type)
-    gen._emit_call(ret_type, t, fname, arg_pairs)
+    gen._emit_call(ret_type, t, fname, arg_pairs, arg_nodes)
     return t
 
 
