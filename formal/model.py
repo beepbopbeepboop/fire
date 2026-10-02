@@ -9970,7 +9970,8 @@ def struct_field_name(field) -> object:
 # field: a one-word struct whose method reads `self.LIMIT` where `comptime LIMIT = 10`
 # measures ONE field, reads the slot nothing ever writes, and prints 0 where the
 # source says 10 (both architectures). See `struct_class_constants` for where the
-# names are classified, and `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`.
+# names are classified, and `formal/imports.py`'s `_attach_declared_census` for
+# how an IMPORTED module's classes get the census this classification reads.
 #
 # The accessor, because the dict is read from the class-constant split, the
 # substitution's site census and a diagnostic, and three `getattr(…, None) or {}`
@@ -10680,8 +10681,8 @@ def struct_comptime_aliases(struct_def) -> dict:
     refused with a sentence about a run-time `AttributeError` in a program that
     does not raise — `res._InjectedValues` in `std/iter/__init__.mojo`, declared
     fourteen lines above the read. That is
-    `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`, and this
-    function is the whole of the fix's first half.
+    `formal/hostmods/ast.mojo`-style module docstrings aside, this function is
+    the whole of the fix's first half.
 
     NOT the whole of it: whether a read can be ANSWERED is still
     `class_constant_word`'s question, asked at the read. A binding's value may be

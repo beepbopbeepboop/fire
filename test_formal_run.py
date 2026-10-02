@@ -9814,8 +9814,7 @@ TYPE_APPLICATION_CASES = [
 
 # ── a `comptime` class attribute read through a receiver, against CPython ──
 #
-# `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`. A
-# `comptime NAME = …` in a class body is a compile-time value the class
+# A `comptime NAME = …` in a class body is a compile-time value the class
 # PUBLISHES: the parser keeps it in `StructDef.comptime_aliases` and out of
 # `StructDef.fields`, and `myinterpreter` resolves `obj.NAME` out of that dict.
 # The formal backend had no table for those names at all, so a read of one
@@ -10176,9 +10175,11 @@ if _TYPE_VALUE_TAG_COLLISIONS:
 # and a struct with no evidence attached is left entirely alone.
 #
 # The last of those is the one that decides how far the fix reaches, so it is
-# here rather than in a comment: it is why a `comptime` member declared in an
-# IMPORTED module is still not substitutable, which is the remaining half of
-# `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`.
+# here rather than in a comment: a `comptime` member declared in an IMPORTED
+# module needs the census that `formal/imports.py`'s `_attach_declared_census`
+# attaches, and the two cross-module cases that exercise that are
+# `byref_cross_module_comptime_attribute_through_a_receiver` and
+# `…_through_a_parameter`.
 _CENSUS_PROBES = [
     # (name, source, expected field names, expected constant names)
     ("a comptime member with no receiver read is a constant",

@@ -1187,9 +1187,10 @@ def imported_struct_defs(source_path: str, stmts: list,
     once however many paths reach it.
 
     **The census is attached to each struct by the module that DECLARES it**,
-    and that is the fix for the half of
-    `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md` that was
-    still open. `module_statements` caches one parse per file per content, so
+    and that is what makes a `comptime` class member of an IMPORTED module a
+    constant here: before, nothing attached it, so `_split_declaration` returned
+    None and every class-level name stayed a field.
+    `module_statements` caches one parse per file per content, so
     the statements a declaration came from are in hand here; before this,
     nothing called `formal.model.attach_field_evidence` on an IMPORTED module's
     structs, so `struct_field_evidence` was None, `_split_declaration` returned
