@@ -241,8 +241,9 @@ HOST_MODELLED = frozenset((
     #     compared, none from a table. CPython's factory API is not
     #     expressible — a hash object is 8 to 64 bytes of state that cannot
     #     cross a dylib boundary — so each digest is one function, and the
-    #     seven absent names (SHA-3, SHAKE, blake2s) are named with the
-    #     measurements in `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md`.
+    #     seven absent names (SHA-3, SHAKE, blake2s) are named, with the
+    #     measurements, the rule that decided them and what each would cost, in
+    #     the module's own "WHAT IS NOT HERE, AND WHY".
     #   `re`  — `formal/hostmods/re.mojo`, a backtracking regex engine in the
     #     subset `regex_compile.py` says it exists for plus `\b`, `^`/`$`
     #     under MULTILINE, DOTALL and `(?P<name>…)` — the four things the

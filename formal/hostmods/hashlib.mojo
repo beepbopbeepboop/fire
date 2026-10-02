@@ -56,11 +56,46 @@ measured reason — libSystem provides none of them, so each would be a
 from-scratch implementation of a specification nobody has checked here — and
 SHAKE additionally needs an extendable output, which is a run-time-length
 sequence this path cannot build
-(`bugs/FORMAL_listdir_no_run_time_sequence.md`). They are named in
-`bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md` with the measurements and the
-next step, and `test_formal_hashlib.py`'s `absent` group asserts each one is
-refused with a message naming itself, so an omission can never be mistaken
-for an implementation.
+(`bugs/FORMAL_listdir_no_run_time_sequence.md`). `test_formal_hashlib.py`'s
+`absent` group asserts each one is refused with a message naming itself, so an
+omission can never be mistaken for an implementation.
+
+THE RULE THAT DECIDES IT, and it is a rule about this repository rather than
+about cryptography: **write what the tree asks for, check it against CPython,
+and name the rest.** Measured over every `.py` and `.mojo` on 2026-09-30 and
+re-checked 2026-10-01 — six hits for all seven names between them, every one of
+them this paragraph, the `absent` group, or `formal/imports.py`'s note about
+this module. No caller anywhere asks for any of them. So the set above is a
+DECISION and not an oversight, and the way to revisit it is a caller appearing:
+`grep -rn "sha3_\|blake2s\|shake_"` over the tree, and if the answer is not six
+self-referential hits, that is the moment to write one.
+
+IF ONE OF THEM IS WANTED, in the order the difficulty actually falls:
+
+  * `blake2s` is the cheapest and reuses this file. BLAKE2s is RFC 7693 §3 and
+    the pieces that carry over are `b2_g`'s structure, the sigma table (the same
+    ten rows) and the parameter block. What does NOT carry over is the word
+    width: 32-bit words throughout, a 64-byte block of 16 words instead of 128,
+    10 rounds instead of 12, and a different IV — so the arithmetic moves to
+    32-bit words, which is a different masking discipline and is where a
+    transcription goes wrong. The test has to be as thorough as the BLAKE2b one
+    is now, and the existing group is parameterised enough that a new algorithm
+    is a new entry in a table and a new length list rather than a new file.
+  * SHA-3 and SHAKE are FIPS 202: a Keccak-f[1600] permutation, a different
+    shape of computation from anything in this file, and no caller to check it
+    against except CPython.
+  * SHAKE is out of reach ON THIS TARGET in any spelling, and that is not a
+    matter of taste: `shake_128(digest_size=n)` returns `n` bytes for an `n` the
+    CALLER chooses, which is a run-time-length sequence. Closing it is Phase 6's
+    allocator work, not an algorithm. If a SHAKE is ever needed the honest
+    answer here is a fixed-length output with the length in the function's name,
+    and that is a decision to make when someone needs it rather than now.
+
+The alternative to the rule — implement all fourteen so the module is a complete
+mirror of CPython — is coherent and would be thirteen of fourteen, because SHAKE
+still cannot be done at all. What is not coherent is implementing some of the
+absent ones for aesthetic reasons and leaving the rest, because then the set is
+nobody's decision.
 
 `algorithms_available`, `algorithms_guaranteed` and `new()` are absent for a
 different reason: they are containers, or they are the factory that cannot
