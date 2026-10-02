@@ -2623,8 +2623,10 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     name: StructDef}`. Handed the first, the owner lookup answered with a `str`
     for any function whose name happened to be a struct's method name, which a
     module-level `def` colliding with one is; the string reached
-    `_overridden_comptime_names` and was asked for `.name`
-    (bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md).
+    `_overridden_comptime_names` and was asked for `.name`. Fixed in `7b1f2643`,
+    by deleting the parameter rather than handing it the right table; the
+    reproducer and the measurement are `test_formal_run.py`'s
+    `class_constant_census_survives_a_function_named_like_a_method`.
 
     The fixpoint is over one edge only: a call `f(c, …)` in some function where
     `c` is a holder makes `f`'s FIRST parameter a holder. That is the whole of
@@ -9077,9 +9079,11 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # the OWNER table it wants (`M.method_owner_names(structs)`, `{lifted
     # <Struct>_<method> function name: StructDef}`) from `structs_by_name`,
     # which is this function's own list of the same nodes, so there is nothing
-    # to thread through and no way to hand it the other one — see
-    # bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md for the
-    # crash that argument used to cause.
+    # to thread through and no way to hand it the other one. Passing the wrong
+    # one made `method_owners.get(fn.name)` answer with a `str` and reach an
+    # `AttributeError` out of the compiler; `7b1f2643` removed the argument
+    # rather than correcting it, which is why there is nothing left here to get
+    # wrong again.
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
                      star_imported_modules(stmts))
