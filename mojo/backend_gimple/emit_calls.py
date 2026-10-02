@@ -4150,11 +4150,12 @@ def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallE
                     # reference has to be boxed -- through a plain local,
                     # because GIMPLE cannot take a component_ref's address).
                     _own_box = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
+                    _cur_t = _as_str(_cur_caps.get(vname) or 'int64_t')
+                    _cur_is_ptr = _cur_t.endswith(' *')
                     if _own_box:
                         tmp = gen._new_val(
                             fct, _own_box if fct.endswith(' *') else f'*{_own_box}')
-                    elif fct.endswith(' *'):
-                        _cur_t = _as_str(_cur_caps.get(vname) or 'int64_t')
+                    elif fct.endswith(' *') and not _cur_is_ptr:
                         _boxed = gen._new_val(_cur_t, f'{_cur_env}->{fld}')
                         tmp = gen._new_val(fct, f'&{_boxed}')
                     else:

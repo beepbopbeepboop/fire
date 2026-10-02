@@ -687,6 +687,64 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
                 return _raw
     return None
 
+def _note_struct_attr_alias(gen, module: str, alias: str, member: str) -> str | None:
+    """Record `alias -> member` in `gen._struct_import_aliases` when
+    `alias = <module>.<member>` binds a CLASS under a new bare name — the
+    assignment spelling of `_note_struct_import_alias`'s `from M import C
+    as A` — and return the real bare name it was recorded under (or None).
+
+    Real Python has no distinct "class value": `Lit = gctypes.IntLiteral`
+    binds the class object itself, and every later `Lit(...)` constructs
+    `IntLiteral`. This compiler does not model a class as a value (the
+    assignment itself lowers to a stubbed 0, with a comment saying so), but
+    the NAME it introduces is exactly as resolvable as the from-import
+    spelling's — and it has to be recorded, because the constructor
+    dispatch and the return-type estimator both key on the bare name. Left
+    unrecorded, they resolve it by bare-name lookup against every struct in
+    the whole-program closure, which is a different question:
+
+      * the right struct usually has the alias's OWN name in these shapes
+        (`comptime.py`'s `IntLiteral = _fc.IntLiteral`), so it works by
+        luck;
+      * otherwise the call silently builds whichever unrelated struct in
+        the closure happens to be spelled like the alias. Real, in the
+        self-host closure: `mojo/middle/offload.py`'s
+        `Lit = gctypes.IntLiteral` built `ast_rewriter.py`'s own
+        `class Lit` (its pattern-matcher primitive, nothing to do with
+        literals) — a hard gcc error there, because the local `Lit` and
+        the struct type `Lit` are one identifier, and a silently wrong AST
+        everywhere else;
+      * and where NO struct matches the alias, the call fell through to the
+        opaque-constructor path. Real, and worse than wrong: this
+        compiler's own `emit_stmts.py` writes `_IL = gimple_ctypes.
+        IntLiteral` and then `_IL(1)`, so the self-hosted compiler built
+        `UnaryOp.operand` for a negative-step `range` by calling a NULL
+        class value through `mojo_fnptr_call_1`.
+
+    No home-module confirmation, unlike the from-import spelling: there the
+    bare name could be an unrelated function, whereas `module.member` names
+    the attribute explicitly, so `member in struct_field_types` plus a base
+    that is a real module marker IS the confirmation. The base test is
+    `gen._module_alias_names` — the set the plain-`import X as Y` scan
+    fills, and the only one that means "namespace, not value"
+    (`imported_symbols` also holds every `from X import name` binding, so
+    it cannot answer it; see that set's own docstring in gimple_codegen.py).
+    """
+    if not alias or not member or alias == member:
+        return None
+    if member not in gen.struct_field_types:
+        return None
+    if module not in getattr(gen, '_module_alias_names', ()):
+        return None
+    if module in gen.var_types or module in gen.struct_field_types:
+        return None
+    _real = gen._c_kw_struct_renames.get(member, member)
+    # First-writer-wins, exactly like `_note_struct_import_alias`: one bare
+    # name, one meaning, whichever spelling claimed it first.
+    if alias not in gen._struct_import_aliases:
+        gen._struct_import_aliases[alias] = _real
+    return gen._struct_import_aliases[alias]
+
 def _note_struct_import_alias(gen, module: str, alias: str, orig_name: str) -> str | None:
     """Record `alias -> orig_name` in `gen._struct_import_aliases` when
     `from <module> import <orig_name> as <alias>` names a CLASS, and return

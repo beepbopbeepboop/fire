@@ -983,6 +983,93 @@ def test_sb1_per_scope_import_distinct_modules(wd):
           ri.stdout.strip().splitlines() == ['112', '223'], repr(ri.stdout))
 
 
+# ── A class reached through a MODULE ALIAS assigned to a name (not a
+#    `from M import C as A` statement) ──
+def test_module_attr_class_alias_constructs_that_class(wd):
+    """`Alias = h.Thing` binds the CLASS OBJECT under a new bare name — the
+    spelling this compiler's own source uses to reach an AST node
+    (`mojo/middle/offload.py`'s `I = gctypes.IdentExpr`,
+    `emit_stmts.py`'s `_IL = gimple_ctypes.IntLiteral`). Python has no
+    distinct "class value": every later `Alias(...)` constructs
+    `h.Thing`.
+
+    The compiled path did not model a class as a value (the assignment
+    itself lowers to a stubbed 0, with a comment saying so) and resolved
+    the CONSTRUCTED NAME by bare-name lookup against every struct in the
+    whole-program closure — a different question. Two ways that went
+    wrong, both real:
+
+      * a same-named struct in another module won. `helper_module.Alias`
+        here, so `Alias(value=7)` built the wrong class; and because the
+        local and the struct type were then ONE C identifier, the local
+        shadowed the type and gcc refused the function outright
+        (`'_t2' undeclared`, `'node' undeclared`) — a hard build failure
+        with no relation to its cause. In the self-host closure this was
+        `mojo/middle/offload.py`'s `Lit = gctypes.IntLiteral` building
+        `ast_rewriter.py`'s own unrelated `class Lit`.
+      * where no struct matched, the call fell through to the
+        opaque-constructor path and the class value it called was the
+        stubbed 0 — `emit_stmts.py`'s `_IL(1)`, i.e. the self-hosted
+        compiler building `UnaryOp.operand` for a negative-step `range`
+        by calling a null function pointer.
+
+    Fixed by recording the alias (`_note_struct_attr_alias`), which both
+    the constructor dispatch and the return-type estimator already
+    consult for the `from M import C as A` spelling. Asserted through both
+    pipelines: the compiled binary and the interpreter, which are
+    separate implementations."""
+    src_helper = ("struct Thing:\n"
+                  "    var value: Int64\n"
+                  "\n"
+                  "    fn __init__(out self, value: Int64):\n"
+                  "        self.value = value\n"
+                  "\n"
+                  "\n"
+                  "struct Alias:\n"
+                  "    var value: Int64\n"
+                  "\n"
+                  "    fn __init__(out self, value: Int64):\n"
+                  "        self.value = -1\n")
+    src_main = ("import helper_module as h\n"
+                "\n"
+                "\n"
+                "fn build(n: Int64):\n"
+                "    Alias = h.Thing\n"
+                "    node = Alias(value=n)\n"
+                "    print(node.value)\n"
+                "\n"
+                "\n"
+                "fn main():\n"
+                "    build(Int64(7))\n")
+
+    proj = os.path.join(wd, 'class_alias_proj')
+    os.makedirs(proj, exist_ok=True)
+    for fname, src in (('helper_module.mojo', src_helper),
+                       ('main.mojo', src_main)):
+        with open(os.path.join(proj, fname), 'w') as f:
+            f.write(src)
+
+    exe = os.path.join(proj, 'main')
+    r = subprocess.run(
+        [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
+        cwd=proj, capture_output=True, text=True, timeout=120)
+    check("class alias: fire.py build succeeds (`Alias = h.Thing` then "
+          "`Alias(value=...)` must build h.Thing, not the same-named "
+          "helper_module.Alias — which also shadowed the local and made "
+          "gcc reject the function)",
+          r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
+    if r.returncode == 0:
+        rr = subprocess.run([exe], capture_output=True, text=True, timeout=20)
+        check("class alias: the compiled binary constructs h.Thing -> 7",
+              rr.stdout.strip().splitlines() == ['7'], repr(rr.stdout))
+    ri = subprocess.run(
+        [sys.executable, os.path.join(HERE, 'fire.py'), 'run', 'main.mojo'],
+        cwd=proj, capture_output=True, text=True, timeout=20)
+    check("class alias: the INTERPRETER path (separate implementation) "
+          "agrees -> 7",
+          ri.stdout.strip().splitlines() == ['7'], repr(ri.stdout))
+
+
 def test_root_module_circular_import_symbol(wd):
     """A sibling module that imports a function FROM the root entry module
     (`from root import f`, while root itself imports the sibling) must call
@@ -1199,6 +1286,7 @@ def main():
         test_sb1_cross_module_same_c_param_overload_mangling(wd)
         test_sb1_mojo_build_cli_wrapper_modules(wd)
         test_sb1_per_scope_import_distinct_modules(wd)
+        test_module_attr_class_alias_constructs_that_class(wd)
         test_root_module_circular_import_symbol(wd)
         test_underscore_prefixed_sibling_import_symbol(wd)
     finally:
