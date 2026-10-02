@@ -188,6 +188,63 @@ CASES = [
      "    print(y)\n"
      "    return 0\n", "7\n7\n"),
 
+    # EVERY position a scalar module constant can be read in, in one case, and
+    # it is here because `read_global_as_an_assignment_value` covers only the
+    # two flat ones. The four added here are the ones a module of this tree
+    # actually wants to write, and each was a REFUSAL once: a module-level
+    # `A = 34` bound to a local inside a function was refused with "'A' has no
+    # home: the register allocator collected no home for it", on both
+    # architectures, while `return A` and `f(A)` in the same module built. The
+    # refusal named the allocator when the real disagreement was between
+    # two walks — one collected homes for the names a function BINDS, the other
+    # expected a home for a name it only READS — and the reader was sent to the
+    # register allocator for a fact about the constant substitution.
+    #
+    # All five spellings are in one case because three of them working is not
+    # the claim: a fix that reached `var y = A` and left `y = A` alone would pass
+    # any one of them separately. And the `if` arm is the shape that turned the
+    # fix on — a read whose RESULT is assigned, in a body the constant walk had
+    # to reach through the branch.
+    ("scalar_module_constant_in_every_read_position",
+     "A = 34\n"
+     "\n"
+     "def k1(x) -> Int:\n"
+     "    var y = 0\n"
+     "    if x == A:\n"
+     "        y = A\n"
+     "    return y\n"
+     "\n"
+     "def k2() -> Int:\n"
+     "    var y = 0\n"
+     "    y = A\n"
+     "    return y\n"
+     "\n"
+     "def k3() -> Int:\n"
+     "    var y = A\n"
+     "    return y\n"
+     "\n"
+     "def k4() -> Int:\n"
+     "    return A\n"
+     "\n"
+     "def k5(n: Int) -> Int:\n"
+     "    return A + n\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    a: Int = k1(34)\n"
+     "    b: Int = k1(0)\n"
+     "    c: Int = k2()\n"
+     "    d: Int = k3()\n"
+     "    e: Int = k4()\n"
+     "    f: Int = k5(8)\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    print(c)\n"
+     "    print(d)\n"
+     "    print(e)\n"
+     "    print(f)\n"
+     "    return 0\n",
+     "34\n0\n34\n34\n34\n42\n"),
+
     ("read_global_into_a_field_store",
      "struct Wrap:\n"
      "    v: Int\n"

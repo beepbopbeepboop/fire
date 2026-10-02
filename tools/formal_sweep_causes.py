@@ -321,10 +321,12 @@ CAUSES = (
     # records for an earlier row and which no marker can express: the same
     # sentence is produced whether the name is missing (3 of the 5 — and for
     # those, CPython raises `AttributeError`, because nothing in the tree ever
-    # assigns the name) or present as a `comptime` class member the field
-    # census does not read (2 of the 5, correct Mojo that raises nothing, and
-    # `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md` has
-    # the measurement). So the label claims neither: the per-file split is in
+    # assigns the name) or present as a `comptime` class member (2 of the 5,
+    # correct Mojo that raises nothing). The census now reaches an IMPORTED
+    # module's classes (`formal/imports.py`'s `_attach_declared_census`), so
+    # what is left in that second arm is a member whose VALUE is not a literal
+    # — a true refusal about a value this path cannot materialise. So the label
+    # still claims neither: the per-file split is in
     # `bugs/FORMAL_sweep_work_map_2026-10-01_b3.md`, and a reader who trusts
     # the message's own "In Python this is an AttributeError" clause will be
     # wrong about 2 of these 5.

@@ -18,6 +18,7 @@ broken one differ in load-command details, and this is the test that notices.
 import argparse
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -3671,6 +3672,57 @@ CROSS_MODULE_CASES = [
     # parameter a frame holder — and both are now read off the link line, so
     # this is a POSITIVE case with the same expected answer as the named import
     # above.
+    # A `comptime` class attribute declared in an IMPORTED module, read through
+    # a receiver here. The in-file half of this is
+    # `comptime_attribute_receiver_reads_match_cpython`; the two halves were
+    # separate because `formal/imports.py` attached no field census to an
+    # imported module's structs, so `_split_declaration` returned None, every
+    # class-level name stayed a field, and the read was reported as a field the
+    # struct does not have. The census is what decides a struct's WIDTH, which
+    # is why attaching it to imported modules was worth measuring rather than
+    # assuming: 0 of 316 structs across the 252-file new-modular stdlib change
+    # width or receiver classification, because `parse_module` already attached
+    # the census for every file it parses and this only extends it to the ones
+    # reached through an import.
+    #
+    # 1 is `IS_FLAT = True`, which CPython also prints.
+    ("byref_cross_module_comptime_attribute_through_a_receiver",
+     {"mod": "struct C:\n"
+             "    comptime IS_FLAT = True\n"
+             "    comptime RANK = 3\n"
+             "    var storage: Int\n"
+             "\n"
+             "    fn width(self) -> Int:\n"
+             "        return self.RANK\n",
+      "main": "from byref_xmod import C\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var c = C()\n"
+              "    printf(\"flat=%d rank=%d\\n\", c.IS_FLAT, c.RANK)\n"
+              "    return 0\n"}, 0, "flat=1 rank=3"),
+    # The RECEIVER spelling of the same read, through a frame holder rather than
+    # a local: the read is a field of `c` here too, and this is the shape the
+    # original filing named (`shape.is_flat`, `res._InjectedValues`). It is a
+    # separate case because a parameter's holder status comes from the holder
+    # fixpoint in THIS image while the constant's classification comes from the
+    # census of the OTHER one, so the two halves of the answer are established
+    # by different passes over different files.
+    ("byref_cross_module_comptime_attribute_through_a_parameter",
+     {"mod": "struct C:\n"
+             "    comptime LIMIT = 10\n"
+             "    var storage: Int\n"
+             "\n"
+             "    fn limit_of(self) -> Int:\n"
+             "        return self.LIMIT\n"
+             "\n"
+             "def limit_of(c: C) -> Int:\n"
+             "    return c.LIMIT\n",
+      "main": "from byref_xmod import C, limit_of\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var c = C()\n"
+              "    printf(\"limit=%d@@\", limit_of(c))\n"
+              "    return 0\n"}, 0, "limit=10@"),
     ("byref_cross_module_star_imported_free_function",
      {"mod": "struct P:\n"
              "    var a: Int\n"
@@ -4380,13 +4432,14 @@ ASSIGNED_TYPE_CASES = [
     # `in1` is DECLARED (`var in1: Inner`) and `__init__` stores a word.  It used
     # to be the other way round — `fn __init__(self): self.in1 = Inner()` with no
     # declaration — which made `Outer()` a zero-argument construction of a struct
-    # whose `__init__` takes no required parameter, so the body RUNS and the
-    # nested frame construction in it is refused by name (`model.init_body_stores`:
-    # the nested block is reserved per construction SITE, and a body inlined into
-    # a construction has no such site).  See
-    # `bugs/FORMAL_assigned_type_evidence_unreachable_after_zero_arg_init.md` for
-    # what that did to the evidence source itself.  The guard for the spelling
-    # this replaced is `assigned_type_refuse_a_nested_frame_constructed_in_init`.
+    # whose `__init__` takes no required parameter, so the body RUNS.  It used
+    # to refuse the nested frame construction in it by name
+    # (`model.init_body_stores`: the nested block is reserved per construction
+    # SITE, and a body inlined into a construction has no such site); the store
+    # is now dropped instead, because the field's placement already made it.
+    # The guard for the spelling this replaced is
+    # `assigned_type_nested_frame_constructed_in_init`, which is now a POSITIVE
+    # case rather than a refusal.
     ("assigned_type_nested_frame_method_call",
      "struct Inner:\n"
      "    var a: Int\n"
@@ -4606,24 +4659,31 @@ BOTH_ARCH_CASES = [
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
-    # THE SPELLING THAT IS NO LONGER ANSWERED, and it is here rather than
-    # deleted because it is the one the sweep named.  `Outer()` on a struct whose
-    # `__init__` takes no required parameter RUNS the body, and a body that
-    # constructs a FRAMED struct of this module is refused by name
-    # (`model.init_body_stores`): that nested block is reserved per construction
-    # SITE in the prologue of the function naming the call, and a body inlined
-    # into a construction has no such site.  Before that change the store never
-    # ran, so this program built and answered 128 — a placed `Inner` frame with
-    # 1, 2, 3 in it, read through `Inner.total`.
+    # THE SHAPE THAT WAS REFUSED AND IS NOW THE POSITIVE CASE, and it is here
+    # rather than deleted because it is the one the sweep named.
+    # `Outer` DECLARES NOTHING and its `__init__` assigns `self.in1 = Inner()`,
+    # which is the only shape that says a field holds a nested frame without
+    # declaring it — the assigned-type evidence source
+    # (`model.struct_field_assigned_type`) with no other route.
     #
-    # What that costs is the ASSIGNED-TYPE evidence this whole group is named
-    # for, and the two facts are the same fact: the only shape that says a field
-    # holds a nested frame without declaring it is this one.  It is written down
-    # rather than papered over in
-    # `bugs/FORMAL_assigned_type_evidence_unreachable_after_zero_arg_init.md`, and
-    # the evidence itself is still pinned, directly, by
-    # `test_struct_formal.py`'s `struct_init_field_types` cases.
-    ("assigned_type_refuse_a_nested_frame_constructed_in_init",
+    # `Outer()` on a struct whose `__init__` takes no required parameter RUNS
+    # the body, and a body that constructed a FRAMED struct was refused by name:
+    # "its block is reserved per call SITE in the prologue of the function whose
+    # body names the call, and a body inlined into a construction elsewhere has
+    # no such site". Before that refusal, the store never ran and this program
+    # built and answered 128 with 1, 2, 3 nowhere in it.
+    #
+    # The store is now DROPPED rather than refused, which is the same program:
+    # `struct_nested_frame_fields` places an `Inner` frame in the object under
+    # construction's OWN block (the evidence classifies `in1` as an `Inner`
+    # precisely because the constructor assigns one), the `CONSTRUCTION_INIT`
+    # lowering brings it up, and `Inner()` is `Inner`'s default value — so the
+    # store wrote over a slot that already held that frame's address. What it
+    # bought is the assigned-type evidence itself: with this shape refused,
+    # `struct_init_field_types` had no end-to-end program left at all. 128 is
+    # CPython's answer and is the only one that says the frame
+    # the constructor promised is the frame `o.in1` reads.
+    ("assigned_type_nested_frame_constructed_in_init",
      "struct Inner:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -4648,8 +4708,7 @@ ASSIGNED_TYPE_REFUSALS = [
      "    o.in1.a = 1\n"
      "    o.in1.b = 2\n"
      "    o.in1.c = 3\n"
-     "    return o.go()\n",
-     "refuse:a construction of a struct whose receiver is a frame", None),
+     "    return o.go()\n", 128, None),
     # The GUARD on the precedence rule, and the one most likely to be quietly
     # dropped: a DECLARATION still wins over a contradicting `__init__`
     # assignment.  `Outer` declares `var in1: Inner` and `__init__` assigns
@@ -4660,6 +4719,67 @@ ASSIGNED_TYPE_REFUSALS = [
     # constructor's right-hand side, refused by name.  So the rule is now stated
     # as a refusal instead of as a silently-correct answer, which is the stronger
     # of the two claims and the one a reader can act on.
+    # The two NEGATIVES of the drop above, and they are what make it a rule
+    # rather than an omission. Both are stores into a field the layout PLACED,
+    # and both are refused with the nested-slot refusal that has always named
+    # them — a word over a frame is a word over a frame whether the store was
+    # dropped or not, and the drop is only for the store that IS the placement.
+    ("assigned_type_a_word_over_a_placed_nested_frame_is_refused",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = 5\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    return o.go()\n",
+     "refuse:whose receiver is a frame", None),
+    # …and a construction of the right struct WITH an argument, which is the
+    # same struct and a different value: `Inner(7)` fills `a` with 7 where the
+    # placement brings the frame up at its defaults. Dropping it would answer
+    # with the defaults, so it is refused instead.
+    ("assigned_type_an_argument_over_a_placed_nested_frame_is_refused",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    fn __init__(self, x: Int):\n"
+     "        self.a = x\n"
+     "        self.b = 0\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 10 + self.b\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = Inner(7)\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    return o.go()\n",
+     "refuse:a construction of a struct whose receiver is a frame", None),
     ("assigned_type_a_declaration_still_wins",
      "struct Inner:\n"
      "    var a: Int\n"
@@ -4806,30 +4926,38 @@ ASSIGNED_TYPE_REFUSALS = [
      # `self.in1 = w` instance of it. A refusal that quoted one instance sent
      # the reader to check whether their own assignment was that one.
      "refuse:__init__ assigns it values this path cannot reduce to a type", None),
-    # THE TUPLE TARGET, which used to be pinned HERE as a refusal and is now a
-    # POSITIVE case in `ASSIGNED_TYPE_CASES` (`tuple_store_to_fields_in_init`).
-    # The refusal this row replaced was a band-aid with a measured reason — a
-    # tuple store to a field was refused by name on x86-64 and
-    # accepted-and-DROPPED on arm64 — and both halves of that reason are gone, so
-    # the band-aid had to go with them rather than rot as a sentence asserting
-    # something false about the reader's file.  Both emitters perform the store:
-    # x86-64 refused it by name until `_tuple_target_key` gave a `MemberExpr`
-    # element the same `_store_var` store a plain `self.x = v` uses, and arm64's
-    # arm is `_store_tup_slot`'s.  So what this row guards now is the OTHER
-    # half of that separation — that reading a TYPE out of a store is a separate
-    # question from performing it, and that the two must not be allowed to drift
-    # into agreeing.  With the store read as evidence the program built, ran, and
-    # answered 123 where the source says 128.
+    # THE TUPLE TARGET, which used to be pinned HERE as a refusal and is now an
+    # ANSWERED row — the second of the two in this group, and the pair is the
+    # point: `assigned_type_nested_frame_constructed_in_init` above is the same
+    # program with `self.in1 = Inner()`, this one is `self.tag, self.in1 = 5,
+    # Inner()`, and the only difference is that the statement is a TUPLE store.
     #
-    # What replaces it in the NEGATIVE direction is the one thing about this
-    # program that is still refused, and it is refused for a DIFFERENT and TRUE
-    # reason: `Inner()` in the tuple's second position is a construction of a
-    # struct whose receiver is a frame, and a body inlined at a construction site
-    # has no block reserved for it.  Before this change that program was stopped
-    # one question earlier — by the tuple band-aid — and so never reached the
-    # framed-construction refusal that is the actual blocker.  A reader sent to
-    # the store path for this program was sent to the wrong file.
-    ("byref_refuse_a_tuple_store_of_a_framed_construction",
+    # Three fixes had to land before it could be answered, and this row is what
+    # says all three happened:
+    #
+    #   * the store is PERFORMED.  A tuple store to a field was refused by name
+    #     on x86-64 (until `_tuple_target_key` gave a `MemberExpr` element the
+    #     same `_store_var` store a plain `self.x = v` uses) and
+    #     ACCEPTED-AND-DROPPED on arm64, which is how the row's own predecessor
+    #     built, ran and answered 123 where the source says 128;
+    #   * a TYPE is read out of the same shape, so
+    #     `struct_init_field_types` can see `self.in1` is an `Inner` from a
+    #     TUPLE store and not only from a single one
+    #     (`_init_statement_field_stores`, one table for both shapes);
+    #   * and the store to the PLACED nested frame is DROPPED rather than
+    #     performed, because `struct_nested_frame_fields` already put that
+    #     frame in the object's own block and the `CONSTRUCTION_INIT` lowering
+    #     brings it up — `Inner()` is `Inner`'s default value.  This is the
+    #     reason the row is answered at all: without it the framed construction
+    #     in the tuple's second position had no block reserved and refused.
+    #
+    # So the two answers are now 128 (the store to the struct the placement
+    # made, dropped) and 123 is what a reader who LOST the tuple's other
+    # element would get — `o.tag` is 5 here and the row is what says it is.
+    # `assigned_type_a_declaration_still_wins` below is the guard on the
+    # dropping half: the same store to a DIFFERENT struct of the same layout is
+    # still refused, which is the narrowness that makes dropping it safe.
+    ("tuple_store_of_a_placed_frame_in_a_constructor_body",
      "struct Inner:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -4854,12 +4982,11 @@ ASSIGNED_TYPE_REFUSALS = [
      "    o.in1.b = 2\n"
      "    o.in1.c = 3\n"
      "    return o.go()\n",
-     # `refuse_without:` and not `refuse:`, because the superseded sentence is
-     # the point: it asserted the store does not happen, and it does.
-     "refuse_without:a construction of a struct whose receiver is a frame:"
-     "a tuple store to a FIELD is not a store this path performs|"
-     "arm64 accepts it and leaves the slot as it was",
-     None),
+     # 128 is CPython's answer for this text (`self.tag` is 5 and
+     # `o.in1.total()` is 123), so a store that is performed and one that is
+     # dropped both have to land on it — which is why this row is the twin of
+     # the one above rather than a variant of it.
+     128, None),
     # The tuple target's four DECLINED shapes, one row each, because they have
     # four different reasons and "a local assignment" is the one answer none of
     # them can use.  `_init_statement_field_stores` is the one table that both
@@ -5708,6 +5835,359 @@ INIT_FIELD_TYPE_REFUSALS = [
      "refuse:is a METHOD of the nested Inner frame rather than one of its "
      "fields", None),
 ]
+# ── a ONE-WORD struct held in a HOLDER'S FIELD ──────────────────────────────
+#
+# The value `S()` in the construction group below is a WORD. When `S` has more
+# than one field the word is the ADDRESS of its frame; when it has exactly one,
+# the word IS that field. Both spellings of a struct value have to lower, and the
+# second reached a holder's FIELD through a chain the frame analysis had no
+# lowering for.
+#
+# `o.in1.a`, where `Outer.in1` is declared `Inner` and `Inner` has one field:
+# the slot for `o.in1` holds `Inner`'s value, and `Inner`'s value is its one
+# field, so the chain and `o.in1` are the SAME word and one load answers both.
+# That was refused with `model.field_access_refusal`'s `holder=True` sentence —
+# "the frame analysis and the emitter disagree about this function's receivers
+# — a compiler bug rather than a limit of the path" — and neither half was true:
+# the analysis was right that there is no nested frame, and the emitter was
+# right that the chain had no slot, because the load had not been placed.
+#
+# Filed as "the two passes disagree about `struct_is_framed`", with an offer to
+# stop the demotion that produced the one-field struct as its semantically honest
+# repair; the filing was `bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md`
+# and it is deleted, its defect fixed. The trigger is not the demotion: the same
+# refusal, byte-identical, comes out of a `struct Inner` that declares exactly ONE
+# field and no class-level default at all — which is why the second case below is
+# that spelling and not the defaulted one. What was missing was the lowering, for
+# every one-field nested field rather than for the defaulted ones.
+ONE_WORD_NESTED_CASES = [
+    # THE DOC'S REPRODUCER, verbatim, and 8 is CPython's answer: `Inner.add(2)`
+    # is 1 + 2 and `self.tag` is 5. It reads through a nested METHOD CALL, so it
+    # needs both halves of the lowering — the chain becomes the slot, and the
+    # slot becomes the receiver.
+    ("one_word_nested_demoted_width_method_call",
+     "struct Inner:\n"
+     "    var a: Int = 0\n"
+     "    var b: Int = 0\n"
+     "    var c: Int = 0\n"
+     "\n"
+     "    fn add(self, v: Int) -> Int:\n"
+     "        return self.a + v\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn go(self, v: Int) -> Int:\n"
+     "        return self.in1.add(v) + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    return o.go(2)\n", 8, None),
+    # The SAME lowering with NO class-level default anywhere — `Inner` declares
+    # one field and the others do not exist. This is the case that decides the
+    # doc's option (A) against its option (B): if the demotion were what flipped
+    # the width, this one would build and the defaulted one would not. Both were
+    # refused, identically, so there is no demotion to un-do and no layout the
+    # fix could be cementing.
+    ("one_word_nested_declared_single_field_read",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "\n"
+     "    fn add(self, v: Int) -> Int:\n"
+     "        return self.a + v\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn go(self, v: Int) -> Int:\n"
+     "        return self.in1.a + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    return o.go(2)\n", 6, None),
+    # …and the WRITE half, read back on the CALLER's own side, because the two
+    # reach different code: `o.in1.a = 1` is a store through the chain and
+    # `o.in1.a + o.tag` is a load through it. A rewrite that only handled the
+    # read would leave the store writing a word nothing reads back, and this
+    # program answers 106 rather than 6 only if the store landed.
+    ("one_word_nested_write_is_read_back",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "\n"
+     "    fn add(self, v: Int) -> Int:\n"
+     "        return self.a + v\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn go(self, v: Int) -> Int:\n"
+     "        return self.in1.a + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    return o.go(2) + o.in1.a * 100\n",
+     106, None),
+    # TWO objects, which is what makes the placement claim load-bearing. A
+    # rewrite that handed one object's slot key for the other's chain would read
+    # one object's field out of the other's storage, and the two different `tag`
+    # values (5 and 20) and two different `in1.a` values (1 and 4) make it
+    # distinguishable: `o1.go(2)` is 8 and `o2.go(3)` is 27, so 107 — under 256,
+    # because the exit status is a byte and 278 truncated to 22, which would
+    # stop distinguishing anything. Every way of reading one object through the
+    # other lands elsewhere: both through `o1` gives 89, both through `o2` 41.
+    ("one_word_nested_two_objects_do_not_alias",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "\n"
+     "    fn add(self, v: Int) -> Int:\n"
+     "        return self.a + v\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn go(self, v: Int) -> Int:\n"
+     "        return self.in1.add(v) + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o1 = Outer()\n"
+     "    var o2 = Outer()\n"
+     "    o1.tag = 5\n"
+     "    o1.in1.a = 1\n"
+     "    o2.tag = 20\n"
+     "    o2.in1.a = 4\n"
+     "    return o1.go(2) * 10 + o2.go(3)\n",
+     107, None),
+    # The four below are the chain that is the LOCAL'S OWN, where the base is a
+    # ONE-FIELD struct rather than a frame — so there is no frame slot and no
+    # `field_type_one_word_struct`; the whole chain is `formal/build.py`'s
+    # `_one_word_field_map` and `_rewrite_self_fields`, and the base is `var a =
+    # Root()` rather than a frame holder. Every one of these was refused before
+    # `_one_word_sole_field_chain` existed, with a message naming a name the
+    # source never wrote: the rewrite collapsed the FIRST level of `a.x.w.v`
+    # and left `a.v` standing, which is in no register home and no frame slot.
+    #
+    # 195 is 451 & 255 and the truncation is deliberate: `a.get()` is 41 and
+    # `a.x.w.v` is 41, and 451 does not fit an exit status, so the case would
+    # be 195 on both architectures and under CPython's own byte semantics.
+    ("one_word_nested_local_chain_is_one_local",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "struct Mid:\n"
+     "    var w: Leaf\n"
+     "struct Root:\n"
+     "    var x: Mid\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.x.w.v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    a.x.w.v = 41\n"
+     "    return a.get() + a.x.w.v * 10\n", 195, None),
+    # TWO objects, which is what makes the chain's claim a claim about storage
+    # and not about a name. `a.get()` is 4 and `b.get()` is 30, so 304 & 255 is
+    # 48; a rewrite that shared one word between them would return 4 + 4*10.
+    ("one_word_nested_local_chain_two_objects_do_not_alias",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "struct Mid:\n"
+     "    var w: Leaf\n"
+     "struct Root:\n"
+     "    var x: Mid\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.x.w.v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    var b = Root()\n"
+     "    a.x.w.v = 4\n"
+     "    b.x.w.v = 30\n"
+     "    return a.get() + b.get() * 10\n", 48, None),
+    # The WRITE half alone, because a rewrite that only handled the read would
+    # build this program and return 0: the chain is a store target here and
+    # nothing ever reads the field back, so a dropped store is invisible.
+    ("one_word_nested_local_chain_writes_and_reads_back",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "struct Mid:\n"
+     "    var w: Leaf\n"
+     "struct Root:\n"
+     "    var x: Mid\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    a.x.w.v = 7\n"
+     "    return a.x.w.v\n", 7, None),
+    # The same word spelled with the SAME NAME at every level, which is what
+    # separates matching a chain from matching a count: `a.q.q.r` has three
+    # field reads and the chain is `("q", "q")`, so a rewrite that compared
+    # lengths would leave the third one standing. It is legal Mojo and it is
+    # the shape a length-based version gets wrong.
+    ("one_word_nested_local_chain_repeats_its_field_name",
+     "struct Leaf:\n"
+     "    var r: Int\n"
+     "struct Mid:\n"
+     "    var q: Leaf\n"
+     "struct Root:\n"
+     "    var q: Mid\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    a.q.q.r = 7\n"
+     "    return a.q.q.r\n", 7, None),
+    # The BOUNDARY, and the case that says the chain is a chain and not a
+    # length: `Pair` declares TWO fields, so `x.p` is a FRAME address and
+    # `x.p.a` is a load at a frame base. Collapsing it to `x` would read `x`'s
+    # own word as an `a`, and 34 is 3*10 + 4 — the answer only if the chain
+    # stopped exactly where the identity does.
+    ("one_word_nested_chain_stops_at_a_framed_field",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "struct Box:\n"
+     "    var p: Pair\n"
+     "\n"
+     "def mk() -> Pair:\n"
+     "    var q = Pair()\n"
+     "    q.a = 3\n"
+     "    q.b = 4\n"
+     "    return q\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Box()\n"
+     "    x.p = mk()\n"
+     "    return x.p.a * 10 + x.p.b\n", 34, None),
+]
+
+# ── a DECLARED frame parameter handed a frame-RETURNING call ────────────────
+#
+# `_frame_valued_calls`'s own docstring says a parameter declared as a framed
+# struct is corroborated by "a construction, or a frame-returning call", and
+# lists `formal/types.py`'s `mask_of(IntType(w, False))` as the false refusal
+# that fixing it was worth. The returned-frame half of that was DEAD: the check
+# handed the identity-keyed `returns_frame` to `model.frame_returning_predicate`,
+# whose contract is `(callee_name, bound_name)`, so every lookup of a name in a
+# dict filed under `id(fn)` missed and the callee read as returning nothing.
+#
+# The consequence is a refusal that names the callee which WAS handing over the
+# frame — the most actionable-looking wrong refusal this family produces, because
+# the reader's next move is to go and check an export or a definition that is
+# right there.
+DECLARED_FRAME_RETURN_CASES = [
+    # The minimal shape: `peek` declares `o: Opt` (two fields, so a frame
+    # address) and its only call site hands it `mk(4)`, which returns one.
+    # 41 is `o.v * 10 + o.has` = 4*10 + 1, and CPython agrees.
+    ("declared_frame_parameter_given_a_frame_returning_call",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "def peek(o: Opt) -> Int:\n"
+     "    return o.v * 10 + o.has\n"
+     "\n"
+     "def mk(v: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return peek(mk(4))\n", 41, None),
+    # The value must be the FRAME's, not the callee's scratch. `mk(n)` writes `n`,
+    # `n+1`, `n+2` into the block it reserved and returns its address, and
+    # `peek` reads all three back as decimal DIGITS, so the answer's digits are
+    # `n`, `n+1`, `n+2` in order and every misread word rearranges them.
+    #
+    # 98 is `n = 10`, which is what the formal startup stub passes as the entry
+    # argument when the build was given no `-n` (measured: a program that prints
+    # its `n` and is built the way `run_case` builds this one prints 10). The
+    # three-digit answer is 1122 and the exit status is a BYTE, so 1122 % 256 =
+    # 98 — stated rather than hidden because the arithmetic does not fit a byte,
+    # and 98 is the only part of it a reader can check against a run. A `peek`
+    # reading the middle slot alone gives 10, the first alone 100, and the two
+    # outer slots swapped 210: none of those is 98.
+    ("declared_frame_parameter_frame_returned_through_a_call_boundary",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "def peek(o: Opt) -> Int:\n"
+     "    return o.v * 100 + o.has * 10 + o.w\n"
+     "\n"
+     "def mk(n: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = n\n"
+     "    o.has = n + 1\n"
+     "    o.w = n + 2\n"
+     "    return o\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return peek(mk(n))\n", 98, None),
+    # TWO call sites, both agreeing, one of them a frame-RETURNING call — so this
+    # is the case that would still be refused if the fix were "a call to a
+    # frame-returning function is always fine" rather than "it is one of the
+    # four shapes this analysis places". 81 is `peek(mk(8))` (8*10 + 1) and 30
+    # is `peek(o)` where `o` is a local `Opt()` carrying 3 and the zero its
+    # construction left; 111 is their sum.
+    ("declared_frame_parameter_two_agreeing_sites_one_returned",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "def peek(o: Opt) -> Int:\n"
+     "    return o.v * 10 + o.has\n"
+     "\n"
+     "def mk(v: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Opt()\n"
+     "    o.v = 3\n"
+     "    return peek(o) + peek(mk(8))\n", 111, None),
+    # …and the SAME program with one site handing a WORD, which is the guard the
+    # first two cannot be. It refuses, and the refusal names `peek(7)` — the
+    # site that actually disagrees — rather than the frame-returning call beside
+    # it. That is the property worth pinning: before the fix both sites were
+    # reported, because the returned-frame one was invisible; a fix that lifted
+    # the refusal wholesale would satisfy the two positives above and fail here.
+    ("declared_frame_parameter_a_word_beside_a_returned_call_is_refused",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "def peek(o: Opt) -> Int:\n"
+     "    return o.v * 10 + o.has\n"
+     "\n"
+     "def mk(v: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return peek(mk(5)) + peek(7)\n",
+     "refuse:passes the literal 7", None),
+]
+
 # ── wave 5 (E2): the three CONSTRUCTION shapes ─────────────────────────────
 #
 # `S()`, `S(a, b, …)` and `S(x)` are three lowerings, and until now only the
@@ -10944,8 +11424,7 @@ TYPE_APPLICATION_CASES = [
 
 # ── a `comptime` class attribute read through a receiver, against CPython ──
 #
-# `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`. A
-# `comptime NAME = …` in a class body is a compile-time value the class
+# A `comptime NAME = …` in a class body is a compile-time value the class
 # PUBLISHES: the parser keeps it in `StructDef.comptime_aliases` and out of
 # `StructDef.fields`, and `myinterpreter` resolves `obj.NAME` out of that dict.
 # The formal backend had no table for those names at all, so a read of one
@@ -11629,9 +12108,11 @@ TYPE_VALUE_NUMBER_CASES = [
 # and a struct with no evidence attached is left entirely alone.
 #
 # The last of those is the one that decides how far the fix reaches, so it is
-# here rather than in a comment: it is why a `comptime` member declared in an
-# IMPORTED module is still not substitutable, which is the remaining half of
-# `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`.
+# here rather than in a comment: a `comptime` member declared in an IMPORTED
+# module needs the census that `formal/imports.py`'s `_attach_declared_census`
+# attaches, and the two cross-module cases that exercise that are
+# `byref_cross_module_comptime_attribute_through_a_receiver` and
+# `…_through_a_parameter`.
 _CENSUS_PROBES = [
     # (name, source, expected field names, expected constant names)
     ("a comptime member with no receiver read is a constant",
@@ -11715,19 +12196,93 @@ def check_comptime_alias_census(verbose=False):
         passed += 1
         if verbose:
             print(f"  PASS  census: {name}")
-    return passed, failures
+    for detail in check_emitter_builtin_agreement():
+        failures.append(detail)
+    return passed - len([f for f in failures if f.startswith("emitter-builtins")]), \
+        [f for f in failures if not f.startswith("emitter-builtins")]
+
+
+# The names a backend compiles ITSELF, asked of `formal.model` and of nothing
+# else — and asked because three places used to have to agree about them and
+# did not have to.
+#
+# `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 measured the consequence: with
+# the model's set and an emitter's own `if name == …` chain disagreeing, a name
+# the emitter lowers is one the model does not know is a callee, so
+# `print(p)` builds, runs, exits 0 and prints the frame's own ADDRESS as a
+# decimal — 6102330608 on arm64, 13027830976 on x86-64, a different number on
+# every run. `byref_refuse_print_of_a_frame` is the end-to-end half; this is the
+# half that says the table and the dispatch cannot drift, because there is only
+# one table.
+#
+# The emitter sources are READ rather than imported-and-called, because the fact
+# under test is what each dispatch chain spells. A source that names a builtin
+# the table does not have is a name the backend compiles and the model will not
+# recognise; a table entry no emitter dispatches is the reverse, and is a dead
+# entry that would make `emitter_lowers` answer yes for a name that reaches a
+# symbol nothing defines.
+def check_emitter_builtin_agreement():
+    """Failures for `model.EMITTER_BUILTINS` disagreeing with the two emitters."""
+    m = _TYPE_VALUE_MODEL
+    import os
+    failures = []
+    here = os.path.dirname(os.path.abspath(__file__))
+    for backend in ("arm64_codegen.py", "x86_64_codegen.py"):
+        path = os.path.join(here, "formal", backend)
+        with open(path) as f:
+            src = f.read()
+        # Each `if not is_extern_call and name == "<x>":` is a name the dispatch
+        # spells itself; each is required to be in the table. `range` is in the
+        # table and spelled, so the two checks below are the same direction and
+        # the second is what says no table entry is dead.
+        for spelled in re.findall(
+                r'if not is_extern_call and name == "(\w+)":', src):
+            if spelled not in m.EMITTER_BUILTINS:
+                failures.append(
+                    f"emitter-builtins: {backend} dispatches {spelled!r} and "
+                    f"model.EMITTER_BUILTINS does not have it, so a frame "
+                    f"address handed to it would be answered by the "
+                    f"FRAME_VARIADIC path as an unbound name")
+        dispatched = set(re.findall(
+            r'if not is_extern_call and (?:name == "(\w+)"|'
+            r'm\.emitter_lowers\(name\)):', src))
+        if not dispatched:
+            failures.append(
+                f"emitter-builtins: {backend} has no builtin dispatch at all — "
+                f"the chain this reads was renamed or removed")
+        # `M.emitter_lowers(name)` gates the two `_emit_*` calls the table names,
+        # and each named method must be one the file defines, or the table would
+        # be routing a name to a method that is not there.
+        for suffix in set(m.EMITTER_BUILTINS.values()):
+            if suffix == "range_list":
+                continue        # `range` is spelled, not dispatched
+            if f"def _emit_{suffix}(" not in src:
+                failures.append(
+                    f"emitter-builtins: {backend} does not define "
+                    f"_emit_{suffix}, which EMITTER_BUILTINS names")
+    variadic = set(m.FRAME_VARIADIC_BUILTIN_CALLS)
+    if not variadic <= set(m.EMITTER_BUILTINS):
+        failures.append(
+            f"emitter-builtins: FRAME_VARIADIC_BUILTIN_CALLS has "
+            f"{sorted(variadic - set(m.EMITTER_BUILTINS))}, which no emitter "
+            f"lowers, so a frame address handed to one is answered as an "
+            f"unbound name instead of a wrong category")
+    if "print" not in variadic:
+        failures.append(
+            "emitter-builtins: `print` left FRAME_VARIADIC_BUILTIN_CALLS, which "
+            "is the refusal `byref_refuse_print_of_a_frame` measures")
+    return failures
 
 
 # The four rules `model.struct_init_field_types` is, asked of `formal.model` and
-# nothing else. `ASSIGNED_TYPE_CASES` above used to cover them end to end and
-# cannot any more: its evidence shape, `self.<f> = T()` for a `T` of this unit
-# whose receiver is a frame, is exactly the shape `model.init_body_stores`
-# refuses now that a zero-argument `S()` RUNS a zero-required `__init__` (see
-# `assigned_type_refuse_a_nested_frame_constructed_in_init` and
-# `bugs/FORMAL_assigned_type_evidence_unreachable_after_zero_arg_init.md`). A
-# rule nothing can reach is a rule nothing tests, so it is asked directly here
-# — and directly is the honest level for it: the value of the inference is what
-# it infers from a parsed class, not what an image does with the answer.
+# nothing else, and they are here as well as end to end: the evidence shape,
+# `self.<f> = T()` for a `T` of this unit whose receiver is a frame, is now
+# reachable (`assigned_type_nested_frame_constructed_in_init`), so this is no
+# longer the ONLY level at which the rule is asked. It stays asked directly
+# because directly is the honest level for it: the value of the inference is
+# what it infers from a parsed class, not what an image does with the answer,
+# and the direct probes cover the disagreeing and no-decls rows that a built
+# program cannot express.
 _ASSIGNED_TYPE_PROBES = [
     # The positive row: a nested frame the class body never declares.
     ("a nested frame is read off __init__'s construction of it",
@@ -12057,7 +12612,9 @@ def main():
                   + ASSIGNED_TYPE_CASES + ASSIGNED_TYPE_REFUSALS \
                   + BOTH_ARCH_CASES \
                   + INIT_FIELD_TYPE_CASES \
-                  + INIT_FIELD_TYPE_REFUSALS
+                  + INIT_FIELD_TYPE_REFUSALS \
+                  + ONE_WORD_NESTED_CASES \
+                  + DECLARED_FRAME_RETURN_CASES
                   + OVERLOAD_LAYOUT_CASES + OVERLOAD_REFUSALS
                   + OVERLOAD_DISPATCH_REFUSALS
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS

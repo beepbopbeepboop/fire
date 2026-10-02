@@ -2120,21 +2120,18 @@ test('formal-dataclasses', [PY, 'test_dataclasses_formal.py'],
 # `mod.NAME`: a call, a RE-EXPORTED call, a submodule chain, and a module-level
 # constant, each built for both architectures and run — plus the three shapes
 # that must stay refused, each with a message that names its own reason, and the
-# manifest that is the contract between the two. 10.3 s, 0.07 GB.
+# manifest that is the contract between the two. 18/18. 10.3 s, 0.07 GB.
 #
-# RED, and registered red rather than excused, for the same reason
-# `formal-struct` above is: a declared red is a report and an unrun red is
-# silence. 1 of 11, and both halves of it are written down in
-# bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md.
+# GREEN, and the marker is gone rather than relaxed: the one red case was a
+# bracketed call to a private name, refused as a specialization whose brackets
+# have nowhere to bind rather than as the export gap it is. The export rule is
+# asked first now for a bracketed callee whose base name the defining module
+# does not publish, so the two facts are told apart by the link line instead of
+# being conflated (`formal/build.py`'s `_bracketed_export_gap`); a bracketed
+# callee the module DOES publish keeps the brackets' own refusal, which is the
+# sentence that is true of it.
 test('formal-module-attr', [PY, 'test_formal_module_attr.py'], mem='tiny',
      deps=['preflight'],
-     expect='bugs/FORMAL_bracketed_private_name_refused_as_a_specialization.md '
-            '— 1 of 18: a bracketed call to a private name is refused as a '
-            'specialization whose brackets have nowhere to bind, rather than '
-            'as the export gap it is (a leading `_` is private). The older '
-            'doc for this case records a dangling symbol on arm64 and an '
-            'unsupported call target on x86-64; both of those are fixed, and '
-            'the two backends now agree',
      extra=['test_formal_module_attr.py', 'formal/model.py',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='mod.NAME: calls, re-exports, chains, constants and attribute '

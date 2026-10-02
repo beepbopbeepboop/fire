@@ -3162,6 +3162,88 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # `_check_holder_agreements` at the end of this function is what would
     # otherwise have said the parameter is not a holder, by name, at the call
     # site.
+    #
+    # THE PER-PARAMETER CONTRACT, published for EVERY function above the loop
+    # below rather than inside it, and that placement is the whole content of
+    # this pass's last step.
+    #
+    # The question it answers is for an IMPORTING module that cannot answer it
+    # for itself: "did your compilation make parameter 2 a frame holder, and of
+    # which struct?"  That is a fact about a compilation this process did not
+    # perform, and the refusal an importing module used to raise said so — which
+    # was true and unhelpful, because the information EXISTS, on the other side
+    # of the module boundary, in this table.
+    #
+    # Published HERE rather than derived at the manifest writer because here is
+    # where the fixpoint has just settled it, and a second derivation would be a
+    # second recognition of "is this parameter a frame holder" — the pair of
+    # recognitions that agrees until the day it does not, which is the failure
+    # mode `_frame_candidates` exists to prevent and which this must not
+    # reintroduce one function along.
+    #
+    # For EVERY function, and not for the ones the loop below happens to reach.
+    # A function this image holds no frame in was published **no contract at
+    # all** — not a contract of `Nones` — and `_export_frame_contract` spells a
+    # missing contract as `[]`, which is its "this compilation could not classify
+    # it".  So `model.resolve_frame_parameter_contract` read `position 0 >=
+    # len([])` and reported `CONTRACT_ABSENT_REASONS["not-exported"]`: a refusal
+    # naming a missing EXPORT about a function the manifest lists with an
+    # arity.  Measured, both architectures:
+    #
+    #     struct P:            # a module WITH a framed struct
+    #         var a: Int
+    #         var b: Int
+    #     def plain(x: Int, by: Int) -> Int:      # …and a function holding none
+    #         return x + by
+    #
+    # → `plain` in the manifest: `{"arity": 2, "frame_params": [], …}`, and the
+    # caller refused with "does not list it as an export".  It does.  The gap is
+    # the middle case between the two that were already answered: a module with
+    # no framed struct at all publishes `[None] * n` (see the early return
+    # above, and why its comment says why), and a function whose parameters the
+    # fixpoint classified publishes their real entries.  What was missing is a
+    # module that HAS a framed struct and a function in it that holds nothing —
+    # which is the ordinary shape of a module with one data class and some
+    # helpers, and the exact shape a free function takes when no call site of its
+    # own exists in its unit.
+    #
+    # So this is the module-level rule applied per FUNCTION, and it costs one
+    # loop: `params_of` is complete before the fixpoint runs and nothing in the
+    # loop below mutates `holders`/`hstruct`/`declared_holders`, so a function
+    # the loop skips is published from the same settled tables the loop would
+    # have read.  `bugs/FORMAL_cross_image_frame_contract_is_not_published_
+    # for_a_free_function.md` measured this and named the misattributed
+    # sentence; the refusal it turns into is `cross_image_plain_parameter_
+    # refusal`, which is true of a parameter the callee's own compilation
+    # compiled as a word.
+    #
+    # POSITIONALLY, keyed on the parameter list rather than by name, because
+    # that is what a CALL SITE has: the importing module knows the argument
+    # index and has no idea what the callee called its parameters.  The value is
+    # the SET of structs the parameter might be a holder of, for the same reason
+    # `hstruct` is a set rather than one struct — a set of one is the ordinary
+    # case and a set of two is a disagreement the consumer is entitled to see.
+    #
+    # `_fn_key(fn)` and NOT `fn.name`, for the reason the table's own docstring
+    # gives: `params_of`, `holders`, `hstruct` and `declared_holders` are all
+    # filed under `id(fn)` because each answers "what does THIS body do with its
+    # own names", and Mojo overloads make one name several bodies.  Reading them
+    # by name was the same defect at the one call site `_fn_key` was introduced
+    # to close, and it was worse than a style disagreement: a name is not a key
+    # in any of the four, so all four `.get`s returned None,
+    # `_parameter_frame_contract` iterated an empty parameter list, and every
+    # module dylib published `frame_params: []`.  `[]` is
+    # `_export_frame_contract`'s "this compilation could not classify it", so
+    # every cross-module frame hand-off was refused as `not-exported` — a
+    # refusal naming a missing EXPORT about a function the manifest lists with an
+    # arity.
+    for fn in functions:
+        fn._frame_param_contract = _parameter_frame_contract(
+            fn, params_of.get(_fn_key(fn)) or (),
+            holders.get(_fn_key(fn)) or (),
+            hstruct.get(_fn_key(fn)) or {},
+            declared_holders.get(_fn_key(fn)) or {})
+
     for fn in functions:
         hs = holders[_fn_key(fn)]
         if not hs and not _stores_a_frame_returning_call(fn,
@@ -3192,6 +3274,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # no slot", which is the disagreement this whole pass exists to keep
         # apart from "this field is nested".
         slots, nested_slots = {}, {}
+        # `[(chain, "h.a")]` — every `<holder>.<field>.<sole>` this walk found to
+        # be a ONE-word struct's own field, which the rewrite below turns into
+        # the depth-1 `<holder>.<field>` it is. Collected during the walk rather
+        # than rewritten in it, because the walk is iterating the tree the
+        # rewrite mutates, which is the thing the comment on
+        # `_rewrite_nested_method_calls` below is about.
+        one_word_nested = []
         # `@dataclass` makes `==` a FIELD compare, and this is the only place
         # a name's struct is known (the fixpoint above settled the locals, the
         # interprocedural edge settled the parameters), so the desugaring runs
@@ -3300,7 +3389,42 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             # in question and a frame diagnostic would be a
                             # diagnostic about the wrong thing.  Fall through to
                             # the value path, which either lowers the method or
-                            # refuses it with `model.value_method_refusal`.
+                            # refuses it with `model.value_method_refusal` —
+                            # UNLESS the agreed type is a ONE-FIELD struct of
+                            # this module, which is the case where the value in
+                            # the slot IS the receiver the callee expects.
+                            #
+                            # `self.in1.add(v)` with `Outer.in1: Inner` and
+                            # `Inner` one field: `Inner.add`'s `self` is that
+                            # field, the slot holds that field's value, and
+                            # `Inner_add(<load of the slot>, v)` is the call.
+                            # Before this the chain fell through to
+                            # `value_method_refusal`, which says the receiver
+                            # "is a frame slot on this path" — true, and the
+                            # reason it cannot say is that it does not know
+                            # WHICH struct, while the declared type settled
+                            # that two lines above and the refusal is raised
+                            # without being told.
+                            #
+                            # The SAME `nested_fields` entry, so
+                            # `_rewrite_nested_method_calls` does the work and
+                            # there is one rewrite for a depth-2 method
+                            # receiver rather than two. Its docstring scopes it
+                            # to a slot holding a nested FRAME; the two differ
+                            # in what the word is (an address, or a value) and
+                            # not in what the call is — the receiver is one
+                            # argument either way, and the receiver load is the
+                            # ordinary `_load_var` path in both.
+                            one = M.field_type_one_word_struct(cands, outer,
+                                                               structs_by_name)
+                            if one is None:
+                                continue
+                            sole = M.struct_sole_field_name(one)
+                            if sole is None:
+                                raise CodegenError(
+                                    M.one_word_nested_sole_field_refusal(
+                                        f"{base}.{outer}", one))
+                            nested_fields[f"{base}.{outer}"] = one
                             continue
                         # Agreed, and it names a framed struct: the slot holds a
                         # NESTED FRAME, placed in the outer object's own block
@@ -3378,8 +3502,39 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 if nested is None:
                     # Agreed, and not a frame of this unit — so the outer field
                     # is a plain value and the inner name is a member of
-                    # whatever that value is.  Not this pass's business; the
-                    # ordinary value lowering owns it.
+                    # whatever that value is.  Not this pass's business UNLESS
+                    # that value is a one-field struct of this module, which is
+                    # the one case where there IS a business: the word in the
+                    # slot is that struct's only field, so this chain is ONE
+                    # load at the OUTER field's own slot.
+                    #
+                    # `model.field_type_one_word_struct` is the recogniser, and
+                    # it is asked from the SAME `cands`/`structs_by_name` as
+                    # `_typed_nested_frame` above rather than re-derived, so
+                    # "agreed on a type" is one answer with two readers rather
+                    # than two answers that agree by luck.
+                    one = M.field_type_one_word_struct(cands, outer_field,
+                                                       structs_by_name)
+                    if one is None:
+                        # Not one word, or not a struct of this module, or the
+                        # candidates disagree: the inner name is a member of
+                        # whatever the value is, and the ordinary value
+                        # lowering owns it.
+                        continue
+                    sole = M.struct_sole_field_name(one)
+                    if sole is None or sole != node.member:
+                        # A one-field struct whose one field binds no name has
+                        # no word to call, so there is nothing this chain could
+                        # be reading — the same refusal `_sole_field_name`
+                        # raises for a receiver, and for the same reason: a
+                        # wrong name here is a wrong answer, not a failure.
+                        raise CodegenError(
+                            M.one_word_nested_sole_field_refusal(
+                                f"{base}.{outer_field}", one))
+                    # Collected, not placed: see `_one_word_nested_chains` below
+                    # for why the answer is a REWRITE rather than a `_frame_slots`
+                    # entry keyed by the chain.
+                    one_word_nested.append((chain, f"{base}.{outer_field}"))
                     continue
                 # A nested frame read in a value position: two loads, and the
                 # OUTER one is already in `_frame_slots` (the depth-1 MemberExpr
@@ -3495,48 +3650,6 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         fn._frame_holders = hs
         fn._frame_nested_slots = nested_slots
         fn._frame_slots = slots
-        # THE PER-PARAMETER CONTRACT, and it is the answer to a question an
-        # IMPORTING module cannot answer for itself: "did your compilation
-        # make parameter 2 a frame holder, and of which struct?"  That is a
-        # fact about a compilation this process did not perform, and the
-        # refusal an importing module used to raise said so — which was true
-        # and unhelpful, because the information EXISTS, on the other side of
-        # the module boundary, in this table.
-        #
-        # Published here rather than derived at the manifest writer because
-        # here is where the fixpoint has just settled it, and a second
-        # derivation would be a second recognition of "is this parameter a
-        # frame holder" — the pair of recognitions that agrees until the day
-        # it does not, which is the failure mode `_frame_candidates` exists to
-        # prevent and which this must not reintroduce one function along.
-        #
-        # POSITIONALLY, keyed on the parameter list rather than by name, because
-        # that is what a CALL SITE has: the importing module knows the argument
-        # index and has no idea what the callee called its parameters. The
-        # value is the SET of structs the parameter might be a holder of, for
-        # the same reason `hstruct` is a set rather than one struct — a set of
-        # one is the ordinary case and a set of two is a disagreement the
-        # consumer is entitled to see.
-        # `_fn_key(fn)` on all four reads, and that is the whole fix: every one
-        # of these tables is FILLED by `_fn_key` (`params_of`, `holders`,
-        # `hstruct`, `declared_holders` are all `{_fn_key(fn): …}`), so reading
-        # them by `fn.name` returned `None` for every function — `_fn_key` is
-        # `id(fn)`, so a name is a key only by accident.  `params` then arrived as
-        # `()`, `_parameter_frame_contract` iterates `params`, and the published
-        # contract was `[]` for EVERY export of EVERY module.  A consumer
-        # (`model.resolve_frame_parameter_contract`) reads that positionally, so
-        # `position >= len(contract)` was `0 >= 0` and it answered
-        # "the manifest does not list it as an export" — a statement about the
-        # manifest that is false, because the manifest lists the export and
-        # publishes a contract; the contract is empty.  Every cross-module frame
-        # hand-off on this path was refused by that sentence.  The regression is
-        # the four `byref_*` cases in `test_formal_run.py`, which assert
-        # EXECUTION on both architectures rather than "it builds".
-        fn._frame_param_contract = _parameter_frame_contract(
-            fn, params_of.get(_fn_key(fn)) or (),
-            holders.get(_fn_key(fn)) or (),
-            (hstruct.get(_fn_key(fn)) or {}),
-            (declared_holders.get(_fn_key(fn)) or {}))
         # `by_name` itself, published, and the reason is a CONSTRUCTION rather
         # than a field read: a copy construction `S(x)` needs to know what `x`
         # IS, and the holder analysis is the only thing in the compiler that
@@ -3556,6 +3669,35 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` §1.
         fn._one_word_candidates = dict(
             one_word.get(_fn_key(fn)) or {})
+        # A ONE-word struct held in a HOLDER'S FIELD, which is a depth-2 chain
+        # that is really a depth-1 one, and the rewrite is what says so.
+        #
+        # `o.in1.a` where `Outer.in1` is declared `Inner` and `Inner` has one
+        # field: the slot for `o.in1` HOLDS `Inner`'s value, and `Inner`'s
+        # value IS its one field, so the chain and `o.in1` are the same word.
+        # Rewriting it to the depth-1 spelling is what puts it in `_frame_slots`
+        # under a key the emitters can load: `_emit_frame_load` derives the
+        # holder as `name.rsplit(".", 1)[0]`, so a `_frame_slots` entry keyed by
+        # the CHAIN would ask it for a frame load from a name (`o.in1`) that has
+        # no home of its own — a table entry that satisfies the lookup and then
+        # faults, which is the one outcome this whole pass exists to prevent.
+        #
+        # The alternative was to place the chain in `_frame_slots` with the
+        # OUTER field's slot, which is the same one load with a key shape the
+        # emitters do not understand. Measured, and it is the crash this
+        # replaces: the program builds and dies with SIGSEGV, because the
+        # access is correct and the holder it is derived from is not.
+        #
+        # So it is a REWRITE, and it is the same rewrite `_one_word_field_map`
+        # makes for a receiver — `x.f` becomes `x` — with the frame slot in
+        # place of the receiver. One rule, two bases: `self` (a method of the
+        # struct), a local built from its constructor, a parameter declared as a
+        # one-field struct, and now a holder's field declared as one. All four
+        # rewrite the access rather than teaching the emitters a second shape,
+        # because a second shape is a second thing that can disagree about where
+        # a word lives.
+        if one_word_nested:
+            _rewrite_one_word_nested_fields(fn, one_word_nested)
         # LAST for this function, and after the walk above rather than inside
         # it: the rewrite MUTATES the tree the walk is iterating, and a walk
         # that mutates what it is walking is how a pass ends up seeing a node
@@ -3577,9 +3719,41 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # A parameter's being a frame holder is a fact about the whole image, and
     # the call site that disagrees with it can be in a function the loop above
     # skipped — see `_check_holder_agreements` for the program that measures it.
+    #
+    # `by_name_returns_frame` and NOT the identity-keyed `returns_frame`, and
+    # that is a fix rather than a style choice: the question this check asks at
+    # a call site is "does a CALL to this NAME hand back a frame", which is the
+    # JOIN over that name's definitions, and `_frame_valued_calls` hands the
+    # table straight to `model.frame_returning_predicate`, whose contract is
+    # `(callee_name, bound_name)`. Handed the identity-keyed table it looks up
+    # a NAME in a dict filed under `id(fn)` and finds nothing, so the
+    # returned-frame case of that function was DEAD: every call to a
+    # frame-returning function read as "this site hands over something this
+    # analysis cannot place", and a parameter declared as that struct was
+    # refused for disagreeing with every call site when every one of them was
+    # handing over exactly the frame the declaration promised.
+    #
+    # Measured, both architectures, before and after:
+    #
+    #     struct Opt:  var v: Int;  var has: Int          # two fields → a frame
+    #     struct Box:  var inner: Opt
+    #         def set(out self, o: Opt): self.inner = o
+    #     def mk(v: Int) -> Opt:                          # RETURNS a frame
+    #         var o = Opt();  o.v = v;  o.has = 1;  return o
+    #     def main(n):
+    #         var b = Box();  b.set(mk(41))
+    #         printf("v=%d h=%d", b.inner.v, b.inner.has)
+    #
+    # was "Box_set() declares 'o' as Opt … every call site in this image hands
+    # it something else: Box_set(b, mk(41)) passes a call to 'mk'" — refusing
+    # the very shape `_frame_valued_calls`'s own docstring says it recognises,
+    # and naming the callee that was handing over the frame. Now builds and
+    # prints `v=41 h=1`. The sibling call five lines below already passed the
+    # by-name table, which is what is why this one was the odd one out rather
+    # than why both were wrong.
     _check_holder_agreements(functions, holders, hstruct, params_of,
                              declared_holders, structs_by_name,
-                             _name_defs, returns_frame)
+                             _name_defs, by_name_returns_frame)
     _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
                             by_name_returns_frame)
     # …and the RECEIVER half of the same question, which the check above cannot
@@ -4102,6 +4276,78 @@ def check_value_position_method_reads(functions, structs) -> None:
                 fn.name, node.obj.name, node.member, owner))
 
 
+
+
+def _rewrite_one_word_nested_fields(fn, chains) -> None:
+    """`o.in1.a` → `o.in1`, for every `(chain, "h.a")` the walk collected.
+
+    The frame-slot base of the rewrite `formal/build.py`'s `_one_word_field_map`
+    makes for a receiver, and the reason it is a REWRITE rather than a
+    `_frame_slots` entry is a measurement rather than a preference.
+
+    `_frame_slots` is keyed `"<holder>.<field>"` and its two readers both
+    derive the holder by `rsplit(".", 1)[0]` — arm64's `_emit_frame_load` and
+    `_emit_frame_store`, and x86-64's pair. A key of `o.in1.a` therefore
+    satisfies the lookup and then asks for a frame load whose holder is
+    `o.in1`, a name with no register home and no slot of its own, and the
+    program builds and dies with SIGSEGV. Keyed by the OUTER field instead
+    (`o.in1` at `o`'s `in1` slot) is the same one load under a key both readers
+    understand — because the rewrite's whole claim is that the two spellings
+    ARE the same word, so the depth-1 key is not an approximation of the
+    depth-2 one, it is it.
+
+    `chains` is the walk's own list rather than a re-derivation: it was built
+    from the same `cands`/`structs_by_name` and the same
+    `model.field_type_one_word_struct` answer as the rest of that walk, so
+    re-deriving here would be a second recognition of "is this field a one-word
+    struct's own field" that agrees with the first until the day it does not.
+
+    Matched by SPELLING the whole chain, not by rewriting any depth-2
+    MemberExpr whose outer field looks right: `outer.inner` where `outer`'s
+    declared type is a one-word struct is the same access only when `inner` is
+    that struct's SOLE field, and the walk is what established that. A chain it
+    did not name is either a value read (`outer` holds an `Int32`) or a nested
+    frame read (`outer` holds a framed struct), both of which already lower
+    through the tables this does not touch.
+    """
+    spellings = {chain: outer for chain, outer in chains}
+    if not spellings:
+        return
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        for name in node.__dataclass_fields__:
+            if name in ("line", "col"):
+                continue
+            node.__setattr__(name, _rewrite_one_word_nested_field(
+                getattr(node, name), spellings))
+
+
+def _rewrite_one_word_nested_field(node, spellings):
+    """`_rewrite_one_word_nested_fields` for one subtree, returning the
+    replacement for `node` itself.
+
+    The recursion has to be able to REPLACE the node it is handed, not only its
+    children, because `o.in1.a` is the top of the expression at the places this
+    is reached — `return o.in1.a`, `o.in1.a + 1`. A rewrite that could only
+    rewrite in place would handle `o.in1.a + 1` and silently leave `return
+    o.in1.a` standing, which is the half that then reaches the emitter with no
+    slot and is refused by name.
+    """
+    if isinstance(node, list):
+        for i, x in enumerate(node):
+            node[i] = _rewrite_one_word_nested_field(x, spellings)
+        return node
+    if isinstance(node, F.MemberExpr):
+        chain = _member_chain(node)
+        outer = spellings.get(chain)
+        if outer is not None:
+            root, member = outer.split(".", 1)
+            return F.MemberExpr(obj=F.IdentExpr(name=root), member=member)
+    for name in getattr(node, "__dataclass_fields__", {}):
+        if name in ("line", "col"):
+            continue
+        setattr(node, name,
+                _rewrite_one_word_nested_field(getattr(node, name), spellings))
+    return node
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:
     """`h.a.m(x)` → `A_m(h.a, x)`, for the fields `nested_fields` names.
 
@@ -6104,8 +6350,41 @@ def _refuse_holder_use(fn, node, holders, by_name, why, reason=None) -> None:
         f"what is still open about it")
 
 
+def _one_word_sole_field_chain(st, structs_by_name: dict) -> tuple:
+    """`("inner", "v")` for a one-word struct whose field is another's, etc.
+
+    The chain of field names a word is stored under, as far as the DECLARED
+    types keep saying the same thing.  `struct OneWord` with sole field `v: Int`
+    is the word `v`; `struct Box` with sole field `inner: OneWord` is that same
+    word, because the receiver of a one-field struct IS its field and the
+    receiver of `OneWord` is `v` — so `b.inner.v` and `b` and `b.inner` are
+    three spellings of ONE local.  The walk stops at the first field whose
+    declared type is not a one-field struct of this module, because that is
+    where the identity ends: a two-field struct in the slot is a FRAME, and
+    `b.inner.v` is then a load at a frame base and not a spelling of `b` at
+    all.  That stopping point is load-bearing, not a limitation — see
+    `_rewrite_self_fields`, whose whole claim is that the chain it is given is
+    the whole chain.
+
+    Read off the DECLARATION (`model.struct_field_type`) rather than inferred
+    from a binding, for the reason `field_type_one_word_struct` gives: the
+    field's own type is named by the class body, so there is no binding to
+    find and no second recognition of the fact to disagree with this one.  The
+    `seen` set is a cycle guard, and it is needed rather than defensive —
+    `struct A: var a: A` is a type that parses.
+    """
+    chain, seen = [], set()
+    while st is not None and st.name not in seen and M.struct_is_one_field(st):
+        seen.add(st.name)
+        field = _sole_field_name(st)
+        chain.append(field)
+        base = M.struct_field_type(st, field, structs_by_name)[0]
+        st = structs_by_name.get(base) if base else None
+    return tuple(chain)
+
+
 def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
-    """{local name: its field name} for locals holding a one-word struct.
+    """{local name: the SOLE-FIELD CHAIN it holds} for one-word-struct locals.
 
     Found from the binding, not inferred: a local initialised from a one-word
     struct's constructor holds that struct's only field, and nothing else on
@@ -6119,6 +6398,13 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
     is the struct the caller's own `self` rewrite below already handles — so
     the two never both fire for one name and cannot disagree about which field
     a name means.
+
+    The value is a CHAIN rather than one field name because the identity does
+    not stop at one level: `_one_word_sole_field_chain` has the argument, and a
+    map that recorded only the first name made `_rewrite_self_fields` rewrite
+    the first level of `b.inner.v` and leave `b.v` standing — a name that is in
+    no register home and no frame slot, so the emitter refused a field access
+    the source never wrote.
     """
     mapping = {}
     for node in M.iter_nodes(fn.body):
@@ -6134,12 +6420,12 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
             continue
         st = structs_by_name.get(value.func.name)
         if st is not None and M.struct_is_one_field(st):
-            mapping[target] = _sole_field_name(st)
+            mapping[target] = _one_word_sole_field_chain(st, structs_by_name)
     for pname, pst in M.parameter_declared_structs(
             fn, structs_by_name, owner).items():
         if pname in mapping or not M.struct_is_one_field(pst):
             continue
-        mapping[pname] = _sole_field_name(pst)
+        mapping[pname] = _one_word_sole_field_chain(pst, structs_by_name)
     return mapping
 
 
@@ -6302,7 +6588,8 @@ def _apply_receiver_writeback(node, writebacks: dict) -> None:
 
 
 def _rewrite_self_fields(node, mapping: dict):
-    """`x.f` -> `x` where `mapping[x] == f`, returning any replacement node.
+    """`x.f[.g…]` -> `x` when every field read is a sole field, replacing the
+    node itself.
 
     This is what makes a one-word struct's field and its receiver the SAME
     storage. Without it the two are separate: `c.n = x` wrote a `c.n` slot
@@ -6310,17 +6597,49 @@ def _rewrite_self_fields(node, mapping: dict):
     zero and every accessor returned a constant — a program that builds, runs,
     and computes the wrong answer. Rewriting the access is what keeps the
     field and the value identical, rather than leaving the codegen to
-    reconcile two spellings of one word."""
+    reconcile two spellings of one word.
+
+    The WHOLE chain is matched, and the node is REPLACED, which is the part
+    that was wrong before. The previous version recursed into the children
+    first and only then asked whether the node it now held was one of the
+    mapped shapes, so for `b.inner.v` with `mapping[b] == ("inner", "v")` it
+    rewrote the inner `b.inner` and returned `b.v` — one level short, a name
+    in no register home and no frame slot, refused as a field access through a
+    base the source never spelled. Matched on the whole chain, `b.inner.v` is
+    the local `b` and the program builds. `_rewrite_one_word_nested_field` a
+    few hundred lines below is the frame-slot half of this same rewrite and
+    has always matched the whole chain, for the same reason.
+
+    A chain LONGER than the map's is not rewritten at this level, and that is
+    not a gap: `_one_word_sole_field_chain` stops where the identity stops, so
+    a longer chain reads through a field whose declared type is a multi-field
+    struct — a frame — and belongs to the nested-frame path rather than to
+    this one.
+    """
     if isinstance(node, list):
         for i, x in enumerate(node):
             node[i] = _rewrite_self_fields(x, mapping)
         return node
-    if (isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr)
-            and mapping.get(node.obj.name) == node.member):
-        return F.IdentExpr(name=node.obj.name)
+    if isinstance(node, F.MemberExpr):
+        root, _, path = _member_chain(node).partition(".")
+        sole = mapping.get(root)
+        if sole and _is_sole_field_prefix(path, sole):
+            return F.IdentExpr(name=root)
     for name in getattr(node, "__dataclass_fields__", {}):
         setattr(node, name, _rewrite_self_fields(getattr(node, name), mapping))
     return node
+
+
+def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
+    """True when `path` (`"inner.v"`) is the first steps of the chain.
+
+    The comparison is on the SPELLING and not on the length, so a chain that
+    diverges at its second level is not a prefix: `b.inner.pad` against
+    `("inner", "v")` names a field the chain never reached, and rewriting it
+    would read `b`'s word as though it were that field's storage.
+    """
+    fields = path.split(".")
+    return bool(fields) and fields == list(sole[:len(fields)])
 
 
 def _constant_read_sites(fn, structs_by_name: dict, owner=None,
@@ -7705,6 +8024,42 @@ def _link_line_publishes(link_line, name: str) -> bool:
     return name in (by_name or {})
 
 
+def _bracketed_export_gap(base_name: str, fn_name: str, link_line):
+    """The EXPORT refusal for `base_name[…](…)`, or None when the export rule
+    is not what stops it.
+
+    `f[x](y)` has two independent reasons to have no callee on this path, and
+    the bracketed scan can only ask one of them. It asked the BRACKETS
+    (`model.specialization_call_refusal`) for every bracketed callee this unit
+    does not compile, which is right for `plain[3](5)` — `plain` is exported
+    perfectly well; the brackets have nowhere to bind — and wrong for
+    `priv._helper[1](2)`, where the name is private and there is no symbol at
+    all. The second case used to be reported with a message about generics and
+    monomorphization, and the reader sent to look for a signature had none to
+    find: the fact is `doc/ABI.md`'s export rule, and it is checkable.
+
+    So the export rule is asked FIRST here, and the two facts are told apart by
+    the link line rather than by a guess: the base name is an imported one
+    (`model.module_symbol`, `site == "imported"`), and the library built for
+    the module it came from does not publish it. A base name the module DOES
+    publish returns None and keeps the brackets' own refusal, which is the
+    sentence that is true of it.
+
+    Both halves are refused rather than assumed. `link_line` empty (a caller
+    that has not resolved imports) or a module with no readable export table
+    yields an empty `published`, and an empty table is not evidence that
+    anything is missing from it — so it returns None and the old verdict stands.
+    """
+    sym = M.module_symbol(base_name)
+    if sym is None or getattr(sym, "site", None) != "imported":
+        return None
+    module = getattr(sym, "module", None)
+    if not module:
+        return None
+    published = _module_published_names(module, link_line)
+    if not published or base_name in published:
+        return None
+    return M.imported_callee_refusal(base_name, sym, fn_name)
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
@@ -8178,7 +8533,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         M.member_chain_text(sub.obj), sub.obj.member,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
                         if _ambiguous_method_owners(sub.obj, structs_by_name)
-                        else M.specialization_call_refusal(base_name))
+                        else (_bracketed_export_gap(
+                            base_name, fn.name, link_line)
+                            or M.specialization_call_refusal(base_name)))
                 elif M.debug_assert_callee(sub):
                     # The FOURTH bracketed callee this tree has a better answer
                     # for, and it is a different KIND of answer from the three
@@ -9238,12 +9595,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                                  method_owners.get(fn.name),
                                  _method_receiver_bases(fn))
         # A method's `self` IS the field; a local initialised from a one-word
-        # constructor holds that struct's only field directly.
+        # constructor holds that struct's only field directly.  The chain, not
+        # the first name, for the reason `_one_word_sole_field_chain` gives.
         mapping = _one_word_field_map(fn, structs_by_name,
                                       method_owners.get(fn.name))
         st = method_owners.get(fn.name)
         if st is not None and M.struct_is_one_field(st):
-            mapping["self"] = _sole_field_name(st)
+            mapping["self"] = _one_word_sole_field_chain(st, structs_by_name)
         _rewrite_self_fields(fn.body, mapping)
         # A class-level CONSTANT is not part of any value, so it is not
         # lowered as a field: it is materialized where it is read. Without

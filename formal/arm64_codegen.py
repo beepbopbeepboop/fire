@@ -6249,15 +6249,25 @@ dylib_exports: list = None, globals_base: int = None,
             raise CodegenError(
                 f"unsupported call target on the formal arm64 path "
                 f"(got {type(e.func).__name__})")
+        # The three builtins this emitter intercepts by BARE NAME, read out of
+        # `model.EMITTER_BUILTINS` rather than spelled here, for the reason that
+        # table's comment gives: the set of names a backend compiles itself is a
+        # fact three places have to agree on — this chain, the x86-64 one, and
+        # `model.FRAME_VARIADIC_BUILTIN_CALLS` — and three hand-written copies of
+        # it are three chances for a caller to be told a callee is compiled when
+        # it is not, or the reverse. `_emit_range_list` takes the ARGS LIST and
+        # the other two take the CallExpr; that asymmetry is the emitter's and is
+        # why the table names the method rather than dispatching it.
         if not is_extern_call and name == "range":
             self._emit_range_list(list(e.args))
             return
-        if not is_extern_call and name == "len":
-            self._emit_len(e)
-            return
-        if not is_extern_call and name == "print":
-            self._emit_print(e)
-            return
+        if not is_extern_call and M.emitter_lowers(name):
+            if name == "len":
+                self._emit_len(e)
+                return
+            if name == "print":
+                self._emit_print(e)
+                return
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return

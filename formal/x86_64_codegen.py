@@ -6019,12 +6019,19 @@ class X86_64Codegen:
             # `[i for i in range(n)]` and `for i in list(range(n))` work.
             self._emit_range_list(list(e.args))
             return
-        if not is_extern_call and name == "len":
-            self._emit_len(e)
-            return
-        if not is_extern_call and name == "print":
-            self._emit_print(e)
-            return
+        # …and the other two, read out of `model.EMITTER_BUILTINS` rather than
+        # spelled here: see arm64's chain for why, and `range` above is already
+        # spelled rather than dispatched because its emitter takes the args
+        # list. `M` is the model import under the same name as on arm64 — the
+        # two files are the same function in two architectures, and a dispatch
+        # that can only be read on one of them is a dispatch that will drift.
+        if not is_extern_call and M.emitter_lowers(name):
+            if name == "len":
+                self._emit_len(e)
+                return
+            if name == "print":
+                self._emit_print(e)
+                return
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return

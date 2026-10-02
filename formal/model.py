@@ -7168,6 +7168,51 @@ BUILTIN_FUNCTIONS = {
     "debug_assert": "debug_assert",
 }
 
+# The builtins each backend's CALL EMITTER intercepts by bare name and lowers
+# itself, rather than leaving to a module symbol. This is the table
+# `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 says would "retire" the
+# duplication: "a single published `model.EMITTER_BUILTINS` that both emitters'
+# `if name == …` chains and `FRAME_VARIADIC_BUILTIN_CALLS` read would make the
+# three agree by construction".
+#
+# They did not agree by construction before, and the disagreement is not
+# hypothetical — it is a refusal that names a callee wrongly. A name here is
+# lowered by the backend, so handing it a FRAME ADDRESS is a wrong-category
+# argument rather than an unbound name, and `FRAME_VARIADIC_BUILTIN_CALLS` is
+# the set that says so. A name in ONE emitter's `if` chain and not in that set
+# is a callee the emitter compiles and the model does not know about, which is
+# exactly the shape that produced `print(p)` building, running, exiting 0 and
+# printing the frame's own address as a decimal (6102330608 on arm64,
+# 13027830976 on x86-64, a different number on every run).
+#
+# `{name: emitter method suffix}`, because both emitters name the methods
+# identically (`_emit_len`, `_emit_print`, …) and the one that does not is a
+# dispatch this table cannot express. `range` is spelled `_emit_range_list`
+# because that emitter takes the ARGS LIST rather than the CallExpr, which is
+# the same asymmetry `_emit_len` and `_emit_print` do not have; it is a
+# property of the emitter, not of the builtin, so it lives here rather than in
+# a caller that has to know it.
+#
+# `open` is NOT here: it is in `BUILTIN_FUNCTIONS` as `file_open`, because
+# `open` is also a C library entry point and the two spellings are genuinely
+# different facts. A reader asking "does the backend compile this" wants the
+# BUILTIN half, and `BUILTIN_FUNCTIONS` plus this table between them are the
+# whole answer.
+EMITTER_BUILTINS = {
+    "range": "range_list",
+    "len": "len",
+    "print": "print",
+}
+
+
+def emitter_lowers(name: str) -> bool:
+    """True when a backend's call emitter lowers a call to `name` ITSELF.
+
+    The one question `FRAME_VARIADIC_BUILTIN_CALLS` and the two emitters' `if
+    name == …` chains all have to answer the same way, asked here once.
+    """
+    return name in EMITTER_BUILTINS
+
 
 def builtin_function(name: str):
     """How a call to the bare name `name` lowers, or None if it is not one of
@@ -7555,13 +7600,20 @@ FRAME_C_VALUE_CALLS = {
 #
 # ONE name, and deliberately a set rather than a general rule: a builtin the
 # backend does not compile must NOT be answered from here, and the only honest
-# test for "the backend compiles this" today is a name someone wrote down after
-# measuring it.  Every emitter has its own hard-coded branch (`arm64_codegen.py`
-# and `x86_64_codegen.py` each spell `if name == "print"`), so a table here is
-# the second place that fact lives — see
-# `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 for what would retire it.
+# test for "the backend compiles this" is no longer a name someone wrote down
+# after measuring it — it is `EMITTER_BUILTINS` above, which both emitters' own
+# `if name == …` chains read, so the three places that have to agree now do.
+#
+# DERIVED from that table rather than written out, because a set written out
+# beside the table it is a subset of is the second place the fact lives wearing
+# a third name. It is also NARROWER than `EMITTER_BUILTINS` on purpose: `len` and
+# `range` take a container and an integer, so handing one a frame address is a
+# LAYOUT question with its own refusal, while what is left here is the set whose
+# members FORMAT whatever they are handed. `emitter_lowers` is the wider
+# question; this is the variadic-over-conversions half of it.
 FRAME_VARIADIC_BUILTIN_CALLS = {
-    "print",
+    name for name in EMITTER_BUILTINS
+    if name in ("print",)
 }
 
 
@@ -12221,11 +12273,18 @@ def _split_declaration(struct_def):
 # field: a one-word struct whose method reads `self.LIMIT` where `comptime LIMIT = 10`
 # measures ONE field, reads the slot nothing ever writes, and prints 0 where the
 # source says 10 (both architectures). See `struct_class_constants` for where the
-# names are classified, and `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`.
+# names are classified, and `formal/imports.py`'s `_attach_declared_census` for
+# how an IMPORTED module's classes get the census this classification reads.
 #
 # ONE reader: the dict is wanted by the class-constant split, the substitution's
 # site census and a diagnostic, and three `getattr(struct_def, …) or {}` spellings
 # of the same default are three places to keep in step.
+#
+# It was briefly DEFINED TWICE in this tree — this definition and a second one
+# carrying only a one-line docstring, added by `work/formal3-2-r2-r2` at the point
+# the same merge had to resolve a conflict here. The bodies were identical, so
+# Python quietly used the later one and the earlier was unreachable; the pair is
+# gone rather than left for the next reader to find.
 def struct_comptime_aliases(struct_def) -> dict:
     """The struct's `comptime NAME = …` bindings: `{name: value node}`.
 
@@ -12251,8 +12310,8 @@ def struct_comptime_aliases(struct_def) -> dict:
     refused with a sentence about a run-time `AttributeError` in a program that
     does not raise — `res._InjectedValues` in `std/iter/__init__.mojo`, declared
     fourteen lines above the read. That is
-    `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`, and this
-    function is the whole of the fix's first half.
+    `formal/hostmods/ast.mojo`-style module docstrings aside, this function is
+    the whole of the fix's first half.
 
     NOT the whole of it: whether a read can be ANSWERED is still
     `class_constant_word`'s question, asked at the read. A binding's value may be
@@ -13985,6 +14044,102 @@ def frame_field_type_candidates(structs, name, decls: dict):
     return (st, (False, rows))
 
 
+def field_type_one_word_struct(structs, name, decls: dict):
+    """The ONE-FIELD struct of this module every candidate agrees `name` holds.
+
+    The third answer `frame_field_type_candidates` does not distinguish, and
+    the only one of the three that is a LOWERING rather than a verdict.
+
+    That function returns `None` for "agreed, and not a frame of this unit",
+    which is right as a verdict — a frame slot holds one word and there is no
+    second layout to read through — but it is three different facts wearing one
+    answer:
+
+      * the agreed type is a scalar or a host type (`Int32`, a `List`, a
+        pointer).  There is nothing to read a field out of.
+      * the agreed type names NO struct of this module.  Same.
+      * **the agreed type names a struct of this module whose receiver is its
+        one field** (`struct_is_one_field`).  The word in the slot IS that
+        field's value, so `<holder>.<name>.<sole field>` is ONE load at
+        `<holder>.<name>`'s own slot and not a second layout at all.
+
+    Only the third has a lowering, and without this the depth-2 branch in
+    `formal/build.py` declined it as "agreed, and not a frame" and the emitter
+    then reported `field_access_refusal`'s `holder=True` sentence — "the frame
+    analysis and the emitter disagree about this function's receivers — a
+    compiler bug rather than a limit of the path".  Neither half was true. The
+    frame analysis was RIGHT (there is no nested frame) and the emitter was
+    right that the access had no slot; what was missing was the one load.
+
+    This is the same scalar replacement `formal/build.py`'s `_one_word_field_map`
+    computes for a receiver (`self`, a local built from a constructor, a
+    parameter declared as a one-field struct) — that function rewrites `x.f` to
+    `x`, and this is the frame-slot spelling of the identical fact. Reading it
+    off the DECLARED type rather than off a binding is what makes it available
+    here: the field's slot is placed by the holder's layout, and the struct is
+    named by the class body, so there is no binding to find.
+
+    **Why the DEMOTION that produced the one-field struct is not in question.**
+    This was filed as "the two passes disagree about `struct_is_framed`", with
+    an offer to stop the demotion (its option B) as the semantically honest
+    repair; the filing was `bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md`
+    and it is deleted, its defect fixed and measured. Measured here: the same
+    refusal, byte-identical, with a `struct Inner` that declares exactly ONE
+    field and no class-level default at all — so the demotion is not the
+    trigger and there is no layout to un-cement. What was missing was the
+    lowering, and it was missing for every one-field nested field rather than
+    for the defaulted ones. Two of three fields defaulted builds; one does not,
+    and the difference is the width and nothing else. The case that pins it is
+    `test_formal_run.py`'s `one_word_nested_declared_single_field_read`, beside
+    the defaulted `one_word_nested_demoted_width_method_call`.
+
+    Returns None for every other case, and `disagree` is not spelled here: a
+    caller that gets None cannot tell "not one word" from "disagree", and both
+    are answers to the same question ("is there one load for this"), which is
+    the question the caller asked. A caller that needs the distinction asks
+    `field_type_is_value` for it, exactly as `frame_field_type_candidates`'s own
+    docstring says its callers should.
+    """
+    rows, bases, have = field_type_rows(structs, name, decls), set(), 0
+    for _sn, base, _ann, _why, _ev in rows:
+        if base is not None:
+            bases.add(base)
+            have += 1
+    if not rows or have != len(rows) or len(bases) > 1:
+        return None
+    st = structs_declared(bases.pop(), decls)
+    if st is None or not struct_is_one_field(st):
+        return None
+    return st
+
+
+def one_word_nested_sole_field_refusal(slot: str, st) -> str:
+    """`slot.f` where `f` is not the one field of the one-word struct in `slot`.
+
+    The third of the three refusals this lowering can raise, and the only one
+    about a name rather than about a layout. `field_type_one_word_struct`
+    agreed the slot holds a one-field struct of this module; this is the case
+    where the field being read through it is not that struct's one field, so
+    there is no word to read and no second layout to read it from.
+
+    The alternative answers were measured and are all worse. Continuing to the
+    value path reaches the emitter with no slot for the chain, and the emitter
+    reports `field_access_refusal`'s `holder=True` sentence — "the frame
+    analysis and the emitter disagree about this function's receivers — a
+    compiler bug rather than a limit of the path" — which is false of both
+    halves: the analysis placed the chain correctly and the emitter asked for
+    a load that does not exist because the name does not. And guessing the
+    field's slot index would be the wrong answer rather than a failure, which
+    is the outcome every refusal in this family exists to prevent.
+    """
+    return (f"{slot} is a {st.name} frame slot and every binding of it agrees "
+            f"its declared type is a {st.name}, which has exactly one field "
+            f"and whose receiver IS that field — so {slot} holds the value of "
+            f"that one field and there is no second layout to read anything "
+            f"else out of. Read the field you mean, or give {st.name} a field "
+            f"for it")
+
+
 def field_type_is_value(structs, name, decls: dict) -> bool:
     """True when every candidate AGREES the field is not a frame of this unit.
 
@@ -14845,6 +15000,12 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
     receivers = struct_receivers(struct_def)
     framed_names = {name for name, s in (decls or {}).items()
                     if struct_is_framed(s)}
+    # The fields this struct's own layout ALREADY brings up as a nested frame,
+    # and the store that would be redundant against one — the drop this walk
+    # does, and the thing its third refusal arm was standing in front of.
+    placed = {field: child.name
+              for field, _slot, child
+              in struct_nested_frame_fields(struct_def, decls)}
     stores = []
     for stmt in (getattr(method, "body", None) or []):
         if isinstance(stmt, F.PassStmt):
@@ -14880,6 +15041,41 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
                 else _init_statement_spelling(stmt)))
         for target, raw in pairs:
             field = target.member
+            if field in placed and _init_store_is_redundant(raw,
+                                                            placed[field]):
+                # The store is the SAME program as no store at all, and dropping
+                # it is what makes the class that assigns a nested frame in its
+                # constructor lower again. `struct_nested_frame_fields` already
+                # placed that frame in the object under construction's OWN
+                # block and the `CONSTRUCTION_INIT` lowering brings it up, so
+                # `self.in1 = Inner()` writes over a slot that already holds
+                # that frame's address — the same value, from the same place,
+                # by a longer route.
+                #
+                # It is dropped rather than refused because the alternative is
+                # refusing a program whose object is already correct: this
+                # construct is what `scripts/stage2_mojo_interpreter.mojo` and
+                # several stdlib classes are written in, and it is the ONLY
+                # shape that says a field holds a nested frame without declaring
+                # it, so refusing it takes the assigned-type evidence source out
+                # of reach entirely.
+                #
+                # Narrow on purpose, and the narrowness is the whole safety of
+                # dropping a store the language requires. The store must name
+                # the struct the placement made (`placed[field]`) and take no
+                # arguments: a construction of a DIFFERENT struct is a different
+                # value, and one with arguments fills fields the placement's
+                # defaults do not. Both fall through to the checks below, which
+                # refuse them by name.
+                #
+                # `raw` and not `stmt.value`: this is per PAIR, so a TUPLE
+                # target asks about the value bound to ITS element. That is the
+                # same question the single-target case asks, and it is why the
+                # check sits inside the loop rather than above it —
+                # `self.in1, self.n = Inner(), 7` drops its first store and
+                # keeps its second, which is the only reading of the statement
+                # that is either correct or obviously not.
+                continue
             slot = struct_frame_slot(struct_def, field)
             if slot is None:
                 return (None, construction_init_body_refusal(
@@ -15013,6 +15209,40 @@ def _init_tuple_target_refusal(stmt, target, value, receivers) -> str | None:
             f"store")
 
 
+def _init_store_is_redundant(value, placed_struct: str) -> bool:
+    """Is this `self.<placed nested frame> = …` the store the placement already made?
+
+    True only for a construction of `placed_struct` — the struct
+    `struct_nested_frame_fields` put in that slot — with NO arguments, which is
+    `self.in1 = Inner()`.
+
+    Both halves are load-bearing and each refuses something real:
+
+      * naming `placed_struct` is what makes it the SAME frame. A construction of
+        a different struct is a different value, and dropping it would leave the
+        field holding the declared type's frame while the source put another
+        one there — the two can share a field count and a field list, which is
+        exactly `bugs/FORMAL_declared_parameter_against_its_call_sites.md`'s
+        subject, so "the layout happens to match" is not available as a test.
+        `assigned_type_a_declaration_still_wins` is the program that measures
+        it: `Outer` declares `var in1: Inner` and `__init__` assigns
+        `Other()`.
+      * no arguments is what makes it a DEFAULT construction. The placement
+        brings the frame up at its defaults; `Inner(7)` fills fields those
+        defaults do not, so the store is not redundant even when it names the
+        right struct.
+
+    A zero-argument construction of the right struct is the frame the placement
+    made and nothing else, because `struct_nested_frame_fields` places by the
+    field's DECLARED type (or, for an undeclared field, by the type its
+    `__init__` assigns — `model.struct_field_assigned_type`, which is the
+    evidence source this restores) and `T()` is `T`'s default value.
+    """
+    return (isinstance(value, F.CallExpr)
+            and isinstance(value.func, F.IdentExpr)
+            and value.func.name == placed_struct
+            and not (value.args or [])
+            and not (value.kwargs or []))
 def _init_statement_spelling(stmt) -> str:
     """How a refusal names the `__init__` statement it is about.
 
@@ -15569,6 +15799,13 @@ def struct_construction_plan(struct_def, call, decls: dict,
                       struct_def, decls)}
         for field, _slot, value in stores:
             if field in placed:
+                # A field the layout PLACED, still being assigned. It cannot be
+                # the redundant store `init_body_stores` drops — that one never
+                # reaches here — so it is a word over a frame, which is the
+                # corruption this refusal has always named. Kept as its own
+                # check rather than folded into the one above because it is a
+                # different question: "may this store exist" was answered yes
+                # and dropped; "may this store overwrite a placed frame" is no.
                 return (None, construction_nested_slot_refusal(
                     name, field, value, placed[field]))
         # A field the body does NOT assign keeps its class-level default, and
