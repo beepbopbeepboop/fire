@@ -59,6 +59,23 @@ _CALLEE_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 # refuse.
 _ABI_ARG_REGS = 8
 
+# How many incoming arguments this backend passes IN TOTAL — eight in registers
+# plus a stack area for the rest.  AAPCS has a stack convention and it is
+# implemented, not refused: argument `8 + k` lives at `[SP + 8k]` as the callee
+# enters, so a ninth argument is an ordinary load from the caller's frame rather
+# than a hole.  The refusal that used to sit at `_ABI_ARG_REGS` on both ends was
+# true about the register count and wrong about the consequence: it meant
+# `struct.pack("<IIQQQQQQ", v0..v7)` could not reach its own module's documented
+# "a format I cannot serve returns an empty list" contract, which is
+# `bugs/FORMAL_struct_pack_over_eight_arguments.md` in full.
+#
+# The bound is a FRAME bound and not an ABI one: every parameter past the
+# eighth needs a home (a callee-saved register or a spill slot), and the spill
+# area is finite.  Sixteen stack arguments is far past any call in this corpus
+# and well inside `_SCRATCH`, so the number is a backstop rather than a design
+# choice.
+_MAX_INCOMING_ARGS = 24
+
 # The local a frame-returning function keeps the CALLER'S block address in.
 # A name rather than a dedicated register, so the word goes through the same
 # register-or-spill-slot home every other local has; the leading underscores
@@ -1037,7 +1054,7 @@ dylib_exports: list = None, globals_base: int = None,
         # parameters first (the call site passes them ahead of the runtime
         # ones), then its runtime parameters.
         incoming = M.incoming_args(f)
-        if len(incoming) > _ABI_ARG_REGS:
+        if len(incoming) > _MAX_INCOMING_ARGS:
             # The other end of the same refusal. `_emit_call` catches a call
             # SITE with too many arguments, but a function can also be REACHED
             # without one — a dylib export, a reflection-resolved call, an
@@ -1047,9 +1064,18 @@ dylib_exports: list = None, globals_base: int = None,
             # of such a name then loaded whatever the slot held, so the value
             # was not merely wrong but BUILD-DEPENDENT. Refusing here means
             # the arity is rejected whichever way the function is entered.
+            #
+            # The limit is `_MAX_INCOMING_ARGS` and not `_ABI_ARG_REGS` because
+            # the ninth argument onwards is a STACK argument, not an error: AAPCS
+            # puts arguments 0..7 in X0..X7 and the rest in the caller's frame at
+            # ascending offsets from the SP the callee enters with. See
+            # `_load_home_from_stack` below, which is the other half of the same
+            # convention as `_emit_call`'s `SUB`/`ADD`.
             raise CodegenError(
                 f"{f.name}: {len(incoming)} parameters exceeds the "
-                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
+                f"{_MAX_INCOMING_ARGS} the formal arm64 ABI passes ("
+                f"{_ABI_ARG_REGS} in registers and "
+                f"{_MAX_INCOMING_ARGS - _ABI_ARG_REGS} on the stack)")
         for i, (pname, ptype) in enumerate(incoming):
             if i == 0:
                 # Already in X19 by the unconditional save above, which also
@@ -1069,6 +1095,23 @@ dylib_exports: list = None, globals_base: int = None,
             # requirement and is not a parameter: it is an address, so it must
             # not be narrowed to a declared width.
             self._load_home_from_reg(pname, i, ptype)
+        # …and the ones past the eighth, which AAPCS does NOT pass in a
+        # register.  Argument `8 + k` arrives at `[SP_in + 8k]`, and `SP_in` is
+        # the SP this function was called with — which the prologue above has
+        # already moved past, so the address is the frame pointer plus the
+        # sixteen bytes of saved FP/LR: `[X29 + 16 + 8k]`.  Every one of those
+        # offsets is ABOVE X29 and every spill slot is below it, so a parameter
+        # home can never land on the argument it is being loaded from.
+        #
+        # Before this existed the answer was to refuse, and the refusal was
+        # right about the ABI and wrong about the consequence: `pack(fmt, v0..v7)`
+        # is nine arguments, and it is `formal/hostmods/struct.mojo`'s OWN
+        # documented "a format I cannot serve returns an empty list" contract
+        # that the caller could never reach.  `bugs/FORMAL_struct_pack_over_eight_
+        # arguments.md` has the measurement and both halves of the mechanism.
+        for i, (pname, ptype) in enumerate(incoming):
+            if i >= _ABI_ARG_REGS:
+                self._load_home_from_stack(pname, i, ptype)
         # The RETURNED-FRAME hidden word, moved from the register the caller
         # passed it in to its home, in the same place and for the same reason
         # as the parameters above: every incoming argument is caller-saved, so
@@ -1464,6 +1507,30 @@ dylib_exports: list = None, globals_base: int = None,
             self._store_var(name, src)
             return None
         return None
+
+    def _load_home_from_stack(self, name: str, index: int, ptype=None):
+        """`[SP_in + 8·(index - 8)]` → this local's home, the stack half of AAPCS.
+
+        The counterpart of `_load_home_from_reg` for the arguments that have no
+        register, and it delegates to that function for the write so the two
+        ends of the convention share one home-assignment rule: `X16` here is
+        exactly `X<src>` there.
+
+        The offset is `[X29 + 16 + 8·(index - 8)]`, positive and small (a
+        function with 24 arguments and five saved pairs puts the last one at
+        X29+112), so it is a plain unsigned scaled `LDR` and no scratch
+        register is spent computing an address — which matters because X17 IS
+        the address scratch `_store_var` uses on the spill path, and borrowing
+        it here would overwrite the value before the store.
+
+        A comptime parameter is already a full word with no declared width to
+        normalize to, which is why `ptype=None` skips the extend — the same
+        rule `_load_home_from_reg` applies, and for the same reason: narrowing a
+        pointer to a declared width would truncate half of it.
+        """
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 29,
+                                           16 + 8 * (index - _ABI_ARG_REGS)))
+        self._load_home_from_reg(name, 16, ptype)
 
     def _no_home(self, name: str) -> str:
         """The refusal for a name with no register, spill slot or frame slot.
@@ -6281,21 +6348,71 @@ dylib_exports: list = None, globals_base: int = None,
         # The frame case still gets the construct's OWN sentence, which
         # names the hidden word and the budget it ran into rather than
         # reporting a count the reader cannot account for.
-        if nargs > _ABI_ARG_REGS:
-            if sret_site is not None:
-                raise CodegenError(
-                    M.returned_frame_convention_refusal(name, len(args))
-                    or f"calling {name}() needs one hidden word for the "
-                       f"caller's block and there is no argument register "
-                       f"left for it")
+        # AAPCS splits the arguments: the first eight in X0..X7 and the rest in
+        # the caller's frame at ascending offsets from the SP the callee enters
+        # with.  Both halves are implemented, so the refusal below is a FRAME
+        # bound rather than the ABI's register count — it used to be
+        # `nargs > _ABI_ARG_REGS`, which was true about X0..X7 and wrong about
+        # the consequence: `pack(fmt, v0..v7)` is nine arguments and the
+        # alternative it protected against (evaluate the extra arguments, drop
+        # them, and branch) built an image that read the ninth parameter as
+        # ZERO — measured, `nine(1,...,9)` returned 1 where the source says
+        # 90001.  A wrong value is strictly worse than a refusal, but so is a
+        # refusal to a program the ABI can express, and this one can.
+        n_stack = max(0, nargs - _ABI_ARG_REGS)
+        if nargs > _MAX_INCOMING_ARGS:
             raise CodegenError(
                 f"call {name}(): {nargs} arguments exceeds the "
-                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
-        # AAPCS: pass up to 8 integer args in X0..X7. Evaluate left-to-right,
-        # spilling each result so nested evaluations (which clobber X0/X1/X2)
-        # don't destroy earlier arguments. Pop in reverse so arg0 lands in X0.
-        # Second slot of each push/pop is XZR so loads never clobber a live arg.
-        for arg in args:
+                f"{_MAX_INCOMING_ARGS} the formal arm64 ABI passes "
+                f"({_ABI_ARG_REGS} in registers and "
+                f"{_MAX_INCOMING_ARGS - _ABI_ARG_REGS} on the stack)")
+        # The returned-frame hidden word IS an argument — the callee reads it
+        # out of the register after the last source one — so eight source
+        # arguments to a frame-returning function is a NINE-argument call. It
+        # has to land in a REGISTER: the callee reads it at index
+        # `len(incoming)` by `_load_home_from_reg` and has no stack convention
+        # for it, so this is the one case the split above cannot absorb and it
+        # keeps the construct's OWN sentence rather than a count the reader
+        # cannot account for.
+        if sret_site is not None and len(args) >= _ABI_ARG_REGS:
+            raise CodegenError(
+                M.returned_frame_convention_refusal(name, len(args))
+                or f"calling {name}() needs one hidden word for the "
+                   f"caller's block and there is no argument register "
+                   f"left for it")
+        # The outgoing-argument area, reserved FIRST and as a multiple of 16 so
+        # SP is still aligned at the call (AAPCS requires it, and every other
+        # SP movement in this backend is a multiple of 16 for the same reason).
+        # Reserving before anything is evaluated is what makes the slots below
+        # safe: an argument expression that itself CALLS pushes and pops
+        # symmetrically, so it works strictly under the area this reserved and
+        # cannot land in it.
+        stack_bytes = 0
+        if n_stack:
+            stack_bytes = 16 * ((n_stack + 1) // 2)
+            _emit_sub_imm(self.asm, 31, 31, stack_bytes)
+        # The STACK arguments first, each stored into the slot the callee will
+        # read it from.  FIRST is load-bearing and not a style preference: the
+        # register arguments below are spilled with a `STP [SP, #-16]!` each,
+        # so evaluating them first would move SP 128 bytes down and every
+        # `[SP + 8k]` above would land in the register spill area instead of
+        # the reserved outgoing slots.  Measured before this was reordered, with
+        # the offsets correct for the SP at the time: `nine(1..9)` returned 37
+        # where the source says 45, and `ten(1..10)` returned 0 where it says
+        # 1000000010 — the ninth argument read as zero, which is the wrong value
+        # the ORIGINAL refusal existed to prevent, arriving by a different road.
+        #
+        # Storing them before the register spills is also what makes a nested
+        # call in a stack argument safe: with the area reserved and nothing else
+        # pushed yet, that nested call pushes strictly below it.
+        for k in range(n_stack):
+            self._emit_expr(args[_ABI_ARG_REGS + k])
+            self.asm.emit(encode_str_xt_xn_imm(0, 31, 8 * k))
+        # The register arguments. Evaluate left-to-right, spilling each result
+        # so nested evaluations (which clobber X0/X1/X2) don't destroy earlier
+        # arguments. Pop in reverse so arg0 lands in X0. Second slot of each
+        # push/pop is XZR so loads never clobber a live arg.
+        for arg in args[:_ABI_ARG_REGS]:
             self._emit_expr(arg)
             self.asm.emit(encode_stp_sp_pre(0, 31))
         if sret_site is not None:
@@ -6304,7 +6421,7 @@ dylib_exports: list = None, globals_base: int = None,
             self._emit_frame_base(self._ret_frame_base + sret_site[1])
             self.asm.emit(encode_mov_zr_xn(0, 9))
             self.asm.emit(encode_stp_sp_pre(0, 31))
-        for i in range(nargs - 1, -1, -1):
+        for i in range(min(nargs, _ABI_ARG_REGS) - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))
             if i != 0:
                 self.asm.emit(encode_mov_zr_xn(i, 0))
@@ -6313,6 +6430,30 @@ dylib_exports: list = None, globals_base: int = None,
             # the BL, the GOT slot and the bind stream all name the symbol the
             # library actually defines.
             symbol = self._extern_symbol(name)
+            # A VARIADIC callee whose arguments overflow the registers is
+            # refused rather than guessed at, and the gate is
+            # `variadic_named_args` and NOT `is_extern`: an ordinary dylib
+            # export — `struct.mojo`'s own `pack`, which is what this whole
+            # change is for — has a normal C signature, and the stack slots
+            # above are exactly where its ninth argument belongs. What is
+            # refused is the one case where two conventions land on one SP:
+            # `_emit_variadic_area` lays a variadic tail out at `[SP + 8i]` as
+            # it stands at the call, which is where the outgoing stack
+            # arguments now are, and nothing states an order between them.
+            # Nothing in this corpus needs it — every `printf` in the tree is
+            # under the register count — and emitting a layout that has not
+            # been measured is what this backend's refusal discipline exists to
+            # prevent. `M.VARIADIC_SLOTS` already bounds the `...` tail.
+            if n_stack and M.variadic_named_args(symbol) is not None:
+                raise CodegenError(
+                    f"call {name}(): {nargs} arguments puts "
+                    f"{n_stack} of them past the {_ABI_ARG_REGS} "
+                    f"argument registers, and {name} is a VARIADIC C entry "
+                    f"point, whose unnamed arguments this path lays out in a "
+                    f"separate stack area — two conventions on one SP with no "
+                    f"order stated between them. Pass fewer arguments, or wrap "
+                    f"the call in a function of this module that takes the "
+                    f"values as parameters")
             area = self._emit_variadic_area(symbol, len(args))
             self.asm.emit_extern_bl(symbol)
             if area:
@@ -6320,6 +6461,8 @@ dylib_exports: list = None, globals_base: int = None,
         else:
             self.asm.emit(encode_bl(0))
             self.asm.emit_label_rel(name, here_offset=-4)
+        if stack_bytes:
+            _emit_add_imm(self.asm, 31, 31, stack_bytes)
         if ext_return is not None:
             self._emit_extern_return(ext_return)
 

@@ -9609,42 +9609,82 @@ TYPE_ARGUMENT_LIST_ABSENT_CASES = [
 # the assertion. `refuse:` also pins both backends to the same words, which is
 # the property these two fixes are really about: one language, two machines.
 REFUSAL_CASES = [
+    # THE ARITY LADDER, and it used to be two REFUSALS above the boundary.
+    #
     # A function of NINE parameters read its ninth as ZERO: the callee's
     # prologue `break`ed out of the argument loop at i == 8 and `_emit_call`
     # dropped the extra arguments after evaluating them for side effects.
-    # `nine(1,...,9)` returned 1 where the source says 90001.
+    # `nine(1,...,9)` returned 1 where the source says 90001.  Zero is the
+    # worst possible wrong answer here, and the reason is structural: a callee
+    # cannot tell a dropped argument from a caller who passed zero, so the
+    # value was not merely wrong but INDISTINGUISHABLE from a legitimate one.
     #
-    # Zero is the worst possible wrong answer here, and the reason is
-    # structural: a callee cannot tell a dropped argument from a caller who
-    # passed zero, so the value is not merely wrong but INDISTINGUISHABLE from
-    # a legitimate one. x86-64 has refused this program since it was written,
-    # which is the evidence the author knew the class existed and arm64 was
-    # the side left open.
+    # The refusal that replaced it was RIGHT about the register count and wrong
+    # about the consequence.  AAPCS passes arguments 0..7 in X0..X7 and the rest
+    # in the caller's frame at ascending offsets from the SP the callee enters
+    # with; the convention was not implemented, so argument 8 was refused
+    # instead of being loaded from `[X29 + 16]`.  That refusal is what made
+    # `formal/hostmods/struct.mojo`'s own "a format I cannot serve returns an
+    # empty list" contract unreachable — `pack(fmt, v0..v7)` is nine arguments —
+    # and it kept `test_struct_formal.py`'s registered `formal-struct` job red
+    # on 2 of its 148 checks (`bugs/FORMAL_struct_pack_over_eight_arguments.md`,
+    # which has the whole measurement).
     #
-    # The needle names the arity and the limit and not the backend, so the
-    # two architectures' differing register counts (8 vs 6) do not have to
-    # be spelled twice.
-    ("nine_arguments_refused",
+    # Four rows because the convention has four corners and a fix that got one
+    # of them wrong would be the same defect again: the ninth argument itself,
+    # that argument arriving from a CALLER'S PARAMETER rather than a literal,
+    # SIXTEEN arguments so the outgoing area is more than one slot, and a nested
+    # call in an argument expression — the last one because a nested call pushes
+    # and pops around SP, and the outgoing slots have to survive that.
+    #
+    # These rows build with no `--backend`, so they are arm64 by construction,
+    # which is the platform whose convention landed. x86-64's SysV stack area
+    # is still unimplemented and its ninth-argument refusal is pinned as a
+    # STATED limit in `test_formal_x86_64_parity.py`'s `X86_ONLY_REFUSALS`.
+    ("nine_arguments_arrive",
      "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
      "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
      "    return a8 * 10000 + a0\n\n"
      "def main() -> int:\n"
      "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n    return 0\n",
-     "refuse:9 arguments exceeds the", None),
-    # The CALLEE end of the same convention, reached with no call site at
-    # all — a dylib export, or an entry point the driver calls directly. It
-    # refused on the arity rather than `break`ing, which left the parameter's
-    # home slot never written and made the first read a build-dependent word.
-    ("nine_parameters_refused_without_a_call_site",
+     0, "nine=90001"),
+    # The stack argument arriving as a CALLER'S PARAMETER rather than as a
+    # literal, which is the direction a compiler could have got wrong by
+    # folding: `bind_call_arguments` fills a defaulted parameter from the
+    # callee's own table, and the value the ninth slot ends up holding is
+    # whatever the caller had at run time. A row that passed only literals
+    # would not notice a stack slot that read the right CONSTANT.
+    ("a_stack_argument_arrives_from_a_caller_parameter",
      "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
      "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
      "    return a8 * 10000 + a0\n\n"
+     "def call_it(w: int):\n"
+     "    return nine(1, 2, 3, 4, 5, 6, 7, 8, w)\n\n"
      "def main() -> int:\n"
-     "    printf(\"x=%d\", 7)\n    return 0\n",
-     "refuse:9 parameters exceeds the", None),
+     "    printf(\"nine=%d\", call_it(9))\n    return 0\n",
+     0, "nine=90001"),
+    ("sixteen_arguments_arrive",
+     "def wide(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int, a8: int, a9: int,\n"
+     "          a10: int, a11: int, a12: int, a13: int, a14: int,\n"
+     "          a15: int) -> int:\n"
+     "    return a15 + a8 * 10 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"wide=%d\", wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))\n"
+     "    return 0\n",
+     0, "wide=107"),
+    ("a_nested_call_in_a_stack_argument_arrives",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a0 + a8\n\n"
+     "def one() -> int:\n"
+     "    return 7\n\n"
+     "def main() -> int:\n"
+     "    printf(\"nested=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n    return 0\n",
+     0, "nested=8"),
     # EIGHT arguments is the boundary and it must still WORK: the fix is a
-    # refusal past the limit, not a smaller limit. Without this row a fix
-    # that cut the ABI to 6 to match x86-64 would pass the two above.
+    # stack argument past the limit, not a smaller limit. Without this row a
+    # fix that cut the ABI to 6 to match x86-64 would pass the two above.
     ("eight_arguments_still_work",
      "def eight(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
      "          a5: int, a6: int, a7: int) -> int:\n"
