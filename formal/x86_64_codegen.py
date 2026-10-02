@@ -1946,8 +1946,7 @@ class X86_64Codegen:
             # the two dispatch on — it is the same shared constant arm64 names.
             raise CodegenError(
                 f"unsupported augmented operator {stmt.op!r} on the formal "
-                f"x86-64 path (formal x86-64 path supports "
-                f"{' '.join(M.AUG_OPS)})")
+                f"x86-64 path (supports {' '.join(M.AUG_OPS)})")
         self._emit_trunc(common_type(ttype, self._ttype(stmt.value)))
         self._store_var(name, Reg.RAX)
 

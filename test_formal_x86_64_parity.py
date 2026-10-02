@@ -318,6 +318,29 @@ REFUSALS = [
      "    printf(\"%d\\n\", len(a[0]))\n"
      "    return 0\n",
      "'+=' on two strings is refused"),
+    # `@=` IS THE ONE AUGMENTED SPELLING NEITHER MACHINE LOWERS, and the needle
+    # is the OPERATOR LIST rather than the words around it, because the two
+    # messages necessarily differ in those: `formal/x86_64_codegen.py` says "on
+    # the formal x86-64 path (supports …)" and its arm64 twin says "(formal
+    # arm64 path supports …)".  Both build that list from `model.AUG_OPS`, so
+    # this row is the anti-rot for that sharing: an edit that adds an operator to
+    # one backend's own table instead of the shared constant makes the two
+    # lists differ and this fails, which is the failure mode the shared
+    # constant exists to prevent.
+    #
+    # It also says which spelling is left: `/=` `//=` `%=` `**=` were on this
+    # list until the delegation that removed them, and `+= -= *= &= |= ^= <<=
+    # >>=` never were.
+    ("aug_matmul_refused_with_the_same_operator_list",
+     "def main():\n"
+     "    var m = Mat()\n"
+     "    m.v @= m.w\n"
+     "    return m.v\n"
+     "\n"
+     "struct Mat:\n"
+     "    var v: Int\n"
+     "    var w: Int\n",
+     "+ - * / // % & | ^ << >> **"),
 ]
 
 

@@ -169,11 +169,13 @@ this session found where x86-64 answered a different NUMBER rather than a
 different verdict, which is why it was worth more than the sweep's top row.**
 
 Both are pinned by `test_formal_x86_64_parity.py` (CPython as the oracle, both
-architectures: 9/9 — the third case routes the same delegation through a FRAME
+architectures: 10/10 — one case routes the same delegation through a FRAME
 SLOT, `self.n //= 2`, which is a different load/store path than a name and the
-one a "store it as a local" mistake would survive) and, for the divide-by-zero
-trap that no CPython oracle can express, by one `BOTH_ARCH_CASES` row in
-`test_formal_run.py`.
+one a "store it as a local" mistake would survive; one `refuse:` row pins the
+operator list both backends print for the spelling that is left, `@=`, keyed on
+`model.AUG_OPS` rather than on the words around it) and, for the
+divide-by-zero trap that no CPython oracle can express, by one
+`BOTH_ARCH_CASES` row in `test_formal_run.py`.
 
 ## 6. Filed, not fixed
 
