@@ -6717,18 +6717,106 @@ CONSTRUCTION_REFUSALS = [
      "    r = Resolver2(n, n, n)\n"
      "    return r.resolve(\"a\")\n",
      "refuse:does not match its fields (no fields at all)", None),
-    # ── A KEYWORD construction, which the language does not have ──
-    # `P3(x=1, y=2)` is not a shape a struct construction has. The tempting
-    # wrong answer is to read the keywords as positionals in dict order, which
-    # makes a program's meaning depend on an iteration order nobody wrote.
-    ("constr_refuse_keyword_arguments",
+    # ── A KEYWORD construction ──
+    # This used to be a REFUSAL, with the case named
+    # `constr_refuse_keyword_arguments` and the comment "which the language does
+    # not have" — which was never true.  It IS a shape, it is the idiomatic
+    # spelling for a struct with many fields, and the stdlib's own
+    # `StringSlice(unsafe_from_ptr=p)` is one.  What the old refusal gave as
+    # its reason was right about the wrong reading: reading the keywords as
+    # POSITIONALS in dict order would make a program's meaning depend on an
+    # iteration order nobody wrote.  Matching each keyword against the FIELD
+    # LIST by name is the reading that cannot depend on any order, so that is
+    # what `model.keyword_construction_stores` does.
+    #
+    # Four cases and a refusal, because the construct has five answers and a
+    # rule that got four of them right would be the same defect again: every
+    # field named; a field left at its default; positionals filling the fields a
+    # keyword does not name; a keyword naming no field; a field named twice.
+    ("constr_keyword_construction",
      "struct P3:\n"
      "    var x: Int\n"
      "    var y: Int\n\n"
      "def main(n: Int) -> Int:\n"
      "    var p = P3(x=1, y=2)\n"
-     "    return p.x\n",
-     "refuse:keyword argument(s) 'x', 'y' is not a shape this path lowers",
+     "    printf(\"x=%d y=%d\", p.x, p.y)\n"
+     "    return p.x + p.y\n", 3, "x=1 y=2"),
+    # A FIELD NO KEYWORD NAMES keeps its class-level default, which is the
+    # language's rule (the object is default-initialized before anything is
+    # assigned to it).  This is the row that separates the keyword shape from
+    # the positional one: `S(a, b)` covers every field, so it has no defaults
+    # left to keep, and a rule that read a keyword construction as a permuted
+    # positional list would have had to invent a value for `x`.
+    ("constr_keyword_leaves_unnamed_fields_at_their_default",
+     "struct P3:\n"
+     "    var x: Int = 4\n"
+     "    var y: Int = 5\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P3(y=9)\n"
+     "    printf(\"x=%d y=%d\", p.x, p.y)\n"
+     "    return p.x + p.y\n", 13, "x=4 y=9"),
+    # THE MIXED FORM: the positionals take the fields in declaration order and
+    # the keyword names its own.  This row is here because a rule that filled
+    # the fields from the keywords alone would answer 0 for `x` and be right
+    # about everything else in this comment.
+    ("constr_keyword_mixed_with_positional",
+     "struct P3:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P3(1, y=2)\n"
+     "    printf(\"x=%d y=%d\", p.x, p.y)\n"
+     "    return p.x + p.y\n", 3, "x=1 y=2"),
+    # A ONE-FIELD struct, where the receiver IS the field: the keyword names
+    # it, the value is the result, and there is nothing to store.  This branch
+    # used to refuse every keyword before the plan was consulted, which is how
+    # the shape stayed a refusal here while the framed case was being fixed.
+    ("constr_keyword_on_a_one_field_struct",
+     "struct W3:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var w = W3(v=42)\n"
+     "    printf(\"v=%d\", w.v)\n"
+     "    return w.v\n", 42, "v=42"),
+    # A keyword naming no field.  The FIELD LIST is in the message, because
+    # "unknown keyword argument" without the names sends the reader to grep a
+    # declaration that is right there.
+    ("constr_refuse_keyword_naming_no_field",
+     "struct P3:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P3(b=3)\n"
+     "    return 0\n",
+     "refuse:is not a field of P3 (x, y)", None),
+    # A field given twice — `S(1, x=2)`, which is CPython's `got multiple
+    # values for argument x`.  The naive reading (append the keywords to the
+    # positionals and let the arity rule notice) would have STORED both, and the
+    # second store would be the program's answer with nothing to say so.
+    ("constr_refuse_a_field_given_twice",
+     "struct P3:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P3(1, x=2)\n"
+     "    return 0\n",
+     "refuse:gives field 'x' more than one value", None),
+    # A keyword against a struct that DECLARES an `__init__`, and this is the
+    # one the resolution cannot fix rather than a rule it is leaving out:
+    # `CONSTRUCTION_INIT` selects the overload by ARGUMENT COUNT, so a keyword
+    # call has nothing to select on.  Picking the widest, or the first, would
+    # be running a constructor the program did not choose.
+    ("constr_refuse_keyword_against_a_declared_init",
+     "struct S3:\n"
+     "    var start: Int\n"
+     "    var end: Int\n"
+     "    def __init__(out self, start: Int, end: Int):\n"
+     "        self.start = start\n"
+     "        self.end = end\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S3(end=7)\n"
+     "    return 0\n",
+     "refuse:is a call to a user-defined `__init__` (S3 declares 1 of them)",
      None),
     # ── a COPY of the wrong thing ──
     # A copy of a DIFFERENT struct. A copy here is a slot-for-slot copy, so it
@@ -7094,6 +7182,145 @@ SUBSCRIPT_CASES = [
      "    v = a[i, j] + b[i, j] + c[i, j] + d[i, j]\n"
      "    return v + e[i, j] + f[i, j] + g[i, j] + h[i, j]\n",
      "refuse:is a subscript whose index is a tuple", None),
+    # ── an ELEMENT of a value that is not a container at all ──
+    #
+    # The third arm of the family the three refusals above belong to, and the
+    # one that had no arm: every one of them is keyed on the base being a FRAME
+    # ADDRESS, and `a = 5` is neither a frame address nor a `char *`, so it
+    # matched none of them. What was left is the blob walk itself — read the
+    # count from offset 0 of the base, read or write at `base + 8 + 8k` — so for
+    # an integer the element address is the integer plus 8.
+    #
+    # Measured on BOTH architectures before the refusal: the build is GREEN and
+    # the image dies of SIGSEGV, exit 139. That is the shape this backend's
+    # whole refusal discipline exists to convert into a message, and it is a
+    # build error now.
+    #
+    # It is the STORE, and the store only, because the store is the one that
+    # computes the address from the base: a read is equally unmapped, and
+    # `model.non_container_element_refusal`'s docstring records that. `a[i]` as a
+    # value and `a[i] = v` as a store reach the same choke point, so the
+    # message is the same one either way — which is why this case asserts the
+    # SUBSCRIPT needle rather than the store's.
+    ("sub_on_an_integer_is_refused",
+     "def main(n):\n"
+     "    a = 5\n"
+     "    a[0] = 1\n"
+     "    printf(\"a=%d\", a)\n"
+     "    return 0\n",
+     "refuse:asks for a container element", None),
+    # THE THREE THAT MUST NOT BE REFUSED, and they are here for the reason they
+    # are the interesting half: `INT_KIND` is this model's DEFAULT for a word,
+    # so all three carry it while being containers, and a check that read the
+    # default as a claim would refuse three correct programs — which is the
+    # failure mode a wrong answer causes everywhere else in this backend.
+    # Every one of the three BUILT and answered before this refusal existed.
+    #
+    #   * an unannotated PARAMETER — `at(xs, i)` is what every container-taking
+    #     function in the corpus looks like;
+    #   * a CALL RESULT whose callee declares `-> List[Int]`, which the kind
+    #     table reaches through `func_kind` and cannot tell from a fallback;
+    #   * a LOOP VARIABLE over a name — the ordinary way to walk a list of
+    #     lists, and the shape a for-in iteration test would refuse.
+    #
+    # The three answers are 30 (the parameter), 2 (the call) and 13 (the loop),
+    # and CPython answers the same three — so this is a value assertion and not
+    # a refusal, which is the only thing that can say "still a program". All
+    # three are in the exit status AND in the printed line, so a regression that
+    # fabricated a plausible number would have to fabricate both.
+    ("sub_on_a_parameter_call_result_and_loop_var_still_build",
+     "def at(xs, i):\n"
+     "    return xs[i]\n"
+     "class H:\n"
+     "    xs: List[Int]\n"
+     "    def get(self) -> List[Int]:\n"
+     "        return self.xs\n"
+     "def show(rows):\n"
+     "    var s = 0\n"
+     "    for row in rows:\n"
+     "        s = s + row[0]\n"
+     "    return s\n"
+     "def main(n):\n"
+     "    var h = H()\n"
+     "    h.xs = [1, 2, 3]\n"
+     "    var ys = h.get()\n"
+     "    var a = at([10, 20, 30], 2)\n"
+     "    var b = ys[1]\n"
+     "    var c = show([[1, 2], [3, 4]])\n"
+     "    printf(\"%d %d %d\", a, b, c)\n"
+     "    return a + b + c\n", 36, "30 2 4"),
+]
+
+
+# ── `%s`, the one printf conversion that DEREFERENCES its argument ───────
+#
+# Every other conversion reads the word it is handed and renders it; `%s` walks
+# bytes at the address until it finds a NUL, so handing it a number is not a
+# wrong rendering — it is a walk off the end of whatever the number points into.
+#
+# `print()` cannot get this wrong: `_print_call` builds the format from each
+# operand's kind and refuses the case it cannot tell.  `printf` takes the format
+# the SOURCE wrote and hands it to C unchecked, which is what these pin.
+PRINTF_TEXT_CASES = [
+    # THE reproducer.  Measured on BOTH architectures before the refusal: the
+    # build is GREEN, the image runs, prints nothing and dies of SIGSEGV,
+    # exit 139, because `%s` walked bytes at address 5 looking for a NUL.  It
+    # builds and it runs, which is the shape of failure this backend exists to
+    # convert into a message.
+    ("printf_s_of_an_integer_is_refused",
+     "def main(n):\n"
+     "    var a = 5\n"
+     "    printf(\"[%s]\", a)\n"
+     "    return 0\n",
+     "refuse:conversion in printf's format string reads", None),
+    # The same thing where the integer is an ARITHMETIC result rather than a
+    # literal, because the evidence the refusal rests on is `own_shape_kind`
+    # — a statement of this function bound the name to an integer ON THAT
+    # STATEMENT'S OWN SHAPE — and `a = 2 + 4` is the shape a corpus program
+    # writes.  It faulted identically before.
+    ("printf_s_of_an_arithmetic_result_is_refused",
+     "def main(n):\n"
+     "    var a = 2 + 4\n"
+     "    printf(\"[%s]\", a)\n"
+     "    return 0\n",
+     "refuse:conversion in printf's format string reads", None),
+    # THE THREE THAT MUST NOT BE REFUSED, and the second of them is the one
+    # that decided the rule.  An UNANNOTATED PARAMETER is a word this build
+    # cannot classify, and `show("abc")` through it prints `[abc]` on both
+    # architectures — measured.  A rule that read "not known to be text" as
+    # "not text" would refuse it, and with it every function in the corpus
+    # that takes a string it was never told about, so `None` — the source does
+    # not say — is the permissive answer here on purpose.
+    ("printf_s_of_a_parameter_a_literal_and_a_bound_string_still_print",
+     "def show(s):\n"
+     "    printf(\"[%s]\", s)\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    var s = \"abc\"\n"
+     "    show(\"def\")\n"
+     "    show(s)\n"
+     "    printf(\"[%s]\", \"lit\")\n"
+     "    return 0\n", 0, "[def][abc][lit]"),
+    # THE VARARG ARITHMETIC, which is the part a scanner gets wrong and which
+    # the refusal depends on: the position of a `%s` in the OUTPUT is the
+    # position of its argument in the varargs list, and getting that off by one
+    # refuses the WRONG argument.  Two things are in this format on purpose and
+    # both consume an argument while reading as none:
+    #
+    #   * `%%` — a literal percent, which `print_literal` doubles so the scanner
+    #     can tell it from a conversion.  A scanner that counted it would shift
+    #     every later conversion by one;
+    #   * `%*d` — a `*` WIDTH, which consumes the `4`.  A scanner that dropped
+    #     it would read the SECOND `%s` as the `7`.
+    #
+    # Both `%s` conversions read a string literal, so a correct scanner finds
+    # nothing to refuse and the program prints; a scanner that miscounts lands a
+    # `%s` on the integer `7` and the build fails.  The expected bytes are
+    # `printf`'s own, checked against the C library on this host.
+    ("printf_star_width_and_literal_percent_keep_the_varargs_aligned",
+     "def main(n):\n"
+     "    printf(\"100%% [%*d] [%s] [%s] %s\", 4, 7, \"a\", \"b\", \"c\")\n"
+     "    return 0\n", 0, "100% [   7] [a] [b] c"),
 ]
 
 
@@ -9252,6 +9479,110 @@ WAVE7_G2_CASES = [
      "    return h.at(1) + h.size()\n", 88, None),
 ]
 
+
+# ── ORDERING a frame address: `<`, `>`, `<=`, `>=` ──────────────────────
+#
+# The sibling of the four refusals above and the same mistake one operator
+# further along: a multi-field struct's receiver is the ADDRESS of a frame of
+# 8-byte slots, and every operator that reaches the flag-setting compare is
+# therefore operating on an address.  For `+`, `&`, `%` and the shifts that is a
+# wrong NUMBER; for `<`, `>` and their non-strict forms it is a wrong BRANCH,
+# which is the worse shape because a correct program takes the wrong path and
+# nothing downstream can tell.
+#
+# Measured on BOTH architectures before the refusal, on two objects of a
+# two-field struct holding EQUAL field values with a field-wise `__eq__`
+# declared: `lt=1 gt=0 le=1 ge=0`.  Four relations decided by nothing in the
+# program — by where the allocator put the two frames — and reordering two
+# independent statements reverses every one of them.  CPython answers the same
+# program with `TypeError: '<' not supported between instances`.
+FRAME_ORDER_CASES = [
+    ("frame_address_ordering_is_refused",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __eq__(self, other: Pair) -> Bool:\n"
+     "        return self.a == other.a and self.b == other.b\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Pair()\n"
+     "    var y = Pair()\n"
+     "    x.a = 1\n"
+     "    x.b = 2\n"
+     "    y.a = 1\n"
+     "    y.b = 2\n"
+     "    printf(\"lt=%d gt=%d le=%d ge=%d\",\n"
+     "           1 if x < y else 0, 1 if x > y else 0,\n"
+     "           1 if x <= y else 0, 1 if x >= y else 0)\n"
+     "    return 0\n",
+     "refuse:orders the ADDRESS of a Pair FRAME", None),
+    # The CONDITION form, and it is a separate case because arm64 has a flags
+    # fast path for a comparison in a condition that never reaches
+    # `_emit_binop` — which is exactly how `if s < t:` came to branch on the
+    # interning order of two string literals while `r = s < t` was a build
+    # error.  Two spellings of one question disagreeing is how a wrong BRANCH
+    # gets in, so the choke point has to be asked at both.
+    ("frame_address_ordering_in_a_condition_is_refused",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Pair()\n"
+     "    var y = Pair()\n"
+     "    x.a = 1\n"
+     "    x.b = 2\n"
+     "    y.a = 5\n"
+     "    y.b = 6\n"
+     "    if x < y:\n"
+     "        return 1\n"
+     "    return 0\n",
+     "refuse:orders the ADDRESS of a Pair FRAME", None),
+    # The CHAIN, a THIRD emitter that never went through `_emit_binop` — the
+    # `s += t` lesson one loop over.
+    ("frame_address_ordering_chain_is_refused",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Pair()\n"
+     "    var y = Pair()\n"
+     "    var z = Pair()\n"
+     "    x.a = 1\n"
+     "    y.a = 2\n"
+     "    z.a = 3\n"
+     "    printf(\"chain=%d\", 1 if x < y < z else 0)\n"
+     "    return 0\n",
+     "refuse:orders the ADDRESS of a Pair FRAME", None),
+    # THE GUARD, and it is two guards in one case because the two things a
+    # too-eager version of this rule would break are both here.
+    #
+    #   * `==`, `!=` and `is` on frames are NOT this refusal, and `eq=1` is the
+    #     dispatch working: a declared `__eq__` reached through the operator,
+    #     which the filing for the operator recorded as open and which
+    #     `EQ_DISPATCH_CASES` above owns.  An address compare IS CPython's
+    #     inherited `object.__eq__`, so for a struct declaring no dunder it is
+    #     the right answer — see `eq_no_declared_dunder_stays_identity`.
+    #   * a FIELD comparison is not a frame comparison: `x.a < x.b` reads two
+    #     64-bit words, and it is what the refusal tells the reader to write.
+    ("guard_field_ordering_and_frame_equality_still_work",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __eq__(self, other: Pair) -> Bool:\n"
+     "        return self.a == other.a and self.b == other.b\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Pair()\n"
+     "    var y = Pair()\n"
+     "    x.a = 1\n"
+     "    x.b = 2\n"
+     "    y.a = 1\n"
+     "    y.b = 2\n"
+     "    var f = 1 if x.a < x.b else 0\n"
+     "    var eq = 1 if x == y else 0\n"
+     "    var ne = 1 if x != y else 0\n"
+     "    printf(\"f=%d eq=%d ne=%d\", f, eq, ne)\n"
+     "    return 0\n", 0, "f=1 eq=1 ne=0"),
+]
+
 # `a == b` on two FRAME ADDRESSES, which used to be a flag-setting compare of
 # two words and therefore an answer about ADDRESSES: CPython's INHERITED
 # `__eq__`, correct for a struct that declares none and a silent bypass of the
@@ -10079,45 +10410,90 @@ TYPE_ARGUMENT_LIST_ABSENT_CASES = [
 ]
 
 
-# The ninth-argument and read-before-store rows are REFUSALS, and they are in
-# their own group because they assert a DIAGNOSTIC rather than a value — the
-# whole point is that the program must not build, so no exit status can carry
-# the assertion. `refuse:` also pins both backends to the same words, which is
-# the property these two fixes are really about: one language, two machines.
+# The read-before-store rows are REFUSALS, and they are in their own group
+# because they assert a DIAGNOSTIC rather than a value — the whole point is
+# that the program must not build, so no exit status can carry the assertion.
+# `refuse:` also pins both backends to the same words, which is the property
+# these two fixes are really about: one language, two machines.
+#
+# The ARITY LADDER rows below used to be refusals in this group and are now
+# ANSWERED ones (`run_case` dispatches on the expectation, not the group), so
+# they no longer say what this paragraph says about them; they are here
+# because the diagnosis they record is a diagnosis about a refusal.
 REFUSAL_CASES = [
+    # THE ARITY LADDER, and it used to be two REFUSALS above the boundary.
+    #
     # A function of NINE parameters read its ninth as ZERO: the callee's
     # prologue `break`ed out of the argument loop at i == 8 and `_emit_call`
     # dropped the extra arguments after evaluating them for side effects.
-    # `nine(1,...,9)` returned 1 where the source says 90001.
+    # `nine(1,...,9)` returned 1 where the source says 90001.  Zero is the
+    # worst possible wrong answer here, and the reason is structural: a callee
+    # cannot tell a dropped argument from a caller who passed zero, so the
+    # value was not merely wrong but INDISTINGUISHABLE from a legitimate one.
     #
-    # Zero is the worst possible wrong answer here, and the reason is
-    # structural: a callee cannot tell a dropped argument from a caller who
-    # passed zero, so the value is not merely wrong but INDISTINGUISHABLE from
-    # a legitimate one. x86-64 has refused this program since it was written,
-    # which is the evidence the author knew the class existed and arm64 was
-    # the side left open.
+    # The refusal that replaced it was RIGHT about the register count and wrong
+    # about the consequence.  AAPCS passes arguments 0..7 in X0..X7 and the rest
+    # in the caller's frame at ascending offsets from the SP the callee enters
+    # with; the convention was not implemented, so argument 8 was refused
+    # instead of being loaded from `[X29 + 16]`.  That refusal is what made
+    # `formal/hostmods/struct.mojo`'s own "a format I cannot serve returns an
+    # empty list" contract unreachable — `pack(fmt, v0..v7)` is nine arguments —
+    # and it kept `test_struct_formal.py`'s registered `formal-struct` job red
+    # on 2 of its 148 checks (`bugs/FORMAL_struct_pack_over_eight_arguments.md`,
+    # which has the whole measurement).
     #
-    # The needle names the arity and the limit and not the backend, so the
-    # two architectures' differing register counts (8 vs 6) do not have to
-    # be spelled twice.
-    ("nine_arguments_refused",
+    # Four rows because the convention has four corners and a fix that got one
+    # of them wrong would be the same defect again: the ninth argument itself,
+    # that argument arriving from a CALLER'S PARAMETER rather than a literal,
+    # SIXTEEN arguments so the outgoing area is more than one slot, and a nested
+    # call in an argument expression — the last one because a nested call pushes
+    # and pops around SP, and the outgoing slots have to survive that.
+    #
+    # These rows build with no `--backend`, so they are arm64 by construction,
+    # which is the platform whose convention landed. x86-64's SysV stack area
+    # is still unimplemented and its ninth-argument refusal is pinned as a
+    # STATED limit in `test_formal_x86_64_parity.py`'s `X86_ONLY_REFUSALS`.
+    ("nine_arguments_arrive",
      "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
      "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
      "    return a8 * 10000 + a0\n\n"
      "def main() -> int:\n"
      "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n    return 0\n",
-     "refuse:9 arguments exceeds the", None),
-    # The CALLEE end of the same convention, reached with no call site at
-    # all — a dylib export, or an entry point the driver calls directly. It
-    # refused on the arity rather than `break`ing, which left the parameter's
-    # home slot never written and made the first read a build-dependent word.
-    ("nine_parameters_refused_without_a_call_site",
+     0, "nine=90001"),
+    # The stack argument arriving as a CALLER'S PARAMETER rather than as a
+    # literal, which is the direction a compiler could have got wrong by
+    # folding: `bind_call_arguments` fills a defaulted parameter from the
+    # callee's own table, and the value the ninth slot ends up holding is
+    # whatever the caller had at run time. A row that passed only literals
+    # would not notice a stack slot that read the right CONSTANT.
+    ("a_stack_argument_arrives_from_a_caller_parameter",
      "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
      "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
      "    return a8 * 10000 + a0\n\n"
+     "def call_it(w: int):\n"
+     "    return nine(1, 2, 3, 4, 5, 6, 7, 8, w)\n\n"
      "def main() -> int:\n"
-     "    printf(\"x=%d\", 7)\n    return 0\n",
-     "refuse:9 parameters exceeds the", None),
+     "    printf(\"nine=%d\", call_it(9))\n    return 0\n",
+     0, "nine=90001"),
+    ("sixteen_arguments_arrive",
+     "def wide(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int, a8: int, a9: int,\n"
+     "          a10: int, a11: int, a12: int, a13: int, a14: int,\n"
+     "          a15: int) -> int:\n"
+     "    return a15 + a8 * 10 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"wide=%d\", wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))\n"
+     "    return 0\n",
+     0, "wide=107"),
+    ("a_nested_call_in_a_stack_argument_arrives",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a0 + a8\n\n"
+     "def one() -> int:\n"
+     "    return 7\n\n"
+     "def main() -> int:\n"
+     "    printf(\"nested=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, one()))\n    return 0\n",
+     0, "nested=8"),
     # ── THE IMPORT DIAGNOSIS OUTRANKS A FRAME REFUSAL ──────────────────────────
     #
     # `_prepare_functions` runs BEFORE `_resolve_imports`, and every frame
@@ -10165,8 +10541,8 @@ REFUSAL_CASES = [
      "    return p.zz + n\n",
      "refuse:P has no field 'zz'", None),
     # EIGHT arguments is the boundary and it must still WORK: the fix is a
-    # refusal past the limit, not a smaller limit. Without this row a fix
-    # that cut the ABI to 6 to match x86-64 would pass the two above.
+    # stack argument past the limit, not a smaller limit. Without this row a
+    # fix that cut the ABI to 6 to match x86-64 would pass the two above.
     ("eight_arguments_still_work",
      "def eight(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
      "          a5: int, a6: int, a7: int) -> int:\n"
@@ -11547,7 +11923,8 @@ def main():
     everything = (CASES + RECVKIND_CASES + FD_CASES + BYREF_CASES
                   + RETURNED_FRAME_CASES
                   + BYREF_REFUSALS + WIDE_OFF_CASES
-                  + SUBSCRIPT_CASES + DECLARED_TYPE_CASES
+                  + SUBSCRIPT_CASES + PRINTF_TEXT_CASES
+                  + DECLARED_TYPE_CASES
                   + DECLARED_TYPE_REFUSALS
                   + ASSIGNED_TYPE_CASES + ASSIGNED_TYPE_REFUSALS \
                   + BOTH_ARCH_CASES \
@@ -11567,7 +11944,7 @@ def main():
                   + TYPE_VALUE_TAG_CASES + ORIGIN_OF_CASES \
                   + TYPE_VALUE_NUMBER_CASES \
                   + ORIGIN_OF_REFUSALS
-                  + EQ_DISPATCH_CASES
+                  + EQ_DISPATCH_CASES + FRAME_ORDER_CASES
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + MUTATING_RECEIVER_REFUSALS

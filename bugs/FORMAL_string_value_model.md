@@ -543,14 +543,50 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   missing buffer as `upper`. It belongs in `LENGTH_DEPENDENT_METHODS` with the
   rest of that family rather than in a refusal, and it is a consequence of the
   representation decision above, not a separate bug.
-- **The proving arm64 build cannot prove `len` or any string method.** Both
-  pre-date the representation decision and both are outside it:
-  `formal/arm64_proof_gen.py` looks for a function called `len_go` when it
-  sees `len(...)` (`Unknown identifier 'len_go'`), and it raises
-  `unsupported: recursion argument bound` on a program containing
-  `s.startswith(...)`. Nothing since has made either worse and neither has
-  been made right; the codegen change is in the `--no-prove` path the sweep
-  uses.
+- **The proving arm64 build cannot prove `len` or any string method.** Re-measured
+  2026-10-01, and the `len_go` half of the original report is STALE — there is
+  no `len_go` in `formal/arm64_proof_gen.py` any more and no `Unknown
+  identifier` error. What is there instead is narrower and better located:
+
+  ```
+  $ python3 fire.py build --formal -o pg1.proof pg1.mojo     # len(s) on a string
+  build: proof check failed: … run_result_exit {let __src := main_pre_0; …}
+         main_code 4294968178 200000 = mojo 10
+  is false
+  ```
+
+  The theorem is `{name}_post_extern_given_callee_returns`, and its own comment
+  states its hypothesis: *"the callee … left every register and the stack frame
+  otherwise as it found them. That is the calling convention."* **It is emitted
+  exactly when that hypothesis is false.** The guard is
+  `ret_type_of.get(last["sym"], "int") not in ("none", "")` — i.e. the theorem
+  appears only when the callee RETURNS a value — and a returning callee returns
+  it IN `x0`, which is the register the conclusion is about. `main` here is
+  `return len(s)`, so the program's answer IS the unknown callee's result and no
+  assumption of the form "every register as it found it" can support it.
+
+  **The fix is the one this file already applied to the sibling theorem.**
+  `_gen_step_blocks`'s caller already suppresses the CONCRETE RUN TEST when
+  `_call_boundary` says the call leaves the image, with a comment saying why
+  ("a run test would compare the machine against `0 = mojo n` and pass for the
+  wrong reason — both sides zero because nothing ran"). `_call_boundary`
+  classifies `strlen` correctly — measured by instrumenting it: `{'kind':
+  'opaque', 'pc': 0x100000358, …}` — so the fact is available at the same site.
+  Suppressing the post-extern theorem on the same condition is the honest
+  answer, and it leaves the one theorem that IS decidable: the reachability
+  statement that the program gets to the call, for every input.
+
+  **What that does not do, and why the gap is real.** With the theorem
+  suppressed the build would be green while proving nothing about `len(s) == 5`,
+  which is the truth: the length of a runtime string is a fact about the
+  C library's memory, and this model cannot compute it. So the STRING half of
+  "cannot prove `len`" is not a codegen gap and not fixable by a lemma — it
+  closes when the model gains a `strlen`, which is a different project from
+  anything in this document. The `s.startswith(...)` half is unchanged and
+  still refuses by name (`call to 's.startswith' has no model in this image (an
+  extern, or a function this generator emits no '_go' for); refusing rather
+  than inventing its return value`), which is the correct refusal and not a
+  gap.
 - **`lib/ProofLib.lean` still carries two `sorry`s**, at `InImage` and
   `Semantics` (line ~4510). Pre-existing, and recorded here only so the next
   reader of the Lean side knows they are there.

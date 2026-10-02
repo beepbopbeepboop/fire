@@ -586,6 +586,61 @@ REFUSALS = [
     # what it computes rather than for a refusal that stopped being the right
     # answer when `formal-module-globals` gave the name a real `__DATA` slot.
     # That comment, and the measurement behind the move, are on the case.
+    # AN ELEMENT OF AN INTEGER.  Every container lowering reads the blob's count
+    # from offset 0 of its base and then reads or writes at `base + 8 + 8k`, so
+    # for `a = 5` the element address is 13 and the image faults: measured on
+    # both architectures from a GREEN build, SIGSEGV, exit 139.  This is here
+    # and not only in `test_formal_run.py` because `run_refusal` builds BOTH
+    # architectures and requires the identical message from each, and for this
+    # refusal "identical on both" is the whole assertion — the defect is SHARED
+    # by the two backends, so a two-architecture comparison cannot see it.
+    ("an_element_of_an_integer_is_refused",
+     "def main(n):\n"
+     "    var a = 5\n"
+     "    a[0] = 1\n"
+     "    printf(\"a=%d\", a)\n"
+     "    return 0\n",
+     "asks for a container element"),
+    # `%s` OF AN INTEGER, and the same argument for putting it here: the
+    # defect is SHARED by the two backends, so only a refusal that is required
+    # to read identically from each can see it.  `%s` is the one printf
+    # conversion that dereferences its argument — every other one renders the
+    # word — so `a = 5; printf("[%s]", a)` walked bytes at address 5 looking
+    # for a NUL.  Measured on both architectures from a GREEN build: nothing
+    # printed, SIGSEGV, exit 139.  The evidence is the same
+    # `ValueKinds.own_shape_kind` the container-element refusal above asks,
+    # which is why one predicate answers both.
+    ("a_percent_s_of_an_integer_is_refused",
+     "def main(n):\n"
+     "    var a = 5\n"
+     "    printf(\"[%s]\", a)\n"
+     "    return 0\n",
+     "conversion in printf's format string reads"),
+    # ORDERING A FRAME ADDRESS, and the reason a wrong BRANCH belongs in the
+    # oracle's file rather than only in the suite:  `x < y` on two multi-field
+    # structs reached the flag-setting compare of two ADDRESSES, so which way it
+    # went was decided by where the allocator put them.  Measured on both
+    # architectures for two objects holding EQUAL field values: `lt=1 gt=0
+    # le=1 ge=0`.  Both backends agreed, so a two-architecture comparison
+    # cannot see it and only a CPython oracle can — CPython raises
+    # `TypeError: '<' not supported between instances`, which is the answer
+    # this path now gives as a build error.
+    ("ordering_a_frame_address_is_refused",
+     "class Pair:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, a, b):\n"
+     "        self.x = a\n"
+     "        self.y = b\n"
+     "    def __eq__(self, other):\n"
+     "        return self.x == other.x and self.y == other.y\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = Pair(1, 2)\n"
+     "    var q = Pair(1, 2)\n"
+     "    printf(\"lt=%d\", 1 if p < q else 0)\n"
+     "    return 0\n",
+     "orders the ADDRESS of a Pair FRAME"),
 ]
 
 

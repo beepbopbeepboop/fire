@@ -373,17 +373,49 @@ line.
 
 ## Open, with the next concrete step
 
-* **A keyword construction.** `StringSlice(unsafe_from_ptr=p)` is the idiomatic
-  spelling and 1 stdlib file reaches it as its first thing wrong. The rule is in
-  the refusal message; it is about fifteen lines over `struct_frame_slots`.
-* **A declared `__init__` is not run**, so `Slice(6, len(lst))` cannot be. This
-  is wave 4's and wave 3's premise (B2) and it is a change to what a struct *is*
-  on this path, not a small improvement. The exact statement of the cost is in
-  this document's parent; nothing here depends on it.
-* **The unannotated-callee residual** in the dead-blob check (above). Closes
-  with the value kind of a call's result, which is `ValueKinds`' question.
-* **No proof-side lemma was added or specified as needed.** The copy is a
-  load/store of `n` slots, so `Frame.frameRead_frameWrite_same` /
+Re-read on 2026-10-01, against the tree this branch is on. Two of the three
+bullets this section used to carry are closed, and the third is the only thing
+here that still earns the file its place in the queue.
+
+* **A keyword construction — CLOSED.** `StringSlice(unsafe_from_ptr=p)` lowers.
+  `model.keyword_construction_stores` matches each keyword against the field
+  list BY NAME (the reading that cannot depend on dict order, which is what the
+  old blanket refusal's reason was actually about), the positionals take the
+  remaining fields in declaration order, a field neither reaches keeps its
+  class-level default, and `CONSTRUCTION_KEYWORD` is the new plan kind — its own
+  because the positional shape covers every field and this one need not. The
+  three ways resolution can fail each have their own sentence: a keyword naming
+  no field (the field list is in the message), a field given twice (CPython's
+  `got multiple values for argument x`), and a declared `__init__` — which is
+  not a rule left out but a shape the resolution cannot fix, because
+  `CONSTRUCTION_INIT` selects the overload by argument COUNT and picking the
+  widest or the first would be running a constructor the program did not choose.
+  Measured before and after on both architectures: `P3(x=1, y=2)` built and
+  printed `x=1 y=2` where the tree refused it; `P3(y=9)` with `x` defaulted to
+  4 printed `x=4 y=9`; `P3(1, y=2)` printed `x=1 y=2`; and `W3(v=42)` on a
+  ONE-field struct built too, which the emitters' pre-plan guards had been
+  refusing. Seven cases in `test_formal_run.py` — four value rows, three
+  refusals — replaced `constr_refuse_keyword_arguments`.
+* **A declared `__init__` is not run — this bullet is STALE and the premise is
+  gone.** The `__init__` section above records the landing: a body that is a
+  straight line of `self.<field> = …` stores is inlined at the construction
+  site, `Slice(6, len(lst))` lowers, and `Slice(a=1)` cannot because overload
+  selection is by arity. What is left of premise (B2) is the four shapes the
+  inline genuinely cannot supply, each with its own message, and they are in
+  the `__init__` section rather than here.
+* **The unannotated-callee residual** in the dead-blob check (above) — **the
+  one open item in this file.** Closes with the value kind of a call's result,
+  which is `ValueKinds`' question and not a re-derivation to be smuggled into
+  the construction pass. It is a deliberate tie-break rather than an oversight
+  (the refusal's own docstring argues the permissive direction at length), so
+  closing it means teaching `_kind_of_call` the difference between a callee's
+  DECLARED return type and the fallback word — which is the same provenance
+  `ValueKinds.own_shape_kind` refuses to trust for want of it, and the two
+  should be one change rather than two.
+* **No proof-side lemma was added or specified as needed.** NOT a bug and not a
+  residual — a note, kept because it is the one thing on this list a reader of
+  the generated proof would want and would not find. The copy is a load/store of
+  `n` slots, so `Frame.frameRead_frameWrite_same` /
   `frameRead_frameWrite_ne` and the constructor's existing
   `frameWrites_window_preserved` fold already describe it — with ONE thing worth
   stating on the Lean side, which is a corollary rather than a new theorem and
@@ -405,10 +437,12 @@ line.
   > evidence than a theorem.
 
 * **`struct_constructor_sites` still reserves a block per site for a COPY,
-  nested frames included, and a copy does not use them.** Harmless (the bytes
-  are reserved and simply not written), and the alternative — sizing the
-  destination's block from the shape — would make the block size depend on the
-  call's arguments, which is a second layout decision for no gain.
+  nested frames included, and a copy does not use them.** NOT a bug — the bytes
+  are reserved and simply not written, and the alternative (sizing the
+  destination's block from the shape) would make the block size depend on the
+  call's arguments, which is a second layout decision for no gain. Recorded
+  because the second half of the reason is the one that decides it and it is not
+  obvious from the waste.
 
 ## Verification
 

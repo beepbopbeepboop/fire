@@ -18,6 +18,16 @@
 > nothing landed — 88 commits of finished formal work sit in unintegrated
 > branches, and eight of the twelve causes above 5 files are owned by them.
 
+> **CURRENCY, re-read 2026-10-01. This is a SNAPSHOT of one commit, not a
+> current measurement, and its numbers do not describe this tree.** The commit and
+> the date are in the line below, and the `pass` count was already 112 on r2, a
+> few hours later, on a different commit — so nothing here should be planned
+> from without a fresh sweep, and this session was explicitly not permitted to
+> run one. What survives is what does not decay: §3's ceiling measurements
+> (cited by three documents), the per-cause RANKS as a picture of where the
+> refusals were, and §6's unexplained entries. Both maps are superseded in turn
+> by any sweep measured after this branch integrates.
+
 **Measured 2026-09-30 on `24f96604` (master), arm64, the tool's default scope**
 (this repo + `../modular/mojo/stdlib/std`). Replaces the sweep snapshot the
 earlier workers planned from, which predates the `os`/`sys`/`struct`/
@@ -261,7 +271,10 @@ codegen gap behind the import, and the sweep's own line says so per file.
    `std/gpu/compute/arch/mma_apple.mojo`, `mojo/middle/stmts_shared.py`,
    `test_arm64_emission.py`. The build driver is being handed something that is
    not JSON, and the sweep classifies it as `tool` (in no rate) rather than as
-   the crash it is. **`FORMAL_sweep_tool_json_decode_error.md`.**
+   the crash it is. **FIXED, and the mechanism is measured:** every dylib
+   manifest is written through `formal/build.py`'s `_write_json_atomic` (a
+   private temp plus `os.replace`), and `test_formal_manifest_atomic.py` is the
+   test. The `open(path, "w")` that truncated it to 0 bytes is gone.
 2. **1 file is `not-answerable/unresolved-import` for the module
    `formal_sweep`** — i.e. `tools/formal_sweep.py` itself, which imports
    `subprocess`. Harmless, but it means the sweep cannot classify its own file

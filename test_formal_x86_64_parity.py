@@ -300,6 +300,33 @@ REFUSALS = [
      "whose body this path does not inline"),
 ]
 
+# The other direction, and it is a PER-PLATFORM limit rather than a shared one:
+# a NINE-argument call.  arm64 grew AAPCS's stack-argument convention on
+# 2026-10-01, so argument 8 travels in the caller's frame and both ends of it
+# load and store there; x86-64's SysV convention — six integer argument
+# registers and then the stack — is still unimplemented here, so the ninth
+# argument is still refused there.  Both answers are correct for their
+# platform, and the point of pinning the x86-64 one is that it is a STATED
+# LIMIT rather than an oversight: if a later change implements the SysV stack
+# area, this case starts failing and says so
+# (`bugs/FORMAL_struct_pack_over_eight_arguments.md` §"the x86-64 gap", which
+# is the same wall from the `struct.pack` side).
+#
+# `test_formal_run.py`'s `nine_arguments_arrive` is the arm64 half, and the
+# nine-parameter CALLEE with no call site is pinned there too — a dylib export
+# is the only way to reach a function without a call site, and
+# `_load_home_from_stack` is what such a function's prologue uses.
+X86_ONLY_REFUSALS = [
+    ("nine_arguments_are_still_refused_on_x86_64",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n"
+     "    return 0\n",
+     "9 arguments exceeds the"),
+]
+
 
 def build(src, out, backend):
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
@@ -386,6 +413,35 @@ def run_refusal(name, mojo_src, needle, tmpdir, verbose):
     return True, ""
 
 
+def run_x86_refusal(name, mojo_src, needle, tmpdir, verbose):
+    """`run_refusal` for a limit that is ONE PLATFORM's, not the model's.
+
+    `run_refusal` requires both backends to refuse with the same words, which
+    is the right assertion for a construct absent from the value model and the
+    WRONG one here: arm64 lowers a nine-argument call, because AAPCS's stack
+    area is implemented on it. So this builds x86-64 only, requires the refusal,
+    and — deliberately — does NOT require arm64 to refuse, because a later
+    change implementing the SysV stack area would make arm64's behaviour
+    irrelevant to this case rather than wrong.
+    """
+    src = os.path.join(tmpdir, name + ".mojo")
+    with open(src, "w") as f:
+        f.write(mojo_src)
+    out = os.path.join(tmpdir, f"{name}.x86_64")
+    rc, text = build(src, out, "x86_64")
+    if rc == 0:
+        return False, ("x86-64 BUILT a construct its own SysV convention does "
+                       "not yet implement (six integer argument registers, and "
+                       "the stack area past them is unimplemented here); the "
+                       "binary is the real answer")
+    if needle not in text:
+        return False, (f"x86-64 refused, but not naming {needle!r}: "
+                       f"{text.strip()[-200:]}")
+    if verbose:
+        print(f"      x86-64 refused, naming {needle!r}")
+    return True, ""
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -398,10 +454,14 @@ def main():
             print(f"  case    {name}")
         for name, _s, needle in REFUSALS:
             print(f"  refusal {name}  ({needle!r})")
+        for name, _s, needle in X86_ONLY_REFUSALS:
+            print(f"  x86-only refusal {name}  ({needle!r})")
         return 0
 
-    known = {c[0] for c in CASES} | {c[0] for c in REFUSALS}
-    wanted = [(c, False) for c in CASES] + [(c, True) for c in REFUSALS]
+    known = ({c[0] for c in CASES} | {c[0] for c in REFUSALS}
+             | {c[0] for c in X86_ONLY_REFUSALS})
+    wanted = ([(c, False) for c in CASES] + [(c, True) for c in REFUSALS]
+              + [(c, "x86") for c in X86_ONLY_REFUSALS])
     if args.cases:
         missing = set(args.cases) - known
         if missing:
@@ -413,7 +473,10 @@ def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         for (name, mojo_src, third), is_refusal in wanted:
             try:
-                if is_refusal:
+                if is_refusal == "x86":
+                    ok, detail = run_x86_refusal(name, mojo_src, third, tmpdir,
+                                                 args.verbose)
+                elif is_refusal:
                     ok, detail = run_refusal(name, mojo_src, third, tmpdir,
                                              args.verbose)
                 else:
