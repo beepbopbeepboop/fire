@@ -2548,7 +2548,15 @@ FD_CASES = [
  # proving a field holds a descriptor is cross-field flow and this path cannot
  # see it — a correct-looking `self._fd.write(s)` must not be lowered on the
  # strength of a name the model does not have.
- ("fd_write_on_frame_slot_refused",
+ #
+ # The needle says "classified as 'int'" where it used to say nothing about a
+ # kind, and the wording moved because `Box.__init__` literally stores `3`:
+ # `model.struct_ctor_field_value` reads the field's value off the construction
+ # that filled the slot, so the receiver now HAS a kind and the message can name
+ # it.  That is the same refusal on the same program — a word that is not a
+ # descriptor — with more said about it, and `3` is a true claim about `b.fd`
+ # rather than a convenient one.
+("fd_write_on_frame_slot_refused",
   "struct Box:\n"
   "    fd: Int\n"
   "    n: Int\n"
@@ -2560,7 +2568,7 @@ FD_CASES = [
   "    b = Box()\n"
   "    b.fd.write(\"x\")\n"
   "    return 0\n",
-  "refuse:and it is a frame slot", None),
+  "refuse:frame slot classified as 'int'", None),
 ]
 
 # ── a multi-field receiver, BY REFERENCE ───────────────────────────────────
@@ -10781,11 +10789,27 @@ EQ_DISPATCH_CASES = [
      "    return bump()\n",
      "refuse:G is read in bump() at `G + 1`", None),
     # The sibling the filing did not mention: the same name WRITTEN through a
-    # `global` declaration, which the language allows and the value model has
-    # nowhere for.  There is no storage a write could outlive a frame in, so both
-    # emitters treat the declaration as a no-op — CPython answers 6 and 6 where
-    # this path answered 10601485 and 5 on arm64 and 11 and 5 on x86-64.
-    ("a_mutated_module_global_is_refused",
+    # `global` declaration.  It USED to expect a refusal here — "there is no
+    # storage a write could outlive a frame in", which was true and which both
+    # emitters enforced by treating the declaration as a no-op, so CPython
+    # answered 6 and 6 where this path answered 10601485 and 5 on arm64 and 11
+    # and 5 on x86-64.  That sentence stopped being true when
+    # `formal-module-globals` gave a written module-level name a `__DATA` slot,
+    # and the row was left asserting a refusal the backend no longer owes —
+    # red on `master` as well as on the branch that found it.  That was recorded
+    # in a `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
+    # doc, now deleted with the row it was about; the decision and its
+    # measurement are in `bugs/FORMAL_module_state_no_storage.md`'s "Re-measured
+    # 2026-10-02" section, which named this doc's owner as the decider.  Option 1
+    # of that doc's two, and the one the tree's behaviour already implements:
+    # the program is RIGHT, so the row asserts the number.
+    #
+    # 12 is CPython's: `G` goes 5 -> 6 and both reads see 6.  Measured on both
+    # backends on this tree, and the same number from `python3`.  The exit
+    # status is the assertion and the empty stdout is the other half of it —
+    # `main` RETURNS the sum rather than printing it, so an image that printed
+    # something and exited 0 would not pass.
+    ("a_mutated_module_global_is_read_back_from_its_slot",
      "G = 5\n"
      "def bump():\n"
      "    global G\n"
@@ -10795,7 +10819,7 @@ EQ_DISPATCH_CASES = [
      "    return G\n"
      "def main(n):\n"
      "    return bump() + rd()\n",
-     "refuse:G is declared `global` in bump() and assigned there", None),
+     12, ""),
 ]
 
 

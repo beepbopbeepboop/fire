@@ -9855,6 +9855,48 @@ def _kind_of_elements(elems) -> str | None:
     return kinds.pop() if len(kinds) == 1 else None
 
 
+def container_literal_elem_kind(node) -> str | None:
+    """What a subscript of the container LITERAL `node` yields, or None.
+
+    The one reader of "what do this container's elements hold", asked of the
+    initializer that states it, and it is asked in two places that used to
+    disagree — which is why it is one function rather than two rules:
+
+      * a dict literal bound to a LOCAL (`d = {"a": 10}`), through
+        `ValueKinds.kind_of`, and
+      * a container literal bound at MODULE level (`D = {"a": 10}`), through
+        `global_slot_kind`, whose slot records the same initializer.
+
+    Only a DICT is a new answer. A list/tuple/set literal already classified by
+    element (`list_kind(_kind_of_elements(...))`), and a dict did not — it
+    classified as a bare `LIST_PREFIX`, so `list_elem_kind` had nothing to hand
+    back and every use site that must decide before emitting refused. `print()`
+    is the one those programs meet first:
+
+        d = {"a": 10, "b": 20}
+        print("Value of a:", d["a"])   # -> print() cannot tell whether
+                                       #    SubscriptExpr is a string or a number
+
+    The VALUES and not the keys, because a dict blob is `[npairs][k0][v0]…` and
+    a subscript of it is a key SCAN that leaves the value in hand
+    (`arm64_codegen._emit_dict_lookup_addr`); the kind asked for is therefore the
+    value's, and `_kind_of_elements` over the keys would claim a string element
+    where the word read out is a number.
+
+    `_kind_of_simple` underwrites on purpose: it classifies a LITERAL, so
+    `{i: 100 + i for i in range(3)}[2]` stays undecided rather than guessing
+    from the first operand of an arithmetic form. Unanimity is the other half
+    of the safety argument — a dict whose values disagree claims nothing, which
+    is what keeps this from being a way to print one of two kinds as the other.
+    """
+    if isinstance(node, F.DictExpr):
+        values = [p[1] for p in (node.pairs or []) if len(p) >= 2]
+        return _kind_of_elements(values)
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return _kind_of_elements(node.elements or [])
+    return None
+
+
 def _kind_of_simple(e) -> str | None:
     """The kind of an expression that needs nothing but itself to classify."""
     if isinstance(e, F.StringLiteral):
@@ -9898,15 +9940,30 @@ class ValueKinds:
         `declared_type_kind` for the whole of it; the hook is consulted only
         where the answer would otherwise be a guess, and a `None` from it leaves
         every existing decision exactly where it was.
+      * `ctor_field_value(struct_name, call, field)` — the expression a
+        CONSTRUCTION puts in a field's slot, or None.  The fifth hook, and it
+        exists because `declared_kind` answers about the struct while a
+        construction's arguments are about the CALL SITE, which is the only
+        place the value is: `p = Point(3, 4)` gives field `x` an integer and a
+        declaration says nothing about it (the common case has no annotation
+        at all), while `p = Point(a, b)` where the arguments are this function's
+        unannotated parameters gives nothing — and both were refused, by name,
+        for the same sentence.  Measured on both architectures before this hook:
+        `print("Point:", p.x, p.y)` on an unannotated two-field class refused
+        with "print() cannot tell whether MemberExpr is a string or a number".
+        `None` leaves every existing decision exactly where it was, which is
+        why this is consulted after `declared_kind` and not instead of it.
     """
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
-                 slot_key=None, declared_kind=None):
+                 slot_key=None, declared_kind=None, ctor_field_value=None):
         self._int_names = frozenset(int_names)
         self._string_names = frozenset(string_names)
         self._func_kind = func_kind or (lambda name: None)
         self._slot_key = slot_key or (lambda expr: None)
         self._declared_kind = declared_kind or (lambda expr: None)
+        self._ctor_field_value = ctor_field_value or (
+            lambda struct_name, call, field: None)
         self.locals: dict = {}
         self._conflicts: set = set()
         self._returns: set = set()
@@ -9917,6 +9974,21 @@ class ValueKinds:
         # whole of what separates "the source SAYS this name holds an
         # integer" from "we could not classify it"; see that method.
         self._own_shape: dict = {}
+        # The CONSTRUCTIONS that bound a name in this function's body, keyed by
+        # name — `{(callee, call)}`, and a `None` VALUE as the tombstone for a
+        # name some other statement also binds.  It is the evidence
+        # `_constructed_field_kind` reads, and the tombstone is the reason that
+        # reading is sound under a flow-INsensitive map: `p = Point(3, 4)` and
+        # then `p = something_else` leaves one name with two homes, and a kind
+        # read off the construction would be a claim about the first
+        # instruction rather than about the slot.  Keyed by the call's identity
+        # because the scan runs twice and a list would collect each site twice.
+        self._ctor_calls: dict = {}
+        # The fields of a holder this function WRITES THROUGH, which retracts
+        # the construction's claim about that field and only that field.  See
+        # `_note_field_stores`, which carries the measurement that makes it
+        # load-bearing rather than tidy.
+        self._field_stores: dict = {}
         # The names this function's SIGNATURE binds, kept apart from the ones
         # its body binds, and the reason is the `declared_kind` hook: an
         # unannotated parameter is seeded INT_KIND above, and for a METHOD
@@ -10019,22 +10091,155 @@ class ValueKinds:
             for nm in _target_names(target):
                 self._bind(nm, kind, own=own)
 
+    def _note_construction(self, target, value) -> None:
+        """Record (or retract) the construction evidence a binding gives.
+
+        A construction is `target = <call to a bare name>` — a type
+        constructor, since a call to a name that is not a type is answered by
+        `func_kind` instead and the hook returns None for it anyway. Everything
+        else that binds the name is a RETRACTION: the name then has a home this
+        map cannot describe, and a field kind read off the construction would be
+        a claim about the construction site rather than about the slot. So a
+        tombstone is written, and a tombstone is what a later construction does
+        not overwrite (`setdefault`), which makes the answer order-independent
+        rather than a function of where in the body the two bindings sit.
+
+        A `str` target (a `VarDecl`'s name) and a tuple target are both
+        refusals here for the same reason: `_bind_target` splits them, and the
+        construction evidence wants ONE name."""
+        name = target if isinstance(target, str) else (
+            target.name if isinstance(target, F.IdentExpr) else None)
+        if name is None:
+            return
+        if isinstance(value, F.CallExpr) and isinstance(value.func,
+                                                        F.IdentExpr):
+            if name not in self._ctor_calls:
+                self._ctor_calls[name] = {}
+            sites = self._ctor_calls[name]
+            # A tombstone is not replaced by a later construction, which is what
+            # makes the answer independent of where in the body the two bindings
+            # sit — so this reads the existing entry rather than `setdefault`ing
+            # one.  The `in` test above is what tells an ABSENT entry from a
+            # tombstone: `dict.get` answers None for both, and conflating them
+            # silently dropped every construction with no retraction before it,
+            # which is measured and pinned in `test_formal_value_model.py`'s
+            # `a_constructed_field_prints` — a whole evidence source that reads
+            # as "this function constructs nothing".
+            if sites is not None:
+                sites[id(value)] = (value.func.name, value)
+        else:
+            self._ctor_calls[name] = None
+
+    def _note_field_stores(self, target) -> None:
+        """Record that a statement writes THROUGH a holder's field.
+
+        Per FIELD rather than per holder, because the claim is per field: `p` is
+        a frame, a store to one of its slots changes that slot and no other, and
+        `p = P("hi", 7); p.n = 8; print(p.s)` still has an answerable `p.s`.
+
+        It has to exist at all. The construction says what went into the slot
+        WHEN THE OBJECT WAS BUILT, and a statement after it in the same
+        function can put something else there — which is not a theoretical gap.
+        Measured on both architectures, from a GREEN build, with nothing in the
+        image wrong:
+
+            class P:
+                def __init__(self, s, n):
+                    self.s = s
+                    self.n = n
+            def main():
+                p = P("hi", 7)
+                p.s = 5
+                print("s:", p.s)
+
+        → SIGSEGV, exit 139, both architectures. `p.s` classified as a string
+        from the construction, `p.s = 5` made it the integer 5, and `%s` walked
+        bytes at address 5 looking for a NUL — the same fault
+        `test_formal_value_model.py`'s `a_percent_s_of_an_integer_is_refused`
+        exists to keep out, reached through a field rather than through a name.
+
+        Depth 1 only, and the reason is the same one `declared_kind` documents:
+        `a.b.c = v` writes the slot of the frame `a.b` names, not a slot of the
+        frame `a` names, so it says nothing about `a`'s own words. A SUBSCRIPT
+        store (`p.items[0] = x`) writes through a pointer and changes no word of
+        `p` either, which is why neither shape is recorded."""
+        if isinstance(target, (F.TupleExpr, F.ListExpr)):
+            for el in target.elements or []:
+                self._note_field_stores(el)
+            return
+        if not isinstance(target, F.MemberExpr) or not isinstance(
+                target.obj, F.IdentExpr):
+            return
+        self._field_stores.setdefault(target.obj.name, set()).add(target.member)
+
+    def _constructed_field_kind(self, e):
+        """What `e.obj`'s construction put in `e.member`, or None.
+
+        The second evidence source for a FIELD, and the one that is about the
+        call site: a declaration says what a field's TYPE is, and a
+        construction says what the VALUE in the slot is, and for the ordinary
+        unannotated class only the second is stated anywhere.
+
+        Unanimity or nothing, on the same rule `own_shape_kind` and
+        `struct_field_kind` use and for the same reason: this map is
+        flow-insensitive, so every construction of the name in this function is
+        a statement about the same slot and two that disagree leave it
+        undecided. One construction, one field, one kind — and the argument's
+        own kind has to be EVIDENCE, not a fallback, which is why a bare name
+        is asked of `own_shape_kind` and a call result is refused by
+        `_own_shape_of`'s filter: `Point(a, b)` where `a` and `b` are this
+        function's unannotated parameters says nothing about anything, and
+        claiming otherwise is how a field would end up printed as a number."""
+        obj = e.obj
+        if not isinstance(obj, F.IdentExpr):
+            return None
+        if e.member in self._field_stores.get(obj.name, ()):
+            return None
+        calls = self._ctor_calls.get(obj.name)
+        if not calls:
+            return None
+        kinds = set()
+        for struct_name, call in calls.values():
+            value = self._ctor_field_value(struct_name, call, e.member)
+            if value is None:
+                return None
+            if isinstance(value, F.IdentExpr) and \
+                    self.own_shape_kind(value.name) is None:
+                return None
+            kind = self.kind_of(value)
+            if kind is None:
+                return None
+            kinds.add(kind)
+        return kinds.pop() if len(kinds) == 1 else None
+
     def _scan(self, stmts) -> None:
         for s in stmts or []:
             if isinstance(s, F.AssignStmt):
                 self._bind_target(s.target, self._value_kind(s.value),
                                   own=self._own_shape_of(s.value))
+                self._note_construction(s.target, s.value)
+                self._note_field_stores(s.target)
             elif isinstance(s, F.VarDecl):
                 self._bind_value(s.name, s.value)
+                self._note_construction(s.name, s.value)
+                self._note_field_stores(s.name)
             elif isinstance(s, F.AugAssignStmt):
                 # `x += e` leaves x holding what it held; an unknown x stays
                 # unknown rather than being called an int by the operator.
                 self._bind_target(s.target, self.locals.get(
                     s.target.name if isinstance(s.target, F.IdentExpr) else ""))
+                self._note_construction(s.target, s.value)
+                self._note_field_stores(s.target)
             elif isinstance(s, F.MultiAssignStmt):
                 vkind = self._own_shape_of(s.value)
                 for t in s.targets:
                     self._bind_target(t, self.kind_of(s.value), own=vkind)
+                # One value for every target, so it is not a construction of
+                # any one of them in the sense the field evidence needs; the
+                # tombstone is what says so.
+                for t in s.targets:
+                    self._note_construction(t, s.value)
+                    self._note_field_stores(t)
             elif isinstance(s, F.ReturnStmt):
                 self._returns.add(self.kind_of(s.value))
             elif isinstance(s, F.IfStmt):
@@ -10237,6 +10442,18 @@ class ValueKinds:
             declared = self._declared_kind(e)
             if declared is not None:
                 return declared
+            # …and the CONSTRUCTION is the second source, for the case the
+            # declaration cannot reach at all: an unannotated class states
+            # nothing, and `struct_field_kind`'s own gate — a kind is a claim
+            # about the VALUE in the slot, and `S()` leaves every slot at its
+            # class-level default — is right about `S()` and wrong about a
+            # frame this very function built with arguments.  Asked AFTER the
+            # declaration, so a class that says both is decided by the
+            # declaration, and a `None` from either leaves the lookup below
+            # exactly as it was.
+            constructed = self._constructed_field_kind(e)
+            if constructed is not None:
+                return constructed
             key = self._slot_key(e)
             return self.name_kind(key) if key is not None else None
         if isinstance(e, F.CallExpr) and isinstance(e.func, F.IdentExpr):
@@ -10273,10 +10490,17 @@ class ValueKinds:
         if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
             return list_kind(_kind_of_elements(e.elements))
         if isinstance(e, F.DictExpr):
-            return LIST_PREFIX
+            # The VALUES, because that is what a subscript of a pair blob
+            # yields — the same element the layout interleaves them in
+            # (`_emit_dict`), read here by the one function every container
+            # literal's element kind comes from.
+            return list_kind(container_literal_elem_kind(e))
         if isinstance(e, F.Comprehension):
             if e.kind == "dict":
-                return LIST_PREFIX
+                # `e.element` is the dict comprehension's VALUE (`e.key` is the
+                # key), so this is the same arm as the `DictExpr` above and not
+                # the key/value unification a LIST comprehension does below.
+                return list_kind(_kind_of_simple(e.element))
             ek = _kind_of_simple(e.element)
             if e.key is not None:
                 ek = _unify(ek, _kind_of_simple(e.key))
@@ -15530,6 +15754,84 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
     return (stores, None)
 
 
+def struct_ctor_field_value(struct_def, call, field, decls: dict = None):
+    """The AST node this construction puts in `field`'s slot, or None.
+
+    `init_body_stores` is asked rather than re-walked, and that is the whole
+    point: it is the ONE function that decides what `S(a, b)` stores where, and
+    the emitters emit from its answer. So the VALUE this returns is the very
+    expression the image will evaluate into the slot — a bare parameter name
+    already resolved to the CALLER's argument expression, which is the step
+    that makes the answer about this construction rather than about the
+    constructor. A second walk of `__init__` would be a second opinion about
+    which argument lands in which slot, and a disagreement between the two is a
+    kind read off the wrong word.
+
+    None means "this construction says nothing about that field", and it is the
+    answer for every case where the question is not decidable rather than
+    merely absent: no `__init__` at all (the positional filling of a struct
+    that declares no constructor is a different question, and `S()` brings
+    every slot up from its class default instead), an arity that matches no
+    declared overload or more than one, a keyword against a declared
+    constructor, a body statement this path refuses to lower, and a field the
+    constructor does not assign. Every one of those is a refusal at the
+    CONSTRUCTION for all but the last, so a program that reaches codegen is
+    only ever asking about a construction that really does perform the store.
+
+    The one case that is not a refusal anywhere and still has to answer None is
+    a field some OTHER method writes. Nothing here knows the whole struct's
+    methods, and a kind claimed from the constructor alone would be a claim
+    about the slot at the construction site and nowhere else — so the caller
+    pairs this with `struct_field_written_outside_init`, which is the check
+    that keeps it a claim about the object's field rather than about its
+    first instruction."""
+    if not struct_init_shapes(struct_def):
+        return None
+    shape, why = init_overload_for_arity(struct_init_shapes(struct_def),
+                                         len(getattr(call, "args", None) or []))
+    if shape is None or why is not None:
+        return None
+    stores, refusal = init_body_stores(struct_def, call, shape, decls or {})
+    if refusal is not None:
+        return None
+    for name, _slot, value in stores or ():
+        if name == field:
+            return value
+    return None
+
+
+def struct_field_written_outside_init(struct_def, field) -> bool:
+    """True when some method OTHER than `__init__` writes `self.<field>`.
+
+    The check that makes a constructor argument a claim about the FIELD rather
+    than about the moment of construction. `ValueKinds` is flow-INsensitive by
+    construction (its own docstring), so a name it saw built by `Point(3, 4)`
+    answers the same wherever it is asked; if a setter ran in between, the slot
+    holds whatever the setter put there and the constructor's argument says
+    nothing about it. `bugs/FORMAL_method_param_field.md`'s neighbourhood is
+    where field stores through a method are measured, so this is asked of the
+    whole method set rather than of the constructor alone.
+
+    Every method of the struct is read, and an assignment is recognised only
+    in the two shapes the emitter performs: `self.f = v` and `self.a, self.b =
+    v, w` (`_init_statement_field_stores`, the one reader of that shape). A
+    write this predicate cannot see is a write it does not veto, which is the
+    wrong direction — so the callers' evidence test (`own_shape_kind`) is what
+    keeps an unclassifiable argument out, and this is a second gate rather than
+    the only one."""
+    receivers = struct_receivers(struct_def)
+    for method in struct_methods(struct_def):
+        if method.name == "__init__":
+            continue
+        for stmt in (getattr(method, "body", None) or []):
+            for target, _value in (_init_statement_field_stores(stmt, receivers)
+                                   or ()):
+                if isinstance(target, F.MemberExpr) and \
+                        target.member == field:
+                    return True
+    return False
+
+
 def _init_statement_field_stores(stmt, receivers) -> list | None:
     """`[(target, value_node)]` — the receiver-field stores one statement IS.
 
@@ -20122,14 +20424,31 @@ def global_slot_kind(name: str):
     everywhere else (`ValueKinds.kind_of`), and this path's dict is a pair blob
     with a count in its first word, which is all `len` needs. The dict-vs-
     sequence distinction that a SUBSCRIPT needs is not a kind question and is
-    `global_slot_is_dict`'s."""
+    `global_slot_is_dict`'s.
+
+    A blob's kind carries its ELEMENT kind, read from the initializer that
+    stated it (`container_literal_elem_kind`), and that is the same answer
+    `ValueKinds.kind_of` gives the same literal bound to a local — so
+    `D = {"a": 10}` at module level and `d = {"a": 10}` inside a function are
+    one question with one answer, and `print(d["a"])` stops being a refusal in
+    one spelling only. The slot's own `site` is the initializer statement, which
+    is what makes the read a question about the source rather than about the
+    words the linker happened to lay out.
+
+    ONLY a slot whose initializer is a literal says this. A blob written by a
+    function (`global L; L[0] = 5` on a list of strings) has an initializer
+    that states no element kind, and `container_literal_elem_kind` answers None
+    for it, which leaves the bare `LIST_PREFIX` — an honest "a container, and
+    nothing here says what is in it" rather than a claim about a word that is
+    written at run time."""
     slot = module_slot(name)
     if slot is None:
         return None
     if slot.init[0] == "str":
         return STR_KIND
     if slot.init[0] == "blob":
-        return LIST_PREFIX
+        elem = container_literal_elem_kind(getattr(slot.site, "value", None))
+        return list_kind(elem)
     return None
 
 
