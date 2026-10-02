@@ -9779,21 +9779,26 @@ class ValueKinds:
                 self._scan(s.body)
                 self._scan(s.else_body)
             elif isinstance(s, F.WithStmt):
+                # A `with` HAS no `else_body` — `fire_compiler.WithStmt`
+                # carries `items`, `body` and `is_async` and nothing else —
+                # so scanning one was an `AttributeError` out of this walk,
+                # reached by every function with a `with` in it. It was
+                # introduced by `work/formal3-8-r2` together with a second
+                # `ForStmt`/`WithStmt` pair, the earlier of the two: the two
+                # edits interleaved in a merge and the result was one arm
+                # reading a field that does not exist plus a duplicate of
+                # itself and of its neighbour.
+                #
+                # The `own=` argument is the part of that branch's change
+                # that is a real improvement and it is kept: the alias is
+                # bound to the context expression's VALUE, so an own shape
+                # read off that expression is the alias's own shape rather
+                # than a guess from the name. The unreachable duplicate arms
+                # are gone rather than left for the next reader to find.
                 for it in (s.items or []):
                     if getattr(it, "alias", None) is not None:
                         self._bind(str(it.alias), self.kind_of(it.expr),
                                    own=self._own_shape_of(it.expr))
-                self._scan(s.body)
-
-                self._scan(s.else_body)
-            elif isinstance(s, F.ForStmt):
-                self._bind_target(s.target, self._iterable_kind(s.iterable))
-                self._scan(s.body)
-                self._scan(s.else_body)
-            elif isinstance(s, F.WithStmt):
-                for it in (s.items or []):
-                    if getattr(it, "alias", None) is not None:
-                        self._bind(str(it.alias), self.kind_of(it.expr))
                 self._scan(s.body)
             elif isinstance(s, F.TryStmt):
                 self._scan(s.body)
