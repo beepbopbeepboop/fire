@@ -425,9 +425,6 @@ BUILTIN_PROGRAMS = {
     #     compiled path prints the MojoList pointer (it was wrong before this fix
     #     too, differently: the paren test unpacked the pair's slot 0). See
     #     bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md.
-    #   * `for first, *rest in ...` — a starred slot is lowered as a variable
-    #     literally named `*rest`, so the body reads 0. See
-    #     bugs/CODEGEN_starred_rest_in_a_for_target_is_a_slot_named_star.md.
     "for_target_one_tuple_dict_and_nested": textwrap.dedent("""\
         def main():
             d = {"a": 1, "b": 2}
@@ -439,6 +436,41 @@ BUILTIN_PROGRAMS = {
                 print(only)
             for (a2, (b2, c2)) in [(9, (10, 11))]:
                 print(a2, b2, c2)
+    """),
+    # Extended unpacking (`*rest`) in a for target, in all three positions the
+    # rule has: a star at the end, a star with slots after it, and the
+    # dict-`.items()` pair shape. Each line was `1 0` where CPython prints
+    # `1 [2, 3]` — the star reached the C declarator as `int64_t *rest;` and
+    # the assignment after it was `*rest = _t22;`, a store through an
+    # uninitialised pointer that happens to be mapped. The comprehension form
+    # (`[r for first, *r in pairs]`) is in its own case below because it was
+    # a PARSER gap as well as this lowering one: the generator-target parser
+    # had no `*` arm at all, so the whole comprehension was a SyntaxError on
+    # both engines before the star reached any lowering.
+    "for_target_starred_rest": textwrap.dedent("""\
+        def main():
+            for first, *rest in [(1, 2, 3), (4, 5, 6)]:
+                print(first, rest)
+            for a, *mid, z in [(1, 2, 3, 4)]:
+                print(a, mid, z)
+            for k, *vs in {"k1": 1, "k2": 2}.items():
+                print(k, vs)
+            for x, *ys in [("p", "q", "r")]:
+                print(x, ys, ys[0])
+            # enumerate and zip yield a PAIR per iteration, so the starred
+            # remainder is a ONE-ELEMENT list there — a different lowering
+            # again (`_emit_starred_slot_from_value`, not a slice of a row).
+            # Distinct target names per loop: a loop TARGET is a rebinding,
+            # and `_declare_var` is first-decl-wins per function (see
+            # `_gen_for_list`'s note), so reusing `i` across an int and a
+            # double sequence is a separate pre-existing bug
+            # (bugs/CODEGEN_zip_loop_target_keeps_the_first_loops_type.md).
+            for ei, *erest in enumerate([7, 8]):
+                print(ei, erest)
+            for zi, *zrest in zip([1, 2], ["u", "v"]):
+                print(zi, zrest)
+            for si, *srest in enumerate("ab"):
+                print(si, srest)
     """),
     "dict_ops": textwrap.dedent("""\
         def main():
@@ -494,6 +526,26 @@ BUILTIN_PROGRAMS = {
         def main():
             print(struct_pointer_live())
             print(char_star_live())
+    """),
+    # The same extended unpacking in a COMPREHENSION target, which needed two
+    # fixes rather than one: the generator-target parser had no `*` arm, so
+    # `[r for first, *r in pairs]` was a SyntaxError on both engines (the
+    # statement path's own `_parse_unpack_target` has always spelled it
+    # "*name" in the same target string), and once it parsed, the per-slot
+    # walk read `*r` as a slot NAME — a variable literally called `*r`, so
+    # the element repr came out `[0, 0]`.
+    #
+    # The remainder rows have THREE elements on purpose: a two-element
+    # remainder prints as a `(a, b)` pair through the runtime's
+    # registered-2-element-list heuristic (`_mojo_repr_pair`), which is a
+    # separate bug from this one and would mask it here — and the nested
+    # comprehension's own result holds three inner lists for the same reason.
+    "comprehension_starred_rest": textwrap.dedent("""\
+        def main():
+            pairs = [(1, "a", "b", "c"), (2, "d", "e", "f")]
+            print([r for first, *r in pairs])
+            rows = [[(1, "m", "n", "o"), (2, "p", "q", "r"), (3, "s", "t", "u")]]
+            print([[q for head, *q in r] for r in rows])
     """),
     # binds only `node.generators[0]` and every `_compr_*_loop` helper takes a
     # single generator, so the extra clauses were silently dropped -- exit 0,
@@ -1067,6 +1119,8 @@ CPYTHON_COMPARABLE = {
     # have seen it.
     "for_target_one_tuple_vs_paren_name",
     "for_target_one_tuple_dict_and_nested",
+    "for_target_starred_rest",
+    "comprehension_starred_rest",
     "comprehension_target_shadows_an_enclosing_local",
 }
 

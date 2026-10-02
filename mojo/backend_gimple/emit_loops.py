@@ -43,7 +43,8 @@ import mojo.backend_gimple.emit_calls as ggc
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.loops_shared import *  # noqa: F401,F403
 from mojo.middle.loops_shared import (
-    _as_str, _gfl_declare_target_name, _pair_key, _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems
+    _as_str, _gfl_declare_target_name, _pair_key, _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems,
+    _emit_starred_slot_from_value, _emit_starred_slot_list, starred_slot_index, starred_slot_name,
 )
 
 def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
@@ -1315,6 +1316,21 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
         for j, nn in enumerate(gen._split_top_level_comma(vn[1:-1].strip())):
             _zip_bind_slot(gen, nn, nested_ptr, nested_elem, j)
         return
+    if starred_slot_index([vn]) >= 0:
+        # The starred slot: read this sequence's element with the same
+        # accessor rule as any other slot, then box it as the one-element
+        # list `*b` means in `for a, *b in zip(...)`.
+        _se = elem if elem else 'int64_t'
+        _ssuf = gimple_ctypes.TypeLattice.list_suffix(_se)
+        if _ssuf == 'str':
+            _star_val = gen._new_val('char *', f"mojo_list_get_str ({list_ptr}, {idx_t})")
+        elif _ssuf == 'double':
+            _star_val = gen._new_val('double', f"mojo_list_get_double ({list_ptr}, {idx_t})")
+        else:
+            _star_val = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
+        _emit_starred_slot_from_value(gen, starred_slot_name(vn), _se,
+                                      _star_val, _se)
+        return
     cvn = gen._cname(vn)
     vt = gen.var_types.get(vn, elem)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -1442,6 +1458,13 @@ def _gen_for_zip(gen, node):
             for nn in gen._split_top_level_comma(vn[1:-1].strip()):
                 _declare_zip_slot(nn, seq_ptr, nested_elem)
             return
+        if starred_slot_index([vn]) >= 0:
+            # `for a, *b in zip(xs, ys)` binds `b` to a ONE-ELEMENT LIST
+            # holding this slot's own element — zip yields one tuple per
+            # iteration, so the remainder after `a` is exactly this slot.
+            # Declared as the list it is; `_zip_bind_slot` below fills it.
+            gen._declare_var(starred_slot_name(vn), 'MojoList *')
+            return
         gen._declare_var(vn, elem)
 
     for _di in range(len(tgt_names)):
@@ -1508,7 +1531,15 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     # Same rule as _gen_for_cstr (see its comment): iterating a str yields
     # 1-char STRINGS, so the value slot is `char *` too. It was `char`,
     # which made `for i, c in enumerate(s)` hand out character codes.
-    gen._declare_var(val_var, 'char *')
+    if starred_slot_index([val_var]) >= 0:
+        # `for i, *rest in enumerate(s)`: the character's remainder is a
+        # ONE-ELEMENT LIST (see `_gen_for_enumerate`'s identical arm).
+        star_src = val_var
+        gen._declare_var(starred_slot_name(val_var), 'MojoList *')
+        val_var = gen._new_temp('char *')
+    else:
+        star_src = ''
+        gen._declare_var(val_var, 'char *')
     cidx_var = gen._cname(idx_var)
     cval_var = gen._cname(val_var)
 
@@ -1537,6 +1568,11 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     _one_c2 = gen._new_val('int64_t', "(int64_t)1")
     _end_c2 = gen._new_val('int64_t', f"{idx_t} + {_one_c2}")
     gen._emit(f"  {cval_var} = mojo_cstr_slice ({s_val}, {idx_t}, {_end_c2});")
+    if star_src:
+        # Iterating a `str` yields 1-char STRINGS, so the starred list's
+        # element type is `char *` (see the declaration above).
+        _emit_starred_slot_from_value(gen, starred_slot_name(star_src),
+                                      'char *', cval_var, 'char *')
     gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
@@ -1602,7 +1638,24 @@ def _gen_for_enumerate(gen, node):
     # If the value part is itself a tuple like (a, b, c), use a temp for the element
     val_is_tuple = (isinstance(raw_val, str) and
                     raw_val.startswith('(') and raw_val.endswith(')'))
-    val_var = gen._new_temp('int64_t') if val_is_tuple else raw_val
+    # ...or a STARRED slot (`for i, *rest in enumerate(xs)`), which binds
+    # the yielded pair's second half as a ONE-ELEMENT LIST. enumerate's pair
+    # is synthesized slot by slot rather than sliced out of a row, so this is
+    # the `_emit_starred_slot_from_value` shape, not `_emit_starred_slot_list`
+    # — and without it the star reached the C declarator as
+    # `int64_t *rest;` with a store through it, so `rest` read as 0.
+    val_is_star = (isinstance(raw_val, str) and raw_val.strip().startswith('*')
+                   and not val_is_tuple)
+    if val_is_tuple:
+        val_var = gen._new_temp('int64_t')
+    elif val_is_star:
+        # The temp that receives the value is minted BELOW, once the
+        # sequence's element type is known — its C type has to match that
+        # element, not be guessed here (`char *` for an int list is exactly
+        # the "makes pointer from integer" this avoids).
+        val_var = None
+    else:
+        val_var = raw_val
 
     # Ensure underlying list
     if lst_type == 'MojoList *':
@@ -1634,7 +1687,18 @@ def _gen_for_enumerate(gen, node):
 
     elem = gen._elem_of(list_ptr)
     gen._declare_var(idx_var, 'int64_t')
-    if not val_is_tuple:
+    star_elem = None
+    if val_is_star:
+        # The starred slot is a LIST of what follows the index, not the
+        # index's own slot type — declared by the emission below, which also
+        # records its element type so `print(rest)` prints `[7]` and not a
+        # pointer.
+        gen._declare_var(starred_slot_name(raw_val), 'MojoList *')
+        star_elem = elem if elem else 'int64_t'
+        val_var = gen._new_temp({
+            'str': 'char *', 'double': 'double'}.get(
+                gimple_ctypes.TypeLattice.list_suffix(star_elem), 'int64_t'))
+    elif not val_is_tuple:
         gen._declare_var(val_var, elem if elem else 'int64_t')
     # Writes go through _cname (a target named after a C keyword is
     # DECLARED renamed — see _gen_for_dict's identical note). `val_var` is
@@ -1700,6 +1764,21 @@ def _gen_for_enumerate(gen, node):
                     gen._emit(f"  {cv} = {ti};")
                 else:
                     gen._safe_coerce_emit('int64_t', gen.var_types.get(vname, pair_elem), ti, cv)
+    elif val_is_star:
+        # `rest = [<element>]` — the pair's second half, as a one-element
+        # list. The element is read with the same per-element accessor rule
+        # as every other slot here, then boxed by the shared helper (the
+        # receiving temp's C type already matches `star_elem`, minted above).
+        _se_suf = gimple_ctypes.TypeLattice.list_suffix(star_elem)
+        if _se_suf == 'str':
+            _sv = gen._new_val('char *', f"mojo_list_get_str ({list_ptr}, {idx_t})")
+        elif _se_suf == 'double':
+            _sv = gen._new_val('double', f"mojo_list_get_double ({list_ptr}, {idx_t})")
+        else:
+            _sv = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
+        gen._emit(f"  {cval_var} = {_sv};")
+        _emit_starred_slot_from_value(gen, starred_slot_name(raw_val),
+                                      star_elem, cval_var, star_elem)
     elif suf == 'double':
         gen._emit(f"  {cval_var} = mojo_list_get_double ({list_ptr}, {idx_t});")
     elif suf == 'str':
@@ -1763,6 +1842,12 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # Lib/test/support/__init__.py's WindowsCleanup.__exit__).
         inner = var[1:-1].strip()
         var_names = gen._split_top_level_comma(inner)
+        # A `*`-starred slot (`for first, *rest in ...`) binds the REMAINDER
+        # as a LIST and shifts every slot after it, so it has to be found
+        # BEFORE the declarations below decide what each slot is. See
+        # `starred_slot_index` for why it is a position and not a name scan.
+        star_idx = starred_slot_index(var_names)
+        n_after = 0 if star_idx < 0 else len(var_names) - star_idx - 1
         # Declare each FLAT slot by its real per-slot element type, not a
         # blanket int64_t: _declare_var is deliberately first-decl-wins,
         # so pre-declaring int64_t here permanently locked every unpacked
@@ -1781,6 +1866,16 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         for _fli in range(len(var_names)):
             _fl_vn = _as_str(var_names[_fli])
             _fl_se = _as_str(slot_elems[_fli]) if _fli < len(slot_elems) else 'int64_t'
+            if _fli == star_idx:
+                # The starred slot holds a LIST OF the remaining elements,
+                # so that is what it is declared as — and its element type
+                # is recorded, because `print(rest)` must print `[2, 3]`
+                # and not the pointer.
+                _gfl_declare_target_name(gen, shadow_name,
+                                         starred_slot_name(_fl_vn), 'MojoList *')
+                if _fl_se and _fl_se != 'int64_t':
+                    gen._elem_types[starred_slot_name(_fl_vn)] = _fl_se
+                continue
             _gfl_declare_target_name(gen, shadow_name, _fl_vn, _fl_se)
     else:
         var_names = None
@@ -1919,11 +2014,39 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 else:
                     gen._safe_coerce_emit('int64_t', vt, raw, cvn)
 
+        # A starred slot's own bounds, and the slots after it, depend on the
+        # item's RUNTIME length (`a, *mid, z` over a 4-item row gives
+        # `mid == [2, 3]`), so with a star in the target the length is read
+        # once and the trailing slots are counted from its end. No star: the
+        # indices stay the literal slot numbers they always were, so a
+        # starless target's generated C is unchanged.
+        item_len = None
+        if star_idx >= 0:
+            item_len = gen._new_val(
+                'int64_t', f"mojo_list_len ({_as_str(tuple_ptr)})")
+
         for i, vn in enumerate(var_names):
-            if vn.startswith('(') and vn.endswith(')'):
-                _emit_target_assign(tuple_ptr, vn, i, 'int64_t')
+            if i == star_idx:
+                # `rest` gets everything from the star's position up to the
+                # slot before the first slot after it — `mojo_list_len` minus
+                # the number of trailing slots.
+                stop = item_len
+                if n_after:
+                    _n = gen._new_val('int64_t', f"{n_after}LL")
+                    stop = gen._new_val('int64_t', f"{item_len} - {_n}")
+                _emit_starred_slot_list(gen, tuple_ptr,
+                                        starred_slot_name(_as_str(vn)),
+                                        f"{i}LL", stop, slot_elems[i])
                 continue
-            _emit_target_assign(tuple_ptr, vn, i, slot_elems[i])
+            slot_i = i
+            if star_idx >= 0 and i > star_idx:
+                _base = gen._new_val('int64_t', f"{item_len} - {n_after}LL")
+                _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
+                slot_i = gen._new_val('int64_t', f"{_base} + {_off}")
+            if vn.startswith('(') and vn.endswith(')'):
+                _emit_target_assign(tuple_ptr, vn, slot_i, 'int64_t')
+                continue
+            _emit_target_assign(tuple_ptr, vn, slot_i, slot_elems[i])
     else:
         cvar = gen._cname(var)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -2207,6 +2330,28 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     if is_tuple:
         inner = var[1:-1].strip()
         var_names = gen._split_top_level_comma(inner)
+        # `for k, *rest in <dict>` unpacks the KEY STRING — Python says
+        # `for a, *b in {"xy": 1}` gives `a == 'x'`, `b == ['y']` — and the
+        # slots of a dict loop here are not slots of a shared row at all
+        # (slot 0 is the key; every later slot is the literal 0, this
+        # lowering's stand-in for a pair's value). There is no row to slice a
+        # remainder out of, so this REFUSES at runtime through the standard
+        # mechanism (`_emit_unsupported_iter`: loud, and not a silently
+        # dropped body) rather than emitting the store through a pointer
+        # named `*rest` — which is a write through an UNINITIALISED pointer,
+        # i.e. a wild store that happens to be mapped.
+        #
+        # A refusal and not a lowering, because the two engines disagree on
+        # this shape already and only one of them can be moved here: the
+        # interpreter binds the WHOLE key (`for k, *vs in d` prints
+        # `abc []` where CPython prints `a ['b', 'c']` — see
+        # bugs/RUNTIME_starred_for_target_over_a_dict_key_is_not_unpacked.md),
+        # so implementing CPython's reading here would make the compiled path
+        # disagree with the interpreter it falls back to, which is the one
+        # comparison this project can actually check.
+        if starred_slot_index(var_names) >= 0:
+            _emit_unsupported_iter(gen, 'dict')
+            return
         # Flatten any nested tuple target the same way _gen_for_list does
         # (a naive split turned `(k, (a, b))` into the bogus fragments
         # `(a` / `b)`, declared verbatim — hard C syntax errors).

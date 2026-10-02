@@ -70,6 +70,12 @@ from mojo.middle.infra_infer import (
 # this object to describe itself" cannot disagree about which dunder wins.
 from mojo.middle.calls_shared import user_dunder_repr_call
 from mojo.middle.stmts_shared import _annotation_container_elem_type
+# The extended-unpacking (`*rest`) slot arithmetic, shared with the
+# for-loop lowering that has the same per-slot walk — see
+# `_compr_list_loop`'s own comment and `starred_slot_index`'s docstring.
+from mojo.middle.loops_shared import (
+    _emit_starred_slot_list, starred_slot_index, starred_slot_name,
+)
 
 # Separator for `function_calls`' `name<sep>index` composite strings — see
 # `analyze_param_usage`. U+001F (ASCII Unit Separator): never appears in a
@@ -3978,6 +3984,14 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         # comprehension site (real: Tools/scripts/summarize_stats.py's
         # `[... for label, (value, den) in object_stats.items()]`).
         var_names = _split_top_level_comma(inner_str)
+        # A `*`-starred slot binds the REMAINDER as a list, and every slot
+        # after it is measured from the END of the item — so the position has
+        # to be known before the declarations and the assignments below,
+        # exactly as in `_gen_for_list` (see
+        # `mojo/middle/loops_shared.starred_slot_index`, which is where the
+        # shared arithmetic and the reason for it live).
+        star_idx = starred_slot_index(var_names)
+        n_after = 0 if star_idx < 0 else len(var_names) - star_idx - 1
         is_dict_items = _iv in gen._dict_items_val_elems
         value_elem = gen._dict_items_val_elems.get(_iv) if is_dict_items else None
         slot_types = gen._tuple_slot_types.get(_iv)
@@ -4015,6 +4029,12 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         for _czi in range(len(var_names)):
             _cvn = _as_str(var_names[_czi])
             _cse = _as_str(slot_elems[_czi]) if _czi < len(slot_elems) else 'int64_t'
+            if _czi == star_idx:
+                # The starred slot holds a LIST of the remaining elements,
+                # which is also what makes it a `MojoList *` and not one of
+                # the row's own slot types — see `_emit_starred_slot_list`.
+                _cvn = starred_slot_name(_cvn)
+                _cse = 'MojoList *'
             _declare_target_name(_cvn, _cse)
             # Own binding per bound name, exactly as the single-target branch
             # below: `[(a, b) for a, b in pairs]` shadows BOTH names, and each
@@ -4022,6 +4042,9 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             # back when the comprehension ends.
             for _bn in _compr_target_leaf_names(_cvn):
                 saved_slots.append((_bn, _compr_bind_target(gen, _bn, _cse)))
+            if _czi == star_idx:
+                gen._elem_types[starred_slot_name(_as_str(var_names[_czi]))] = \
+                    _as_str(slot_elems[_czi])
         len64 = gen._new_val('int64_t', f'mojo_list_len ({_iv})')
         idx64 = gen._new_val('int64_t', '(int64_t)0')
         bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -4071,8 +4094,29 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
                 else:
                     gen._safe_coerce_emit('int64_t', vt, raw, cv)
 
+        # With a star in the target the row's own length decides the starred
+        # slot's bounds and every slot after it, so it is read once; a
+        # starless target keeps the literal indices it always had.
+        _sub_len = None
+        if star_idx >= 0:
+            _sub_len = gen._new_val('int64_t', f"mojo_list_len ({_as_str(sub_list)})")
         for i, vn in enumerate(var_names):
-            _emit_slot_assign(sub_list, vn, i, slot_elems[i])
+            if i == star_idx:
+                _stop = _sub_len
+                if n_after:
+                    _na = gen._new_val('int64_t', f"{n_after}LL")
+                    _stop = gen._new_val('int64_t', f"{_sub_len} - {_na}")
+                _emit_starred_slot_list(gen, sub_list,
+                                        starred_slot_name(_as_str(vn)),
+                                        f"{i}LL", _stop,
+                                        _as_str(slot_elems[i]))
+                continue
+            _slot_i = i
+            if star_idx >= 0 and i > star_idx:
+                _base = gen._new_val('int64_t', f"{_sub_len} - {n_after}LL")
+                _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
+                _slot_i = gen._new_val('int64_t', f"{_base} + {_off}")
+            _emit_slot_assign(sub_list, vn, _slot_i, slot_elems[i])
         gen._gen_compr_append(node, gen0, res, res_type, bb_post)
         gen._emit(f"  goto {bb_post};")
         gen._emit_label(bb_post)

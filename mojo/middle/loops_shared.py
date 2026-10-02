@@ -163,6 +163,143 @@ def _tuple_unpack_slot_elems(gen, it_val: str, nslots: int) -> list:
             elems.append(_as_str(pair_elem))
     return elems
 
+def starred_slot_index(slots: list) -> int:
+    """Which slot of an unpacking target is `*`-starred, or -1 for none.
+
+    Python's extended unpacking (`for first, *rest in ...`) puts the star in
+    the SLOT TEXT, and `fire_compiler.for_target_names` keeps it there on
+    purpose — "a starred leaf keeps its star ... the binding rules for it are
+    the consumer's". Two consumers already read it: `boundnames`' binder
+    strips it for the bound-name set, and the interpreter's
+    `_bind_comprehension_target` finds it and does the before/star/after
+    arithmetic. A third one did not, and used a slot as a variable name
+    verbatim — so `*rest` reached the C declarator as `int64_t *rest;` and
+    the assignment that followed was `*rest = _t22;`, a store through an
+    UNINITIALISED pointer. It did not always crash: the slot landed in
+    whatever the frame held, so `for first, *rest in [(1,2,3)]` printed
+    `1 0` where CPython prints `1 [2, 3]`.
+
+    By POSITION, which is what makes the rest of the rule expressible: every
+    slot before the star is measured from the front of the item, every slot
+    after it from the END, and the star takes what is left between them
+    (`a, *mid, z` over a 4-item row gives `mid == [2, 3]`). Scanning names
+    for a `*` character cannot express that; the interpreter's `star_idx` is
+    the model.
+
+    The first star wins. A second one is a CPython `SyntaxError` ("multiple
+    starred expressions in assignment"), so it cannot come from real source —
+    only from a hand-built AST, where treating the extra `*name` as an
+    ordinary slot name is at least not a silent misreading of valid code.
+    """
+    for _i in range(len(slots)):
+        _s = _as_str(slots[_i]).strip()
+        if _s.startswith('*'):
+            return _i
+    return -1
+
+
+def starred_slot_name(slot: str) -> str:
+    """The name a starred target slot binds: `'*rest'` -> `'rest'`. A slot
+    with no star is returned unchanged, so a caller that has already found
+    the star by position can hand every slot through this."""
+    _s = _as_str(slot).strip()
+    if _s.startswith('*'):
+        return _s[1:].strip()
+    return _s
+
+
+def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
+                            stop: str, slot_elem: str) -> None:
+    """`name = <list_ptr>[start:stop]`, emitted as a real counted loop.
+
+    GIMPLE has no slice expression and no variable-length array, so the
+    remainder is built the only way it can be: a fresh list, an index from
+    `start`, and one append per element up to `stop`. `start`/`stop` are
+    already-emitted int64_t operand NAMES, not literals, because a starred
+    slot's own bounds depend on the item's runtime length (the slots after
+    the star are counted from its end) — see `starred_slot_index`.
+
+    The element accessor is the per-slot rule every non-starred slot uses
+    (`mojo_list_get_str` for a `char *` slot, the int accessor otherwise),
+    so the list the body goes on to read has the same element type as the
+    row it came from.
+
+    Declares `name` as a `MojoList *` and records its element type: the body
+    must be able to print/iterate/len it as the list Python bound, which is
+    the whole point of the star. The declaration is NOT forced — each site's
+    own pre-pass declares the stripped name first (that is where the C
+    declarations are emitted, before the loop opens), and `_declare_var` is
+    first-decl-wins, so this call only fills the entry in when a site has not
+    declared it yet.
+    """
+    _lp = _as_str(list_ptr)
+    _nm = _as_str(name)
+    gen._declare_var(_nm, 'MojoList *')
+    if slot_elem and slot_elem != 'int64_t':
+        gen._elem_types[_nm] = slot_elem
+    _dst = gen._cname(_nm)
+    _lst = gen._new_temp('MojoList *')
+    gen._emit(f"  {_lst} = mojo_list_new ();")
+    gen._emit(f"  {_dst} = {_lst};")
+    _i = gen._new_val('int64_t', _as_str(start))
+    _cond = gen._new_bb(); _body = gen._new_bb(); _after = gen._new_bb()
+    gen._emit(f"  goto {_cond};")
+    gen._emit_label(_cond)
+    _c = gen._new_val('_Bool', f"{_i} < {_as_str(stop)}")
+    gen._emit(f"  if ({_c}) goto {_body}; else goto {_after};")
+    gen._emit_label(_body)
+    if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
+        _rd = gen._new_val('char *', f"mojo_list_get_str ({_lp}, {_i})")
+        gen._void_call('mojo_list_append_str', [('MojoList *', _dst), ('char *', _rd)])
+    elif gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'double':
+        _rd = gen._new_val('double', f"mojo_list_get_double ({_lp}, {_i})")
+        gen._void_call('mojo_list_append_double', [('MojoList *', _dst), ('double', _rd)])
+    else:
+        _rd = gen._new_val('int64_t', f"mojo_list_get_int ({_lp}, {_i})")
+        gen._void_call('mojo_list_append_int', [('MojoList *', _dst), ('int64_t', _rd)])
+    _one = gen._new_val('int64_t', "1LL")
+    _nxt = gen._new_val('int64_t', f"{_i} + {_one}")
+    gen._emit(f"  {_i} = {_nxt};")
+    gen._emit(f"  goto {_cond};")
+    gen._emit_label(_after)
+
+
+def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
+                                  value: str, slot_elem: str) -> None:
+    """`name = [value]` — a starred slot whose remainder is exactly ONE value.
+
+    The shape is `enumerate`/`zip`, which yield a 2-tuple per iteration, so
+    `for i, *rest in enumerate(xs)` binds `rest` to a one-element LIST
+    (`rest == [7]`, not `7`). These two lowerings have no shared row to slice
+    — the pair is synthesized slot by slot — so this is the
+    `_emit_starred_slot_list` counterpart for "the remainder is a value, not
+    a range".
+
+    `value_ctype` is the already-lowered value's C type and `value` its
+    operand name; the element type recorded on the new list is `slot_elem`,
+    which is the SEQUENCE's element type (what the value holds), not the
+    value's C storage.
+    """
+    _nm = _as_str(name)
+    gen._declare_var(_nm, 'MojoList *')
+    if slot_elem and slot_elem != 'int64_t':
+        gen._elem_types[_nm] = slot_elem
+    _dst = gen._cname(_nm)
+    _lst = gen._new_temp('MojoList *')
+    gen._emit(f"  {_lst} = mojo_list_new ();")
+    gen._emit(f"  {_dst} = {_lst};")
+    if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
+        gen._void_call('mojo_list_append_str',
+                       [('MojoList *', _dst), ('char *', _as_str(value))])
+    elif gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'double':
+        gen._void_call('mojo_list_append_double',
+                       [('MojoList *', _dst), ('double', _as_str(value))])
+    else:
+        _iv = gen._new_val('int64_t', f"(int64_t){_as_str(value)}")
+        gen._void_call('mojo_list_append_int',
+                       [('MojoList *', _dst), ('int64_t', _iv)])
+
+
 def _gfl_declare_target_name(gen, shadow_name, vn: str, se: str) -> None:
     """Hoisted out of `_gen_for_list` (recursive nested closure) — the
     lifted-closure-env determinism fix; `gen`/`shadow_name` threaded."""
