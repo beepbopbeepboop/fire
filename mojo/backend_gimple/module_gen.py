@@ -2114,8 +2114,30 @@ def gen_module_impl(self, stmts):
                     for _ms in module_stmts:
                         if isinstance(_ms, FunctionDef):
                             self._global_inline_defs.add(_ms.name)
+                            # `_imported_func_home` ONLY, and never
+                            # `_note_own_func_home`: this observation is
+                            # "module _mn DEFINES a function named _ms.name"
+                            # — a whole-program fact about a SIBLING, which
+                            # is exactly what tier 3 (`_imported_func_home`,
+                            # setdefault/first-wins) is for. Recording it in
+                            # tier 2 as well put a sibling's definition into
+                            # the dict documented as "THIS exact gen_module
+                            # call's own FromImportStmt scan", so two
+                            # siblings each defining a common name collided
+                            # it to `_AMBIGUOUS_FUNC_HOME` and `_func_qualifier`
+                            # then refused EVERY reference to that name in the
+                            # whole program — including a bare `open(...)` in
+                            # a module that lexically imports nothing of the
+                            # kind, where the reference is the builtin.
+                            # Measured: `Lib/zipfile/__init__.py`, whose bare
+                            # `open(...)` uses are the builtin, was refused
+                            # outright because six unrelated siblings
+                            # (codecs, tokenize, bz2, lzma,
+                            # compression.zstd._zstdfile, tarfile) each define
+                            # `open` — see
+                            # bugs/COMPILE_FAIL_open_is_ambiguous_from_
+                            # transitive_registrations.md.
                             self._imported_func_home.setdefault(_ms.name, _mn)
-                            self._note_own_func_home(_ms.name, _mn, record_scope=False)
                         elif isinstance(_ms, StructDef):
                             for _m in _ms.methods:
                                 self._global_inline_defs.add(_m.name)

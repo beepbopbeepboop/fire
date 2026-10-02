@@ -585,6 +585,70 @@ def test_dotted_sibling_import_qualifier_agrees() -> bool:
     return ok
 
 
+def test_builtin_open_is_not_ambiguous_from_transitive_siblings() -> bool:
+    """A bare `open(...)` that is the BUILTIN must build, even when two
+    transitively-imported siblings each define their own `open`.
+
+    `gen_module_impl`'s transitive-discovery loop used to register every
+    inlined sibling's top-level FunctionDef names into
+    `_own_imported_func_home` as well as into `_imported_func_home`. The
+    first of those two is documented as "THIS exact gen_module call's own
+    FromImportStmt scan — operating only on `stmts`, never shared across
+    temp_gens"; a sibling's *definition* is neither, and colliding two of
+    them flipped the key to `_AMBIGUOUS_FUNC_HOME`, which
+    `_func_qualifier` turns into a hard refusal for EVERY reference to
+    that name in the whole program. Measured on
+    `/Users/mrs/net/Python-3.14.6/Lib/zipfile/__init__.py`, whose bare
+    `open(...)` uses are the builtin and which imports no `open` at all:
+    six unrelated siblings (codecs, tokenize, bz2, lzma,
+    compression.zstd._zstdfile, tarfile) each define one, and the file's
+    OWN compile unit is clean — the whole program was refused by this one
+    message. See
+    bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md.
+
+    The sibling bodies here PRINT when called, so "the builtin was used"
+    is asserted by their absence and not merely by the build succeeding —
+    a fix that silently picked one sibling's `open` would otherwise pass.
+
+    `f.read()`'s VALUE is deliberately not asserted: the compiled
+    file-read surface is a separate gap from the qualifier resolution
+    under test (measured: it answers 0 for both engines' `hello`), and
+    freezing today's wrong value here would lock that gap in. What is
+    asserted is what this fix is about — the build succeeds, and the
+    builtin ran rather than either sibling's shadow."""
+    pkg = {
+        'q/__init__.py': '',
+        'q/data.txt': 'hello\n',
+        'q/a.py': ('def open(name, mode="r"):\n'
+                   '    print("A_OPEN_CALLED")\n'
+                   '    return "A"\n'),
+        'q/b.py': ('def open(name, mode="r"):\n'
+                   '    print("B_OPEN_CALLED")\n'
+                   '    return "B"\n'),
+        'q/main.py': (
+            'import q.a\n'
+            'import q.b\n'
+            '\n'
+            'def main():\n'
+            '    f = open("q/data.txt")\n'
+            '    print("OPEN_OK")\n'
+            '\n'
+            'main()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'q/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'q/main.py')
+    ok = (rc == 0 and stdout == 'OPEN_OK\n'
+          and 'OPEN_CALLED' not in stdout
+          and py_rc == 0 and py_stdout == stdout)
+    if not ok:
+        print(f"  ✗ builtin_open_is_not_ambiguous_from_transitive_siblings: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} "
+              f"{py_stdout!r})")
+    return ok
+
+
 CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
@@ -597,6 +661,7 @@ CASES = [
     test_bare_import_sibling_struct_ctor_through_module,
     test_bare_import_sibling_struct_field_through_module,
     test_dotted_sibling_import_qualifier_agrees,
+    test_builtin_open_is_not_ambiguous_from_transitive_siblings,
 ]
 
 
