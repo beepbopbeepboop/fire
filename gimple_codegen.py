@@ -4578,8 +4578,9 @@ class GimpleGen:
         return ginf._compr_set_loop(self, node, gen0, res, res_type, it_val)
     def _gen_print(self, args: list, kwargs: list=None):
         return ginf._gen_print(self, args, kwargs)
-    def _note_dict_callable_ret(self, dict_val: str, value_text: str) -> None:
-        return ginf.note_dict_callable_ret(self, dict_val, value_text)
+    def _note_dict_callable_ret(self, dict_val: str, value_text: str,
+                                value_ctype: str = 'int64_t') -> None:
+        return ginf.note_dict_callable_ret(self, dict_val, value_text, value_ctype)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
     def _eval_const_bool(self, node) -> bool | None:

@@ -1448,7 +1448,7 @@ def _gen_stmt_AssignStmt(gen, node):
                 # store and the print dispatch use too.
                 if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                     gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
-                gen._note_dict_callable_ret(obj_v, v)
+                gen._note_dict_callable_ret(obj_v, v, vtype)
                 # Pass actual vtype so _emit_call can coerce pointers to int64_t
                 gen._emit_call('void', '', 'mojo_dict_set_int',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
@@ -1504,7 +1504,7 @@ def _gen_stmt_AssignStmt(gen, node):
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
                     if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
-                    gen._note_dict_callable_ret(dp, v)
+                    gen._note_dict_callable_ret(dp, v, vtype)
                     # Pass actual vtype so _emit_call can coerce pointers to int64_t
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
@@ -1518,7 +1518,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      ('char *', v)])
                 else:
-                    gen._note_dict_callable_ret(_dsw_dp, v)
+                    gen._note_dict_callable_ret(_dsw_dp, v, vtype)
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      (vtype, v)])
@@ -2776,7 +2776,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
                 if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                     gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
-                gen._note_dict_callable_ret(obj_v, v)
+                gen._note_dict_callable_ret(obj_v, v, vtype)
                 gen._emit_call('void', '', 'mojo_dict_set_int',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
             elif ot in ('int', 'int64_t'):
@@ -2805,7 +2805,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True, True)
                     if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
-                    gen._note_dict_callable_ret(dp, v)
+                    gen._note_dict_callable_ret(dp, v, vtype)
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
             elif ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) not in gen.struct_field_types:

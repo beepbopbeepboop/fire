@@ -3976,13 +3976,51 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
 
 
-def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
+def note_dict_callable_ret(gen, dict_val: str, value_text: str,
+                           value_ctype: str = 'int64_t') -> None:
     """A callable stored into a dict keeps its return type for a later
     `d[k](...)` call, which is the one place a dict subscript can be a
     CALLEE. Called from every dict store of an int64 slot; a non-callable
-    value has no entry in `_callable_ret_types` and is a no-op, which is
-    what keeps this off the hot path."""
-    _rt = gen._callable_ret_types.get(value_text)
+    value matches none of the three sources below and is a no-op, which is
+    what keeps this off the hot path.
+
+    THREE sources, because a first-class callable has more than one
+    representation here and every one of them has to reach the same
+    consumer:
+
+      - `_callable_ret_types` — a non-capturing closure or a lifted free
+        function, i.e. a bare `void *` function pointer.
+      - `_bound_method_ret_types` — anything that needs a receiver
+        alongside the pointer: a struct method bound as a value (`C().m`)
+        and a CAPTURING closure (`lambda x: x + n`, whose env is the
+        receiver). Both are a `MojoBoundMethod *`.
+      - `value_ctype` itself, for a `MojoBoundMethod *` whose construction
+        temp is not in either table because the value is a call RESULT
+        (`e['c'] = mk(100)`): `_call_expr` materializes it into a fresh
+        temp and nothing records its return type, because `mk`'s caller is
+        not a static callable-materialization site. A `MojoBoundMethod *`
+        is a callable BY CONSTRUCTION — the only producer in the tree is
+        `mojo_bound_method_new` — so this is a positive test, not a guess,
+        and 'int64_t' is the honest return type: that is what
+        `mojo_fnptr_call_N` hands back, and the consumer uses the answer
+        only to choose the helper.
+
+    The first two alone left two silent-wrong-answer shapes, both exit 0
+    with a printed `0` while `f = d[k]; f(...)` printed CPython's answer:
+    `dd = {}; dd['m'] = C().m; print(dd['m'](4))` (the bound method is the
+    dict's FIRST callable store, so nothing had put the container in the
+    table — one lambda stored first and the bound method rides in on that
+    entry, which is how the original bug report's `d['k'] = lambda a, b:
+    a + b` repro looked already-fixed) and `e['c'] = mk(100)` (a call
+    result, which neither table can have). The value in the dict was a
+    perfectly good bound method in both cases — `mojo_fnptr_call_1`
+    dispatches it, which is exactly what the working named-local spelling
+    emits — so what was missing was an ENTRY, not a mechanism.
+    """
+    _rt = (gen._callable_ret_types.get(value_text)
+           or gen._bound_method_ret_types.get(value_text))
+    if not _rt and value_ctype == 'MojoBoundMethod *':
+        _rt = 'int64_t'
     if not _rt:
         return
     _cur = gen._dict_callable_ret.get(dict_val)

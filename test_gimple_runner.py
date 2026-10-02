@@ -1099,6 +1099,44 @@ def main():
 main()
 """, "5\n9\nhi\n")
 
+    # The SAME subscript callee, reached with a `MojoBoundMethod *` in the
+    # dict instead of a bare function pointer. `note_dict_callable_ret`
+    # consulted only `_callable_ret_types`, which is where a non-capturing
+    # closure and a lifted free function land; a struct method bound as a
+    # value (`C().m`) lands in `_bound_method_ret_types` instead. With no
+    # entry for the container, `dd['m'](4)` took the indirect-call stub and
+    # printed 0 at exit 0 — while `f = dd['m']; f(4)` in the same program
+    # printed CPython's 8, because the value in the dict was a perfectly
+    # good bound method all along and `mojo_fnptr_call_1` dispatches it. So
+    # this is a missing ENTRY, not a missing mechanism, and the named-local
+    # line is in the test as the control that says so.
+    #
+    # It reproduces only when the bound method is the dict's FIRST callable
+    # store: one lambda stored first puts the container in the table and the
+    # bound method then rides in on that entry, which is how the original
+    # bug report's `d['k'] = lambda a, b: a + b` repro looked already-fixed
+    # while this shape stayed broken. `g` is the control for THAT ordering
+    # dependence and `e` is the fixed shape: the two dicts differ only in
+    # what is stored first.
+    test_gimple_stdout("gimple_dict_held_bound_method_through_subscript", """\
+class C:
+    def m(self, x):
+        return x * 2
+
+def main():
+    dd = {}
+    dd['m'] = C().m
+    print(dd['m'](4))
+    f = dd['m']
+    print(f(5))
+    g = {}
+    g['cap'] = lambda x: x + 1
+    g['m'] = C().m
+    print(g['m'](4))
+main()
+""", "8\n10\n8\n")
+
+
     test_gimple_stdout("gimple_callable_value_keeps_its_return_type", """\
 def plain():
     return False
