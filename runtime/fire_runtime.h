@@ -1742,13 +1742,20 @@ int64_t _char_replace_impl(int64_t s, int64_t old_s, int64_t new_s);
 int mojo_eval(int expr, MojoDict *globals, MojoDict *locals);
 
 /* Module functions that are imported.
- * `py_tokenize`'s arity must match fire_compiler.py's definition
- * (`py_tokenize(src: str, filename: str = "")`) or every --dump-full
- * self-host closure fails with "too many arguments to function
- * 'py_tokenize'; expected 1, have 2" at each of its ~20 call sites. A
- * defaulted parameter still occupies a parameter slot in the lowered C
- * signature; test_selfhost_sigs.py checks this line against the source. */
-MojoList *py_tokenize(char *source, char *filename);  /* lexer.tokenize -> list[Token] */
+ * `py_tokenize` takes ONE argument: fire_compiler.py defines it as
+ * `py_tokenize(src: str)` and puts the filename-carrying form in its own
+ * function, `py_tokenize_named(src, filename)`. This declaration said
+ * `(char *source, char *filename)` and its comment still described the older
+ * `py_tokenize(src, filename="")`, i.e. a DEFAULTED second parameter — which
+ * is right about the failure mode ("a defaulted parameter still occupies a
+ * parameter slot") and wrong about the fix, because the default is gone now.
+ * With this header included first, GCC checks every call against it, so the
+ * whole self-host closure failed with 25 x "too few arguments to function
+ * 'py_tokenize'; expected 2, have 1" while fire.ci's own prototype and
+ * definition (both one-argument) were already correct.
+ * test_selfhost_sigs.py checks this line against the source. */
+MojoList *py_tokenize(char *source);  /* lexer.tokenize -> list[Token] */
+MojoList *py_tokenize_named(char *source, char *filename);  /* py_tokenize with a filename */
 /* Parser is defined as a struct in generated code; no function stub needed */
 char *gimple_codegen_compile_to_gimple(char *source, int do_imports, char *filename);  /* compile_to_gimple function */
 

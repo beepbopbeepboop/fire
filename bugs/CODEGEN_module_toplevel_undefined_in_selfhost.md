@@ -139,3 +139,71 @@ five modules:
 `bootstrap-stage2-cc` rows go from FAIL/SKIP to passing. Until then the gate is
 **red for a reason that has nothing to do with the GPU offload work**, which is
 worth saying out loud whenever those three rows are quoted.
+
+## ROOT CAUSE FOUND, and the link failure it was masking (2026-10-01)
+
+This bug is FIXED. Its two earlier "SUPERSEDED"/"masked" sections were both
+right that the symptom had moved; the cause is not the asymmetry those
+sections guessed at.
+
+`mojo/backend_gimple/module_gen.py` used the name `_lens` for two locals in
+two different functions of the same file:
+
+    1257:  _lens = self._device_launch_lengths.get(_nm) or {}      # a DICT
+    6114:  _lens = {len(e.elements) for e in _els}                # a SET
+
+The compiled path froze the NAME as the set, so line 1257 raised
+
+    cannot coerce MojoSet * to MojoDict * (incompatible container kinds)
+
+inside `gen_module_impl` — while `module_gen.py` itself was being compiled as
+an imported module. `_compile_imported_module`'s handler printed the error and
+rolled back, and that rollback is where this bug's blast radius came from:
+
+* `_compiled_modules` entries added by the failed attempt WERE discarded;
+* the shared `_sub_toplevels` list was NOT — it is shared by reference across
+  every gen level (`gimple_codegen.py` declares it "(shared)"), and the root
+  reads it at emission time to write one forward declaration per entry;
+* the exception also destroyed `module_gen`'s accumulated `imported_code`,
+  which is where the BODIES of the four GPU siblings it had already inlined
+  lived.
+
+So four modules that never failed kept their declarations and lost their bodies:
+
+    Undefined symbols for architecture arm64:
+      "__mojo_backend_gimple_device_select_toplevel", referenced from: _mojo_main
+      "__mojo_backend_gimple_emit_metal_toplevel", ...
+      "__mojo_middle_metal_ops_toplevel", ...
+      "__mojo_middle_offload_toplevel", ...
+
+**Four modules blamed for one module's bug.** The "57 declarations, 0 bodies"
+count in the section above was taken from an artifact that never finished
+generating; on a complete one it is **33 declared, 33 bodies** once the
+collision is gone, and **32/28** with exactly the four above missing before.
+
+Both halves are fixed: the two locals no longer share a name, and the
+rollback now truncates `_sub_toplevels` back to its pre-attempt length, so a
+module that fails can no longer leave a declaration with nothing behind it
+for the linker to find later.
+
+## What that unmasked (still open)
+
+Fixing this put four GPU modules' code into the closure for the first time —
+`mojo/middle/offload.py` alone is ~2000 lines of the metal branch's offload
+pass, and it has never been through the compiled path, because it was being
+silently dropped. It does not compile: three errors, two shapes.
+
+1. **`offload.py:1621`, `_t32` undeclared** — inside the module-level
+   generator `_walk_stmts`, in the `for attr in ('body', 'then_body', ...)`
+   loop: a loop temp is USED with no matching declaration line emitted. Valid
+   everywhere else this shape appears, so this reads as a generator-body
+   lowering gap rather than a general one.
+2. **`offload.py:1747`, `fused = fusable(st)`** — both directions of the
+   assignment are reported, i.e. `fusable`'s return type is inferred two
+   different ways in one function. `fusable` is a nested closure annotated
+   `-> 'gctypes.ExprStmt | None'` (a STRING annotation) whose body returns
+   both `None` and a `gctypes.ExprStmt(...)` struct construction.
+
+So the metal line's GPU work has been validated on the python-hosted path and
+on the Metal benchmarks, never through the self-host closure. Filed as
+bugs/CODEGEN_offload_module_never_compiled.md.

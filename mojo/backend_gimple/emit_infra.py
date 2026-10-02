@@ -2333,6 +2333,32 @@ def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: boo
             # Local variable shadows a C library function; rename to avoid
             # "invalid call to non-function" when the function is called later
             c_name = f"_var_{name}"
+        elif name in (getattr(gen, 'struct_field_types', None) or {}):
+            # Local variable shadows a STRUCT TYPE NAME. Distinct from the
+            # three cases above, and worse, because it breaks a DECLARATION
+            # rather than a call: the struct is emitted as
+            # `typedef struct Lit { ... } Lit;` at module scope, and a local
+            # `int64_t Lit;` shadows that typedef for the rest of the
+            # translation unit, so a later temp declared with that struct's
+            # pointer type becomes `Lit * _t32;` -- which no longer parses as a
+            # declaration at all. GCC then reports it as an EXPRESSION
+            # statement `(*_t32);` and says "'_t32' undeclared", which points
+            # at the temp and not at the real cause, the local three lines up.
+            #
+            # Real: `mojo/middle/offload.py`'s `rewrite_gemm` does
+            # `I = gctypes.IdentExpr` / `Lit = gctypes.IntLiteral` as plain
+            # locals, and its `isinstance(x, Lit)` checks make the compiler
+            # mint a `Lit *` temp, so the self-host closure could not compile
+            # its own GPU module. Same class as the `module_gen.py` `_lens`
+            # set/dict collision: a name serving two roles in one scope, where
+            # the compiled path freezes one meaning and the other breaks.
+            #
+            # Renaming the LOCAL (not the struct) is the right direction: the
+            # struct name is load-bearing across the whole unit -- field
+            # accesses, constructor calls, and every other function's
+            # `Lit *` temp -- whereas this local is function-scoped and every
+            # reference to it already resolves through `_c_names`.
+            c_name = f"_var_{name}"
         elif (name in gen.imported_symbols
               and gen.imported_symbols[name].get('return_type', 'int64_t') != 'unknown'):
             # Local variable shadows an imported *function* (not a module import) —

@@ -3097,7 +3097,20 @@ class GimpleGen:
         'Scope_get':             ('int',        ['Scope *', 'char *']),
         'Scope_set':             ('void',       ['Scope *', 'char *', 'int']),
         'Scope___init__':        ('void',       ['Scope *', 'Scope *']),
-        'py_tokenize':              ('MojoList *', ['char *', 'char *']),
+        # `py_tokenize` takes ONE argument. It used to be
+        # `py_tokenize(src, filename="")` -- a second parameter with a default
+        # -- and listed both, which was right while that was the definition.
+        # The 2-arg form is now its own function, `py_tokenize_named(src,
+        # filename)` (fire_compiler.py), and `py_tokenize` is
+        # `py_tokenize(src)` with no second parameter at all. A two-parameter C
+        # signature is therefore wrong on both ends: every caller passes one
+        # argument (127 call sites) and the C function takes one, so GCC
+        # rejected the whole self-host build with 24 x "too few arguments to
+        # function 'py_tokenize'; expected 2, have 1". Regression from merging
+        # origin/master's work/master-selfhost-fix (1d5a25ed): the
+        # `py_tokenize_named` split landed without updating this table.
+        'py_tokenize':              ('MojoList *', ['char *']),
+        'py_tokenize_named':        ('MojoList *', ['char *', 'char *']),
         'Parser_parse_module':   ('MojoList *', ['Parser *']),
         'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),
         'interpret_and_execute': ('void',        ['char *', 'int']),

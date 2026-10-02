@@ -6215,9 +6215,23 @@ def gen_module_impl(self, stmts):
         try:
             if all(isinstance(e, (ListExpr, TupleExpr)) and e.elements
                    for e in _els):
-                _lens = {len(e.elements) for e in _els}
-                if len(_lens) == 1:
-                    _n = _lens.pop()
+                # `_elens`, NOT `_lens`: this used to share a name with the
+                # dict `_lens` in `gen_module_impl`'s device-kernel pass
+                # (per-buffer launch lengths), two functions apart in this
+                # same file. They are a `MojoSet *` and a `MojoDict *`, and
+                # the compiled path froze the NAME as the set, so the dict
+                # assignment raised "cannot coerce MojoSet * to MojoDict *
+                # (incompatible container kinds)" — which took out
+                # `module_gen.py`'s own compile, and with it (silently, see
+                # `_compile_imported_module`'s rollback) the four GPU sibling
+                # modules it had already inlined. Symptom: four undefined
+                # `__mojo_*_toplevel` symbols at link, blaming four modules
+                # for one module's bug. Distinct names is the whole fix; the
+                # collision was silent precisely because nothing checks that
+                # two locals of one name agree.
+                _elens = {len(e.elements) for e in _els}
+                if len(_elens) == 1:
+                    _n = _elens.pop()
                     _slots = [gimple_ctypes.TypeLattice.join_all(
                         [self._quick_type(e.elements[j]) for e in _els])
                         for j in range(_n)]

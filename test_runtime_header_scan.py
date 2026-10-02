@@ -242,7 +242,11 @@ def test_every_declaration_is_seen():
     # merge had. One name, and it is the whole delta -- which is exactly why the
     # number is read off the call and never added up: 531 + 1 is right here and
     # would have been wrong on any other pair of sides.
-    for header, want in (('fire_runtime.h', 532),
+    # 532 -> 533 (2026-10-01, self-host signature fix): `py_tokenize_named`.
+    # `py_tokenize` is one argument now (`py_tokenize(src: str)`) with the
+    # filename-carrying form split into its own function, so the header gains a
+    # name rather than changing one. Taken from the call, per the rule above.
+    for header, want in (('fire_runtime.h', 533),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

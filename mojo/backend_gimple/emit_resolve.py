@@ -476,6 +476,43 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             emitted_structs_before = set(gen._emitted_structs)
             inline_defs_before = set(gen._global_inline_defs)
             emitted_allocs_before = set(gen._emitted_allocs)
+            # AND the module-toplevel registration list, which is shared by
+            # reference across every gen level (gimple_codegen.py declares it
+            # "(shared)") and which the ROOT reads at emission time to write
+            # one forward declaration per entry and one call per entry in
+            # `main`. A name registered by an attempt that then raised has no
+            # body anywhere: the exception destroyed the `imported_code` the
+            # body lived in. Left behind, it becomes a declaration with
+            # nothing behind it, and the link fails naming a module the
+            # reader has no reason to connect to the module that actually
+            # failed.
+            #
+            # Measured, on this tree: `mojo/backend_gimple/module_gen.py` has
+            # a local named `_lens` that is a set comprehension in
+            # `_register_free_generator` and a dict in `gen_module_impl`, and
+            # the compiled path froze the name as `MojoSet *`, so the dict
+            # assignment raised "cannot coerce MojoSet * to MojoDict *". That
+            # one module carries four GPU siblings (`device_select`,
+            # `emit_metal`, `metal_ops`, `offload`) in its own inline closure,
+            # so its failure silently deleted all four of their bodies while
+            # leaving all four registered:
+            #
+            #     Undefined symbols for architecture arm64:
+            #       "__mojo_backend_gimple_device_select_toplevel", referenced from: _mojo_main
+            #       "__mojo_backend_gimple_emit_metal_toplevel", ...
+            #       "__mojo_middle_metal_ops_toplevel", ...
+            #       "__mojo_middle_offload_toplevel", ...
+            #
+            # Four modules blamed for one module's bug, which is also how
+            # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md read
+            # ("57 declarations, 0 bodies", "the blast radius is 57 modules;
+            # the visible symptom is 5") before its own counts came off an
+            # artifact that never finished generating.
+            #
+            # Truncate rather than clear: an OUTER module legitimately
+            # registered its own name before this attempt started, and that
+            # one is not this failed attempt's to retract.
+            sub_toplevels_before = len(gen._sub_toplevels)
             # Same rollback rationale for the builtin-as-value funcptr pair:
             # a module whose gen_module raises mid-compile (e.g. the
             # "cannot compile module: `Counter[...] = ...` subscript store"
@@ -972,6 +1009,10 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._funcptr_builtins_needed.discard(_n)
                 for _e in list(gen._emitted_funcptr_builtins - funcptr_emitted_before):
                     gen._emitted_funcptr_builtins.discard(_e)
+                # See `sub_toplevels_before` above: a declaration with no body
+                # behind it is a link error attributed to the wrong module.
+                if len(gen._sub_toplevels) > sub_toplevels_before:
+                    del gen._sub_toplevels[sub_toplevels_before:]
                 # doc/OWNERSHIP_MODEL.md Phase 3's per-function state
                 # (gimple_gen_infra.py's begin_function/_owned_free_
                 # candidates) is NOT tied to modules_before/etc like the
