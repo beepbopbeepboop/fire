@@ -196,6 +196,58 @@ CASES = [
      "    a[bump()] += 100\n"
      "    sys.stdout.write(\"%d %d %d\" % (a[0], a[1], a[2]))\n"
      "    return 0\n"),
+    # `len` is on this list because the two architectures answered it the SAME
+    # wrong way, which is the shape a one-backend fix would hide: `_emit_call`
+    # special-cased `range` and treated every other callee as a known function
+    # or an extern, and `len` matched neither, so it became a call to a libc
+    # symbol that does not exist.  Both backends therefore returned whatever
+    # the call left in the return register — measured, -6 for `len(range(10))`
+    # on BOTH — and one architecture being right would have been as much a bug
+    # as both being wrong.  (`bugs/FORMAL_x86_64_formal_backend_gaps.md`.)
+    #
+    # Four operand shapes in one line, because the fix is not one rule and the
+    # four are the four ways to be wrong about it:
+    #
+    #   * a `range` blob — the count field at offset 0;
+    #   * a LIST literal and a list LOCAL — the same field, and the local is the
+    #     one a fall-through reads through an unclassified word;
+    #   * a string LOCAL — a bare `char *`, and its length is a COMPUTATION
+    #     (`strlen`) rather than a field, because a NUL-terminated run has no
+    #     count word.  Measured before the fix, on both architectures:
+    #     1819043176 = 0x6C6C6568 = "hell" read little-endian;
+    #   * a string that is a METHOD RESULT — `lstrip` yields an INTERIOR
+    #     pointer, so this is the case that pins the scan to the NUL from
+    #     wherever the pointer starts rather than from the original literal.
+    #     Measured before the fix, on both: 536897896 = 0x20006869, "hi"
+    #     followed by the two spaces that had just been trimmed.
+    #
+    # The empty string is here too, because a scan that forgets the terminator
+    # walks off the end of the buffer, and 0 is the answer that says it did not.
+    #
+    # TWO printfs, not one, and the reason is this suite's own subject rather
+    # than taste: SysV x86-64 passes six integer arguments in registers, so a
+    # single `printf` of seven values is refused on x86-64 and built on arm64 —
+    # which is a different divergence than the one this case exists to close
+    # (bugs/FORMAL_x86_64_argument_registers.md).  A case that tripped it would
+    # report that filing and not this one.
+    ("len_of_every_operand_shape",
+     "def main():\n"
+     "    m = \"hello\"\n"
+     "    w = \"  hi\".lstrip()\n"
+     "    e = \"\"\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"%d %d %d %d\", len(m), len(w), len(e), len(xs))\n"
+     "    printf(\" %d %d %d\", len([1, 2, 3, 4]), len(range(10)), len([]))\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    m = \"hello\"\n"
+     "    w = \"  hi\".lstrip()\n"
+     "    e = \"\"\n"
+     "    xs = [1, 2, 3]\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (len(m), len(w), len(e), len(xs)))\n"
+     "    sys.stdout.write(\" %d %d %d\" % (\n"
+     "        len([1, 2, 3, 4]), len(range(10)), len([])))\n"
+     "    return 0\n"),
 ]
 
 
@@ -216,6 +268,36 @@ REFUSALS = [
      "    printf(\"%d\\n\", len(a[0]))\n"
      "    return 0\n",
      "'+=' on two strings is refused"),
+    # THE SECOND HALF of the tuple-store divergence, and the reason the first
+    # half needed a positive case to be worth anything.  `h.x, h.y = p, q` is
+    # lowered by both now (`test_formal_value_model.py`'s
+    # `tuple_store_to_self_and_to_a_local` pins it against CPython on both), but
+    # the same SPELLING inside `__init__` reaches a different pass: the
+    # construction-with-arguments inline, which lowers the call by storing each
+    # of the constructor's `self.<field> = …` assignments into the fresh block
+    # and so needs the body to BE a straight line of those.  A tuple target is
+    # not, and it is refused — which is correct, and which is only correct while
+    # BOTH architectures say so.  x86-64 used to reach its own
+    # `_emit_tuple_assign` and refuse with
+    # "tuple assignment targets must be plain names on the formal x86-64 path",
+    # so the two backends answered one program with two different sentences.
+    #
+    # It is here rather than in the positive list because there is no output to
+    # compare: the assertion is that neither machine may answer it, and a case
+    # that pins an answer would be pinning the wrong one.
+    ("a_tuple_target_in_a_constructor_body_is_refused_identically",
+     "class Tail:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x, self.y = p, q\n"
+     "    def total(self):\n"
+     "        return self.x + self.y\n"
+     "def main(n):\n"
+     "    var t = Tail(3, 4)\n"
+     "    printf(\"t=%d\", t.total())\n"
+     "    return 0\n",
+     "whose body this path does not inline"),
 ]
 
 

@@ -448,7 +448,7 @@ measurement instruction attached:
 | row | claim that holds it |
 |---|---|
 | 93, `debug_assert[…]` | `formal2-assert-imports` |
-| 57, register ABI (x86-64) | `formal2-x86-parity` (`FORMAL_x86_64_hostmods_that_do_not_build.md` §Failure 2) |
+| 57, register ABI (x86-64) | `FORMAL_x86_64_argument_registers.md` (the census that first measured it is now `test_formal_hostmods_census.py`) |
 | 28, callee has no definition | first-layer, integrated; `FORMAL_callee_no_def_ceiling_zero.md` |
 | 24, MLIR dialect | `formal2-mlir-comptime` + `formal-mlir-gpu` |
 | 24, receiver at argument position 0 | `formal-receiver-novalue` |

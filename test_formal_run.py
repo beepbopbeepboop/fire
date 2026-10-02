@@ -4812,7 +4812,14 @@ ASSIGNED_TYPE_REFUSALS = [
     # tuple store to a field was refused by name on x86-64 and
     # accepted-and-DROPPED on arm64 — and both halves of that reason are gone, so
     # the band-aid had to go with them rather than rot as a sentence asserting
-    # something false about the reader's file.
+    # something false about the reader's file.  Both emitters perform the store:
+    # x86-64 refused it by name until `_tuple_target_key` gave a `MemberExpr`
+    # element the same `_store_var` store a plain `self.x = v` uses, and arm64's
+    # arm is `_store_tup_slot`'s.  So what this row guards now is the OTHER
+    # half of that separation — that reading a TYPE out of a store is a separate
+    # question from performing it, and that the two must not be allowed to drift
+    # into agreeing.  With the store read as evidence the program built, ran, and
+    # answered 123 where the source says 128.
     #
     # What replaces it in the NEGATIVE direction is the one thing about this
     # program that is still refused, and it is refused for a DIFFERENT and TRUE
@@ -5065,13 +5072,13 @@ INIT_FIELD_TYPE_CASES = [
      "    if o2.inner.total() != 489:\n"
      "        return 50 + o2.inner.total()\n"
      "    return 0\n", 0, None),
-    # THE TUPLE FORM is exercised by `init_assigned_scalar_fields_stay_plain`
-    # below rather than here, because it is a property of the STATEMENT
-    # lowering and x86-64 does not lower a `MemberExpr` tuple target at all
-    # (`formal/x86_64_codegen.py`'s `_emit_tuple_assign` takes plain names only,
-    # while arm64 lowers it) — a divergence in the two backends rather than in
-    # anything to do with the evidence source, filed as
-    # `bugs/FORMAL_x86_64_tuple_assignment_member_target.md`.
+    # THE TUPLE FORM is a PROPERTY OF THE STATEMENT LOWERING rather than of
+    # this evidence source, so the four shapes of it are checked against CPython
+    # on BOTH backends in `test_formal_value_model.py`'s `TUPLE_STORE_CASES`
+    # (which is where the x86-64 half of it was fixed).  These cases are written
+    # with separate assignments only so that they mean the same thing on both
+    # architectures as the model reads them, which is what the comment on
+    # `init_assigned_scalar_fields_stay_plain` records.
     ("init_assigned_scalar_fields_stay_plain",
      "class Tail:\n"
      "    __slots__ = ('limit', '_chunks', '_size')\n"

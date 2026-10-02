@@ -414,9 +414,14 @@ CAUSES = (
     # cannot see a target that passes six, and reading a 56-file row as part of
     # `other refusal` is how the previous map had to identify it by hand.
     # Not a bug — it is the two ABIs. It is still the largest single-file
-    # difference between the backends and it is worth 51 files behind
-    # `re.mojo` alone (see `bugs/FORMAL_x86_64_hostmods_that_do_not_build.md`
-    # §Failure 2, and `formal2-x86-parity`, which holds the claim).
+    # difference between the backends, and the host module it costs is
+    # `fnmatch.mojo` — `match_core(7)` is the one over-wide function left in
+    # `formal/hostmods` (both `re.mojo` and `hashlib.mojo` had theirs narrowed,
+    # so the "51 files behind `re.mojo` alone" figure this comment used to
+    # quote is no longer measurable).  See
+    # `bugs/FORMAL_x86_64_argument_registers.md` for the limit and its
+    # measurement, and `test_formal_hostmods_census.py` for the per-module,
+    # per-backend table it produces.
     ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
      (("the formal arm64 ABI passes in registers",),
       ("the formal x86-64 ABI passes in registers",))),

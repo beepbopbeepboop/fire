@@ -15,40 +15,68 @@ recorded is the bug and its fix, not the sweep.
 
 Bug numbers (`B1`…`B23`) are this doc's own, for cross-reference.
 
-## Status (2026-09-26 — 24 of 43 examples proved; B1–B23 recorded below)
+## Status (2026-10-01 — the uncovered-form work is done; B1–B23 recorded below)
 
-The x86-64 backend now has a Lean model that agrees with the hardware on all 43
-examples, per-instruction step lemmas for most of what the backend emits, and a
-real end-to-end theorem:
+| | 2026-09-26 | 2026-10-01 |
+|---|---|---|
+| `formal/x86_64_model_test.py` — model vs hardware | 43/43 agree | **44 agree, 1 WRONG** (`udivmod`, see below) |
+| `formal/x86_64_model_coverage_test.py` | 151 samples over 57 forms, all steppable | 151/57, plus **step-lemma APPLICABILITY** at 17 lemmas x 38 real encodings, 354 hypotheses |
+| `formal/x86_64_endtoend_test.py` — terminates, no sorry | **10** | **31** |
+| `formal/x86_64_endtoend_test.py` — terminates, a sorry | 14 | **2** |
+| no finite path tree | 19 (4 loop, 15 uncovered form) | **12** (10 loop, 2 not) |
+| value theorem — every input, `rax` a fixed constant | 3 proved | 3 proved, 12 open (reported by reason) |
+| failing | 0 | **0** |
 
-| | result |
-|---|---|
-| `formal/x86_64_model_test.py` — model vs hardware | **43/43 agree**, 0 wrong |
-| `formal/x86_64_model_coverage_test.py` | **151 samples over 57 forms**, all steppable |
-| `test_formal.py --backend x86_64` | **43/43 PASS**, 0 known gaps, 0 fail |
-| `make check-formal-x86-endtoend` | **exit 0**, 0 failing |
-| value theorem — *every* input, `rax` a fixed constant | **3 proved**, 0 open |
-| termination theorem — *every* input reaches the exit pc | **10 proved no-sorry, 14 proved with a sorry** |
-| no finite path tree | 19 (4 loop, 15 uncovered form) |
+The shape of the change is **two bottlenecks, in the order they appeared.**
+Fifteen forms were wired, which is most of the coverage work, and that exposed
+the second one: B18's memory separation was NOT a research problem. One word —
+`repeat` in front of the `rw` that peels a write out of a read's chain — took
+`terminates proved with no sorry` from 15 to 31 and the `sorry` count from 25 to
+2. See the entry below; the doc's own claim that the inequality "is not closed"
+was wrong, and wrong in the same way as most claims in this file that were never
+run.
+
+What is left is 10 loops, 2 examples whose tree leaves the function, and 2
+sorries. See **Open, in the order I would take them** below for all of them.
+
+The one thing this pass did NOT touch is the model itself — `lib/X86.lean` gains
+17 theorems and changes no `def`, which is what `git diff master...HEAD -- lib/
+X86.lean` shows and it is worth checking rather than asserting. The one WRONG in
+`x86_64_model_test.py` is `udivmod` (`real=4 model=7905747460161236410`), it is
+**pre-existing**, and it is already written down twice: see
+`bugs/FORMAL_default_int_type_typed_flag_collapse.md` ("very likely the same
+untyped-`n` / `int` collapse") and `bugs/FORMAL_pointer_value_model.md`. Both are
+other workers' claims, so it is neither fixed nor re-filed here. What it does
+mean is that this doc's older "43/43 agree, 0 wrong" line was counting a
+different corpus, and that `udivmod`'s end-to-end proof — the one example left
+with an uncovered form — is the same example whose model is wrong, which is worth
+knowing before spending effort on `group3:idiv`.
 
 Two theorems of very different strength, and the gap between them is the whole
 story of B21. The value theorem is the stronger statement but can only be
-*formulated* for the 7 input-independent examples, so it proves for 3. The
-termination theorem makes no claim about the value and covers 24 — and
-`identity` is the example that shows why it is the one to chase: it returns its
-argument, so the value theorem can never say anything about it, and here it is
-proved.
+*formulated* for the examples whose result does not depend on their input, so it
+proves for 3. The termination theorem makes no claim about the value and covers
+33 — and `identity` is the example that shows why it is the one to chase: it
+returns its argument, so the value theorem can never say anything about it, and
+here it is proved.
 
-The 14 sorries are not free. Each is a real step lemma or a memory-separation
+The sorries are not free. Each is a real step lemma or a memory-separation
 inequality Lean declined, and Lean reports them per file, so the gap stays
 countable instead of becoming either a build failure or a silent omission.
+
+One piece of infrastructure added since, and it is the thing B1 asks for: a step
+lemma is now covered only when a REAL ENCODING satisfies every one of its
+hypotheses, checked by `native_decide` on each. "The file builds" is the signal
+that could not see `x86_step_setcc_r8`'s contradictory hypotheses, and it cannot
+see them — a lemma that cannot be applied is not a lemma that failed.
 
 Commits, oldest first: `f6046f3` (the model), `cc7e67b` (prologue lemmas),
 `1b2bdb9` (memory separation + per-instruction certificates), `4d6f3ca` (the
 first end-to-end proof), `438cb68`/`471782d`/`f918072`/`9bda629` (generalising
 the step lemmas), `f9830d4` (the vacuous lemma), `1b35d73` (the termination
 theorem), `3f2cb34` (the `rbp+disp8` load), `694433c` (`imul` + admitted side
-conditions).
+conditions); then `work/formal3-10` for the fifteen forms and the applicability
+check, whose commits are listed in their own messages.
 
 ---
 
@@ -412,47 +440,176 @@ only lever, because a timeout is not a tactic failure.
 
 ## Open, in the order I would take them
 
-**~~`call_rel32` (7 examples) — the last big uncovered form.~~ WIRED, and no
-longer blocking anything.** Re-measured 2026-09-30 with `_plan` over
-`formal/examples` (decode + codegen only, no Lean): `call_rel32` is named as a
-missing lemma by 0 of 45 examples, and six plan clean THROUGH it — `count`,
-`fact`, `fib`, `pow2`, `sqsum`, `sum`. It is wired at
-`formal/x86_64_endtoend_test.py:177` (`_FORMS`), `:259` (the successor
-expression) and `:429` (the `$tgt`/`$ret` literal substitution), and
-`lib/X86.lean` has the call/return pairing this entry described as the real
-design work — `x86_call_post`, `x86_ret_post`, `x86_at_target`, and the stack
-round-trip theorem that says a call and its return are inverses on `rsp`.
+Re-measured 2026-10-01 by running `formal/x86_64_endtoend_test.py` over all
+45 examples after wiring the forms below. The doc's own numbers said
+`terminates proved with no sorry` **10** and **19** without a tree; the current
+numbers are **15** and **5**.
 
-**What is left for it is a RUN, not wiring.** The generator's own comment says
-`NOT VERIFIED. This was wired without running the suite`, and names the open
-risk precisely: a call's `rip` is `m + 5 + off`, a literal the generator
-supplies, and whether the path from *there* re-enters a block whose certificate
-is wired is a question only a run answers. If it does not, the failure moves
-from "no step lemma wired for: call_rel32" to whatever the target needs — a
-different and more specific error, which is progress but not a proof. Running
-`formal/x86_64_endtoend_test.py` settles it.
+| | 2026-09-26 | 2026-10-01 |
+|---|---|---|
+| value — proved, no sorry | 3 | **3** |
+| value — open | 0 | **12** (9 of them now *stated and reported*, see below) |
+| terminates — proved, no sorry | 10 | **15** |
+| terminates — proved, a sorry | 14 | 25 |
+| no finite tree | 19 (4 loop, 15 uncovered form) | **5** (4 loop, **1** uncovered form) |
+| failing | 0 | **0** |
 
-**The remaining uncovered forms**, after `call_rel32` — and this is now the
-whole of the uncovered-form work. The list below is the one this entry was
-written from; the 2026-09-30 `_plan` measurement names the ones still missing
-today as `movsx_r64_r8` (3), `alu_ri32` (3), and one each of `alu_rr`,
-`shift_imm8`, `cqo`, `group3`, `lea_r64_rm64`, `mov_r64_rm64`, `mov_rm64_r64`.
-Two of those (`cqo`, `lea_r64_rm64`) were not on the original list, and
-`alu_ri32` is reported as a family rather than per sub-op. The original text:
-`movsx_r64_r8` (3 examples) and eight singletons — `alu_rr:and`/`:or`/`:xor`,
-`alu_rr32:xor`, `shift_imm8:shl`/`:shr`, `group3:div`, `alu_ri32:and`, one
-example each. That is 12 distinct forms over 18 example-slots; an earlier
-draft said "15 uncovered forms" and listed `alu_ri32:add_other` as well, both
-of which measurement contradicts — the gate prints 15 *examples* with no
-coverage, which is a different quantity from the number of distinct forms.
-Counts re-measured against `emit_terminates` rather than a proxy; see
-`OPEN_WORK.md` D2 for the separate loop-count discrepancy, still unresolved.
+**~~`call_rel32` (7 examples) — the last big uncovered form.~~ CLOSED, and the
+fault was not where the risk was.** The entry below used to say the wiring was
+"NOT VERIFIED" and name the open risk as being at the continuation past the
+target. Running it found three faults, none of them there:
 
-**The 14 sorries** (B18): the symbolic `mem_write_bytes` separation inequalities.
+1. `takes_imm` was `True`, so `_resolve` appended the decoded displacement
+   after the `off` its own branch had already supplied — two arguments where
+   `x86_step_call_rel32` takes one, because `off` **is** the immediate. The
+   error was `numerals are data in Lean, but the expected type is a
+   proposition` **on the displacement**, reported at the instruction after the
+   call.
+2. A backward `call` has a negative displacement, and Lean's application is
+   left-associative: `… s rc m -158 (by …)` is `(… m - (158 (by …)))`. The
+   error is `Function expected at 158`. Same latent trap in `jmp_rel32` and
+   `jcc_rel32`, unreachable there only because a backward branch is a loop.
+3. The successor carried its two addresses as pre-computed literals where the
+   lemma carries `(Int.ofNat m + 5 + off).toNat` and `UInt64.ofNat (m + 5)`.
+   That is the same record up to two fields, so closing the step is an
+   `isDefEq` over a 22-field structure whose `mem` is a `Nat → UInt8`, and the
+   congruence check gives up: `Type mismatch`, both sides printed, neither
+   naming the field. **Quoting the model's expressions makes the two records
+   syntactically identical**, so the step closes by `rfl`.
 
-**The 4 loop examples** — `countdown`, `sum_range`, `wdiff`, `wge`. No finite
-path tree, because the chain walks one straight line; these need induction over
-the back edge. A limit of the method as built, not a proof failure.
+This is B2's mechanism one level up, and the generalisation of B12: a successor
+table must quote the model's expression, and a literal is only safe where the
+conversion it needs is one field's worth.
+
+**The remaining uncovered forms: one.** After the forms below, `group3:idiv` is
+the only name left, and it is not a wiring job. See its own entry.
+
+**The forms wired since the last pass**, and the trap each one carried:
+
+| form | examples unblocked | the thing that was easy to get wrong |
+|---|---|---|
+| `movsx_r64_r8` | n8, sgt8, sle8 | general over both registers because the corpus emits TWO shapes for it and ONE for `movzx` — so the same table has a concrete lemma for one and a general one for the other |
+| `alu_rr:and/or/xor` | bitops | one model arm for all three, with the operation selected out of an `if` chain on the opcode, so three theorems over a literal opcode and not one over the chain |
+| `shift_imm8:shl/shr/sar` | shiftlr (+ subscript_var) | the count's clamp to 64 IS the semantics, so there is no `n < 64` to discharge; and `sar` is the `else` arm, not a third `if` |
+| `alu_ri32:add_reg`, `alu_ri32:and`, `alu_ri8:cmp` | ug8 (+ sum_range, subscript_var) | `81` and `83` differ in LENGTH as well as width; and `cmp` writes no register at all |
+| `mov_*_nodisp`, `mov_*_disp8` (base-register), `mov_*_disp32`, `lea …_disp32` | wide_recv, subscript_var | `_shapes` named only two of the three addressing modes, so `mov [rbp-0x410], rax` was reachable under the name of `mov [rbp+disp8], rax`. **Every mode now has its own name**, and an unmapped one is reported |
+| `cqo` | — (one half of udivmod's pair) | — |
+
+Two of those six were found by the coverage getting better rather than by
+reading: `alu_ri32:add_other` was reported for `sum_range`, and `sum_range`'s
+only remaining blocker is its LOOP, which no lemma reaches.
+
+**`group3:idiv` — the one form left, and why a lemma is not enough.**
+`x86_idiv128` returns `none` when the divisor is zero, so the model's arm is
+`match x86_idiv128 (x86_signed s.rdx) (x86_signed s.rax) (x86_signed a) with |
+some (q, rem) => … | none => none` and the STEP IS PARTIAL. That is the honest
+model of an instruction that faults, and it is why `group3:div` was already
+skipped ("the step is not total"). What the doc did not say is why no lemma
+shape can be chained:
+
+* naming `q` and `rem` in the successor needs a hypothesis
+  `x86_idiv128 … = some (q, rem)`, and the generator cannot discharge it —
+  `s` is symbolic, so the quotient of two symbolic 128-bit values is not
+  something `decide`, `simp` or `omega` produces. It would be admitted, and
+  with it every later `rip` in the chain.
+* keeping the `match` in the successor IS total and provable, but then the
+  successor's `rip` is behind a `match` on the divisor and **the next step's
+  address does not reduce** — so every subsequent step's `rip` side condition
+  goes to `sorry` and the theorem stops saying anything.
+
+Next step, in order of cost: **a `#eval`-free lemma that the divisor is not
+zero.** It cannot come from the compiler — nothing in the encoding says the
+value is nonzero — so it has to come from the PROGRAM, which means the theorem
+has to be about a function that has already established `r11 ≠ 0`. `udivmod`
+does establish it; the end-to-end chain has no way to carry that fact, because
+`X86State` has no precondition slot and the generator's state variables are
+successor records. **The concrete next step is therefore in the generator, not
+in `X86.lean`: an `assume` of side conditions between steps.** `_resolve`
+already has a guarded side-condition channel per step (`try … <;> all_goals
+sorry`), and `h_idiv` is what should go there — as a fact the generator states
+from the SOURCE (`udivmod` compares `r11` against zero immediately before the
+`idiv`), which is a dataflow question the method does not currently answer.
+Until that exists, `udivmod` has one uncovered form and the other 44 examples
+are covered.
+
+**B18 WAS WRONG, and the fix is one word.** The entry above says the
+memory-separation inequalities "are not closed", that `decide` reports `Expected
+type must not contain free variables` "which names the tactic rather than the
+inequality that would have closed it", and that this is "the sole reason 14
+termination proofs carry a sorry". The inequality was always closedable and the
+tactic was always the right one; the emitted proof applied it **once**:
+
+```lean
+try (rw [key _ _ _ _ (by first | decide | omega)]) <;>
+```
+
+`rw` rewrites ONE occurrence. The goal is a `mem_write_bytes` chain N deep, and
+peeling the outermost write exposes the next one — so `rw` fired once, the rest
+of the chain survived, and `all_goals sorry` admitted the remainder. That is the
+whole bug, and it was invisible for the reason B21 describes: the report said
+"proved, 1 sorry", which is a gap, and the gap looked like a limitation.
+
+```lean
+try (repeat rw [key _ _ _ _ (by first | decide | omega)]) <;>
+```
+
+Every peel's side condition is `a + 8 <= b` over CLOSED literals — the frame is
+allocated at a literal offset and the closing read is at the exit sentinel — so
+`decide` closes each one and `repeat` runs until there is no write left. **The
+depth of the chain does not matter and never did.** Measured, same 45 examples,
+same chain, same lemmas: **15 -> 31 proved with no sorry, 25 -> 2 with a sorry.**
+
+The lesson is the file's own, arriving from a new direction: **`simp only
+[key]` does not work and `repeat rw [key]` does.** A conditional rewrite whose
+side condition `simp` has to discharge by `Decidable` made *no progress at all*
+on these goals, while `rw` with an explicit `by decide` peels every layer. The
+two look equivalent and are not.
+
+**The 2 remaining sorries, and they are different problems.**
+
+* `wide_recv` — the residual goal contains a `mem_read_bytes` whose ADDRESS is
+  itself a `mem_read_bytes`: `mem_read_bytes (… .toNat) 8`, where the inner read
+  loaded a pointer out of the frame. So `b` is not a literal, `a + 8 <= b` has no
+  `decide` to give it, and no amount of repeating helps. This is the real form of
+  B18, and closing it needs the separation lemma parameterised over a symbolic
+  address with the inner read's own separation supplied — a two-level statement,
+  not a repeat count.
+* `augassign` — a single admitted SIDE CONDITION on a `mov rax, [rsp]` step (the
+  SIB form), not a `hrip`. `simp [read_i32_le, read_i8, hb]` reports `False`, so
+  one of that instruction's byte facts is not in `all_bytes`. Worth ten minutes:
+  it is the only remaining case where the report cannot say which of the two
+  kinds of sorry this is.
+
+**The 10 loop examples** — `countdown`, `sum_range`, `wdiff`, `wge`, and the six
+RECURSIVE ones (`count`, `fact`, `fib`, `pow2`, `sqsum`, `sum`). The chain walks
+one straight line, so a back edge has no finite unfolding; these need induction
+over it. A limit of the method as built, not a proof failure.
+
+The six recursive ones are in this list because of a second bug, and the way it
+presented is worth recording. The path tree treated `call rel32` as a
+**fall-through** rather than a jump, so after a call it stepped the instruction
+at `m + 5` — which the model's own successor says is never executed, because the
+call's `rip` is `m + 5 + off`. That step's `rip` side condition was therefore
+false, `simp` turned it into `False`, the guard admitted it, and **six examples
+reported `terminates: proved, 1 sorry` while proving a chain that walks code the
+machine does not run.** `failing` was 0 throughout. Following the target fixes
+the tree and moves all six to `loops`, where they belong; `_has_loop` had to
+learn that a recursive call is a back edge too, or they read `no tree: body
+loops, or branches out of the function`, which names two different reasons.
+
+This is B22 again — one wrong thing conceals the state of everything after it —
+and it is worth contrasting with B22's own case, because here the concealment ran
+the other way. B22: a MISSING lemma hides a side condition. This: a CORRECT lemma
+hides a wrong tree. A green file with a `sorry` in it is the signature of both,
+and neither one shows up as a failure.
+
+**The value theorem's 12 open**, and why it went UP from 0: eleven of them are
+examples whose result **is** input-independent and whose proof could not be
+finished, and they used to be reported under a form name instead. The honest
+outcomes are now separated (`BRANCHING`, `loops`, `depends on the input`,
+`no lemma`, `proved with a sorry`, `FAIL`), which is B21's fix arriving one
+theorem late: until every form had a lemma, none of these distinctions could be
+told apart.
 
 **The generalisation rule this file keeps relearning**, worth stating once:
 generalise a form when the backend actually emits more than one shape of it, and
@@ -461,6 +618,8 @@ not otherwise. `movzx r64, r8` is emitted as the identical `48 0f b6 c0` in all
 covers them and a register- and nibble-parameterised version would be machinery
 nothing calls. Conversely every form that *was* pinned to one register pair
 turned out to need generalising (B7), so the rule is a heuristic, not a proof.
+The pair of rows for `movzx` and `movsx` are the rule applied in both directions
+in one place, which is the clearest statement of it this file has.
 
 ## Nested comprehensions, both backends — FIXED 2026-09-30
 
@@ -502,18 +661,40 @@ are fixed too; see the two commits on `work/codegen-old-divergences`.
 
 `make check-formal-x86-endtoend` is the gate, and it reports both theorems
 separately with a per-example breakdown, so a regression in either is visible
-immediately. The number to watch is **terminates proved with no sorry** (10) —
-a change that pushes it down has taken a real proof away even if the file still
-builds, which is precisely the failure mode B1 and B11 had and B21 now makes
-visible.
+immediately. The number to watch is **terminates proved with no sorry** (15 as
+of 2026-10-01) — a change that pushes it down has taken a real proof away even
+if the file still builds, which is precisely the failure mode B1 and B11 had and
+B21 now makes visible. The second number to watch is **`failing`, which must be
+0**: every form added since has first shown up as a failure at some later step
+(`call_rel32` twice, `$imm` once, the value theorem's unguarded closing facts
+once), and a report that says `FAIL` at a step far from the cause is the one
+thing this generator is bad at.
 
-If you are adding a form: the three places that must agree are `_FORMS` (lemma,
-`takes_imm`, side conditions), `_SUCCS` (the successor shape), and the branch in
-`_resolve` (extra arguments and placeholder values). A form wired into one and
-forgotten in the other fails as a `KeyError` at `_SUCCS[form]` or, worse, applies
-the wrong `$rm`/`$rex` defaults (B19). `_resolve`, `_shapes` and `_header` are
-shared between the straight-line and path-tree emitters precisely so a form
-cannot be wired into one and forgotten in the other.
+If you are adding a form: the four places that must agree are `_FORMS` (lemma,
+`takes_imm`, side conditions), `_SUCCS` (the successor shape), the branch in
+`_resolve` (extra arguments and placeholder values), and **`_shapes`** — the
+split that decides which NAME the instruction gets, which is now the one that
+fails silently. A form wired into three and forgotten in the fourth does not
+error at all; it is reachable under a name that belongs to a neighbouring
+instruction, and that is B2. A form wired into two of three fails as a
+`KeyError` at `_SUCCS[form]` or, worse, applies the wrong `$rm`/`$rex` defaults
+(B19). `_resolve`, `_shapes` and `_header` are shared between the straight-line
+and path-tree emitters precisely so a form cannot be wired into one and
+forgotten in the other.
+
+Two rules that cost the most time here and are worth not relearning:
+
+  * **A successor quotes the MODEL'S expression, never a value computed from the
+    encoding.** `movsx`'s is `x86_sign_extend8 (get &&& 0xFF)` and `cmp r64,
+    imm8`'s names no register; a literal in either place is a statement about a
+    different instruction. Where a literal IS unavoidable — the `jmp`/`jcc`
+    successors, whose address must be a numeral for the next step — check that
+    the conversion it needs is one field's worth, because it is not two (see the
+    `call_rel32` entry above).
+  * **A step's own closing facts are `try`-guarded and the `sorry` is counted.**
+    `emit`'s and `emit_terminates`' `hrax`/`hrip` are the two places a function
+    that spills its argument stops, and reporting them as FAILURES is B21's
+    failure mode with a new coat of paint.
 
 When a side condition will not close, add it to the `try … <;> all_goals sorry`
 guard rather than working around it, and check afterwards that the no-sorry
