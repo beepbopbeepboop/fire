@@ -459,6 +459,67 @@ def _manifest_path(dylib_path: str) -> str:
     return dylib_manifest_path(dylib_path)
 
 
+def admitted_contracts(source_path: str) -> list:
+    """Every ADMITTED CONTRACT this file's build reaches, transitively.
+
+    A `formal/admitted.py` `Contract` per `@admitted(...)` in any module of the
+    file's import CLOSURE — the same closure `import_closure_digest` walks, with
+    the same `imported_modules` / `resolve_module_path` pair and the same
+    `relative_to` / `project_root`, so the two cannot disagree about what this
+    file builds against.
+
+    TRANSITIVE is the load-bearing word and it is why this is not a lookup of the
+    entry file's own imports.  `formal/build.py`'s `_resolve_imports` compiles
+    every module in the closure into a dylib and links it, so a file that never
+    names `subprocess` still links a library whose `run` is an admitted
+    contract; a per-file `trust:` line that only looked at the entry file would
+    under-report for exactly the files with the deepest closures, which is where
+    the trust is hardest to see.
+
+    The whole MODULE's contracts are reported for a module that is reached, not
+    only the ones the calling file calls.  That is a deliberate over-report and
+    the reason for it is that the narrower answer needs a call-graph walk across
+    dylib boundaries, and the failure mode of getting it wrong is a `trust:`
+    line that omits a contract the image's link line carries.  A contract listed
+    for a call nobody makes costs a reader one line; one missing costs them the
+    whole point of the line.  `formal/admitted.py`'s module docstring states the
+    same rule where the contracts themselves are declared.
+
+    A file that reaches none returns `[]`, which is what every caller tests for
+    and what keeps the common case free.
+    """
+    from formal import admitted as _admitted
+    hostmod_paths = {os.path.abspath(full)
+                     for _rel, full in _admitted.hostmod_files()}
+    seen_paths = set()
+    out = {}
+    queue = [os.path.abspath(source_path)]
+    while queue:
+        path = queue.pop(0)
+        if path in seen_paths:
+            continue                      # cycle, or a diamond: one visit
+        seen_paths.add(path)
+        for st in module_statements(path):
+            if not isinstance(st, F.ImportStmt):
+                continue
+            names = [st.module]
+            for mod, _alias in (st.extra or []):
+                names.append(mod)
+            for m in names:
+                if not isinstance(m, str) or not m:
+                    continue
+                dep = resolve_module_path(m, relative_to=path,
+                                          project_root=source_path)
+                if dep is None:
+                    continue
+                if os.path.abspath(dep) not in seen_paths:
+                    queue.append(os.path.abspath(dep))
+        if path in hostmod_paths:
+            for c in _admitted.contracts_in_file(path):
+                out[c.qualified] = c
+    return [out[k] for k in sorted(out)]
+
+
 def import_closure_digest(source_path: str, _seen=None) -> str:
     """A digest of every SOURCE this file's build reads besides itself.
 

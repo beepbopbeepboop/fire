@@ -306,6 +306,48 @@ def _sorry_note(result) -> str:
             f"it is not a proof]")
 
 
+def _trust_note(result) -> str:
+    """The ADMITTED HOST CONTRACTS this build rests on, or "" when it rests on none.
+
+    The `sorry` count above says HOW MUCH is admitted; this says WHAT, which is
+    the part a reader cannot reconstruct.  `proof_sorries` is a number whose
+    meaning depends on the file, and the file is not printed: a build reporting
+    "3 declarations ADMITTED a sorry" could be three CFG leaves in this file's
+    own control flow or three `@admitted` contracts about a second process, and
+    those are not remotely the same claim.  So the names and their assumptions go
+    on the line.
+
+    Printed on its OWN line, after `Built:`, rather than appended to `Proof:`,
+    and that is not cosmetic.  `Proof:` is about the generated Lean file, and it
+    is printed only when proofs ran; the sweep builds with `--no-prove` and its
+    files still rest on these contracts, so a note attached to `Proof:` would
+    vanish for exactly the files whose classification depends on it.  It is also
+    why this reads `result["admitted"]`, which `formal/build.py` fills
+    unconditionally, rather than something computed here.
+
+    A contract whose summary carries an `error` — the closure walk failed, which
+    `formal/build.py`'s `_admitted_summary` catches rather than let a build
+    succeed with a note it could not write — is printed as the error it is.  The
+    alternative is an empty list, which reads as "this build trusts nothing
+    about the host", and that is precisely the claim that would be false.
+    """
+    admitted = result.get("admitted") or []
+    if not admitted:
+        return ""
+    lines = []
+    for c in admitted:
+        if c.get("error"):
+            lines.append(f"  {c.get('name')} — COULD NOT BE READ: {c['error']}")
+        elif c.get("assumes"):
+            lines.append(f"  {c['name']} — assumes of the host: {c['assumes']}")
+        else:
+            lines.append(f"  {c['name']} — (no assumption text; see "
+                         f"{c.get('source')}:{c.get('line')})")
+    head = (f"trust: {len(admitted)} admitted host contract(s) — a claim of "
+            f"trust, not a proof:")
+    return "\n".join([head] + lines)
+
+
 def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                        run_it: bool, link_dylibs=None, arch: str = "arm64") -> int:
     """The one formal executable path: `fire build --formal` and bare
@@ -333,6 +375,9 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
         traceback.print_exc(file=sys.stderr)
         return 1
     print(f"Built: {result['path']}  [{result.get('backend', arch)}]")
+    trust = _trust_note(result)
+    if trust:
+        print(trust)
     if result.get("proof_path"):
         cached = " (verified from cache)" if result.get("proof_cached") else ""
         print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
