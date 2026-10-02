@@ -2890,16 +2890,13 @@ def test_checked_run_replays_a_pass_and_reruns_a_failure():
 # the point: every removal below is a test something now runs.
 # The reason the formal backend's per-construct suites give, said once. It is a
 # variable rather than a repeated literal because a literal repeated fifteen
-# times is fifteen places to forget to update, and this text names a file
-# (`bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`) that a
-# reader has to be able to grep for.
+# times is fifteen places to forget to update, and it is a sentence a reader can
+# match on when they want to know why a suite they just found is not in a gate.
 _FORMAL_SUITE_REASON = (
     'Builds and RUNS images on both architectures against CPython, one table '
     'entry per construct; run directly rather than from a gate because a run '
     'of one is minutes of real compilation. The construct and its bug doc are '
-    'named in the file\'s own docstring. '
-    'bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md records '
-    'what registering them properly would cost.')
+    'named in the file\'s own docstring.')
 
 
 UNREGISTERED = {
@@ -2921,8 +2918,7 @@ UNREGISTERED = {
     # (program, expected) built and run on both architectures against CPython —
     # so a per-file sentence would be fifteen copies of one sentence, and the
     # table's own comment is where a reader looks for what these have in
-    # common. `bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`
-    # records the gap and what closing it properly costs.
+    # common.
     'test_formal_returned_frame.py': _FORMAL_SUITE_REASON,
     'test_formal_bracketed_method_field_set.py': _FORMAL_SUITE_REASON,
     'test_formal_cross_module.py': _FORMAL_SUITE_REASON,

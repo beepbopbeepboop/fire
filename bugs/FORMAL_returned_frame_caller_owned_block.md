@@ -264,7 +264,7 @@ reserved, and both emitters read them.
 | `python3 fire.py dylib --formal --no-prove` on a module with a frame-returning function | refused by `returned_frame_library_refusal` — the importer is a compilation this build does not perform |
 | `python3 test_formal_dylib.py` | `PASS=11 FAIL=1`; the failure is `default path emits a checked proof` and it is **pre-existing** — `lean timed out` building `ProofLib`, and the same `PASS=11 FAIL=1` on `53f89ae7` |
 | `python3 test_formal_sweep.py` | `Ran 56 tests … OK` |
-| `python3 test_suite.py` | `200 passed, 1 failed` — the estate check, red on master for eleven files that are in neither a registered spec nor `UNREGISTERED`. This file's own suite now declares itself; the other eleven are `construct:estate-registration`'s, filed as `COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`. |
+| `python3 test_suite.py` | `200 passed, 1 failed` — at the time, the estate check was red on master for eleven files in neither a registered spec nor `UNREGISTERED`. Resolved since: all eleven are registered specs in `tools/suite.py` (`formal-argparse`, `formal-frame-len`, `formal-hashlib`, `formal-module-attr`, `formal-os`, `formal-os-backing`, `formal-struct`, `formal-sys`, `formal-time`, `formal-toplevel`, `llm-reference`) and `test_suite.py` is green. |
 
 The byte-identity measurement is what found bug 3, and it is worth recording
 WHY it found it: `CLAUDE.md` asks for byte-identical output from a
