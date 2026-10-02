@@ -7111,6 +7111,70 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_scalar_given_a_char_star_parameter_is_stringified():
+        """A SCALAR passed where a `str` parameter is declared must be
+        `str(value)`, which is both Python's answer and the only answer that
+        is not a wild pointer.
+
+        `_emit_call`'s `ptype == 'char *'` branch used to reinterpret the
+        integer's BITS as an address (`(char *)(void *)(int64_t)5`), so
+        `class D: def __init__(self, w: str)` called as `D(5)` stored
+        address 5 in a `char *` field and the first `mojo_print` of it walked
+        to it and SIGSEGV'd with no output at all — while `D(2.5)` did not
+        even compile ("cannot convert to a pointer type"). It now goes
+        through `_stringify_value`, the same chokepoint `str()`, f-strings
+        and `%s` use.
+
+        The doc's repro is a struct method returning one of its own `str`
+        fields (`bugs/CODEGEN_method_returning_self_str_field_segfaults.md`,
+        removed with this fix), and it is reproduced here — including the
+        imported-sibling spelling, since the field read off the object and
+        the read back out of the method are two separate lowerings and a fix
+        to only one of them leaves the other wrong.
+
+        A BOXED value is in the same fixture for the reason the fix has to
+        be careful about it: an `int64_t` that really holds a `char *` is
+        also `ptype == 'char *'` on this path, and `_stringify_value`
+        answers it from `_actual_types` as a cast rather than as a decimal.
+        """
+        global _PASS, _FAIL
+        name = "scalar_given_a_char_star_parameter_is_stringified"
+        src = '''\
+class Dialog:
+    def __init__(self, widgetName: str):
+        self.widgetName = widgetName
+    def show(self):
+        return self.widgetName
+def main():
+    a = Dialog(5)
+    print(a.widgetName)
+    print(a.show())
+    print(Dialog(2.5).show())
+    print(Dialog(True).show())
+    print(Dialog("plain").show())
+    print(len(Dialog(7).widgetName))
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_user_defined_dunder_repr_value():
         """The same thing with the VALUE checked, on BOTH pipelines
         (single-TU and link mode — they are separate codegen paths and this
@@ -8057,6 +8121,7 @@ outer([10, 20, 30])
     test_every_funcptr_initializer_has_a_definition()
     test_callable_return_type_survives_its_carrier()
     test_variadic_lambda_lowers_as_gimple_in_every_body()
+    test_scalar_given_a_char_star_parameter_is_stringified()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
