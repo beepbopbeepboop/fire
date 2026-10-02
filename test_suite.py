@@ -2481,16 +2481,16 @@ def test_selfhost_key_hashes_nothing_dead():
     fail is the trap `bugs/UNTESTED.md` §4 documents.
     """
     import cas
-    report = cas.selfhost_extra_is_justified()
+    missing, unreached, reached = cas.selfhost_extra_is_justified()
     check('self-host key: no hashed input is a file that is not there',
-          not report['missing'],
+          not missing,
           f'deleted but still hashed, so the fingerprint is folding a '
-          f'"missing" marker and going on: {report["missing"]}')
+          f'"missing" marker and going on: {missing}')
     check('self-host key: no hashed input is a file nothing reaches',
-          not report['unreached'],
+          not unreached,
           'in the key with no importer and no declared entry point, so it is a '
           'live dependency on a file nothing builds against — delete it and its '
-          f'_SELFHOST_EXTRA entry together: {report["unreached"]}')
+          f'_SELFHOST_EXTRA entry together: {unreached}')
 
     # Anti-vacuity, the same two guards the orphan walk has: neither half can
     # be empty-because-broken. A walk that reached nothing would make
@@ -2498,8 +2498,8 @@ def test_selfhost_key_hashes_nothing_dead():
     # failure — a check that reads an empty list and calls it a pass — is what
     # these guards are for.
     check('self-host key: ...and the walk it judges against really walked',
-          len(report['reached']) > 30,
-          f'only reached {len(report["reached"])} files from '
+          len(reached) > 30,
+          f'only reached {len(reached)} files from '
           f'{len(cas._SELFHOST_ENTRIES)} entries, so "nothing hashes an '
           f'unreached file" would be a statement about a walk that did not run')
     check('self-host key: ...and the entries are declared, not inferred',
@@ -2515,12 +2515,12 @@ def test_selfhost_key_hashes_nothing_dead():
     # a key with one dead file in it and require it to say so. This is the
     # property `build_mojo_cli.py` violated, exercised on a file that exists.
     victim = 'fire_main.py'
-    widened = cas.selfhost_extra_is_justified(
+    _m, widened, _r = cas.selfhost_extra_is_justified(
         entries=[e for e in cas._SELFHOST_ENTRIES if e != victim])
     check('self-host key: ...and the check detects an unreached file',
-          victim in widened['unreached'],
+          victim in widened,
           f'dropping {victim} from the declared entries made no difference, so '
-          f'the "unreached" half is vacuous: {widened["unreached"]}')
+          f'the "unreached" half is vacuous: {widened}')
 
 
 def test_the_compiler_imports_from_every_real_entry_point():

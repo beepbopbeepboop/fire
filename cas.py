@@ -329,7 +329,7 @@ def selfhost_closure_is_complete(entry: str = 'fire.py') -> tuple:
     return missing, seen
 
 
-def selfhost_extra_is_justified(entries=None) -> dict:
+def selfhost_extra_is_justified(entries=None) -> tuple:
     """The OTHER direction of the self-host key, and the one that was unchecked.
 
     `selfhost_closure_is_complete` above is one-directional by design: it
@@ -344,8 +344,8 @@ def selfhost_extra_is_justified(entries=None) -> dict:
     the key for the binary whose entire purpose is to be trusted across a
     self-host chain.
 
-    Returns `{'missing': [...], 'unreached': [...], 'reached': set()}`. The
-    invariant is that the first two are EMPTY, i.e. every file
+    Returns `(missing, unreached, reached)`. The invariant is that the first
+    two are EMPTY, i.e. every file
     `selfhost_fingerprint()` hashes
 
       * exists on disk (`missing`) — the fingerprint tolerates an absent file
@@ -360,17 +360,40 @@ def selfhost_extra_is_justified(entries=None) -> dict:
 
     Both halves are cheap and both have failed silently: a hash of a 54-file
     closure is microseconds, against a whole self-host build.
+
+    Returns `(missing, unreached, reached)`, and the shapes below are chosen
+    for the SELF-HOSTED path, which is not an optimisation. This file is in
+    its own compiled closure, and on that path every AST node is an
+    int64_t-boxed pointer (see `mojo/middle/infra_infer.py`'s own notes on
+    boxed parameters). The first version of this function used `set(a) |
+    set(b) | set(c)` and `set(x) - y - z`, and the self-host build rejected it
+    with four hard errors in this very function --
+    `passing argument 1 of 'mojo_list_len'/'mojo_list_get_str'/... makes
+    pointer from integer without a cast`, i.e. a set union of three lists of
+    strings lowered to reading list slots off a scalar. `update()` on a set
+    built by `add`, two membership tests in a comprehension over a plain list,
+    and a 3-tuple return are the shapes this codegen already lowers
+    correctly everywhere else in the closure. A performance-adjacent helper in
+    `cas.py` that the self-host build cannot compile is worse than no helper.
     """
     entries = list(_SELFHOST_ENTRIES if entries is None else entries)
     reached = set()
     for entry in entries:
-        reached |= set(selfhost_closure_is_complete(entry)[1])
+        for path in selfhost_closure_is_complete(entry)[1]:
+            reached.add(path)
     hashed = selfhost_inputs()
     missing = sorted(n for n in hashed
                      if not os.path.isfile(os.path.join(HERE, n)))
-    earned = set(entries) | set(_COMPILER_SOURCES) | set(_RUNTIME_SOURCES)
-    unreached = sorted(set(hashed) - reached - earned)
-    return {'missing': missing, 'unreached': unreached, 'reached': reached}
+    earned = set()
+    for name in entries:
+        earned.add(name)
+    for name in _COMPILER_SOURCES:
+        earned.add(name)
+    for name in _RUNTIME_SOURCES:
+        earned.add(name)
+    unreached = sorted(n for n in hashed
+                       if n not in reached and n not in earned)
+    return missing, unreached, reached
 
 
 def toolchain_fingerprint(gcc: str, flags: tuple = ()) -> str:
