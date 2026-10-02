@@ -882,6 +882,24 @@ def _in_reach_from_authority() -> frozenset:
 IN_REACH_HOST_MODULES = _in_reach_from_authority()
 
 
+def _admitted_host_modules() -> frozenset:
+    """Every host module that ANSWERS under a declared contract.
+
+    A third bucket, read from `formal/imports.py`'s own `host_module_tier`, and
+    separate because the two existing ones could not describe these: `subprocess`
+    is not a gap with an owner (it has a model) and it is not unreachable (it
+    builds), so a two-way split called it one or the other and both were false.
+    The reach line below reads it so a file that moved out of `host-import`
+    because its host module now answers is not silently missing from the report.
+    """
+    try:
+        from formal import imports as I
+        return frozenset(n for n in I.HOST_MODULES
+                         if I.host_module_tier(n) == 'admitted')
+    except Exception:
+        return frozenset()
+
+
 def _host_tiers() -> tuple:
     """(in_reach, unreachable, where) — the split, and which file said so.
 
@@ -897,8 +915,15 @@ def _host_tiers() -> tuple:
         return set(), set(), None
     try:
         from formal import imports as I
-        unreachable = frozenset(n for n in I.HOST_MODULES
-                                if I.host_module_tier(n) == 'unreachable')
+        unreachable = frozenset(
+            n for n in I.HOST_MODULES
+            if I.host_module_tier(n) == 'unreachable'
+            # An ADMITTED module is not unreachable: it has a model and it
+            # builds.  Counting it here would put it in the "permanent fact about
+            # the target" bucket of the reach line, which is the claim that made
+            # the sweep's largest bucket look unfixable, and it would be false of
+            # every one of the five.
+            and I.host_module_tier(n) != 'admitted')
     except Exception:
         unreachable = frozenset()
     return set(in_reach), set(unreachable), "formal/imports.py"
@@ -2876,6 +2901,20 @@ def main():
         if reach_files:
             print(f"    in reach, and therefore WORK rather than a permanent "
                   f"fact: {', '.join(reach_files)}")
+        admitted_mods = sorted(_admitted_host_modules())
+        if admitted_mods:
+            # Named here because the OTHER two halves of this line went quiet
+            # when these five modules got models: a file that used to be reported
+            # here stopped being reported anywhere, and a reader comparing two
+            # runs would see the bucket shrink with nothing to say where the
+            # files went.  They are not in `host-import` (they are not refused)
+            # and they are not in `in reach` (nothing is left to write), so this
+            # line is the only place their absence is explained.
+            print(f"    neither, and not in this count at all: "
+                  f"{', '.join(admitted_mods)} now have a formal/hostmods model "
+                  f"and answer under DECLARED CONTRACTS -- files importing them "
+                  f"are no longer refused, and a file that builds on one is "
+                  f"counted as `{CLASS_ADMITTED}`, never as a pass")
         # The two names that used to be hardcoded here, and why neither is any
         # more: they were a standing editorial claim that `os` and `sys` were
         # "most of it", which is a statement about the WORK and goes stale the

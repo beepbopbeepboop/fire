@@ -107,14 +107,24 @@ _HOSTMODS_ROOT = os.path.join(_REPO_ROOT, "formal", "hostmods")
 # not a behaviour change: every one of these refuses the build exactly as
 # before, and the union is asserted to equal what the single list used to hold.
 HOST_UNREACHABLE = frozenset((
+    # `subprocess`, `threading`, `concurrent`, `concurrent.futures` and `ctypes`
+    # were here until 2026-10-02 and are now in HOST_ADMITTED below, because each
+    # has a `formal/hostmods/` model.  A name LEAVES this set by being WRITTEN,
+    # for the reason the HOST_MODELLED comment states: an entry left behind is a
+    # claim that is false once the module that answers it is in the tree, and this
+    # one is worse than false -- it feeds `host_module_tier`, so the sweep's reach
+    # line would go on reporting these as "needs a host process this image does
+    # not have" for a file that now builds.  The capability is still missing; what
+    # changed is that the module answers anyway, under a declared contract.
+    #
     # A second process.
-    "subprocess",
     # A thread, and a proved model of one.
-    "threading", "concurrent", "concurrent.futures", "asyncio",
+    "asyncio",
     # A socket.
     "socket", "urllib", "http",
-    # A dynamic loader for foreign code, or an embedded CPython.
-    "ctypes", "importlib", "importlib.util", "importlib.machinery",
+    # A dynamic loader for foreign code, or an embedded CPython.  `ctypes` moved
+    # to HOST_ADMITTED with the rest; what is left here is the embedded CPython.
+    "importlib", "importlib.util", "importlib.machinery",
     # The interpreter's own frames, allocation set, or shutdown path. There is
     # no interpreter here to ask, and on this path a value is one 64-bit word,
     # so there is nothing for `gc` to track and no bytecode for `dis` to
@@ -312,6 +322,81 @@ HOST_MODELLED = frozenset((
     "inspect",
 ))
 
+# The THIRD tier, and it exists because the other two could not say what is now
+# true of five modules.
+#
+# `HOST_MODELLED` says "a Mojo-side implementation could in principle provide
+# this, and has not yet" -- a gap with an owner.  `HOST_UNREACHABLE` says "this
+# needs an object a freestanding image does not have" -- a fact about the target,
+# permanent.  Both are FALSE of `subprocess` since its `formal/hostmods/` model
+# landed: the module is written, so it is not a gap, and the second process is
+# still missing, so it is not modelled either.  What it is, and what neither tier
+# had a word for, is a module that ANSWERS under a DECLARED CONTRACT -- its API
+# shape is computed and checked against CPython, and its host-dependent answers are
+# each a named claim of trust, emitted into the generated Lean as a `sorry` that
+# `formal/lean.py`'s census counts and printed by `fire.py` as a `trust:` line.
+#
+# So the tier is not a bookkeeping convenience.  A reader asking "can a person
+# write `subprocess` for this backend?" used to get "no", which sends them away
+# from a file that now builds; and a reader asking "what does this build trust?"
+# got no answer at all, because there was no category to ask in.
+#
+# Membership rule: a name is here IFF it has a `formal/hostmods/` source, exactly
+# as `HOST_MODELLED`'s rule is "a name LEAVES here by being WRITTEN".  It is the
+# same rule with the opposite arrow, and `test_formal_admitted.py` asserts the
+# partition -- both that every admitted name has a model and that every hostmod
+# declaring a contract is in this tier -- so a module cannot be written and
+# forgotten, which is the failure mode a hand-maintained tier always has.
+HOST_ADMITTED = frozenset((
+    # A second process: `run`, `call`, `check_call`, `check_output`, `getoutput`,
+    # `getstatusoutput`, `Popen.wait` -- seven contracts, and everything decidable
+    # about the arguments is decided rather than admitted.
+    "subprocess",
+    # A dynamic loader for foreign code.  The type table and the buffer helpers
+    # are pure; `CDLL` and a call through the handle are the two contracts.
+    "ctypes",
+    # A thread.  `Future`'s five states and the lock's bit are arithmetic; the
+    # pool and the thread are the contracts.
+    "concurrent", "concurrent.futures", "threading",
+    # A kernel-held advisory lock: eleven constants and one contract.
+    "fcntl",
+))
+
+# A name in HOST_ADMITTED whose `formal/hostmods/` source has gone, and a hostmod
+# that declares a contract without its module being in the tier.  Both are
+# reported rather than corrected: the first would be a claim this table cannot
+# keep true by itself, and the second would be a proof resting on a contract the
+# tier does not admit to.  `test_formal_admitted.py` asserts this is empty.
+def _admitted_tier_conflicts() -> list:
+    import os
+    root = _HOSTMODS_ROOT
+    if not os.path.isdir(root):
+        return ["formal/hostmods/ does not exist"]
+    bad = []
+    have = set()
+    for dirpath, dirs, files in os.walk(root):
+        dirs.sort()
+        for name in sorted(files):
+            if not name.endswith(".mojo"):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, name), root)
+            parts = rel.split(os.sep)
+            if parts[-1] == "__init__.mojo":
+                parts = parts[:-1]
+            else:
+                parts[-1] = parts[-1][:-len(".mojo")]
+            have.add(".".join(parts))
+    for n in sorted(HOST_ADMITTED):
+        if n not in have:
+            bad.append(f"{n} is in HOST_ADMITTED but has no formal/hostmods source")
+    from formal import admitted as _admitted
+    for c in _admitted.all_contracts():
+        if c.module.split(".")[0] not in HOST_ADMITTED:
+            bad.append(f"{c.module} declares an admitted contract but is not in "
+                       f"HOST_ADMITTED")
+    return bad
+
+
 # Everything the build treats as a host module. The union, deliberately: the
 # predicate the BUILD consults must not change behaviour, and this is the one
 # place that says so.
@@ -327,7 +412,7 @@ HOST_MODELLED = frozenset((
 # files they imported "not a stdlib or sibling module", which is a statement
 # about module RESOLUTION and is simply false of a CPython standard-library
 # module with no Mojo source.
-HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED
+HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED | HOST_ADMITTED
 
 
 # A module the formal FRONT END implements at COMPILE TIME, so the import is
@@ -389,7 +474,7 @@ def is_frontend_provided(name: str) -> bool:
 
 
 def host_module_tier(name: str) -> str:
-    """`'modelled'`, `'unreachable'`, or `''` for a name that is not a host module.
+    """`'modelled'`, `'admitted'`, `'unreachable'`, or `''` for no such name.
 
     The accessor that makes the split usable. A coverage report can then say
     "this file is out of reach because it needs a second process" — a fact
@@ -398,15 +483,26 @@ def host_module_tier(name: str) -> str:
     owner. Before this existed both were one bucket, and the bucket's own
     description asserted the stronger of the two claims about all of them.
 
+    `'admitted'` is the third answer, for a module that has a
+    `formal/hostmods/` source AND declares `@admitted` contracts for the
+    operations whose answer is an external fact -- see `HOST_ADMITTED`.  It is
+    tested after `unreachable` and before `modelled` because a name in two tiers
+    is a bug the partition check reports, and the order only decides what such a
+    bug looks like.
+
     `unreachable` is tested first, so a name in both tiers would resolve to the
     permanent answer; the partition is asserted to be disjoint by the test
-    suite, and `_host_tier_conflicts` reports any overlap on demand.
+    suite, and `_host_tier_conflicts` reports any overlap on demand, with
+    `_admitted_tier_conflicts` doing the same for the admitted half plus its
+    "has a source" rule.
     """
     if not name:
         return ""
     top = name.split(".")[0]
     if top in HOST_UNREACHABLE or name in HOST_UNREACHABLE:
         return "unreachable"
+    if top in HOST_ADMITTED or name in HOST_ADMITTED:
+        return "admitted"
     if top in HOST_MODELLED or name in HOST_MODELLED:
         return "modelled"
     return ""
