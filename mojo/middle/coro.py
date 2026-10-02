@@ -2221,10 +2221,14 @@ def _compute_no_wd_forward(stmts: list) -> None:
     # keeps one value word per entry, so its int and str views agree by
     # construction and every key spelling lands in the one domain. All four
     # tables are LOCAL for a reason of their own: a container handed across a
-    # call boundary reaches codegen as a boxed `int64_t`, and `x in <boxed
-    # dict>` goes through `mojo_in_dispatch_int`, which has no dict branch at
-    # all (bugs/CODEGEN_in_dispatch_int_has_no_dict_branch.md) -- so every
-    # membership test in this function is deliberately a typed-local one.
+    # call boundary reaches codegen as a boxed `int64_t` and the membership
+    # test then goes through a RUNTIME dispatcher
+    # (`mojo_in_dispatch_int` / `mojo_in_dispatch_str`) instead of the typed
+    # `mojo_dict_contains`, which costs a registry probe per test and — before
+    # the int view grew a dict branch — answered a flat "no". The dispatcher
+    # is answerable now (test_container_membership.py), so this is a cost and
+    # a clarity choice rather than a correctness requirement; keeping the
+    # tables local keeps the answer a compile-time predicate.
     preds: dict = {}
     seeds: list = []
     for name in fns:

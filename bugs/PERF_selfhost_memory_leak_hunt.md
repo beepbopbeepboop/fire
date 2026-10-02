@@ -29,8 +29,10 @@ The early rows are PARTIAL runs (they die before the end); the honest comparison
 
 ## What the bytes were (heapprof, live bytes at the end)
 1. **Tuple dict key never hits** (`_selfhost_parsed_modules` & two siblings keyed on `(path, mtime)`): every call re-tokenized,
-   parsed and rewrote ~60 compiler sources, per imported module. 16 of 19 GB at the first crash. FIXED (string key, one
-   shared per-file cache). General bug: bugs/CODEGEN_tuple_dict_key_hashed_by_address.md.
+   parsed and rewrote ~60 compiler sources, per imported module. 16 of 19 GB at the first crash. FIXED twice over: first
+   at these call sites (string key, one shared per-file cache), then at the MECHANISM — a tuple dict key is now keyed by
+   its CONTENT (`mojo_dict_key_for`), covered by test_dict_tuple_key.py, so the call sites no longer have to be defended
+   individually. Both bugs' docs are deleted.
 2. **A malloc per character** (`mojo_char_to_str`, plus a fresh list per `c in (...)` display): ~150 B per scanned character.
    FIXED (256 shared immortal strings; display freed after `in`). Test: gimple_char_scan_allocates_nothing_per_character
    (4377 MB -> 1.5 MB).
