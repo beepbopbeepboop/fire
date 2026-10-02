@@ -939,6 +939,73 @@ def test_struct_method_across_modules(tmpdir, _shared):
               f"the trie is missing the method export {e['symbol']}")
 
 
+# A library that CONSTRUCTS its own struct.  `STRUCT_LIB` above declares one
+# and only ever constructs it in the IMPORTER, so nothing in it exercises the
+# library's own `Counter()` — and that omission is the whole of the gap this
+# case covers: a struct crosses the boundary as a LAYOUT, not as a symbol
+# (`reflect.emit_table_c` skips `SYM_TYPE` entries, so `_Counter` is never
+# defined anywhere), while the codegen recognises an `S(...)` constructor by
+# consulting the struct table it is HANDED.  On the dylib path that table was
+# not handed over, so a constructor in the library's own body fell through the
+# ordinary call path and became a BL against a symbol nothing defines, and the
+# build failed with "the library would bind 1 symbol(s) that nothing provides:
+# Counter" — a link-line diagnosis for a codegen omission, naming neither the
+# constructor nor the file.
+SELF_CTOR_LIB = """\
+struct Counter:
+  var n: Int
+  var tag: Int
+
+def make(n: Int) -> Int:
+  var c = Counter()
+  c.n = n
+  c.tag = 1
+  return c.n + c.tag
+
+def make_static(n: Int) -> Int:
+  var c = Counter()
+  c.n = n
+  c.tag = 2
+  return c.n * 10 + c.tag
+"""
+
+
+def test_a_library_may_construct_its_own_struct(tmpdir, _shared):
+    """`Counter()` inside the LIBRARY, which is a different thing from
+    `Counter()` in the importer.
+
+    The answer is asserted rather than the build succeeding, because a library
+    that compiled the constructor to the WRONG value would link perfectly: the
+    two library functions are separate symbols, so `make` being wrong cannot
+    affect `make_static`, and only their sum pins both. Measured against
+    CPython's own reading of the same three functions, which gives `make(10)`
+    = 11, `make_static(10)` = 102 and the program 13.
+
+    The `Counter()` in the importer is already covered by
+    `test_struct_method_across_modules`; what is new here is the one INSIDE
+    `make`/`make_static`, in the library's own compilation."""
+    root = os.path.join(tmpdir, "selfctor")
+    os.makedirs(root)
+    write_tree(root, {
+        "clib.mojo": SELF_CTOR_LIB,
+        "cuser.mojo": ("from clib import make, make_static\n"
+                       "\n"
+                       "def main() -> Int:\n"
+                       "  return make(10) + make_static(10) - 100\n"),
+    })
+    fresh_cas()
+    _result, out = build(root, "cuser.aout")
+    code, err = run(out)
+    # 11 + 102 - 100 = 13, CPython's answer for the same three functions.
+    check(code == 13,
+          f"a library constructing its own struct returned {code}, expected 13 "
+          f"(make(10)=11 and make_static(10)=102); stderr: {err}. If this "
+          f"build refused with \"would bind 1 symbol(s) that nothing "
+          f"provides: Counter\", the library's struct declarations did not "
+          f"reach the emitter — a class crosses as a layout, so there is no "
+          f"`Counter` symbol for the dangling call to have found.")
+
+
 def test_one_word_struct_field_is_the_value(tmpdir, _shared):
     """`c.n` and `c` must be the SAME word for a one-field struct.
 
@@ -1753,6 +1820,8 @@ TESTS = [
      test_no_import_needs_no_dylib),
     ("a struct method is callable across modules",
      test_struct_method_across_modules),
+    ("a library may construct its own struct",
+     test_a_library_may_construct_its_own_struct),
     ("a one-word struct's field IS its value",
      test_one_word_struct_field_is_the_value),
     ("a struct too wide for one word is refused with the switch off",

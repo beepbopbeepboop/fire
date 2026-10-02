@@ -10404,12 +10404,35 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # sources and each one's table numbers its own slots from zero.
     library_slots: dict = {}
     library_slot_owners: dict = {}
+    # The struct DECLARATIONS this library compiles, merged from every source
+    # it is built from, for `compile(structs=…)` below.
+    #
+    # It is missing here and the omission is a SILENT wrong answer, not a
+    # refusal: the codegen recognises an `S(...)` constructor by consulting
+    # `self._structs`, and with the table empty a constructor falls through the
+    # ordinary call path and becomes a BL against a symbol named `S` — which
+    # nothing defines, because a class crosses the boundary as a LAYOUT, not as
+    # a symbol (`reflect.emit_table_c` skips `SYM_TYPE` entries for exactly that
+    # reason). So a module that constructs its own struct anywhere in its own
+    # body failed to build as a dylib with "the library would bind 1 symbol(s)
+    # that nothing provides: S", which names the link line and not the
+    # constructor.
+    #
+    # It is a constructor call inside the LIBRARY, not a method call on an
+    # imported class, and the difference is what makes this the fix rather than
+    # the one `bugs/FORMAL_imported_class_reached_as_a_value.md` §2 describes:
+    # nothing crosses the boundary here at all. The library compiles its own
+    # source, and this file's `_formal_module_functions` already returned that
+    # file's StructDefs — they were collected into `structs_by_file` for
+    # `_method_exports` and then not handed to the emitter.
+    library_structs: list = []
     for source_path in source_paths:
         module, functions, module_source, file_structs, file_slots, \
             file_constants = \
             _formal_module_functions(source_path, link_dylibs, arch=arch,
                                      fmt="macho", link_manifests=linked)
         structs_by_file[source_path] = file_structs
+        library_structs.extend(file_structs)
         for name, value in file_constants.items():
             constants.setdefault(name, value)
         for name, slot in (file_slots or {}).items():
@@ -10578,7 +10601,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             ordered,
             base_addr=TEXT_BASE + dylib_code_offset(
                 install_name, False, dep_install, has_globals),
-            emit_startup=False)
+            emit_startup=False, structs=library_structs)
         external_syms = info.get("external_syms") or []
         if external_syms:
             # The dependency load commands are known BEFORE compiling, so the
@@ -10590,7 +10613,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                           has_globals)
             code, info = codegen.compile(ordered,
                                          base_addr=TEXT_BASE + code_file,
-                                         emit_startup=False)
+                                         emit_startup=False,
+                                         structs=library_structs)
             external_syms = info.get("external_syms") or []
             stub_addrs = externer_layout(len(code), external_syms, arch=arch,
                                         entryoff=code_file)["stub_addrs"]
