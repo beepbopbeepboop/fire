@@ -2102,8 +2102,8 @@ test('formal-hashlib', [PY, 'test_formal_hashlib.py'], mem='tiny',
 # exactly the five values the module has slots for, on the measured ground that
 # the module answers the FORMAT it was given (`_nvalues(fmt)`) rather than the
 # number of arguments that arrived, so "five supplied, more wanted" is exactly
-# the state under test. The ABI wall itself is untouched and still documented
-# in bugs/FORMAL_struct_pack_over_eight_arguments.md §"What is left".
+# the state under test. Both ABIs have since grown their stack-argument
+# convention, so the wall that doc pointed at is gone and the doc with it.
 #
 # `proofs` and not `check` for a reason the solo number hides: 43 s alone, and
 # 201 s measured in a `-j4` run beside the other seven (it is 154 checks, most

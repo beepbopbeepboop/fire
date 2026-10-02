@@ -17155,8 +17155,10 @@ def returned_frame_container_writes(fn, holder) -> list:
 # and widening the source path is not the same change as widening this one.  A
 # callee's block address also has to survive being read out of the frame rather
 # than a register, which is a second question from whether the offset is right.
-# `bugs/FORMAL_x86_64_argument_registers.md` step 3 asked for this number to be
-# decided before the register ceiling was lifted, and this is the decision.
+# The filing that asked for this number to be decided BEFORE the register
+# ceiling was lifted (`bugs/FORMAL_x86_64_argument_registers.md`, deleted
+# 2026-10-02 with the emitters half landed) is the reason it is written down
+# here rather than left implicit: this is the decision.
 #
 # Named rather than written at each use because the two backends have to apply
 # the same number: a build that answers "8 is fine" on arm64 and "8 is not fine"

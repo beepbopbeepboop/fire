@@ -1,10 +1,13 @@
 # FORMAL_ast_bridge_binds_only_the_first_parameter: `mojo` and `MojoFunc` are one-input, so a two-parameter entry point has no proof
 
-**Found 2026-10-01 while re-measuring what
-`bugs/FORMAL_x86_64_argument_registers.md`'s next step actually costs. NOT
-FIXED here beyond a generator guard that stops the ill-typed proof from being
-written; the real fix is in `lib/ProofLib.lean`. Status: open, with the
-measurement, the generated text, and the exact next step.**
+**Found 2026-10-01 while re-measuring what the argument-registers filing's next
+step actually costs; that filing (`bugs/FORMAL_x86_64_argument_registers.md`) is
+deleted as of 2026-10-02, its emitters half landed on both backends and its
+`RETURNED_FRAME_MAX_ARGS` half decided. NOT FIXED here beyond a generator guard
+that stops the ill-typed proof from being written; the real fix is in
+`lib/ProofLib.lean`. Status: open, with the measurement, the generated text, and
+the exact next step — and it is now the WHOLE of what is left of that filing, so
+this is the only document that owns it.**
 
 ## What I ran
 
@@ -134,11 +137,24 @@ file typechecks throughout:
    Lean accepts — which is the assertion that cannot be written until step 3 is
    done, and is why the guard is a guard rather than a fix.
 
-## Why this doc exists in the argument-registers doc's claim
+## Why this doc outlived the argument-registers doc
 
-`bugs/FORMAL_x86_64_argument_registers.md` prices lifting the register limit as
-"the same work twice" in the emitters. It is that **and** this: once a
-seven-argument function is legal, the proof side has to state something about
-seven arguments, and today it cannot state anything about two. The other half of
-that doc's step list — step 3, "decide the `RETURNED_FRAME_MAX_ARGS` budget
-first" — is one line of it; the `MojoFunc` arity is the other.
+That doc priced lifting the register limit as "the same work twice" in the
+emitters. It was that **and** this: once a seven-argument function is legal, the
+proof side has to state something about seven arguments, and today it cannot
+state anything about two. Its two halves have now gone opposite ways, which is
+why this one is still here and that one is not:
+
+* **step 3, "decide the `RETURNED_FRAME_MAX_ARGS` budget first"** — DECIDED on
+  2026-10-02. Six stays, because the hidden word travels by the REGISTER path on
+  both backends and neither has a stack convention for it; `formal/model.py`'s
+  `RETURNED_FRAME_MAX_ARGS` carries the reasoning and
+  `test_returned_frame_layout.py` pins both emitters' register path.
+* **the `MojoFunc` arity** — this file, still open. So this is now the only
+  place the proof half of "lift the register limit" is written down, and it is
+  the part that is bigger.
+
+Nothing about the two backends disagrees about any of it: `mojo` is declared
+`UInt64 → UInt64` and `evalFunc` binds one parameter on BOTH, so a
+seven-argument function is unprovable on arm64 and on x86-64 for the same reason
+and with the same message.

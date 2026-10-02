@@ -102,7 +102,8 @@ def hostmod_modules():
 # no stack area, so `match_core(7)` had nowhere to go.  Both conventions have
 # one now (`formal/x86_64_codegen.py`'s `_load_home_from_stack` and `_emit_call`
 # on x86-64, `_MAX_INCOMING_ARGS` on both), which is what
-# `bugs/FORMAL_x86_64_argument_registers.md` asked for, so the rows are deleted
+# `bugs/FORMAL_x86_64_argument_registers.md` asked for (that filing is deleted
+# too, with its emitters half landed), so the rows are deleted
 # rather than re-needleed.
 #
 # `test_known_x86_64_failures_are_still_failing` went with them.  It existed to

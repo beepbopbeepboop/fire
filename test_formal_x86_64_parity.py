@@ -229,7 +229,8 @@ CASES = [
     # x86-64 passed six integer arguments in registers, so a seven-value
     # `printf` was refused on x86-64 and built on arm64, and a case that tripped
     # it would have reported that filing instead of this one
-    # (bugs/FORMAL_x86_64_argument_registers.md).  It is one call again now that
+    # (`bugs/FORMAL_x86_64_argument_registers.md`, now deleted).  It is one call
+    # again now that
     # both conventions have a stack area, and
     # `a_variadic_printf_with_an_argument_in_the_frame` below is the row that
     # says so.
@@ -408,7 +409,8 @@ CASES = [
     # the other.  Both conventions are implemented now
     # (`formal/x86_64_codegen.py`'s `_load_home_from_stack`/`_emit_call` and
     # `_MAX_INCOMING_ARGS` on both backends), which is what
-    # `bugs/FORMAL_x86_64_argument_registers.md` asked for; before that x86-64
+    # `bugs/FORMAL_x86_64_argument_registers.md` asked for, and which is deleted;
+    # before that x86-64
     # REFUSED the program and arm64 answered it, which is the two-architecture
     # disagreement about one source file this file exists to end.
     #
