@@ -241,8 +241,9 @@ HOST_MODELLED = frozenset((
     #     compared, none from a table. CPython's factory API is not
     #     expressible — a hash object is 8 to 64 bytes of state that cannot
     #     cross a dylib boundary — so each digest is one function, and the
-    #     seven absent names (SHA-3, SHAKE, blake2s) are named with the
-    #     measurements in `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md`.
+    #     seven absent names (SHA-3, SHAKE, blake2s) are named, with the
+    #     measurements, the rule that decided them and what each would cost, in
+    #     the module's own "WHAT IS NOT HERE, AND WHY".
     #   `re`  — `formal/hostmods/re.mojo`, a backtracking regex engine in the
     #     subset `regex_compile.py` says it exists for plus `\b`, `^`/`$`
     #     under MULTILINE, DOTALL and `(?P<name>…)` — the four things the
@@ -1310,7 +1311,8 @@ def star_imported_modules(stmts) -> tuple:
 
 
 def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
-    """{name: (module, kind)} for the names this module binds by RE-EXPORT.
+    """{name: (module, kind, defining_name)} for the names this module binds by
+    RE-EXPORT.
 
     `from .sub import addone` binds `addone` in this file without defining
     it. A package `__init__.mojo` is nothing BUT such statements, and that is
@@ -1333,6 +1335,13 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     either refuse every package that re-exports a type (most of them) or wave
     through a genuinely missing function.
 
+    `defining_name` is the name the DEFINING module published the symbol under,
+    and it is what every consumer of this table has to look the symbol up by:
+    the link line's flat `{bare name: symbol}` map is keyed by it, so an
+    ALIAS's own entry has to say whose name it stands for. It equals the key for
+    an unaliased re-export, which is every re-export that existed before the
+    alias was recorded.
+
     `import a.b` binds the MODULE, not a name, so it contributes nothing here;
     only `from ... import ...` does. The loop is `_from_import_bindings`, shared
     with `imported_bound_names`, and the three filters below are what make this
@@ -1345,27 +1354,151 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     consumer asks for), and not this reader's to change while it is rewriting
     the loop underneath.
 
-    KEYED ON THE DEFINITION'S OWN NAME, not on the alias — `from x import f as
-    g` is recorded as `f` — which is what this table has always done and is
-    deliberate in one direction and a known gap in the other. Deliberate: an
-    export is matched against a library's export set by the name the DEFINING
-    module gave it. A gap: the name this file actually binds is `g`, so an
-    aliased re-export is published under a spelling no consumer of this module
-    can ask for. `imported_bound_names` records `g` for exactly that reason, and
-    fixing this table to match would change what every dylib manifest already
-    on disk claims its module exports — a manifest-content change for callers to
-    re-derive, which is not this reader's to make silently."""
+    **BOTH SPELLINGS ARE PUBLISHED, and the value carries the DEFINING name.**
+    `from x import f as g` records `f -> (x, kind, f)` AND `g -> (x, kind, f)`,
+    which is what this table did not do and why an aliased re-export was
+    unlinkable: the manifest published the name no consumer of this module asks
+    for and not the one every consumer does, so `g(21)` reached the bind audit
+    as a symbol nothing provides. Recording `f` alone is right for the
+    re-export's own sake — an export is matched against a library's export set
+    by the name the DEFINING module gave it — and it is what a *non-aliased*
+    re-export still records, so this is ADDITIVE: a consumer of either spelling
+    resolves, and nothing that resolved before stops. The third element is what
+    makes the second key honest: a symbol is found under the DEFINING name (the
+    flat link-line map is keyed by it), so `g`'s entry has to say which name
+    `g` stands for rather than looking `g` up and finding nothing.
+
+    The alias is filtered by the SAME three rules as the original, applied to
+    the alias's own spelling: a name this module defines wins over any import
+    (the precedence `imported_bound_names` and `import_bindings` both state), a
+    private alias is not published, and an inert one is not either. The
+    original name's own filters are unchanged, so a private definition brought
+    in under a public alias stays out of the manifest exactly as before rather
+    than becoming a build refusal over a name the defining module does not
+    export at all."""
     defined = _defined_names(stmts)
     kinds_by_module = kinds_by_module or {}
     out: dict = {}
-    for _bound, name, module in _from_import_bindings(stmts):
+    for bound, name, module in _from_import_bindings(stmts):
         if (name in defined or _is_inert_module(name)
                 or name.startswith("_")):
             continue
-        out.setdefault(name, (module,
-                              kinds_by_module.get(module, {})
-                              .get(name, "unknown")))
+        kind = kinds_by_module.get(module, {}).get(name, "unknown")
+        out.setdefault(name, (module, kind, name))
+        if (bound != name and bound not in defined
+                and not _is_inert_module(bound)
+                and not bound.startswith("_")):
+            out.setdefault(bound, (module, kind, name))
     return out
+
+
+def own_module_identity(source_path: str, project_root: str = None) -> str:
+    """The dotted name `source_path` is ADDRESSED by, independent of who reached it.
+
+    `_module_identity` qualifies a name against the module that spelled it, and
+    so it needs to be HANDED the importer's identity — which `build_module_dylib`
+    takes as `_parent` and which nothing computed. A relative import at the root
+    therefore resolved differently depending on the spelling that reached it:
+    `formal/hostmods/os/path/__init__.mojo` builds its `.._syscalls` import as
+    the library `___syscalls.<digest>.arm64.dylib` with exports
+    `___syscalls_fs_chdir_9f63a2` when compiled on its own (`_parent` is None,
+    so the name passes through with its dots), and as `__syscalls.<digest>…`
+    with exports `__syscalls_fs_chdir_9f63a2` when the same process reached the
+    same file as `.path` from `formal/hostmods/os/__init__.mojo`. Two spellings,
+    two libraries, one source file. Nothing FAILED — `_BUILT` is keyed by
+    resolved path, and every consumer reads the manifest written beside the
+    library the build actually produced — but `build_module_dylib`'s own comment
+    says the source digest in the filename "is what makes sharing safe rather
+    than merely rare", and for this module the artifact depended on the
+    spelling rather than on the source. That is a content-addressing hole, and
+    the fix is to make the identity a function of the FILE.
+
+    THE PACKAGE CHAIN, and that is the rule rather than "the longest search
+    root": a directory is part of a module's name exactly when it is a PACKAGE,
+    which on this path means it holds an `__init__.mojo`. So the name is built
+    by walking up from the file's own directory for as long as each directory
+    is a package, prefixing the file's own basename at each step. For
+    `formal/hostmods/os/path/__init__.mojo` that is `os` then `path` — the
+    `__init__` itself contributes nothing, because it is the package rather
+    than a module inside it — and for `formal/hostmods/os/_syscalls.mojo` it is
+    `os` plus `_syscalls`. Which is what an importer actually spells, so
+    `.._syscalls` from `os/path` resolves to `os._syscalls` whether the file was
+    reached from `os` or built on its own.
+
+    "The longest search root" was tried first and is wrong for a reason worth
+    recording: `_search_roots` deliberately contains the importing file's OWN
+    directory and, as a catch-all for an absolute name, the repository root.
+    Both are strict ancestors of almost every file here, so the longest one is
+    usually the repository — which would name `formal.hostmods.os.path`. The
+    root that matters is the one whose modules are addressed WITHOUT a package
+    prefix, and that is a different question from the one a search root
+    answers.
+
+    A file in no package at all falls back to the roots: the longest one that is
+    a strict ancestor, relative to it with `__init__` and `.mojo` dropped. For
+    `formal/hostmods/sys.mojo` under `_HOSTMODS_ROOT` that is `sys`, which is
+    how `import sys` spells it.
+
+    None when neither answers — a file outside every search root, whose
+    identity nothing in this build can name. The caller then behaves exactly as
+    it did before: this makes the common case right rather than making every
+    case answerable, and a wrong answer here would be a wrong LIBRARY NAME,
+    which is worse than the naming instability it removes.
+    """
+    if not source_path:
+        return None
+    target = os.path.abspath(source_path)
+    if not target.endswith(".mojo"):
+        return None
+    stem = os.path.basename(target)
+    stem = stem[: -len(".mojo")]
+    is_package_init = stem == "__init__"
+
+    # The package chain: each directory that holds an `__init__.mojo` is one
+    # component of the name, nearest first. `os/path/__init__.mojo` is the
+    # package `os.path` and contributes `path` only because its own directory
+    # is the package; `os/__init__.mojo` is the package `os` and contributes
+    # nothing itself.
+    parts = [] if is_package_init else [stem]
+    directory = os.path.dirname(target)
+    while directory and os.path.exists(os.path.join(directory, "__init__.mojo")):
+        parts.append(os.path.basename(directory))
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    if len(parts) > (0 if is_package_init else 1):
+        return ".".join(reversed(parts))
+
+    # No package chain: fall back to the roots, so a top-level module under a
+    # fixed root is still named by it.
+    best = None
+    for root in _search_roots(target, project_root):
+        if not root:
+            continue
+        root = os.path.abspath(root)
+        # A STRICT ancestor: the root must be above the file, never the file's
+        # own directory, or every module in one directory would answer with a
+        # single-component name and two of them would collide.
+        if not target.startswith(root + os.sep):
+            continue
+        if best is None or len(root) > len(best):
+            best = root
+    if best is None:
+        return None
+    rel = os.path.relpath(target, best)
+    out = []
+    for part in rel.split(os.sep):
+        if part.endswith(".mojo"):
+            part = part[: -len(".mojo")]
+        if part == "__init__":
+            continue
+        if not part:
+            continue
+        out.append(part)
+    if not out:
+        return None
+    return ".".join(out)
 
 
 def _module_identity(module_name: str, parent: str = None) -> str:
@@ -1403,9 +1536,14 @@ def _qualified_reexports(reexports: dict, parent: str) -> dict:
     manifest can tell which module actually defines the forwarded name.
 
     Same function, same parent, so the record and the file name cannot disagree
-    about which module a relative name resolved to."""
-    return {name: (_module_identity(module, parent), kind)
-            for name, (module, kind) in (reexports or {}).items()}
+    about which relative name resolved to.
+
+    The third element is `reexported_names`' `defining_name` and is carried
+    through untouched: qualifying a module must not renumber a name, and
+    dropping the element here would silently turn every ALIAS back into a
+    lookup under its own spelling."""
+    return {name: (_module_identity(module, parent), kind, defines)
+            for name, (module, kind, defines) in (reexports or {}).items()}
 
 
 def _dylib_lock(out: str):

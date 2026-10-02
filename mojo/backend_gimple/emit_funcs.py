@@ -56,7 +56,7 @@ import mojo.backend_gimple.emit_infra as ginf
 from mojo.middle.funcs_shared import *  # noqa: F401,F403
 from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
-    _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
+    _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
     _param_ctype, _parsed_import, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
@@ -104,6 +104,11 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
         gen._declare_var(env_var, f"{ci.env_struct} *")
         gen._emit(f"  {env_var} = {alloc_fn} ();")
         for vname, vtype in ci.captures:
+            # The FIELD's type, once, for every branch below — a by-reference
+            # capture (`ci.mut_names`) is stored as a pointer to the owner's
+            # box, and this is the code that has to agree with the typedef
+            # emitted elsewhere. See `gimple_ctypes._env_field_ctype`.
+            _fct = gimple_ctypes._env_field_ctype(ci, _as_str(vname))
             _own_mut_ptr = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
             if vname in ci.mut_names and _own_mut_ptr:
                 # DOUBLY-NESTED by-reference capture. This function is
@@ -153,19 +158,28 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 # `discover_closures`'s transitive fixup now rules out --
                 # falls through to the by-value branch below rather than
                 # emit something silently wrong.
-                ptr_val = gen._new_val(f"{vtype} *", gen._cname(vname))
+                ptr_val = gen._new_val(_fct, gen._cname(vname))
                 gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {ptr_val};")
             # If vname is captured in the current function's own env, read from _env->vname.
             elif vname in gen._captures and gen._env_param:
                 # GIMPLE: cannot use component_ref directly as RHS of struct store;
                 # load into a temp first.
-                tmp = gen._new_val(vtype, f"{gen._env_param}->{gimple_ctypes._c_field_name(vname)}")
+                _cur_t = _as_str(gen._captures.get(vname) or 'int64_t')
+                if _fct.endswith(' *') and not _cur_t.endswith(' *'):
+                    # THIS function holds the name by VALUE while the closure it
+                    # is building wants it by REFERENCE: forward a box, not the
+                    # value. Through a plain local, since a component_ref's
+                    # address is not a GIMPLE operand.
+                    _boxed = gen._new_val(_cur_t, f"{gen._env_param}->{gimple_ctypes._c_field_name(vname)}")
+                    tmp = gen._new_val(_fct, f'&{_boxed}')
+                else:
+                    tmp = gen._new_val(_fct, f"{gen._env_param}->{gimple_ctypes._c_field_name(vname)}")
                 gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {tmp};")
             else:
                 # Use _safe_coerce_emit to handle int→int64_t and other conversions.
                 local_type = gen.var_types.get(vname, vtype)
                 cname = gen._write_dest(vname)  # resolve capture path if nested
-                gen._safe_coerce_emit(local_type, vtype, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
+                gen._safe_coerce_emit(local_type, _fct, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
         gen._closure_envs[node.name] = env_var
     else:
         gen._closure_envs[node.name] = ''

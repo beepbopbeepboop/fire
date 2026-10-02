@@ -2603,12 +2603,17 @@ def gen_module_impl(self, stmts):
         # reflection repr iterates `struct_field_types` in insertion order
         # and the later self-host augmentation appends any missing dataclass
         # fields, so the seed has to remain a PREFIX of
-        # `StringLiteral(value, line, col, is_bytes)` or the native repr
-        # emits `value, is_bytes, line, col` and every file with a string
-        # literal diverges from the reference (64 `.ast` diffs).
+        # `StringLiteral(value, line, col, is_bytes, is_raw)` or the native
+        # repr emits `value, is_bytes, line, col` and every file with a
+        # string literal diverges from the reference (64 `.ast` diffs).
+        # `is_raw` is appended at the END for the same reason: it was added
+        # after `is_bytes` (it records an `r` prefix, so
+        # `_strip_string_prefix_and_quotes` no longer carries it), and putting
+        # it anywhere else would reorder the fields the prefix rule protects.
         'line': 'int64_t',
         'col': 'int64_t',
         'is_bytes': '_Bool',
+        'is_raw': '_Bool',
     }
     self.struct_field_types['TstringLiteral'] = {
         'value': 'char *',
@@ -4039,15 +4044,33 @@ def gen_module_impl(self, stmts):
     # call for the `not do_imports` shape, where this pass does not run;
     # `_note_struct_import_alias` is first-writer-wins, so the two can
     # never disagree about what an alias names.
+    #
+    # The SAME walk collects the assignment spelling of the same fact —
+    # `Alias = <module>.<Class>` (`_note_struct_attr_alias`), which is how
+    # this compiler's own source reaches an AST node class
+    # (`mojo/middle/offload.py`'s `I = gctypes.IdentExpr`,
+    # `emit_stmts.py`'s `_IL = gimple_ctypes.IntLiteral`). The pairs are
+    # only RESOLVED below, after the plain-`import X as Y` scan has filled
+    # `_module_alias_names`: "is this base a module namespace" is not
+    # answerable until that scan has run, and a guess made here would have
+    # to be a second guess later. Both spellings write the same table
+    # first-writer-wins, so a name claimed by either is claimed once.
+    _attr_alias_candidates: list = []
     for _al_n in _walk_ast(stmts):
-        if not (isinstance(_al_n, FromImportStmt)
-                and not getattr(_al_n, 'wildcard', False)):
-            continue
-        for _al_ip in (getattr(_al_n, 'name_alias_strs', None) or []):
-            _al_name = gimple_ctypes._fi_name(_al_ip)
-            _al_alias = gimple_ctypes._fi_alias(_al_ip)
-            if _al_alias:
-                self._note_struct_import_alias(_al_n.module, _al_alias, _al_name)
+        if isinstance(_al_n, FromImportStmt) and not getattr(_al_n, 'wildcard', False):
+            for _al_ip in (getattr(_al_n, 'name_alias_strs', None) or []):
+                _al_name = gimple_ctypes._fi_name(_al_ip)
+                _al_alias = gimple_ctypes._fi_alias(_al_ip)
+                if _al_alias:
+                    self._note_struct_import_alias(_al_n.module, _al_alias, _al_name)
+        elif (isinstance(_al_n, AssignStmt)
+                and isinstance(getattr(_al_n, 'target', None), IdentExpr)
+                and isinstance(getattr(_al_n, 'value', None), MemberExpr)):
+            _al_mem = _al_n.value
+            if isinstance(getattr(_al_mem, 'obj', None), IdentExpr):
+                _attr_alias_candidates.append(
+                    (_as_str(_al_mem.obj.name), _as_str(_al_n.target.name),
+                     _as_str(_al_mem.member)))
 
     _phase0_func_types = dict(self.func_return_types)   # save Phase 0 registrations
     _phase0_imported   = dict(getattr(self, 'imported_symbols', {}))  # save Phase 0 imported_symbols
@@ -4107,6 +4130,11 @@ def gen_module_impl(self, stmts):
                         'return_type': 'unknown',
                     }
                 self._module_alias_names.add(_im_local)
+
+    # `_module_alias_names` is finally populated, so the `Alias = <module>.
+    # <Class>` candidates collected by the alias walk above can be resolved.
+    for _aa_base, _aa_alias, _aa_member in _attr_alias_candidates:
+        self._note_struct_attr_alias(_aa_base, _aa_alias, _aa_member)
 
     for s in stmts:
         if isinstance(s, FromImportStmt):
@@ -9453,7 +9481,8 @@ def gen_module_impl(self, stmts):
                 if ci.env_struct and ci.env_struct not in self._emitted_structs:
                     parts.append(f"typedef struct {ci.env_struct} {{")
                     for vname, vtype in ci.captures:
-                        field_ctype = f"{vtype} *" if vname in ci.mut_names else vtype
+                        field_ctype = gimple_ctypes._env_field_ctype(
+                            ci, _as_str(vname))
                         parts.append(f"  {field_ctype} {_c_field_name(vname)};")
                     parts.append(f"}} {ci.env_struct};")
                     parts.append('')
@@ -10058,7 +10087,8 @@ def gen_module_impl(self, stmts):
                 if ci.env_struct and ci.env_struct not in self._emitted_structs:
                     parts.append(f"typedef struct {ci.env_struct} {{")
                     for vname, vtype in ci.captures:
-                        field_ctype = f"{vtype} *" if vname in ci.mut_names else vtype
+                        field_ctype = gimple_ctypes._env_field_ctype(
+                            ci, _as_str(vname))
                         parts.append(f"  {field_ctype} {_c_field_name(vname)};")
                     parts.append(f"}} {ci.env_struct};")
                     parts.append('')

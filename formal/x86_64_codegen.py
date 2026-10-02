@@ -362,9 +362,16 @@ def _callee_symbol(func) -> str | None:
     `model.incoming_args`, comptime first) and a call site that passed only
     the runtime arguments, `f[1](3, 7)` would have built an image in which `x`
     read 7 and `y` read whatever was in RSI before — a wrong number with exit
-    0. See bugs/FORMAL_x86_64_comptime_specialization_abi.md, which is why this
-    arm and the `_specialization_args` call below landed together rather than
-    one at a time.
+    0. Which is why this arm and the `_specialization_args` call below landed
+    together rather than one at a time: each of the three halves on its own is
+    either a loud refusal or a silently wrong image, and the pair that matters
+    is the NAME and the CALL SITE.  The regression that keeps them together is
+    `test_formal_receiver_position.py`'s `COMPTIME_ABI_CASES` and
+    `test_formal_specialized_method_call.py`'s `x86_abi_specialized_method_call_
+    on_both`, which run every spelling on BOTH machines — reverting only the
+    prologue half makes all three fail on a WRONG NUMBER rather than on a
+    refusal, which is precisely the failure a refusal-shaped expectation
+    cannot see.
     """
     if isinstance(func, F.SubscriptExpr):
         return comptime_eval.specialization_name(func)
@@ -1712,12 +1719,37 @@ class X86_64Codegen:
         self._emit_stmt(F.AssignStmt(target=F.IdentExpr(name=target),
                                      value=value, line=0, col=0))
 
-    def _intern_string(self, s: str) -> str:
+    def _intern_string(self, s) -> str:
         """Return a stable data label for `s`, emitting the bytes on first use.
 
         The bytes live after all the code (see `compile`), so a string is
         read-only data in the image's text — the same place the arm64 backend
-        puts them."""
+        puts them.
+
+        `s` is a `StringLiteral` node or a plain string, and the reason is the
+        same as on arm64: the node carries `is_raw`, which is what tells
+        `r"a\\nb"` (four characters, a literal backslash and an `n`) from
+        `"a\\nb"` (three, a newline) once `_strip_string_prefix_and_quotes` has
+        stripped the prefix and the quotes. A plain string is already-decoded
+        text and is taken at face value.
+
+        THE decode point for a string literal on this backend, and it is here
+        rather than at the call sites because every byte of every string on this
+        path goes through this one function — and because this path is the one
+        engine in the repository that does NOT hand the literal's text to a C
+        compiler, which is where `fire_compiler.py` leaves escapes decoded-by-
+        proxy. `fire_compiler.decoded_literal` is the tree's one reader of that
+        question (the interpreter and the arm64 backend delegate to the same
+        one); without it `len("a\\nb")` was 4 on a formal image and the printed
+        bytes carried a literal backslash, on both architectures, while
+        `fire.py run` and `fire.py build` both printed a real newline.
+
+        Decoding BEFORE the intern lookup is what makes interning by content
+        right: two literals differing only in escape spelling (`"\\t"` and a
+        spelled tab) now get the same key, which is what `==` on a string
+        address already assumes.
+        """
+        s = F.decoded_literal(s)
         if s in self._str_intern:
             return self._str_intern[s]
         label = f"str_{self._str_counter}"
@@ -2419,12 +2451,17 @@ class X86_64Codegen:
         frags, operands = [], []
         for a in args:
             if isinstance(a, F.StringLiteral):
-                frags.append(M.print_literal(a.value))
+                frags.append(M.print_literal(a))
                 continue
             kind = self._expr_str_kind(a)
             if kind == M.STR_KIND:
                 frags.append("%s")
-            elif kind == M.INT_KIND:
+            elif M.is_number_kind(kind):
+                # `is_number_kind` and not `== INT_KIND`: a type TAG is a word,
+                # so `print(t)` for `t = bool` prints the tag, which is what it
+                # printed before `TYPE_KIND` existed (`t` was then an `int` by
+                # `_value_kind`'s default). Asking `== INT_KIND` here would make
+                # the construct's own positive case a refusal.
                 frags.append("%lld" if cmp_signed(self._ttype(a)) else "%llu")
             else:
                 raise CodegenError(
@@ -2441,7 +2478,14 @@ class X86_64Codegen:
 
         `file=` is refused unless it is stdout, because this model has exactly
         one stream and a `file=sys.stderr` that quietly went to stdout would be
-        a program whose diagnostics are missing rather than one that failed."""
+        a program whose diagnostics are missing rather than one that failed.
+
+        `sep` and `end` come back as the literal NODES and not as `.value`,
+        which is the whole reason this signature is unchanged while its body is
+        not: `print(sep=r"\\t")` must print a backslash and a `t`, and
+        `print_literal` can only know that from the node. The defaults are
+        plain strings, which `print_literal` takes at face value — they are
+        already-decoded text."""
         sep, end = " ", "\n"
         for k, v in e.kwargs:
             if not isinstance(v, F.StringLiteral):
@@ -2451,9 +2495,9 @@ class X86_64Codegen:
                     f"the line ending are baked into the format string, which "
                     f"is built before the call is emitted")
             if k == "sep":
-                sep = v.value
+                sep = v
             elif k == "end":
-                end = v.value
+                end = v
             elif k == "file":
                 if not (isinstance(v, F.MemberExpr) and v.member == "stdout"):
                     raise CodegenError(
@@ -3004,17 +3048,28 @@ class X86_64Codegen:
             comes back present.
         """
         # Both operands literal is a COMPILE-TIME answer, taken first because
-        # it is the one case where the answer is not a question about the
-        # representation. The empty needle is TRUE here, which is Python's
+        # it is the one case where the answer is not a question about
+        # the representation. The empty needle is TRUE here, which is Python's
         # rule and also what `strstr` would say, so the constant and the call
         # cannot disagree.
+        #
+        # BOTH SIDES ARE DECODED before the substring test, and that is what
+        # keeps the constant and the call agreeing now that the call's operands
+        # are interned decoded text. `"t" in "\t"` is a needle of `t` against a
+        # haystack of one TAB, so it is FALSE; folding it on the raw source text
+        # made it TRUE, because the raw haystack is a backslash and a `t` and
+        # contains a `t`. `fire_compiler.decode_c_escapes` is the one decoder,
+        # the same one `_intern_string` uses — see
+        # bugs/FORMAL_string_literal_escape_is_not_decoded.md.
         if isinstance(left, F.StringLiteral) and isinstance(right, F.StringLiteral):
             # The EMPTY needle is TRUE, which is Python's rule and what
             # `strstr` returns for it (the haystack itself, non-NULL). Folding
             # it to False because `bool("")` is False made the
             # both-operands-literal case disagree with the call the same
             # expression makes when either side is a name.
-            found = left.value == "" or left.value in right.value
+            needle = F.decoded_literal(left)
+            haystack = F.decoded_literal(right)
+            found = needle == "" or needle in haystack
             self._emit_mov_imm(Reg.RAX, (0 if found else 1) if invert
                                else (1 if found else 0))
             return
@@ -3413,6 +3468,16 @@ class X86_64Codegen:
         # entirely and fabricate a word.
         why = M.multi_index_refusal_for(e, self._is_dict_subscript(e.obj),
                                         self._functions, self._structs)
+        if why is not None:
+            raise CodegenError(why)
+        # A TYPE index, before the base's own shape is asked: the base does not
+        # decide this. `xs[bool]` took the blob's bounds check against a 63-bit
+        # tag and exited 1 with nothing printed, and `s[bool]` added a tag to a
+        # `char *`. One call here covers the read, the store and the augmented
+        # assignment, and it is asked of the KIND rather than of the node so a
+        # local bound to a type is refused as well as the bare name.
+        why = M.type_index_refusal(self._expr_str_kind(e.index),
+                                   M.spelled(e.index))
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_subscript(e.obj):
@@ -4054,7 +4119,7 @@ class X86_64Codegen:
             # -4, not -3: the 7-byte encoding is REX, opcode, ModRM, disp32,
             # so the displacement FIELD starts 4 bytes before the end (and
             # there is no SIB byte in front of it to skip).
-            self.asm.emit_label_rip(self._intern_string(expr.value),
+            self.asm.emit_label_rip(self._intern_string(expr),
                                     here_offset=-4)
             return
 
@@ -4579,6 +4644,23 @@ class X86_64Codegen:
         # were written to the same wrong rule (the rule itself is
         # `model.shift_saturated_is_zero`; the arithmetic `>>` case is not 0,
         # which is why only the SIGN is left to a run-time fact).
+        #
+        # …and a literal NEGATIVE amount is refused, which is the build-time
+        # half of the same rule: the amount is decidable here, and a refusal
+        # names the line where the run-time trap in `_emit_shift_reg` can only
+        # leave a status behind. It has to come BEFORE the saturation test,
+        # because a negative amount is below 64 and would otherwise fall
+        # through to the register form and be masked. `model`'s
+        # `shift_amount_is_trap` is the decision, so arm64 asks the same
+        # question and words it identically.
+        #
+        # `fold_literal_expr` rather than this backend's `_static_int`: both
+        # read a literal, but the shared folder is the one that also answers
+        # `0 - 1` and `1 * -1`, and `0 - 1` is the spelling the reproducer in
+        # the bug doc used.
+        known = M.fold_literal_expr(e.right)
+        if M.shift_amount_is_trap(known):
+            raise CodegenError(M.negative_shift_refusal(op, known))
         if lit is not None and M.shift_saturates(lit):
             self._emit_expr(e.left)
             self._emit_saturated(op, signed)
@@ -4604,29 +4686,42 @@ class X86_64Codegen:
         THE ONE register-form shift emitter on this backend; RAX holds the
         value and RCX the amount on entry, and RAX is the result on exit.
 
-        The amount is compared against 64 and a saturating branch taken
-        BEFORE the shift, because the three x86 shift forms do not agree
-        about an out-of-range count and agreeing with none of them is not a
-        rule: `SHR`/`SAR` saturate at 63 (so `x >> 64` would be `x >> 63`,
-        which is 1 for a negative operand where Python says 0), while `SHL`
-        masks the count to 6 bits (so `x << 64` is `x`). One comparison
-        covers all three, and the saturated value is the same one arm64
-        computes — `model.shift_saturated_is_zero` is the rule and this is
-        only its instruction selection.
+        THREE answers for the amount, in this order, and the order is the whole
+        content of this function:
 
-        The compare is SIGNED, matching arm64's and for the same reason: an
-        amount of 64 or more saturates, and a NEGATIVE one (which CPython
-        rejects with ValueError, and which this path has always handed to
-        the hardware) keeps the masking it had. Unsigned, a negative amount
-        would take the saturating branch and answer 0 — a third wrong answer
-        rather than the one that is there now. See
-        bugs/FORMAL_negative_shift_amount_masks_instead_of_raising.md.
+        1. **Negative** → `exit(SHIFT_TRAP_STATUS)`. A negative amount is not a
+           shift distance, so there is no value to compute; the hardware masks
+           `SHL`'s count to 6 bits, so `x << -1` was `x << 63`. Both
+           compares are SIGNED, and the negative one runs FIRST for exactly
+           the reason `model.shift_amount_is_trap` is a separate rule from
+           `shift_saturates`: a negative amount is below 64, so unsigned it
+           would take the saturating branch and answer 0 — a third wrong
+           answer rather than the one that was there.
+        2. **At or past the width** → the saturated value. One comparison
+           covers all three x86 shift forms, which do not agree about an
+           out-of-range count: `SHR`/`SAR` saturate at 63 (so `x >> 64` would
+           be `x >> 63`, which is 1 for a negative operand where Python says
+           0), while `SHL` masks the count to 6 bits (so `x << 64` is `x`).
+           The saturated value is the same one arm64 computes —
+           `model.shift_saturated_is_zero` is the rule and this is only its
+           instruction selection.
+        3. **In range** → the shift instruction.
+
+        The trap is the same `exit` the divide-by-zero arm of `_emit_div_mod`
+        emits, and the same status (`model.SHIFT_TRAP_STATUS`), so "this
+        program has no answer" is one answer on this path. A statically
+        negative amount never reaches here — `_emit_shift` refuses it at build
+        time, which is the half that can name the line.
         """
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
+        neg_label = f"{fn}_sh{sid}_neg"
         sat_label = f"{fn}_sh{sid}_sat"
         end_label = f"{fn}_sh{sid}_end"
+        self.asm.emit(encode_cmp_r64_imm32(Reg.RCX, 0))
+        self._record_cond_branch()
+        self._emit_jcc(COND_L, neg_label)
         self.asm.emit(encode_cmp_r64_imm32(Reg.RCX, M.SHIFT_WIDTH))
         self._record_cond_branch()
         self._emit_jcc(COND_GE, sat_label)
@@ -4635,6 +4730,13 @@ class X86_64Codegen:
         self._emit_jmp(end_label)
         self.asm.label(sat_label)
         self._emit_saturated(op, signed)
+        self._emit_jmp(end_label)
+        # The negative-amount trap, laid out after the saturating arm so both
+        # arms are reached by one short forward branch and neither falls into
+        # the other. The same `exit` (and the same status) the divide-by-zero
+        # arm of `_emit_div_mod` emits.
+        self.asm.label(neg_label)
+        self._emit_call_exit(M.SHIFT_TRAP_STATUS)
         self.asm.label(end_label)
 
     def _emit_saturated(self, op: str, signed: bool) -> None:
@@ -5440,10 +5542,18 @@ class X86_64Codegen:
                                           self._structs))
 
     def _aliased_export(self, name: str):
-        """The manifest export a bare callee reaches THROUGH an import alias."""
+        """The manifest export a bare callee reaches THROUGH an import alias.
+
+        The forwarded table is passed because a package `__init__` is a NAMESPACE
+        library with an empty export table, so the names it publishes are all in
+        `forwarded` — which is what makes `from pkg import base as aliased`
+        resolvable, and why this is asked of the same three tables in the same
+        order as the DOTTED spelling (`model.dylib_aliased_export`).
+        """
         return M.dylib_aliased_export(self._dylib_by_name,
                                       self._dylib_by_module, name,
-                                      self._import_aliases)
+                                      self._import_aliases,
+                                      self._dylib_forwarded)
 
     def _extern_symbol(self, name: str) -> str:
         """The boundary symbol an unbound callee `name` is emitted against.

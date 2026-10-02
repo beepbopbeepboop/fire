@@ -174,6 +174,62 @@ value-model level and neither is local:
   says the same about its own table). A fix that lands on one machine and not the
   other is the two-machines-one-language failure this backend exists to prevent.
 
+## Re-measured 2026-10-01 (`work/formal3-7`): the dependency chain's FIRST
+## arrow has MOVED, and it moved to something this doc does not cover
+
+`builtin_slice.mojo` still lands where this doc says it does, which is the
+whole of what this doc is about:
+
+```
+$ python3 tools/memslot.py --gb 8 --label bsl -- python3 fire.py build \
+      --formal --no-prove -o .tmp/esc/bsl \
+      ../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo
+build: builtin_slice.mojo imports 'std.format._utils', which cannot be built
+either: builtin_slice.mojo: self.step.or_else() is an Optional unwrap […]
+```
+
+**But `std/utils/variant.mojo` no longer refuses on `__mlir_op`.** This doc's
+§"The wall behind THAT" puts the first arrow of the chain at
+`get_discriminant`'s `__mlir_op.\`pop.variant.discr_gep\`` and measured that
+refusal as the thing standing between `Optional.or_else` and a build. That
+refusal has moved EARLIER in the file and now says something else:
+
+```
+$ python3 tools/memslot.py --gb 8 --label var -- python3 fire.py build \
+      --formal --no-prove -o .tmp/esc/var \
+      ../new-modular/Mojo/stdlib/std/utils/variant.mojo
+build: Self._Storage reads a `comptime` class attribute of Variant, whose
+value is `_VariantStorageFor[…]` — and a formal value is one 64-bit word with
+nowhere to keep a non-literal one […]
+```
+
+The `__mlir_op` code is still in the source — `variant.mojo:362` still reads
+`__mlir_op.\`pop.variant.discr_gep\`` and `:154`/`:310` still call
+`__get_mvalue_as_litref` — so this doc's claim that reaching the tag needs the
+MLIR intrinsic is unchanged as a statement about the SOURCE. What changed is
+the ORDER: a `comptime` class attribute holding a computed value is now
+refused earlier than the intrinsic is reached, so `construct:mlir-and-gpu-globals`
+is no longer the first thing in the way.
+
+**So the chain in §"The wall behind THAT" now reads:**
+
+    comptime class attribute whose value is a computation (`_VariantStorageFor[…]`)
+      ->  Variant.get_discriminant's `__mlir_op` (unchanged, now second)
+        ->  Optional.or_else
+          ->  builtin_slice.mojo builds
+            ->  the 13 files reach their own next refusal
+
+and the first arrow is a *value-model* question about a `comptime` class
+attribute holding a non-literal — closer to this doc's own subject than the
+MLIR one was, and NOT covered by anything this doc records. Anyone picking up
+option 2 should measure that arrow first rather than reaching for
+`__mlir_op`, which is what this doc's own text tells them to do.
+
+What did NOT move: `Optional`'s own refusal, `builtin_slice.mojo`'s terminal
+cause, and therefore the honest accounting — still 0 of the 13 files gained a
+PASS. Verified on arm64 only; the x86-64 half of this doc's measurements is
+from its author and I did not repeat it.
+
 ## What was measured, and what was not
 
 * Both refusals, on arm64 and x86-64, identical text.
@@ -186,3 +242,5 @@ value-model level and neither is local:
   answer for any file this unblocks, and whether `Variant`'s discriminator
   survives this path's own value model — that is the first thing to check when
   option 2 is picked up, and it is checkable on one file.
+* **Re-measured on arm64 only** by the 2026-10-01 session above, which did not
+  repeat the x86-64 half.

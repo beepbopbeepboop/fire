@@ -963,15 +963,34 @@ def _gen_stmt_AssignStmt(gen, node):
             return
         # Regular local variable assignment
         if tname not in gen.var_types:
-            # Check for inferred variable type (from analysis of all assignments)
-            func_key = gen.current_func_name
-            if func_key and hasattr(gen, '_inferred_var_types'):
-                if func_key in gen._inferred_var_types and tname in gen._inferred_var_types[func_key]:
-                    ctype = gen._inferred_var_types[func_key][tname]
+            # A name bound to more than one distinct container kind has no
+            # container pointer type at all, so it is declared as the box and
+            # every store coerces into it — BEFORE any of the ground-truth
+            # rules below, which would otherwise pick the first value's kind
+            # and leave the second store to hit `_sce_simple_emit`'s
+            # container-kind chokepoint as a hard "cannot coerce" build
+            # failure. This is the container half of the rule
+            # `_prebound_local_ctypes` states for structs (a name is recorded
+            # only while every pointer-shaped binding of it agrees; a
+            # disagreement disqualifies it and the box is the answer), and it
+            # has to come first because every rule below is a "trust this one
+            # value" rule, which is exactly what a mixed name must not be
+            # trusted for. Real: `gen_module_impl`'s `_lens` is a dict at
+            # line 1257 and a set at line 6114, and the self-host closure
+            # could not be generated until this existed.
+            _mixed = tname in ginf.mixed_container_locals(gen)
+            if _mixed:
+                ctype = 'int64_t'
+            else:
+                # Check for inferred variable type (from analysis of all assignments)
+                func_key = gen.current_func_name
+                if func_key and hasattr(gen, '_inferred_var_types'):
+                    if func_key in gen._inferred_var_types and tname in gen._inferred_var_types[func_key]:
+                        ctype = gen._inferred_var_types[func_key][tname]
+                    else:
+                        ctype = vtype
                 else:
                     ctype = vtype
-            else:
-                ctype = vtype
             # The pre-pass cannot always see a nested subscript's element type
             # (it runs before the cross-call element contract), so it can hint
             # an integer for what is really a double read. A local assigned a
@@ -998,7 +1017,13 @@ def _gen_stmt_AssignStmt(gen, node):
             # to `_mojo_at_char` dereferenced as a `char` — the
             # int+list concat on the next line became `char * + MojoList *`
             # and gimple died with "internal compiler error: in build2".
-            if vtype in ('MojoDict *', 'MojoList *', 'MojoSet *') and ctype != vtype:
+            #
+            # `_mixed` is excluded from it deliberately: every rule in this
+            # group is "trust THIS value", which is the one thing a name
+            # holding two container kinds cannot be trusted for, and letting
+            # it through here would undo the box two lines above.
+            if not _mixed and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *') \
+                    and ctype != vtype:
                 ctype = vtype
             # Same "trust ground truth" principle, generalized to ANY pointer
             # type (not just Mojo containers) — this pre-pass hint
@@ -1012,7 +1037,8 @@ def _gen_stmt_AssignStmt(gen, node):
             # int64_t against that pointer value would truncate/reinterpret
             # it as an integer at the coercion below. See
             # bugs/CODEGEN_untyped_param_string_passthrough_wrong.md.
-            if ctype in ('int', 'int64_t') and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
+            if not _mixed and ctype in ('int', 'int64_t') \
+                    and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
                 ctype = vtype
             # `s: Set[Int] = {}` — an ANNOTATED assignment declares a
             # container kind, and an empty `{}` is a dict DISPLAY: evidence

@@ -168,7 +168,7 @@ def test_every_writer_goes_through_the_atomic_path(tmpdir):
                                         "path": "/tmp/dep.dylib"}])
         check("_record_link_deps_is_atomic", len(calls) == 1, f"{calls}")
         calls.clear()
-        B._record_namespace(manifest, {"f": ("std.x", "function")}, {})
+        B._record_namespace(manifest, {"f": ("std.x", "function", "f")}, {})
         check("_record_namespace_is_atomic", len(calls) == 1, f"{calls}")
         calls.clear()
         I._record_depends(manifest, [("std.x", "/src/x.mojo")])
@@ -186,7 +186,8 @@ def test_the_round_trip_still_reads(tmpdir):
                                       constants={"sys.argv": "list"})
     B._record_link_deps(manifest, [{"install_name": "@rpath/dep.dylib",
                                     "path": "/tmp/dep.dylib"}])
-    B._record_namespace(manifest, {"reexported": ("std.rt", "function")},
+    B._record_namespace(manifest, {"reexported": ("std.rt", "function",
+                                                  "reexported")},
                         {"reexported": "_std_rt__reexported"}, traits=["T"])
     I._record_depends(manifest, [("std.rt", "/src/rt.mojo")])
     payload = json.load(open(manifest))
@@ -199,6 +200,8 @@ def test_the_round_trip_still_reads(tmpdir):
         check("reexports_survive",
               payload["reexports"]["reexported"]["symbol"]
               == "_std_rt__reexported"),
+        check("the_defining_name_survives",
+              payload["reexports"]["reexported"]["defines"] == "reexported"),
         check("traits_survive", payload.get("traits") == ["T"]),
         check("depends_on_survives",
               payload["depends_on"] == [{"module": "std.rt",

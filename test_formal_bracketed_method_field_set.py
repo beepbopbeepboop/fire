@@ -29,15 +29,15 @@ blocking the 13-file `builtin_slice.mojo` row: `Slice.start` is declared
 `Optional[Int]`, the backend believed that to be a frame, and it refused to let
 the ctor store one in a field.
 
-This is the OTHER HALF of the pair `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md`
-describes, and the half that is safe to fix.  That doc's defect B — a bare
-`self.helper` in VALUE position — is genuinely ambiguous (an instance attribute
-shadows a class method in Python) and is deliberately NOT touched here; three
-structs in this tree still count a method name as a field because of it, and
-`refuse_a_value_position_method_reference_is_still_refused` pins that they are
-still refused rather than silently reading zero.  What this file fixes is the
-shape where the name is unambiguously a CALL, which the existing exemption
-already said about and simply could not see.
+This is one half of a pair of defects in this derivation.  The other half — a
+bare `self.helper` in VALUE position — IS ambiguous (an instance attribute
+shadows a class method in Python), so it was settled by Python's own rule rather
+than by the exemption below: `model.struct_receiver_reads` DEMOTES a name the
+struct declares as a method and never stores into, and
+`a_method_name_the_struct_stores_into_is_still_a_field` is the other half of
+THAT (the store keeps it a field).  What the exemption below handles is the
+shape where the name is unambiguously a CALL, which it already said about and
+simply could not see.
 
 CENSUS, measured by parsing all 644 structs in this repository and under
 `../new-modular/Mojo/stdlib/std` and asking which ones have a method name in
@@ -94,7 +94,8 @@ BACKENDS = ("arm64", "x86_64")
 # compared. The differential cases here are NOT re-pointed at x86-64 on the
 # strength of that one construct: each is a separate program and has to be run
 # before it can be claimed, which is what `test_formal_x86_64_parity.py` is for.
-# The measurement is in bugs/FORMAL_x86_64_comptime_specialization_abi.md.
+# `X86_ABI_PARITY` below is the one construct here that IS claimed on both
+# machines, because it was the one that was measured on both.
 COMPTIME_ABI = "arm64"
 
 # ── the differential cases ──────────────────────────────────────────────────
@@ -104,31 +105,43 @@ DIFF_CASES = [
     # THE TERMINAL CONSTRUCT, in miniature, and the case the whole file is
     # about.  `Cell` has ONE field, so it fits one word and its receiver IS that
     # field — exactly `Optional`'s shape, and exactly the shape this change
-    # recovers.  `bump[7]` writes `self._value`, and `total` reads it back; the
-    # bracket argument is given a distinct weight so a case that read a
-    # never-written slot would print a DIFFERENT NUMBER rather than crash.
+    # recovers.  `bump[7]` writes `self._value`; the bracket argument is given a
+    # distinct weight so a case that read a never-written slot would print a
+    # DIFFERENT NUMBER rather than crash.
+    #
+    # `bump` MUTATES AND RETURNS NOTHING, and that is load-bearing rather than
+    # incidental.  It used to `return self._value` and print the return value,
+    # which is the shape `model.one_field_mutating_methods` refuses by name —
+    # a one-field mutator hands its receiver back on every path, and one that
+    # ALSO returns a value has no single answer ("both changes its receiver and
+    # returns a value").  That rule landed after this row was written, so the
+    # row stopped being about the field set and became about the mutator rule;
+    # the program below is the same construct without the return, so it still
+    # asks the question this file is named for, and the refused shape is pinned
+    # separately as `refuse_a_one_field_mutator_that_also_returns_a_value` so
+    # the interaction between the two features is a row rather than an accident.
     ("bracketed_method_call_does_not_invent_a_field",
      "struct Cell:\n"
      "    var _value: Int\n"
-     "    def bump[T: Int](out self, k: Int) -> Int:\n"
+     "    def bump[T: Int](out self, k: Int):\n"
      "        self._value = self._value + T + k\n"
-     "        return self._value\n"
      "\n"
      "def main() -> Int:\n"
      "    var c = Cell()\n"
      "    c._value = 5\n"
-     '    printf("v=%d", c.bump[7](3))\n'
+     "    c.bump[7](3)\n"
+     '    printf("v=%d", c._value)\n'
      "    return 0\n",
      "class Cell:\n"
      "    def __init__(self):\n"
      "        self._value = 5\n\n"
      "    def bump(self, t, k):\n"
      "        self._value = self._value + t + k\n"
-     "        return self._value\n"
      "\n"
      "def main():\n"
      "    c = Cell()\n"
-     '    print("v=%d" % c.bump(7, 3), end="")\n'
+     "    c.bump(7, 3)\n"
+     '    print("v=%d" % c._value, end="")\n'
      "    return 0\n"
      "\n"
      "main()\n"),
@@ -367,11 +380,18 @@ FIELDSET_CASES = [
      "        return self.bump(2)\n",
      ["_value"]),
 
-    # A VALUE-POSITION method reference — the OTHER defect, deliberately left
-    # alone.  `self.helper` here is not a call, so it is a name this derivation
-    # has always counted; pinning the current behaviour is what stops a future
-    # change from "fixing" it into the layout and reading zero.
-    ("a_value_position_method_reference_is_still_counted",
+    # A VALUE-POSITION method reference, `self.helper` in a place that is not a
+    # call.  This is the OTHER defect of the pair named in this file's
+    # docstring, and it is a wrong answer: counting it invented a slot that
+    # nothing ever writes, so the read answered ZERO — a number the source never
+    # wrote, from a program that built, ran and exited.
+    #
+    # `model.struct_receiver_reads` DEMOTES it, so the derived set is `_value`
+    # alone and the read is refused by name instead
+    # (`refuse_a_value_position_method_reference_is_still_refused`, below).
+    # Before that demotion this row EXPECTED `["_value", "helper"]`, and it was
+    # asserting the bug.
+    ("a_value_position_method_reference_is_not_a_field",
      "struct Cell:\n"
      "    var _value: Int\n"
      "    def helper(self) -> Int:\n"
@@ -379,7 +399,63 @@ FIELDSET_CASES = [
      "    def go(self) -> Int:\n"
      "        var m = self.helper\n"
      "        return self._value\n",
+     ["_value"]),
+
+    # …and the other half of Python's rule, which is what makes the demotion
+    # above safe rather than merely conservative: an instance attribute
+    # SHADOWS the class's method, so a name the struct both declares as a
+    # method and STORES into IS a field and stays one.  Without this row a fix
+    # that demoted every method NAME would be a fix that deletes real storage,
+    # and it would build — a struct with one fewer field than the source says is
+    # a silent wrong answer, not a refusal.
+    #
+    # The store is in a DIFFERENT method from the read on purpose:
+    # `struct_receiver_stores` is asked over the whole struct precisely because
+    # `__init__` writes `self.helper` and `size` reads it back, so the read's own
+    # method carries no evidence either way.  A demotion that asked only the
+    # reading method would get this row wrong.
+    ("a_method_name_the_struct_stores_into_is_still_a_field",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "    def helper(self) -> Int:\n"
+     "        return 1\n"
+     "    def __init__(self):\n"
+     "        self.helper = 7\n"
+     "    def go(self) -> Int:\n"
+     "        return self.helper\n",
      ["_value", "helper"]),
+
+    # DEFECT A, the keyword argument, which was the other half of that doc and
+    # the direction this rule exists to get right: `CallExpr.kwargs` is
+    # `list[tuple[str, Expr]]`, and the walk read `list` alone, so each `x` was a
+    # tuple, a tuple has no `__dataclass_fields__`, and the whole expression was
+    # invisible.  So `self._untyped_callee` — the exact spelling
+    # `formal/arm64_codegen.py` uses — contributed nothing to ARM64Codegen's
+    # field set.
+    #
+    # A field MISSED is two real fields aliased into one slot, which is the one
+    # error the derivation's own docstring names.  `c` is the control: the same
+    # name in an ordinary argument position, which the walk always reached, so
+    # the pair says the gap was the keyword SPELLING and not the name.
+    ("a_field_carried_by_a_keyword_argument_is_a_field",
+     "struct Cell:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def check(self, op):\n"
+     "        return string_binary_refusal(op, self._untyped_callee, self.c)\n",
+     ["a", "b", "_untyped_callee", "c"]),
+
+    # The CONTROL for the row above, and it is what makes that row mean
+    # something: the same three names with no keyword argument at all.  If the
+    # kwarg row were passing because the walk had simply stopped seeing method
+    # bodies, this would fail.
+    ("a_field_in_an_ordinary_argument_position_is_a_field",
+     "struct Cell:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def check(self, op):\n"
+     "        return string_binary_refusal(self._untyped_callee, self.c)\n",
+     ["a", "b", "_untyped_callee", "c"]),
 ]
 
 # ── the refusals that must SURVIVE ──────────────────────────────────────────
@@ -389,15 +465,20 @@ REFUSALS = [
     # The bracketed call is now recognised as a CALL, which leaves the
     # value-position reference as the shape that has no representation — and it
     # must still be REFUSED rather than lowered to a load of a slot nothing ever
-    # writes.  This is `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md`
-    # defect B, deliberately NOT fixed by the change this file tests: that
-    # derivation counts a bare `self.helper` as a field, and lifting the
-    # refusal without lifting it would turn a wrong zero into a load of one.
+    # writes.  Both halves of that defect's fix are in: `model.struct_receiver_reads`
+    # DEMOTES the name out of the derived field set (see
+    # `a_value_position_method_reference_is_not_a_field`), so there is no slot
+    # left to load, and `build.check_value_position_method_reads` names the
+    # method.  This row is the REFUSAL half of that pair, and it is the one that
+    # has to hold: the demotion alone would let the read reach an emitter with no
+    # slot to read, and the refusal alone would leave a load of one.
     #
     # The shape is `self.helper` as a KEYWORD ARGUMENT's value rather than a
     # `return` of it, because that is the spelling the sweep reported
     # (`checker.check_temporal_monotionality`, `job.excl`) and the one
-    # `test_formal_run.py`'s `method_reference_is_not_a_frame_slot` pins.
+    # `test_formal_run.py`'s `method_reference_is_not_a_frame_slot` pins.  It is
+    # deliberately the kwarg SPELLING, which is defect A's position — the two
+    # defects are in one construct and this row is where they meet.
     ("refuse_a_value_position_method_reference_is_still_refused",
      "class Cell:\n"
      "    __slots__ = ('value', 'pad')\n"
@@ -450,6 +531,31 @@ REFUSALS = [
      '    printf("v=%d", go(h) * 10 + h.pad)\n'
      "    return 0\n",
      "outlives the frame it names"),
+
+    # THE ONE-FIELD MUTATOR THAT ALSO RETURNS A VALUE — the program
+    # `bracketed_method_call_does_not_invent_a_field` used to be before that row
+    # was reshaped, and it is here so the pair is one fact in two halves rather
+    # than a row that quietly stopped asking its question.
+    #
+    # `model.one_field_mutating_methods` is the rule: a one-field struct's
+    # mutator hands its receiver back on every path and the CALLER stores that
+    # back over the receiver expression, so the callee has one answer; one that
+    # also returns a value has two, and this path picks neither.  The bracketed
+    # specialization is beside the point and is kept because that is the shape
+    # the row was originally about — the refusal must not depend on the brackets.
+    ("refuse_a_one_field_mutator_that_also_returns_a_value",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "    def bump[T: Int](out self, k: Int) -> Int:\n"
+     "        self._value = self._value + T + k\n"
+     "        return self._value\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     '    printf("v=%d", c.bump[7](3))\n'
+     "    return 0\n",
+     "both changes its receiver and returns a value"),
 ]
 
 # ── x86-64's comptime ABI, pinned ───────────────────────────────────────────
@@ -564,7 +670,8 @@ def run_fieldset_case(case, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
         f.write(source)
-    stmts = F.Parser(F.py_tokenize(source, src)).with_filename(src).parse_module()
+    stmts = (F.Parser(F.py_tokenize_named(source, src))
+             .with_filename(src).parse_module())
     structs = [s for s in stmts if isinstance(s, F.StructDef)]
     if len(structs) != 1:
         return False, f"the case declares {len(structs)} structs, expected 1"

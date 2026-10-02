@@ -1117,12 +1117,23 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
     symbol does not exist.
     """
     from formal.imports import (build_module_dylib, dylib_chain,
-                                imported_modules, resolve_module_path,
+                                imported_modules, own_module_identity,
+                                resolve_module_path,
                                 unresolvable_import_error)
     mods = imported_modules(stmts)
     if not mods:
         return []
     if fmt_wants_macho(arch):
+        # The name THIS file is addressed by, which is what a relative import
+        # inside it resolves against. Without it a relative import at the root
+        # resolved differently depending on which module reached this file
+        # first: the same source produced `___syscalls.<digest>.arm64.dylib`
+        # built on its own and `__syscalls.<digest>.arm64.dylib` reached as
+        # `.path`, with the exports mangled to match — two libraries and two
+        # export spellings for one file, so the digest in the filename stopped
+        # being sufficient to identify the artifact. See
+        # bugs/FORMAL_relative_import_at_the_root_has_no_qualified_identity.md.
+        parent = own_module_identity(source_path, source_path)
         # Per-architecture, and that is load-bearing rather than tidiness.
         # This directory holds BUILT module dylibs, and a dylib is a
         # target-specific image: an arm64 library and an x86-64 library for
@@ -1150,7 +1161,8 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                     unresolvable_import_error(source_path, mod))
             try:
                 dylib = build_module_dylib(mod, path, out_dir, arch,
-                                           project_root=source_path)
+                                           project_root=source_path,
+                                           _parent=parent)
             except ImportBuildError as e:
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
@@ -1261,6 +1273,32 @@ def compile_formal(source_path: str, output: str = None,
     # dylib), and the executable's functions are the ones the linker is about to
     # act on.
     M.publish_target(M.target_for(arch, fmt))
+    # A REFUSAL from the function pipeline is PARKED, not raised, and that is
+    # the fix for a whole family rather than a convenience.
+    #
+    # `_prepare_functions` runs BEFORE `_resolve_imports`, and every frame
+    # refusal — the hand-off family, the return family, the container and field
+    # families — is raised from inside it. So a file that both trips a frame
+    # clause AND imports something was reported with the frame sentence, which
+    # is a `codegen` class: a gap in this backend, in this file. The reader is
+    # sent after a construct the file could reach, and the sweep's denominators
+    # count it as answerable-in-principle work. But the file imports a host
+    # module, and a file that does that is out of this backend's reach whatever
+    # its own codegen says.
+    #
+    # The codebase has already fixed this twice, by hand, for the two late
+    # checks now in `_run_late_checks`: `check_frame_field_blob_premises`
+    # (measured at 67 files of this repository) and `check_construction_shapes`
+    # (14 more). The frame refusals were left inside, so they still do it. What
+    # is different here is that `_resolve_imports` needs NOTHING this pipeline
+    # produces — it takes `(source_path, stmts, arch)`, all three already in
+    # hand — so the refusal can simply be held rather than moved.
+    #
+    # The refusal is still raised, with the same words, at the first point
+    # after the imports have had their say. Nothing is let through: a file whose
+    # imports resolve is refused exactly as before, and one whose imports do not
+    # is refused for the import, which is the more fundamental fact.
+    parked_prepare_refusal = None
     try:
         functions, structs, symbols, slots = _prepare_functions(
             stmts, synthetic=True, extra_structs=imported_structs)
@@ -1268,8 +1306,10 @@ def compile_formal(source_path: str, output: str = None,
         # A clean compile error. The function pipeline runs before codegen
         # proper, so a refusal raised there — a method whose receiver is wider
         # than a word, say — used to reach the user as a raw traceback instead
-        # of the one-line diagnostic every other refusal produces.
-        raise FormalBuildError(str(e))
+        # of the one-line diagnostic every other refusal produces. Held as a
+        # `FormalBuildError`'s message rather than raised, for the reason above.
+        parked_prepare_refusal = str(e)
+        functions = structs = symbols = slots = None
     ordered = functions
 
     # `import X` means X is a dependency. Each imported module is compiled in
@@ -1277,6 +1317,10 @@ def compile_formal(source_path: str, output: str = None,
     # link line with everything it itself needs, dependencies first. Without
     # this an import was silently dropped and its calls became BLs against
     # symbols nothing defines.
+    #
+    # …and this is reached even when the function pipeline refused, which is
+    # the whole point: it is the only thing here that can say whether this file
+    # is reachable at all.
     try:
         import_dylibs = _resolve_imports(source_path, stmts, arch)
     except ImportBuildError as e:
@@ -1316,6 +1360,19 @@ def compile_formal(source_path: str, output: str = None,
             f"module's symbols in .dynstr with nothing providing them. The "
             f"code generator does honour arch; the container is the missing "
             f"half. Build for macho, or lower the module into this image.")
+    # THE PARKED REFUSAL, and the ORDER is the whole fix: the import diagnosis
+    # above has had its say, and so has the ELF-container check above this, and
+    # both are facts about whether this file can be built HERE at all — which
+    # outranks a refusal about one construct in its body.  It is raised as a
+    # `FormalBuildError` because that is exactly what the old site converted it
+    # to, so a file whose imports resolve sees byte-identical output and a file
+    # whose imports do not is now told the more fundamental thing.
+    #
+    # …which also means this cannot be reached with `functions` unbound: the
+    # late checks below and the codegen after them both need the pipeline's
+    # output, so a parked refusal has to end the build here.
+    if parked_prepare_refusal is not None:
+        raise FormalBuildError(parked_prepare_refusal)
     # HERE and not inside `_prepare_functions`, which ran before the imports
     # resolved: a file that imports a host module is out of reach whatever its
     # codegen says, and this check fires on a third of the repository, so
@@ -1643,12 +1700,19 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     by_name = {st.name: st for st in structs}
     check_frame_field_blob_premises(structs)
     check_frame_subscript_escapes(functions)
-    # Three more late frame checks, each added by a later branch and each paid
+    # Late frame checks, each added by a later branch and each paid
     # for twice while this block was open-coded at both call sites — which is the
     # drift `_run_late_checks` exists to stop. They keep the order they had at
-    # their own call site: a holder rebound from a word, a construction whose
-    # shape does not match, and a module global shadowed by a local read.
+    # their own call site: a holder rebound from a word, a receiver rebound to a
+    # word, a construction whose shape does not match, and a module global
+    # shadowed by a local read.
     check_frame_holder_rebinds(functions)
+    check_receiver_rebinds(functions)
+    # …and the one that names a value-position METHOD read for what it is. The
+    # field-set derivation already stopped it being a zero, so this is the
+    # diagnosis rather than a second verdict, and it is here rather than in the
+    # frame pass for the reason its docstring gives.
+    check_value_position_method_reads(functions, structs)
     check_construction_mismatches(functions)
     check_shadowed_global_reads(functions)
     check_construction_shapes(functions, by_name)
@@ -2697,7 +2761,35 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     returns_frame: dict = {}
     for fn in functions:
         owner = owners.get(fn.name)
-        if owner is not None and owner.name in framed:
+        # `and M.method_receiver_name(fn) is not None`, and the guard rather
+        # than a change to `struct_receivers` because this asks about ONE
+        # method while `struct_receivers` answers for the whole CLASS. Its
+        # unconditional `{"self"}` seed is right for its other job — deriving
+        # the field set, where `self.n` in ANY method is a field write — and
+        # wrong for this one, which asks "does THIS function take a receiver".
+        # A `@staticmethod` has none, so putting `self` in its holder set made
+        # the call sites hand it a frame: `R__single(self, counter)` is two
+        # arguments to a one-parameter function, and the parameter the
+        # definition reads as `counter` was bound to the receiver. See
+        # bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md.
+        #
+        # `model.method_receiver_name`, and not `fire_compiler
+        # .method_receiver_kind`, because that rule asks the same question and
+        # answers it differently: it decides by the first parameter's NAME
+        # (`self`, `cls`) where this path reads a receiver however it is
+        # spelled — `struct_receivers` seeds `{"self"}` and ADDS each method's
+        # own first parameter, which is how `def total(this)` gets `this` in
+        # the set the three lines below copy into the holder table. Asking the
+        # name-based rule here therefore excluded every `this`-receiver method
+        # from its own holder set, and the emitter's field access found no
+        # home: `Pair___init__: 'this.b' is a field access through 'this', and
+        # this path has no way to say what 'this' holds` for a program whose
+        # `self` spelling computes 409. It is the same divergence as
+        # `_receiverless_methods`'s, in the second of the two places it was
+        # asked; one rule, `method_receiver_name`, is what both now read, and it
+        # is the rule the rest of the pipeline derives its fields from.
+        if owner is not None and owner.name in framed \
+                and M.method_receiver_name(fn) is not None:
             for recv in M.struct_receivers(owner):
                 holders[_fn_key(fn)].add(recv)
                 hstruct[_fn_key(fn)][recv] = [owner]
@@ -3394,9 +3486,26 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # the same reason `hstruct` is a set rather than one struct — a set of
         # one is the ordinary case and a set of two is a disagreement the
         # consumer is entitled to see.
+        # `_fn_key(fn)` on all four reads, and that is the whole fix: every one
+        # of these tables is FILLED by `_fn_key` (`params_of`, `holders`,
+        # `hstruct`, `declared_holders` are all `{_fn_key(fn): …}`), so reading
+        # them by `fn.name` returned `None` for every function — `_fn_key` is
+        # `id(fn)`, so a name is a key only by accident.  `params` then arrived as
+        # `()`, `_parameter_frame_contract` iterates `params`, and the published
+        # contract was `[]` for EVERY export of EVERY module.  A consumer
+        # (`model.resolve_frame_parameter_contract`) reads that positionally, so
+        # `position >= len(contract)` was `0 >= 0` and it answered
+        # "the manifest does not list it as an export" — a statement about the
+        # manifest that is false, because the manifest lists the export and
+        # publishes a contract; the contract is empty.  Every cross-module frame
+        # hand-off on this path was refused by that sentence.  The regression is
+        # the four `byref_*` cases in `test_formal_run.py`, which assert
+        # EXECUTION on both architectures rather than "it builds".
         fn._frame_param_contract = _parameter_frame_contract(
-            fn, params_of.get(fn.name) or (), holders.get(fn.name) or (),
-            (hstruct.get(fn.name) or {}), declared_holders.get(fn.name) or {})
+            fn, params_of.get(_fn_key(fn)) or (),
+            holders.get(_fn_key(fn)) or (),
+            (hstruct.get(_fn_key(fn)) or {}),
+            (declared_holders.get(_fn_key(fn)) or {}))
         # `by_name` itself, published, and the reason is a CONSTRUCTION rather
         # than a field read: a copy construction `S(x)` needs to know what `x`
         # IS, and the holder analysis is the only thing in the compiler that
@@ -3432,6 +3541,12 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                              _name_defs, returns_frame)
     _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
                             by_name_returns_frame)
+    # …and the RECEIVER half of the same question, which the check above cannot
+    # ask because it deliberately skips receiver names (its two repairs — use a
+    # different name, copy the value out — do not exist for a receiver). Needs
+    # no holder set, which is why it is not folded into the call above: a
+    # receiver is not a name the holder analysis knows anything about.
+    _collect_receiver_rebinds(functions, structs_by_name)
     _park_construction_mismatches(functions, framed)
 
 
@@ -3638,6 +3753,121 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
     return False
 
 
+def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
+    """PARK every method that rebinds its own receiver to something that is not
+    a construction of its own struct.
+
+    The receiver half of `_collect_holder_rebinds`, and separate because the
+    local rule's REPAIRS do not exist here: a receiver is not a name the caller
+    can re-declare, and "copy the value out of it first" is not a thing. That is
+    why the local check skips receiver names by NAME (from
+    `model.struct_receivers`, so `out self` and `inout self` are covered by the
+    same rule) — and skipping them there is what leaves this to be asked.
+
+    The rule is `_value_may_be_a_frame` with the receiver's OWN struct as the
+    alias, which is the function the local check already uses and deliberately
+    does not use for this: `self = Self(...)` is a construction (so a frame,
+    and fine), and `self = other_receiver` is a copy (so the address the caller
+    holds is the one still being written, also fine). Everything else — a word,
+    a call, a string — is this finding. It reuses the recognition rather than
+    reimplementing it, because a second copy of "what can be a frame" is how
+    the two came to disagree about `self = Self(...)` in the first place.
+
+    Parked on the function and raised by `check_receiver_rebinds`, like every
+    other finding in this family, so the refusal does not preempt the import
+    diagnosis (`_run_late_checks` is called after imports resolve)."""
+    owners = M.method_owner_names(list((structs_by_name or {}).values()))
+    for fn in functions:
+        owner = owners.get(fn.name)
+        if owner is None:
+            continue
+        # A ONE-FIELD struct's receiver is not an address, so this rule's whole
+        # premise is false there.  `self = self + k` in a one-field mutator is
+        # a store to the struct's own single word, and it reaches the caller
+        # because the method RETURNS the receiver and the call site stores it
+        # back (`model.receiver_writeback_name`) — the mechanism this check
+        # would otherwise forbid, for the same program the check is right about
+        # everywhere else.  Decided by `struct_is_one_field`, the same predicate
+        # the rewrite that makes `self.<field>` mean `self` is decided by, so
+        # the two cannot disagree about which receivers are values.
+        if M.struct_is_one_field(owner):
+            continue
+        receivers = M.struct_receivers(owner)
+        # A receiver rebound to ANOTHER RECEIVER is a copy of the same address,
+        # so the caller's slot already holds the address the method's field
+        # writes land through and there is no dropped store to report. A
+        # receiver is not in the holder set, so `_value_may_be_a_frame`'s "is
+        # the name a holder" answer does not apply to one — the question is
+        # asked from the DECLARATION instead, which is the same evidence
+        # `parameter_declared_structs` exists to give: a parameter typed
+        # `other: Self` (or `other: R`) is an address of the same frame layout
+        # whatever any call site passed, so a rebind to it copies rather than
+        # repoints.
+        same_type = {getattr(st, "name", None) for st in
+                     M.parameter_declared_structs(
+                         fn, structs_by_name, owner).values()}
+        # `owner` is what reduces a bare `Self`, and it is not always supplied:
+        # the call site that reaches this collector with the owner unresolved
+        # answers `{}` for a parameter typed `other: Self` while answering
+        # `{'other': R}` for one typed `other: R`. That is the right behaviour
+        # of a function asked a question it cannot answer, so the reduction is
+        # done HERE from the same place the declaration lives — the parameter
+        # tuple's own annotation — rather than by calling it again with a
+        # different owner and hoping the two agree. A parameter whose
+        # annotation names the receiver's own struct is a same-type copy
+        # whether or not `Self` was reduced for us.
+        own_name = getattr(owner, "name", None)
+        for p in (getattr(fn, "params", None) or ()):
+            pname, ann = (p[0], p[1]) if isinstance(p, (tuple, list)) \
+                else (p, None)
+            if pname in receivers or not ann:
+                continue
+            if own_name and M.annotation_base_name(ann, own_name) == own_name:
+                same_type.add(pname)
+        findings = []
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, (F.AssignStmt, F.VarDecl)):
+                continue
+            if isinstance(node, F.VarDecl):
+                target, value = node.name, node.value
+            else:
+                target = (node.target.name
+                          if isinstance(node.target, F.IdentExpr) else None)
+                value = node.value
+            if not isinstance(target, str) or target not in receivers:
+                continue
+            if value is None:
+                continue
+            if isinstance(value, F.IdentExpr):
+                if value.name in receivers:
+                    continue        # a copy of the receiver itself
+                if value.name in same_type:
+                    continue        # a parameter of the same struct: also a copy
+            if _value_may_be_a_frame(value, structs_by_name, receivers, owner):
+                continue            # a construction of the receiver's own struct
+            findings.append((target, _expr_spelling(value)))
+        if findings:
+            fn._receiver_rebinds = (findings, owner)
+
+
+def check_receiver_rebinds(functions) -> None:
+    """Raise the receiver-rebound findings `_collect_receiver_rebinds` parked.
+
+    One finding, for the reason `check_frame_holder_rebinds` raises one: a
+    method with three of them has one defect with three lines, and the first is
+    enough to act on. The message is `model`'s, so both backends word this
+    construct identically — a receiver's meaning is a property of the by-
+    reference design, not of an instruction either backend chose."""
+    for fn in functions:
+        findings, owner = getattr(fn, "_receiver_rebinds", (None, None))
+        if not findings:
+            continue
+        target, value_spelling = findings[0]
+        names = [owner] if owner is not None else []
+        raise CodegenError(M.receiver_rebound_from_a_word_refusal(
+            fn.name, target, value_spelling, names))
+
+
 def _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
                          returns_frame: dict = None) -> None:
     """PARK every name this function holds a frame for and also assigns a word to.
@@ -3762,6 +3992,73 @@ def check_frame_holder_rebinds(functions) -> None:
             raise CodegenError(M.holder_rebound_from_a_word_refusal(
                 fn.name, name, value_spelling, frame_spelling,
                 cands))
+
+
+def check_value_position_method_reads(functions, structs) -> None:
+    """Raise a `<recv>.<name>` read that is a METHOD of the receiver's own struct.
+
+    `model.struct_receiver_reads` already REMOVES these names from the derived
+    field set, so the wrong answer is gone before this runs; what is left is the
+    diagnosis, and it is a separate check because the frame pass cannot give it:
+    the frame pass only sees reads whose base it has already classified as a
+    FRAME address, and a method reference is most often a read of a receiver that
+    is not one — a struct with a single field has its receiver BE that field. So
+    with the name no longer a field, no frame slot is asked for, and the read
+    reaches the emitter, which answers "this path has no way to say what `self`
+    holds" about a `self` whose struct this file declares two lines above.
+
+    Measured, on `u13c.py`: before the field-set fix the program built, ran and
+    exited 1 where the source's `o.size()` is a bound method and CPython raises
+    `TypeError` on the multiplication; with the field set corrected it is
+    refused, and this check is what makes the refusal name `helper` rather than
+    the base.
+
+    **It is asked of METHODS ONLY, and that is the whole of its soundness
+    argument.** A `<recv>.<name>` read where `recv` is not a receiver of this
+    function has no established struct behind it — a receiver's type is not
+    inferred on this path, which is the premise of every one of these refusals —
+    so asking the struct table the question would be asserting the very thing it
+    cannot know. A method body knows: it was lifted from that struct, and
+    `model.struct_receivers` is the same function that seeds its receiver as a
+    frame holder, so the receiver names here and the ones the frame pass uses
+    cannot drift apart.
+
+    **Python's own shadowing rule decides what fires**, via
+    `model.struct_receiver_stores`: a name the struct both declares as a method
+    and STORES into is an instance attribute and stays a field, so a read of it
+    is a field read and is not this check's — `u13b.py` is that case and it still
+    builds and computes what CPython computes. Only a name nothing stores into is
+    a method here, which is exactly the set `struct_receiver_reads` demoted, so
+    the two cannot disagree about which names are which.
+
+    **The walk is `iter_nodes` and that is a limitation, not a choice.** A
+    `MemberExpr` in a method's body cannot be told apart from one that is the
+    CALLEE of a call without a parent, so this check is asked of every demoted
+    read — and the only demoted names are ones the struct never stores into,
+    which a call cannot store into either. So the over-approximation cannot
+    refuse a program whose `self.helper` is a genuine field access: if it were,
+    something would have to store into it, and the demotion is exactly the
+    absence of that.
+    """
+    owners = M.method_owner_names(list(structs or ()))
+    for fn in functions:
+        owner = owners.get(fn.name)
+        if owner is None:
+            continue
+        receivers = M.struct_receivers(owner)
+        methods = {m.name for m in M.struct_methods(owner)
+                   if getattr(m, "name", None)}
+        demoted = methods - M.struct_receiver_stores(owner, receivers)
+        if not demoted:
+            continue
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.MemberExpr) \
+                    or not isinstance(node.obj, F.IdentExpr) \
+                    or node.obj.name not in receivers \
+                    or node.member not in demoted:
+                continue
+            raise CodegenError(M.value_position_method_refusal(
+                fn.name, node.obj.name, node.member, owner))
 
 
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:
@@ -4692,11 +4989,29 @@ def _frame_return_status(fn, holders, by_name, returns_by_name):
             if cands:
                 frames.append((cands, value.name))
                 continue
-        if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
-            st = returns_by_name.get(value.func.name)
-            if st is not None:
-                frames.append(([st], f"{value.func.name}()"))
-                continue
+        if isinstance(value, F.CallExpr):
+            # `M.call_callee_name`, and NOT `value.func.name`: a comptime
+            # specialization `f[T](r)` names the same function `f` does,
+            # contributes no call-time argument of its own, and so lands the
+            # frame on `f`'s parameter at exactly the position the bare
+            # spelling would. Reading only the bare one made this `return` fall
+            # through to `words.append(...)` and classified the function
+            # `_RETURN_WORD` — "no path returns a frame address" — and that one
+            # word is load-bearing three ways: `returns_frame[fn.name]` is never
+            # set, so no caller reserves a block
+            # (`model.struct_returned_frame_sites`, the other end of the same
+            # use-after-free); and `fn._image_returns_frame` has no entry for
+            # it, so an ENTRY function that returns a frame gets no
+            # `entry_frame_return_refusal` at all. Measured on arm64 beside its
+            # bare twin, same source: the twin is REFUSED by name, the
+            # specialization built and exited 112 — a stack address read as an
+            # int.
+            callee = M.call_callee_name(value.func)
+            if callee is not None:
+                st = returns_by_name.get(callee)
+                if st is not None:
+                    frames.append(([st], f"{callee}()"))
+                    continue
         words.append(_expr_spelling(value))
     if not frames:
         return _RETURN_WORD, None, None
@@ -5685,6 +6000,141 @@ def _sole_field_name(st) -> str:
             f"be declared as `name: Type` or `name = value` to be "
             f"representable on this path")
     return name
+
+
+def _return_the_receiver(fn, wb=None) -> None:
+    """Make every exit of a one-field mutator RETURN its receiver.
+
+    The callee half of `model.receiver_writeback_name`. Three things, and the
+    first two are the ones that are easy to leave out:
+
+      * a `return` with no value becomes `return <receiver>`, so an EARLY exit
+        hands the receiver back too. Rewriting only the fall-through would make
+        `if c: return` return whatever the return register happened to hold, and
+        the caller would store that over the object's value — a build-dependent
+        word, which is the whole class of defect this path refuses elsewhere;
+      * a body that can fall off its end gets a `return <receiver>` appended, so
+        no path returns nothing. `model.returns_on_every_path` is the reader for
+        that, not either backend's private `_always_returns`: this is a build
+        pass, and a pass that grew its own third copy of "does this body always
+        return" is how the two architectures end up disagreeing about it;
+      * a method that already returns a VALUE is refused, because one 64-bit
+        word is already spoken for and dropping one of the two silently is how a
+        program that builds computes the wrong answer. The declared return type
+        is the ordinary way to hit that and a literal `return 1` is the
+        undeclared one, so both are asked here.
+
+    Runs BEFORE `_rewrite_self_fields`, which is what makes the appended
+    `return self` mean the new value: the rewrite turns `self._value` into
+    `self`, so a `return` placed after it reads the word the body just stored.
+    """
+    if (getattr(fn, "return_type", None) is not None
+            or any(isinstance(n, F.ReturnStmt) and n.value is not None
+                   for n in M.iter_nodes(fn.body))):
+        # The MEMBER name, not the lifted one: the reader wrote `c.bump()` and a
+        # diagnostic that says `Cell.Cell_bump()` sends them looking for a
+        # function they never declared. It is carried by the write-back entry
+        # rather than sliced off the symbol for exactly that reason.
+        raise CodegenError(M.mutating_receiver_return_refusal(
+            getattr(wb, "owner", None) or fn.name,
+            getattr(wb, "member", None) or fn.name))
+    recv = M.receiver_writeback_name(fn)
+    if recv is None:
+        return
+    for node in M.iter_nodes(fn.body):
+        if isinstance(node, F.ReturnStmt) and node.value is None:
+            node.value = F.IdentExpr(name=recv)
+    if not M.returns_on_every_path(fn.body):
+        fn.body = list(fn.body) + [
+            F.ReturnStmt(value=F.IdentExpr(name=recv), line=fn.line)]
+
+
+def _writeback_spelling(node) -> str:
+    """The receiver as the reader wrote it, for the refusal's sentence."""
+    if isinstance(node, F.IdentExpr):
+        return node.name
+    if isinstance(node, F.MemberExpr):
+        obj = _writeback_spelling(node.obj)
+        return f"{obj}.{node.member}" if obj else str(node.member)
+    if isinstance(node, F.SubscriptExpr):
+        obj = _writeback_spelling(node.obj)
+        return f"{obj}[…]" if obj else "[…]"
+    return type(node).__name__
+
+
+def _apply_receiver_writeback(node, writebacks: dict) -> None:
+    """`c.bump(4)` as a statement -> `c = Cell_bump(c, 4)`, in place.
+
+    The caller half, and the reason it is a STATEMENT-shaped rewrite: the word
+    the callee handed back has to land in the binding the receiver was read
+    from, and a call in any other position has nowhere to put it. `x = c.bump()`
+    would read the receiver's new value as `x`, which is a different program
+    from the one written; so it is refused, as is a receiver this path cannot
+    store through. Both refusals are the trade the rest of this file makes — a
+    construct that cannot be lowered honestly is named, not emitted.
+
+    A NAME and nothing else, because a name is the one receiver this path can
+    store the answer into — a local's home. A field receiver (`h.cell.bump()`)
+    is already refused further out, by the rule that a method call on a frame
+    slot is not a call this backend lowers, so it never reaches here; a SUBSCRIPT
+    receiver (`items[0].bump(4)`) has no addressable storage on this path at
+    all. Both are named by `model.mutating_receiver_target_refusal` rather than
+    left to fail in an emitter, because a construct that cannot be lowered
+    honestly is named, not emitted.
+
+    The list arm is a `while` loop rather than a `for` because the rewrite
+    REPLACES an element with a different node: iterating a list while changing
+    its length is how a pass like this skips the statement after the one it
+    just rewrote.
+
+    `model.call_callee_name` rather than `getattr(call.func, "name", None)`,
+    and the two spellings it accepts are the whole of the difference.  This pass
+    runs AFTER `_rewrite_method_calls`, which replaces the callee of `c.bump[7]`
+    with `Cell_bump` and leaves the specialization brackets ON it — so the
+    callee node here is a `SubscriptExpr` over an `IdentExpr` and has no `name`
+    of its own.  Reading `.name` found nothing, `writebacks.get(None)` was None,
+    and the call was left alone: `c.bump[7](3)` on a one-field struct built, ran
+    and left `c` at 5 where the source says 15 — the receiver the callee handed
+    back was dropped, and the program computed the wrong answer with no
+    diagnostic anywhere.  `call_callee_name` is the reader both emitters already
+    use for this question (`arm64_codegen._specialization_of` delegates to
+    `comptime.specialization_name`), so the write-back and the call it rewrites
+    now name the callee the same way.
+    """
+    if isinstance(node, list):
+        i = 0
+        while i < len(node):
+            item = node[i]
+            if isinstance(item, F.ExprStmt) and isinstance(item.value,
+                                                          F.CallExpr):
+                call = item.value
+                wb = writebacks.get(M.call_callee_name(call.func))
+                if wb is not None:
+                    recv = call.args[0] if call.args else None
+                    if not isinstance(recv, F.IdentExpr):
+                        raise CodegenError(
+                            M.mutating_receiver_target_refusal(
+                                wb.owner, wb.member,
+                                _writeback_spelling(recv)))
+                    node[i] = F.AssignStmt(target=recv, value=call,
+                                           line=item.line)
+                    i += 1
+                    continue
+            _apply_receiver_writeback(item, writebacks)
+            i += 1
+        return
+    if isinstance(node, F.ExprStmt):
+        return                        # a statement: the list arm handled it
+    if isinstance(node, F.CallExpr):
+        wb = writebacks.get(M.call_callee_name(node.func))
+        if wb is not None:
+            recv = node.args[0] if node.args else None
+            raise CodegenError(M.mutating_receiver_value_refusal(
+                wb.owner, wb.member,
+                _writeback_spelling(recv) if recv is not None else "the receiver"))
+        return
+    for field in getattr(node, "__dataclass_fields__", {}):
+        _apply_receiver_writeback(getattr(node, field), writebacks)
 
 
 def _rewrite_self_fields(node, mapping: dict):
@@ -8499,7 +8949,16 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and only the comparison is refused.
     refuse_none_comparisons(functions, structs_by_name,
                             _method_receiver_bases, method_owners)
+    # The ONE-FIELD MUTATOR write-back, decided once for the whole module
+    # because it is a property of the image rather than of one function: the
+    # callee half is "return the receiver on every path" and the caller half is
+    # "store it back over the expression the receiver came from", and the two
+    # halves must agree on the same table or a call site stores an answer from a
+    # method that did not hand one back.
+    writebacks = M.one_field_mutating_methods(functions, method_owners)
     for fn in functions:
+        if fn.name in writebacks:
+            _return_the_receiver(fn, writebacks[fn.name])
         _rewrite_method_calls(fn.body, owners, wide, receiverless)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
@@ -8526,6 +8985,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # from a constructor.
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name))
+        # …and the CALLER half of the one-field mutator write-back, after
+        # `_rewrite_self_fields` so the receiver it stores through is the same
+        # word the callee was handed (`c._value` is `c` by now, and it is `c`
+        # in the argument too). Before it would store through a spelling the
+        # emitter has already rewritten, which is a store to a name nothing
+        # binds.
+        if writebacks:
+            _apply_receiver_writeback(fn.body, writebacks)
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
@@ -8639,17 +9106,41 @@ def _receiverless_methods(owners: dict, structs_by_name: dict) -> set:
     value — it has no register, no slot and no frame, so the call bound a name
     with no home at all.
 
-    Collected from the DECLARATION (an empty parameter list), not from the
-    spelling, and only for structs `owners` actually resolved: a name two
-    structs declare is ambiguous and `_rewrite_method_calls` already refuses
-    to rewrite it, so there is nothing to decide here."""
+    Collected from the DECLARATION, not from the spelling, and only for structs
+    `owners` actually resolved: a name two structs declare is ambiguous and
+    `_rewrite_method_calls` already refuses to rewrite it, so there is nothing
+    to decide here.
+
+    `model.method_receiver_name` is what answers it, and reading it rather than
+    asking the question a second time is the whole of the fix — the question
+    has TWO answers on this tree and they disagreed. `fire_compiler
+    .method_receiver_kind` recognises a receiver by the FIRST PARAMETER'S NAME
+    (`self`, `cls`) after the decorator, which is right for the three consumers
+    that read it — the coroutine lowering and the two registration paths — and
+    wrong here, because this path spells its receivers `this` as readily as
+    `self` (`model.struct_receivers` says so in as many words, and the rest of
+    the formal pipeline already reads `this.a` as a field of the class). Asking
+    the name-based rule meant every `this`-receiver method was decided
+    receiver-less, so `_rewrite_method_calls` prepended no receiver and the call
+    was checked against a parameter list whose first slot it had not filled:
+    `def total(this)` called as `p.total()` refused with `missing required
+    argument 'this'`, on a program whose `self` spelling builds and computes
+    153. `model.method_receiver_name` asks the question the DECLARATION answers
+    — the decorator first, then the first parameter — which is the same answer
+    `struct_receivers` derives the field set from, so the receiver this decides
+    and the receiver the callee declares cannot drift apart. It also covers the
+    other half of `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method
+    .md`: a `@staticmethod` with PARAMETERS takes no receiver either, and an
+    empty parameter list (`def first():`, the shape this was written for) is
+    already the same case there. `def import_module(var module: String)` in
+    `std/python/python.mojo` is that defect from the other side."""
     out = set()
     for struct_name in (owners or {}).values():
         st = (structs_by_name or {}).get(struct_name)
         if st is None:
             continue
         for m in M.struct_methods(st):
-            if not (getattr(m, "params", None) or []):
+            if M.method_receiver_name(m) is None:
                 out.add(m.name)
     return out
 
@@ -10226,7 +10717,14 @@ def _namespace_library(output: str, install_name: str, arch: str,
     dep_constants = M.dylib_module_constants(dylib_export_lists(linked))
     provided = set(dylib_syms) | {name for table in dep_constants.values()
                                   for name in table}
-    missing = sorted(n for n in functions if n not in provided)
+    # A re-exported name is provided under the name the DEFINING module
+    # published it as, which for an ALIAS is not the name this module binds —
+    # `from x import f as g` publishes `g` and the symbol is `f`'s. Asking
+    # `provided` about `g` would report every aliased re-export as a missing
+    # definition, so the question is asked of `defining_name` and the answer
+    # reported under the name the caller actually writes.
+    missing = sorted(n for n, v in functions.items()
+                     if v[2] not in provided)
     if missing:
         listed = ", ".join(missing[:8])
         mods = ", ".join(sorted({functions[n][0] for n in missing})[:4])
@@ -10284,13 +10782,21 @@ def _namespace_constants(reexports: dict, own: dict, linked: list) -> dict:
     constant arrives as `"unknown"` — which is exactly why it must be looked up
     rather than trusted to be a function. A name that is a function re-export
     keeps its own route (the `reexports` forwarding), and a name that is a TYPE
-    has no value of this kind at all."""
+    has no value of this kind at all.
+
+    The lookup is by the entry's `defining_name` and the publication is under
+    the key, which differ only for an ALIAS: a dependency publishes its
+    constant under the name it defined, so `from .x import NAME as N` has to ask
+    for `NAME` and publish `N`. Asking for `N` would find nothing, and
+    publishing `NAME` would be the alias bug this whole table's shape is
+    about — a consumer that writes `pkg.N` is the only spelling that can
+    happen."""
     out = dict(own or {})
     tables = M.dylib_module_constants(dylib_export_lists(linked))
-    for name, (_module, kind) in (reexports or {}).items():
+    for name, (_module, kind, defines) in (reexports or {}).items():
         if kind != "unknown" or name in out:
             continue
-        for value in _constants_named(tables, name):
+        for value in _constants_named(tables, defines):
             out[name] = value
             break
     return out
@@ -10315,11 +10821,23 @@ def _record_namespace(manifest_path: str, reexports: dict,
     reader that wanted to check that every published name binds would look in
     `reexports` and find, for a trait, no symbol to check — which is the true
     fact, but stated in the one field whose contract is "there is a symbol".
+
+    The SYMBOL is looked up under the entry's `defining_name`, not under the
+    key. `dylib_syms` is the flat `{bare export name: symbol}` map assembled
+    from the linked libraries' manifests, and a defining module exports its own
+    name — so for every re-export that existed before aliases were recorded the
+    two are the same string, and for an ALIAS they are not: `from x import f as
+    g` publishes `g`, the symbol is `f`'s, and looking `g` up returns None,
+    which is how an aliased re-export reached the consumer as a name with no
+    symbol behind it. `defines` records the name the symbol was found under, so
+    a reader can tell an alias from a definition and neither has to re-derive
+    the import statement.
     """
     def _mark(payload):
         payload["kind"] = "namespace"
         payload["reexports"] = {
-            n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(n)}
+            n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(v[2]),
+                "defines": v[2]}
             for n, v in sorted(reexports.items())}
         if traits:
             # Absent rather than empty for a pure re-export package: the key

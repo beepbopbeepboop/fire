@@ -540,11 +540,20 @@ def run_end_to_end(verbose):
     can be the oracle outright — same text, same stdout, same exit status. That
     is the strongest form and it is the one a caller can act on.
 
-    `byte_exact` holds backslash-bearing literals, where CPython *cannot* be the
-    oracle (a non-raw `a\\nb` is three characters to CPython and four here, by
-    design). The expectation is spelled out instead, from the documented
-    contract, and the program prints the literal as well as its length so a
-    mangled byte cannot hide behind a right count.
+    `byte_exact` used to hold backslash-bearing literals with NO CPython oracle,
+    on the stated ground that "a non-raw `a\\nb` is three characters to CPython
+    and four here, by design". **That design is gone.** A literal's escapes are
+    now decoded by every engine — `fire_compiler.decode_c_escapes`, called
+    through `decoded_literal` — and a raw literal is told apart from a cooked
+    one by `StringLiteral.is_raw`, which the parser records because
+    `_strip_string_prefix_and_quotes` discards the `r`. So CPython IS the
+    oracle for `byte_exact` now, which is why it is given one: a `\"` is a
+    quote and a `r"\n"` is a backslash and an `n`, and the expectation is
+    spelled from CPython rather than from a contract this path used to keep.
+
+    The program still prints the literal as well as its length, so a mangled
+    byte cannot hide behind a right count — that part was always the point of
+    the case and is unchanged.
     """
     if platform.machine() not in ("arm64", "aarch64"):
         print(f"SKIP: the end-to-end cases build an arm64 image; host is "
@@ -560,8 +569,12 @@ def run_end_to_end(verbose):
              '    print(c)\n'
              '    print(len(a) + len(b) + len(c))\n'
              '    return 0\n')
-    # The literals here are the ones whose characters this path does NOT
-    # reinterpret: a quote run, a real newline, a quote of the other kind.
+    # The two spellings ONE LEVEL APART, which is what makes this case worth
+    # an oracle rather than a pinned expectation. `a` is cooked and its `\"` is
+    # a QUOTE (three characters); `b` is raw and its `\n` is a BACKSLASH and an
+    # `n` (four). A decoder that ignored `is_raw` would make both three and
+    # print `p` newline `q` for `b`; one that decoded twice would make `b` two
+    # characters. Only the pair pins both, and CPython answers for it.
     byte_exact = ('def main():\n'
                   '    a = ' + Q3 + 'a\\"b' + Q3 + '\n'
                   '    b = r' + Q3 + 'p\\nq' + Q3 + '\n'
@@ -618,7 +631,8 @@ def run_end_to_end(verbose):
     cases = [
         # (name, mojo text, python text or None, expected stdout, expected exit)
         ("agree", agree, agree + "main()\n", 'p"q\nx\ny\nsay "hi"\n14\n', 0),
-        ("byte_exact", byte_exact, None, 'a\\"b\np\\nq\n4\n4\n', 0),
+        ("byte_exact", byte_exact, byte_exact + "main()\n",
+         'a"b\np\\nq\n3\n4\n', 0),
         ("continued", continued, continued + "main()\n", 'abcd\nxy\nm\n7\n', 0),
         ("not_line_breaks", not_breaks, not_breaks + "main()\n",
          '9\nx\vy\np\fy\nm\x1cy\n', 0),

@@ -242,11 +242,17 @@ def test_every_declaration_is_seen():
     # merge had. One name, and it is the whole delta -- which is exactly why the
     # number is read off the call and never added up: 531 + 1 is right here and
     # would have been wrong on any other pair of sides.
-    # 532 -> 533 (2026-10-01, self-host signature fix): `py_tokenize_named`.
-    # `py_tokenize` is one argument now (`py_tokenize(src: str)`) with the
-    # filename-carrying form split into its own function, so the header gains a
-    # name rather than changing one. Taken from the call, per the rule above.
-    for header, want in (('fire_runtime.h', 533),
+    #
+    # `py_tokenize_named` is NOT an entry here, and this is the merge that
+    # settled it rather than adding one. One side of the `py_tokenize` conflict
+    # declared it in runtime/fire_runtime.h, which would have made this 533;
+    # it is deliberately not declared -- the function is not in
+    # `_NO_OVERLOAD_MANGLE`, so a generated call would reach it mangled and a
+    # bare-name declaration could never be that call's prototype, and nothing
+    # calls it from generated code at all. Leaving it out lands the count back
+    # on 532 exactly, which is independent evidence that this is the shape the
+    # other side had already built and gated. See the header's own comment.
+    for header, want in (('fire_runtime.h', 532),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

@@ -678,10 +678,31 @@ the `("frame", …)` branch of §4 and is refused for a different reason.
   here because it is the difference between "the 8-byte load returned the wrong
   number" and "the 8-byte load was right and `printf` truncated it", and the two
   look identical in output. `deref_four_widths_at_one_address` therefore
-  COMPARES the 8-byte read rather than printing it. **Next step:** `_emit_print`'s
-  integer path narrows to 32 bits when it cannot type the expression; a formal
-  value is one 64-bit word, so `%d` should print the whole word. Not this
-  change's lane (a `printf` site, and F3 owns the value sites), and reported.
+  COMPARES the 8-byte read rather than printing it.
+
+  **CORRECTED 2026-10-01 (`formal3-6-r2`): this is NOT a defect, and the "next
+  step" above would have introduced one.** Re-measured on this tree, both
+  architectures, same output; and three facts say the narrowing is right:
+
+  * `%d` is a 32-bit conversion in C, and a raw `printf` call is a call to the C
+    library with the format string the SOURCE wrote. `printf("%d", wide)` prints
+    the low 32 bits under gcc and clang alike, and this backend is a faithful
+    implementation of the same call. Widening `%d` to `%lld` here would make the
+    formal path answer differently from the C it is a backend FOR.
+  * the path that OWNS the format string already does the right thing:
+    `print(x)` builds `%lld`/`%llu` from the expression's own resolved type
+    (`arm64_codegen._print_call`, shared with x86-64), so a 64-bit value printed
+    with `print` prints all 64 bits on both backends today.
+  * there is no second implementation to disagree with. `printf` is not a
+    builtin the Mojo interpreter has — measured: `fire.py run` on a program that
+    calls it raises `NameError: name 'printf' is not defined` — so a raw
+    `printf` has exactly one answer on this path and it is the C one.
+
+  So the fact worth keeping is the METHOD one, not the bug: "the 8-byte load was
+  right and `printf` truncated it" and "the 8-byte load returned the wrong
+  number" are indistinguishable in the output, which is why
+  `deref_four_widths_at_one_address` compares the read instead of printing it. A
+  test that wants the whole word writes `%lld`, or uses `print`.
 - **A PRE-EXISTING x86-64 bug, found here and NOT fixed: a one-field struct's
   field read returns 0 on x86-64 and the field's value on arm64.** Reproduced on
   `git archive HEAD` with no diff applied:

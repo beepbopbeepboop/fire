@@ -1742,20 +1742,27 @@ int64_t _char_replace_impl(int64_t s, int64_t old_s, int64_t new_s);
 int mojo_eval(int expr, MojoDict *globals, MojoDict *locals);
 
 /* Module functions that are imported.
- * `py_tokenize` takes ONE argument: fire_compiler.py defines it as
- * `py_tokenize(src: str)` and puts the filename-carrying form in its own
- * function, `py_tokenize_named(src, filename)`. This declaration said
- * `(char *source, char *filename)` and its comment still described the older
- * `py_tokenize(src, filename="")`, i.e. a DEFAULTED second parameter — which
- * is right about the failure mode ("a defaulted parameter still occupies a
- * parameter slot") and wrong about the fix, because the default is gone now.
- * With this header included first, GCC checks every call against it, so the
- * whole self-host closure failed with 25 x "too few arguments to function
- * 'py_tokenize'; expected 2, have 1" while fire.ci's own prototype and
- * definition (both one-argument) were already correct.
- * test_selfhost_sigs.py checks this line against the source. */
+ * `py_tokenize`'s arity must match fire_compiler.py's definition
+ * (`py_tokenize(src: str)`) or every --dump-full self-host closure fails
+ * with "too many arguments to function 'py_tokenize'; expected 1, have 2"
+ * at each of its ~20 call sites, plus a "conflicting types" at the
+ * definition. A DEFAULTED parameter still occupies a parameter slot in the
+ * lowered C signature and the self-host MATERIALIZES it at every call
+ * site, so a defaulted `filename` is an ABI change however invisible it
+ * looks at the Python call site. That is why the filename-carrying lexer
+ * entry point is a separate function, `py_tokenize_named(src, filename)`,
+ * whose arity the codegen derives from its definition like any other's.
+ *
+ * `py_tokenize_named` is deliberately NOT declared here. It is not in
+ * `_NO_OVERLOAD_MANGLE` (only `py_tokenize` is), so generated code would
+ * reach it under a mangled name and this bare-name declaration could never
+ * be the prototype such a call matched; and nothing calls it from generated
+ * code at all -- its callers are Python (formal/build.py, the lexing tests),
+ * which get their prototype from the definition. Declaring it would add a
+ * fact to this header that nothing checks and nothing could use.
+ * test_selfhost.py's `pinned_prototypes_match_their_definitions` checks
+ * the `py_tokenize` line below against the source. */
 MojoList *py_tokenize(char *source);  /* lexer.tokenize -> list[Token] */
-MojoList *py_tokenize_named(char *source, char *filename);  /* py_tokenize with a filename */
 /* Parser is defined as a struct in generated code; no function stub needed */
 char *gimple_codegen_compile_to_gimple(char *source, int do_imports, char *filename);  /* compile_to_gimple function */
 

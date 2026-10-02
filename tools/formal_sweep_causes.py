@@ -493,18 +493,20 @@ CAUSES = (
     # indistinguishable from a cause nothing is blocked by.)
     ("method call on a value receiver is not one of the lowered methods",
      (("lowers only append, close, write",),)),
-    # 3 files, and below the 5-file bar a cause has to clear to be worth a
-    # row — but it has a bug doc of its own
-    # (`bugs/FORMAL_none_is_not_a_literal.md`), and a cause with a doc and no
-    # marker is a cause nobody can find from the table.
-    ("a class-level default is the NAME `None`",
-     (("is a NAME rather than a literal",),)),
-    # The other half of the row above: the default is a literal-looking
-    # expression whose value is NOT materializable here (a call, a computed
-    # name), rather than the NAME `None`. Both are "a class-level default this
-    # path cannot turn into a word" and a reader who fixed the row above would
-    # reasonably believe the row covers this one. 1 file, in-file, both
-    # architectures (`formal/dataclass_transform.py:530`).
+    # A class-level default that is a literal-looking expression whose value is
+    # NOT materializable here (a call, a computed name) rather than one the
+    # build can fold. 1 file, in-file, both architectures
+    # (`formal/dataclass_transform.py`'s `field_refusal`).
+    #
+    # This row used to have a sibling above it, for the case where the default
+    # is the NAME `None` — `None` parses to `IdentExpr('None')` on this parser
+    # and is not a literal, so there was nothing to materialize. It is gone
+    # because `model.NONE_WORD` makes `None` the word 0, which is the
+    # representation rather than an approximation, and `fold_literal_expr`
+    # folds it: `bugs/FORMAL_none_is_not_a_literal.md` is closed and the
+    # message it named is no longer emitted by anything. A cause row whose
+    # marker matches no live message is a cause that blocks nothing, which is
+    # indistinguishable from a cause nothing is blocked by.
     ("a class-level default that is not a value this build can materialize",
      (("is not a value this build can materialize",),)),
     # A String method that returns a SHORTER string. `formal/model.py:2602`
@@ -517,6 +519,15 @@ CAUSES = (
     # does not write, which is the fix's shape.
     ("a String method that returns a SHORTER string writes the receiver's bytes",
      (("returns a SHORTER string",),)),
+    # A one-field struct's mutating method, where the RECEIVER is the struct, so
+    # the callee hands the receiver back and the caller has to store it. One
+    # value-model fact with three wordings: a formal value is one 64-bit word,
+    # and it is already carrying the receiver. 0 files measured at the time of
+    # writing (the refusal is newer than the last sweep), and the fix for each
+    # wording is named in the message — the row is here so a swept file that
+    # lands on it reads as this construct rather than as `other refusal`.
+    ("a one-field struct's mutator has no convention to write its answer back",
+     (("mutating method",),)),
 )
 
 def _check_cause_shape():

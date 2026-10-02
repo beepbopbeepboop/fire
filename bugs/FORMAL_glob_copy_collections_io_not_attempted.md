@@ -1,6 +1,35 @@
 # FORMAL_glob_copy_collections_io_not_attempted: `glob`, `copy` and `collections`, re-measured 2026-09-30
 
-**Status: OPEN for `glob`, `copy` and `collections`, and CLOSED for `io`.**
+**Status: NOT WORK, and closed 2026-10-01. Nothing here is module-shaped, and
+the one recommendation that was still outstanding has been carried out.**
+
+Every remaining action this document names is one of three things, and all three
+are now settled rather than open:
+
+* `glob` — the "ship the pattern half alone" advice is **WITHDRAWN** above, with
+  the measurement that withdrew it. `glob.glob` returns a run-time-length list,
+  which `bugs/FORMAL_listdir_no_run_time_sequence.md` already decomposes, so a
+  real `glob` is blocked on a capability and not on a module.
+* `collections` and `copy` — the recommendation was "one bug doc for `clone` +
+  a constructible type, covering `copy` AND `collections` together … That doc
+  does not exist yet and should". **It exists now**:
+  `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`, which
+  re-measures the five files on this tree (all five still stop at the host
+  import, so a module would convert 0), decomposes the capability into a
+  compile-time-known record / a shallow struct clone / a runtime reflection
+  table, and folds in the copy-construction half that
+  `FORMAL_frame_receiver_handoff.md` §4c already names as missing.
+* `io` — closed above, and it has been since 2026-09-30.
+
+**What a reader should take from this instead of the doc.** The rule it
+restates is still the rule and is still the answer for any of these three
+modules: *a value cannot cross a dylib boundary unless it is one 64-bit word.*
+`glob.glob`, `collections.Counter` and `copy.deepcopy` are all "hand back a
+list / a dict / a new object", so all three are that one sentence before they
+are anything module-specific, and writing any of them converts **zero** files
+until the capability lands. The measurements below are kept because they are
+what establishes that, and they are re-derivable in about a minute with the
+stub-module trick they describe.
 
 > **RE-MEASURED 2026-10-01 — the numbers in `glob` and `collections` below are
 > STALE and the recommendation they end on has changed. Read

@@ -2546,7 +2546,7 @@ dylib_exports: list = None, globals_base: int = None,
             # appended after the code, immediates back-patched in resolve().
             # Interned by content so equal literals share one address —
             # makes pointer equality valid for dict string keys.
-            label = self._intern_string(expr.value)
+            label = self._intern_string(expr)
             self.asm.emit_adrp_add(0, label)
             return
 
@@ -2783,8 +2783,38 @@ dylib_exports: list = None, globals_base: int = None,
             f"unsupported expression {type(expr).__name__} on the formal "
             f"arm64 path")
 
-    def _intern_string(self, s: str) -> str:
-        """Return a stable data label for `s`, emitting bytes on first use."""
+    def _intern_string(self, s) -> str:
+        """Return a stable data label for `s`, emitting bytes on first use.
+
+        `s` is a `StringLiteral` node or a plain string. The node form is what
+        carries `is_raw`, which is why it is accepted rather than only
+        `node.value`: `r"a\\nb"` and `"a\\nb"` are the same four characters
+        once `_strip_string_prefix_and_quotes` has done its work, so a decoder
+        handed only the body cannot tell them apart and would decode the raw one
+        as well. A plain string is already-decoded text — a fold, a manifest
+        value, `GlobalDataImage.string_cells`, a comptime read — and is taken at
+        face value.
+
+        THE decode point for a string literal on this backend, and it is here
+        rather than at the call sites because every byte of every string on this
+        path goes through this one function — and because this path is the one
+        engine in the repository that does NOT hand the literal's text to a C
+        compiler, which is where `fire_compiler.py` leaves escapes decoded-by-
+        proxy. `fire_compiler.decoded_literal` is the tree's one reader of that
+        question (the interpreter and the x86-64 backend delegate to the same
+        one); without it `len("a\\nb")` was 4 on a formal image and the printed
+        bytes carried a literal backslash, on both architectures, while
+        `fire.py run` and `fire.py build` both printed a real newline. See
+        `fire_compiler.decode_c_escapes` and, for the measurement,
+        `bugs/FORMAL_string_literal_escape_is_not_decoded.md` — deleted, since
+        that is fixed.
+
+        Decoding BEFORE the intern lookup is what makes interning by content
+        right: two literals differing only in escape spelling (`"\\t"` and a
+        spelled tab) now get the same key, which is what `==` on a string
+        address already assumes.
+        """
+        s = F.decoded_literal(s)
         if s in self._str_intern:
             return self._str_intern[s]
         label = f"str_{self._str_counter}"
@@ -2976,10 +3006,18 @@ dylib_exports: list = None, globals_base: int = None,
                                           self._structs))
 
     def _aliased_export(self, name: str):
-        """The manifest export a bare callee reaches THROUGH an import alias."""
+        """The manifest export a bare callee reaches THROUGH an import alias.
+
+        The forwarded table is passed because a package `__init__` is a NAMESPACE
+        library with an empty export table, so the names it publishes are all in
+        `forwarded` — which is what makes `from pkg import base as aliased`
+        resolvable, and why this is asked of the same three tables in the same
+        order as the DOTTED spelling (`model.dylib_aliased_export`).
+        """
         return M.dylib_aliased_export(self._dylib_by_name,
                                       self._dylib_by_module, name,
-                                      self._import_aliases)
+                                      self._import_aliases,
+                                      self._dylib_forwarded)
 
     def _extern_symbol(self, name: str) -> str:
         """The boundary symbol an unbound callee `name` is emitted against.
@@ -3343,7 +3381,7 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_key_const(self, e, reg: int) -> None:
         """X{reg} = the canonical 64-bit value of a literal key element."""
         if isinstance(e, F.StringLiteral):
-            self._emit_string_addr(reg, self._intern_string(e.value))
+            self._emit_string_addr(reg, self._intern_string(e))
             return
         if isinstance(e, F.BoolLiteral):
             self._emit_mov_imm(f"X{reg}", 1 if e.value else 0)
@@ -3556,6 +3594,16 @@ dylib_exports: list = None, globals_base: int = None,
         # entirely and fabricate a word.
         why = M.multi_index_refusal_for(e, self._is_dict_subscript(e.obj),
                                         self._functions, self._structs)
+        if why is not None:
+            raise CodegenError(why)
+        # A TYPE index, before the base's own shape is asked: the base does not
+        # decide this. `xs[bool]` took the blob's bounds check against a 63-bit
+        # tag and exited 1 with nothing printed, and `s[bool]` added a tag to a
+        # `char *`. One call here covers the read, the store and the augmented
+        # assignment, and it is asked of the KIND rather than of the node so a
+        # local bound to a type is refused as well as the bare name.
+        why = M.type_index_refusal(self._expr_str_kind(e.index),
+                                   M.spelled(e.index))
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_key_subscript(e):
@@ -3903,12 +3951,17 @@ dylib_exports: list = None, globals_base: int = None,
         frags, operands = [], []
         for a in args:
             if isinstance(a, F.StringLiteral):
-                frags.append(M.print_literal(a.value))
+                frags.append(M.print_literal(a))
                 continue
             kind = self._expr_str_kind(a)
             if kind == M.STR_KIND:
                 frags.append("%s")
-            elif kind == M.INT_KIND:
+            elif M.is_number_kind(kind):
+                # `is_number_kind` and not `== INT_KIND`: a type TAG is a word,
+                # so `print(t)` for `t = bool` prints the tag, which is what it
+                # printed before `TYPE_KIND` existed (`t` was then an `int` by
+                # `_value_kind`'s default). Asking `== INT_KIND` here would make
+                # the construct's own positive case a refusal.
                 frags.append("%lld" if cmp_signed(self._ttype(a)) else "%llu")
             else:
                 raise CodegenError(
@@ -3925,7 +3978,14 @@ dylib_exports: list = None, globals_base: int = None,
 
         `file=` is refused unless it is stdout, because this model has exactly
         one stream and a `file=sys.stderr` that quietly went to stdout would be
-        a program whose diagnostics are missing rather than one that failed."""
+        a program whose diagnostics are missing rather than one that failed.
+
+        `sep` and `end` come back as the literal NODES and not as `.value`,
+        which is the whole reason this signature is unchanged while its body is
+        not: `print(sep=r"\t")` must print a backslash and a `t`, and
+        `print_literal` can only know that from the node. The defaults are
+        plain strings, which `print_literal` takes at face value — they are
+        already-decoded text."""
         sep, end = " ", "\n"
         for k, v in e.kwargs:
             if not isinstance(v, F.StringLiteral):
@@ -3935,9 +3995,9 @@ dylib_exports: list = None, globals_base: int = None,
                     f"the line ending are baked into the format string, which "
                     f"is built before the call is emitted")
             if k == "sep":
-                sep = v.value
+                sep = v
             elif k == "end":
-                end = v.value
+                end = v
             elif k == "file":
                 if not (isinstance(v, F.MemberExpr)
                         and v.member == "stdout"):
@@ -6635,6 +6695,26 @@ dylib_exports: list = None, globals_base: int = None,
             # fact here, so the operand is still evaluated and `ASR #63`
             # replicates it.
             lit = self._static_int(imm_r)
+            # …and a literal NEGATIVE amount is refused rather than emitted,
+            # which is the build-time half of the same rule: the amount is
+            # decidable here, and a refusal names the line where the run-time
+            # trap in `_emit_shift_reg` can only leave a status behind. It has
+            # to come BEFORE the saturation test, because a negative amount is
+            # below 64 and would otherwise fall through to the register form
+            # and be masked. `model.shift_amount_is_trap` is the decision, so
+            # x86-64 asks the same question and words it identically.
+            #
+            # `fold_literal_expr` rather than this backend's `_static_int`:
+            # both read a literal, but the shared folder is the one that also
+            # answers `0 - 1` and `1 * -1`, and `0 - 1` is the spelling the
+            # reproducer in the bug doc used. Two readers of "what does the
+            # build know this amount is" is how the two spellings of one
+            # literal would come to disagree about whether the build can
+            # decide it.
+            known = M.fold_literal_expr(imm_r)
+            if M.shift_amount_is_trap(known):
+                raise CodegenError(M.negative_shift_refusal(op, known))
+            lit = self._static_int(imm_r)
             if lit is not None and M.shift_saturates(lit):
                 self._emit_saturated(op, signed)
                 self._emit_trunc(result_t)
@@ -7155,29 +7235,39 @@ dylib_exports: list = None, globals_base: int = None,
         and the rule is one rule (`model.shift_saturated_is_zero`), so the
         rule lives here and both callers come to it.
 
-        The amount is compared against 64 and a saturating branch taken
-        BEFORE the shift instruction runs, so the masking is never the
-        answer. The sign for the arithmetic case is X0's own, read before
-        X0 is overwritten.
+        THREE answers for the amount, in this order, and the order is the
+        whole content of this function:
 
-        The compare is SIGNED, which is what keeps this fix to the case it
-        fixes: an amount of 64 or more (signed, so 64..2^63-1) saturates,
-        and a NEGATIVE amount is below 64 and keeps the masking it has
-        always had. That is not an endorsement — CPython raises ValueError
-        for a negative amount, and this path answers with the masked shift
-        — it is a separate question left alone rather than changed under
-        cover of a fix about the saturation boundary. See
-        bugs/FORMAL_negative_shift_amount_masks_instead_of_raising.md, which
-        is also why the compare must not be made unsigned: unsigned, a
-        negative amount would take the saturating branch and answer 0, a
-        THIRD wrong answer rather than this one.
-        """
+        1. **Negative** → `exit(SHIFT_TRAP_STATUS)`. A negative amount is not
+           a shift distance, so there is no value to compute; the hardware
+           would mask it to its low six bits and answer a different shift
+           entirely (`1 << -1` was `1 << 63`). The compare is SIGNED, and it
+           runs BEFORE the saturation compare for exactly the reason
+           `shift_amount_is_trap` is a separate rule from `shift_saturates`:
+           a negative amount is below 64, so unsigned it would take the
+           saturating branch and answer 0 — a third wrong answer rather than
+           the one that was there.
+        2. **At or past the width** → the saturated value, which is 0 for
+           `<<` and for a logical `>>` and the sign-extended word for an
+           arithmetic one (`model.shift_saturated_is_zero`).
+        3. **In range** → the shift instruction.
+
+        The trap is the same three-instruction `exit` the divide-by-zero arm
+        of `_emit_div_shift_pow` emits, and the same status
+        (`model.SHIFT_TRAP_STATUS`), so "this program has no answer" is one
+        answer on this path. A statically negative amount never reaches here —
+        `_emit_div_shift_pow` refuses it at build time, which is the half that
+        can name the line."""
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
+        neg_label = f"{fn}_sh{sid}_neg"
         sat_label = f"{fn}_sh{sid}_sat"
         end_label = f"{fn}_sh{sid}_end"
-        self.asm.emit(encode_cmp_xn_imm(1, 64))
+        self.asm.emit(encode_cmp_xn_imm(1, 0))
+        self.asm.emit(encode_b_cond("lt", 8))
+        self.asm.emit_label_rel(neg_label, here_offset=-4)
+        self.asm.emit(encode_cmp_xn_imm(1, M.SHIFT_WIDTH))
         self.asm.emit(encode_b_cond("ge", 8))
         self.asm.emit_label_rel(sat_label, here_offset=-4)
         if op == "<<":
@@ -7190,6 +7280,17 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit_label_rel(end_label, here_offset=-4)
         self.asm.label(sat_label)
         self._emit_saturated(op, signed)
+        self.asm.emit(encode_b(0))
+        self.asm.emit_label_rel(end_label, here_offset=-4)
+        # The negative-amount trap, laid out after the saturating arm so both
+        # arms are reached by one short forward branch and neither falls into
+        # the other. Darwin arm64 exit(status): x16 = SYS_exit, x0 = status,
+        # svc #0x80 — the same three instructions, and the same status, as the
+        # divide-by-zero arm of `_emit_div_shift_pow` above.
+        self.asm.label(neg_label)
+        self.asm.emit(encode_movz_xd_imm(0, M.SHIFT_TRAP_STATUS))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
         self.asm.label(end_label)
 
     def _emit_saturated(self, op: str, signed: bool) -> None:
@@ -7675,13 +7776,26 @@ dylib_exports: list = None, globals_base: int = None,
         # the representation at all. The empty needle is TRUE here, which is
         # Python's rule and also what `strstr` would say, so the constant and
         # the call cannot disagree.
+        #
+        # BOTH SIDES ARE DECODED before the substring test, and that is what
+        # keeps the constant and the call agreeing now that the call's operands
+        # are interned decoded text. `"t" in "\t"` is a needle of `t` against a
+        # haystack of one TAB, so it is FALSE; folding it on the raw source text
+        # made it TRUE, because the raw haystack is a backslash and a `t` and
+        # contains a `t`. Measured: `str_membership_two_literals`-shaped programs
+        # disagreed between the literal fold and the same expression with a name
+        # in it. `fire_compiler.decode_c_escapes` is the one decoder, the same
+        # one `_intern_string` below uses — see
+        # bugs/FORMAL_string_literal_escape_is_not_decoded.md.
         if isinstance(left, F.StringLiteral) and isinstance(right, F.StringLiteral):
             # The EMPTY needle is TRUE, which is Python's rule and what
             # `strstr` returns for it (the haystack itself, non-NULL). Folding
             # it to False because `bool("")` is False made the
             # both-operands-literal case disagree with the call the same
             # expression makes when either side is a name.
-            found = left.value == "" or left.value in right.value
+            needle = F.decoded_literal(left)
+            haystack = F.decoded_literal(right)
+            found = needle == "" or needle in haystack
             self.asm.emit(encode_movz_xd_imm(
                 0, (0 if found else 1) if invert else (1 if found else 0)))
             return
@@ -8219,28 +8333,49 @@ dylib_exports: list = None, globals_base: int = None,
 
 
 def _always_returns(stmts: list) -> bool:
-    """Whether a statement list provably returns on every path."""
-    if not stmts:
-        return False
-    st = stmts[0]
-    rest = stmts[1:]
-    if isinstance(st, F.ReturnStmt):
-        return True
-    if isinstance(st, F.IfStmt):
-        if not st.else_body and not st.elifs:
-            return _always_returns(rest)  # if can fall through; check rest
-        if not _always_returns(st.then_body):
-            return _always_returns(rest)
-        for _c, body in (st.elifs or []):
-            if not _always_returns(body):
-                return _always_returns(rest)
-        if st.else_body and not _always_returns(st.else_body):
-            return _always_returns(rest)
-        # All branches return — but statements after the if still matter.
-        return _always_returns(rest) if rest else True
-    if isinstance(st, F.WhileStmt):
-        return _always_returns(rest)  # the loop body may not run
-    return _always_returns(rest)
+    """Whether a statement list provably returns on every path.
+
+    ITERATIVE over the sibling stream, recursive only into the branches of a
+    compound statement.  That split is not a style choice: the previous
+    version recursed once per SIBLING (`return _always_returns(rest)`), so a
+    function of N statements needed N Python frames and a straight-line
+    `main` of a little over a thousand statements died with a bare
+    `RecursionError` — the whole diagnostic, naming a function whose name
+    says nothing about the program.  A generated program is exactly that
+    shape (a few hundred `printf` calls in one function), and the sibling
+    count is unbounded where the block NESTING depth is not, so the limit
+    was an artefact of the walk rather than a property of the analysis.
+
+    The predicate is unchanged, statement for statement: a `return` answers
+    True; an `if` answers True when every one of its branches does, and
+    otherwise falls through to the statements after it; a loop always falls
+    through, because its body may not run.  An `if` with neither `elif`s nor
+    an `else` has one branch, cannot answer for all of them, and falls
+    through — which is why the branch count is the test, and why an EMPTY
+    `else_body` (`[]`, not `None`) is still no `else`."""
+    cur = stmts or []
+    i, n = 0, len(cur)
+    while i < n:
+        st = cur[i]
+        i += 1
+        if isinstance(st, F.ReturnStmt):
+            return True
+        if isinstance(st, F.IfStmt):
+            branches = [st.then_body]
+            branches += [b for _c, b in (st.elifs or [])]
+            if st.else_body:
+                branches.append(st.else_body)
+            # Fewer than two branches: the `if` can fall through, so it says
+            # nothing about the statements after it — the same answer the
+            # recursive walk gave, reached a different way.
+            if len(branches) >= 2 and all(_always_returns(b) for b in branches):
+                # All branches return — but statements after the if still
+                # matter, and a list that ends here has reached its end.
+                if i >= n:
+                    return True
+        # A loop, an `if` that falls through, and anything else all answer
+        # the same question: is there a `return` later in this list?
+    return False
 
 
 def _reg_num(reg: str) -> int:

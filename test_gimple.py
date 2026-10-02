@@ -53,6 +53,46 @@ def _force_cpp_coro():
             os.environ['MOJO_CORO'] = _prev
 
 
+def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
+    """The C return type of `<struct>.<method>`'s DEFINITION, as the codegen
+    actually emits it when compiling `module` — or '' if there is none.
+
+    A hand-written forward declaration (`gimple_codegen._SELFHOST_SIGS`)
+    has to agree with the definition the codegen infers, and for an
+    UNANNOTATED method that inferred type is not derivable from the Python
+    source by any cheaper route: `inspect` sees `def _parse_expr(self,
+    min_prec: int)` and nothing else. So read it off the generated C, which
+    is the only copy of the fact that gcc will actually compare against.
+
+    Deliberately compiled as a SINGLE unit (`do_imports=False`), which is
+    how every non-self-host module and every per-file bootstrap step compiles:
+    it is 3.3 s and 0.1 GB for fire_compiler.py, against the ~30 minutes a
+    whole self-host closure takes to discover the same disagreement as a
+    "conflicting types" wall.
+
+    Matches the DEFINITION and not the forward declaration by what follows
+    it: the definition's header is at column 0 and a `{` body comes next,
+    while a declaration ends in `;` and a call site is indented and ends in
+    `;` too. Only the DEFINITION's header carries the `__GIMPLE` tag between
+    the return type and the name, so it is stripped before the type is
+    returned — otherwise the caller would read `Parser` for a `Parser *`.
+    The mangled name (`fire_compiler_Parser__parse_expr`) is matched on its
+    tail, so this does not care whether the module qualified it.
+    """
+    src = open(module, encoding='utf-8', errors='replace').read()
+    c_src = compile_to_gimple(src, do_imports=False, filename=module)
+    head_of = re.compile(r'^([^\n;{}]*?)\b\w*(' + re.escape(method)
+                         + r')\s*\([^\n;{}]*\)\s*$', re.M)
+    for m in head_of.finditer(c_src):
+        if not c_src[m.end():].lstrip().startswith('{'):
+            continue
+        head = m.group(1)
+        if '/*' in head or head.rstrip().endswith('*'):
+            continue
+        return re.sub(r'\b__GIMPLE\b', '', head).strip()
+    return ''
+
+
 def gimple_compiles(mojo_src: str) -> tuple[bool, str, str]:
     """Return (ok, c_src, stderr)."""
     c_src = compile_to_gimple(mojo_src)
@@ -389,6 +429,95 @@ def twice_same():
         _FAIL += 1
 
 
+def test_rebound_container_local_is_the_box():
+    """A local rebound to a different CONTAINER KIND is not a retyping either.
+
+    The container half of the rule `rebound_local_returns_the_box_not_its_
+    first_struct` states for structs, and it is the one that took the
+    self-host closure down: a `MojoDict` and a `MojoSet` are distinct
+    runtime structs with distinct slot layouts (DESIGN.html R2), so no
+    container pointer describes a name that has held both.
+
+    The store site reads the local's DECLARED type and declarations are
+    first-decl-wins, so `mixed` was first declared `MojoDict *` from its
+    first store and the set store then reached `_sce_simple_emit`'s
+    container-kind chokepoint — the one that refuses rather than
+    reinterpreting one struct's memory as another's — and the whole
+    MODULE failed to compile:
+
+        cannot coerce MojoSet * to MojoDict * (incompatible container
+        kinds) at mojo/backend_gimple/module_gen.py: value='_t17778'
+        dest='_lens'
+
+    Real instance: `gen_module_impl`'s `_lens` is a dict at line 1257
+    (`self._device_launch_lengths.get(_nm) or {}`) and a set at line 6114
+    (`_lens = {len(e.elements) for e in _els}`) — one function, one name,
+    two kinds. Verified against master's own module_gen.py, which is in
+    the self-host closure.
+
+    Also asserted: a name bound to ONE container kind keeps that real
+    pointer type, because the box is a cost (every later read goes through
+    dynamic dispatch) and must only be paid by a name that has earned it.
+    """
+    global _PASS, _FAIL
+    name = "rebound_container_local_is_the_box"
+    try:
+        ok, c_src, stderr = gimple_compiles("""\
+def mixed(n: Int):
+    c = {}
+    if n > 0:
+        c = {n, n + 1}
+    return c
+
+
+def dict_only(n: Int):
+    c = {'a': n}
+    return c['a']
+
+
+def set_only(n: Int):
+    c = {n, n + 1}
+    return len(c)
+""")
+    except TypeError as e:
+        # The codegen REFUSES the mixed slot rather than miscompiling it —
+        # `_sce_simple_emit`'s container-kind chokepoint. That refusal is the
+        # build failure this test exists to prevent, and it arrives as an
+        # exception rather than as gcc stderr, so it is reported here
+        # instead of taking the whole suite down with it.
+        print(f"FAIL  {name}: the codegen refused the module outright: {e}")
+        _FAIL += 1
+        return
+    def declared(fname, local):
+        """The C type of `local`'s declaration inside `fname`'s emitted body.
+        Scoped to the function, because all three shapes below use the same
+        local name and still have to be told apart; the emitted symbol is
+        the mangled `fname_<hash>`, hence the prefix match."""
+        m = re.search(r'^\S[^\n;]*\b' + re.escape(fname) + r'_[0-9a-f]+'
+                      r'[^\n;]*\n\{\n(.*?)^\}$', c_src, re.M | re.S)
+        if m is None:
+            return ''
+        d = re.search(r'^  (\S+(?: \S+)*?) ' + re.escape(local) + r';$',
+                      m.group(1), re.M)
+        return d.group(1) if d else ''
+    mixed_t = declared('mixed', 'c')
+    dict_t = declared('dict_only', 'c')
+    set_t = declared('set_only', 'c')
+    if ok and mixed_t == 'int64_t' and dict_t == 'MojoDict *' \
+            and set_t == 'MojoSet *':
+        print(f"PASS  {name}  (mixed={mixed_t}, "
+              f"dict_only={dict_t}, set_only={set_t})")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiles={ok} mixed={mixed_t!r} "
+              f"dict_only={dict_t!r} set_only={set_t!r} "
+              f"(want 'int64_t' / 'MojoDict *' / 'MojoSet *')")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
 def run_tests():
     # A vetted struct constructor bound to an owned local is initialised in frame storage.
     test_c_shape("owned_struct_local_is_initialised_in_the_frame", """\
@@ -489,6 +618,8 @@ def main():
     test_gimple_operators_are_actually_gimple()
     # A local rebound to a different struct has no single pointer type.
     test_return_type_of_a_rebound_local_is_the_box()
+    # ... and neither does one rebound to a different CONTAINER kind.
+    test_rebound_container_local_is_the_box()
 
 
     # 1. Empty void function (pass body)
@@ -7563,12 +7694,19 @@ print("%r" % p)
             declaration.
 
         A hand-written table the compiler cannot check is a table that will
-        drift again. This derives the arity — and, for the two Parser/
-        Interpreter methods, the return TYPE — from the real function objects
+        drift again. This derives the arity from the real function objects
         with `inspect`, so a signature change fails here, in `make check`,
         instead of after a 30-minute `fire.py fire --dump-full` plus a gcc
         run. The header is compared against the same source because it is the
-        only copy a NON-self-host module's generated C sees."""
+        only copy a NON-self-host module's generated C sees.
+
+        The RETURN type of an unannotated method is not derivable from the
+        source at all, so for the one entry where it matters
+        (`Parser__parse_expr`) it is derived from the generated C instead —
+        see `selfhost_emitted_return_type` and the note at the call site.
+        Checking that entry's SHAPE ("must be a pointer") is what let it hold
+        a return type no definition had, which is the same class of bug the
+        arity check exists to prevent, one level down."""
         global _PASS, _FAIL
         name = "handwritten_selfhost_signature_tables_match_the_source"
         import inspect
@@ -7578,31 +7716,38 @@ print("%r" % p)
         # bare name -> the real function object it must describe. `py_tokenize`
         # is a module-level function so it lives in `_KNOWN_SIGS`; the rest are
         # struct methods, which the self-host forward-decl block spells out in
-        # `_SELFHOST_SIGS`.
+        # `_SELFHOST_SIGS`. The third field is the (module, struct) its
+        # DEFINITION is emitted in, for the return-type half of the check.
         subjects = {
             'py_tokenize': (gimple_codegen.GimpleGen._KNOWN_SIGS,
-                            fire_compiler.py_tokenize),
+                            fire_compiler.py_tokenize, None),
             'Parser_parse_module': (
                 gimple_codegen._SELFHOST_SIGS,
-                fire_compiler.Parser.parse_module),
+                fire_compiler.Parser.parse_module,
+                ('fire_compiler.py', 'Parser')),
             'Parser___init__': (
                 gimple_codegen._SELFHOST_SIGS,
-                fire_compiler.Parser.__init__),
+                fire_compiler.Parser.__init__,
+                ('fire_compiler.py', 'Parser')),
             'Parser_with_filename': (
                 gimple_codegen._SELFHOST_SIGS,
-                fire_compiler.Parser.with_filename),
+                fire_compiler.Parser.with_filename,
+                ('fire_compiler.py', 'Parser')),
             'Parser__parse_expr': (
                 gimple_codegen._SELFHOST_SIGS,
-                fire_compiler.Parser._parse_expr),
+                fire_compiler.Parser._parse_expr,
+                ('fire_compiler.py', 'Parser')),
             'Interpreter___init__': (
                 gimple_codegen._SELFHOST_SIGS,
-                myinterpreter.Interpreter.__init__),
+                myinterpreter.Interpreter.__init__,
+                ('myinterpreter.py', 'Interpreter')),
             'Interpreter_execute': (
                 gimple_codegen._SELFHOST_SIGS,
-                myinterpreter.Interpreter.execute),
+                myinterpreter.Interpreter.execute,
+                ('myinterpreter.py', 'Interpreter')),
         }
         problems = []
-        for bare, (table, fn) in subjects.items():
+        for bare, (table, fn, home) in subjects.items():
             if bare not in table:
                 problems.append(f"{bare}: absent from its signature table")
                 continue
@@ -7617,22 +7762,44 @@ print("%r" % p)
                     f"{bare}: table declares {got} C parameter(s), the "
                     f"source takes {want} ({list(real.parameters)}) — a "
                     f"DEFAULTED parameter still occupies a C parameter slot")
-            # `_parse_expr` is the Pratt loop's expression parser: every branch returns
-        # some AST node, so the definition the codegen emits is a NODE POINTER
-        # and a table entry of `int64_t` truncates it (and, being emitted as a
-        # forward declaration once per importing module, also disagrees with
-        # the definition in every one of them). Its return is UNANNOTATED in
-        # the source, so this is the one place the check is on the table's own
-        # shape rather than on a type derived from the source — which is the
-        # whole point: nothing else in the pipeline compares the two.
-        _pex = gimple_codegen._SELFHOST_SIGS.get('Parser__parse_expr')
-        if _pex is None:
-            problems.append("Parser__parse_expr: absent from _SELFHOST_SIGS")
-        elif not _pex[0].endswith('*'):
-            problems.append(
-                f"Parser__parse_expr: table return type is {_pex[0]!r}, but "
-                f"the method returns an AST node — the table needs the "
-                f"pointer type the definition is emitted with")
+            # The RETURN type is not derivable from the source: none of these
+            # defs carries a return annotation, so `inspect` sees nothing and
+            # all this loop could do was assert the table's own SHAPE. That is
+            # exactly what let one row hold a type no definition had —
+            # `Parser__parse_expr` read `UnaryOp *` because the inference used
+            # to say `UnaryOp *` (`left` is first bound by the `not` branch's
+            # `UnaryOp(...)`, and first-binding-wins typed the whole Pratt
+            # parser that way), then the inference was fixed to return the box
+            # for a local rebound across node types and the table kept the old
+            # answer. A forward declaration that disagrees with the definition
+            # is unrecoverable in a self-host closure: "conflicting types", once
+            # per importing module, plus a `-Wint-conversion` at every call
+            # site.
+            #
+            # So this asks the only authority there is: compile the defining
+            # module and read the return type off the DEFINITION the codegen
+            # actually emits. 3.3 s and 0.1 GB per module, against the ~30
+            # minutes a whole self-host closure takes to hit the same
+            # disagreement from gcc — and it cannot itself go stale, because it
+            # comes from the same inference the definition comes from.
+            # Every method row is checked, not just the one that broke: the
+            # others are 3 s each and a stale row in any of them is the same
+            # build break.
+            if home is None:
+                continue
+            _mod, _struct = home
+            _method = bare[len(_struct) + 1:]
+            _emitted = selfhost_emitted_return_type(_mod, _struct, _method)
+            if not _emitted:
+                problems.append(
+                    f"{bare}: no emitted definition found in {_mod}'s own "
+                    f"generated C to compare the declared {_ret!r} against")
+            elif _emitted != _ret:
+                problems.append(
+                    f"{bare}: the table declares {_ret!r} but the codegen "
+                    f"emits the definition as {_emitted!r} — the forward "
+                    f"declaration is emitted once per importing module, so "
+                    f"every one of them is a conflicting-types error")
         # The header's hand-written compiler entry points, against the same
         # source. Only the ones the compiled path calls on ordinary code are
         # listed; the rest of the file is runtime plumbing, not a mirror of
