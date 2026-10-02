@@ -7,7 +7,7 @@
 A ceiling that kills a process after it has already eaten the machine (tools/memcap.py) is not
 enough: 30 jobs each *allowed* 24 GB is 720 GB of allowance on a 128 GB box, and every one of
 them can sit under its own ceiling while the machine collapses (2026-09-29: about 30 compiler
-processes at ~30 GB each, killed by hand). So memory is *allocated to a job before it starts*,
+processes, killed by hand). So memory is *allocated to a job before it starts*,
 out of one machine-wide budget, exactly like a counting semaphore of gigabytes:
 
   * a 51 GB job takes 51 of the budget; with the default 96 GB budget a second one waits;
@@ -69,6 +69,26 @@ DEFAULT_BUDGET_GB = 96.0
 
 # The environment variable through which a reservation covers its own tree.
 HELD = 'MEMSLOT_HELD'
+# …and the two through which an admitted job's reservation becomes a POOL its
+# own descendants draw from concurrently, rather than each of them being told
+# "already accounted for" and taking nothing. A reservation is a claim on the
+# machine, so an aggregate of N children inside one claim is still ONE claim
+# and the children have to be bounded by it: `make -j20 bside` is twenty
+# concurrent compiles, and the ledger's view of the machine while they ran was
+# a single 55 GB holder against an actual allowance of twenty per-file ceilings.
+# A per-process ceiling is not a bound on a sum, which is the whole reason the
+# reservation exists (2026-09-29: ~30 processes, every one inside its own
+# ceiling, until the box collapsed — the width was the finding, whatever any
+# single item measured).
+#
+# So a child that opts in with `Slot(..., pool=True)` takes its gigabytes from
+# a sub-ledger keyed by POOL and capped at POOL_GB — the parent's own class —
+# and the machine-wide ledger still carries the parent alone, because the pool's
+# usage IS the parent's usage. A child that does not opt in is unaffected, and
+# a request larger than the pool falls back to the machine-wide ledger rather
+# than deadlocking on a cap its own ancestor set.
+POOL = 'MEMSLOT_POOL'
+POOL_GB = 'MEMSLOT_POOL_GB'
 
 # BACKFILL ("sneaking in"). A reservation is a worst-case promise: a 96 GB holder may really use 4. Most
 # jobs in this repo are small and quick (under ~6 GB, seconds to minutes), and making them queue behind a
@@ -129,6 +149,25 @@ def ledger_dir():
 
 def budget_gb(override=None):
     return float(override if override is not None else os.environ.get("MEMSLOT_BUDGET_GB", DEFAULT_BUDGET_GB))
+
+
+def pool_id() -> str:
+    """The pool this process tree's descendants may draw from, or ''.
+
+    Reaches down the same way `inherited_gb` does: the admitting process is in
+    a different process tree from the child that asks, so the environment is
+    how the cap travels.
+    """
+    return (os.environ.get(POOL) or '').strip()
+
+
+def pool_gb() -> float:
+    """The pool's cap in GB — the admitting job's own reservation."""
+    raw = (os.environ.get(POOL_GB) or '').strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.0
 
 
 def inherited_gb():
@@ -204,12 +243,25 @@ def _alive(pid):
 
 
 class Ledger:
-    """Read-modify-write the shared ledger under an exclusive flock."""
+    """Read-modify-write the shared ledger under an exclusive flock.
+
+    `name` selects a SUB-ledger: the pool a job's descendants draw from is a
+    second ledger in the same directory, with the same file format, the same
+    pruning and the same FIFO, so the arithmetic and the crash-safety are the
+    same code rather than a second implementation of both. Its budget is the
+    admitting job's own reservation and it is NOT added to the main one: the
+    pool's usage is inside the parent's reservation, which the main ledger
+    already carries.
+    """
+
+    def __init__(self, name: str = ''):
+        self.file = f'ledger-{name}.json' if name else 'ledger.json'
+        self.lockfile = f'ledger-{name}.lock' if name else 'ledger.lock'
 
     def __enter__(self):
         d = ledger_dir()
-        self.path = os.path.join(d, "ledger.json")
-        self.lock = open(os.path.join(d, "ledger.lock"), "w")
+        self.path = os.path.join(d, self.file)
+        self.lock = open(os.path.join(d, self.lockfile), "w")
         fcntl.flock(self.lock, fcntl.LOCK_EX)
         try:
             self.data = json.load(open(self.path))
@@ -227,6 +279,17 @@ class Ledger:
         tmp = self.path + ".tmp%d" % os.getpid()
         json.dump(self.data, open(tmp, "w"), indent=1)
         os.replace(tmp, self.path)
+        # A POOL's ledger is named after the job and the runner that opened it,
+        # so it is a new file for every admitted job; an empty one is removed
+        # here, under the same lock, rather than accumulating in a directory
+        # every worktree on the machine shares. A pool with a holder or a
+        # waiter is never removed, so this cannot race a live one.
+        if self.file != 'ledger.json' and not self.data["holders"] \
+                and not self.data["queue"]:
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
         fcntl.flock(self.lock, fcntl.LOCK_UN)
         self.lock.close()
 
@@ -236,33 +299,39 @@ class Ledger:
         return sum(h["gb"] for h in self.data["holders"] if not h.get("sneak"))
 
 
-def acquire(gb, label, budget, poll=0.5, announce=True, owner=""):
+def acquire(gb, label, budget, poll=0.5, announce=True, owner="", ledger=""):
     """Block until `gb` fits under `budget` and this request is first in line; return its ticket.
 
     `owner` names the reservation inside this process, so one process can hold
     several (the test runner does, one per worker thread) and still release
     exactly the one it means. Liveness is NOT keyed on it: a holder lives while
     the pid that took the reservation is alive, or while the job it started is.
+    `ledger` names a sub-ledger (a pool) instead of the machine-wide one.
     """
     if gb > budget:
         raise ValueError("request of %.1f GB exceeds the whole budget of %.1f GB" % (gb, budget))
-    with Ledger() as L:
+    with Ledger(ledger) as L:
         ticket = L.data["next_ticket"]
         L.data["next_ticket"] += 1
         L.data["queue"].append({"ticket": ticket, "pid": os.getpid(), "owner": owner,
                                 "gb": gb, "label": label, "t": time.time()})
     told = False
     while True:
-        with Ledger() as L:
+        with Ledger(ledger) as L:
             head = min(L.data["queue"], key=lambda q: q["ticket"]) if L.data["queue"] else None
             if head and head["ticket"] == ticket and L.used() + gb <= budget + 1e-9:
                 L.data["queue"] = [q for q in L.data["queue"] if q["ticket"] != ticket]
                 L.data["holders"].append({"pid": os.getpid(), "owner": owner, "job": 0,
                                           "gb": gb, "label": label, "t": time.time()})
                 return ticket
-            if may_sneak(L, gb):            # small, and the machine has plenty free RIGHT NOW: backfill
+            if may_sneak(L, gb) and not ledger:
+                # backfill: small, and the machine has plenty free RIGHT NOW.
+                # NEVER inside a pool: a sneaker is excluded from `L.used()` by
+                # design (so it cannot delay the head of the machine-wide
+                # queue), and a pool's whole job is to bound a SUM — a sneaker
+                # that does not count toward it is not a bound.
                 L.data["queue"] = [q for q in L.data["queue"] if q["ticket"] != ticket]
-                L.data["holders"].append({"pid": os.getpid(), "owner": owner, "job": 0, "sneak": True,
+                L.data["holders"].append({"pid": os.getpid(), "owner": owner, "sneak": True,
                                           "gb": gb, "label": label, "t": time.time()})
                 return ticket
             used, ahead = L.used(), sum(1 for q in L.data["queue"] if q["ticket"] < ticket)
@@ -273,17 +342,17 @@ def acquire(gb, label, budget, poll=0.5, announce=True, owner=""):
         time.sleep(poll)
 
 
-def note_job(pid, owner=""):
+def note_job(pid, owner="", ledger=""):
     """Record the job's pid on our holder entry, so the reservation outlives a killed memslot."""
-    with Ledger() as L:
+    with Ledger(ledger) as L:
         for h in L.data["holders"]:
             if h["pid"] == os.getpid() and h.get("owner", "") == owner:
                 h["job"] = pid
 
 
-def release(owner=""):
+def release(owner="", ledger=""):
     """Give back this process's reservation(s) named `owner`. Returns how many."""
-    with Ledger() as L:
+    with Ledger(ledger) as L:
         keep_h = [h for h in L.data["holders"]
                   if not (h["pid"] == os.getpid() and h.get("owner", "") == owner)]
         freed = len(L.data["holders"]) - len(keep_h)
@@ -316,22 +385,44 @@ class Slot:
     (`covering` above), and in that case `acquire` returns immediately and the
     release is a no-op. The two that must not both happen are the runner's own
     admission and the `memslot.py` wrapper in the recipe it admitted.
+
+    `pool=True` is the other side of the same sentence, and it exists because
+    "covered" is the wrong answer for a FAN-OUT. One admitted `make -j20` is
+    one reservation, and twenty children each told "already accounted for" are
+    twenty processes each permitted its own per-file ceiling — the exact shape
+    that took the machine down on 2026-09-29. A child that opts into the pool
+    instead takes its gigabytes from a sub-ledger capped at the admitting job's
+    own reservation, so the aggregate is what was reserved, and the fallback
+    when the pool cannot take the request is the machine-wide ledger rather
+    than a wait that can never be satisfied.
     """
 
-    __slots__ = ('gb', 'label', 'budget', 'owner', 'ticket', 'waited', 'covered')
+    __slots__ = ('gb', 'label', 'budget', 'owner', 'ticket', 'waited', 'covered',
+                 'pool', 'ledger')
 
-    def __init__(self, gb, label, budget=None, owner=None):
+    def __init__(self, gb, label, budget=None, owner=None, pool=False):
         self.gb, self.label = float(gb), label
         self.budget = budget_gb(budget)
         self.owner = owner if owner is not None else f"{os.getpid()}:{label}"
         self.ticket = None
         self.waited = 0.0
-        self.covered, _ = covering(self.gb, label, self.budget)
+        self.ledger = ''
+        pid, cap = pool_id(), pool_gb()
+        if pool and pid and cap >= self.gb:
+            self.pool, self.ledger = True, pid
+            self.covered = False
+        else:
+            self.pool = False
+            self.covered, _ = covering(self.gb, label, self.budget)
 
     def acquire(self):
         t0 = time.time()
         try:
-            if not self.covered:
+            if self.pool:
+                self.ticket = acquire(self.gb, self.label, pool_gb(),
+                                      owner=self.owner, ledger=self.ledger,
+                                      announce=False)
+            elif not self.covered:
                 self.ticket = acquire(self.gb, self.label, self.budget, owner=self.owner)
         finally:
             self.waited = time.time() - t0
@@ -339,12 +430,12 @@ class Slot:
 
     def note_job(self, pid):
         if self.ticket is not None:
-            note_job(pid, self.owner)
+            note_job(pid, self.owner, self.ledger)
 
     def release(self):
         if self.ticket is not None:
             self.ticket = None
-            release(self.owner)
+            release(self.owner, self.ledger)
 
     def __enter__(self):
         return self.acquire()
@@ -354,7 +445,7 @@ class Slot:
         return False
 
 
-def held_env(gb):
+def held_env(gb, pool=None):
     """The `MEMSLOT_HELD` value to hand a child, so a reservation covers its tree.
 
     Every caller that takes a reservation should put this in the environment
@@ -362,8 +453,17 @@ def held_env(gb):
     second, contradictory reservation, and it is why the variable carries the
     gigabytes rather than a flag: a nested request is compared against the
     number it was admitted for, and a mismatch is reported.
+
+    `pool` names the sub-ledger this reservation opens for its own fan-out
+    (see `POOL` above). It is a NAME, not a number: the gigabytes are
+    published too, and they are this reservation's, so there is one number in
+    the tree rather than two.
     """
-    return {HELD: f'{float(gb):g}'}
+    out = {HELD: f'{float(gb):g}'}
+    if pool:
+        out[POOL] = str(pool)
+        out[POOL_GB] = f'{float(gb):g}'
+    return out
 
 
 def reserved_gb():

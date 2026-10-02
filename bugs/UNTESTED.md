@@ -17,10 +17,48 @@ equivalent for the 45 example files a cached test is *about*.
 
 ---
 
+## Status, 2026-10-01
+
+Two of the four §5 items are closed and the census has moved; the rest stands.
+
+* **§4.1 — the unregistered test that WRITES to the tree — is fixed.**
+  `test_py314_full.py` took a constant destination and wrote
+  `bugs/<CATEGORY>_<path>.md`, so 300 seconds of it produced 25 new bug docs
+  and a `grammar_snippet_gen.cpp` at the repo root. It now takes `--root` (and
+  a missing tree is exit 2, not a zero-file pass that looks green), writes its
+  reports to `--out` — a fresh temp directory by default, printed at the end —
+  and only writes into `bugs/` when `--write-to-bugs` says so. The
+  investigation is unchanged; only the destination moved.
+* **§3.1 — the cached test that could not see its subject — is fixed** (the
+  `checked_run.py` side landed earlier; the registry now says
+  `extra=['test_examples_parse.py', 'formal/examples']`, so the 46th example is
+  covered the day it is added).
+* **The estate's numbers, re-measured on this tree:** 135 `test_*.py`, 83 run
+  by a registered spec, **54 declared with a reason in
+  `test_suite.py`'s `UNREGISTERED` and 0 undeclared** — so the "50 unregistered,
+  21 red" of §1 has become 54 of which none is undeclared. The
+  "21 exit non-zero" half is still a measurement, not a fact, and re-running
+  54 files is an hour of scheduling somebody should choose rather than a
+  side effect of a doc edit.
+* **§5's other three items are unchanged**: the four tests dead at import
+  (`mojo/ast_nodes.mojo`, `mojo/parser.mojo`) are in another claim's write
+  set; the Tier-2 reds are behaviour work in the async/coroutine code; and the
+  general "does this test still reference anything that exists" check is not
+  statically decidable, for the reason §3.2 gives.
+
+The one thing §2's Tier-1 table is now wrong about is a *number* rather than a
+shape: `test_x86_64_containers.py` is no longer 59/60 x86-64 and 52/60 arm64.
+On 2026-10-01 it measures **59/60 on x86-64**, one `with-statement` refusal,
+and it is `x86-containers` in `x86` with a marker that states the count.
+
+---
+
 ## 1. The shape, measured
 
+*Historical: the counts below are the 2026-07-28 measurement this document was
+written from, and the 2026-10-01 re-measurement is in the Status section above.*
+
 | | count | how |
-|---|---|---|
 | `test_*.py` in the repo | **81** | `find . -name 'test_*.py'`, all at the repo root |
 | named by a registered spec's `cmd` | **33** | parse of `suite.REGISTRY`; there is no glob and no discovery, so a file must be spelled out |
 | **unregistered** | **50** | 62% of the estate |
