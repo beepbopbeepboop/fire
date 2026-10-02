@@ -5783,9 +5783,27 @@ int mojo_in_dispatch_str(int64_t container, char *needle)
     return 0;
 }
 
+/* The dict branch is `mojo_dict_contains_kw`, not `mojo_dict_contains`, and the
+ * difference is the whole question: on the int view the needle is not known to
+ * be an integer at all. An erased key can be a boxed `char *` (a str subscripted
+ * dict read through an int64_t accessor), and `_kw` is the existing helper that
+ * decides between the two key domains from `mojo_boxed_is_str` — the same
+ * discriminator the dict-subscript path uses, so `d[k]` and `k in d` agree on
+ * the same erased key instead of one of them answering for a key the other
+ * cannot see. Casting the needle to `char *` unconditionally (what this used
+ * to be written as the moment a dict branch existed) makes an int-keyed dict
+ * compare its integer bits as if they were a string.
+ *
+ * The list and set branches stay on their int view deliberately: there is no
+ * `_kw` twin for either, and inventing one means strcmp-ing slots that hold
+ * bare integers, which is the segfault the `contains` pair's own note in this
+ * file records having been tried. That is an element-type inference gap in the
+ * codegen, where the static type is known, not something to guess at here. */
 int mojo_in_dispatch_int(int64_t container, int64_t needle)
 {
     if (container == 0) return 0;
+    if (mojo_is_registered_dict(container))
+        return mojo_dict_contains_kw((MojoDict *)(intptr_t)container, needle);
     if (mojo_is_registered_list(container))
         return mojo_list_contains_int((MojoList *)(intptr_t)container, needle);
     if (mojo_is_registered_set(container))
