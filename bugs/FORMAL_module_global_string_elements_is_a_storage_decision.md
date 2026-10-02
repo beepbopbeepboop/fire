@@ -36,10 +36,58 @@ That is not a small change in the answer, and it is worth being explicit that
 **the filing's four-step next step is therefore aimed at machinery that is not
 there**: "give `GlobalDataImage` a string arena", "record a fixup for the
 container word and one per string element", "the existing lazy initializer
-already fills address-valued slots from code".  There is no `GlobalDataImage`,
-no lazy initializer, and no `__DATA` block; a formal value lives in a function's
-frame.  Steps 1–2 of that plan would have to be re-derived against whatever the
-value model is at the time, not applied.
+already fills address-valued slots from code".
+
+> **THIS DOCUMENT'S PREMISE IS NOW STALE — the subject is fixed, and measured
+> (2026-10-02, from the `sweep:repo-c` slice).** Three claims above are no longer
+> true, and the third is bigger than the other two:
+>
+> * **The machinery exists.** `GlobalDataImage` is at `formal/model.py:17688`,
+>   with `blob`, `fixups` and `string_cells`; the lazy initializer is real and
+>   documented at `formal/model.py:17745` ("WHY THE INITIALIZER IS LAZY" — a
+>   function that reads a global is emitted with a flag-word check, because a
+>   dylib has no startup stub to put one in); `__DATA` is written by
+>   `build_data_image`, and `GlobalSlot.is_address` is the one predicate both
+>   linkers ask so they cannot disagree about which words need a rebase.
+> * **`__DATA` exists**, so the paragraph's "a formal value lives in a function's
+>   frame" is no longer a statement about the whole image.
+> * **`L = ["a", "b"]` BUILDS, RUNS, AND IS CORRECT.** Measured on this tree, on
+>   arm64 and on x86-64, every shape this document says is not answerable:
+>
+>   | shape | arm64 | x86-64 | CPython |
+>   |---|---|---|---|
+>   | module-level `L[0]`, `L[1]` where `L = ["ab", "cd"]` | `ab`/`cd` | `ab`/`cd` | same |
+>   | module-level `D = {"k": 7}` read by STRING key | `7` | `7` | same |
+>   | `len(L)` on that module-level list | `2` | — | `2` |
+>   | a list of strings **returned by a callee** (`def build(s): return [s]`) | `ab` | — | same |
+>   | a list nested in a list, `L[0][0]` | `ab` | — | same |
+>
+>   So the "string arena" the filing asked for exists, and
+>   `GlobalDataImage`'s `string_cells` is it: the interned-literal `char *`
+>   written into the container blob by CODE, with the flag word ordering it
+>   before the first read. `global_slot_is_dict` is the key-scan half. Note that
+>   the returned-by-a-callee row is the case this document names
+>   `construction_dead_blob_refusal`, and it is now correct too — which is worth
+>   knowing, because that refusal's whole argument was the frame lifetime this
+>   table says the lazy initializer answers.
+>
+> **So this document should be DELETED, not kept with a Status history** — per
+> this repository's own rule for `bugs/`, a fixed bug still listed is
+> indistinguishable from an open one. **It is not deleted here** because the
+> claim `bug:FORMAL_module_state_no_storage` owns it and is not this branch's.
+> The measurements above are spot checks on five shapes, not a sweep: they were
+> taken to decide whether the premise was stale, not to certify the capability.
+> They also do not touch `formal/build.py`'s remaining no-storage refusals, whose
+> current row in the sweep census is
+> `bugs/FORMAL_module_global_bound_to_a_non_literal_has_no_lazy_initializer.md`
+> — a module global bound to a **non-literal**, which is a different question and
+> is still refused.
+>
+> **The next step for the owner is one sweep and a decision, not a
+> re-derivation**: re-measure the shapes above, delete the doc if they still
+> pass, and narrow it to whatever does not. What is NOT available any more is
+> the paragraph this correction replaces — steps 1–2 of a plan aimed at
+> machinery that is present.
 
 ## Why a container of strings is still not answerable, and the honest reason
 

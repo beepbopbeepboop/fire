@@ -254,10 +254,10 @@ def test_pack_omitted_value_slots_are_filled(tmpdir):
     entirely in that shape, which is what put the whole of `formal/` behind a
     single declaration.
 
-    Each case is the same format, the same value, and the same expected bytes
-    under three arities, so the row that says a default fills the slot and the
-    row that says the value is not disturbed by the slots after it are both in
-    the same comparison against CPython.
+    Each case is one format and one value compared against CPython at the
+    natural arity and at two wider ones, so "a default fills the slot" and "the
+    value is not disturbed by the slots after it" are both assertions in the
+    same run rather than one of them being assumed.
     """
     cases = [
         ("<I", [V_I1], 1),
@@ -277,7 +277,6 @@ def test_pack_omitted_value_slots_are_filled(tmpdir):
                      list(struct.pack(fmt, *values)),
                      f'pack("{fmt}", {values}) with {n_slots} argument(s) is '
                      f"CPython's bytes")
-
 
 
 def test_pack_single_value_formats(tmpdir):
