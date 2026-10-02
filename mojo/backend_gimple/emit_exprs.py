@@ -4156,37 +4156,13 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
     rhs_exprs = (list(node.right.elements) if isinstance(node.right, gimple_ctypes.TupleExpr)
                  else [node.right])
 
-    parts = []
-    buf = []
-    i, n = 0, len(fmt_bytes)
-    while i < n:
-        c = fmt_bytes[i]
-        if c != '%':
-            buf.append(c); i += 1
-            continue
-        if i + 1 < n and fmt_bytes[i + 1] == '%':
-            buf.append('%'); i += 2
-            continue
-        if buf:
-            parts.append(('lit', ''.join(buf), '')); buf = []
-        spec_start = i
-        i += 1
-        while i < n and fmt_bytes[i] in '-+0 #.123456789':
-            i += 1
-        conv = fmt_bytes[i] if i < n else 's'
-        if i < n:
-            i += 1
-        parts.append(('spec', fmt_bytes[spec_start:i], conv))
-    if buf:
-        parts.append(('lit', ''.join(buf), ''))
-
-    # Indexed, NOT `sum(1 for p in parts if p[0] == 'spec')` — a genexpr
-    # subscripting a freshly-iterated tuple is the same self-hosted trap
-    # fixed throughout this function; see the loop below's own comment.
-    n_specs = 0
-    for _pi in range(len(parts)):
-        if parts[_pi][0] == 'spec':
-            n_specs += 1
+    # The SAME parser the `str` spelling uses (`_parse_percent_template`),
+    # which is what removed the second copy: it produces the identical
+    # lit/spec sequence — `%%` collapses to a literal `%` either way, and the
+    # only difference between the two lowerings is what happens to each part
+    # afterwards (`mojo_str_cat` on `char *` vs `mojo_bytes_concat` on
+    # `MojoBytes *`).
+    parts = _parse_percent_template(fmt_bytes)
 
     def _lit_bytes(text):
         # Explicit accumulation loop, NOT `''.join(<genexpr>)` — see
@@ -4200,33 +4176,55 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
         sload = gen._new_val('char *', sname)
         return gen._new_val('MojoBytes *', f'mojo_bytes_new_lit ({sload}, {len(text)})')
 
-    if n_specs != len(rhs_exprs):
+    if _percent_operands_needed(parts) != len(rhs_exprs):
         for e in rhs_exprs:
             gen.lower_expr(e)
         return 'MojoBytes *', _lit_bytes(fmt_bytes)
 
+    # A `*`-width/`.*`-precision is still not lowered on the bytes side, and the
+    # reason is a representation one, not an oversight. `MojoBytes` is
+    # `{uint8_t *data; int64_t len;}`, so its value is NOT a C string: a
+    # `%s`-of-bytes has to be spliced by LENGTH (the fast path below), while
+    # every width/precision in this emitter is applied by handing `sprintf` a
+    # `char *`, which stops at the first embedded NUL. Padding to a width is
+    # therefore not expressible here at all — `b'a\x00b'` is three bytes and
+    # `%*s` must see all three. Doing it properly needs a
+    # length-aware pad-and-justify helper on `MojoBytes` in the runtime, which
+    # is a separate piece of work; until then a template carrying a dynamic
+    # width degrades to its literal text here exactly as it always has, which
+    # is wrong-but-obvious rather than wrong-and-plausible. The `str` spelling
+    # above has no such problem and lowers these for real.
+    for _pi in range(len(parts)):
+        if parts[_pi][0] == 'spec' and parts[_pi][3]:
+            for e in rhs_exprs:
+                gen.lower_expr(e)
+            return 'MojoBytes *', _lit_bytes(fmt_bytes)
+
     arg_i = 0
     acc_val = None
-    # Plain 3-way unpack, NOT `for part in parts: ... part[0]/part[1]` —
-    # `parts` is a freshly-built `list[tuple]` (each entry appended via
-    # `parts.append((...))` just above), and subscripting a value obtained
-    # by single-var for-loop iteration over such a list is the established
-    # self-hosted trap (working `==` but corrupted `len()`/content on the
-    # subscripted slot) — confirmed via `mojoc fire.py --dump-full`
-    # producing a different `mojo_str_cat (<heap address>, ...)` literal
-    # every run for `_lower_percent_format`'s identical-shaped loop
-    # (gimple_gen_exprs.py:~3334), which already carried this exact
-    # diagnosis in its own comment; this sibling (bytes) version had the
-    # same shape and presumably the same live bug, just not yet caught by
-    # a byte-identity check exercising it. All `parts` entries are now
-    # normalized to 3-tuples (`'lit'` entries carry a dummy `''' conv
-    # slot) so one uniform unpack shape covers both kinds.
-    for kind, text_or_spec, conv in parts:
+    # Plain 4-way unpack, NOT `part[0]`/`part[1]` — `parts` is a
+    # freshly-built `list[tuple]` (each entry appended via `parts.append((...))`
+    # by the shared parser), and subscripting a value obtained by single-var
+    # for-loop iteration over such a list is the established self-hosted trap
+    # (working `==` but corrupted `len()`/content on the subscripted slot) —
+    # confirmed via `mojoc fire.py --dump-full` producing a different
+    # `mojo_str_cat (<heap address>, ...)` literal every run for
+    # `_lower_percent_format`'s identical-shaped loop
+    # (gimple_gen_exprs.py:~3334), which already carried this exact diagnosis
+    # in its own comment; this sibling (bytes) version had the same shape and
+    # presumably the same live bug, just not yet caught by a byte-identity
+    # check exercising it. All `parts` entries are normalized to 4-tuples
+    # (`'lit'` entries carry dummy conv and dyn slots) so one uniform unpack
+    # shape covers both kinds.
+    for kind, text_or_spec, conv, dyn in parts:
         if kind == 'lit':
             if not text_or_spec:
                 continue
             part_val = _lit_bytes(text_or_spec)
         else:
+            # `dyn` is 0 for every spec that reaches here (the guard above
+            # returned otherwise), so `arg_i` advances by one per spec exactly
+            # as it always did and no operand can be skipped.
             full_spec = text_or_spec
             _enode = rhs_exprs[arg_i]
             et, ev = gen.lower_expr(_enode)
@@ -4261,6 +4259,93 @@ def _lower_percent_dict(gen, node: gimple_ctypes.BinaryOp):
     return 'char *', t
 
 
+def _parse_percent_template(fmt_text: str):
+    """Split a %-format template into ('lit', text, '', ()) and
+    ('spec', full_spec, conv, dyn) parts, in source order.
+
+    ONE parser for the `str` and `bytes` spellings, which had drifted into
+    two near-identical copies (`_lower_percent_format` /
+    x `lit` entries carry two dummy slots so both kinds
+    unpack with a single uniform `for a, b, c, d in parts:` shape -- the
+    property the self-hosted backend needs, since subscripting a value
+    obtained by iterating a freshly-built list is this codegen's documented
+    corruption trap (see `_lower_percent_format`'s own comment).
+
+    `dyn` is the number of operands the spec consumes BEFORE its value: a `*`
+    width and a `.*` precision each take one (`'%0*.*f' % (8, 2, 1.5)`), in
+    that order. Python has always allowed both and this compiler refused the
+    whole template (see `_lower_percent_format`'s arity check), which is not
+    a rare shape: `Tools/unicode/gencodec.py`'s `hexdigits()` writes
+    `'0x%0*X' % (precision, t)`, and its output was the literal template text.
+
+    `full_spec` keeps the whole spec verbatim — flags, width, precision — so
+    it can be handed to `sprintf` unchanged: C spells a dynamic width with
+    the same `*`, so a `%0*X` needs no rewriting at all, only a wider
+    argument list."""
+    parts = []
+    lit_start = 0
+    esc_buf = ''
+    i, n = 0, len(fmt_text)
+    while i < n:
+        c = fmt_text[i]
+        if c != '%':
+            i += 1
+            continue
+        # hit a '%': flush the pending literal run
+        _run = fmt_text[lit_start:i]
+        if i + 1 < n and fmt_text[i + 1] == '%':
+            # `esc_buf` is a str, concatenated -- not a char list appended to;
+            # a list of single `char`s joined on the self-hosted backend
+            # produced an erased/garbage string that then compiled to
+            # `mojo_str_cat (<decimal address>, ...)` in emitted C, different
+            # every --dump-full run. `%%` (an escaped percent) is the one case
+            # a plain slice can't represent verbatim, so those runs are
+            # accumulated here and flushed as their own 'lit' part.
+            esc_buf = esc_buf + _run + '%'
+            i += 2
+            lit_start = i
+            continue
+        _lit = esc_buf + _run
+        if _lit:
+            parts.append(('lit', _lit, '', 0))
+        esc_buf = ''
+        spec_start = i
+        i += 1
+        # Flags, width, precision, with a `*` in the width or precision
+        # position standing for one operand each.
+        dyn = 0
+        while i < n:
+            _sc = fmt_text[i]
+            if _sc == '*':
+                dyn += 1
+                i += 1
+                continue
+            if _sc in '-+0 #.123456789':
+                i += 1
+                continue
+            break
+        conv = fmt_text[i] if i < n else 's'
+        if i < n:
+            i += 1
+        parts.append(('spec', fmt_text[spec_start:i], conv, dyn))
+        lit_start = i
+    _tail = esc_buf + fmt_text[lit_start:n]
+    if _tail:
+        parts.append(('lit', _tail, '', 0))
+    return parts
+
+
+def _percent_operands_needed(parts) -> int:
+    """How many RHS operands `parts` consumes: one per spec, plus one per
+    `*`-width/`.*`-precision. Indexed, NOT `sum(...)` over a genexpr -- the
+    same self-hosted trap as `_lower_bytes_percent_format`'s own spec count."""
+    needed = 0
+    for _pi in range(len(parts)):
+        if parts[_pi][0] == 'spec':
+            needed += 1 + parts[_pi][3]
+    return needed
+
+
 def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> tuple[str, str]:
     """Lower literal `%`-format string formatting to a `char *` result.
 
@@ -4274,62 +4359,9 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
     rhs_exprs = (list(node.right.elements) if isinstance(node.right, gimple_ctypes.TupleExpr)
                  else [node.right])
 
-    # Parse into ('lit', text) | ('spec', full_spec, conv) parts.
-    # `full_spec` keeps the flags/width/precision text (e.g. '%08.3f')
-    # so sprintf below reproduces them; only the conversion character
-    # needs any Python->C translation.
-    # Build literal runs by SLICING `fmt_text` (`fmt_text[lit_start:i]`),
-    # NOT by `buf.append(c)` + `''.join(buf)` — a list of single `char`s
-    # joined on the self-hosted backend produced an erased/garbage string
-    # that then compiled to `mojo_str_cat (<decimal address>, ...)` in
-    # emitted C (gimple_cpp_core.py:2934's `"..." % (_tid,)`), different
-    # every --dump-full fire.py run. `%%` (an escaped percent) is the one
-    # case a plain slice can't represent verbatim, so those runs are
-    # accumulated in `esc_buf` (a str, concatenated — not a char list)
-    # and flushed as their own 'lit' part.
-    parts = []
-    lit_start = 0
-    esc_buf = ''
-    i, n = 0, len(fmt_text)
-    while i < n:
-        c = fmt_text[i]
-        if c != '%':
-            i += 1
-            continue
-        # hit a '%': flush the pending literal run
-        _run = fmt_text[lit_start:i]
-        if i + 1 < n and fmt_text[i + 1] == '%':
-            esc_buf = esc_buf + _run + '%'
-            i += 2
-            lit_start = i
-            continue
-        _lit = esc_buf + _run
-        if _lit:
-            parts.append(('lit', _lit, ''))
-        esc_buf = ''
-        spec_start = i
-        i += 1
-        # Flags, width, precision. Dynamic width/precision ('%*d') isn't
-        # supported -- rare enough in practice to leave as a follow-up
-        # rather than block the common literal-width case.
-        while i < n and fmt_text[i] in '-+0 #.123456789':
-            i += 1
-        conv = fmt_text[i] if i < n else 's'
-        if i < n:
-            i += 1
-        parts.append(('spec', fmt_text[spec_start:i], conv))
-        lit_start = i
-    _tail = esc_buf + fmt_text[lit_start:n]
-    if _tail:
-        parts.append(('lit', _tail, ''))
+    parts = _parse_percent_template(fmt_text)
 
-    # Indexed, NOT `sum(1 for p in parts if p[0] == 'spec')` — same
-    # self-hosted trap as the bytes sibling function above.
-    n_specs = 0
-    for _pi in range(len(parts)):
-        if parts[_pi][0] == 'spec':
-            n_specs += 1
-    if n_specs != len(rhs_exprs):
+    if _percent_operands_needed(parts) != len(rhs_exprs):
         # Can't safely map operands to specs (mismatched-arity source,
         # or a '%' that wasn't really meant as a format template).
         # Degrade to the literal text -- still evaluated the RHS for any
@@ -4341,20 +4373,20 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
 
     arg_i = 0
     acc_val = None
-    # Plain 3-way unpack, NOT `for part in parts: ... part[1]`/`part[2]` —
+    # Plain 4-way unpack, NOT `for part in parts: ... part[1]`/`part[2]` --
     # `_as_str(part[1])` alone was NOT sufficient: `part` here comes from
     # single-var for-loop iteration over a freshly-built `list[tuple]`,
     # and SUBSCRIPTING that iterated value is itself the self-hosted trap
     # (working `==` but corrupted `len()`/hashing on the subscripted
-    # slot — the same class of bug as `node.params[i][0]`, confirmed
+    # slot -- the same class of bug as `node.params[i][0]`, confirmed
     # while fixing the check-native-dumpfull crash), not something a
     # post-hoc `_as_str()` on the extracted value can repair. Confirmed
     # live: `mojoc fire.py --dump-full` produced a different
     # `mojo_str_cat (<heap address>, ...)` literal every run for this
     # exact loop despite the `_as_str` guards already here. All `parts`
-    # entries are normalized to 3-tuples (`'lit'` entries carry a dummy
-    # `''` conv slot) so one uniform unpack shape covers both kinds.
-    for kind, text_or_spec, conv in parts:
+    # entries are normalized to 4-tuples (`'lit'` entries carry dummy
+    # conv and dyn slots) so one uniform unpack shape covers both kinds.
+    for kind, text_or_spec, conv, dyn in parts:
         if kind == 'lit':
             text = text_or_spec
             if not text:
@@ -4362,15 +4394,30 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
             part_val = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(text)))
         else:
             full_spec = text_or_spec
+            width_ints = _lower_percent_width_args(gen, rhs_exprs, arg_i, dyn)
+            arg_i += dyn
             _enode = rhs_exprs[arg_i]
             et, ev = gen.lower_expr(_enode)
             arg_i += 1
-            part_val = gen._format_percent_spec(full_spec, conv, et, ev, _enode)
+            part_val = gen._format_percent_spec(full_spec, conv, et, ev, _enode, width_ints)
         acc_val = part_val if acc_val is None else gen._new_val(
             'char *', f'mojo_str_cat ({acc_val}, {part_val})')
     if acc_val is None:
         acc_val = gen._new_val('char *', gen._intern_string(''))
     return 'char *', acc_val
+
+
+def _lower_percent_width_args(gen, rhs_exprs, arg_i: int, dyn: int) -> list:
+    """Lower the `dyn` `*`-width/`.*`-precision operands at `rhs_exprs[arg_i:]`
+    into plain C `int` temps, in source order, and return them. `dyn` is 0 for
+    every spec without a dynamic width, which is the overwhelming majority —
+    then this is an empty list and the spec lowers exactly as it always did."""
+    out = []
+    for _d in range(dyn):
+        _dn = rhs_exprs[arg_i + _d]
+        _dt, _dv = gen.lower_expr(_dn)
+        out.append(gen._to_c_int_arg(_dt, _dv))
+    return out
 
 
 def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:

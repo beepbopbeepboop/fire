@@ -4801,6 +4801,10 @@ class GimpleGen:
         return ginf._try_lower_slice_region_eq(self, slice_node, other_node, negate)
     def _sprintf_one(self, c_spec: str, arg_val: str) -> str:
         return ginf._sprintf_one(self, c_spec, arg_val)
+    def _sprintf_n(self, c_spec: str, arg_vals: list) -> str:
+        return ginf._sprintf_n(self, c_spec, arg_vals)
+    def _to_c_int_arg(self, ctype: str, val: str) -> str:
+        return ginf._to_c_int_arg(self, ctype, val)
     def _to_int64(self, ctype: str, val: str) -> str:
         return ginf._to_int64(self, ctype, val)
     def _resolve_member_expr_type(self, node) -> str | None:
@@ -4916,8 +4920,9 @@ class GimpleGen:
     def _subst_idents(self, expr, mapping: dict):
         return grsl._subst_idents(self, expr, mapping)
     def _format_percent_spec(self, full_spec: str, conv: str, et: str, ev: str,
-                             enode=None) -> str:
-        return grsl._format_percent_spec(self, full_spec, conv, et, ev, enode)
+                             enode=None, width_ints: list | None = None) -> str:
+        return grsl._format_percent_spec(self, full_spec, conv, et, ev, enode,
+                                         width_ints)
     def _cast_for_list(self, elem_type: str, val: str, suf: str) -> str:
         return grsl._cast_for_list(self, elem_type, val, suf)
     def _type_expr_to_ann(self, node) -> str:

@@ -6305,6 +6305,62 @@ print([1, 2])
 print({"a": 1})
 """, "S<a>\nS<a>\nS<a>\nQ<b>\nQ<b>\nR<a>\nR<a>\nQ<b>\n1\nx\n[1, 2]\n{'a': 1}\n")
 
+    # A `*`-width and a `.*`-precision in a %-format spec, each of which
+    # consumes an operand of its own BEFORE the value. The compiler's spec
+    # parser treated `*` as the conversion character, so the template's
+    # operand count never matched its spec count and the WHOLE template
+    # degraded to its literal text — `'0x%0*X' % (precision, t)` printed
+    # `0x%0*X` (bugs/COMPILE_FAIL_Tools_unicode_gencodec.md's reported
+    # `    (): (0x%0*X, 0x%0*X),` entry lines).
+    #
+    # Every conversion is exercised, not just the hex one, because the
+    # operand ordering has to be right for each: C reads the dynamic width
+    # out of the varargs in the same position Python consumes it, so
+    # `'%.*f' % (3, x)` passing `x` where the precision belongs is the
+    # failure this shape invites, and it would print something plausible.
+    # `%%` rides along because an escaped percent inside a template that
+    # also has a dynamic spec used to defeat the whole thing.
+    #
+    # Compared against CPython rather than a hand-written expectation: the
+    # widths, the zero padding and the rounding are exactly what this is
+    # checking, and a hand-written string is one more thing to keep in sync.
+    test_gimple_matches_cpython("gimple_percent_format_star_width_and_precision", """\
+def hexdigits(precision, item):
+    return '0x%0*X' % (precision, item)
+
+def main():
+    for p in [2, 4, 6]:
+        print(hexdigits(p, 255))
+    print('%*d|' % (6, 42))
+    print('%-*d|' % (5, 3))
+    print('%.*f' % (3, 3.14159))
+    print('%*.*f|' % (8, 2, 3.14159))
+    print('%*x %*o' % (5, 255, 6, 8))
+    print('%*s|' % (5, 'x'))
+    print('%*r|' % (5, 'y'))
+    print('%*c|' % (4, 65))
+    print('a%%b %*s' % (5, 'x'))
+    print('%s=%r %d %05.2f' % ('k', 'v', 7, 1.5))
+main()
+""")
+
+    # The `bytes` spelling shares the SAME parser now, so a template whose
+    # lit/spec split the parser gets wrong is caught here too — the two copies
+    # had drifted into agreeing only by accident. It deliberately stops short
+    # of the `*`-width shapes: `MojoBytes` is `{data, len}`, not a C string, so
+    # a width cannot be applied through `sprintf` there without truncating at
+    # an embedded NUL, and that half is still open (see
+    # `_lower_bytes_percent_format`'s own comment).
+    test_gimple_matches_cpython("gimple_bytes_percent_format_shares_the_parser", """\
+def main():
+    print(b'0x%02X' % 255)
+    print(b'%d-%s' % (3, b'bb'))
+    print(b'%% plain')
+    print(b'%5d|%-5d|' % (42, 3))
+    print(b'%s' % b'a\\x00b')
+main()
+""")
+
     # A container of structs prints its ELEMENTS through the element's own
     # `__repr__` — the container rows of
     # bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_

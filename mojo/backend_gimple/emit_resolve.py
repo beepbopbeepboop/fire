@@ -2387,27 +2387,49 @@ def _intern_string(gen, escaped: str) -> str:
 
 
 def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
-                         enode=None) -> str:
+                         enode=None, width_ints: list | None = None) -> str:
     """Render one %-spec's operand to `char *`, applying any width or
-    precision in `full_spec` via a real C sprintf (see _sprintf_one)
+    precision in `full_spec` via a real C sprintf (see _sprintf_n)
     rather than reimplementing printf-style padding by hand.
 
     `enode` is the operand's AST node when the caller has it. It carries the
     only thing that distinguishes a bool from an int 0/1 — a bool's lowered C
     type is a plain `int` — so `'%r' % (b,)` has no other way to print True
-    (see `is_python_bool_expr` and `_repr_value`)."""
+    (see `is_python_bool_expr` and `_repr_value`).
+
+    `width_ints` are the already-lowered C `int` values a `*`-width and/or a
+    `.*`-precision consumed, in that order; empty for every spec without one.
+    They go in FRONT of the value, because that is where C reads them too —
+    `'%0*X' % (4, 255)` is `sprintf (buf, "%0*llX", 4, 255LL)`. The spec text
+    itself needs no rewriting for this: C spells a dynamic width with the same
+    `*`, and the 64-bit length modifier the integer conversions add lands
+    AFTER the width, which is exactly where C's grammar wants it
+    (`%[flags][width][.precision][length]conv`)."""
+    if width_ints is None:
+        width_ints = []
     if conv == 's':
         sval = gen._stringify_value(et, ev, enode)
         if full_spec == '%s':
             return sval
-        return gen._sprintf_one(full_spec[:-1] + 's', sval)
+        args = list(width_ints)
+        args.append(sval)
+        return gen._sprintf_n(full_spec[:-1] + 's', args)
     if conv == 'r':
         rval = gen._repr_value(et, ev, enode)
         if full_spec == '%r':
             return rval
-        return gen._sprintf_one(full_spec[:-1] + 's', rval)
+        args = list(width_ints)
+        args.append(rval)
+        return gen._sprintf_n(full_spec[:-1] + 's', args)
     if conv == 'c':
         nv = gen._to_int64(et, ev)
+        if width_ints:
+            # `%*c`: C takes the code as an `int`, so route it through sprintf
+            # rather than the `mojo_char_to_str` path below (which has no width
+            # to apply and takes a `char`).
+            args = list(width_ints)
+            args.append(nv)
+            return gen._sprintf_n(full_spec[:-1] + 'c', args)
         cv = gen._new_val('char', f'(char){nv}')
         return gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
     if conv in 'diouxX':
@@ -2418,10 +2440,14 @@ def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
         # undefined behavior (only 32 bits of the varargs int64_t are
         # consumed on most ABIs). "%5d" -> "%5lld", etc.
         c_spec = full_spec[:-1] + 'll' + conv
-        return gen._sprintf_one(c_spec, nv)
+        args = list(width_ints)
+        args.append(nv)
+        return gen._sprintf_n(c_spec, args)
     if conv in 'fFeEgG':
         dv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
-        return gen._sprintf_one(full_spec, dv)
+        args = list(width_ints)
+        args.append(dv)
+        return gen._sprintf_n(full_spec, args)
     # Unknown/unsupported conversion (e.g. '%a') -- degrade to str().
     return gen._stringify_value(et, ev)
 
