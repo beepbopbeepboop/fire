@@ -509,6 +509,44 @@ CASES = [
      "\n"
      "main(0)\n", "42\n43\n43\n"),
 
+    # The KIND of a body-filled slot, which is the third source of a value's
+    # kind beside a folded literal and a container literal. `len(G)` is the
+    # consumer that needs it and the one that was refused: `("unknown", …)`
+    # states no kind, and a slot whose kind is nothing is an unclassified word,
+    # so `len` said "the source does not say what this operand holds" about an
+    # operand the source annotates on the CALLEE's `-> List[Int]`.
+    #
+    # The two halves are here because they are two different questions and the
+    # fix answers both from one declaration: `len` needs to know the slot holds a
+    # blob, and `G == "hi"` needs to know it holds a `char *` — a word read as an
+    # int64 would make the second one compare two addresses, which is the
+    # documented failure of `global_slot_is_string`'s own row.
+    #
+    # `List[Int]` yields the BARE list prefix rather than `list:int`, because the
+    # annotation says what the container is and not what its elements are. That is
+    # the same answer a container literal of non-word elements gets, so the two
+    # spellings cannot disagree — and `print(G)` (the container itself) is still
+    # refused on this path, for a local exactly as for a global.
+    ("a_body_filled_slot_carries_the_callee_s_kind",
+     "def make() -> List[Int]:\n"
+     "    return [3, 14, 0]\n"
+     "\n"
+     "def greet() -> String:\n"
+     "    return \"hi\"\n"
+     "\n"
+     "NUMS = make()\n"
+     "NAME = greet()\n"
+     "\n"
+     "def main(n):\n"
+     "    c: Int = 0\n"
+     "    if NAME == \"hi\":\n"
+     "        c = 1\n"
+     "    print(len(NUMS))\n"
+     "    print(c)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "3\n1\n"),
+
     # ── module boundaries ──
     # A dylib's `__DATA` is emitted with `emit_startup=False`, so there is no
     # startup stub to run an initializer from: the lazy per-function check is
@@ -644,7 +682,8 @@ REFUSALS = [
      "\n"
      "read_g()\n"
      "G = compute()\n",
-     "before it reaches the assignment at statement"),
+     "module body calls first is a path to it, and that call runs before the "
+     "store"),
 
     # The store's OWN value runs before the store completes, so `G = compute()`
     # reads as "compute has not been called yet" for the duration of the call.

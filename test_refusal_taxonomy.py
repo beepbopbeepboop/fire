@@ -245,6 +245,23 @@ CAUSE_SAMPLES = [
     ("a module-global name has no storage",
      "encode_sxtb_wd_wn: '_SXT_BASES' is bound at module level, and this path "
      "has no module-global storage for it"),
+    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather
+    # than from a sweep log, because the shape it refuses did not exist as a
+    # distinct message until a module body was recognised as the module's own
+    # writer — before that, a name whose value a call computes and a name read
+    # before its slot was filled were the same refusal, and this sample would
+    # have been indistinguishable from the row above.
+    ("a module global the module BODY fills, read before it fills it",
+     "read_g: 'G' is one of the module-global slots in this image's `__DATA`, "
+     "and it has no static initializer: the value is computed by the module's "
+     "own top-level statements, which this path compiles into the synthetic "
+     "function the startup stub enters. That function is the entry, so nothing "
+     "runs before its first statement — but this read is reached before the "
+     "store of 'G' completes, so the load would read the zero an unwritten slot "
+     "gives. The module body calls something at its statement 1, before it "
+     "reaches the assignment at statement 2 that fills 'G'. Move the assignment "
+     "above the first top-level statement that calls anything. Make the value a "
+     "literal and the build folds it at every read instead"),
     ("a module-level name of ANOTHER module is not exported as a word",
      "main: 'sys' is imported from `sys`, and it is a module-level name of "
      "another module. This path compiles an import into a dylib"),
