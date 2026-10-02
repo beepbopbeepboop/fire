@@ -6091,6 +6091,107 @@ ONE_WORD_NESTED_CASES = [
      "    var x = Box()\n"
      "    x.p = mk()\n"
      "    return x.p.a * 10 + x.p.b\n", 34, None),
+    # ── the identity READ AS A CALL'S RECEIVER, which is a different program ──
+    #
+    # Every case above reads a one-word chain, and the rewrite is right for a
+    # read: `b.inner` and `b` are one word and reading either gives the field.
+    # Reading it as a CALL'S RECEIVER is not the same thing, because the rewrite
+    # keeps the METHOD NAME and drops the STRUCT the name belongs to.
+    # `std/builtin/builtin_slice.mojo` is the source of the shape and the
+    # measurement: `StridedSlice.write_to`'s whole body is
+    # `self._inner.write_to(writer)`, where `write_to` is declared by `Slice`,
+    # so after the identity the callee reads `self.write_to(writer)` — a call of
+    # `StridedSlice.write_to` on `self`, which is that same function, forever.
+    # Three refusals come out of it depending on which pass notices, and the one
+    # the file itself hit was a FALSE one ("`self.write_to` is not a field of
+    # StridedSlice … in Python this expression is the bound method", about an
+    # expression that is a CALL and was Slice's).
+    #
+    # So these assert the LIFT: `self._inner.add(v)` is `Slice.add(self, v)`,
+    # because `_inner`'s DECLARED type names the struct and that is the only
+    # thing in hand that can. 10 is `3 + 7`, and it is the number a wrong
+    # dispatch could not produce — the infinite recursion has no exit status.
+    ("one_word_field_method_call_reaches_the_fields_own_method",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "\n"
+     "    def add(self, v: Int) -> Int:\n"
+     "        return self.start + v\n"
+     "\n"
+     "struct StridedSlice:\n"
+     "    var _inner: Slice\n"
+     "\n"
+     "    def emit(self, v: Int) -> Int:\n"
+     "        return self._inner.add(v)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var inner = Slice()\n"
+     "    inner.start = 3\n"
+     "    var ss = StridedSlice()\n"
+     "    ss._inner = inner\n"
+     "    return ss.emit(7)\n", 10, None),
+    # The chain is a chain, so the receiver can be TWO fields deep: `Root.x` is
+    # `Mid`, `Mid.w` is `Leaf`, and `self.x.w.leaf()` is `Leaf.leaf(self)` by the
+    # same argument one level up. A lift that matched one level would leave
+    # `self.x.leaf()` for the identity to collapse into `self.leaf()`, which is
+    # `Root.leaf` — a symbol this image does not define.
+    ("one_word_field_method_call_through_a_two_level_chain",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def scaled(self, k: Int) -> Int:\n"
+     "        return self.v * k\n"
+     "\n"
+     "struct Mid:\n"
+     "    var w: Leaf\n"
+     "\n"
+     "struct Root:\n"
+     "    var x: Mid\n"
+     "\n"
+     "    def get(self, k: Int) -> Int:\n"
+     "        return self.x.w.scaled(k)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    a.x.w.v = 6\n"
+     "    return a.get(5)\n", 30, None),
+    # The same lift with a LOCAL as the root rather than a method's `self`,
+    # because `_one_word_field_map` records both and the lift has to ask the
+    # same question of both. `b` is one word from `Box()`, so `b.inner.add(7)`
+    # becomes `Slice.add(b, 7)` and `self.start` inside it reads `b`.
+    ("one_word_field_method_call_through_a_local_root",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "\n"
+     "    def add(self, v: Int) -> Int:\n"
+     "        return self.start + v\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Slice\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box()\n"
+     "    b.inner.start = 40\n"
+     "    return b.inner.add(2)\n", 42, None),
+]
+
+# The BOUNDARY of the lift above: a field whose declared type is NOT a struct of
+# this image has no method table, so the call cannot be lifted and must still be
+# refused — by the value-receiver sentence, which is true of it. Without this
+# case the lift could widen to any `recv.f.m(x)` and every case above would
+# still pass.
+ONE_WORD_FIELD_METHOD_REFUSALS = [
+    ("one_word_field_method_call_on_a_scalar_field_is_still_refused",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "    def go(self) -> Int:\n"
+     "        return self.n.add(2)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box()\n"
+     "    b.n = 3\n"
+     "    return b.go()\n",
+     "refuse:is a method call on a value", None),
 ]
 
 # ── a DECLARED frame parameter handed a frame-RETURNING call ────────────────
@@ -12633,6 +12734,7 @@ def main():
                   + INIT_FIELD_TYPE_CASES \
                   + INIT_FIELD_TYPE_REFUSALS \
                   + ONE_WORD_NESTED_CASES \
+                  + ONE_WORD_FIELD_METHOD_REFUSALS \
                   + DECLARED_FRAME_RETURN_CASES
                   + OVERLOAD_LAYOUT_CASES + OVERLOAD_REFUSALS
                   + OVERLOAD_DISPATCH_REFUSALS
