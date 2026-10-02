@@ -2573,8 +2573,23 @@ def _build_cfg(body) -> tuple:
     # predecessor, which is the edge that makes the seed reach anything: a body
     # emitted with an empty pending list opens its own unreachable first block,
     # and every block after it then inherits the universe.
+    #
+    # `run` RETURNS the blocks that fall out of the end of the body, and that
+    # return value is DISCARDED on purpose. Those blocks leave the function, so
+    # they have no successor; wiring them to `entry` (which is what `+=` on
+    # `entry.succs` did) puts an edge from the function's first block to its
+    # last one, and the fixpoint reads that as a path from the entry to the
+    # exit that runs NOTHING in between. Every name the body stores is then not
+    # in the last block's IN set, and `read_before_store` reports the first
+    # read after the last control-flow statement as a read before any store.
+    # It refused correct stdlib Mojo on that invented edge — measured on
+    # `std/collections/binary_heap.mojo`'s `BinaryHeap__heapify_up`, where
+    # `var element` is 15 lines above the read it was reported for, and
+    # through that file's import closure on most of the stdlib. A block that
+    # falls out of the function needs no successor for the fixpoint either: it
+    # is the last block, and `_definitely_stored` reads IN sets, not exits.
     entry = new([])
-    entry.succs += run(body, [], [entry.index])
+    run(body, [], [entry.index])
     for b in blocks:
         for d in b.succs:
             if d is not None and 0 <= d < len(blocks):

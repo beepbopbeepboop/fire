@@ -322,7 +322,96 @@ CASES = [
     ("nested_def_is_another_frame_ok",
      "    def inner():\n        m = 1\n        return m\n"
      "    return inner()\n", "ok"),
+
+    # ── a function that FALLS OFF THE END, and the edge that must not exist ──
+    # Every case above ends in `return`, and a `return` TERMINATES: the CFG
+    # builder returns no fall-through exits, so the defect these rows are about
+    # could not show through any of them. A `def` whose last statement is a
+    # CALL — a mutator that leaves its result in the array, which is ordinary
+    # code and is what `std/collections/binary_heap.mojo`'s `_heapify_up` is —
+    # is the shape the table did not cover, and `_build_cfg` gave the ENTRY
+    # block an edge to that last block. The edge is a path from the function's
+    # first block to its last that stores nothing, so every store in the body
+    # stopped dominating the read after the loop and the analysis reported
+    # correct stdlib Mojo as an `UnboundLocalError` the program does not have.
+    # `struct_check` below is the structural pin; these rows are the behavioural
+    # one, and the first of them is `_heapify_up` reduced to its shape.
+    ("fall_off_the_end_after_a_loop_break_ok",
+     "    t = 1\n    while n > 0:\n        if t > 2:\n            break\n"
+     "        n = n - 1\n    print(t)\n", "ok"),
+    ("fall_off_the_end_after_a_for_break_ok",
+     "    t = 0\n    for i in range(3):\n        if i:\n"
+     "            break\n    print(t)\n", "ok"),
+    ("fall_off_the_end_after_an_if_ok",
+     "    t = 1\n    if n:\n        p = 2\n    print(t)\n", "ok"),
+    ("fall_off_the_end_inside_a_try_ok",
+     "    t = 1\n    try:\n        p = 2\n    except ValueError:\n"
+     "        p = 3\n    print(t)\n", "ok"),
+    # …and the check must not have been weakened into silence to get there.
+    # The last block still INTERSECTS the paths that reach it: a store in one
+    # arm of an `if` is not a dominating store, and this program raises
+    # `UnboundLocalError` at `probe(0)`, so it is still a refusal.
+    ("fall_off_the_end_store_in_one_arm_still_refused",
+     "    if n:\n        q = 1\n    print(q)\n", "refuse"),
+    ("fall_off_the_end_del_on_one_arm_still_refused",
+     "    t = 1\n    if n:\n        del t\n    print(t)\n", "refuse"),
+    ("fall_off_the_end_read_of_nothing_stored_still_refused",
+     "    if n:\n        pass\n    print(q)\n", "refuse"),
 ]
+
+# The CFG invariant the case table cannot reach, checked on the GRAPH.
+#
+# The defect was `entry.succs += run(...)` in `_build_cfg`: the value `run`
+# returns is the list of blocks that fall out of the end of the body, and
+# adding it to the ENTRY block's successors put an edge from the function's
+# first block to its last. Every case in `CASES` above ends in `return`, which
+# makes `run` return `[]`, so the whole table was blind to it — which is why
+# this is a separate check and not four more rows: the property is about the
+# graph, and it is only reachable from a body that does not end in a
+# terminating statement.
+#
+# `ENTRY_OUTGOING` is the invariant stated as a value: the entry block's
+# successors are the blocks the body's first statement is reached from, which
+# is the preheader of straight-line code and the loop header or the `if`/`try`
+# header when the body opens with one.
+STRUCTURAL_CASES = [
+    ("fall_off_the_end",
+     "    t = 1\n    while n > 0:\n        t = t - 1\n    print(t)\n"),
+    ("fall_off_the_end_after_a_break",
+     "    t = 1\n    for i in range(3):\n        if i:\n"
+     "            break\n    print(t)\n"),
+    ("fall_off_the_end_after_an_if",
+     "    t = 1\n    if n:\n        t = 2\n    print(t)\n"),
+    ("falls_off_the_end_after_an_if_no_else",
+     "    if n:\n        t = 2\n    print(0)\n"),
+    ("ends_in_a_return",
+     "    t = 1\n    if n:\n        t = 2\n    return t\n"),
+]
+
+
+def structural_failures() -> list:
+    """The `_build_cfg` edges that must not exist, one line per broken one."""
+    out = []
+    for name, body in STRUCTURAL_CASES:
+        stmts = parse_module("def probe(n):\n" + body, filename=f"{name}.mojo")
+        fn = the_function(stmts)
+        blocks, entry = M._build_cfg(fn.body)
+        # The body opens its first real block from the entry and nothing else
+        # is reachable from the entry: an edge from the entry to any LATER
+        # block is a path that runs none of the body, and the fixpoint reads
+        # it as one.
+        for succ in blocks[entry].succs:
+            if succ > 1:
+                out.append(f"{name}: the entry block has an edge to block "
+                           f"{succ} ({len(blocks)} blocks), which is a path "
+                           f"from the function's first block to a later one "
+                           f"that stores nothing")
+        later = [b.index for b in blocks if b.index != entry and entry in b.preds]
+        for idx in later:
+            if idx != min(blocks[entry].succs or [idx]):
+                out.append(f"{name}: block {idx} lists the entry block as a "
+                           f"predecessor; only the body's first block may")
+    return out
 
 
 def cpython_raises(body: str, value: int) -> bool:
@@ -418,6 +507,15 @@ def main():
             if args.verbose:
                 mark = f" [diverges: {diverges}]" if diverges else ""
                 print(f"  PASS  {name} ({expect}){mark}")
+    struct = structural_failures()
+    for detail in struct:
+        failed += 1
+        print(f"  FAIL  cfg: {detail}")
+    if not struct:
+        passed += 1
+        if args.verbose:
+            print(f"  PASS  cfg-entry-has-no-edge-to-the-function-exit "
+                  f"({len(STRUCTURAL_CASES)} bodies)")
     print(f"read-before-store: PASS={passed} FAIL={failed}")
     return 1 if failed else 0
 
