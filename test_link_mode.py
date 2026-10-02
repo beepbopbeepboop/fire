@@ -539,10 +539,10 @@ def test_module_scoped_cross_module_struct_ctor_both_import_spellings() -> bool:
     """A cross-module struct CONSTRUCTOR called at MODULE scope, in BOTH
     import spellings, with the field read straight off the result.
 
-    `bugs/hard/CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md`
-    (deleted by this fix; the mechanism is recorded in the pre-pass's own
-    comment in `module_gen.py` and in `bugs/hard/README.md`'s 2026-10-02
-    entry). Both arms printed the `Parameter *`'s own pointer
+    the module-scope cross-module struct constructor (its bug doc is deleted
+    by this fix; the mechanism is recorded in the pre-pass's own comment in
+    `module_gen.py` and in `bugs/hard/README.md`'s 2026-10-02 entry). Both
+    arms printed the `Parameter *`'s own pointer
     bits as a decimal with exit 0, where CPython prints `v`, and the
     function-scoped spelling of the same two lines was correct throughout —
     which is what made it look scope-dependent rather than like a missing set

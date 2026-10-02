@@ -2008,8 +2008,10 @@ class GimpleGen:
         # `mojo_repr_list_kinds` on exactly this table. What it does NOT
         # cover is a read with no compile-time slot index — iteration and a
         # computed subscript both need ONE static C type for a read whose
-        # slot is not known; see
-        # bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
+        # slot is not known. That residue was closed by moving the kinds ONTO
+        # the value (`mojo_list_set_kinds` / `mojo_list_get_boxed` /
+        # `mojo_repr_boxed` in runtime/fire_runtime.c) rather than by trying
+        # to make one static C type cover a heterogeneous slot.
         self._struct_slot_kinds: dict[str, list] = {}
         # `struct.Struct(...)` result C value -> its const-folded format
         # string, so the INSTANCE methods can derive the same per-slot kinds

@@ -23,7 +23,6 @@ Last updated 2026-10-01.
 | doc | what remains |
 |---|---|
 | `CODEGEN_coro_yield_kind_unresolved_callsite.md` | one untypable call site silently re-poisoned the yield slot to `int64_t`. **FIXED 2026-09-26** for cases 1–7, and *correct* rather than refused — the evidence was always reachable, it just was not read. The doc's own docstring parenthetical is implemented, plus six sound widenings (any-annotation is not a hole; a bare identifier bound to a list answers `('list', k)`; `if caller_env:` was truthiness where membership was meant; ordinary `def`s are now scanned too). One shape has no reachable evidence and must stay refused. Case 8 reclassified: it is the ordinary loop lowering, not this subsystem. |
-| `CODEGEN_struct_kwargs_and_inline_unpack.md` | `struct.*` keyword arguments were silently dropped, and mixed int+float `unpack` returned raw IEEE-754 bits. **BOTH FIXED 2026-09-26**, and the residue under the second one **FIXED 2026-09-29**: the per-slot kinds now travel with the VALUE (a side table on the live `MojoList` address, `mojo_list_set_kinds`) instead of dying with one compile-time C name, so a copy, a slice, a concat, a returned value and a class attribute's `Struct` handle all read back correctly; and a read with no compile-time slot index — iteration, a computed subscript — is **boxed** (`mojo_list_get_boxed` + `mojo_repr_boxed`), which also fixes the heterogeneous `[1, 2.5]` literal that the doc named as the root cause underneath it. A uniform format records nothing and pays nothing. One thing the work uncovered is a DIFFERENT bug and is filed separately: a function returning a `MojoList *` it built in a local is typed `int64_t`, so the caller print()s the address and iterating it segfaults (pre-existing, not `struct`). |
 | `CODEGEN_method_call_on_struct_param_mistyped.md` | a method call on a struct passed as a free-function *parameter* was mistyped by method name alone — 6 crashes plus 2 silent wrong values. **FIXED 2026-09-26** for everything it owns: 8/8 names now correct, via a new cross-call contract in Pass 1.3d plus three supporting fixes. The doc's suggested refusal was not needed; the call site knows the type. One cross-module row remains and is *not* this bug in link mode — `module.Class(...)` construction is unresolved on every path, the larger gap named above. |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | **the kw-only-callable blocker is FIXED for the same-module case, 2026-09-29.** `walk_tree` and `iter_files_by_suffix` now compile and produce CPython's text; the stack-switch `kwonly params (v0)` gate is a representability question instead of a blanket refusal, and a callable-valued parameter's default is a real function address instead of a NULL pointer (which used to SIGSEGV on **every** path, ordinary `def`s included — that half was not in the doc). Residue: `_walk_tree`/`glob_tree` still refuse because their defaults name an **imported** module's function, undecidable at A3's eligibility time, and that same gap is a live SIGSEGV on the ordinary path (`bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md`); `iter_files`'s variadic lambda and `process_filenames`' `Exception(...)`-as-a-value are separate and outside this bug, so the file still does not build. |
 
@@ -78,9 +77,11 @@ made concrete: on 2026-09-26 two closed reports were re-tested and **both
 still had live, silent, wrong-value residue** that their own text did not
 have. Keeping the file did not prevent that; it hid it, behind a CLOSED
 banner that everyone had stopped reading. The residue became new OPEN docs
-(`CODEGEN_bytes_silent_wrong_values.md` and
-`CODEGEN_struct_kwargs_and_inline_unpack.md`), which is the honest home for
-it. Mechanistic knowledge that still matters lives in the source comment
+(`CODEGEN_bytes_silent_wrong_values.md` and what was then
+`CODEGEN_struct_kwargs_and_inline_unpack.md`), which was the honest home for
+it. **Both of those are themselves gone now** — closed and deleted, the
+`struct` one on 2026-10-02 — which is the arc the next paragraph describes,
+run to its end. Mechanistic knowledge that still matters lives in the source comment
 that explains the mechanism, not in a doc about a bug that no longer exists.
 
 **The bytes doc followed the same arc, one round further, and is now gone
@@ -112,7 +113,7 @@ new OPEN doc above rather than losing the residue:
 | removed | residue now tracked in |
 |---|---|
 | `CODEGEN_bytes_value_type.md` | (both now closed and removed) |
-| `CODEGEN_struct_module.md` | `CODEGEN_struct_kwargs_and_inline_unpack.md` |
+| `CODEGEN_struct_module.md` | `CODEGEN_struct_kwargs_and_inline_unpack.md` (itself closed and deleted 2026-10-02) |
 | `CODEGEN_struct_format_shadowed_by_format_attribute.md` | `CODEGEN_return_type_of_module_constructor_result_erased.md` |
 | `CODEGEN_coro_nested_async_closure_capture.md` | `CODEGEN_coro_captured_param_capture_crashes.md` — itself closed and removed 2026-09-29 |
 | `CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md` | `CODEGEN_coro_yield_kind_unresolved_callsite.md` |

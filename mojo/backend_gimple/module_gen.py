@@ -1880,7 +1880,7 @@ def gen_module_impl(self, stmts):
             # MODULE-level statements, with a `None` enclosing context. These
             # were simply not in the set of sites either contract below saw,
             # which is the whole of
-            # bugs/hard/CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md:
+            # the module-scope cross-module constructor case:
             # a module-scope `insp.Parameter('v', 7)` / `Parameter('v', 7)`
             # records no cross-module constructor field hint, so the imported
             # module compiled `self.v = v` at the `int64_t` default against a
@@ -5857,7 +5857,7 @@ def gen_module_impl(self, stmts):
         # receiver restriction, so `L`'s slot got no evidence from `mk`'s body
         # at all and `mk`'s parameter stayed `int64_t`: the pointer was
         # re-boxed on the way in and `x.numel()` printed the box's decimal
-        # (bugs/hard/CODEGEN_param_used_only_as_method_receiver.md).
+        # (the module-scope/module-global cases of the same family).
         #
         # Scoped to a BARE identifier argument (`L(t)`, never `L(t.n)` or
         # `L(self.t)`), because that is the shape where the argument's own
@@ -5944,7 +5944,7 @@ def gen_module_impl(self, stmts):
     _ctor_scalar_obs: dict = {}          # "<struct>::<pname>" -> scalar type
     _ctor_scalar_conflict: dict = {}     # "<struct>::<pname>" -> True (mixed)
     # This is the CONSTRUCTOR direction of
-    # bugs/hard/CODEGEN_param_used_only_as_method_receiver.md. The repro's
+    # the ctor-direction cross-call struct contract. The repro's
     # receiver is `self.w` inside `L.numel`, whose type is whatever `__init__`'s
     # own unannotated `w` was typed — so the evidence this pass needs is at
     # the `L(T(15))` CALL SITE, and no free-function signature pass can see
@@ -6080,7 +6080,7 @@ def gen_module_impl(self, stmts):
                 # the whole point is that the parameter is only ever stored in
                 # a field and read back through it, and refusing to admit it is
                 # what left `self.w.numel()` reading `int64_t.numel()`
-                # (bugs/hard/CODEGEN_param_used_only_as_method_receiver.md).
+                # (the ctor-direction cross-call struct contract).
                 # Admission still requires unanimity (the conflict dict above),
                 # a registered struct, and no container-literal veto.
                 if _st2 != 'double' and _st2 != 'char *':

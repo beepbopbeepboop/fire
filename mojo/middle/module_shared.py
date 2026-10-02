@@ -851,9 +851,10 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
     (`gen_module_impl`'s `_phase17_append_hits` loop) keys the answer on a
     module GLOBAL's name, which is what makes the conclusion function-
     independent: a registry populated by a constructor and read by a
-    different function is exactly the case this exists for, and
-    `bugs/hard/CODEGEN_cross_function_container_element_type.md` is that
-    case failing — for two reasons, both of them HERE.
+    different function is exactly the case this exists for, and the two gaps
+    named below are that case failing — with the whole of the observable
+    damage being a downstream method call on an element that read back as
+    `int64_t`.
 
     Two receivers reach a module-level container, and only one of them was
     recognised:

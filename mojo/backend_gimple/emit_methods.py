@@ -635,8 +635,7 @@ def _struct_build_value_list(gen, arg_nodes, codes):
 # direction — the omission this replaces read `node.args` and never looked at
 # `node.kwargs` at all, so `struct.unpack_from(fmt, buf, offset=2)` ran with
 # offset 0 and returned well-formed data read from the WRONG PLACE, and
-# `struct.calcsize(fmt='<HH')` returned 0 where CPython raises
-# (bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md).
+# `struct.calcsize(fmt='<HH')` returned 0 where CPython raises.
 #
 # Per entry point:
 #   kw       parameter name -> its positional index. A name absent from this

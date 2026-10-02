@@ -540,8 +540,12 @@ def _struct_slot_kinds(codes):
     whole-result repr (`_list_repr_fn` -> `mojo_repr_list_kinds`). It is a
     property of the VALUE, not of whether it was bound to a local; a read
     with no compile-time slot index (iteration, a computed subscript) still
-    has no single right C type, which is the residue named in
-    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
+    has no single right C type. That residue was closed in the RUNTIME, by
+    moving the per-slot kinds onto the live `MojoList` (a side table keyed on
+    its address) and boxing a read with no compile-time index — see
+    `mojo_list_set_kinds` / `mojo_list_get_boxed` / `mojo_repr_boxed` in
+    runtime/fire_runtime.c and `_lower_LambdaExpr`'s env-field block in
+    emit_calls.py for the consumers.
     """
     out = []
     for c in codes or ():
@@ -562,8 +566,9 @@ def _struct_elem_ctype(codes):
     That degradation is now confined to reads with no compile-time slot
     index: `_struct_slot_kinds` carries the real per-slot kinds, and the
     subscript, the `a, b = t` destructuring target and the whole-result repr
-    all consult it. See
-    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md."""
+    all consult it. See `_struct_slot_kinds` / `_struct_attr_format` in
+    mojo/backend_gimple/emit_methods.py, which are where those consumers are
+    written."""
     if not codes:
         return 'int64_t'
     kinds = set()

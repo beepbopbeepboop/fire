@@ -5106,7 +5106,8 @@ main()
 """, "str\n2\n")
 
     # The CONSTRUCTOR half of the same cross-call struct contract
-    # (bugs/hard/CODEGEN_param_used_only_as_method_receiver.md). The receiver
+    # (the ctor-direction cross-call struct contract in `module_gen.py`'s
+    # constructor observation pass). The receiver
     # here is `self.w`, whose C type comes from `__init__`'s own unannotated
     # `w`, so the only evidence anywhere is the `L(T(15))` CALL SITE — the
     # free-function pass that fixes the case above cannot see it. Before the
