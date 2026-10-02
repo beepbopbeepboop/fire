@@ -288,6 +288,8 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "typing": "test_formal_small_hosts.py",
     "platform": "test_formal_platform.py",
     "fnmatch": "test_formal_fnmatch.py",
+    "enum": "test_formal_core_hostmods.py",
+    "contextlib": "test_formal_core_hostmods.py",
 }
 
 
