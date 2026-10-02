@@ -279,6 +279,29 @@ def specialization_name(func):
     return None
 
 
+def keyword_bracket_args(attrs, ct_params: list) -> dict:
+    """The `f[a, b=…]` bracket's keyword half, as {ct-param name: expr}.
+
+    `SubscriptExpr` keeps the two halves of a bracket apart: POSITIONAL items in
+    `index`, KEYWORD items in `attrs` as `(name, expr)` pairs (fire_compiler,
+    `_parse_postfix`'s "keyword-style bracket" arm). A keyword half is only
+    honoured for a name `ct_params` actually declares, for the reason
+    `specialization_args` gives for over-supplied brackets: the declaration is
+    a LOSSY record, so an unrecognised name is far more often a parser gap (an
+    MLIR op attribute, a `//`-separated runtime type parameter) than a mistake
+    in the source. `name is None` is the parser's own record of an item it
+    could not name, and is skipped for the same reason."""
+    if not attrs:
+        return {}
+    declared = {p for p in ct_params if isinstance(p, str)}
+    out = {}
+    for pair in attrs:
+        name, expr = pair
+        if isinstance(name, str) and name in declared:
+            out[name] = expr
+    return out
+
+
 def specialization_args(call, ct_params: list) -> list:
     """The argument expressions binding `ct_params` at this call site.
 
@@ -286,6 +309,15 @@ def specialization_args(call, ct_params: list) -> list:
     rule the interpreter applies (`_parse_generic_params_capture`'s docstring:
     "enough for the interpreter to bind a call-site subscript (`f[Int32]()`) to
     names by position").
+
+    `f[a, b=…](x)` names the keyword half BY NAME (`keyword_bracket_args`), and
+    the positional items fill the parameters the keyword half did not claim, in
+    declaration order. That is the shape the stdlib writes a defaulted comptime
+    parameter in (`def _write_to[*, is_repr: Bool](…)`, called
+    `_write_to[is_repr=True](w)`), and reading only `index` for it bound the
+    named parameter to 0 — the same word an unsupplied one gets, so the
+    parameter was invisible rather than missing and the program computed a
+    number the source never wrote.
 
     Anything the bracket does not supply binds to 0: these paths have no type
     inference to deduce a comptime parameter from the runtime arguments, and 0
@@ -304,6 +336,21 @@ def specialization_args(call, ct_params: list) -> list:
     idx = call.func.index
     supplied = list(idx.elements) if isinstance(idx, (_fc.TupleExpr,
                                                       _fc.ListExpr)) else [idx]
+    by_name = keyword_bracket_args(getattr(call.func, 'attrs', None), ct_params)
+    if by_name:
+        # The keyword items are NOT in `index` (that is the whole of the
+        # parser's split), so nothing has to be taken out of `supplied`; the
+        # parameters a keyword claimed are simply not filled positionally.
+        unbound = list(supplied)
+        bound = []
+        for name in ct_params:
+            if isinstance(name, str) and name in by_name:
+                bound.append(by_name[name])
+            elif unbound:
+                bound.append(unbound.pop(0))
+            else:
+                bound.append(_fc.IntLiteral(value=0))
+        return bound
     if len(supplied) < len(ct_params):
         supplied = supplied + [_fc.IntLiteral(value=0)
                                for _ in range(len(ct_params) - len(supplied))]

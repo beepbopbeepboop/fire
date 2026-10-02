@@ -264,43 +264,24 @@ DIFF_CASES = [
 #    names the bug doc that owns the fix.
 #
 # (name, mojo_source, python_source, why)
-KNOWN_GAPS = [
-    # THE STDLIB'S OWN SPELLING of a defaulted comptime parameter, and the reason
-    # `optional.mojo`'s `_write_to[*, is_repr: Bool]` is in the census this file
-    # changed.  The image answers `403` where CPython says `423`, which is
-    # `scale = 0` — the keyword bracket is not read, so it is padded with the
-    # "unknown compile-time value" zero.  Pre-existing and not this construct:
-    # `mojo/middle/comptime.py`'s `specialization_args` reads `func.index` and
-    # never `func.attrs`, and it is shared with the gimple and x86-64 paths.
-    # bugs/FORMAL_keyword_comptime_parameter_is_silently_dropped.md
-    ("KNOWN_GAP_keyword_comptime_parameter_is_dropped",
-     "struct Cell:\n"
-     "    var value: Int\n"
-     "    var pad: Int\n"
-     "    def show[*, scale: Int](self, n: Int) -> Int:\n"
-     "        return self.value * 100 + scale * 10 + n\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    var c = Cell()\n"
-     "    c.value = 4\n"
-     "    c.pad = 1\n"
-     '    printf("v=%d", c.show[scale=2](3))\n'
-     "    return 0\n",
-     "class Cell:\n"
-     "    def __init__(self, value, pad):\n"
-     "        self.value = value\n"
-     "        self.pad = pad\n\n"
-     "    def show(self, scale, n):\n"
-     "        return self.value * 100 + scale * 10 + n\n"
-     "\n"
-     "def main():\n"
-     "    c = Cell(4, 1)\n"
-     '    print("v=%d" % c.show(2, 3), end="")\n'
-     "    return 0\n"
-     "\n"
-     "main()\n",
-     "the keyword comptime parameter is bound to 0"),
-]
+#
+# EMPTY, and kept as a mechanism rather than deleted with its last entry: this is
+# where a program this backend gets WRONG goes, so a reader who finds one has
+# somewhere to put it, and `run_known_gap_case` is the anti-rot half — a gap
+# case passes only while the image DISAGREES with CPython, and FAILS the moment
+# the two agree, which is the signal to delete the case and its bug doc in the
+# same commit.
+#
+# It held exactly one case until 2026-10-01, and that case is now a differential
+# assertion in `test_formal_specialized_method_call.py`
+# (`keyword_comptime_parameter_is_bound_by_name`, plus the two-keyword
+# `keyword_comptime_parameters_bind_by_name_not_by_bracket_order` that says the
+# binding is by NAME): a keyword comptime bracket parameter used to bind to 0 —
+# `mojo/middle/comptime.py`'s `specialization_args` read `func.index` and never
+# `func.attrs` — so `c.show[scale=2](3)` printed 403 where CPython printed 423.
+# `bugs/FORMAL_keyword_comptime_parameter_is_silently_dropped.md` is deleted
+# with that fix.
+KNOWN_GAPS = []
 
 
 # ── the field-set cases (no image; the derivation itself) ───────────────────
@@ -564,7 +545,7 @@ def run_fieldset_case(case, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
         f.write(source)
-    stmts = F.Parser(F.py_tokenize(source, src)).with_filename(src).parse_module()
+    stmts = F.Parser(F.py_tokenize_named(source, src)).with_filename(src).parse_module()
     structs = [s for s in stmts if isinstance(s, F.StructDef)]
     if len(structs) != 1:
         return False, f"the case declares {len(structs)} structs, expected 1"
