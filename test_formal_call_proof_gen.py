@@ -208,6 +208,74 @@ class TestGeneratorSource(unittest.TestCase):
                              f"`native_decide` downstream then fails with "
                              f"'mojo' uses 'sorry'")
 
+    def test_a_model_of_two_parameters_is_refused_not_applied_to_one(self):
+        """`_go_apply` used to read the FIRST binder and apply one argument.
+
+        `def f(a0, a1): return a0 + a1` produced `def f_go (a0) (a1)` and then
+        `def mojo (n : UInt64) := f_go n` — an argument-count error, which Lean
+        does not recover from as a `sorry` and does not elaborate, so the whole
+        proof file fails three definitions away from the line that is wrong.
+
+        The one-parameter limit is not a generator's taste: `mojo` is declared
+        `UInt64 -> UInt64`, `eval_eq_mojo` and every run test quantify over one
+        `n`, and `lib/ProofLib.lean`'s `MojoFunc`/`evalFunc` bind one parameter
+        with 0 for every other name.  So the honest answer is to refuse and name
+        the arity.  Measured on both generators.
+        """
+        import formal.arm64_proof_gen as G
+        defs2 = "def f_go (a0 : UInt64) (a1 : UInt64) : UInt64 :=\n  a0\n"
+        with self.assertRaises(NotImplementedError) as caught:
+            G._go_apply(defs2, "f")
+        said = str(caught.exception)
+        for needle in ("f_go", "2 parameters", "mojo"):
+            self.assertIn(needle, said,
+                          f"the refusal must name the model's arity and the "
+                          f"one-input apparatus it does not fit; got {said!r}")
+        # ONE implementation, not two.  The x86-64 generator imports the arm64
+        # one (`from formal import arm64_proof_gen as AP`) precisely so the two
+        # machines cannot disagree about how a model is applied; a second
+        # arity check of its own would be the duplication that check exists to
+        # prevent, and this is the assertion that says so.
+        import formal.x86_64_proof_gen as X
+        src = open(PROOF_GEN).read()
+        self.assertIn("_go_apply(go_defs, func_name)", src,
+                      "the x86-64 generator no longer applies the model through "
+                      "the shared reader, so it has its own arity handling")
+        self.assertEqual(X.generate_x86_64_proof.__module__,
+                         "formal.x86_64_proof_gen")
+        # …and the three shapes that DO fit are untouched, which is the other
+        # half: a guard that also refused arity 1 would turn this into a proof
+        # generator that proves nothing.
+        for defs, want in (("def f_go (n : UInt64) : UInt64 :=\n  n\n", "f_go n"),
+                           ("def f_go : UInt64 :=\n  0\n", "f_go")):
+            self.assertEqual(G._go_apply(defs, "f"), want)
+
+    def test_the_generated_mojo_is_one_input_for_every_arity(self):
+        """The end-to-end statement, on both generators, for a 2-parameter entry.
+
+        `_go_apply` is the shared reader both call, so pinning it is nearly
+        enough — but "nearly" is how a second call site appears.  This drives the
+        real entry points with the one text that reaches them, and asks for the
+        REFUSAL rather than the text, so a reordering that lets `MojoFunc.mk`
+        reach the output first is caught here.
+        """
+        from types import SimpleNamespace
+        from formal.build import parse_module
+        import fire_compiler as F
+        src = "def f(a0, a1):\n    return a0 + a1\n"
+        fns = [f for f in parse_module(src) if isinstance(f, F.FunctionDef)]
+        prog = SimpleNamespace(functions=fns, externs=[])
+        info = {"func_name": "f", "base_addr": 0x1000, "labels": {},
+                "test_input": 10}
+        import formal.arm64_proof_gen as G
+        import formal.x86_64_proof_gen as X
+        for gen, entry in ((X, "generate_x86_64_proof"),
+                           (G, "generate_arm64_proof")):
+            with self.assertRaises(NotImplementedError,
+                                   msg=f"{entry} emitted a one-input `mojo` for "
+                                       f"a two-parameter model"):
+                getattr(gen, entry)(prog, b"", dict(info))
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`
