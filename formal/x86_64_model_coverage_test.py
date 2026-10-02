@@ -339,6 +339,23 @@ def step_lemmas():
                 enc,
                 _rex_mod3_hyps(BASE + 16 * len(out), enc[0], enc[2], 0xc1,
                                digit=digit)))
+    # The digit-immediate ALU forms, at both widths and at a negative immediate
+    # as well as a positive one.  `83`'s sign extension from ONE byte is the
+    # thing worth pinning: a lemma stated over the decoded Python integer rather
+    # than over `UInt8.toInt` would disagree with the model for every negative
+    # `cmp`, and 0xff decoding as -1 is exactly the case.
+    for name, enc_fn, opcode, digit, args in (
+            ("add", X.encode_add_r64_imm32, 0x81, 0, ((R.RAX, 1000), (R.R9, -7))),
+            ("and", X.encode_and_r64_imm32, 0x81, 4, ((R.RBX, -1), (R.R11, 255))),
+            ("cmp", X.encode_cmp_r64_imm8, 0x83, 7, ((R.RAX, 0), (R.R11, -3)))):
+        for reg, imm in args:
+            enc = enc_fn(reg, imm)
+            out.append(Lemma(
+                "x86_step_%s_ri%d" % (name, 8 if opcode == 0x83 else 32),
+                "%s %s, %d" % (name, reg.name, imm),
+                enc,
+                _rex_mod3_hyps(BASE + 16 * len(out), enc[0], enc[2], opcode,
+                               digit=digit)))
     return out
 
 

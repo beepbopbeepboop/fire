@@ -122,6 +122,21 @@ _FORMS = {
                        ["rip", "b0", "b1", "b2", "imm"]),
     "alu_ri32:add_rsp": ("x86_step_add_rsp_imm32", True,
                      ["rip", "b0", "b1", "b2", "imm"]),
+    # The digit-immediate ALU forms the backend emits outside the rsp pair.
+    # `81` is the 32-bit immediate and `83` the 8-bit one, and they are not the
+    # same length: the model's `endAddr` is `m + 7` for the first and `m + 4`
+    # for the second, so a successor that said one length for both would be a
+    # proof of a different instruction.  `cmp` is the one whose successor names
+    # no register at all -- digit 7 sets the flags and discards the result.
+    "alu_ri32:add_reg": ("x86_step_add_ri32", False,
+                         ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                          "rm"]),
+    "alu_ri32:and": ("x86_step_and_ri32", False,
+                     ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                      "rm"]),
+    "alu_ri8:cmp": ("x86_step_cmp_ri8", False,
+                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                     "rm"]),
     "mov_r64_rm64_reg": ("x86_step_mov_rm64_r64_reg", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod",
                           "reg", "rm"]),
@@ -247,6 +262,24 @@ _SUCCS = {
     "alu_ri32:add_rsp":
         "{ x86_flags_add $s $s.rsp $imm ($s.rsp + $imm) with "
         "rsp := $s.rsp + $imm, rip := $next }",
+    # The digit-immediate ALU successors.  `$imm` is the MODEL's expression for
+    # the immediate, not the decoded number: `UInt64.ofInt (read_i32_le rc (m+3))`
+    # for the `81` forms and `UInt64.ofInt (read_i8 (rc (m+3)))` for the `83` one,
+    # and substituting a literal would state a different thing for every
+    # sign-extended byte.  `$next` is what carries the length difference.
+    "alu_ri32:add_reg":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
+        "($rm + x86_rex_b $rex)) + $imm) with rip := $next, zf := ($fa).zf, "
+        "sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
+    "alu_ri32:and":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ((x86_get_reg $s "
+        "($rm + x86_rex_b $rex)) &&& $imm) with rip := $next, zf := ($fl).zf, "
+        "sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
+    # No register in this one: digit 7 computes the subtraction, sets the flags
+    # and throws the difference away.
+    "alu_ri8:cmp":
+        "{ $s with rip := $next, zf := ($fs).zf, sf := ($fs).sf, "
+        "cf := ($fs).cf, of_ := ($fs).of_ }",
     "mov_rm64_imm32": "{ $s with rax := $imm, rip := $next }",
     "alu_ri32:add":
         "{ x86_flags_add $s $s.rax $imm ($s.rax + $imm) with "
@@ -480,6 +513,35 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         extra_args = " %d %d %d %d %d" % (rex, modrm, reg, rm, dst)
         extra_succ = {"$rex": str(rex), "$reg": str(reg), "$rm": str(rm),
                       "$dst": str(dst)}
+    elif form in ("alu_ri32:add_reg", "alu_ri32:and", "alu_ri8:cmp"):
+        # `REX.W 81 /digit id` or `83 /digit ib`, so the ModRM is `raw[2]` and the
+        # immediate starts at `raw[3]` -- 4 bytes wide for `81`, one for `83`.
+        # `digit` is the ModRM `reg` field and names the OPERATION; the
+        # register is the rm field (+REX.B).  The decoder has already refused a
+        # memory operand for this family, so mod is always 3.
+        rex, modrm = raw[0], raw[2]
+        digit, rm = (modrm >> 3) & 7, modrm & 7
+        extra_args = " %d %d %d" % (rex, modrm, rm)
+        # `UInt8.toInt` is the sign the instruction propagates, so the model's
+        # own reader is used rather than a decoded Python integer: `83` sign
+        # extends from ONE byte and `81` from four, and a literal would lose
+        # exactly that.
+        if form == "alu_ri8:cmp":
+            imm = "UInt64.ofInt (read_i8 (rc %d))" % (addr + 3)
+        else:
+            imm = "UInt64.ofInt (read_i32_le rc %d)" % (addr + 3)
+        a = "(x86_get_reg $s (%d + x86_rex_b $rex))" % rm
+        if form == "alu_ri32:add_reg":
+            res = "(%s + %s)" % (a, imm)
+            extra_succ["$fa"] = "x86_flags_add $s %s %s %s" % (a, imm, res)
+        elif form == "alu_ri32:and":
+            res = "(%s &&& %s)" % (a, imm)
+            extra_succ["$fl"] = "x86_flags_logic $s %s" % res
+        else:
+            res = "(%s - %s)" % (a, imm)
+            extra_succ["$fs"] = "x86_flags_sub $s %s %s %s" % (a, imm, res)
+        extra_succ.update({"$rex": str(rex), "$rm": str(rm),
+                           "$imm": imm})
     elif form.startswith("shift_imm8:"):
         # `REX.W C1 /digit ib`, so the ModRM is `raw[2]` as for every other
         # one-byte opcode, and the `digit` is its REG field -- the operation,
@@ -633,7 +695,14 @@ def _shapes(code, insns):
             # form to an rax lemma matches zero of them, and the symptom is a
             # proof that does not apply rather than a gap.
             want = 0xc4 if form == "alu_ri32:add" else 0xec
-            form = form + ("_rsp" if raw[2] == want else "_other")
+            form = form + ("_rsp" if raw[2] == want else "_reg")
+            # `_reg`, not `_other`: the decoder REFUSES a memory operand for
+            # this opcode family ("ALU with an immediate and a memory operand is
+            # not emitted", formal/x86_64_decode.py), so every remaining
+            # `alu_ri32:add` really is `add r64, imm32` and the old `_other`
+            # stood for one instruction under a name that said it was a
+            # fallback.  The digit is already in the form name, so the split
+            # that is left to do is rsp versus not-rsp and nothing else.
         if form in ("mov_r64_rm64", "mov_rm64_r64"):
             m, rm = modrm >> 6, modrm & 7
             if m == 3:
