@@ -252,7 +252,22 @@ def test_every_declaration_is_seen():
     # work): `mojo_dict_key_for` and `mojo_dict_key_free` — the CONTENT key a
     # tuple used as a dict key is stored and looked up under, replacing the
     # object's address. Two, taken from the call.
-    for header, want in (('fire_runtime.h', 539),
+    # 539 -> 541 (2026-10-01, the rest of the bug batch, merged over the two
+    # container-compare entries above): two names in and one net change out, so
+    # the total is NOT theirs plus these:
+    #   +1  `mojo_int_str_transient` (`bugs-segfaults`) — the decimal spelling
+    #       of an integer dict key above 2 GiB, which cannot be a borrowed
+    #       8-byte buffer and needs its own allocator's lifetime.
+    #   +1  `mojo_repr_list_slotkinds` (`bugs-silent-values-b`) — the repr of a
+    #       list whose per-slot kinds now travel with the value.
+    #   +2/-2, net zero (`bugs-silent-values-a`): `mojo_dict_set_bool` and
+    #       `mojo_dict_set_bytes_bool` REPLACE `mojo_is_bool_dict` and
+    #       `mojo_mark_dict_bool_values`. The pair that went away marked a dict
+    #       as bool-valued and read the flag off it; the pair that arrived sets
+    #       the value's kind at the store, which is what stops one bool value
+    #       from poisoning its neighbours' repr.
+    # Read off the call on the merged header: 541.
+    for header, want in (('fire_runtime.h', 541),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),
