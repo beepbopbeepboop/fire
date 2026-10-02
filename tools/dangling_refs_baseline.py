@@ -91,7 +91,6 @@ BASELINE = {
     'bugs/FORMAL_wide_receiver_by_reference.md': 1,
     'bugs/FORMAL_x86_64_hostmods_that_do_not_build.md': 2,
     'bugs/FORMAL_x86_64_tuple_assignment_member_target.md': 1,
-    'bugs/PARTIAL_WORK_HANDOFF.md': 9,
     'bugs/PERF_char_scan_peak_rss_over_its_ceiling.md': 1,
     'bugs/PERF_printed_container_repr_leaks_its_cat_buffers.md': 1,
     'bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md': 1,
