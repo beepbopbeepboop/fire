@@ -17564,6 +17564,86 @@ def literal_default_word(value) -> tuple:
     return (DEFAULT_OPAQUE, None)
 
 
+# The accessors CPython's `enum` puts on a MEMBER, and the bases that make a
+# class one. A class deriving from any of these has members whose `.value` is the
+# class constant itself and whose `.name` is the constant's own spelling — which is
+# the whole of what `enum` asks of this path, and the reason `enum.mojo` can be
+# written at all.
+#
+# Transitive through `struct_derived_names`, so `class Reg(MyEnumBase)` is
+# recognised as well as `class Reg(Enum)`.
+ENUM_BASES = frozenset(("Enum", "IntEnum", "StrEnum", "Flag", "IntFlag",
+                        "ReprEnum"))
+
+
+def struct_is_enum(struct_defs, struct_name: str) -> bool:
+    """True when `struct_name` derives from one of CPython's `enum` bases.
+
+    The gate on `enum_member_accessor`, and the reason it is a question about the
+    CLASS rather than about the member access. `S.NAME.value` is only an enum
+    member's value when `S` IS an enum: on a plain class CPython raises
+    `AttributeError` (`'int' object has no attribute 'value'`, measured), so
+    answering it there would be inventing an attribute the class does not have.
+
+    `struct_derived_names` already answers "which structs derive from THIS name"
+    for one name, so this asks it once per enum base and ORs — the transitive walk
+    is that function's, not a second copy of its fixed point. It takes a LIST of
+    StructDefs (it reads `name`/`bases` off each), so a caller holding the usual
+    `{name: struct}` mapping passes `list(...values())`; `_values` below does it so
+    no caller has to remember.
+
+    The base is matched by NAME because that is all this path has: `class
+    Reg(Enum)` records `bases == ['Enum']` and the enum machinery behind the name
+    is never run, so the names above ARE the rule. A program that defines its own
+    class called `Enum` is indistinguishable here from CPython's — which is the
+    same answer this path already gives for any other erased base, and the same
+    direction it takes when it cannot see a derivation (see
+    `struct_is_derived_from`)."""
+    if not struct_name:
+        return False
+    if struct_name in ENUM_BASES:
+        return True
+    return any(struct_name in struct_derived_names(_struct_def_values(struct_defs),
+                                                  base)
+               for base in ENUM_BASES)
+
+
+def _struct_def_values(struct_defs) -> list:
+    """The StructDefs in `struct_defs`, whether it is a list or a name mapping.
+
+    `struct_derived_names` and `struct_is_derived_from` both read `name`/`bases`
+    off what they are given, so they want a LIST — and every caller of the
+    derivation helpers in `formal/build.py` holds a `{name: struct}` mapping,
+    because that is what the constant census is keyed by. Normalizing here is what
+    lets both take either, which is the alternative to every call site remembering
+    (and `struct_is_enum` was wrong for exactly that reason when first written)."""
+    if isinstance(struct_defs, dict):
+        return list(struct_defs.values())
+    return list(struct_defs or [])
+
+
+def enum_member_accessor(struct_defs, struct_name: str, member: str):
+    """`'value'` / `'name'` when `S.member` is an enum member's accessor, else None.
+
+    The two attributes CPython gives every `enum` member, and the two that carry
+    an answer this path can produce exactly:
+
+      * `S.NAME.value` is the class constant `NAME` holds — the SAME literal
+        `S.NAME` itself materializes to (`class_constant_word`), because on this
+        path a member is not an object and so the member and its value are one
+        word. Verified against CPython: for `Reg.RAX = 0`, `Reg.RAX.value` is 0.
+      * `S.NAME.name` is the constant's own spelling as a string, which is the
+        member's `name` in CPython and needs nothing but the declaration site.
+
+    Gated on `struct_is_enum` because that is what makes the read an enum
+    accessor's rather than an arbitrary attribute: `S.NAME.foo` is still an
+    `AttributeError` in CPython, and so is `S.NAME.value` on a class that is not
+    an enum. Returning None for those keeps this from inventing an attribute."""
+    if member not in ("value", "name"):
+        return None
+    return member if struct_is_enum(struct_defs, struct_name) else None
+
+
 def class_constant_word(name: str, default) -> tuple:
     """`(kind, payload)` — what a read of the class constant `name` yields.
 
