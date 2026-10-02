@@ -69,6 +69,11 @@ V_NEG = 0 - 5            # signed: the arithmetic-shift case
 
 RESULTS = []
 
+# "The values were not compared", distinct from `None` ("no differences") and
+# from `[]`. `expect_lines` uses it so a wrong COUNT fails the values check
+# rather than passing it on a comparison it never made.
+_NOT_COMPARED = object()
+
 
 def check(ok, what, detail=""):
     RESULTS.append((bool(ok), what))
@@ -77,12 +82,57 @@ def check(ok, what, detail=""):
     return bool(ok)
 
 
+class Ran:
+    """One built image's result: its stdout lines AND how it exited.
+
+    Both halves are carried because an image that builds, links, and then dies
+    at its first instruction produces exactly the same stdout as one that
+    legitimately printed nothing — an empty list — and reporting only the first
+    makes "crashed" indistinguishable from "answered wrongly". `subprocess`
+    reports a signal death as a negative returncode, so `died` names the signal
+    and `exited` names an ordinary nonzero exit.
+    """
+    __slots__ = ("lines", "returncode", "stderr")
+
+    def __init__(self, run):
+        self.lines = [ln for ln in run.stdout.split("\n") if ln.strip() != ""]
+        self.returncode = run.returncode
+        self.stderr = (run.stderr or "").strip()
+
+    @property
+    def died(self):
+        """True if the process was killed by a signal, named."""
+        if self.returncode is not None and self.returncode < 0:
+            import signal
+            try:
+                name = signal.Signals(-self.returncode).name
+            except ValueError:
+                name = f"signal {-self.returncode}"
+            return f"was killed by {name} (exit {self.returncode})"
+        return None
+
+    def why_empty(self):
+        """Why there are no lines: a crash, a nonzero exit, or genuinely none.
+
+        "" when the image exited 0 — a clean run that printed nothing is the
+        program's own answer and needs no excuse.
+        """
+        died = self.died
+        if died:
+            return died
+        if self.returncode != 0:
+            return (f"exited {self.returncode} without printing"
+                    + (f"; stderr: {self.stderr[-300:]}" if self.stderr
+                       else ""))
+        return ""
+
+
 def build_and_run(tmpdir, name, source):
     """Compile `source` through the formal arm64 backend and run it.
 
-    Returns the stdout lines, or raises AssertionError with the build output —
-    a build failure is a test failure here, never a skip: `struct.mojo` is in
-    this repository and a program that imports it must build.
+    Returns a `Ran`, or raises AssertionError with the build output — a build
+    failure is a test failure here, never a skip: `struct.mojo` is in this
+    repository and a program that imports it must build.
     """
     path = os.path.join(tmpdir, f"{name}.py")
     with open(path, "w") as f:
@@ -95,28 +145,78 @@ def build_and_run(tmpdir, name, source):
     if result.returncode != 0:
         raise AssertionError(
             f"build failed: {(result.stderr or result.stdout).strip()[-600:]}")
-    run = subprocess.run([out], capture_output=True, text=True,
-                         timeout=RUN_TIMEOUT)
-    return [ln for ln in run.stdout.split("\n") if ln.strip() != ""]
+    return Ran(subprocess.run([out], capture_output=True, text=True,
+                              timeout=RUN_TIMEOUT))
 
 
-def expect_lines(tmpdir, name, source, expected, what):
-    """The program's printed integers must equal `expected`, element-wise."""
+def expect_lines(tmpdir, name, source, expected, what, into=None,
+                announce=True):
+    """The program's printed integers must equal `expected`, element-wise.
+
+    **Both checks are always recorded.** Returning early after the length
+    mismatch made the number of checks a function of how many cases failed —
+    `144`, `145`, `147`, `148` checks on an unchanged tree — so a red run's
+    total was a symptom of the failures rather than a fixed denominator, and a
+    reader could not tell a missing check from a failing one. Each case now
+    contributes exactly two checks, whatever it does.
+
+    `into` redirects those two checks to another tally instead of `RESULTS`,
+    which is for a caller measuring THIS harness rather than `struct`: the
+    probes in `test_the_check_count_is_fixed_whatever_the_verdicts` are
+    supposed to fail, and a failure that reached the suite tally would make it
+    red for a reason that has nothing to do with `struct`. It is the same code
+    path either way, so what the probe measures is real. `announce=False`
+    suppresses the FAIL lines, which is the other half of that: a probe's
+    expected failure printed among the suite's real ones is noise.
+    """
+    tally = RESULTS if into is None else into
+
+    def _say(ok, text, detail=""):
+        if not ok and announce:
+            print(f"FAIL  {text}" + (f": {detail}" if detail else ""),
+                  flush=True)
+
     try:
-        got = build_and_run(tmpdir, name, source)
+        ran = build_and_run(tmpdir, name, source)
     except AssertionError as e:
-        check(False, what, str(e))
+        tally.append((False, what))
+        tally.append((False, f"{what} (value comparison)"))
+        _say(False, what, str(e))
         return None
-    if not check(len(got) == len(expected), what,
-                 f"expected {len(expected)} numbers, program printed "
-                 f"{len(got)}: {got}"):
-        return None
-    bad = [(i, g, e) for i, (g, e) in enumerate(zip(got, expected))
-           if int(g) != e]
-    check(not bad, what,
-          f"{len(bad)} of {len(expected)} differ, first: "
-          + ", ".join(f"line {i}: got {g}, CPython says {e}"
-                      for i, g, e in bad[:4]))
+    got = ran.lines
+    why = ran.why_empty()
+    # `bad` holds (line, got, expected) triples, so the report below must
+    # unpack THREE. It unpacked two, which raised ValueError on the first
+    # wrong value — and `main()`'s catch-all turned that into a single
+    # "raised" check, so a wrong-value failure cost the run one of its two
+    # checks. That is the moving total this file had, and it meant the most
+    # informative failure in the suite (the bytes are wrong) was the one that
+    # could not be printed.
+    if len(got) == len(expected):
+        bad = [(i, g, e) for i, (g, e) in enumerate(zip(got, expected))
+               if int(g) != e]
+        count_detail = ""
+        values_detail = (f"{len(bad)} of {len(expected)} differ, first: "
+                         + ", ".join(f"line {i}: got {g}, CPython says {e}"
+                                     for i, g, e in bad[:4])) if bad else ""
+    else:
+        # No value comparison is possible, so the second check FAILS and reports
+        # why the count was wrong. Not `bad = None`, which would read as "no
+        # differences" and pass the check on a comparison that was never made —
+        # a check that cannot fail is not a check. This is also what keeps the
+        # two checks honest about each other: a case whose program printed the
+        # wrong number of lines failed BOTH halves of the expectation.
+        bad = _NOT_COMPARED
+        count_detail = (f"expected {len(expected)} numbers, program printed "
+                        f"{len(got)}: {got}"
+                        + (f"; the image {why}" if why else ""))
+        values_detail = (why or f"printed {got} instead of "
+                         f"{len(expected)} numbers") + \
+            " (values were never compared: the count was already wrong)"
+    tally.append((not count_detail, what))
+    _say(not count_detail, what, count_detail)
+    tally.append((not bad, f"{what} (values)"))
+    _say(not bad, f"{what} (values)", values_detail)
     return got
 
 
@@ -600,7 +700,7 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
                "        i = i + 1\n"
                "    print(n)\n")
         try:
-            got = build_and_run(tmpdir, f"refuse_{fmt.strip('<>')}", src)
+            ran = build_and_run(tmpdir, f"refuse_{fmt.strip('<>')}", src)
         except AssertionError as e:
             check(False, f'pack("{fmt}") is refused, not wrong', str(e))
             continue
@@ -608,18 +708,66 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
         # than printing, so a refusal shows up as a nonzero exit; a wrong
         # answer would print `size`. Accept either "printed 0" or "the read
         # of the empty list stopped the program".
-        run = subprocess.run(
-            [os.path.join(tmpdir, f"refuse_{fmt.strip('<>')}.bin")],
-            capture_output=True, text=True, timeout=RUN_TIMEOUT)
-        refused = (got == ["0"]) or (run.returncode != 0)
+        got = ran.lines
+        refused = (got == ["0"]) or (ran.returncode != 0)
         check(refused,
               f'pack("{fmt}") must produce nothing (it needs 8 values and '
               f"only 8 argument registers exist, one of which is the format); "
               f"the program instead read {size - len(got)} of {size} bytes "
-              f"and exited {run.returncode}")
+              f"and exited {ran.returncode}"
+              + (f"; the image {ran.died}" if ran.died else ""))
 
 
 # ── 5. the module is where the resolver looks, and the corpus imports it ─────
+
+def test_the_check_count_is_fixed_whatever_the_verdicts(tmpdir):
+    """A failing case records the SAME number of checks as a passing one.
+
+    This suite's total used to be a function of how many cases failed —
+    `expect_lines` returned early after the length mismatch, so a red run
+    reported fewer checks than a green one (`144` / `145` / `147` / `148` on an
+    unchanged tree). That is not cosmetic: a moving total means the denominator
+    moves, so a reader cannot tell a check that was not reached from one that
+    was reached and failed, and the total is useless as evidence.
+
+    Both halves are measured here rather than asserted: a case whose program
+    prints the right number of wrong values, and one whose program prints
+    nothing at all. The second is the shape the real flake took.
+
+    `into=reached`, because two of the three probes are SUPPOSED to fail — a
+    probe recorded in the suite's own tally would be indistinguishable from the
+    bug it exists to detect. The count is read off a second tally the same
+    `expect_lines` populates, so what is measured is the real code path.
+    """
+    cases = [
+        # (name, source, expected, shape, checks reached, checks failed)
+        # `want_failed` is 2 for the count mismatch because a program that
+        # printed the wrong NUMBER of lines cannot have its values compared —
+        # so the second check fails too, on the attribution rather than on a
+        # comparison. That is the whole point of the shape: an early return
+        # used to make it 1.
+        ("checkcount_wrong_values",
+         "from struct import calcsize\n\ndef main():\n    print(0)\n",
+         [struct.calcsize("<I")], "values differ, count matches", 2, 1),
+        ("checkcount_prints_nothing",
+         "from struct import calcsize\n\ndef main():\n    pass\n",
+         [struct.calcsize("<I")], "prints nothing", 2, 2),
+        ("checkcount_correct",
+         "from struct import calcsize\n\ndef main():\n"
+         f'    print(calcsize("<I"))\n',
+         [struct.calcsize("<I")], "everything agrees", 2, 0),
+    ]
+    for name, src, expected, shape, want_checks, want_failed in cases:
+        reached = []
+        expect_lines(tmpdir, name, src, expected, f"count probe: {shape}",
+                     into=reached, announce=False)
+        check(len(reached) == want_checks,
+              f"a `{shape}` case reaches exactly {want_checks} checks; got "
+              f"{len(reached)}")
+        check(sum(1 for ok, _ in reached if not ok) == want_failed,
+              f"a `{shape}` case fails {want_failed} of its {want_checks} "
+              f"checks; got {sum(1 for ok, _ in reached if not ok)} failures")
+
 
 def test_module_resolves_and_is_exported(tmpdir):
     """`struct` resolves to the module source and exports the four entry points.
@@ -737,6 +885,7 @@ def main():
         test_the_unservable_list_is_exactly_the_wide_pack_formats,
         test_unservable_formats_are_refused_not_wrong,
         test_the_module_builds_on_both_backends,
+        test_the_check_count_is_fixed_whatever_the_verdicts,
         test_module_resolves_and_is_exported,
         test_struct_is_a_builtin_name_not_a_host_module,
         test_the_seven_importers_no_longer_refuse_on_the_import,
