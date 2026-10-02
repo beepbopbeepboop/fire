@@ -4772,37 +4772,29 @@ class Interpreter:
 
     @staticmethod
     def _decode_c_escapes(s: str) -> str:
-        r"""Decode C-style backslash escapes (\n, \t, \\, \xHH, ...) the same
-        way the compiled path does. The parser strips a string literal's outer
-        quotes but leaves escape sequences as raw two-character runs (backslash
-        + letter), so `"ab\ncd"` reached here as the 6-char text `ab\ncd`
-        (backslash-n literal) — the interpreter then reported len 6 and wrong
-        indices, while `mojo build` reported 5 (the C compiler decodes the
-        escape in the emitted C literal). This realigns the two: same escape
-        set as gimple_codegen._c_escape passes through to C. Note the compiled
-        path does not preserve raw (r"...") strings either — that's a shared,
-        pre-existing limitation, so decoding here removes an interp-vs-compiled
-        divergence rather than introducing a new one."""
-        if '\\' not in s:
-            return s
-        simple = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"',
-                  "'": "'", '0': '\0', 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
-        out = []
-        i, n = 0, len(s)
-        while i < n:
-            c = s[i]
-            if c == '\\' and i + 1 < n:
-                nxt = s[i + 1]
-                if nxt in simple:
-                    out.append(simple[nxt]); i += 2; continue
-                if nxt == 'x' and i + 3 < n and s[i + 2] in '0123456789abcdefABCDEF' \
-                        and s[i + 3] in '0123456789abcdefABCDEF':
-                    out.append(chr(int(s[i + 2:i + 4], 16))); i += 4; continue
-                # Unknown escape — leave the backslash as-is (Python's own
-                # behavior for e.g. `"\d"`), matching _c_escape's `\\` passthrough.
-                out.append(c); i += 1; continue
-            out.append(c); i += 1
-        return ''.join(out)
+        """This tree's ONE C-escape decoder, which lives in `fire_compiler`
+        beside `_strip_string_prefix_and_quotes` — the module CLAUDE.md makes
+        the single source of truth for the front end.
+
+        The parser strips a string literal's outer quotes but leaves escape
+        sequences as raw two-character runs (backslash + letter), because the
+        compiled path hands the text to a C compiler, which decodes them. A
+        consumer that does not hand the text to a C compiler decodes it here
+        instead, which is what realigns this interpreter with `mojo build`
+        (`"ab\ncd"` is 5 characters, not 6).
+
+        This used to be a second, private copy of that table. It is a delegate
+        now: the formal backends' interning path needs the same decode, and two
+        copies of an escape table is two chances to disagree — see
+        `bugs/FORMAL_string_literal_escape_is_not_decoded.md`, where the third
+        consumer having no copy at all was a measured wrong answer on both
+        architectures (`len("a\nb")` was 4).
+
+        Note the compiled path does not preserve raw (r"...") strings either —
+        that's a shared, pre-existing limitation recorded on
+        `fire_compiler.decode_c_escapes`, so decoding here removes an
+        interp-vs-compiled divergence rather than introducing one."""
+        return N.decode_c_escapes(s)
 
     def _format_fstring_body(self, body: str) -> str:
         # Parse an f-string body (prefix/quotes already stripped) into its

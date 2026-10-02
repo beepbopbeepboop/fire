@@ -1717,7 +1717,26 @@ class X86_64Codegen:
 
         The bytes live after all the code (see `compile`), so a string is
         read-only data in the image's text — the same place the arm64 backend
-        puts them."""
+        puts them.
+
+        THE decode point for a string literal on this backend, and it is here
+        rather than at the call sites because every byte of every string on this
+        path goes through this one function — and because this path is the one
+        engine in the repository that does NOT hand the literal's text to a C
+        compiler, which is where `fire_compiler.py` leaves escapes decoded-by-
+        proxy. `fire_compiler.decode_c_escapes` is the tree's single decoder
+        (the interpreter and the arm64 backend delegate to the same one);
+        without this call `len("a\nb")` was 4 on a formal image and the printed
+        bytes carried a literal backslash, on both architectures, while
+        `fire.py run` and `fire.py build` both printed a real newline. See
+        `bugs/FORMAL_string_literal_escape_is_not_decoded.md`.
+
+        Decoding BEFORE the intern lookup is what makes interning by content
+        right: two literals differing only in escape spelling (`"\\t"` and a
+        spelled tab) now get the same key, which is what `==` on a string
+        address already assumes.
+        """
+        s = F.decode_c_escapes(s)
         if s in self._str_intern:
             return self._str_intern[s]
         label = f"str_{self._str_counter}"
@@ -3004,17 +3023,28 @@ class X86_64Codegen:
             comes back present.
         """
         # Both operands literal is a COMPILE-TIME answer, taken first because
-        # it is the one case where the answer is not a question about the
-        # representation. The empty needle is TRUE here, which is Python's
+        # it is the one case where the answer is not a question about
+        # the representation. The empty needle is TRUE here, which is Python's
         # rule and also what `strstr` would say, so the constant and the call
         # cannot disagree.
+        #
+        # BOTH SIDES ARE DECODED before the substring test, and that is what
+        # keeps the constant and the call agreeing now that the call's operands
+        # are interned decoded text. `"t" in "\t"` is a needle of `t` against a
+        # haystack of one TAB, so it is FALSE; folding it on the raw source text
+        # made it TRUE, because the raw haystack is a backslash and a `t` and
+        # contains a `t`. `fire_compiler.decode_c_escapes` is the one decoder,
+        # the same one `_intern_string` uses — see
+        # bugs/FORMAL_string_literal_escape_is_not_decoded.md.
         if isinstance(left, F.StringLiteral) and isinstance(right, F.StringLiteral):
             # The EMPTY needle is TRUE, which is Python's rule and what
             # `strstr` returns for it (the haystack itself, non-NULL). Folding
             # it to False because `bool("")` is False made the
             # both-operands-literal case disagree with the call the same
             # expression makes when either side is a name.
-            found = left.value == "" or left.value in right.value
+            needle = F.decode_c_escapes(left.value)
+            haystack = F.decode_c_escapes(right.value)
+            found = needle == "" or needle in haystack
             self._emit_mov_imm(Reg.RAX, (0 if found else 1) if invert
                                else (1 if found else 0))
             return

@@ -8107,8 +8107,34 @@ def print_literal(text: str) -> str:
     verbatim, because the format string is not built as C SOURCE. It is a
     string-table entry: the backends append a NUL and store the bytes, and a
     literal newline byte in the table is the newline printf writes. Escaping
-    here would put a backslash and an `n` on stdout instead."""
-    return text.replace("%", "%%")
+    here would put a backslash and an `n` on stdout instead.
+
+THE TEXT IS DECODED FIRST, and the order is the whole of it. A literal
+    reaches here as raw source text (`"a\\nb"` is four characters with a
+    backslash), and the decode is `fire_compiler.decode_c_escapes` — the one
+    decoder, which the backends' `_intern_string` calls for the same reason.
+    Decoding has to precede the `%` doubling because a `%` can ARRIVE from an
+    escape: `print("\\x25")` is one percent sign, and escaping the raw
+    two-character text `\\x25` finds nothing to double, so printf is handed a
+    bare `%` and consumes whatever is next in the varargs. Measured on this
+    tree: `print("\\x25")` printed an empty line while `print("100% done")` in
+    the same program printed correctly, which is exactly the signature of the
+    escaping having run on the wrong text.
+
+    THE BACKSLASHES ARE THEN DOUBLED, and that is not tidiness — it is what
+    makes the decode compose with the ONE that happens downstream. This
+    function's result becomes a `StringLiteral` that both backends intern, and
+    interning decodes (see `arm64_codegen._intern_string`). A second decode of
+    already-decoded text is not a no-op: a source `"a\\nb"` decodes once to
+    `a` NEWLINE `b`, which is right, but a source `"a\\\\nb"` decodes once to a
+    literal BACKSLASH followed by `n` and would decode a second time to a
+    newline — the wrong answer, and one that only shows on a string holding a
+    backslash. Doubling every backslash after the decode makes the second pass
+    an exact inverse: `\\\\` decodes back to a single backslash, and a real
+    newline byte is not a backslash and passes through untouched. So the format
+    string reaches the image as the text this function decoded, which is the
+    only order in which `%` and `\\n` can both be right."""
+    return F.decode_c_escapes(text).replace("\\", "\\\\").replace("%", "%%")
 
 
 def print_format(fragments: list, sep: str = " ", end: str = "\n") -> str:

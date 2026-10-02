@@ -1259,6 +1259,57 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool) -> int:
         j += 1
     return -1
 
+def decode_c_escapes(s: str) -> str:
+    r"""Decode C-style backslash escapes in a string literal's BODY.
+
+    THE single decoder for this tree, and every engine calls it (CLAUDE.md:
+    consolidate duplicates rather than maintaining parallel implementations — the
+    interpreter and the compiled path each carried their own copy and the formal
+    backends had none, which is
+    bugs/FORMAL_string_literal_escape_is_not_decoded.md).
+
+    Why a consumer has to call it at all: the parser strips a string literal's
+    outer quotes and hands the body on as RAW SOURCE TEXT, because the compiled
+    path passes that text to a C compiler, which decodes the escapes itself.
+    A consumer that does not hand the text to a C compiler has to do it here.
+
+        The set: the C simple escapes, plus \xHH.
+
+    \n \t \r \\ \" \' \0 \a \b \f \v, then \x followed by two hex digits. An
+    UNKNOWN escape keeps its backslash (`"\d"` is a backslash and a d, which is
+    CPython's own behaviour and what `gimple_codegen._c_escape` passes through),
+    and a trailing lone backslash is kept verbatim. That is deliberately
+    permissive: a recognised escape it gets WRONG is a wrong answer, while an
+    unrecognised one it leaves alone is what the source most likely meant.
+
+    Not in scope, and worth saying so: RAW strings. `_scan_string_end` records
+    that no engine here preserves `r"..."`, so a literal's body arriving here has
+    already lost the distinction and decoding will not make it worse. Deciding
+    what a raw string should do is a question about the tokenizer, not this
+    function.
+    """
+    if '\\' not in s:
+        return s
+    simple = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"',
+              "'": "'", '0': '\0', 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == '\\' and i + 1 < n:
+            nxt = s[i + 1]
+            if nxt in simple:
+                out.append(simple[nxt]); i += 2; continue
+            if nxt == 'x' and i + 3 < n and s[i + 2] in '0123456789abcdefABCDEF' \
+                    and s[i + 3] in '0123456789abcdefABCDEF':
+                out.append(chr(int(s[i + 2:i + 4], 16))); i += 4; continue
+            # Unknown escape — leave the backslash as-is (CPython's own
+            # behaviour for e.g. "\d"), matching gimple_codegen._c_escape's
+            # `\\` passthrough.
+            out.append(c); i += 1; continue
+        out.append(c); i += 1
+    return ''.join(out)
+
 def _ends_inside_string(line: str) -> bool:
     r"""True when `line` stops part-way through an unterminated string literal.
 

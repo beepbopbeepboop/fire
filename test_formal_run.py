@@ -1672,7 +1672,12 @@ CASES = [
      "    d._mlir_value = 7\n"
      "    print(\"v = %d\\n\", d._mlir_value)\n"
      "    return 0\n",
-     0, "v = %d\\n 7"),
+     # `print("v = %d\n", …)` — the EXPECTED stdout carries a real NEWLINE,
+     # because a string literal is decoded before it is interned and
+     # `fire.py run` / `fire.py build` both print a real newline there too
+     # (bugs/FORMAL_string_literal_escape_is_not_decoded.md). It used to carry
+     # a literal backslash-n, which was this suite asserting the bug.
+     0, "v = %d\n 7"),
     # GUARD, and it is here because the case above is not enough on its own:
     # the identical struct under a name that is NOT on the list must keep
     # building, or the fix has become "refuse every struct". Before the fix
@@ -1687,7 +1692,12 @@ CASES = [
      "    d._mlir_value = 7\n"
      "    print(\"v = %d\\n\", d._mlir_value)\n"
      "    return 0\n",
-     0, "v = %d\\n 7"),
+     # `print("v = %d\n", …)` — the EXPECTED stdout carries a real NEWLINE,
+     # because a string literal is decoded before it is interned and
+     # `fire.py run` / `fire.py build` both print a real newline there too
+     # (bugs/FORMAL_string_literal_escape_is_not_decoded.md). It used to carry
+     # a literal backslash-n, which was this suite asserting the bug.
+     0, "v = %d\n 7"),
     # A name on the list that this image has NO declaration of is still
     # refused — there is no field list to bring up — but the reason it now
     # gives is one it has checked ("this image has no declaration of Span")
@@ -1723,12 +1733,11 @@ CASES = [
      "    var s = String()\n"
      "    print(\"len=%d\\n\", len(s))\n"
      "    return 0\n",
-     # The expected stdout carries a LITERAL backslash-n, not a newline: a
-     # string literal on this path is stored unescaped, so `print` receives
-     # the two characters `\` and `n`. That is verified against the repo's own
-     # committed `test_output.txt` (35 bytes with literal backslashes), so the
-     # expectation is the representation, not a bug in it.
-     0, "len=%d\\n 0"),
+     # The expected stdout carries a real NEWLINE: a string literal is
+     # decoded before it is interned, so `print`'s `\n` is the newline printf
+     # writes. It used to carry a LITERAL backslash-n, which was this suite
+     # asserting the bug (bugs/FORMAL_string_literal_escape_is_not_decoded.md).
+     0, "len=%d\n 0"),
 
     # ── wave 5 (E4): `in` on a string, `+=` on a string, and the rest of
     # ── the arithmetic surface a `char *` reaches ──────────────────────────
@@ -1818,24 +1827,57 @@ CASES = [
      "        r = r + 256\n"
      "    printf(\"r=%d\\n\", r)\n"
      "    return 0\n", 0, "r=349"),
-    # The unescaping boundary, and it is the reason this case exists at all:
-    # string literals are stored UNESCAPED on this path, so `"\t"` is a
-    # BACKSLASH and a `t` — two characters — and a backslash is not a tab.
-    # A membership test written against the escaped reading would answer a
-    # question nobody asked. All four assertions are here because each is a
-    # different way to get it wrong: the letter, the backslash, the length,
-    # and the absent letter.
-    ("str_membership_on_the_unescaped_representation",
-     "def main(n):\n"
-     "    r = 0\n"
-     "    if \"t\" in \"\\t\":\n"
-     "        r = r + 1\n"
-     "    if \"x\" in \"\\t\":\n"
-     "        r = r + 2\n"
-     "    if len(\"\\t\") == 2:\n"
-     "        r = r + 4\n"
-     "    printf(\"r=%d\\n\", r)\n"
-     "    return 0\n", 0, "r=5"),
+# The unescaping boundary, and it is the reason this case exists at all.
+     # REWRITTEN, because the claim in the comment it replaces was FALSE: it
+     # said a string literal is stored UNESCAPED on this path, so `"\t"` is a
+     # BACKSLASH and a `t`. That was true until
+     # bugs/FORMAL_string_literal_escape_is_not_decoded.md, which measured the
+     # opposite — the formal backends intern the RAW source text because they
+     # are the one engine here that does not hand a literal to a C compiler to
+     # decode it, so `len("\t")` was 4-spelled-2 and a printed line ending came
+     # out as a literal `\n`. Both other engines in this repository
+     # (`fire.py run`, `fire.py build`) decoded it all along, so the boundary
+     # was the parser and BOTH consumers decoded; now all three do.
+     #
+     # The boundary is still what this case tests, and it is still four
+     # different ways to get it wrong, which is why the assertions are kept
+     # rather than deleted with the comment:
+     #   the letter `t` is NOT in a tab      (1 -> absent)
+     #   the letter `x` is NOT in a tab      (2 -> absent)
+     #   a tab is not TWO characters         (4 -> absent)
+     # and `r` therefore stays 0, which is what CPython prints for the same
+     # program. `"\t" in "\t"` (both sides a literal, folded at compile time)
+     # is the pair that makes the two lowerings comparable — see
+     # `str_membership_literal_fold_agrees_with_the_call`.
+     ("str_membership_on_the_decoded_representation",
+      "def main(n):\n"
+      "    r = 0\n"
+      "    if \"t\" in \"\\t\":\n"
+      "        r = r + 1\n"
+      "    if \"x\" in \"\\t\":\n"
+      "        r = r + 2\n"
+      "    if len(\"\\t\") == 2:\n"
+      "        r = r + 4\n"
+      "    printf(\"r=%d\\n\", r)\n"
+      "    return 0\n", 0, "r=0"),
+     # The same expression with a NAME in it, which is the shape that makes the
+     # libc `strstr` rather than the compile-time fold. It exists so the two
+     # lowerings are pinned to the SAME answer on the same text: a haystack
+     # name's bytes are the interned literal's bytes, so a fold that read raw
+     # source text and a call that read interned bytes could disagree, and
+     # nothing else in this file compares them.
+     ("str_membership_literal_fold_agrees_with_the_call",
+      "def main(n):\n"
+      "    s = \"\\t\"\n"
+      "    r = 0\n"
+      "    if \"t\" in s:\n"
+      "        r = r + 1\n"
+      "    if \"\\t\" in s:\n"
+      "        r = r + 2\n"
+      "    if \"x\" in s:\n"
+      "        r = r + 4\n"
+      "    printf(\"r=%d\\n\", r)\n"
+      "    return 0\n", 0, "r=2"),
     # A haystack that is a DERIVED INTERIOR POINTER rather than a literal —
     # the shape `lstrip` returns, and the one the pre-change pointer-based
     # reasoning got wrong. Also the case where the needle and the haystack are
@@ -1865,6 +1907,88 @@ CASES = [
      "        r = r + 4\n"
      "    printf(\"r=%d\\n\", r)\n"
      "    return 0\n", 0, "r=5"),
+
+    # ── a string literal's ESCAPES are decoded, on this path too ────────────
+    #
+    # `fire.py run` and `fire.py build` both decoded a literal's escapes and
+    # the formal backends did not, because they are the one engine in this
+    # repository that does not hand the literal's text to a C compiler to
+    # decode for it. So `len("a\nb")` was 4 where every other engine says 3,
+    # and `print("a\nb")` wrote a backslash and an `n`. See
+    # bugs/FORMAL_string_literal_escape_is_not_decoded.md for the measurement;
+    # these are the cases that pin the fix, and each one is a different way to
+    # get the decode wrong rather than a restatement of the first.
+    #
+    # `len` of an escaped literal — the arithmetic form of the defect, so it
+    # cannot be explained away as a printing artefact. Three escapes in one
+    # program because each decodes to a DIFFERENT byte and a decoder that only
+    # knew `\n` would pass two of the three.
+    ("str_escape_len_is_decoded",
+     "def main(n):\n"
+     "    printf(\"%d %d %d %d\\n\", len(\"a\\nb\"), len(\"\\t\"), "
+     "len(\"a\\\\b\"), len(\"q\\\"q\"))\n"
+     "    return 0\n", 0, "3 1 3 3"),
+    # The PRINTED BYTES, which is the symptom a user sees. `od -c` on this
+    # program's output on both architectures is
+    #   a \n b \n x \t y \n \n
+    # and the case's expected stdout is the same three lines, so a decoder that
+    # dropped an escape, doubled one, or left the backslash in place all fail
+    # here even where `len` happened to agree.
+    ("str_escape_printed_bytes_are_decoded",
+     "def main(n):\n"
+     "    print(\"a\\nb\")\n"
+     "    printf(\"c\\nd\\n\")\n"
+     "    print(\"\\tx\\ty\\n\")\n"
+     "    return 0\n", 0, "a\nb\nc\nd\n\tx\ty\n\n"),
+    # A BACKSLASH the source meant, twice over, and this is the case that
+    # caught a second bug in the fix rather than in the original defect. The
+    # decode happens in `_intern_string`, and `print`'s format string is
+    # interned too — so decoding it once in the format builder and again in
+    # the intern would turn the second of these two strings into a real
+    # newline.
+    #
+    # Two spellings one level apart, which is the whole point:
+    #   `"a\nb"`  the body is a, backslash, n, b — a REAL newline → 3
+    #   `"a\\nb"` the body is a, backslash, backslash, n, b → a LITERAL
+    #             backslash and an `n` → 4
+    # A fix that decoded twice, or not at all, gets the first right and the
+    # second wrong (5 and a real newline) or (4 and 4, with the first printing
+    # `a\nb`), so the pair distinguishes them. This is the case `print` and
+    # `len` are both in because they take different paths — one builds a
+    # format string that is interned, the other a length.
+    ("str_escape_a_literal_backslash_stays_one_backslash",
+     "def main(n):\n"
+     "    a = \"a\\nb\"\n"
+     "    b = \"a\\\\nb\"\n"
+     "    printf(\"%d %d\\n\", len(a), len(b))\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    return 0\n", 0, "3 4\na\nb\na\\nb\n"),
+    # A `%` that ARRIVES FROM AN ESCAPE, which is the case that found the
+    # ordering bug: `print_literal` doubles `%` because a format string is not
+    # a string, and it used to do that on the RAW text — where `print("\x25")`
+    # is a backslash, an `x`, a `2` and a `5`, with no `%` to double. printf
+    # was then handed a bare `%` and read a vararg it was never given, so it
+    # printed an EMPTY LINE. `100% done` sits beside it because that spelling
+    # has a real `%` in the source and printed correctly all along, which is
+    # what makes the pair a diagnosis rather than two coincidences.
+    ("str_escape_a_percent_sign_from_an_escape_is_not_a_conversion",
+     "def main(n):\n"
+     "    print(\"\\x25\")\n"
+     "    print(\"100% done\")\n"
+     "    printf(\"q=%s\\n\", \"a\\x25b\")\n"
+     "    return 0\n", 0, "%\n100% done\nq=a%b\n"),
+    # An escape that is NOT one of the simple set is left alone, backslash and
+    # all, which is CPython's own behaviour and what `gimple_codegen._c_escape`
+    # passes through to C. A decoder that refused an unknown escape, or that
+    # dropped the backslash, would change this program's answer; one that
+    # guessed a meaning would too. `\d` is a regex fragment and is in the
+    # corpus in real literals, so this is not a synthetic spelling.
+    ("str_escape_an_unknown_escape_keeps_its_backslash",
+     "def main(n):\n"
+     "    printf(\"%d\\n\", len(\"\\d\"))\n"
+     "    print(\"\\d\")\n"
+     "    return 0\n", 0, "2\n\\d\n"),
     # A list haystack still takes the blob scan. This is a GUARD: the string
     # case is dispatched BEFORE the blob case now, and a haystack whose kind
     # this path cannot see must still reach the blob path rather than being
