@@ -449,7 +449,8 @@ has **no Lean `axiom` and no `opaque`** anywhere; everything is assumed in the
 | 5 | `formal/x86_64_proof_gen.py:690` | the x86-64 end-to-end theorem |
 | 6 | `formal/arm64_proof_gen.py:6910` | every extern call step (`True := by trivial`) |
 | 7 | `formal/arm64_proof_gen.py:4077,4258,4790,4797,4875,4891,5089` | `all_goals (first \| done \| sorry)` CFG leaves — 13 sorries in 9 of 43 arm64 proofs, owned by `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` |
-| 8 | ~~`lib/ProofLib.lean:895`~~ | **REMOVED 2026-09-28.** This row said "All per-node lemmas currently admit". Read, they do not: all seven `evalExpr_*` lemmas are `rfl`, which is the whole content of each statement, and `lib/ProofLib.lean` contains no `sorry` or `admit` at all. The section comment above them said the same false thing and said so in the present tense; both are corrected. The trust that remains is row 4 — `rfl` proves the unfolding of `evalExpr`, not that `evalExpr` is what the machine runs. |
+| 8 | FORMAL.md §7a | **the ADMITTED HOST CONTRACTS**: one `sorry` per `@admitted(...)` in a `formal/hostmods/` module, counted by the same census as every other hole, named per file by a `trust:` line, and classified by `tools/formal_sweep.py` as `built-with-admitted-contracts`. 15 of them across `subprocess`, `ctypes`, `fcntl`, `concurrent.futures` and `threading`. This is the FIRST row here that is about the HOST rather than about this compiler's own code: it is a claim about a second process, a thread, a dynamic loader and a kernel lock, declared in the Mojo source and checked for scope. The policy is §7a; the per-contract assumptions are in each module's own `@admitted` text |
+| 9 | ~~`lib/ProofLib.lean:895`~~ | **REMOVED 2026-09-28.** This row said "All per-node lemmas currently admit". Read, they do not: all seven `evalExpr_*` lemmas are `rfl`, which is the whole content of each statement, and `lib/ProofLib.lean` contains no `sorry` or `admit` at all. The section comment above them said the same false thing and said so in the present tense; both are corrected. The trust that remains is row 4 — `rfl` proves the unfolding of `evalExpr`, not that `evalExpr` is what the machine runs. |
 
 **The two holes in the mechanism that checks this** were both closed in the
 five-agent round of 2026-09-27, by that round's [5] (`formal/lean.py`) and the
@@ -500,6 +501,141 @@ figure.
 Under this programme a proof will be asked to carry real weight, so the honesty
 mechanism has to see vacuity and not only holes. That is part of phase 3's exit
 criterion, not a separate cleanup.
+
+---
+
+## 7a. ADMITTED HOST CONTRACTS — the one place the policy lives
+
+A module can be **unreachable** on this target and still be answerable. `subprocess`
+needs a second process, `ctypes` needs a dynamic loader for foreign code,
+`threading` and `concurrent.futures` need a thread, `fcntl` needs a kernel-held
+lock — none of which a freestanding image linking libSystem and nothing else has.
+`formal/imports.py` refused every file importing one, which is a true statement
+about the TARGET standing where a statement about the FILE belongs, and it is why
+30 files of the arm64 sweep were reported for a fact no work in this tree can
+change.
+
+The question this adds is the one the `HOST_MODELLED`/`HOST_UNREACHABLE` split was
+missing: **what would a proof have to ASSUME about the host to accept the file?**
+
+Each such module gets a Mojo-side model of its **API shape** in
+`formal/hostmods/`, and each operation whose answer is an external fact is
+declared an **admitted contract**:
+
+```mojo
+@admitted("the child's exit status, an integer in 0..255, and the captured "
+          "output bytes are an arbitrary byte string")
+def run(request: str) -> int:
+    ...
+```
+
+Five rules, each of which is enforced somewhere other than this paragraph, because
+a rule stated only here is a rule that rots.
+
+**1. The declaration is written once, in the Mojo source.** `formal/admitted.py`
+is the only reader and the only place the text is shaped; the `trust:` line, the
+generated Lean docstring and the sweep's class reason are all rendered from it. A
+reader of `formal/hostmods/subprocess.mojo` reads the same sentence a reader of
+the `trust:` line does.
+
+**2. An admission may constrain the host's ANSWER and nothing else.**
+`formal/admitted.py`'s `contract_text_is_scoped` refuses any contract text
+containing "always", "never", "deterministic", "empty" or "no other". A claim
+about what the host *does* is not an admission — it is an unproved assertion with a
+proof attached to it, which is exactly what the deleted
+`dylib_export_contract_stub`'s `fun n => n` was.
+
+**3. It is `sorry`, not `axiom`, because `sorry` is countable.** §7's position is
+that this project has no `axiom` and no `opaque` anywhere, and that is load-bearing
+rather than stylistic: `formal/lean.py`'s census counts what Lean reports as
+`declaration uses 'sorry'`, so an admission written as an `axiom` would be a claim
+of trust that no count ever reports. Each contract is emitted as
+
+```lean
+def admitted_subprocess_run (req : UInt64) : UInt64 := by sorry
+```
+
+`def` and not `theorem`, because a `theorem`'s type must be a `Prop` and this
+declaration's type is the contract's **value**; measured, `theorem` is refused
+with `type of theorem … is not a proposition`. The `sorry` is counted all the
+same — Lean's warning fires for any declaration reaching `sorryAx`.
+
+**4. The contract IS the model, and only what depends on it is admitted.**
+`formal/arm64_proof_gen.py`'s `_call_go` refuses any callee it has no `_go` for,
+which is right for an extern (an extern's return value is not a term the model can
+invent) and wrong for a callee whose return value *is* a declared contract. An
+admitted call renders as the `sorry`-proved `admitted_*` applied to its argument,
+so the model's value is the contract's. Then `native_decide` cannot close a
+theorem about that value — it *executes* the model — so those theorems are
+emitted as named `sorry`s by `_decide_or_admit`, and **everything else in the file
+keeps its normal proof**. The condition is about CALLS, not about contracts being
+present: a file that imports `subprocess` and never calls it links a library with
+seven contracts in it and its own proof is decidable.
+
+**5. An admitted call REFUSES at run time, with a status that cannot be mistaken
+for the host's answer.** `subprocess.run` prints which contract stopped it and
+exits **125** — outside 0..255, so it *cannot* be read as a child's exit status.
+A refusal that returned a plausible number would be a fabricated answer wearing a
+diagnostic's clothes, and the number has to make the mistake impossible rather
+than unlikely.
+
+### What each contract assumes
+
+One table, and it is generated from the declarations rather than written here —
+`python3 test_formal_admitted.py counts` prints the counts and the module
+docstrings carry the full text of each.
+
+| module | contracts | assumes |
+|---|---|---|
+| `subprocess` | 7 | the child's exit status is an integer in 0..255; captured output is an arbitrary byte string; `call` raises nothing for a non-zero status |
+| `ctypes` | 2 | `CDLL` returns 0 (no such library here) or a non-zero word this target's loader owns; a call through a handle returns one word, unconstrained |
+| `fcntl` | 1 | `flock` answers one word: 0 taken, or an errno that is a fact about every other holder of the file |
+| `concurrent.futures` | 2 | `submit` runs the callable on some thread and answers one word; `shutdown(wait=True)` has joined every thread |
+| `threading` | 3 | `Thread.start` begins running the target; `Thread.join` it has stopped; `Lock.acquire` is granted by the kernel |
+
+Everything a hostmod **decides** rather than admits is checked against CPython's
+own answer by `test_formal_admitted.py` — `subprocess`'s argument shapes and
+constants, `ctypes`'s thirteen sizes and five conversions and three buffer
+refusals, `fcntl`'s eleven flags, `Future`'s five states against a live `Future`,
+`threading`'s `TIMEOUT_MAX` against CPython's own `Lock`. That half is what stops
+the trust from growing to cover something CPython can simply be asked about, and it
+has already earned its keep: it caught `TIMEOUT_MAX` written as 2^63−1 when
+CPython's answer is 9223372036, and a timeout check that refused `-1` — the value
+`Lock.acquire` passes itself.
+
+### Where the trust is visible
+
+| surface | what it shows |
+|---|---|
+| `fire.py build --formal` | a `trust:` line naming each contract and its assumption — on its OWN line, not appended to `Proof:`, because the sweep builds with `--no-prove` and a note attached there would vanish for exactly the files whose class depends on it |
+| `result["admitted"]` | the same list as plain dicts, computed once, computed ALWAYS, handed to the proof generator so the proof and the verdict cannot describe different admissions |
+| the generated Lean | one `def admitted_<module>_<name> … := by sorry` per contract, each with its assumption in its docstring, under a `/- ADMITTED HOST CONTRACTS -/` header naming all of them |
+| `formal/lean.py`'s census | the count, as Lean reports it — the same instrument that counts every other hole in this project |
+| `tools/formal_sweep.py` | the class `built-with-admitted-contracts`: in the answerable denominator, NOT in the numerator |
+| `test_formal_admitted.py` | `ADMITTED_COUNTS`, pinned per module, failing in BOTH directions |
+
+The sweep class is the one that matters for a coverage report. A `pass` is this
+tool's claim that the image built and every symbol it binds is on its own link
+line; a file that also asked a second process to answer a question has not had
+that claim made for it. It is deliberately in the denominator and not the
+numerator, so the headline rate can only go **down** as more of the tree is
+admitted against — which is the direction a rate about provability has to move in.
+
+### Two limits worth knowing, both stated rather than hidden
+
+- **One word per admitted call.** `MojoExpr.call` in `lib/ProofLib.lean` carries a
+  single `UInt64`, so the AST layer of a proof can only evaluate a one-argument
+  call. An admission applied to two arguments in the source model and one in the
+  AST model would make `eval_eq_mojo` — the statement that the two layers are the
+  same function — *false* rather than merely unproved. So a call with any other
+  arity is refused by `_call_go`, naming the call. `fcntl.flock(fd, operation)`
+  keeps CPython's real two-argument signature anyway: the task is to model the API
+  shape, and a one-parameter `flock` would be a signature CPython does not have.
+- **A cross-dylib call whose value is used still has no machine half.** Admitting
+  the model is what lets the proof be *generated and typechecked*; the end-to-end
+  theorem about a program that calls into a dylib is a separate, pre-existing gap
+  (`bugs/FORMAL_lean_model_call_semantics.md`), and the generated file says so at
+  the call boundary rather than pretending.
 
 ---
 
