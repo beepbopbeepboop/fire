@@ -6538,7 +6538,16 @@ def gen_module_impl(self, stmts):
             # unrelated functions can each nest a `helper`, and the enclosing
             # scope is what says which of them this call site means.
             _gmatch = None
-            for _gown, _gsrc, _glift, _gpn, _gdef in _gmi_nested:
+            # Index-walk, NOT a tuple-unpack `for` target: a multi-element unpack
+            # in a for target erases each element to int64_t on the self-hosted
+            # path (the trap `discover_closures` and `lambdareduce` each
+            # document at length), and a boxed name never compares equal.
+            for _gni in range(len(_gmi_nested)):
+                _gent = _gmi_nested[_gni]
+                _gown = _as_str(_gent[0])
+                _gsrc = _as_str(_gent[1])
+                _glift = _as_str(_gent[2])
+                _gpn = _gent[3]
                 if _gsrc != _gcallee:
                     continue
                 if _gmatch is None:
@@ -6549,14 +6558,15 @@ def gen_module_impl(self, stmts):
             if _gmatch is None:
                 continue
             _glift, _gpn = _gmatch
-            for _gi, _ga in enumerate(_as_list(_gcall.args) or []):
+            _gargs = _as_list(_gcall.args) or []
+            for _gi in range(len(_gargs)):
                 if _gi >= len(_gpn):
                     break
-                if _arg_scalar_type(_scope_name, _ga, deep_str=True) != 'char *':
+                if _arg_scalar_type(_scope_name, _gargs[_gi], deep_str=True) != 'char *':
                     continue
                 _gmi_rec.setdefault(_glift, set()).add(_gpn[_gi])
-    for _glift in _gmi_rec:
-        self._int64_may_hold_str.setdefault(_glift, set()).update(_gmi_rec[_glift])
+    for _grk in _gmi_rec:
+        self._int64_may_hold_str.setdefault(_grk, set()).update(_gmi_rec[_grk])
     # Pass 1.3d-struct: the same unanimity-over-call-sites contract as the
     # loop above, for a REGISTERED STRUCT pointer.
     #
@@ -6644,7 +6654,16 @@ def gen_module_impl(self, stmts):
     # under the latter, and it has to be the enclosing scope's entry: two
     # unrelated functions can each nest a `helper`.
     _nested_lifted: dict = {}
-    for _gown, _gsrc, _glift, _gpn, _gdef in _gmi_nested:
+    # Index-walk, NOT a tuple-unpack `for` target: a multi-element unpack
+    # in a for target erases each element to int64_t on the self-hosted
+    # path (the trap `discover_closures` and `lambdareduce` each
+    # document at length), and a boxed name never compares equal.
+    for _gni in range(len(_gmi_nested)):
+        _gent = _gmi_nested[_gni]
+        _gown = _as_str(_gent[0])
+        _gsrc = _as_str(_gent[1])
+        _glift = _as_str(_gent[2])
+        _gpn = _gent[3]
         _nested_lifted.setdefault(_gown, {})[_gsrc] = _glift
 
     def _gmi_param_names(params) -> list:
@@ -6677,12 +6696,22 @@ def gen_module_impl(self, stmts):
     # see: its body IS reached (the walk descends into it) but it is credited
     # to the enclosing function, and its own name is in neither `_fn_by_name`
     # nor `_params`. One fixed point, fed both — not a second one.
-    for _gown, _gsrc, _glift, _gpn, _gdef in _gmi_nested:
+    # Index-walk, NOT a tuple-unpack `for` target: a multi-element unpack
+    # in a for target erases each element to int64_t on the self-hosted
+    # path (the trap `discover_closures` and `lambdareduce` each
+    # document at length), and a boxed name never compares equal.
+    for _gni in range(len(_gmi_nested)):
+        _gent = _gmi_nested[_gni]
+        _gown = _as_str(_gent[0])
+        _gsrc = _as_str(_gent[1])
+        _glift = _as_str(_gent[2])
+        _gpn = _gent[3]
         _params[_glift] = list(_gpn)
         _calls[_glift] = []
         _rets[_glift] = []
         _copies[_glift] = []
         _glift_rename = _nested_lifted.get(_glift, {})
+        _gdef = _gent[4]
         for _nd in _walk_ast(_as_list(_gdef.body)):
             if (isinstance(_nd, gimple_ctypes.AssignStmt)
                     and isinstance(_nd.target, IdentExpr)
