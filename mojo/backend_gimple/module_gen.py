@@ -48,6 +48,7 @@ import mojo.backend_gimple.device_select as _gmi_device_select
 import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
+import mojo.middle.funcs_shared as funcs_shared
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 # Re-export shared helpers from mojo.middle.module_shared via explicit imports.
@@ -4892,6 +4893,37 @@ def gen_module_impl(self, stmts):
                 self.struct_field_types[_xf_hstruct][_xf_hfield] = _xf_ct
 
     self._inferred_var_types: dict[str, dict[str, str]] = {}  # func_name -> {var_name -> type}
+    def _reconcile_param_container_kinds():
+        """Rewrite `_inferred_param_types` where a parameter's USAGE evidence
+        and its own body BINDINGS disagree about the container kind.
+
+        The two estimators see different things, and only one of them can see
+        the body: `_infer_param_types` reads uses (a subscript, an iteration, a
+        method call, a call the name is passed to) and runs before this
+        function exists; `resolve_shared._infer_local_var_types` reads
+        bindings, every assignment to the name in the whole body through every
+        branch. When they disagree about which CONTAINER it is, the binding
+        answer wins — see `funcs_shared.param_binding_ctype` for the rule and
+        why it is that narrow.
+
+        Applied to the shared table rather than at a reader, because that
+        table feeds the forward DECLARATION as well as the definition.
+        Correcting only the definition is `conflicting types for 'pick'` at
+        every call site, which is what the first attempt at this did.
+
+        Must run after `_inferred_var_types` is populated and before any
+        signature is emitted, which is why it is called from both of that
+        table's population loops rather than from one of them.
+        """
+        for _rn in list(getattr(self, '_inferred_var_types', None) or {}):
+            _rp = self._inferred_param_types.get(_rn)
+            if not _rp:
+                continue
+            for _rpn in list(_rp.keys()):
+                _fixed = funcs_shared.param_binding_ctype(self, _rn, _rpn, _rp[_rpn])
+                if _fixed != _rp[_rpn]:
+                    _rp[_rpn] = _fixed
+
     for s in all_functions:
         if isinstance(s, FunctionDef):
             # `_as_funcdef_node`, not the isinstance-narrowed `s` directly:
@@ -4920,6 +4952,7 @@ def gen_module_impl(self, stmts):
                 # mid-body under `current_func_name` — see
                 # `ginf.alias_multi_kind_locals`.
                 ginf.alias_multi_kind_locals(self, key, m)
+    _reconcile_param_container_kinds()
 
     def _arg_scalar_type(caller_name, a, deep_str=False,
                          prefer_refined_param=False, caller_struct=None):
@@ -6631,6 +6664,7 @@ def gen_module_impl(self, stmts):
                 # mid-body under `current_func_name` — see
                 # `ginf.alias_multi_kind_locals`.
                 ginf.alias_multi_kind_locals(self, key, m)
+    _reconcile_param_container_kinds()
 
     self._param_generator_api: dict[str, dict[str, str]] = {}
     self._fn_returns_generator: dict[str, str] = {}

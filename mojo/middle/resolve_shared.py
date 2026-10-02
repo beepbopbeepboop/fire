@@ -1253,12 +1253,32 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     #
     # A struct pointer counts as a kind: `Code *` vs `MojoList *` is the same
     # "no single C type" situation and the guard refuses it identically.
+    #
+    # `len(set(...))`, and that is load-bearing: `inferred[vname]` is one entry
+    # per ASSIGNMENT SITE, so a local assigned the SAME container kind three
+    # times produced three identical entries and this read as a conflict.
+    # The `TypeLattice.join_all` two lines above had already answered
+    # `['MojoSet *', 'MojoSet *', 'MojoSet *', 'int64_t'] -> MojoSet *` — a
+    # single kind — and the two disagreed about the same list.
+    #
+    # The consequence was silent and one-sided: a false conflict makes
+    # `_gen_stmt_AssignStmt`'s `_pin_to_ground_truth` False, which DISABLES
+    # the three "trust ground truth" rules for that name, so the local keeps
+    # whatever `_infer_param_types` guessed for it and every store is then
+    # judged against that guess. Real:
+    # `Tools/c-analyzer/c_parser/match.py`'s
+    # `match_storage(decl, expected)`, whose four branches all assign a SET
+    # (`{default}`, `{expected or default}`, `_info.STORAGE` (a frozenset)
+    # and a set comprehension) — the parameter's usage-only guess was
+    # `MojoList *`, so the set comprehension's store was refused with
+    # `cannot coerce MojoSet * to MojoList *` and the whole module fell out
+    # of the compiled path.
     _known_structs = set(gen.struct_field_types)
     conflicting: set = set()
     for vname in inferred:
-        _kinds = [t for t in inferred[vname]
+        _kinds = {t for t in inferred[vname]
                   if t in ('MojoDict *', 'MojoList *', 'MojoSet *')
-                  or gimple_exprtypes._is_known_struct_ptr_ctype(t, _known_structs)]
+                  or gimple_exprtypes._is_known_struct_ptr_ctype(t, _known_structs)}
         if len(_kinds) > 1:
             conflicting.add(_as_str(vname))
     gen._multi_kind_locals[_as_str(getattr(func, 'name', ''))] = conflicting

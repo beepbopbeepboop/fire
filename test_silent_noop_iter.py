@@ -367,6 +367,59 @@ def main():
 '''
 
 
+@case('parameter_rebound_to_one_container_kind_is_not_multi_kind')
+def _():
+    # A parameter that is REASSIGNED, always to the SAME container kind, is
+    # not a multi-kind name — and treating it as one is not a safe
+    # over-approximation, because `_multi_kind_locals` does not merely
+    # annotate: it switches OFF the three "trust ground truth" rules in
+    # `_gen_stmt_AssignStmt`, so the parameter keeps whatever
+    # `_infer_param_types` guessed for it from its USES and every store is
+    # then judged against that guess.
+    #
+    # `expected` here is iterated and truth-tested, which is equally
+    # consistent with a list, so usage said `MojoList *`; all four branches
+    # assign a set, so bindings said `MojoSet *`, and
+    # `_sce_simple_emit`'s container-kind guard refused the file outright.
+    # Real: `Tools/c-analyzer/c_parser/match.py`'s `match_storage`, whose
+    # refusal is gone and that module now compiles past it.
+    #
+    # Every branch assigns a SET, deliberately: one dict among them would
+    # make the name genuinely multi-kind, which is the OTHER case (and the
+    # one the box answers) — mixing the two here would test that instead.
+    # The set comprehension iterates a SET rather than a list because the
+    # element type of a comprehension over an unannotated list PARAMETER is a
+    # separate, already-filed gap
+    # (bugs/CODEGEN_unannotated_dict_param_value_type_not_propagated.md) and
+    # belongs to no case in this file.
+    #
+    # Both halves of the property are printed: the set survives the
+    # reassignment, AND the un-reassigned parameter next to it (usage and
+    # bindings agreeing, so nothing should change for it) still works — a
+    # fix that made every container parameter a set would pass the first
+    # line and fail the second.
+    return '''def pick(box, other):
+    if box is None:
+        box = {"a"}
+    elif box == "x":
+        box = {box}
+    else:
+        box = {v for v in box}
+    return sorted(box)
+
+
+def plain(items):
+    return items[0]
+
+
+def main():
+    print(pick(None, None))
+    print(pick("x", None))
+    print(pick({"q", "r"}, None))
+    print(plain(["first", "second"]))
+'''
+
+
 @case('next_iter_over_a_dict_items_expression')
 def _():
     # `next(iter(<expression>))`, where the expression is not a bare name.
