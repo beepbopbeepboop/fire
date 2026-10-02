@@ -6385,7 +6385,7 @@ def _one_word_sole_field_chain(st, structs_by_name: dict) -> tuple:
 
 
 def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
-    """{local name: the SOLE-FIELD CHAIN it holds} for one-word-struct locals.
+    """{local name: the ONE-WORD STRUCT it holds} for one-word-struct locals.
 
     Found from the binding, not inferred: a local initialised from a one-word
     struct's constructor holds that struct's only field, and nothing else on
@@ -6400,12 +6400,16 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
     the two never both fire for one name and cannot disagree about which field
     a name means.
 
-    The value is a CHAIN rather than one field name because the identity does
-    not stop at one level: `_one_word_sole_field_chain` has the argument, and a
-    map that recorded only the first name made `_rewrite_self_fields` rewrite
-    the first level of `b.inner.v` and leave `b.v` standing — a name that is in
-    no register home and no frame slot, so the emitter refused a field access
-    the source never wrote.
+    **The value is the STRUCT and not the chain**, which is a change of what
+    this table holds rather than of what it means, and it is what lets ONE
+    recognition of "this name is a one-word struct's word" serve both of the
+    rewrites that need it: `_rewrite_self_fields`, which wants the chain
+    (`_one_word_sole_field_chain` derives it from the struct in one line), and
+    `_rewrite_one_word_field_method_calls`, which needs the struct itself to
+    read a field's DECLARED type off it.  Recording the chain here would have
+    left the second rewrite unable to do its job without a second walk of the
+    same bindings — and two walks of one set of bindings is two recognitions
+    that can come apart, which is the shape of every drift this file has.
     """
     mapping = {}
     for node in M.iter_nodes(fn.body):
@@ -6421,12 +6425,12 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
             continue
         st = structs_by_name.get(value.func.name)
         if st is not None and M.struct_is_one_field(st):
-            mapping[target] = _one_word_sole_field_chain(st, structs_by_name)
+            mapping[target] = st
     for pname, pst in M.parameter_declared_structs(
             fn, structs_by_name, owner).items():
         if pname in mapping or not M.struct_is_one_field(pst):
             continue
-        mapping[pname] = _one_word_sole_field_chain(pst, structs_by_name)
+        mapping[pname] = pst
     return mapping
 
 
@@ -6641,6 +6645,147 @@ def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
     """
     fields = path.split(".")
     return bool(fields) and fields == list(sole[:len(fields)])
+
+
+def _rewrite_one_word_field_method_calls(node, one_word: dict,
+                                         structs_by_name: dict,
+                                         receiverless=()) -> None:
+    """`recv.f.m(x)` -> `F_m(recv.f, x)`, where `recv.f` is a ONE-WORD field.
+
+    **This runs before `_rewrite_self_fields`, and it has to.** That rewrite is
+    the identity `self._inner` IS `self` for a one-word struct, and it is
+    correct for a field READ. It is catastrophic for a field READ that is a
+    CALL'S RECEIVER, because the rewrite keeps the method NAME and throws away
+    the struct that name was looked up in:
+
+    ```
+    struct Slice:  var start: Int
+                   def write_to(self, w) -> Int: return self.start + w
+    struct StridedSlice:  var _inner: Slice
+                   def write_to(self, w) -> Int: return self._inner.write_to(w)
+    ```
+
+    `self._inner.write_to(w)` is a call of **`Slice.write_to`** with `self` as
+    the receiver word. After the identity rewrite the callee reads
+    `self.write_to(w)`, which is `StridedSlice.write_to` with `self` — a
+    different function, which recurses into itself forever. Measured on this
+    tree, arm64 and x86-64 identically, three different refusals depending on
+    which pass noticed:
+
+    * when `write_to` is declared by both structs, `check_value_position_
+      method_reads` sees `self.write_to` and refuses the program as "a
+      value-position method reference", which is FALSE of it (it is a call, and
+      it was Slice's) — `std/builtin/builtin_slice.mojo`'s own
+      `StridedSlice_write_to`, verbatim;
+    * when the outer method has a name of its own, the name survives and the
+      value-receiver path refuses with "`self.write_to()` is a method call on a
+      value … 'write_to' is not one of those methods";
+    * when the inner struct has two fields, there is no identity to apply and
+      `_rewrite_nested_method_calls` WOULD lift this to `Slice_write_to` — but
+      it runs inside `_frame_receivers`, which is the last rewrite in the
+      pipeline, and by then the one-word case has already been collapsed.
+
+    So the lift has to happen while the declared type is still readable, and the
+    DECLARED TYPE is the only thing that settles it: `f`'s annotation names the
+    struct the method belongs to. No inference, no second opinion — the same
+    fact `_rewrite_nested_method_calls` uses, read one pass earlier because that
+    pass is too late.
+
+    **The receiver argument stays the field access, not the local.** After this
+    rewrite `_rewrite_self_fields` collapses `recv.f` to `recv` on its way
+    through, which is exactly right: for a one-word field the two ARE the same
+    word, and that is the identity this path already relies on everywhere.
+
+    Four conditions, and each is load-bearing rather than cautious:
+
+      * the root is a one-word receiver or local (`one_word`), because that is
+        the set whose field access is about to be collapsed — a root outside it
+        is untouched by the identity and `_rewrite_nested_method_calls` still
+        sees it;
+      * the chain from the root is a prefix of the root's sole-field chain
+        (`_is_sole_field_prefix`), so the rewrite fires on exactly the
+        expressions the identity will rewrite and not on one it will leave
+        standing;
+      * the LAST field's declared type names a struct of THIS unit, which is
+        what makes the method name resolvable at all — a field declared `Int`
+        has no struct, and the emitter's own diagnosis is the true one there;
+      * the field's struct DECLARES the method. Without that last clause this
+        would lift `recv.f.m(...)` to `F_m(...)` for a name that is not a method
+        of `F`, producing a call to a symbol nothing defines — the outcome
+        `formal/model.py`'s `type_constructor_prefers_local_struct` calls out by
+        name.
+    """
+    # `model.rewrite_tree` for the `elifs` reason its own comment gives, and
+    # this walk is the SECOND consumer of it — the first is `_rewrite_method_calls`,
+    # which had the same hole and is what `std/testing/prop/random.mojo` hit. A
+    # lift that silently skips an `elif` arm is the same defect as the collapse
+    # it exists to prevent, one conditional deeper.
+    M.rewrite_tree(
+        node,
+        lambda n: None if (isinstance(n, F.CallExpr)
+                           and isinstance(n.func, F.MemberExpr)
+                           and _lift_one_word_field_method(
+                               n, one_word, structs_by_name, receiverless))
+        else n)
+
+
+def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
+                                receiverless) -> bool:
+    """The one call `_rewrite_one_word_field_method_calls` lifts. True if it did.
+
+    Split out so the walk above stays a walk: the conditions are five facts about
+    one node and they read as one question ("does this callee name a method of
+    the struct its receiver's DECLARED type names?"), which is not the same
+    shape as "visit every node".
+    """
+    func = call.func
+    obj = func.obj
+    if not isinstance(obj, F.MemberExpr):
+        return False
+    # `_root_ident` and not `obj.obj` being an `IdentExpr`, because the chain can
+    # be any depth: `self.x.w.m(...)` has a `MemberExpr` at the bottom of `obj`
+    # too, and a depth-2 test would leave every chain longer than one hop to be
+    # collapsed without a lift — which is the same defect one level down.
+    key = _root_ident(obj)
+    if key is None or key[1] < 1:
+        return False
+    root = key[0]
+    st = one_word.get(root)
+    if st is None:
+        return False
+    chain = _member_chain(obj)
+    if chain == root:
+        return False                      # `recv.m(x)`, `_rewrite_method_calls`'s
+    sole = _one_word_sole_field_chain(st, structs_by_name)
+    _, _, path = chain.partition(".")
+    if not _is_sole_field_prefix(path, sole):
+        return False
+    inner = _chain_declared_struct(st, path.split("."), structs_by_name)
+    if inner is None or not any(m.name == func.member
+                                for m in M.struct_methods(inner)):
+        return False
+    call.func = F.IdentExpr(name=M.method_function_name(inner.name, func.member))
+    if func.member not in (receiverless or ()):
+        call.args = [obj] + list(call.args)
+    return True
+
+
+def _chain_declared_struct(st, fields, structs_by_name: dict):
+    """The struct `st.<fields…>` names by DECLARED type, or None.
+
+    The walk `struct_field_type` makes one level at a time, and it is the same
+    reader `_one_word_sole_field_chain` uses for the identity, so the two cannot
+    disagree about what `st.f` holds. `None` at any step is the honest answer: a
+    field with no declared type, or one naming a type this unit does not
+    declare, and there is no struct to name in either case.
+    """
+    cur = st
+    for field in fields:
+        base = M.struct_field_type(cur, field, structs_by_name)[0]
+        cur = structs_by_name.get(base) if base else None
+        if cur is None:
+            return None
+    return cur
 
 
 def _constant_read_sites(fn, structs_by_name: dict, owner=None,
@@ -9799,13 +9944,26 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                                  method_owners.get(fn.name),
                                  _method_receiver_bases(fn))
         # A method's `self` IS the field; a local initialised from a one-word
-        # constructor holds that struct's only field directly.  The chain, not
-        # the first name, for the reason `_one_word_sole_field_chain` gives.
-        mapping = _one_word_field_map(fn, structs_by_name,
-                                      method_owners.get(fn.name))
+        # constructor holds that struct's sole field directly.  The table holds
+        # the STRUCT and the chain is derived from it in one line, because the
+        # rewrite below needs the struct and the rewrite after that needs the
+        # chain — one recognition of "this name is a one-word word", read twice.
+        one_word = _one_word_field_map(fn, structs_by_name,
+                                       method_owners.get(fn.name))
         st = method_owners.get(fn.name)
         if st is not None and M.struct_is_one_field(st):
-            mapping["self"] = _one_word_sole_field_chain(st, structs_by_name)
+            one_word["self"] = st
+        # A method call THROUGH a one-word field, lifted while the field's
+        # DECLARED type can still be read — the identity below is about the same
+        # storage but it keeps the method name and loses the struct, and a
+        # method name without its struct is a call to the wrong function
+        # (`_rewrite_one_word_field_method_calls` has the three refusals and the
+        # measurement; `std/builtin/builtin_slice.mojo`'s `StridedSlice` is the
+        # source of the shape).
+        _rewrite_one_word_field_method_calls(fn.body, one_word,
+                                             structs_by_name, receiverless)
+        mapping = {name: _one_word_sole_field_chain(one, structs_by_name)
+                   for name, one in one_word.items()}
         _rewrite_self_fields(fn.body, mapping)
         # A class-level CONSTANT is not part of any value, so it is not
         # lowered as a field: it is materialized where it is read. Without
@@ -10086,46 +10244,52 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     the argument for why that has to happen here rather than being left to the
     link audit. Before it, `bs[0].get()` compiled to a call against a symbol
     spelled `get`."""
-    if isinstance(node, list):
-        for x in node:
-            _rewrite_method_calls(x, owners, wide, receiverless, fn_name,
-                                  imported)
-        return
-    if isinstance(node, F.CallExpr):
-        target = _method_call_target(node, owners)
+    # `model.rewrite_tree`, and the walk it brings with it: `IfStmt.elifs` is a
+    # list of TUPLES, so a recursion that tests `isinstance(node, list)` stops
+    # dead at the first `elif` while `model.iter_nodes` — which every LATE check
+    # uses — walks all of them. That gap is what made a method call inside an
+    # `elif` reach `check_value_position_method_reads` unlifted and be refused
+    # as a value-position method reference, with the message telling the reader
+    # to add parentheses a call already had (`std/testing/prop/random.mojo`'s
+    # `Rng.rand_scalar`, measured 2026-10-02; `model.rewrite_tree`'s comment is
+    # the long form). `None` from `visit` means "handled, do not descend", which
+    # is what the two `return`s below did.
+    def visit(n):
+        if not isinstance(n, F.CallExpr):
+            return n
+        target = _method_call_target(n, owners)
         if target is None:
-            why = _receiver_shape_refusal(node, owners, fn_name, imported)
+            why = _receiver_shape_refusal(n, owners, fn_name, imported)
             if why is not None:
                 raise CodegenError(why)
-        if target is not None:
-            owner, member, receiver = target
-            if (wide or {}).get(owner) is not None:
-                st = wide[owner]
-                raise CodegenError(
-                    f"{owner}.{member}() cannot be lowered: its "
-                    f"receiver has {M.struct_field_summary(st)}, and a formal "
-                    f"value is one 64-bit word, so `self.<field>` has no "
-                    f"representation on this path. The receiver would have to "
-                    f"be a pointer to an out-of-line frame of fields, which is "
-                    f"a change to the value model the two backends AND the Lean "
-                    f"proof share, not to this one function. Concretely, "
-                    f"{M.struct_width_cost(st)}")
-            lifted = F.IdentExpr(name=M.method_function_name(owner, member))
-            if member not in (receiverless or ()):
-                node.args = [receiver] + list(node.args)
-            if isinstance(node.func, F.SubscriptExpr):
-                # The brackets stay, and stay on the callee: they are the
-                # specialization, and the emitter reads them off the callee
-                # (`arm64_codegen._specialization_of`).  Only the BASE is
-                # replaced, which is the one thing that changes — it becomes the
-                # lifted name instead of the receiver's.
-                node.func.obj = lifted
-                return
-            node.func = lifted
-            return
-    for name in getattr(node, "__dataclass_fields__", {}):
-        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless,
-                              fn_name, imported)
+            return n
+        owner, member, receiver = target
+        if (wide or {}).get(owner) is not None:
+            st = wide[owner]
+            raise CodegenError(
+                f"{owner}.{member}() cannot be lowered: its "
+                f"receiver has {M.struct_field_summary(st)}, and a formal "
+                f"value is one 64-bit word, so `self.<field>` has no "
+                f"representation on this path. The receiver would have to "
+                f"be a pointer to an out-of-line frame of fields, which is "
+                f"a change to the value model the two backends AND the Lean "
+                f"proof share, not to this one function. Concretely, "
+                f"{M.struct_width_cost(st)}")
+        lifted = F.IdentExpr(name=M.method_function_name(owner, member))
+        if member not in (receiverless or ()):
+            n.args = [receiver] + list(n.args)
+        if isinstance(n.func, F.SubscriptExpr):
+            # The brackets stay, and stay on the callee: they are the
+            # specialization, and the emitter reads them off the callee
+            # (`arm64_codegen._specialization_of`).  Only the BASE is
+            # replaced, which is the one thing that changes — it becomes the
+            # lifted name instead of the receiver's.
+            n.func.obj = lifted
+            return None
+        n.func = lifted
+        return None
+
+    M.rewrite_tree(node, visit)
 
 
 def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):

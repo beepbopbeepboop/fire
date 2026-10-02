@@ -6091,6 +6091,211 @@ ONE_WORD_NESTED_CASES = [
      "    var x = Box()\n"
      "    x.p = mk()\n"
      "    return x.p.a * 10 + x.p.b\n", 34, None),
+    # ── the identity READ AS A CALL'S RECEIVER, which is a different program ──
+    #
+    # Every case above reads a one-word chain, and the rewrite is right for a
+    # read: `b.inner` and `b` are one word and reading either gives the field.
+    # Reading it as a CALL'S RECEIVER is not the same thing, because the rewrite
+    # keeps the METHOD NAME and drops the STRUCT the name belongs to.
+    # `std/builtin/builtin_slice.mojo` is the source of the shape and the
+    # measurement: `StridedSlice.write_to`'s whole body is
+    # `self._inner.write_to(writer)`, where `write_to` is declared by `Slice`,
+    # so after the identity the callee reads `self.write_to(writer)` — a call of
+    # `StridedSlice.write_to` on `self`, which is that same function, forever.
+    # Three refusals come out of it depending on which pass notices, and the one
+    # the file itself hit was a FALSE one ("`self.write_to` is not a field of
+    # StridedSlice … in Python this expression is the bound method", about an
+    # expression that is a CALL and was Slice's).
+    #
+    # So these assert the LIFT: `self._inner.add(v)` is `Slice.add(self, v)`,
+    # because `_inner`'s DECLARED type names the struct and that is the only
+    # thing in hand that can. 10 is `3 + 7`, and it is the number a wrong
+    # dispatch could not produce — the infinite recursion has no exit status.
+    ("one_word_field_method_call_reaches_the_fields_own_method",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "\n"
+     "    def add(self, v: Int) -> Int:\n"
+     "        return self.start + v\n"
+     "\n"
+     "struct StridedSlice:\n"
+     "    var _inner: Slice\n"
+     "\n"
+     "    def emit(self, v: Int) -> Int:\n"
+     "        return self._inner.add(v)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var inner = Slice()\n"
+     "    inner.start = 3\n"
+     "    var ss = StridedSlice()\n"
+     "    ss._inner = inner\n"
+     "    return ss.emit(7)\n", 10, None),
+    # The chain is a chain, so the receiver can be TWO fields deep: `Root.x` is
+    # `Mid`, `Mid.w` is `Leaf`, and `self.x.w.leaf()` is `Leaf.leaf(self)` by the
+    # same argument one level up. A lift that matched one level would leave
+    # `self.x.leaf()` for the identity to collapse into `self.leaf()`, which is
+    # `Root.leaf` — a symbol this image does not define.
+    ("one_word_field_method_call_through_a_two_level_chain",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def scaled(self, k: Int) -> Int:\n"
+     "        return self.v * k\n"
+     "\n"
+     "struct Mid:\n"
+     "    var w: Leaf\n"
+     "\n"
+     "struct Root:\n"
+     "    var x: Mid\n"
+     "\n"
+     "    def get(self, k: Int) -> Int:\n"
+     "        return self.x.w.scaled(k)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    a.x.w.v = 6\n"
+     "    return a.get(5)\n", 30, None),
+    # The same lift with a LOCAL as the root rather than a method's `self`,
+    # because `_one_word_field_map` records both and the lift has to ask the
+    # same question of both. `b` is one word from `Box()`, so `b.inner.add(7)`
+    # becomes `Slice.add(b, 7)` and `self.start` inside it reads `b`.
+    ("one_word_field_method_call_through_a_local_root",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "\n"
+     "    def add(self, v: Int) -> Int:\n"
+     "        return self.start + v\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Slice\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box()\n"
+     "    b.inner.start = 40\n"
+     "    return b.inner.add(2)\n", 42, None),
+]
+
+# The BOUNDARY of the lift above: a field whose declared type is NOT a struct of
+# this image has no method table, so the call cannot be lifted and must still be
+# refused — by the value-receiver sentence, which is true of it. Without this
+# case the lift could widen to any `recv.f.m(x)` and every case above would
+# still pass.
+ONE_WORD_FIELD_METHOD_REFUSALS = [
+    ("one_word_field_method_call_on_a_scalar_field_is_still_refused",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "    def go(self) -> Int:\n"
+     "        return self.n.add(2)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box()\n"
+     "    b.n = 3\n"
+     "    return b.go()\n",
+     "refuse:is a method call on a value", None),
+]
+
+# ── a CONDITIONAL ARM: `elif` and `comptime if`, and a walk that stops at them ──
+#
+# Both of these are ONE defect seen twice, and it is a defect in the WALKS rather
+# than in either construct. `IfStmt.elifs` is a list of TUPLES — the only
+# container in the tree that is not a list — so a walk that recurses on
+# `isinstance(node, list)` descends every `if` body and every `else` and stops
+# dead at the first `elif`, while `model.iter_nodes` (which every LATE check
+# uses) walks all of them. And a `comptime if` is a distinct NODE
+# (`fire_compiler.ComptimeIfStmt`), so a walk that knows `IfStmt` does not know
+# it at all.
+#
+# The consequence is the same both times and it is a REFUSAL THAT MISDESCRIBES
+# ITS OWN PROGRAM, because the reader is a check and the rewriter is a rewrite:
+#
+#   * the `elif` case — `formal/build.py`'s `_rewrite_method_calls` misses the
+#     arm, so a method call inside it is never lifted, so it reaches
+#     `check_value_position_method_reads` as `self._next` and the program is
+#     refused with "self._next is not a field of Rng … Call it
+#     (`self._next(...)`), which is a receiver and a call and lowers" — about a
+#     call that HAS its parentheses. Measured: `std/testing/prop/random.mojo`'s
+#     `Rng.rand_scalar`, arm64 and x86-64 identically.
+#   * the `comptime if` case — `mojo/middle/boundnames.py`'s `_lbn_walk` misses
+#     the node, so a name bound in the branch is not a local, so it gets no
+#     register and the program is refused with "'a' has no home: the register
+#     allocator collected no home for it, so the emitter and the allocation walk
+#     disagree" — which blames a disagreement between two passes instead of
+#     naming the one walk both of them should have shared.
+#
+# Both cases here are the two shapes with and without the offending arm, because
+# a case that only has the arm cannot tell a fix from a rewrite that stopped
+# emitting the branch: `a` alone and `a` + `b` are different numbers, and the
+# `comptime` pair differs by which arm the specialization takes.
+CONDITIONAL_ARM_CASES = [
+    # 9 = the `elif` arm's answer (diff 6 + lo 3). The `if` twin is 0, so a
+    # rewrite that dropped the arm entirely would be caught by the exit status
+    # rather than passing quietly.
+    ("method_call_in_an_elif_arm_is_lifted",
+     "struct Rng:\n"
+     "    def _next(self, max: Int) -> Int:\n"
+     "        return max\n"
+     "\n"
+     "    def rand_scalar[T: Int](self, lo: Int, hi: Int) -> Int:\n"
+     "        if lo > hi:\n"
+     "            return 0\n"
+     "        elif T == 2:\n"
+     "            var diff = hi - lo if hi > lo else lo - hi\n"
+     "            var uint64 = self._next(diff)\n"
+     "            return uint64 + lo\n"
+     "        else:\n"
+     "            return hi\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = Rng()\n"
+     "    return r.rand_scalar[2](3, 9)\n", 9, None),
+    ("method_call_in_an_if_body_is_lifted",
+     "struct Rng:\n"
+     "    def _next(self, max: Int) -> Int:\n"
+     "        return max\n"
+     "\n"
+     "    def rand_scalar[T: Int](self, lo: Int, hi: Int) -> Int:\n"
+     "        if T == 2:\n"
+     "            var diff = hi - lo if hi > lo else lo - hi\n"
+     "            var uint64 = self._next(diff)\n"
+     "            return uint64 + lo\n"
+     "        return hi\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = Rng()\n"
+     "    return r.rand_scalar[2](3, 9)\n", 9, None),
+    # 5 is the `else` arm (`k + 2` with k = 3), so this case is the one that
+    # proves the arm was CHOSEN and not merely compiled: the `then` arm's answer
+    # is 4.
+    ("a_local_in_a_comptime_if_body_has_a_home",
+     "def pick[T: Int](k: Int) -> Int:\n"
+     "    comptime if T == 1:\n"
+     "        var a = k + 1\n"
+     "        return a\n"
+     "    else:\n"
+     "        var b = k + 2\n"
+     "        return b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return pick[2](3)\n", 5, None),
+    # The same with an `elif` between the two arms, which is the shape
+    # `random.mojo`'s `rand_scalar` actually has (`comptime if … elif
+    # dtype.is_integral():`). 45 = the elif arm (15 + 25 + 5); the `then` arm
+    # answers 16 and the `else` 15, so all three arms are distinguishable and a
+    # rewrite that dropped the elif would not pass as the then arm.
+    ("a_local_in_a_comptime_elif_arm_has_a_home",
+     "def pick[T: Int](k: Int, lo: Int, hi: Int) -> Int:\n"
+     "    comptime if T == 1:\n"
+     "        var a = k + 1\n"
+     "        return a\n"
+     "    elif T == 2:\n"
+     "        var diff = hi - lo\n"
+     "        var uint64 = k\n"
+     "        return uint64 + diff + lo\n"
+     "    else:\n"
+     "        return k\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return pick[2](15, 5, 30)\n", 45, None),
 ]
 
 # ── a DECLARED frame parameter handed a frame-RETURNING call ────────────────
@@ -12652,6 +12857,8 @@ def main():
                   + INIT_FIELD_TYPE_CASES \
                   + INIT_FIELD_TYPE_REFUSALS \
                   + ONE_WORD_NESTED_CASES \
+                  + ONE_WORD_FIELD_METHOD_REFUSALS \
+                  + CONDITIONAL_ARM_CASES \
                   + DECLARED_FRAME_RETURN_CASES
                   + OVERLOAD_LAYOUT_CASES + OVERLOAD_REFUSALS
                   + OVERLOAD_DISPATCH_REFUSALS

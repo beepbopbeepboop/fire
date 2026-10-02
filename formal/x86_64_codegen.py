@@ -2721,7 +2721,9 @@ class X86_64Codegen:
             raise CodegenError(
                 f"{_dotted(e.func)}() takes no keyword arguments on the formal "
                 f"x86-64 path (got {[k for k, _v in e.kwargs]})")
-        how = M.builtin_value_method(method) or M.pointer_bounded_method(method)
+        how = (M.builtin_value_method(method)
+               or M.pointer_bounded_method(method)
+               or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
         elif how == "file_write":
@@ -2734,6 +2736,14 @@ class X86_64Codegen:
             self._emit_str_affix(e, at_end=how == "str_endswith")
         elif how == "str_find":
             self._emit_str_find(e)
+        elif how == "str_identity":
+            # A string -> `char *` conversion, which is the IDENTITY here: a
+            # `String` on this path is its own address, and the `CStringSpan` it
+            # becomes is a ONE-FIELD struct whose value IS that field
+            # (`model.STRING_IDENTITY_METHODS`).  Emitting the receiver is the
+            # whole lowering, and it is `std/os/env.mojo`'s every `external_call`
+            # argument — measured, that file's terminal cause before this arm.
+            self._emit_expr(e.func.obj)
         elif how == "str_count":
             # EXPLICIT, and it was implicit until this wave: `count`'s lowering
             # was the `else` below, so every method name with no lowering of its
@@ -2753,7 +2763,7 @@ class X86_64Codegen:
                 f"{_dotted(e.func)}() is a method call on a value and this "
                 f"backend has no lowering for {method!r}, which reached the "
                 f"value-method dispatch with `how` = {how!r}. Every lowering "
-                f"both tables name is matched by an explicit arm above, so this "
+                f"every table names is matched by an explicit arm above, so this "
                 f"is a table entry with no arm rather than a construct: "
                 f"`method` resolved to {how!r} and nothing claimed it. Refused "
                 f"rather than lowered as the nearest arm, which is how a "
@@ -2797,6 +2807,13 @@ class X86_64Codegen:
             ).format(dotted=_dotted(e.func)))
         _load, width, signed = how
         self._emit_expr(obj)                    # RAX = the address
+        if _load == "identity":
+            # A NULLABLE POINTER's `value()` is `Optional.value()`, the UNWRAP,
+            # and the receiver IS the pointer (`model.nullable_pointer_unwrap`).
+            # Nothing is emitted after the receiver: the answer is the word that
+            # is already in RAX. The load below would read the FIRST BYTE of the
+            # pointee instead, which is what this used to do — measured, SIGSEGV.
+            return
         base = Reg(0)
         dst = Reg(0)
         if width == 1:
