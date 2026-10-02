@@ -5105,6 +5105,130 @@ def main():
 main()
 """, "str\n2\n")
 
+    # The CONSTRUCTOR half of the same cross-call struct contract
+    # (bugs/hard/CODEGEN_param_used_only_as_method_receiver.md). The receiver
+    # here is `self.w`, whose C type comes from `__init__`'s own unannotated
+    # `w`, so the only evidence anywhere is the `L(T(15))` CALL SITE — the
+    # free-function pass that fixes the case above cannot see it. Before the
+    # fix `w` stayed `int64_t`, the field inherited it, and `self.w.numel()`
+    # hit the generic no-op stub and returned the `T *`'s own bits: a
+    # pointer-sized garbage decimal, exit 0, no diagnostic.
+    test_gimple_stdout("gimple_ctor_param_used_only_as_field_then_receiver", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def main():
+    print(L(T(15)).numel())
+
+main()
+""", "15\n")
+
+    # The same fix reached through a FREE FUNCTION's parameter instead of
+    # through a field, and with a second (`char *`) constructor argument
+    # beside it, so the struct answer has to be admitted per SLOT and not
+    # simply as "this constructor saw a struct somewhere".
+    test_gimple_stdout("gimple_ctor_param_struct_and_scalar_slots_are_independent", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w, tag):
+        self.w = w
+        self.tag = tag
+    def numel(self):
+        return self.w.numel()
+    def label(self):
+        return self.tag
+
+def mk(t):
+    return L(t, 'hi')
+
+def main():
+    x = mk(T(8))
+    print(x.numel(), x.label())
+
+main()
+""", "8 hi\n")
+
+    # The `self.<field>` constructor argument, resolved from the owning
+    # method's struct — and the one-hop chain that needs it: `Box(self.t)`
+    # inside `Holder.go` is only observable once `Holder.t` has a `T *`
+    # field type, which is itself written by the same observation pass from
+    # `Holder(T(4))` at the call site. So collection and application have to
+    # run to a fixpoint; one pass sees `Holder.t` as the int64_t default and
+    # the chain stops there.
+    test_gimple_stdout("gimple_ctor_param_self_field_argument_resolves_a_chain", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class Box:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+class Holder:
+    def __init__(self, t):
+        self.t = t
+    def go(self):
+        return Box(self.t).numel()
+
+def main():
+    print(Holder(T(4)).go())
+
+main()
+""", "4\n")
+
+    # A genuinely POLYMORPHIC constructor argument — `T` and `U` both passed
+    # into the same slot — must stay unresolved, which is the documented rule
+    # ("not unanimous over the call sites → leave it at the int64_t default").
+    # What is asserted is that the widening above does not resolve such a slot
+    # by picking a winner: both classes answer `0` for a method that does not
+    # read the field, so a resolved `T *` would still print `0 0` here and the
+    # test would pass either way — which is exactly why the receiver-reading
+    # variant lives in
+    # bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md
+    # instead, where the two outcomes are actually distinguishable.
+    test_gimple_stdout("gimple_ctor_param_polymorphic_slot_stays_unresolved", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class U:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def tag(self):
+        return 0
+
+def main():
+    print(L(T(2)).tag(), L(U(2)).tag())
+
+main()
+""", "0 0\n")
+
     # The `var` spelling of a class-body field. To Python this is the SAME
     # declaration as the bare `NAME = ...` above — `var` only suppresses a
     # type inference the class body never did — but only the bare spelling

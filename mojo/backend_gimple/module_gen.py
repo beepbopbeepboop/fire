@@ -5021,7 +5021,7 @@ def gen_module_impl(self, stmts):
             return None
         return None
 
-    def _arg_struct_ptr_type(caller_name, a):
+    def _arg_struct_ptr_type(caller_name, a, caller_struct=None):
         """Observed STRUCT-POINTER C type of one call argument, or None.
 
         The struct-typed sibling of `_arg_scalar_type`, kept separate rather
@@ -5045,11 +5045,13 @@ def gen_module_impl(self, stmts):
         either crashed in a dict runtime helper or — silently, exit 0 — was
         boxed and printed as a decimal address.
 
-        Deliberately FREE-FUNCTION-only, so there is no `caller_struct` /
-        `self.<field>` arm: the only caller of this is the free-function
-        call-site walk, whose callers have no owning struct, and a `self`
-        field of one of a METHOD's parameters is already resolved by the
-        struct-method contract (Pass 1.3e) that owns that case.
+        `caller_struct` is passed by exactly ONE caller, the constructor
+        observation pass below, and only so its `self.<field>` argument shape
+        resolves — the same argument, and the same `caller_struct` value,
+        `_arg_scalar_type`'s own MemberExpr arm already handles (see the
+        `NamespaceReader(self._path)` note there). The free-function Pass
+        1.3d caller leaves it None, which is exactly the "no owning struct"
+        reading the arm falls back to, so its behaviour is unchanged.
 
         `IdentExpr` delegates to `_arg_scalar_type` (whose IdentExpr arm
         already returns the caller's own inferred type verbatim, whatever it
@@ -5073,11 +5075,21 @@ def gen_module_impl(self, stmts):
             return None
         if isinstance(a, gimple_ctypes.MemberExpr):
             # `<local>.<field>` whose local is a known `<Struct> *` — the
-            # shape a receiver forwards most often. Same resolution
-            # `_arg_scalar_type`'s MemberExpr arm does, minus its
+            # shape a receiver forwards most often — plus `self.<field>` when
+            # the call site is inside a method of a known struct. Same
+            # resolution `_arg_scalar_type`'s MemberExpr arm does, minus its
             # `char *`/`double` whitelist.
             _obj = a.obj
             if not isinstance(_obj, gimple_ctypes.IdentExpr):
+                return None
+            _own2 = caller_struct
+            if _as_str(_obj.name) == 'self':
+                if not _own2:
+                    return None
+                _ft2 = self.struct_field_types.get(_own2, {}).get(_as_str(a.member))
+                if (isinstance(_ft2, str) and _ft2.endswith(' *')
+                        and _ft2[:-2] in self.struct_field_types):
+                    return _ft2
                 return None
             _ot = self._inferred_var_types.get(_as_str(caller_name), {}).get(
                 _as_str(_obj.name))
@@ -5807,16 +5819,34 @@ def gen_module_impl(self, stmts):
         ann: dict = {}
         for _an_pn, _an_pt in (fn.params or []):
             ann[_as_str(_an_pn)] = _an_pt
-        # Direct receiver only — NOT rooted at a subscript/slice of the param,
-        # which is a container (`p[0].m()`) and not this param at all.
+        # A METHOD RECEIVER, or a direct argument to a struct CONSTRUCTOR call.
+        # Receiver: not rooted at a subscript/slice of the param, which is a
+        # container (`p[0].m()`) and not this param at all.
+        #
+        # Constructor argument: `def mk(t): return L(t, 'hi')` called as
+        # `mk(T(8))` is the same one-hop shape with no receiver anywhere —
+        # the struct is learned at `mk`'s call site and has to travel one more
+        # hop to reach `L.__init__`'s own parameter. This used to stop at the
+        # receiver restriction, so `L`'s slot got no evidence from `mk`'s body
+        # at all and `mk`'s parameter stayed `int64_t`: the pointer was
+        # re-boxed on the way in and `x.numel()` printed the box's decimal
+        # (bugs/hard/CODEGEN_param_used_only_as_method_receiver.md).
+        #
+        # Scoped to a BARE identifier argument (`L(t)`, never `L(t.n)` or
+        # `L(self.t)`), because that is the shape where the argument's own
+        # type IS the parameter's type; any derivation would make the
+        # observation about the derived expression rather than about `pname`.
         receiver_params: set = set()
         _rcalls: list = []
         self._calls_in_stmts(fn.body, _rcalls)
         for _rc in _rcalls:
-            if not isinstance(_rc.func, MemberExpr):
-                continue
-            if isinstance(_rc.func.obj, IdentExpr):
-                receiver_params.add(_as_str(_rc.func.obj.name))
+            if isinstance(_rc.func, MemberExpr):
+                if isinstance(_rc.func.obj, IdentExpr):
+                    receiver_params.add(_as_str(_rc.func.obj.name))
+            elif isinstance(_rc.func, IdentExpr) and _ctor_init_params.get(_as_str(_rc.func.name)):
+                for _rc_a in _rc.args:
+                    if isinstance(_rc_a, IdentExpr):
+                        receiver_params.add(_as_str(_rc_a.name))
         for pname in sorted(pmap):
             if pname not in receiver_params:
                 continue
@@ -5886,111 +5916,232 @@ def gen_module_impl(self, stmts):
 
     _ctor_scalar_obs: dict = {}          # "<struct>::<pname>" -> scalar type
     _ctor_scalar_conflict: dict = {}     # "<struct>::<pname>" -> True (mixed)
-    # Constructor call sites live in free functions, at toplevel, AND inside
-    # struct METHODS — and the method case is the one real code hits most
-    # (`NamespaceReader(self._path)` in
-    # importlib/_bootstrap_external.py). `_caller_bodies` covers only the
-    # first two, so a `S(...)` constructed from a method body contributed no
-    # observation at all and the slot stayed unresolved. `_method_caller_
-    # bodies` (built by the Pass 1.3e method contract just above) already
-    # carries the owning StructDef as its second element, which is exactly
-    # what `self.<field>` resolution needs.
-    for _cname, _cstruct, _cbody in _method_caller_bodies:
-        calls = []
-        self._calls_in_stmts(_cbody, calls)
-        for call in calls:
-            if not isinstance(call.func, IdentExpr):
-                continue
-            struct_name = _as_str(call.func.name)
-            pnames = _ctor_init_params.get(struct_name)
-            if not pnames:
-                continue
-            for i, a in enumerate(call.args):
-                if i >= len(pnames):
-                    break
-                st = _arg_scalar_type(_cname, a, caller_struct=_cstruct)
-                if not st:
+    # This is the CONSTRUCTOR direction of
+    # bugs/hard/CODEGEN_param_used_only_as_method_receiver.md. The repro's
+    # receiver is `self.w` inside `L.numel`, whose type is whatever `__init__`'s
+    # own unannotated `w` was typed — so the evidence this pass needs is at
+    # the `L(T(15))` CALL SITE, and no free-function signature pass can see
+    # it. `_arg_scalar_type` returns None for a struct-constructor argument
+    # (`L(T(15))`'s `T(15)` is a CallExpr, and the IdentExpr arm's answer is
+    # filtered to nothing unless it is `char *`/`double`), so before this the
+    # slot had no evidence at all: `__init__`'s `w` stayed `int64_t`, the field
+    # `w` inherited it, and `self.w.numel()` degraded to the generic no-op
+    # stub — a pointer's own bits printed as a decimal, exit 0.
+    #
+    # A struct pointer shares `_ctor_scalar_obs` rather than getting its own
+    # map, unlike Pass 1.3d's `_struct_obs`/`_scalar_obs` split, because here
+    # a slot holds exactly ONE ctype and any two different answers are a
+    # genuine conflict of equal standing. Pass 1.3d's split exists only because
+    # its `_scalar_obs` set is shared across a whole free function's params
+    # and its scalar admission rule is a `char *`/`double` whitelist; a
+    # `<Struct> *` landing in that same set would suppress an otherwise
+    # unanimous `char *` on a DIFFERENT parameter. Here the comparison is
+    # always against the same `<struct>::<param>` key, so one map with the
+    # existing "different from what is already recorded → conflict" rule
+    # expresses both cases correctly and needs no second set of maps.
+    #
+    # Both `_method_caller_bodies` (below) and `_caller_bodies` are walked,
+    # for the reason the scalar observer's own comment gives: a `S(...)`
+    # constructed from a method body is a real and common shape
+    # (`NamespaceReader(self._path)` in importlib/_bootstrap_external.py),
+    # and `_method_caller_bodies` additionally carries the owning StructDef,
+    # which is what resolves a `self.<field>` argument.
+    #
+    # COLLECTION and APPLICATION run to a small bounded fixpoint, because each
+    # can feed the other and neither sees the other's output within one pass.
+    # The concrete case that needs it is the `self.<field>` argument above: a
+    # `Box(self.t)` inside `Holder.go` can only be observed once `Holder.t`
+    # itself has a `T *` field type, and that type is written by the
+    # APPLICATION half below from the very same observation map. One pass sees
+    # `Holder.t` as the `int64_t` default and records no evidence for
+    # `Box.w`; the second sees the `T *` and resolves it. The same one-hop
+    # structure Pass 1.3e solves for pure method-forwarding chains, and the
+    # same bound, for the same reason (a bounded number of hops is all real
+    # code has; an unbounded one would be a closure). Re-collecting is
+    # idempotent by construction: `_ctor_scalar_obs` records the first answer
+    # per key and only ever adds a conflict flag on a DISAGREEMENT, so a
+    # second round over the same evidence cannot change any key.
+    for _ctor_round in range(4):
+        _ctor_changed = False
+        for _cname, _cstruct, _cbody in _method_caller_bodies:
+            calls = []
+            self._calls_in_stmts(_cbody, calls)
+            for call in calls:
+                if not isinstance(call.func, IdentExpr):
                     continue
-                _skey = struct_name + '::' + _as_str(pnames[i])
-                _sprev = _ctor_scalar_obs.get(_skey, '')
-                if not _sprev:
-                    _ctor_scalar_obs[_skey] = st
-                elif _sprev != st:
-                    _ctor_scalar_conflict[_skey] = True
-    for caller_name, body in _caller_bodies:
-        calls = []
-        self._calls_in_stmts(body, calls)
-        for call in calls:
-            if not isinstance(call.func, IdentExpr):
-                continue
-            struct_name = _as_str(call.func.name)
-            pnames = _ctor_init_params.get(struct_name)
-            if not pnames:
-                continue
-            for i, a in enumerate(call.args):
-                if i >= len(pnames):
-                    break
-                st = _arg_scalar_type(caller_name, a)
-                if not st:
+                struct_name = _as_str(call.func.name)
+                pnames = _ctor_init_params.get(struct_name)
+                if not pnames:
                     continue
-                _skey = struct_name + '::' + _as_str(pnames[i])
-                _sprev = _ctor_scalar_obs.get(_skey, '')
-                if not _sprev:
-                    _ctor_scalar_obs[_skey] = st
-                elif _sprev != st:
-                    _ctor_scalar_conflict[_skey] = True
+                for i, a in enumerate(call.args):
+                    if i >= len(pnames):
+                        break
+                    _skey = struct_name + '::' + _as_str(pnames[i])
+                    st = _arg_scalar_type(_cname, a, caller_struct=_cstruct)
+                    if not st:
+                        st = _arg_struct_ptr_type(_cname, a, _cstruct)
+                    if not st:
+                        continue
+                    _sprev = _ctor_scalar_obs.get(_skey, '')
+                    if not _sprev:
+                        _ctor_scalar_obs[_skey] = st
+                    elif _sprev != st:
+                        _ctor_scalar_conflict[_skey] = True
+        for caller_name, body in _caller_bodies:
+            calls = []
+            self._calls_in_stmts(body, calls)
+            for call in calls:
+                if not isinstance(call.func, IdentExpr):
+                    continue
+                struct_name = _as_str(call.func.name)
+                pnames = _ctor_init_params.get(struct_name)
+                if not pnames:
+                    continue
+                for i, a in enumerate(call.args):
+                    if i >= len(pnames):
+                        break
+                    _skey = struct_name + '::' + _as_str(pnames[i])
+                    st = _arg_scalar_type(caller_name, a)
+                    if not st:
+                        st = _arg_struct_ptr_type(caller_name, a, None)
+                    if not st:
+                        continue
+                    _sprev = _ctor_scalar_obs.get(_skey, '')
+                    if not _sprev:
+                        _ctor_scalar_obs[_skey] = st
+                    elif _sprev != st:
+                        _ctor_scalar_conflict[_skey] = True
 
-    for _csn in _ctor_init_params:
-        _init = _ctor_init_methods.get(_csn)
-        if not _init:
-            continue
-        _ann = {}
-        for _ap2 in (_init.params or []):
-            _ann[_as_str(_ap2[0])] = _ap2[1]
-        _init_defaults = getattr(_init, 'param_defaults', {}) or {}
-        for pname in _ctor_init_params[_csn]:
-            _skey2 = _csn + '::' + pname
-            # VETO: this observer only ever produces `char *` / `double`
-            # / a `<Struct> *`, so it cannot see the container-literal
-            # evidence the pass above collected. Without the veto,
-            # `Thing([1, 2])` beside `Thing("s")` found this observer's own
-            # evidence unanimous and typed the field `char *` — a silent
-            # wrong answer where the documented rule is "not unanimous →
-            # leave unresolved, the int64_t default". Veto-only by
-            # construction: it can refuse a slot, never resolve one, so it
-            # cannot widen what this pass already accepted.
-            _lit_ct_obs = self._ctor_container_lit_obs.get(_skey2, '')
-            if self._ctor_container_lit_conflict.get(_skey2) or (
-                    _lit_ct_obs and _lit_ct_obs != _ctor_scalar_obs.get(_skey2, '')):
+        for _csn in _ctor_init_params:
+            _init = _ctor_init_methods.get(_csn)
+            if not _init:
                 continue
-            _st2 = _ctor_scalar_obs.get(_skey2, '')
-            # FLAT dicts + string comparison, NOT `types not in ({'double'},
-            # {'char *'})` over a nested `dict[str, dict[str, set]]`: the
-            # set-of-sets membership test is unreliable self-hosted, and a
-            # nested dict's `.get` returns an untyped int, so neither the
-            # inner membership nor the set comparison worked.
-            if _st2 != 'double' and _st2 != 'char *':
-                continue                        # none, or not unanimous
-            if _ctor_scalar_conflict.get(_skey2):
-                continue                        # mixed scalar evidence
-            _resolved_type = _st2
-            if _ann.get(pname) is not None:
-                continue                        # respect explicit annotation
-            if pname in _init_defaults:
-                continue                        # respect default-value inference
-            self._ctor_lit_param_types[_csn + '::' + pname] = _resolved_type
-            for node in _walk_ast(_init.body):
-                if not isinstance(node, AssignStmt):
+            _ann = {}
+            for _ap2 in (_init.params or []):
+                _ann[_as_str(_ap2[0])] = _ap2[1]
+            _init_defaults = getattr(_init, 'param_defaults', {}) or {}
+            for pname in _ctor_init_params[_csn]:
+                _skey2 = _csn + '::' + pname
+                # VETO: this observer only ever produces `char *` / `double`
+                # / a `<Struct> *`, so it cannot see the container-literal
+                # evidence the pass above collected. Without the veto,
+                # `Thing([1, 2])` beside `Thing("s")` found this observer's own
+                # evidence unanimous and typed the field `char *` — a silent
+                # wrong answer where the documented rule is "not unanimous →
+                # leave unresolved, the int64_t default". Veto-only by
+                # construction: it can refuse a slot, never resolve one, so it
+                # cannot widen what this pass already accepted.
+                _lit_ct_obs = self._ctor_container_lit_obs.get(_skey2, '')
+                if self._ctor_container_lit_conflict.get(_skey2) or (
+                        _lit_ct_obs and _lit_ct_obs != _ctor_scalar_obs.get(_skey2, '')):
                     continue
-                tgt = node.target
-                if not (isinstance(tgt, MemberExpr) and isinstance(tgt.obj, IdentExpr)
-                        and tgt.obj.name == 'self'):
+                _st2 = _ctor_scalar_obs.get(_skey2, '')
+                # FLAT dicts + string comparison, NOT `types not in ({'double'},
+                # {'char *'})` over a nested `dict[str, dict[str, set]]`: the
+                # set-of-sets membership test is unreliable self-hosted, and a
+                # nested dict's `.get` returns an untyped int, so neither the
+                # inner membership nor the set comparison worked.
+                #
+                # A `<Struct> *` observation is admitted here too, and only that
+                # one extra shape: the observer above can now return a struct
+                # pointer, and admitting it here is what carries that evidence
+                # into `pm` (the `__init__` parameter's own C type) and hence
+                # into the field `self.w = w` writes. It stays a strictly
+                # narrower widening than Pass 1.3d-struct's, which required the
+                # parameter to be a METHOD RECEIVER in the callee's body —
+                # there is no such requirement here, because for a CONSTRUCTOR
+                # the whole point is that the parameter is only ever stored in
+                # a field and read back through it, and refusing to admit it is
+                # what left `self.w.numel()` reading `int64_t.numel()`
+                # (bugs/hard/CODEGEN_param_used_only_as_method_receiver.md).
+                # Admission still requires unanimity (the conflict dict above),
+                # a registered struct, and no container-literal veto.
+                if _st2 != 'double' and _st2 != 'char *':
+                    if not (_st2.endswith(' *') and _st2[:-2] in self.struct_field_types):
+                        continue                # none, or not unanimous
+                if _ctor_scalar_conflict.get(_skey2):
+                    continue                    # mixed scalar evidence
+                _resolved_type = _st2
+                if _ann.get(pname) is not None:
+                    continue                    # respect explicit annotation
+                if pname in _init_defaults:
+                    continue                    # respect default-value inference
+                if self._ctor_lit_param_types.get(_csn + '::' + pname) == _resolved_type:
                     continue
-                v = node.value
-                if isinstance(v, IdentExpr) and v.name == pname:
-                    _fld_types = self.struct_field_types.setdefault(_csn, {})
-                    if _fld_types.get(tgt.member) in (None, 'int', 'int64_t'):
-                        _fld_types[tgt.member] = _resolved_type
+                _ctor_changed = True
+                self._ctor_lit_param_types[_csn + '::' + pname] = _resolved_type
+                for node in _walk_ast(_init.body):
+                    if not isinstance(node, AssignStmt):
+                        continue
+                    tgt = node.target
+                    if not (isinstance(tgt, MemberExpr) and isinstance(tgt.obj, IdentExpr)
+                            and tgt.obj.name == 'self'):
+                        continue
+                    v = node.value
+                    if isinstance(v, IdentExpr) and v.name == pname:
+                        _fld_types = self.struct_field_types.setdefault(_csn, {})
+                        if _fld_types.get(tgt.member) in (None, 'int', 'int64_t'):
+                            _fld_types[tgt.member] = _resolved_type
+
+        # The CALLER-side twin of the same fixpoint: a free function's
+        # unannotated parameter that is FORWARDED straight into a
+        # constructor slot now knows what that slot holds, so it is that
+        # struct pointer. Without this the constructor is typed correctly at
+        # its own definition but the forwarding function's parameter stays
+        # `int64_t`, and the value is re-boxed on the way in —
+        # `def mk(t): return L(t, 'hi')` called as `mk(T(8))` printed
+        # `L`'s receiver's own pointer bits instead of `8`.
+        #
+        # This is the mirror image of the rule `_infer_param_types` already
+        # applies to containers ("a parameter passed to a callee whose own
+        # parameter was inferred as a container is a container"), and it needs
+        # the same admission discipline Pass 1.3d-struct's application loop
+        # documents: an explicit annotation wins, a defaulted parameter keeps
+        # its default-derived type (a call site omitting the argument would
+        # otherwise feed the default through the refined C type), and only a
+        # no-evidence type is replaced.
+        for _cpn, _cbody2 in _caller_bodies:
+            _cpcalls: list = []
+            self._calls_in_stmts(_cbody2, _cpcalls)
+            for _cpc in _cpcalls:
+                if not isinstance(_cpc.func, IdentExpr):
+                    continue
+                _cp_pnames = _ctor_init_params.get(_as_str(_cpc.func.name))
+                if not _cp_pnames:
+                    continue
+                for _cp_i, _cp_a in enumerate(_cpc.args):
+                    if _cp_i >= len(_cp_pnames):
+                        break
+                    if not isinstance(_cp_a, IdentExpr):
+                        continue
+                    _cp_argn = _as_str(_cp_a.name)
+                    _cp_fn = _fn_by_name.get(_as_str(_cpn))
+                    if not _cp_fn:
+                        continue
+                    _cp_ann = None
+                    _cp_isdef = False
+                    for _cp_p, _cp_pt in (_cp_fn.params or []):
+                        if _as_str(_cp_p) == _cp_argn:
+                            _cp_ann = _cp_pt
+                            break
+                    if _cp_ann is not None:
+                        continue                # respect explicit annotation
+                    _cp_dfl = getattr(_cp_fn, 'param_defaults', {}) or {}
+                    if _cp_argn in _cp_dfl:
+                        continue                # respect default-value inference
+                    _cp_slot = _as_str(_cpc.func.name) + '::' + _as_str(_cp_pnames[_cp_i])
+                    _cp_st = self._ctor_lit_param_types.get(_cp_slot, '')
+                    if not (_cp_st.endswith(' *') and _cp_st[:-2] in self.struct_field_types):
+                        continue
+                    _cp_cur = self._inferred_param_types.get(_as_str(_cpn), {}).get(_cp_argn)
+                    if _cp_cur is not None and _cp_cur not in _STRUCT_FALLBACKS:
+                        continue
+                    if _cp_cur == _cp_st:
+                        continue
+                    _ctor_changed = True
+                    self._inferred_param_types.setdefault(_as_str(_cpn), {})[_cp_argn] = _cp_st
+        if not _ctor_changed:
+            break
 
     for _gm_stmt in stmts:
         if isinstance(_gm_stmt, AssignStmt) and isinstance(_gm_stmt.target, IdentExpr):
