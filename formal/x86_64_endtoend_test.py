@@ -37,37 +37,45 @@ step lemma for that this can state a successor expression for.  A function
 using anything else is reported as uncovered, with the form named, rather than
 skipped silently -- the point is to know what is and is not proved.
 
-  3 examples are proved end to end -- ret42, seven, const2 -- and the rest
-  name the forms that block them, most-blocking first:
+  Measured 2026-10-01 over all 45 examples: **terminates proved with no sorry
+  15, proved with a sorry 25, no finite tree 5 (4 loops and one uncovered
+  form), failing 0**; value 3 proved and 12 open.  It was 10 / 14 / 19 / 0 and
+  value 3 / 0 when the twenty-odd forms below were wired, so the list of
+  blockers has gone from fourteen names to one.
 
-      28  jcc_rel32        26  setcc          8  imul_r64_r64
-      26  movzx_r64_r8     21  jmp_rel32      7  call_rel32
-      17  alu_rr:add       11  alu_rr:sub      3  movsx_r64_r8
+  The twenty that came off this list, and the count of examples each was
+  blocking, is the useful record of what a lemma is worth -- but note that it
+  is NOT the count it adds to the proved line, because the blockers overlap
+  heavily.  `alu_rr:cmp` and `alu_rr:test` removed 27 each and moved the proved
+  count by zero, since every example they blocked was blocked by something else
+  too.
 
-  `alu_rr:cmp` and `alu_rr:test` came off this list with the two flags-only
-  lemmas, 27 examples each.  The proved count did not move, because every
-  example they blocked was also blocked by something else -- the blockers
-  overlap heavily, so the useful measure of a lemma is what it removes from
-  this list, not the count it adds to the proved line.
+      28 jcc_rel32      26 setcc          8 imul_r64_r64   7 call_rel32
+      26 movzx_r64_r8   21 jmp_rel32      3 movsx_r64_r8   3 shift_imm8:*
+      3 mov_*_nodisp    3 mov_*_disp8    3 lea_r64_rm64   2 alu_ri32:add_reg
+      2 alu_ri32:and    2 alu_ri8:cmp    1 alu_rr:and/or/xor
 
-  `mov_r64_rm64` and `mov_rm64_r64` are gone from that list: the five general
-  `mov` lemmas in X86.lean cover every shape the backend emits for them, and
-  taking them out is what took the suite from 1 proved to 3.
+  What remains is `group3:idiv`, and it is the one that is not a wiring job:
+  `x86_idiv128` returns `none` when the divisor is zero, so the model's step is
+  PARTIAL, and no statement of it can be chained by this generator.  The long
+  version, with why naming the quotient and remainder needs a side condition the
+  generator cannot discharge and keeping the `match` stops the next address
+  from reducing, is in `bugs/FORMAL_x86_64_end_to_end_proof.md`.
 
-  `setcc` (26) is the one that does NOT fall out of a generalisation, and it
-  is worth saying why rather than leaving it in the list.  `cmp` and `test`
-  above are flags-only: proving them is proving the operands and the flag
-  function, and the successor names no register.  `setcc` sits behind the
-  decoder's 0x0F dispatch, where reaching the case means excluding the jcc
-  range, 0xaf (imul) and the movzx/movsx opcodes, and where the destination
-  is the r/m field rather than the reg field -- the opposite sense to `mov`,
-  which is where the two existing concrete lemmas (`setne_al`, `setle_al`) got
-  their orientation.  The two concrete lemmas do cover the common conditions;
-  what is missing is the nibble-parameterised version, and the work is pinning
-  down which decoder (there is a 0x0F dispatch in `x86_step_rex` and another in
-  `x86_step_plain`, with different `rip + 3` / `rip + 4` lengths) the
-  no-REX encoding actually reaches, then stating the range and exclusion facts
-  separately so `simp` can use each as a rewrite.
+  `setcc` (26) was the one that did NOT fall out of a generalisation, and it is
+  worth saying why rather than leaving it in the list.  `cmp` and `test` are
+  flags-only: proving them is proving the operands and the flag function, and
+  the successor names no register.  `setcc` sits behind the decoder's 0x0F
+  dispatch, where reaching the case means excluding the jcc range, 0xaf (imul)
+  and the movzx/movsx opcodes, and where the destination is the r/m field rather
+  than the reg field -- the opposite sense to `mov`, which is where the two
+  existing concrete lemmas (`setne_al`, `setle_al`) got their orientation.  The
+  two concrete lemmas do cover the common conditions; what is missing is the
+  nibble-parameterised version, and the work is pinning down which decoder
+  (there is a 0x0F dispatch in `x86_step_rex` and another in `x86_step_plain`,
+  with different `rip + 3` / `rip + 4` lengths) the no-REX encoding actually
+  reaches, then stating the range and exclusion facts separately so `simp` can
+  use each as a rewrite.
 
   Three limits are worth stating separately, because each is a limit of what
   is proved here rather than a gap in it:
@@ -276,6 +284,12 @@ _FORMS = {
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:test": ("x86_step_test_rr", False,
                     ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    # `cqo`, the `idiv` setup.  No operand, no ModRM, and only one encoding in
+    # the corpus, so it is a concrete lemma on the REX byte alone -- the shape
+    # `x86_step_movzx_rax_al` has.  It is here because `group3:idiv` is not, and
+    # wiring half of a pair is still worth having: `cqo` alone makes udivmod's
+    # tree one form short rather than two, which is a measurement.
+    "cqo": ("x86_step_cqo", False, ["rip", "b0", "b1", "rex", "w"]),
     "leave": ("x86_step_leave", False, ["rip", "b0"]),
     "ret": ("x86_step_ret", False, ["rip", "b0"]),
 }
@@ -466,6 +480,7 @@ _SUCCS = {
     "alu_rr:test":
         "{ $s with rip := $next, zf := ($fl).zf, sf := ($fl).sf, "
         "cf := ($fl).cf, of_ := ($fl).of_ }",
+    "cqo": "{ $s with rdx := x86_sign_extend32 $s.rax, rip := $next }",
     "leave":
         "{ $s with rbp := mem_read_bytes $s.mem $s.rbp.toNat 8, "
         "rsp := $s.rbp + 8, rip := $next }",
@@ -707,6 +722,13 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # quotes the model's own expression (see `_SUCCS`), and `$tgt`/`$ret`
         # would only be substituting pre-computed arithmetic for it.
         extra_succ = {"$off": "(%d)" % off}
+    elif form == "cqo":
+        # REX 99: the only byte after the prefix, so there is no ModRM and
+        # nothing to read out of the encoding but the REX itself.  `b1` is the
+        # hypothesis that pins the opcode, and it comes from the byte list like
+        # every other `b1` here.
+        extra_args = " %d" % raw[0]
+        extra_succ = {"$rex": str(raw[0])}
     elif form == "setcc":
         op2, modrm = raw[1], raw[2]
         extra_args = " %d %d %d %d" % (op2, modrm, op2 - 0x90, modrm & 7)

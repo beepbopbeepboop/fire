@@ -387,6 +387,17 @@ def step_lemmas():
     # makes, because the exclusion it tests is about the rm field and not about
     # the sign of the displacement.  The mode is read back out of the encoding
     # rather than written down here, so a row cannot disagree with the encoder.
+    # `cqo`: no operand and no ModRM, so it does not go through the shared
+    # hypothesis helper at all.  `encode_cqo` is the only producer and there is
+    # nothing to vary but the REX byte, which is fixed at 0x48.
+    cqo = X.encode_cqo()
+    out.append(Lemma(
+        "x86_step_cqo", "cqo", cqo,
+        ["s.rip = %d" % (BASE + 16 * len(out)),
+         "code %d = %d" % (BASE + 16 * len(out), cqo[0]),
+         "code %d = %d" % (BASE + 16 * len(out) + 1, cqo[1]),
+         "x86_is_rex %d = true" % cqo[0],
+         "x86_rex_w %d = true" % cqo[0]]))
     for lemma, label, enc in _memory_samples():
         out.append(Lemma(
             lemma, label, enc,
