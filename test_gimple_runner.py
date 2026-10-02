@@ -1371,6 +1371,57 @@ print("ret", returning())
 looping()
 """)
 
+    # A MULTI-ITEM `with` has to unwind in REVERSE acquisition order —
+    # `exit 7` before `exit 6` — which is the entire point of nesting: an
+    # inner context manager's teardown may depend on the outer one's state
+    # still being live. `_with_emit_exits` walked its index-parallel item
+    # lists FORWARD, so every multi-item `with` released the outer manager
+    # first (bugs/CODEGEN_multi_item_with_unwinds_in_forward_order.md),
+    # silently, exit 0.
+    #
+    # Every exit route is in the one program because there are five emission
+    # sites for the same walk (normal tail, the `return` interceptor, the
+    # loop `continue`/`break` arm, the setjmp exception arm, and the no-`__exit__`
+    # fallback) and each is a separate place to get the order wrong. `as` on
+    # the first item only, because the teardown order is independent of it
+    # and CPython has to agree about the alias too.
+    test_gimple_matches_cpython("gimple_multi_item_with_unwinds_in_reverse", """\
+class Ctx:
+    def __init__(self, n):
+        self.n = n
+    def __enter__(self):
+        print("enter", self.n)
+        return self.n
+    def __exit__(self, a, b, c):
+        print("exit", self.n)
+
+def three():
+    with Ctx(1), Ctx(2), Ctx(3):
+        print("body")
+
+def raiser():
+    with Ctx(4) as a, Ctx(5):
+        print("before", a)
+        raise ValueError("boom")
+
+def early():
+    with Ctx(6), Ctx(7):
+        return 99
+
+def nested():
+    with Ctx(8):
+        with Ctx(9):
+            print("inner")
+
+three()
+try:
+    raiser()
+except ValueError as e:
+    print("caught", e)
+print("early", early())
+nested()
+""")
+
     test_gimple_stdout("gimple_list_sort_method_in_place", """\
 def main():
     l = [3, 1, 2]
