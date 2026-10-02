@@ -2057,35 +2057,416 @@ def _merge_reads(into: dict, more: dict) -> None:
         into.setdefault(name, ln)
 
 
+# ── the CFG, and the "definitely stored" fixpoint over it ──────────────────
+#
+# `read_before_store` is a DOMINANCE question wearing a walk's clothes: the
+# defect is a read that not every path to it stores, so the answer is a
+# fixpoint over the function's control-flow graph rather than an ordered pass
+# over its statements. Everything in this section exists to build that graph
+# once, here, and for both backends to read one answer from it — the same
+# reason every other layout decision in this module is shared, and the same
+# reason a second CFG in an emitter would be a second opinion about which path
+# runs.
+
+
+class _Block:
+    """A maximal run of statements with one entry and one set of successors.
+
+    `succs` holds indices into the list `_build_cfg` returns, and `preds` is
+    its transpose — built once at the end rather than maintained by hand,
+    because a CFG whose forward and backward edges can disagree is worse than
+    no CFG.
+
+    `defs` is what the block's own statements STORE, and `kills` is what they
+    `del`. Both are needed and they are not inverses: `del x` removes a name
+    from the definitely-stored set without storing anything, which is what
+    makes `del x` on one arm of a branch a read-before-store on the other."""
+
+    __slots__ = ("index", "stmts", "succs", "preds", "defs", "kills")
+
+    def __init__(self, index, stmts):
+        self.index = index
+        self.stmts = stmts
+        self.succs: list = []
+        self.preds: list = []
+        self.defs: set = set()
+        self.kills: set = set()
+
+    def __repr__(self):
+        return (f"<block {self.index}: {len(self.stmts)} stmt(s), "
+                f"-> {self.succs}>")
+
+
+def _cfg_block_defs(stmts) -> tuple:
+    """`(defs, kills)` for a straight-line run: what it stores, what it dels.
+
+    A NAME walk and nothing else, because a straight-line run has no control
+    flow in it: every statement in the block is reached whenever the block is.
+    That is what makes a block the unit the fixpoint wants.
+
+    `ExprStmt` and `Pass` are here as no-ops deliberately — they end a block
+    for the reader's benefit, not the analysis's, and treating an unrecognised
+    statement as a definition would put a name in `defs` that nothing stores."""
+    defs: set = set()
+    kills: set = set()
+    for s in (stmts or []):
+        kind = type(s).__name__
+        if kind in ("AssignStmt", "AugAssignStmt"):
+            defs |= _store_names(getattr(s, "target", None))
+        elif kind == "VarDecl":
+            n = getattr(s, "name", None)
+            if isinstance(n, str):
+                defs.add(n)
+        elif kind == "MultiAssignStmt":
+            for t in (getattr(s, "targets", None) or []):
+                defs |= _store_names(t)
+        elif kind == "WithStmt":
+            for it in (getattr(s, "items", None) or []):
+                a = getattr(it, "alias", None)
+                if isinstance(a, str):
+                    defs.add(a)
+        elif kind == "TryStmt":
+            for h in (getattr(s, "handlers", None) or []):
+                n = getattr(h, "name", None)
+                if isinstance(n, str):
+                    defs.add(n)
+        elif kind == "DelStmt":
+            for t in (getattr(s, "targets", None) or []):
+                kills |= _store_names(t)
+        elif kind in ("ComptimeVarStmt",):
+            defs |= _store_names(getattr(s, "target", None))
+        elif kind in ("ForStmt", "ComptimeForStmt"):
+            # A loop TARGET is a definition, and it is one in the HEADER rather
+            # than in the body: the body runs zero times on the first entry
+            # and the target is still bound, which is what keeps
+            # `for i in range(0, 100): if i > 3: break` then `return i` legal
+            # (CPython's `for_range_break`, and the reason this decision is
+            # not "the target is stored by the body").
+            defs |= _store_names(getattr(s, "target", None))
+    return defs, kills
+
+
+def _case_is_wildcard(case) -> bool:
+    """Whether a `match` case is irrefutable, so the match has no fall-through.
+
+    A wildcard (`case _`) and a bare capture (`case x`) both match whatever
+    reaches them, so a `match` ending in one is total and a statement after it
+    is reached from every path. `case 1` / `case "s"` / `case [a, b]` are all
+    refutable, and a `case` with a `guard` is refutable however its pattern
+    reads — the guard is the source saying "this one might not match".
+
+    Read off the recorded patterns rather than the source text, because the
+    patterns are what the rest of the analysis reads and a text search for `_`
+    would match a `_` inside a literal.
+
+    The consequence of getting this wrong is a FALSE REFUSAL of a program that
+    is correct, which is why the answer is the conservative one in the
+    direction that matters: an unrecognised pattern shape is treated as
+    REFUTABLE (so the fall-through edge is kept and nothing is refused), never
+    as exhaustive."""
+    if getattr(case, "guard", None) is not None:
+        return False
+    pats = getattr(case, "patterns", None) or []
+    if not pats:
+        return False
+    for p in pats:
+        if isinstance(p, F.IdentExpr):
+            # `_` is the wildcard; any other bare name is a capture, which is
+            # also irrefutable.
+            continue
+        return False
+    return True
+
+
+def _build_cfg(body) -> tuple:
+    """`(blocks, entry index)` for a function body.
+
+    **The builder's shape, and why it needs two pieces of state rather than
+    one.** A control-flow statement's arms converge on what follows, so the
+    builder has to know both "which blocks fall through to the next statement"
+    (`pending`) and "which block is currently accepting straight-line
+    statements" (`cur`). One list cannot be both: after an `if`, `pending` is
+    the join's predecessors, and appending the next statement to `pending[-1]`
+    would make the join a self-loop and lose the edge that makes the join
+    reachable from the false arm. So `cur is None` after every control-flow
+    statement, and the next straight-line statement opens a block linked from
+    `pending` — which is the join, and is the whole join mechanism.
+
+    That is also why an `if`/`elif`/`else` chain needs no special case for
+    `elif`: an `elif` is an `if` whose "else" arm is the next `if`, so the
+    chain is three statements threading one `pending` list through all three.
+
+    `break` and `continue` are resolved against the `loops` stack rather than
+    emitted as an edge to the next statement, because their target is not the
+    next statement. A `break` in a loop's `else` clause is not that loop's
+    `break` in Python; the `else` clause is emitted with the loop POPPED, so a
+    `break` inside it attaches to the enclosing loop and an `if`-join it forms
+    is the loop's real exit. Getting that wrong would invent an edge to a join
+    the program cannot reach, which is the one direction that could make the
+    fixpoint refuse a legal program.
+
+    Everything unrecognised becomes a leaf statement in the current block, so
+    an unknown SHAPE contributes no edge and no definition rather than a wrong
+    one — the same "silence rather than a wrong answer" the statement walk
+    settled for, and the direction `_definitely_stored`'s top-initialization
+    then makes safe.
+    """
+    blocks: list = []
+
+    def new(stmts) -> _Block:
+        b = _Block(len(blocks), list(stmts or []))
+        b.defs, b.kills = _cfg_block_defs(b.stmts)
+        blocks.append(b)
+        return b
+
+    def open_block(stmts, pending: list) -> _Block:
+        """Open a block for `stmts` and make every `pending` exit reach it."""
+        b = new(stmts)
+        for p in pending:
+            if p is not None and 0 <= p < len(blocks):
+                blocks[p].succs.append(b.index)
+        return b
+
+    def run(stmts, loops: list, pending: list) -> list:
+        """Emit `stmts`, returning the indices that fall through to the end.
+
+        `pending` holds the exits that reach the FIRST statement here; the
+        block it opens is the first thing emitted, and the exits at the end of
+        the run are what the caller joins to whatever comes next. A `break` or
+        `continue` returns `[]` — control does not fall through — while adding
+        itself to the loop stack, which is how the loop's own join collects it.
+        """
+        if not pending:
+            # A run nothing can reach. It still gets a block, so an
+            # unreachable region cannot leave a hole in the index space the
+            # fixpoint walks.
+            b = new([])
+            pending = [b.index]
+        cur = None
+
+        def take() -> _Block:
+            """The block the next straight-line statement joins, opening one
+            if a control-flow statement closed the previous."""
+            nonlocal cur, pending
+            if cur is None:
+                cur = open_block([], pending)
+                pending = [cur.index]
+            return cur
+
+        for s in (stmts or []):
+            kind = type(s).__name__
+            if kind == "IfStmt":
+                cond = open_block([s], pending)
+                pending = [cond.index]
+                cur = None
+                arms = [getattr(s, "then_body", None) or []]
+                arms += [b for _c, b in (getattr(s, "elifs", None) or [])]
+                has_else = getattr(s, "else_body", None) is not None
+                if has_else:
+                    arms.append(s.else_body)
+                arm_exits: list = []
+                for body in arms:
+                    arm_exits += run(body, loops, [cond.index])
+                if not has_else:
+                    arm_exits.append(cond.index)      # the false edge
+                pending = arm_exits
+                continue
+            if kind in ("WhileStmt", "ForStmt", "ComptimeForStmt"):
+                head = open_block([s], pending)
+                pending = [head.index]
+                cur = None
+                loops.append({"head": head.index, "exits": [],
+                              "continues": []})
+                body_exits = run(getattr(s, "body", None) or [], loops,
+                                 [head.index])
+                # The body flows back to the header, which is what makes the
+                # header reachable from itself and the fixpoint a fixpoint
+                # rather than a single pass.
+                for be in body_exits:
+                    blocks[be].succs.append(head.index)
+                frame = loops[-1]
+                loops.pop()
+                # `else` runs when the condition fails, so it hangs off the
+                # header — emitted with the loop POPPED, so a `break` inside
+                # it is the enclosing loop's rather than this one's.
+                else_exits = run(getattr(s, "else_body", None) or [], loops,
+                                 [head.index])
+                blocks[head.index].succs += else_exits
+                # A `break` in the BODY also reaches the join, and that is what
+                # keeps `for i in range(0, 100): if i > 3: break` then
+                # `return i` legal: the loop's target is defined in the header
+                # and the join is reached from the header's exit edge as well
+                # as from the break.
+                pending = else_exits + frame["exits"]
+                continue
+            if kind == "WithStmt":
+                w = open_block([s], pending)
+                pending = run(getattr(s, "body", None) or [], loops,
+                              [w.index])
+                cur = None
+                continue
+            if kind == "TryStmt":
+                t = open_block([s], pending)
+                pending = [t.index]
+                cur = None
+                arm_exits = run(getattr(s, "body", None) or [], loops,
+                                [t.index])
+                for h in (getattr(s, "handlers", None) or []):
+                    arm_exits += run(getattr(h, "body", None) or [], loops,
+                                     [t.index])
+                # `else` runs only when the body did NOT raise and `finally`
+                # runs either way, so both are ARMS of the one statement
+                # rather than a chain. That is what makes a `return` inside
+                # `finally` a terminating path rather than a fallthrough, and
+                # a store in only one handler not a dominating store.
+                if getattr(s, "else_body", None) is not None:
+                    arm_exits += run(s.else_body, loops, [t.index])
+                fin_exits = run(getattr(s, "finally_body", None) or [], loops,
+                                [t.index])
+                blocks[t.index].succs += fin_exits
+                pending = fin_exits or arm_exits
+                cur = None
+                continue
+            if kind == "MatchStmt":
+                m = open_block([s], pending)
+                pending = [m.index]
+                cur = None
+                arm_exits: list = []
+                exhaustive = False
+                for c in (getattr(s, "cases", None) or []):
+                    arm_exits += run(getattr(c, "body", None) or [], loops,
+                                     [m.index])
+                    if _case_is_wildcard(c):
+                        exhaustive = True
+                # A `match` with no matching case FALLS THROUGH to whatever
+                # follows, and that is a path to the join that stores nothing.
+                # The edge is omitted only when a case is EXHAUSTIVE, which the
+                # source says by ending in a wildcard (`case _`) or an
+                # irrefutable capture — read off the recorded patterns, because
+                # a `match` that always matches is the one case where the
+                # fall-through does not exist and adding the edge anyway would
+                # refuse a legal program. `bugs/FORMAL_read_before_store_dominating_store.md`
+                # names this as the shape a partial rule gets wrong, and a
+                # false refusal is the worse of the two errors here: the old
+                # walk was silent on it and every program it accepted built.
+                if not exhaustive:
+                    arm_exits.append(m.index)
+                pending = arm_exits
+                continue
+            if kind in ("BreakStmt", "ContinueStmt"):
+                b = open_block([s], pending)
+                if loops:
+                    if kind == "BreakStmt":
+                        loops[-1]["exits"].append(b.index)
+                    else:
+                        loops[-1]["continues"].append(b.index)
+                # With no loop around it this is a syntax error CPython
+                # catches, so there is no target: control does not fall
+                # through, and inventing a successor would be an edge to a join
+                # the program cannot reach.
+                return []
+            if kind in ("ReturnStmt", "RaiseStmt"):
+                open_block([s], pending)
+                # No successor: control leaves the function.
+                return []
+            b = take()
+            b.stmts.append(s)
+            d, k = _cfg_block_defs([s])
+            b.defs |= d
+            b.kills |= k
+        if cur is None and not pending:
+            return []
+        return pending
+
+    # The entry block is opened FIRST, before the body is emitted, so it is
+    # index 0 and the fixpoint's seed is a single place no other block can
+    # reach by accident. The body is emitted WITH the entry as its pending
+    # predecessor, which is the edge that makes the seed reach anything: a body
+    # emitted with an empty pending list opens its own unreachable first block,
+    # and every block after it then inherits the universe.
+    entry = new([])
+    entry.succs += run(body, [], [entry.index])
+    for b in blocks:
+        for d in b.succs:
+            if d is not None and 0 <= d < len(blocks):
+                blocks[d].preds.append(b.index)
+    return blocks, entry.index
+
+
+def _definitely_stored(blocks: list, entry: int, seed: set) -> dict:
+    """`{block index: names every path to that block stores}` — the fixpoint.
+
+    The standard "definitely assigned" dataflow: a name is in a block's IN set
+    when it is in EVERY predecessor's OUT set, and a block's OUT set is its IN
+    set plus what it defines. Seeded at the entry with `seed` (the parameter
+    names, which the CALLER stores), and iterated to a fixpoint because a loop
+    makes the answer depend on itself.
+
+    **Initialized from the TOP, not the bottom**, and that is the whole safety
+    property. Every non-entry block starts as "every name is stored" and is
+    narrowed; a block with no predecessor therefore keeps everything, which is
+    the right answer for unreachable code (nothing can read an unstored name
+    in a block nothing reaches) and the right direction in general — this
+    analysis can only ever refuse a name it can PROVE no path stores, never one
+    it merely failed to track.
+
+    Intersection rather than union is what closes the bug this replaced: the
+    statement walk added a branch arm's stores to the set the code after the
+    branch saw, so a name stored in ONE arm looked stored to the join. Here the
+    join intersects, so `if i: t = 1` then `print(t)` reports `t` — which is
+    the defect — and `if c: p = 1 else: p = 2` then `print(p)` does not,
+    because both arms store it. The second case is the one that says the
+    analysis is a fixpoint and not a heuristic: the two shapes are the same
+    graph with different arm sets."""
+    everything = set()
+    for b in blocks:
+        everything |= b.defs
+    for node in iter_nodes([b.stmts for b in blocks]):
+        everything |= set(_expr_reads(node, set()).keys())
+    universe = everything | set(seed)
+    out: dict = {b.index: (set(seed) if b.index == entry else set(universe))
+                 for b in blocks}
+    changed = True
+    rounds = 0
+    while changed:
+        changed = False
+        rounds += 1
+        for b in blocks:
+            if not b.preds:
+                continue
+            merged = None
+            for p in b.preds:
+                p_out = out[p] - blocks[p].kills | blocks[p].defs
+                merged = set(p_out) if merged is None else (merged & p_out)
+            if merged is not None and merged != out[b.index]:
+                out[b.index] = merged
+                changed = True
+        # A pathological CFG cannot loop forever (the sets only shrink and
+        # there are finitely many), but the bound makes a cycle in the builder
+        # a wrong answer rather than a hang.
+        if rounds > len(blocks) + 2:
+            break
+    return out
+
+
 def read_before_store(fn, params: set = None, placed: set = None):
     """The first (name, line) a function reads that nothing stores first, or
     None.
 
-    `params` is the function's incoming parameter names: they are stored by
-    the CALLER, so reading one is never reading an unstored name.
+    `params` is the function's incoming parameter names: they are stored by the
+    CALLER, so reading one is never reading an unstored name.
     `placed` restricts the answer to names that have a home at all — a name
     with no home is `check_module_symbols`' refusal to make, and this one
     would be a second, worse message about the same name.
 
-    THE ALGORITHM, and what it is worth. A straight statement walk with a
-    `stored` set, where a name enters `stored` at the point its assignment
-    appears. Reading a name that is not yet in `stored` — and is not a
-    parameter — is this case.
+    **THE ALGORITHM, and what it is worth.** A "definitely stored" fixpoint
+    over the function's CFG: `_build_cfg` cuts the body into basic blocks once,
+    and `_definitely_stored` iterates a name into a block only when EVERY path
+    to that block stores it. A read is this defect when the name is in neither
+    the block's IN set nor the statements preceding it inside the block.
 
-    Branches are walked conservatively: entering an `if`, a loop, a `try` or
-    a `with` body adds that body's stores to `stored` (so a read AFTER the
-    branch is not reported when the branch is the only writer), which is
-    exactly the soundness this version gives up. The alternative — adding
-    nothing — refuses `if c: p = 1` / `print(p)`, which is a program that
-    WORKS whenever `c` is true and raises otherwise, and refusing it would be
-    refusing a legal program on the strength of a path this analysis does not
-    look at.
-
-    So this version is EXACT on the shapes it decides and SILENT on the ones
-    it cannot, and both halves of that are deliberate: a false refusal breaks
-    working code, while a false silence leaves today's behaviour in place for
-    a program that already miscompiles and is now at least named by a bug doc.
-    The shape that survives is a name stored in only SOME arm of a branch:
+    That is a change of question rather than a widening of the old one, and it
+    is what closes the shape the statement-order walk could not see:
 
         def f(n):
             for i in range(3):
@@ -2093,16 +2474,36 @@ def read_before_store(fn, params: set = None, placed: set = None):
                     t = 1
             printf("t=%d", t)
 
-    `t` is stored somewhere in the body, so this walk sees the store and the
-    read as fine; whether the register holds 1 or the caller's leftover
-    depends on which arm ran, and CPython raises UnboundLocalError when
-    `i == 0`. Catching it needs a store to DOMINATE the read — every path
-    from the entry to pass one — which is a reachability computation over the
-    function's CFG and not a walk over its statements. Recorded in
-    bugs/FORMAL_read_before_store_dominating_store.md rather than
-    approximated here, because an approximation that misses some arms is
-    indistinguishable from no check at all.
-    """
+    `t` is stored SOMEWHERE in the body, so the old walk saw the store and the
+    read as fine; whether the register holds 1 or the caller's leftover depends
+    on which arm ran, and CPython raises `UnboundLocalError` when `i == 0`.
+
+    **Two shapes the fixpoint gets right that a "count the arms" heuristic
+    does not**, and they are the reason this is a real analysis rather than a
+    rule:
+
+    * a name stored in EVERY arm of an `if`/`elif`/`else` chain IS dominating —
+      `if c: p = 1 else: p = 2` then `print(p)` is legal, returns 3, and the
+      intersection over arms is exactly the rule;
+    * the `for` target STAYS bound after its loop, because the target is a
+      definition in the loop's HEADER and the join is reached from the header's
+      exit edge — which is what keeps
+      `for i in range(0, 100): if i > 3: break` then `return i` (returns 4, and
+      is legal) out of the answer set. Deciding it needs "did this loop execute
+      at least once", which the CFG answers for free and the old walk could
+      not.
+
+    `try`/`except`/`else`/`finally`, `break` out of one arm of a loop, a
+    `match` with a wildcard arm and a `del` on one path are all ordinary edges
+    here rather than cases, which is what
+    `bugs/FORMAL_read_before_store_dominating_store.md` asked for: it warned
+    that a partial rule "fires on some of them and not others is worse than
+    none in a specific way — it makes the corpus look covered".
+
+    A statement shape the builder does not recognise becomes a leaf statement
+    in its block, so it contributes no edge and no definition: an unknown shape
+    is a silence rather than a wrong answer, and the direction is the safe one
+    because the fixpoint is initialized from the top."""
     params = set(params if params is not None
                  else (getattr(fn, "params", None) or ()))
     params = {p[0] if isinstance(p, (tuple, list)) and p else p for p in params}
@@ -2147,221 +2548,137 @@ def read_before_store(fn, params: set = None, placed: set = None):
             return
         found.append((name, line))
 
-    def walk_expr(e):
-        for name, ln in _expr_reads(e, stored).items():
+    def walk_expr(e, live):
+        for name, ln in _expr_reads(e, live).items():
             note(name, ln if ln is not None else getattr(e, "line", None))
 
-    def walk_stmts(stmts):
-        nonlocal stored
+    def walk_stmts(stmts, live):
+        """The reads of a straight-line run, in order, updating `live`.
+
+        The per-statement rules are the old walk's, unchanged and for the same
+        reasons — they are about what ONE statement does, and the old walk was
+        right about all of them. What changed is what `live` starts as: a
+        block's IN set rather than a running set threaded through the whole
+        function. The `if`/`while`/`for`/`try` arms are not here at all, because
+        the CFG has already accounted for them by the time a block is walked."""
+        live = set(live)
         for s in (stmts or []):
-            walk_stmt(s)
-
-    def stores_of(s) -> set:
-        """The names ONE statement stores, computed without running the walk.
-
-        Used for the branch bodies, where the stores have to be visible to
-        the code after the branch without being attributed to a position
-        inside it."""
-        kind = type(s).__name__
-        if kind in ("AssignStmt", "AugAssignStmt", "ForStmt"):
-            return _store_names(getattr(s, "target", None))
-        if kind == "VarDecl":
-            n = getattr(s, "name", None)
-            return {n} if isinstance(n, str) else set()
-        if kind == "MultiAssignStmt":
-            out: set = set()
-            for t in (getattr(s, "targets", None) or []):
-                out |= _store_names(t)
-            return out
-        if kind == "WithStmt":
-            out = set()
-            for it in (getattr(s, "items", None) or []):
-                a = getattr(it, "alias", None)
-                if isinstance(a, str):
-                    out.add(a)
-            return out
-        if kind == "TryStmt":
-            out = set()
-            for h in (getattr(s, "handlers", None) or []):
-                n = getattr(h, "name", None)
-                if isinstance(n, str):
-                    out.add(n)
-            return out
-        return set()
-
-    def walk_stmt(s):
-        nonlocal stored
-        kind = type(s).__name__
-        line = getattr(s, "line", None)
-        if kind == "AssignStmt":
-            # The VALUE is read before the target is written: `x = x + 1` is
-            # the canonical case, and reading the value after adding the
-            # target to `stored` would make it look initialised.
-            walk_expr(getattr(s, "value", None))
-            stored |= _store_names(getattr(s, "target", None))
-            return
-        if kind == "AugAssignStmt":
-            # `x += 1` READS x. An augmented assignment to a name nothing
-            # stored is the same defect as `x = x + 1` with a shorter
-            # spelling, and it is the one that reads most like ordinary code.
-            walk_expr(getattr(s, "target", None))
-            walk_expr(getattr(s, "value", None))
-            stored |= _store_names(getattr(s, "target", None))
-            return
-        if kind == "VarDecl":
-            walk_expr(getattr(s, "value", None))
-            n = getattr(s, "name", None)
-            if isinstance(n, str):
-                stored.add(n)
-            return
-        if kind == "MultiAssignStmt":
-            walk_expr(getattr(s, "value", None))
-            for t in (getattr(s, "targets", None) or []):
-                stored |= _store_names(t)
-            return
-        if kind == "IfStmt":
-            walk_expr(getattr(s, "condition", None))
-            # Every arm's stores become visible to the code after the `if`.
-            # See the docstring: this is the half of the analysis that is
-            # deliberately not exact, stated rather than implied.
-            for b in (getattr(s, "then_body", None) or []):
-                walk_stmt(b)
-            for _c, b in (getattr(s, "elifs", None) or []):
-                walk_stmt(b)
-            for b in (getattr(s, "else_body", None) or []):
-                walk_stmt(b)
-            return
-        if kind == "WhileStmt":
-            walk_expr(getattr(s, "condition", None))
-            for b in (getattr(s, "body", None) or []):
-                walk_stmt(b)
-            for b in (getattr(s, "else_body", None) or []):
-                walk_stmt(b)
-            return
-        if kind == "ForStmt":
-            # The ITERABLE is read before the target exists (a `for` target is
-            # a fresh binding, not a read of an enclosing one), and the target
-            # is bound BEFORE the body runs — `for v in xs: total += v` reads
-            # a stored `v` and must not be reported.
-            #
-            # The target STAYS stored after the loop, which is a deliberate
-            # divergence from CPython and the right side of it. CPython leaves
-            # it unbound when the iterable is empty, so
-            # `for i in []: pass` then `print(i)` is a NameError; treating
-            # that as this case refuses
-            #
-            #     for i in range(0, 100):
-            #         if i > 3: break
-            #     return i
-            #
-            # which is legal — the loop ran, so `i` is bound, and it returns
-            # 4. That is `test_formal_run.py`'s `for_range_break`, and it is
-            # the shape real code is written in. Deciding it properly needs
-            # "did this loop execute at least once", which is the same
-            # reachability question the branch arms need; refusing the legal
-            # shape to catch the illegal one would break working programs,
-            # and a false refusal is the worse of the two errors here.
-            walk_expr(getattr(s, "iterable", None))
-            stored |= stores_of(s)
-            for b in (getattr(s, "body", None) or []):
-                walk_stmt(b)
-            for b in (getattr(s, "else_body", None) or []):
-                walk_stmt(b)
-            return
-        if kind == "WithStmt":
-            for it in (getattr(s, "items", None) or []):
-                walk_expr(getattr(it, "expr", None))
-            for b in (getattr(s, "body", None) or []):
-                walk_stmt(b)
-            stored |= stores_of(s)
-            return
-        if kind == "TryStmt":
-            for b in (getattr(s, "body", None) or []):
-                walk_stmt(b)
-            for h in (getattr(s, "handlers", None) or []):
-                for b in (getattr(h, "body", None) or []):
-                    walk_stmt(b)
-            for b in (getattr(s, "else_body", None) or []):
-                walk_stmt(b)
-            for b in (getattr(s, "finally_body", None) or []):
-                walk_stmt(b)
-            stored |= stores_of(s)
-            return
-        if kind == "MatchStmt":
-            walk_expr(getattr(s, "subject", None))
-            for c in (getattr(s, "cases", None) or []):
-                for b in (getattr(c, "body", None) or []):
-                    walk_stmt(b)
-            return
-        if kind in ("ReturnStmt", "ExprStmt"):
-            walk_expr(getattr(s, "value", None))
-            return
-        if kind == "AssertStmt":
-            walk_expr(getattr(s, "value", None))
-            walk_expr(getattr(s, "msg", None))
-            return
-        if kind == "RaiseStmt":
-            walk_expr(getattr(s, "value", None))
-            return
-        if kind == "DelStmt":
-            # `del x` READS x, and a name nothing stored is the same case.
-            for t in (getattr(s, "targets", None) or []):
-                walk_expr(t)
-            return
-        if kind in ("ComptimeVarStmt",):
-            walk_expr(getattr(s, "value", None))
-            t = getattr(s, "target", None)
-            stored |= _store_names(t)
-            return
-        if kind in ("ComptimeForStmt", "ComptimeIfStmt"):
-            walk_expr(getattr(s, "iterable", None)
-                      if kind == "ComptimeForStmt"
-                      else getattr(s, "condition", None))
-            for b in (getattr(s, "body", None) or getattr(s, "then_body", None)
-                      or []):
-                walk_stmt(b)
-            for _c, b in (getattr(s, "elifs", None) or []):
-                walk_stmt(b)
-            for b in (getattr(s, "else_body", None) or []):
-                walk_stmt(b)
-            if kind == "ComptimeForStmt":
-                t = getattr(s, "target", None)
-                stored |= _store_names(t)
-            return
-        if kind in ("FunctionDef", "StructDef", "TraitDef", "LambdaExpr"):
-            # A nested definition's body is a DIFFERENT frame with its own
-            # parameters, and its locals are not this function's. Walking it
-            # here would report its own unstored names against this
-            # function's `stored` set.
-            return
-        # Anything else: walk its expressions rather than ignore it, so an
-        # unrecognised statement shape is a silence rather than a wrong
-        # answer.
-        for f in getattr(s, "__dataclass_fields__", ()) or ():
-            if f in ("line", "col"):
+            kind = type(s).__name__
+            if kind == "AssignStmt":
+                # The VALUE is read before the target is written: `x = x + 1`
+                # is the canonical case, and reading the value after adding
+                # the target would make it look initialised.
+                walk_expr(getattr(s, "value", None), live)
+                live |= _store_names(getattr(s, "target", None))
                 continue
-            v = getattr(s, f, None)
-            if isinstance(v, (F.IfStmt, F.WhileStmt, F.ForStmt, F.WithStmt,
-                              F.TryStmt, F.MatchStmt, F.ReturnStmt,
-                              F.ExprStmt, F.AssertStmt, F.RaiseStmt,
-                              F.DelStmt, F.AssignStmt, F.AugAssignStmt,
-                              F.VarDecl, F.MultiAssignStmt, F.FunctionDef,
-                              F.StructDef, F.TraitDef, F.LambdaExpr)):
-                walk_stmt(v)
-            elif isinstance(v, list) and v and all(
-                    isinstance(x, (F.IfStmt, F.WhileStmt, F.ForStmt,
-                                   F.WithStmt, F.TryStmt, F.ReturnStmt,
-                                   F.ExprStmt, F.AssertStmt, F.RaiseStmt,
-                                   F.DelStmt, F.AssignStmt, F.AugAssignStmt,
-                                   F.VarDecl, F.MultiAssignStmt))
-                    for x in v):
-                for x in v:
-                    walk_stmt(x)
-            else:
-                walk_expr(v)
+            if kind == "AugAssignStmt":
+                # `x += 1` READS x. An augmented assignment to a name nothing
+                # stored is the same defect as `x = x + 1` with a shorter
+                # spelling.
+                walk_expr(getattr(s, "target", None), live)
+                walk_expr(getattr(s, "value", None), live)
+                live |= _store_names(getattr(s, "target", None))
+                continue
+            if kind == "VarDecl":
+                walk_expr(getattr(s, "value", None), live)
+                n = getattr(s, "name", None)
+                if isinstance(n, str):
+                    live.add(n)
+                continue
+            if kind == "MultiAssignStmt":
+                walk_expr(getattr(s, "value", None), live)
+                for t in (getattr(s, "targets", None) or []):
+                    live |= _store_names(t)
+                continue
+            if kind in ("ForStmt", "ComptimeForStmt"):
+                # The ITERABLE is read before the target exists (a `for` target
+                # is a fresh binding, not a read of an enclosing one), and the
+                # target is bound BEFORE the body runs.
+                walk_expr(getattr(s, "iterable", None), live)
+                live |= _store_names(getattr(s, "target", None))
+                continue
+            if kind == "WhileStmt":
+                walk_expr(getattr(s, "condition", None), live)
+                continue
+            if kind == "IfStmt":
+                walk_expr(getattr(s, "condition", None), live)
+                continue
+            if kind == "MatchStmt":
+                walk_expr(getattr(s, "subject", None), live)
+                continue
+            if kind == "ComptimeIfStmt":
+                walk_expr(getattr(s, "condition", None), live)
+                continue
+            if kind == "WithStmt":
+                for it in (getattr(s, "items", None) or []):
+                    walk_expr(getattr(it, "expr", None), live)
+                    a = getattr(it, "alias", None)
+                    if isinstance(a, str):
+                        live.add(a)
+                continue
+            if kind == "TryStmt":
+                for h in (getattr(s, "handlers", None) or []):
+                    n = getattr(h, "name", None)
+                    if isinstance(n, str):
+                        live.add(n)
+                continue
+            if kind == "DelStmt":
+                # `del x` READS x, and a name nothing stored is the same case.
+                for t in (getattr(s, "targets", None) or []):
+                    walk_expr(t, live)
+                for t in (getattr(s, "targets", None) or []):
+                    live -= _store_names(t)
+                continue
+            if kind == "ComptimeVarStmt":
+                walk_expr(getattr(s, "value", None), live)
+                live |= _store_names(getattr(s, "target", None))
+                continue
+            if kind in ("FunctionDef", "StructDef", "TraitDef", "LambdaExpr"):
+                # A nested definition's body is a DIFFERENT frame with its own
+                # parameters, and its locals are not this function's.
+                continue
+            if kind in ("ReturnStmt", "ExprStmt"):
+                walk_expr(getattr(s, "value", None), live)
+                continue
+            if kind == "RaiseStmt":
+                walk_expr(getattr(s, "value", None), live)
+                continue
+            if kind == "AssertStmt":
+                walk_expr(getattr(s, "value", None), live)
+                walk_expr(getattr(s, "msg", None), live)
+                continue
+            if kind in ("BreakStmt", "ContinueStmt", "Pass", "GlobalStmt",
+                        "NonlocalStmt"):
+                continue
+            # Anything else: walk its expressions rather than ignore it, so an
+            # unrecognised statement shape is a silence rather than a wrong
+            # answer.
+            for f in getattr(s, "__dataclass_fields__", ()) or ():
+                if f in ("line", "col"):
+                    continue
+                v = getattr(s, f, None)
+                if isinstance(v, (F.IfStmt, F.WhileStmt, F.ForStmt, F.WithStmt,
+                                  F.TryStmt, F.MatchStmt, F.ReturnStmt,
+                                  F.ExprStmt, F.AssertStmt, F.RaiseStmt,
+                                  F.DelStmt, F.AssignStmt, F.AugAssignStmt,
+                                  F.VarDecl, F.MultiAssignStmt, F.FunctionDef,
+                                  F.StructDef, F.TraitDef, F.LambdaExpr)):
+                    walk_expr(v, live)
+                else:
+                    walk_expr(v, live)
 
-    stored: set = set()
-    walk_stmts(getattr(fn, "body", None) or [])
+    blocks, entry = _build_cfg(getattr(fn, "body", None) or [])
+    stored_in = _definitely_stored(blocks, entry, params)
+    # Blocks in index order, so the finding is the FIRST in SOURCE order rather
+    # than whatever order the builder happened to finish them in — a diagnostic
+    # that names a later line when an earlier one is the same defect sends the
+    # reader to the wrong place.
+    for b in sorted(blocks, key=lambda x: x.index):
+        if b.index == entry:
+            continue
+        walk_stmts(b.stmts, stored_in.get(b.index, set()))
+        if found:
+            break
     return found[0] if found else None
 
 
