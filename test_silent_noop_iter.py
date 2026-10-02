@@ -230,6 +230,39 @@ def main():
 '''
 
 
+@case('next_iter_over_a_dict_items_expression')
+def _():
+    # `next(iter(<expression>))`, where the expression is not a bare name.
+    # Reading a dict's first entry this way is the ordinary Python idiom, and
+    # the `next(iter(x))` lowering existed only for `x` being an IdentExpr —
+    # so this shape matched no `next(...)` form at all and hit the
+    # whole-module refusal ("`next(...)` on next(CallExpr) has no lowering"),
+    # which is not a per-line diagnostic: it takes the whole file out of the
+    # compiled path. Real: `Apple/__main__.py`'s
+    # `next(iter(slice_parts.items()))`, twice.
+    #
+    # The `for k, v in d.items():` line is in the case on purpose: the
+    # destructuring form and the loop form read the SAME [key, value] pair,
+    # so they must print the same thing. That is the property, not just
+    # "compiles" — an element-type guess that made `next(iter(...))` disagree
+    # with the loop over the same list would still be wrong here.
+    #
+    # In one function, deliberately: a dict handed to a CALLEE does not carry
+    # its value type across the call boundary in this codegen (a separate,
+    # pre-existing gap that the `for` form shares — see
+    # bugs/CODEGEN_unannotated_dict_param_value_type_not_propagated.md), so
+    # putting the pair read behind a call would test that instead of this.
+    return '''def main():
+    d = {"alpha": "one", "beta": "two"}
+    k, v = next(iter(d.items()))
+    print(k, v)
+    for k2, v2 in d.items():
+        print(k2, v2)
+        break
+    print("done")
+'''
+
+
 @case('container_kind_dict_keys')
 def _():
     # The same class with a dict: `mojo_dict_keys` is the real conversion
