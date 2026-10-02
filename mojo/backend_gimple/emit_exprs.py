@@ -5089,7 +5089,14 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # `mojo_list_extend`. A set/dict comprehension with 2+ clauses is still
     # dropped -- those need per-kind insert/merge, not a list extend, and
     # guessing at it is how this bug got in.
-    if len(node.generators) > 1 and node.kind in ('list', 'generator'):
+    if len(node.generators) > 1 and node.kind in ('list', 'generator',
+                                                       'set', 'dict'):
+        # `list`/`generator` merge with `mojo_list_extend`; `set` and `dict`
+        # merge with `mojo_set_update`/`mojo_dict_update`, because an element
+        # has to be INSERTED (deduplicated / keyed), not concatenated. All
+        # four park the remainder here and the per-kind arm in
+        # `_gen_compr_append` does its own merge -- guessing at that from
+        # the list path is how the clauses were dropped in the first place.
         gen._compr_pending_inner = gimple_ctypes.Comprehension(
             kind=node.kind, element=node.element, key=node.key,
             generators=list(node.generators[1:]))

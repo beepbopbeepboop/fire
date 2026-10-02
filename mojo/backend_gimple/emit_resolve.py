@@ -2985,6 +2985,49 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._tuple_slot_types[res] = gen._tuple_slot_types[_iv_raw]
         return
 
+    if _inner is not None and node.kind == 'set':
+        # A set comprehension with 2+ clauses. Same park-the-remainder shape
+        # as the list branch above, but the merge is a per-ELEMENT ADD, not a
+        # list extend: `{i + j for i in range(3) for j in range(3)}` needs a
+        # real `mojo_set_add` per element so duplicates collapse. The inner
+        # comprehension is lowered as a SET of its own and merged with
+        # `mojo_set_update` (src over dst), which is the same
+        # accumulate-one-kind-at-a-time contract the list branch's
+        # `mojo_list_extend` has.
+        gen._compr_pending_inner = None
+        _ir = gen.lower_expr(_inner)
+        _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
+        _iv = _iv_raw
+        if _it.endswith(' *') and _it != 'MojoSet *':
+            _iv = gen._new_val('MojoSet *', f'(MojoSet *){_iv_raw}')
+        gen._emit_call('void', '', 'mojo_set_update',
+                       [('MojoSet *', res), ('MojoSet *', _iv)])
+        # The single-clause set arm below ends with `_elem_types[res] = et`
+        # and a set with no recorded element type is UNDESCRIBABLE
+        # (`sorted(set(text))` then yields raw char* decimals), so carry the
+        # inner set's element type the same way.
+        if _iv_raw in gen._elem_types:
+            gen._elem_types[res] = gen._elem_types[_iv_raw]
+        return
+
+    if _inner is not None and node.kind == 'dict':
+        # A dict comprehension with 2+ clauses, same shape again, merged
+        # per-PAIR with `mojo_dict_update`. Without it
+        # `{(i, j): i * j for i in range(2) for j in range(2)}` printed a
+        # TWO-entry dict whose keys were raw heap addresses baked into the
+        # generated C as decimal literals -- the ASLR-dependent class of
+        # wrong output, and the reason this case is worth its own arm rather
+        # than a widened list extend.
+        gen._compr_pending_inner = None
+        _ir = gen.lower_expr(_inner)
+        _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
+        _iv = _iv_raw
+        if _it.endswith(' *') and _it != 'MojoDict *':
+            _iv = gen._new_val('MojoDict *', f'(MojoDict *){_iv_raw}')
+        gen._emit_call('void', '', 'mojo_dict_update',
+                       [('MojoDict *', res), ('MojoDict *', _iv)])
+        return
+
     if node.kind == 'list' or node.kind == 'generator':
         # `_lower_comprehension` initializes a 'generator' comprehension
         # identically to 'list' ("convert to list for simplicity" — see

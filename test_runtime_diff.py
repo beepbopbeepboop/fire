@@ -434,6 +434,32 @@ BUILTIN_PROGRAMS = {
             print([(7,)])
             print([(0, 0)])
     """),
+    # A set/dict comprehension with 2+ `for` clauses. `list`/`generator` were
+    # fixed first because both are list-backed; `set` and `dict` need a real
+    # per-ELEMENT insert / per-PAIR merge, so they are separate arms rather
+    # than a widened list extend.
+    #
+    # Asserted STRUCTURALLY (len / in / subscript) rather than by printing:
+    # a dict comprehension has three unrelated pre-existing rendering bugs
+    # (int keys stringify, a 0 value reads as None, a tuple key prints as a
+    # heap address) that are filed as
+    # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md. Using
+    # the repr here would make this case measure those instead, and would
+    # have hidden the clause-count fix — the old behaviour dropped every
+    # clause after the first, so the dict had 2 entries where Python's has
+    # 3 (keys collide), which `len` sees and the repr does not distinguish
+    # from a key-stringification bug.
+    "set_and_dict_comprehension_two_clauses": textwrap.dedent("""\
+        def main():
+            print({i + j for i in range(3) for j in range(3)})
+            print(len({i + j for i in range(3) for j in range(3)}))
+            print(4 in {i + j for i in range(3) for j in range(3)})
+            d = {i + j: i * j for i in range(2) for j in range(2)}
+            print(len(d))
+            print((1 + 1) in d)
+            print(d[0 + 1])
+            print(d[1 + 1])
+    """),
     "global_var": textwrap.dedent("""\
         var counter: Int = 0
 
