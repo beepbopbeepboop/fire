@@ -74,12 +74,32 @@ What is asserted, in the order the fixes were made:
      `model.module_body`; this pins the classification against the tree's
      own host modules, which are all three at once and every one of which must
      keep building with no entry function at all.
- 10. **The tree's own regression set.** `t1.mojo` is still a `codegen`
-     finding — now for the real reason (`sys.exit` is a C-library name that
-     `doc/ABI.md`'s export rule excludes, so the module does not export it),
-     rather than a false pass. And the three shape files the sweep reported
-     as `pass` while dropping their bodies are asserted to either produce
-     CPython's output or to refuse by name — never to pass in silence.
+10. **A struct construction with arguments in a module body is RUN, not
+      refused.** It used to be a `case_refused` row, and it was wrong for as
+      long as it stood: a declared `__init__` whose body is a straight line of
+      `self.<field> = <bare parameter>` assignments is inlined at the
+      construction site, so `Point(1, 2)` in a module body built, ran and
+      printed the right answer while the row said it had no representation.
+      Three rows now cover the construct, because one of them covered only
+      half of it: the running case (both fields read, so a transposed inline
+      cannot pass), the class-default case (a constructor that assigns one of
+      two fields leaves the other at its default — `3 0`, not `3 3`), and the
+      refusal that must survive both, which is `self.x = x * 10` and would be
+      a SILENT wrong answer if the inline ever accepted it.
+  11. **`case_refused_without`: the anti-rot direction for a REWORDING.**
+      `name_in_function` pins that `__name__` in a function is not substituted,
+      and it used to do that with a needle-only assertion against a sentence
+      that had stopped being true of the file. A needle-only row is satisfied
+      by APPENDING the true sentence and leaving the false one in place, which
+      is how a message that asserts something untrue outlives the change that
+      made it untrue; the row now requires the message to have stopped saying
+      it AND to still name what it says now.
+  12. **The tree's own regression set.** `t1.mojo` is still a `codegen`
+      finding — now for the real reason (`sys.exit` is a C-library name that
+      `doc/ABI.md`'s export rule excludes, so the module does not export it),
+      rather than a false pass. And the three shape files the sweep reported
+      as `pass` while dropping their bodies are asserted to either produce
+      CPython's output or to refuse by name — never to pass in silence.
 
 Invoked directly:
     python3 test_formal_toplevel.py [-v]
@@ -209,6 +229,56 @@ def case_refused(name, source, needle, tmpdir, verbose=False):
                     f"refused, but not with {needle!r}: {text.strip()[-300:]}")
         if verbose:
             print(f"      [{backend}] refused: {needle!r}")
+    return ok
+
+
+def case_refused_without(name, source, needle, forbidden, tmpdir,
+                         verbose=False):
+    """REFUSED, still naming `needle`, and NO LONGER saying `forbidden`.
+
+    `test_formal_run.py` has this mode for the whole formal suite and this file
+    did not, which is the gap `bugs/FORMAL_toplevel_test_asserts_a_refusal_the_
+    backend_no_longer_owes.md` §4 found: it is the anti-rot direction for a
+    REWORDING, and a needle-only assertion cannot see one. A refusal that has
+    stopped being TRUE about the file it is reported against survives every
+    `case_refused` row in this file, because the words the row pins are still
+    in the message — the sentence that is false has simply been joined by a
+    true one. The concrete instance is `name_in_function` below, whose old
+    needle `\'__name__' has no home` stopped being raised the moment a
+    MORE SPECIFIC check (`compares a NUMBER with a string`, which fires before
+    the storage enumeration because it is asked first) began answering that
+    program.
+
+    Both halves are required, and they are required for the two ways this can
+    be faked: without `forbidden`, appending the true sentence satisfies the
+    row and leaves the false one in place; without `needle`, deleting the
+    message — or replacing it wholesale with something unrelated — satisfies it
+    too. What is left is "refused, for `needle`, no longer claiming
+    `forbidden`", which is the row's actual subject."""
+    ok = True
+    for backend in BACKENDS:
+        src = os.path.join(tmpdir, f"{name}.{backend}.mojo")
+        with open(src, "w") as f:
+            f.write(source)
+        out = os.path.join(tmpdir, f"{name}.{backend}.aout")
+        r = build(src, out, backend)
+        if r.returncode == 0:
+            ok &= check(False, f"{name} [{backend}] refused",
+                        f"it BUILT a construct with no representation, and it "
+                        f"is no longer asserting {forbidden!r} either; the "
+                        f"binary is the real answer here")
+            continue
+        text = r.stderr or r.stdout
+        said = [f for f in forbidden if f in text]
+        ok &= check(not said, f"{name} [{backend}] no longer says {said!r}",
+                    f"the refusal asserts a fact that is not true of the file "
+                    f"it is reported against: {text.strip()[-300:]}")
+        ok &= check(needle in text, f"{name} [{backend}] still names {needle!r}",
+                    f"refused without the superseded wording, but also "
+                    f"without naming {needle!r}, so the message may have been "
+                    f"dropped rather than corrected: {text.strip()[-300:]}")
+        if verbose:
+            print(f"      [{backend}] refused: {needle!r}, not {forbidden!r}")
     return ok
 
 
@@ -369,11 +439,28 @@ def test_name_in_a_function_is_still_refused(tmpdir, verbose):
     wrong for every other, which is the class of lie
     `bugs/FORMAL_module_state_no_storage.md` is about. Pinned so a later
     change cannot widen the substitution into the function bodies."""
-    return case_refused(
+    # `refuse_without:`, and the needle is the REWORDED sentence rather than
+    # the one this row used to pin.  A more specific check now answers this
+    # program before the storage enumeration does: the comparison is a NUMBER
+    # against a STRING, and `strcmp` dereferences both operands, so the
+    # operand-kind question is asked first and `\'__name__' has no home` is no
+    # longer what it says.  It was not a lifted refusal — the program is still
+    # refused on both backends, and what the row is FOR (that `__name__` in a
+    # FUNCTION is not substituted) is still exactly what it pins.
+    #
+    # The forbidden half is the old needle, and it is the half that makes this
+    # a case rather than a restatement: a needle-only row is satisfied by
+    # APPENDING the true sentence and leaving the false one in place, which is
+    # how a message that says something untrue about the file outlives the
+    # change that made it untrue.  Verified pre-existing rather than caused by
+    # whatever change surfaced it: the same source built from `HEAD` restored
+    # into a scratch copy refuses identically.
+    return case_refused_without(
         "name_in_function",
         "def f():\n    if __name__ == \"__main__\":\n        return 1\n"
         "    return 0\n\nf()\n",
-        "'__name__' has no home", tmpdir, verbose)
+        "compares a NUMBER with a string",
+        ["'__name__' has no home"], tmpdir, verbose)
 
 
 # ── 5. the module docstring, `pass`, and a folded constant are not body ────
@@ -556,6 +643,49 @@ d = {"a": 10, "b": 20}
 print("Value of a:", d["a"])
 """
 
+# `class_jit.mojo`'s shape — a struct construction with arguments, written in a
+# MODULE BODY rather than inside a function.  It used to be pinned here as a
+# REFUSAL, which was wrong for the whole time the assertion existed: a declared
+# `__init__` whose body is a straight line of `self.<field> = <bare
+# parameter>` is inlined at the construction site, so this program builds, runs,
+# and prints what it says.  `bugs/FORMAL_toplevel_body_struct_construction_no_
+# longer_refused.md` is the record; what it asked for is a running case, which
+# is what this is.
+#
+# Two fields, two arguments, BOTH fields read: an inline that transposed the
+# argument order or the field order would answer `x=2 y=1`, and an inline that
+# stored only one of them would leave the other holding a word neither
+# architecture agrees on.  No escape in the format — see the case's docstring.
+BODY_CONSTRUCTION_RUNS = """\
+struct Point:
+    x: Int
+    y: Int
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+p = Point(1, 2)
+printf("x=%d y=%d", p.x, p.y)
+"""
+
+# The CLASS-DEFAULT half of the same inlining, and the part a
+# field-filling implementation would get wrong.  `P`'s constructor assigns one
+# of its two fields, so `p.y` is never written by anything — and the answer
+# (0) is the field's class-level default, not the constructor's missing
+# argument and not whatever the frame allocator left in the slot.  CPython says
+# `3 0` for the same text, measured, and the case asserts that pair rather than
+# a single number so that a `3 3` cannot pass.
+BODY_CONSTRUCTION_CLASS_DEFAULT = """\
+struct P:
+    x: Int
+    y: Int
+    def __init__(self, x):
+        self.x = x
+
+p = P(3)
+printf("x=%d y=%d", p.x, p.y)
+"""
+
 
 def test_t1_is_a_named_finding_not_a_pass(tmpdir, verbose):
     """`t1.mojo` refuses, naming why — it does not exit 0 in silence.
@@ -606,32 +736,100 @@ def test_a_module_body_reaches_its_next_real_finding(tmpdir, verbose):
         "print() cannot tell whether", tmpdir, verbose)
 
 
+def test_a_module_body_construction_with_arguments_runs(tmpdir, verbose):
+    """A construction WITH arguments in a module body lowers, and is RIGHT.
+
+    The row that replaces the stale refusal beside it, and it is this file's own
+    discipline for a construct written in a module body: build the image,
+    EXECUTE it, and compare the answer. A refusal only says the backend
+    declined; a run says the answer is right — and the answer being right is
+    the part that matters, because the failure this replaces was never a
+    crash. It was a row asserting a refusal for a program that compiled and
+    computed exactly what it says.
+
+    The needle the old row pinned was the ordinary construction refusal, and
+    the point of pairing the two rows is that it is STILL the ordinary
+    construction refusal that refuses a body this path cannot inline — there is
+    no body-specific list, and this pair is what keeps that true while the
+    inline underneath it stands.
+
+    Two arguments into two fields and the read is of the FIRST of them, so a
+    constructor inlined with the arguments swapped (or with the field order
+    transposed) prints `2` where the source says `1`. `p.y` is read as well:
+    a body that only ever stored one of the two fields would leave the other
+    holding whatever the allocator left behind, which on the two architectures
+    is not the same word.
+
+    **No escape in the format string, and that is deliberate rather than an
+    oversight**: string literals are stored unescaped on this path, so
+    `printf("%d\\n", …)` writes a literal backslash and an `n` — 3 bytes for
+    the answer `1`, not 2 — which `test_formal_sys.py:510`
+    (`test_string_escapes_are_not_interpreted`) pins as a property of the
+    representation. The expected stdout below is the representation, not a
+    bug in it, and CPython is not the oracle for a file that calls `printf`."""
+    return case_agrees_with_cpython(
+        "body_construction_runs", BODY_CONSTRUCTION_RUNS, tmpdir, verbose,
+        expect_stdout="x=1 y=2", expect_exit=0)
+
+
 def test_a_module_body_can_still_be_refused_by_the_ordinary_codegen(tmpdir,
                                                                    verbose):
     """…and a body is refused by the ordinary checks, not by a second set.
 
-    `class_jit.mojo`'s shape: a struct construction with arguments inside the
-    body. The message is the ordinary construction refusal, unchanged, because
-    the body is a function and the function pipeline is what answers it. A
-    second, body-specific refusal list would have made this a different
-    message for the same construct depending on where it was written.
+    `class_jit.mojo`'s shape: a struct construction inside the body whose
+    `__init__` has a body this path does not inline. The message is the
+    ordinary construction refusal, unchanged, because the body is a function
+    and the function pipeline is what answers it. A second, body-specific
+    refusal list would have made this a different message for the same
+    construct depending on where it was written.
 
-    The argument count is THREE, and that is what keeps the case about the
-    thing it claims to be about. It was two when this was written, and two is
-    exactly the arity the declared `__init__` takes, so `c0438b4`'s inline
-    started answering it: `Point(1, 2)` in a module body now builds, runs, and
-    prints 1, which is the right answer for the program. Three is refused by
-    the SAME message for the same reason the case is about — the body is a
-    function, so the ordinary construction check is what refuses it — and it
-    exercises the arm of the inline that genuinely has no answer (a count no
-    declared arity admits) rather than the arm that was fixed underneath it.
+    **This row used to be a two-argument `Point(1, 2)`, and it used to be
+    wrong.** A declared `__init__` whose body is a straight line of
+    `self.<field> = <bare parameter>` assignments is INLINED at the
+    construction site — `formal/model.py`'s `construction_init_body_refusal`
+    says so in its own words, under the heading "What is NOT refused, and the
+    reason it is worth stating" — so the program built, ran and printed the
+    right answer while this row insisted it had no representation.  That is a
+    hole in coverage pointed the wrong way: it says "this has no
+    representation" about a construct that has one, and a reader who believes
+    the row does not go and look for the coverage the inlining actually has.
+    The running half of the pair is `test_a_module_body_construction_with_
+    arguments_runs` below; this row is the half that must not be
+    lost, because `self.x = x * 10` refused is the one that would be a SILENT
+    wrong answer if it regressed (`P(3)` would print `3` where the source says
+    `30`).
     """
     return case_refused(
         "body_construction_refusal",
-        "struct Point:\n    x: Int\n    y: Int\n    def __init__(self, x, y):\n"
-        "        self.x = x\n        self.y = y\n\n"
-        "p = Point(1, 2, 3)\nprintf(\"%d\\n\", p.x)\n",
+        "struct P:\n    x: Int\n    def __init__(self, x):\n"
+        "        self.x = x * 10\n\n"
+        "p = P(3)\nprintf(\"%d\", p.x)\n",
         "is a call to a user-defined `__init__`", tmpdir, verbose)
+
+
+def test_a_module_body_construction_leaves_an_unassigned_field_at_its_default(
+        tmpdir, verbose):
+    """A constructor that assigns ONE of two fields leaves the other alone.
+
+    The half of the inlining a "fill the fields from the arguments"
+    implementation gets wrong, and it is why this is a pair of assertions
+    rather than one: the lowering is not "fill the fields", it is "store each
+    of the constructor's `self.<field> = …` assignments into the fresh block
+    at the construction site", so a field the constructor does not mention is
+    never written and keeps the class default the construction brought it up
+    with.
+
+    Asserted as the PAIR `x=3 y=0` rather than as `x=3`, so an inline that
+    invented a value for `y` — `3 3` being the plausible one — cannot pass.
+    CPython's answer for the same text is the same pair, and it is a class
+    attribute in the oracle program rather than a field with no default at
+    all: under a bare `class P`, `y` is not declared anywhere and CPython
+    raises `AttributeError`, which would make this a test of a different
+    question. `struct P: x: Int; y: Int` is the spelling that says what `y`
+    is, and a field declared with no value defaults to 0 on both sides."""
+    return case_agrees_with_cpython(
+        "body_construction_class_default", BODY_CONSTRUCTION_CLASS_DEFAULT,
+        tmpdir, verbose, expect_stdout="x=3 y=0", expect_exit=0)
 
 
 # ── the classifier itself, as a unit ───────────────────────────────────────
@@ -807,6 +1005,8 @@ def main():
         test_dylib_path_refuses_a_module_body,
         test_t1_is_a_named_finding_not_a_pass,
         test_a_module_body_reaches_its_next_real_finding,
+        test_a_module_body_construction_with_arguments_runs,
+        test_a_module_body_construction_leaves_an_unassigned_field_at_its_default,
         test_a_module_body_can_still_be_refused_by_the_ordinary_codegen,
         test_a_name_collision_with_the_body_function_is_refused,
         test_a_folded_constant_the_body_rebinds_keeps_its_store,

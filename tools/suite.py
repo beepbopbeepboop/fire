@@ -2086,11 +2086,15 @@ test('formal-struct', [PY, 'test_struct_formal.py'], mem='tiny',
 # diagnostic. That bug is closed and its doc deleted (6ad8efd5), so the
 # durable record is this file, and its cases build the image, EXECUTE it, and
 # compare stdout and exit status with CPython on the same text.
+#
+# The `expect=` this row carried (`FORMAL_toplevel_body_struct_construction_no_
+# longer_refused.md`, 2 of 70) is gone with the two rows it described: the
+# stale `case_refused` for a construction the backend inlines is now a
+# build-and-RUN case plus the class-default case beside it, and the second
+# row was a rewording of `name_in_function`, which `case_refused_without:`
+# now pins in the direction a needle-only assertion cannot see.
 test('formal-toplevel', [PY, 'test_formal_toplevel.py'], mem='tiny',
      deps=['preflight'],
-     expect='bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md '
-            '— 2 of 70: a struct construction with arguments in a module body '
-            'now BUILDS where the case still asserts a refusal',
      extra=['test_formal_toplevel.py', 'tools/formal_sweep.py',
             'formal'] + FORMAL_BUILD_INPUTS,
      desc='a module body runs: built, executed, and diffed against CPython')

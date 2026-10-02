@@ -4496,6 +4496,113 @@ ASSIGNED_TYPE_CASES = [
      "    if o2.in1.c != 10:\n"
      "        return 4000 + o2.in1.c\n"
      "    return 0\n", 0, None),
+    # THE TUPLE TARGET, and the reason this group has a second list
+    # (`BOTH_ARCH_CASES`) at all.  `self.p, self.q, self.r = 3, 4, 7` in an
+    # `__init__` is ordinary Python that this repository writes —
+    # `tools/procrun.py` opens with `self.limit, self._chunks, self._size =
+    # limit, [], 0` — and it used to be refused on x86-64 by name and
+    # ACCEPTED-AND-DROPPED on arm64, where it built, ran, and computed 0.
+    #
+    # 14 is CPython's answer for this text, and every field is READ, so an
+    # inline that transposed the pairing (`q` ← 4 and `p` ← 3) or read
+    # one slot off by one fails rather than agreeing by luck.
+    #
+    # MEASURED, and the reason the three `BOTH_ARCH_CASES` rows exist rather
+    # than this one being enough: reversing the value pairing in
+    # `_init_statement_field_stores` leaves THIS ROW GREEN, because `3 + 4 + 7`
+    # is 14 whichever way round it is. It is a positive case built for the host
+    # architecture only, and its whole subject — a construct the two backends
+    # once disagreed about — is not what it checks. The `BOTH_ARCH_CASES` rows
+    # use positional arithmetic and fail on the same sabotage.
+    #
+    # It is in `BOTH_ARCH_CASES` as well for the other half: a case whose
+    # subject is a two-architecture DISAGREEMENT cannot be checked by running
+    # one of the two.
+    ("tuple_store_to_fields_in_init",
+     "class Tail:\n"
+     "    def __init__(self):\n"
+     "        self.p, self.q, self.r = 3, 4, 7\n"
+     "\n"
+     "    def total(self):\n"
+     "        return self.p + self.q + self.r\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = Tail()\n"
+     "    return t.total()\n", 14, None),
+]
+
+# Positive cases built and RUN on BOTH backends, which is what
+# `run_case` above deliberately does not do: it builds the host's architecture
+# for an answered case because that is what "does the binary compute the right
+# answer" means for the other 400 rows, and a case whose SUBJECT is a
+# two-architecture disagreement needs the other half of the assertion.
+#
+# It exists because that class of defect is invisible to every other shape in
+# this file.  A `refuse:` row builds both — and so passes when one architecture
+# refuses and the other BUILDS-and-lies is not caught by it either, since the
+# refusal half fails; and a positive row runs one, so x86-64 refusing what arm64
+# lowers is a green run.  That combination is exactly what
+# `bugs/FORMAL_x86_64_tuple_assignment_member_target.md` measured: arm64 lowered
+# a member tuple target, x86-64 refused it by name, and nothing in the suite
+# noticed for the whole life of the divergence.
+BOTH_ARCH_CASES = [
+    # A positive case whose expected answer is under 256, because the formal
+    # entry point's return value becomes the process exit status and a status is
+    # eight bits wide: 347 & 255 == 91, and a constant written as 347 would be a
+    # case that can never pass.  3, 4 and 7 rather than 1, 2 and 3 so that a
+    # transposed pairing (43) and a slot read one off (74, 370) are all
+    # different from the right answer and from each other.
+    ("both_arch_tuple_store_to_fields_in_init",
+     "class Tail:\n"
+     "    def __init__(self):\n"
+     "        self.p, self.q, self.r = 3, 4, 7\n"
+     "\n"
+     "    def total(self):\n"
+     "        return self.p * 100 + self.q * 10 + self.r\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = Tail()\n"
+     "    return t.total()\n", 91, None),
+    # A RECEIVER SPELLED `this`, because the receiver set is `struct_receivers`
+    # and not the literal `self`: a table that hard-coded the one spelling would
+    # make this row pass on the strength of the spelling the other rows use and
+    # refuse nothing.  4 * 100 + 9 = 409, and 409 & 255 == 153.
+    ("both_arch_tuple_store_through_a_renamed_receiver",
+     "class Pair:\n"
+     "    def __init__(this):\n"
+     "        this.a, this.b = 4, 9\n"
+     "\n"
+     "    def total(this):\n"
+     "        return this.a * 100 + this.b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = Pair()\n"
+     "    return p.total()\n", 153, None),
+    # The value the tuple form carries that the separate-assignment form cannot:
+    # a field assigned a CONSTRUCTOR ARGUMENT.  `__init__(self, n, m)` with
+    # `self.p, self.q = n, m` is what `init_body_stores` substitutes the
+    # CALLER's own expression for, and it is the half that makes the tuple form
+    # a per-field store rather than a store of three constants — a reader
+    # checking the row above cannot tell whether the pairing is positional or
+    # whether the three slots happen to hold the three constants in order.
+    #
+    # The values are BARE parameters, not `n * 2`, and that is the shape the
+    # inline accepts: `constr_refuse_an_init_body_that_reads_a_parameter_in_an_
+    # expression` is the row that says why a name inside an expression is a
+    # refusal (the arithmetic names a word the CALLING function does not have),
+    # and a tuple element is under exactly the same rule as a plain one.
+    # 3 * 100 + 7 = 307, and 307 & 255 == 51.
+    ("both_arch_tuple_store_binds_constructor_arguments",
+     "class Scale:\n"
+     "    def __init__(self, n: Int, m: Int):\n"
+     "        self.p, self.q = n, m\n"
+     "\n"
+     "    def total(self):\n"
+     "        return self.p * 100 + self.q\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = Scale(3, 7)\n"
+     "    return s.total()\n", 51, None),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -4699,16 +4806,23 @@ ASSIGNED_TYPE_REFUSALS = [
      # `self.in1 = w` instance of it. A refusal that quoted one instance sent
      # the reader to check whether their own assignment was that one.
      "refuse:__init__ assigns it values this path cannot reduce to a type", None),
-    # A TUPLE target: `self.a, self.b = A(), B()`, which is what
-    # `tools/procrun.py` writes.  The field is recognised as assigned, so the
-    # message is about the STORE and not about the type — and the store is the
-    # real gap: a tuple store to a field is refused by name on x86-64 and
-    # ACCEPTED-AND-DROPPED on arm64.  This case is here so that reading a type
-    # out of a store the emitter does not perform cannot come back unnoticed;
-    # with it read as evidence the program built, ran, and answered 123 where
-    # the source says 128.
-    # bugs/FORMAL_tuple_store_to_a_field.md is the codegen bug.
-    ("byref_refuse_a_tuple_target_names_the_store",
+    # THE TUPLE TARGET, which used to be pinned HERE as a refusal and is now a
+    # POSITIVE case in `ASSIGNED_TYPE_CASES` (`tuple_store_to_fields_in_init`).
+    # The refusal this row replaced was a band-aid with a measured reason — a
+    # tuple store to a field was refused by name on x86-64 and
+    # accepted-and-DROPPED on arm64 — and both halves of that reason are gone, so
+    # the band-aid had to go with them rather than rot as a sentence asserting
+    # something false about the reader's file.
+    #
+    # What replaces it in the NEGATIVE direction is the one thing about this
+    # program that is still refused, and it is refused for a DIFFERENT and TRUE
+    # reason: `Inner()` in the tuple's second position is a construction of a
+    # struct whose receiver is a frame, and a body inlined at a construction site
+    # has no block reserved for it.  Before this change that program was stopped
+    # one question earlier — by the tuple band-aid — and so never reached the
+    # framed-construction refusal that is the actual blocker.  A reader sent to
+    # the store path for this program was sent to the wrong file.
+    ("byref_refuse_a_tuple_store_of_a_framed_construction",
      "struct Inner:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -4733,7 +4847,93 @@ ASSIGNED_TYPE_REFUSALS = [
      "    o.in1.b = 2\n"
      "    o.in1.c = 3\n"
      "    return o.go()\n",
-     "refuse:a tuple store to a FIELD is not a store this path performs", None),
+     # `refuse_without:` and not `refuse:`, because the superseded sentence is
+     # the point: it asserted the store does not happen, and it does.
+     "refuse_without:a construction of a struct whose receiver is a frame:"
+     "a tuple store to a FIELD is not a store this path performs|"
+     "arm64 accepts it and leaves the slot as it was",
+     None),
+    # The tuple target's four DECLINED shapes, one row each, because they have
+    # four different reasons and "a local assignment" is the one answer none of
+    # them can use.  `_init_statement_field_stores` is the one table that both
+    # the `__init__` inline and the type evidence read, so these four are the
+    # exact complement of what it accepts — a shape it accepts with the wrong
+    # pairing would be a wrong ANSWER, and a shape it declines for a reason the
+    # message does not name is a diagnostic that sends the reader to look for
+    # the wrong thing.
+    ("constr_refuse_a_starred_element_of_a_tuple_target",
+     "struct S1:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.a, *rest = 1, 2, 3\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S1()\n"
+     "    return s.a\n",
+     "refuse:whose body this path does not inline: a starred target (`*rest`)",
+     None),
+    ("constr_refuse_a_nested_group_in_a_tuple_target",
+     "struct S2:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        (self.a, self.b), self.c = (1, 2), 3\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S2()\n"
+     "    return s.a\n",
+     "refuse:whose body this path does not inline: a tuple target whose group "
+     "`((self.a, self.b), self.c)` holds a nested pair", None),
+    ("constr_refuse_a_mixed_target_in_a_tuple_target",
+     "struct S3:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.a, other.b = 1, 2\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S3()\n"
+     "    return s.a\n",
+     "refuse:whose body this path does not inline: a tuple target that mixes a "
+     "field of the receiver with `other.b`", None),
+    ("constr_refuse_a_tuple_target_of_the_wrong_arity",
+     "struct S4:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.a, self.b, self.c = 1, 2\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S4()\n"
+     "    return s.a\n",
+     "refuse:whose body this path does not inline: a tuple target of 3 fields "
+     "assigned 2 value(s)", None),
+    # The BLOB right-hand side: `self.a, self.b = f()` unpacks a runtime
+    # container, and the count that says whether the pairing is even possible is
+    # a value neither this table nor the store can read at a construction site.
+    ("constr_refuse_a_tuple_target_unpacked_from_a_call",
+     "struct S5:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.a, self.b = pair()\n"
+     "\n"
+     "def pair():\n"
+     "    return [1, 2]\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S5()\n"
+     "    return s.a\n",
+     "refuse:whose body this path does not inline: a tuple target of 2 fields "
+     "assigned from `pair(...)`", None),
 ]
 
 
@@ -7380,6 +7580,51 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
         return False, f"stdout {run.stdout[:120]!r} does not contain {want_stdout!r}"
     if verbose:
         print(f"      stdout={run.stdout[:60]!r} exit={run.returncode}")
+    return True, ""
+
+
+def run_both_arch_case(name, source, want_exit, want_stdout, tmpdir, verbose):
+    """Build and RUN on BOTH backends, and require the same answer from each.
+
+    `run_case` builds the host's architecture for an answered case, which is
+    the right economy for the other four hundred rows and the wrong one here:
+    a case whose subject is a construct the two backends once DISAGREED about
+    cannot be checked by running one of them.  Both halves of the assertion are
+    needed and neither subsumes the other — `want_exit` alone would accept two
+    different wrong answers, and "it built" alone would accept a program that
+    computes the wrong number on both, which is the worse of the two failures
+    and the one this suite exists to catch.
+
+    The expected answer is a constant rather than a CPython run because the
+    form is the four-column one every other group uses and CPython cannot run
+    these sources verbatim (`class` fields with `var`-less annotations and a
+    `main(n: Int)` signature).  Each constant is stated in the case's comment
+    with its arithmetic, which is the property a constant has to have for this
+    to be an assertion rather than a transcript of the lowering.
+    """
+    src = os.path.join(tmpdir, name + ".mojo")
+    with open(src, "w") as f:
+        f.write(source)
+    for backend in ("arm64", "x86_64"):
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        rc, text = build_formal(src, out, backend=backend)
+        if rc != 0:
+            return False, f"--backend={backend} did not build: {text.strip()[-300:]}"
+        if not os.path.isfile(out):
+            return False, (f"--backend={backend} reported success but wrote no "
+                           f"binary")
+        run = subprocess.run([out], capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT)
+        if run.returncode != want_exit:
+            return False, (f"--backend={backend} exited {run.returncode}, "
+                           f"expected {want_exit}"
+                           + (f"; stderr: {run.stderr.strip()[:120]}"
+                              if run.stderr.strip() else ""))
+        if want_stdout is not None and want_stdout not in run.stdout:
+            return False, (f"--backend={backend} stdout {run.stdout[:120]!r} "
+                           f"does not contain {want_stdout!r}")
+        if verbose:
+            print(f"      {backend}: exit={run.returncode}")
     return True, ""
 
 
@@ -10637,18 +10882,65 @@ TYPE_VALUE_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    return Int(DType.float8_e4m3fn)\n",
      "refuse:DType.float8_e4m3fn names a type", None),
-    # `len()` of a type. A GUARD rather than a new refusal: the four production
-    # files reverted in place give byte-identical messages for `len(bool)` and
-    # `len(List)` before this construct existed, so what this case pins is that
-    # making a type a VALUE did not turn `len()` of one into a count. The
-    # wording is the imprecision it has always had — the source does say what the
-    # operand holds, and it says `bool` — and the bug doc has the next step.
+    # `len()` of a type.  This was a GUARD against making a type a VALUE turning
+    # `len()` of one into a count, and the guard held; what it also pinned was the
+    # imprecision: "the source does not say what this operand holds … Annotate it
+    # (`x: String`)" is FALSE about `len(bool)`, because the source says `bool` at
+    # the use site and the advice is to annotate a name that already has a type.
+    # So the row is now `refuse_without:` — the same program, asserting the false
+    # sentence is gone AND that a type-specific one replaced it, which a wholesale
+    # deletion of the message would not satisfy.  The old needle is the FORBIDDEN
+    # half, which is why the two clauses are one case rather than two.
     ("len_of_a_type_is_refused",
      "def main(n: Int) -> Int:\n"
      "    return len(bool)\n",
-     "refuse:len(bool)", None),
+     "refuse_without:len(bool) is len() of a TYPE:"
+     "the source does not say what this operand holds", None),
+    # The same message for a LOCAL BOUND TO A TYPE, which is the half that needed
+    # a kind of its own: `t = bool` bound `t` as an `int` by `_value_kind`'s word
+    # default, so `len(t)` said "an integer has no length" — a sentence about a
+    # value that is a TYPE TAG.  Without this row the kind could go back to
+    # INT_KIND for a local and only the bare-name spelling would notice.
+    ("len_of_a_bound_type_is_refused",
+     "def main(n: Int) -> Int:\n"
+     "    t = bool\n"
+     "    return len(t)\n",
+     "refuse_without:len(t) is len() of a TYPE:"
+     "an integer has no length", None),
+    # A type as a SUBSCRIPT INDEX.  Before the kind existed this BUILT on both
+    # architectures, ran, and exited 1 with nothing printed — the tag bounds-checked
+    # against a three-element blob and took the out-of-range exit, which is the
+    # bounds check doing its job on a number the source never wrote.  A build-time
+    # refusal is the only answer here: a tag is not an element position.
+    ("refuse_a_type_as_a_subscript_index",
+     "def main(n: Int) -> Int:\n"
+     "    var xs = [10, 20, 30]\n"
+     "    printf(\"%d\", xs[bool])\n"
+     "    return 0\n",
+     "refuse:is a TYPE used as a subscript index", None),
+    # …and through a LOCAL, because that is what makes it a kind rather than a
+    # check of the operand's node: `t = bool; xs[t]` is the same program with one
+    # more line in it, and a node-only recogniser would answer the first and refuse
+    # the second.
+    ("refuse_a_bound_type_as_a_subscript_index",
+     "def main(n: Int) -> Int:\n"
+     "    var xs = [10, 20, 30]\n"
+     "    t = bool\n"
+     "    printf(\"%d\", xs[t])\n"
+     "    return 0\n",
+     "refuse:is a TYPE used as a subscript index", None),
+    # On a STRING, where the index is not bounds-checked at all — it is `s + i` on a
+    # bare `char *`.  `s[bool]` SEGFAULTED on both architectures before the kind
+    # existed (measured), so this is the case where the refusal is worth having at
+    # all rather than a nicer message, and it is asked at the same choke point as
+    # the blob case precisely so both are covered by one check.
+    ("refuse_a_type_as_a_string_index",
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"%d\", s[bool])\n"
+     "    return 0\n",
+     "refuse:is a TYPE used as a subscript index", None),
 ]
-
 
 # ── the tag is INJECTIVE over the type names this path admits ──────────────
 #
@@ -10688,6 +10980,38 @@ if _TYPE_VALUE_TAG_COLLISIONS:
     raise AssertionError(
         f"two type names share a tag, so `t == A` would answer for `t == B`: "
         f"{_TYPE_VALUE_TAG_COLLISIONS}")
+
+
+# The other direction, and it is here because a kind nothing reads as a NUMBER
+# would be a refusal rather than an improvement: `print()` picks its conversion
+# from the kind, and a tag is a word, so `print(t)` for `t = bool` must still
+# print the tag.  That is what `model.is_number_kind` is for, and without it
+# these two rows are refusals ("print() cannot tell whether IdentExpr is a
+# string or a number") — a change that made the construct's own value
+# unprintable.
+#
+# The expected answer is `type_tag("bool")`, read from the model rather than
+# written down, so a change to the TAG FUNCTION cannot leave a literal behind
+# that the image no longer produces: the rows would fail with a number mismatch
+# instead of passing on "it built".
+#
+# The local spelling and the BARE spelling are separate rows because they take
+# different paths — the local is bound by `_value_kind` from the same
+# classification, and the bare one arrives at `print` with nothing bound at all,
+# which is the row that was refused outright before `TYPE_KIND` existed.
+TYPE_VALUE_NUMBER_CASES = [
+    ("type_value_a_local_prints_as_a_number",
+     "def main(n):\n"
+     "    t = bool\n"
+     "    print(t)\n"
+     "    return 0\n",
+     0, str(_TYPE_VALUE_MODEL.type_tag("bool"))),
+    ("type_value_a_bare_type_prints_as_a_number",
+     "def main(n):\n"
+     "    print(bool)\n"
+     "    return 0\n",
+     0, str(_TYPE_VALUE_MODEL.type_tag("bool"))),
+]
 
 
 # ── the field census, asked of the model directly ────────────────────────────
@@ -11127,6 +11451,7 @@ def main():
                   + SUBSCRIPT_CASES + DECLARED_TYPE_CASES
                   + DECLARED_TYPE_REFUSALS
                   + ASSIGNED_TYPE_CASES + ASSIGNED_TYPE_REFUSALS \
+                  + BOTH_ARCH_CASES \
                   + INIT_FIELD_TYPE_CASES \
                   + INIT_FIELD_TYPE_REFUSALS
                   + OVERLOAD_LAYOUT_CASES + OVERLOAD_REFUSALS
@@ -11141,6 +11466,7 @@ def main():
                   + TYPE_APPLICATION_REFUSALS + TYPE_VALUE_CASES \
                   + TYPE_VALUE_DTYPE_CASES + TYPE_VALUE_REFUSALS \
                   + TYPE_VALUE_TAG_CASES + ORIGIN_OF_CASES \
+                  + TYPE_VALUE_NUMBER_CASES \
                   + ORIGIN_OF_REFUSALS
                   + EQ_DISPATCH_CASES
                   + TYPE_ARGUMENT_LIST_CASES
@@ -11164,10 +11490,10 @@ def main():
                      + COMPTIME_ATTRIBUTE_CASES
                      + ONE_FIELD_MUTATOR_CASES
                      if not args.cases or c[0] in args.cases])
-    # `selected` is the four-column groups, so the pair cases have to be OUT of
-    # it: they are dispatched separately below, and a name in both would be
-    # counted twice by the arity check and reported as an unknown case. They are
-    # in `everything` for the `--list` census and nowhere else.
+    # `BOTH_ARCH_CASES` is the four-column shape, so it rides `selected` and the
+    # ordinary `run_case` dispatch; what makes it different is the RUNNER, and
+    # that is a set of names rather than a table of its own.
+    both_arch_names = {c[0] for c in BOTH_ARCH_CASES}
     selected = [c for c in everything
                 if c[0] not in pair_names
                 and (not args.cases or c[0] in args.cases)]
@@ -11226,6 +11552,10 @@ def main():
                         args.verbose)
                 elif name in module_names:
                     ok, detail = run_module_case(
+                        name, source, want_exit, want_stdout, tmpdir,
+                        args.verbose)
+                elif name in both_arch_names:
+                    ok, detail = run_both_arch_case(
                         name, source, want_exit, want_stdout, tmpdir,
                         args.verbose)
                 else:

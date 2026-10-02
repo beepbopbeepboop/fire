@@ -362,9 +362,16 @@ def _callee_symbol(func) -> str | None:
     `model.incoming_args`, comptime first) and a call site that passed only
     the runtime arguments, `f[1](3, 7)` would have built an image in which `x`
     read 7 and `y` read whatever was in RSI before — a wrong number with exit
-    0. See bugs/FORMAL_x86_64_comptime_specialization_abi.md, which is why this
-    arm and the `_specialization_args` call below landed together rather than
-    one at a time.
+    0. Which is why this arm and the `_specialization_args` call below landed
+    together rather than one at a time: each of the three halves on its own is
+    either a loud refusal or a silently wrong image, and the pair that matters
+    is the NAME and the CALL SITE.  The regression that keeps them together is
+    `test_formal_receiver_position.py`'s `COMPTIME_ABI_CASES` and
+    `test_formal_specialized_method_call.py`'s `x86_abi_specialized_method_call_
+    on_both`, which run every spelling on BOTH machines — reverting only the
+    prologue half makes all three fail on a WRONG NUMBER rather than on a
+    refusal, which is precisely the failure a refusal-shaped expectation
+    cannot see.
     """
     if isinstance(func, F.SubscriptExpr):
         return comptime_eval.specialization_name(func)
@@ -2449,7 +2456,12 @@ class X86_64Codegen:
             kind = self._expr_str_kind(a)
             if kind == M.STR_KIND:
                 frags.append("%s")
-            elif kind == M.INT_KIND:
+            elif M.is_number_kind(kind):
+                # `is_number_kind` and not `== INT_KIND`: a type TAG is a word,
+                # so `print(t)` for `t = bool` prints the tag, which is what it
+                # printed before `TYPE_KIND` existed (`t` was then an `int` by
+                # `_value_kind`'s default). Asking `== INT_KIND` here would make
+                # the construct's own positive case a refusal.
                 frags.append("%lld" if cmp_signed(self._ttype(a)) else "%llu")
             else:
                 raise CodegenError(
@@ -3456,6 +3468,16 @@ class X86_64Codegen:
         # entirely and fabricate a word.
         why = M.multi_index_refusal_for(e, self._is_dict_subscript(e.obj),
                                         self._functions, self._structs)
+        if why is not None:
+            raise CodegenError(why)
+        # A TYPE index, before the base's own shape is asked: the base does not
+        # decide this. `xs[bool]` took the blob's bounds check against a 63-bit
+        # tag and exited 1 with nothing printed, and `s[bool]` added a tag to a
+        # `char *`. One call here covers the read, the store and the augmented
+        # assignment, and it is asked of the KIND rather than of the node so a
+        # local bound to a type is refused as well as the bare name.
+        why = M.type_index_refusal(self._expr_str_kind(e.index),
+                                   M.spelled(e.index))
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_subscript(e.obj):

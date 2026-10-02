@@ -1,9 +1,18 @@
 # FORMAL_x86_64_argument_registers: x86-64's six integer argument registers is the largest x86-64 parity gap, and lifting it is a real ABI change rather than a spill
 
-**Area:** FORMAL (x86-64 codegen). **Status: OPEN — measured, not fixed, and
-the measurement is the point.** Found while working `construct:x86-64-parity`
-on 2026-10-01, when the other x86-64 parity items had closed and this was the
-largest thing left.
+**Area:** FORMAL (x86-64 codegen + the proof model). **Status: OPEN — measured,
+not fixed, and the measurement is the point.** Found while working
+`construct:x86-64-parity` on 2026-10-01, when the other x86-64 parity items had
+closed and this was the largest thing left.
+
+**Re-measured 2026-10-01, and the size of the job grew.** The codegen half is as
+described below; the PROOF half was not in this document at all, and it is the
+larger one: `lib/ProofLib.lean`'s `MojoFunc`/`evalFunc` bind one parameter, so a
+two-parameter function — which BUILDS on both architectures today — produces a
+proof file that does not elaborate. `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`
+has the measurement and the order; "The exact next step" below carries the parts
+that belong here (the stack-slot reservation and the disp32 gap in the x86-64
+model).
 
 ## What it is
 
@@ -88,12 +97,48 @@ functions. Both are real and both are worth saying precisely what they do:
 AMD64 puts arguments 7+ on the stack at `[rsp+0]`, `[rsp+8]`, … and AAPCS64 puts
 arguments 9+ at `[sp+0]`, `[sp+8]`, … The emitters model an ABI smaller than
 the real one on both machines; the refusal is a missing stack-argument
-convention, not a property of either ABI. Implementing it is the same work twice
-and it changes an ABI contract, which is why it is filed rather than done here.
+convention, not a property of either ABI. Implementing it is the same work
+twice in the codegen **and a change to the proof model on top** — see "The exact
+next step" above, which is where the size of that second half is measured — and
+it changes an ABI contract, which is why it is filed rather than done here.
 
 ## The exact next step
 
-1. **x86-64 call site** (`formal/x86_64_codegen.py:5659`): replace the
+**One correction first, measured 2026-10-01, because it changes the size of the
+job and the doc's §5 sentence understates it: this is not "the same work twice"
+in the emitters.** Lifting the limit makes a SEVEN-argument function legal, and
+the proof side cannot state anything about seven arguments — or about two.
+`lib/ProofLib.lean` has three one-parameter assumptions that are the same
+assumption:
+
+| where | shape |
+|---|---|
+| `lib/ProofLib.lean:745` | `inductive MojoFunc \| mk (name) (param : String) (body)` — one `param` |
+| `lib/ProofLib.lean:882` | `evalFunc … (arg : UInt64)`, environment `fun name => if name == param then arg else 0` — every other parameter evaluates to **0** |
+| `formal/arm64_proof_gen.py::_go_apply` | read `binders[0]`, applied one argument |
+
+Measured on this tree, both generators, for `def f(a0, a1): return a0 + a1`:
+
+```lean
+def f_go (a0 : UInt64) (a1 : UInt64) : UInt64 := ...
+def mojo (n : UInt64) : UInt64 :=
+  f_go n                                  -- argument-count error
+```
+
+So a two-parameter entry point — a legal program, which **builds on both
+architectures** (`def main(n: Int, m: Int) -> Int: return n + m`) — produces a
+proof file that does not elaborate, with the error three definitions away from
+the line that is wrong. **`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`**
+is the measurement and the order; a generator guard landed with it so the
+ill-typed file is no longer written, but the fix is `lib/ProofLib.lean`, and its
+hardest step is that `test_input` (one `UInt64`, from `compile_formal`'s
+`test_input=`) has to become a tuple, which is a `formal/build.py` change and not
+a generator one. Read that doc before starting step 1 below: the codegen half and
+the proof half are one change, not two, and the codegen half is the easy one.
+
+The codegen steps, unchanged and still correct:
+
+1. **x86-64 call site** (`formal/x86_64_codegen.py:5939`): replace the
    `len(args) > len(ARG_REGS)` refusal with a push of the surplus. The
    evaluation discipline already exists and is correct — arguments are evaluated
    left to right onto 16-byte slots and popped in reverse into the argument
@@ -102,7 +147,20 @@ and it changes an ABI contract, which is why it is filed rather than done here.
    and lands at `[rsp+0]`, `[rsp+8]`, … The 16-byte slot size is a problem and
    is also the solution: SysV requires 8-byte spacing, and `_SLOT` is 16, so the
    surplus needs its own push rather than a slot.
-2. **x86-64 callee prologue** (`:862`): read parameter *i* for *i* >= 6 from
+   **The one detail the step below does not fix, added by measurement:** the
+   surplus area has to be reserved BEFORE the argument slots are pushed, because
+   the register pops restore RSP and a value written at `[rsp+0]` during the pop
+   loop would be overwritten by the next pop. So: `sub rsp, 8*surplus` (rounded
+   UP to a multiple of 16, with the padding placed at the HIGHER addresses so
+   argument 6 still lands at `[rsp+0]` — see step 2), then evaluate and pop, and
+   write each surplus argument at `[rsp + pad + 8*(i-6)]`. SysV requires RSP to be
+   16-byte aligned at the `call`, and `8*surplus` is not a multiple of 16 for an
+   odd `surplus`, which is what the rounding is for. `formal/x86_64.py`'s
+   `_rm_disp` already emits a **disp32** for `|disp| > 127`, so the encoder needs
+   no change — but `lib/X86.lean` has **zero** disp32 forms (five `mov … mem` step
+   theorems, all disp8), so the *model* returns `none` for a stack read beyond
+   offset 127 and that has to be added alongside.
+2. **x86-64 callee prologue** (`:993`): read parameter *i* for *i* >= 6 from
    `[rbp + 16 + 8*(i-6)]` — 16 because the return address is at `[rbp+8]` and
    the saved RBP at `[rbp+0]`. The `_emit_extend` normalization the register
    path applies applies unchanged, since a stack argument arrives in exactly
@@ -116,7 +174,9 @@ and it changes an ABI contract, which is why it is filed rather than done here.
 4. **Then arm64**, identically, and the shared budget becomes `min(6, 8)` = 6
    for the frame convention and 6 for the plain arity limit — which is the
    number every message already quotes, so nothing user-visible changes except
-   that 7- and 8-argument programs build on both.
+   that 7- and 8-argument programs build on both. **This step's proof half is
+   the same one**: `lib/ProofLib.lean`'s `Arm64State`/`X86State` are separate
+   models but the `MojoFunc`/`evalFunc` arity is shared, so it is done once.
 5. `test_formal_run.py`'s `nine_arguments_refused` and
    `nine_parameters_refused_without_a_call_site` pin the refusal at NINE and
    pass with the needle `"9 arguments exceeds the"`. They stay green while the

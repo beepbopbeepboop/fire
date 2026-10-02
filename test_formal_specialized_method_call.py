@@ -67,18 +67,20 @@ _comptime_then_runtime_arguments` below is the case that pins the ORDER, because
 a specialization lift that transposed the receiver and the comptime arguments
 would produce a plausible wrong number rather than a failure.
 
-WHY x86-64 STILL REFUSES, and why that is not a gap in this change
--------------------------------------------------------------------
-`f[T](x)` builds on arm64 and is refused on x86-64 with "unsupported call target
-on the formal x86-64 path (got SubscriptExpr)", because x86-64's caller does not
-pass the comptime arguments while its callee prologue reserves a register for
-them (`incoming_args` is shared).  That refusal is LOAD-BEARING and is measured,
-with its three-half table, in `bugs/FORMAL_x86_64_comptime_specialization_abi.md`.
-A specialized METHOD call inherits it exactly as a specialized free function
-does — the construct needs the same missing half, and this change does not
-provide it.  `x86_abi_refusal_is_load_bearing` pins it for the method spelling
-so that a future change which made x86-64 "work" here by teaching it the name
-alone would fail this file rather than silently produce a wrong image.
+WHY BOTH ARCHITECTURES ARE RUN, and what the refusal used to be pinning
+---------------------------------------------------------------------
+`f[T](x)` built on arm64 and was REFUSED on x86-64 with "unsupported call target
+on the formal x86-64 path (got SubscriptExpr)", because x86-64's caller did not
+pass the comptime arguments while its callee prologue reserved a register for
+them (`incoming_args` is shared).  That refusal was LOAD-BEARING, and it was
+worth pinning for the reason this file now pins the PARITY instead: a backend
+that knows the callee's NAME without the ABI builds an image that links and
+computes something else, and only running both machines tells the two apart.
+The ABI took THREE halves to port, not one — the call site, `_callee_symbol`,
+and the callee prologue's allocation order — and `x86_abi_specialized_method_call_
+on_both` is what keeps the three together.  Reverting only the prologue half
+makes the case fail on a WRONG NUMBER rather than on a refusal, which is exactly
+the failure a refusal-shaped expectation cannot see.
 
 Every differential case is written twice, once as Mojo and once as plain Python,
 and the two are made to AGREE rather than the expectation being hand-written —

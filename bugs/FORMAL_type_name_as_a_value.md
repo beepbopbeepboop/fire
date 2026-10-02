@@ -198,30 +198,48 @@ notes are for is the merge, and each says which way it cuts.
 
 ## 5. What is still open, each with its next step
 
-* **`len()` of a type is refused with the wrong reason.** `len(bool)` and
-  `len(List)` get "the source does not say what this operand holds … Annotate it
-  (`x: String`) or bind it to a list" — true as far as it goes (a tag is neither
-  a `char *` nor a counted blob, so both of the two things `len` can answer are
-  correctly declined) and false in the only clause that matters for the reader,
-  because the source does say what the operand holds: it says `bool`. **This is
-  pre-existing and unchanged by this change** — measured with the four
-  production files reverted, byte-identical either way — so it is here as an
-  inherited imprecision, not as something this construct introduced.
-  **Next step:** three lines in each backend's `_emit_len`, before
-  `M.len_refusal` — ask `M.type_value_tag(operand)` and raise a message that says
-  a type is not a container. Deliberately not done here: it is a fourth
-  diagnostic for a program that cannot mean anything, and the two arms would have
-  to agree on it.
-* **A type is classified as an `int`, or as nothing at all.** `ValueKinds` has no
-  `TYPE_KIND`: a bare type-name read is unclassified (None — which is why `len` of
-  one takes its "the source does not say" branch above), and a LOCAL bound to a
-  type is an integer by `_value_kind`'s word default. So a subscript by one
-  (`xs[bool]`) would read a blob at a tag-derived offset instead of refusing.
-  **Next step:** a `TYPE_KIND` in `formal/model.py` plus the two
-  `if kind == M.INT_KIND` format switches in the backends, which is why it is a
-  separate piece of work and not a line in this one. Nothing a program that
-  typechecks can observe today: a subscript by a type is not a program, and this
-  path already computes an answer for `1[0]`.
+**The first two entries below CLOSED on 2026-10-01**, together, because they are
+one decision: a type is a value, so it is a KIND. `formal/model.py` has
+`TYPE_KIND`; `ValueKinds.name_kind` returns it for a name no local and no module
+global binds (last, which is the guard — `a_local_named_like_a_type_still_wins`
+cannot regress); `len_refusal` has the row the `None` branch was faking; and
+`model.type_index_refusal` is the sibling of `string_index_refusal` one level up.
+`test_formal_run.py`: `len_of_a_type_is_refused` is now `refuse_without:` (the
+same program, asserting the false sentence is GONE and a type-specific one
+replaced it), plus a bound-local `len` row, three index rows (list, bound local,
+string base) and `TYPE_VALUE_NUMBER_CASES` — two `print` rows whose expected
+answer is `type_tag("bool")` read from the model, because a tag IS a word and
+`print()` must keep printing it (`model.is_number_kind`).
+
+**The filing's prediction for the subscript half was wrong in a way worth
+recording: it is not a wrong number.** §5 below said `xs[bool]` "would read a
+blob at a tag-derived offset instead of refusing". Measured on this tree, both
+architectures, before the change:
+
+| program | arm64 | x86-64 |
+|---|---|---|
+| `xs = [10, 20, 30]; printf("%d", xs[bool])` | exit **1**, nothing printed | exit **1**, nothing printed |
+| `s = "abc"; printf("%d", s[bool])` | **SIGSEGV** | **SIGSEGV** |
+
+The bounds check gets there first — a tag is a large positive 63-bit hash, so it
+is out of range for a three-element blob and takes the out-of-range exit. So the
+defect was a silent *exit* on a program a reader can write, which is still a
+defect (no diagnostic at all, on both architectures, for a program whose failure
+is at build time on CPython with `TypeError: list indices must be integers or
+slices, not type`) but is not the plausible-looking wrong number the rest of
+this file is about. `s[bool]` segfaulting is the worse half and it is the one
+that made the fix worth doing: a string index is `s + i` on a bare `char *` and
+there is no bounds check to catch a tag.
+
+Also measured while doing it, and **a widening this change introduced on purpose**:
+`print(bool)` in the BARE position was refused outright before it ("print()
+cannot tell whether IdentExpr is a string or a number") and now prints the tag,
+which is the same word `print(t)` for `t = bool` already printed. That is the
+same widening the construct already made for `t`, so leaving the bare spelling
+refused would have been the inconsistency rather than the safety.
+
+### Still open
+
 * **`DType` as a value is a refusal, and that is a real limit.** A program that
   wants the runtime type object — `DType(Int32)`, `dtype.name`, `dtype.is_signed()`
   — still has no answer, and `formal/model.py`'s `POINTEES_REFUSED` already
@@ -229,19 +247,35 @@ notes are for is the merge, and each says which way it cuts.
   object needs storage this image does not have (it is a pointer to something),
   so it is the same class of question as `FORMAL_string_value_model.md` and
   belongs to whoever owns the value model.
+* **A `DType`-ANNOTATED field is still not `TYPE_KIND`.** `declared_type_kind`
+  answers `String` and the integer names and a framed struct and a blob, and
+  `DType` is none of those, so `b.t` for `var t: DType` is unclassified while
+  `t = DType.int32` in a local is now a tag. **Deliberately left**, and the
+  reason is the direction of the risk: the annotation is the one thing this path
+  trusts about a slot, so making a declared `DType` field a tag would let
+  `len(self.t)` and `self.t[i]` take a new branch on a shape the corpus uses
+  (`std/testing/prop/random.mojo` and `func_attribute.mojo` both declare
+  `dtype: DType`) for no gain — the two operations are refused either way, only
+  with different sentences. **Next step**, if a reader wants it: a row in
+  `declared_type_kind`, agreed over the holder's candidates like every other row
+  there.
 * **The float8/float4 family and `uint128`** (§2's table). 202 corpus spellings,
   one entry each in `TYPE_VALUE_NAMES`, and the distinctness check grows with it
   by construction.
 
 ## 6. Verification
 
-| command | this change |
-|---|---|
-| `python3 test_formal_run.py` | **PASS=401 FAIL=0**, of which 13 are the new cases below |
-| `python3 test_formal_imports.py` | PASS=41 EXPECTED=0 FAIL=0 |
-| `python3 -m unittest test_formal_sweep_truth` | Ran 31 tests — OK |
-| `python3 test_formal_link_accounting.py` | 133 passed, 0 failed, 133 checks |
-| `python3 tools/formal_sweep.py -j 3 -t 120 <the 8 files>` | PASS=0, 0/8, four terminals moved — the table in §3 |
+| command | this change | the 2026-10-01 follow-up (`TYPE_KIND`) |
+|---|---|---|
+| `python3 test_formal_run.py` | **PASS=401 FAIL=0**, of which 13 are the new cases below | **PASS=533 FAIL=5** — the same five fail on `master` (four `byref_cross_module_*`, one `a_mutated_module_global_is_refused`), measured by running those case names against `git archive master`; they belong to other claims. 6 of the new rows are the ones in §5 |
+| `python3 test_formal_imports.py` | PASS=41 EXPECTED=0 FAIL=0 | PASS=43 EXPECTED=0 FAIL=0 |
+| `python3 -m unittest test_formal_sweep_truth` | Ran 31 tests — OK | Ran 31 tests — OK |
+| `python3 test_formal_link_accounting.py` | 133 passed, 0 failed, 133 checks | 174 passed, 0 failed, 174 checks |
+| `python3 test_refusal_taxonomy.py` | — | PASS (156/156 checks, 33 families, 53 causes) |
+| `python3 -m unittest test_formal_sweep` | — | Ran 76 tests — OK |
+| `python3 test_formal_value_model.py` | — | PASS=19 FAIL=0 |
+| `python3 test_formal_target_queries.py` | — | PASS=25 FAIL=0 |
+| `python3 test_formal_toplevel.py` | — | PASS=85 FAIL=0 |
 
 The answered cases' expected values are what CPython prints for the same text
 (`a=12 b=10 c=1 d=1 h=7`, and exit 5 for `int(int(5))`), run with a `printf`
@@ -260,6 +294,7 @@ host architecture for an answered case and both only for a refusal.
 | `formal/arm64_codegen.py` | `_load_var`'s last resort; the `DType.<member>` arm in `_emit_expr` |
 | `formal/x86_64_codegen.py` | the same two, x86-64 |
 | `test_formal_run.py` | `TYPE_VALUE_CASES` (6), `TYPE_VALUE_DTYPE_CASES` (3), `TYPE_VALUE_REFUSALS` (3), `TYPE_VALUE_TAG_CASES` (1, generated) |
+| `formal/model.py`, both backends, `test_formal_run.py` (2026-10-01) | `TYPE_KIND`, `is_number_kind`, the `len_refusal` row, `type_index_refusal`, the `print()` conversion switch and the subscript choke point; `TYPE_VALUE_REFUSALS` (7, one of them reworded to `refuse_without:`) and `TYPE_VALUE_NUMBER_CASES` (2) |
 
 ## 8. Why it is NOT the same construct as the one that was fixed
 

@@ -1220,7 +1220,7 @@ def _no_value_model(e, kind: str) -> None:
 def _model_shape(go_defs: str, fname: str) -> dict:
     """How to APPLY the model named `<fname>_go` / `<fname>_model`.
 
-    Returns `{"kind": …, "ptype": …}` where `kind` is one of
+Returns `{"kind": …, "ptype": …, "arity": …}` where `kind` is one of
 
       ``"applied"``  `def f_go (n : T) : UInt64 :=` — apply to `n.toNat` if
                     `T` is `Nat`, else to `n`;
@@ -1228,8 +1228,17 @@ def _model_shape(go_defs: str, fname: str) -> dict:
                     domain type is the `→` source, so apply to `n.toNat`;
       ``"nullary"``  `def f_go : UInt64 :=` — apply to NOTHING.
 
-    This is the single reader for that shape, and both generators use it, so
-    the two cannot disagree about how the model is applied.  They used to each
+    `arity` is the number of `(name : type)` binders the head declares, and it
+    is reported because `_go_apply` REFUSES anything past one.  The head is read
+    with `findall` rather than `search` for that reason: an earlier version took
+    `binders[0]` and produced `def mojo (n) := f_go n` for
+    `def f_go (a0 : UInt64) (a1 : UInt64)`, which Lean does not accept as an
+    argument-count error and does not recover from either — the whole proof file
+    fails to elaborate, three definitions away from the line that is wrong.  So
+    the count is a fact the caller has to be able to see.
+
+    This is the single reader for that shape, and both generators use it, so the
+    two cannot disagree about how the model is applied.  They used to each
     re-derive it, and the x86-64 one's regex
     (`def NAME \\((\\w+) : (\\w+)\\)`) did not match a nullary model: it
     fell through to the default argument `n` and emitted `ret42_go n` for
@@ -1248,21 +1257,66 @@ def _model_shape(go_defs: str, fname: str) -> dict:
     # `def f_go (n ` -- and a zero-binder reading of that is a nullary model.
     head = _re.search(r"^def %s\b(.*?)(?::=|\n)" % _re.escape(name), src, _re.M)
     if head is None:
-        return {"kind": "applied", "ptype": "UInt64", "name": name}
+        return {"kind": "applied", "ptype": "UInt64", "name": name, "arity": 1}
     text = head.group(1)
     _ty = r"[\w]+(?:\s*(?:→|->)\s*[\w]+)*"
     binders = _re.findall(r"\(\s*([\w']+)\s*:\s*(%s)\s*\)" % _ty, text)
     if binders:
-        return {"kind": "applied", "ptype": binders[0][1], "name": name}
+        return {"kind": "applied", "ptype": binders[0][1], "name": name,
+                "arity": len(binders)}
     arrow = _re.search(r":\s*([\w]+)\s*(?:→|->)", text)
     if arrow:
-        return {"kind": "curried", "ptype": arrow.group(1), "name": name}
-    return {"kind": "nullary", "ptype": "UInt64", "name": name}
+        return {"kind": "curried", "ptype": arrow.group(1), "name": name,
+                "arity": 1}
+    return {"kind": "nullary", "ptype": "UInt64", "name": name, "arity": 0}
 
 
 def _go_apply(go_defs: str, fname: str, arg: str = "n") -> str:
-    """The term that applies `fname`'s model to `arg`, at whatever arity it has."""
+    """The term that applies `fname`'s model to `arg`, at whatever arity it has.
+
+    "at whatever arity it has" is 0 or 1, and that limit is the whole content of
+    this function.  The term it produces is the body of
+
+        def mojo (n : UInt64) : UInt64 := <this>
+
+    and `mojo` is a ONE-INPUT function by construction: `eval_eq_mojo`, every
+    `native_decide` run test and the universal theorem all quantify over a
+    single `n`, and `lib/ProofLib.lean`'s AST bridge is one-parameter too
+    (`MojoFunc.mk name param body`, and `evalFunc`'s environment is
+    `fun name => if name == param then arg else 0` — every parameter past the
+    first evaluates to 0).  So there is no term to write for a two-parameter
+    model: it would need two inputs where the apparatus has one.
+
+    Which is why this refuses rather than applying `binders[0]`, which is what
+    it used to do.  Measured, both generators, for
+    `def f(a0, a1): return a0 + a1`:
+
+        def f_go (a0 : UInt64) (a1 : UInt64) : UInt64 := ...
+        def mojo (n : UInt64) : UInt64 :=
+          f_go n                       -- argument-count error, elaborates to
+                                       -- nothing, and the whole file fails
+
+    The refusal says which arity and why, so the reader is at the line that is
+    wrong rather than three definitions away from it — the same discipline
+    `_model_shape` applies to the nullary case, and the same one
+    `_gen_go`'s docstring records having already needed for the MODEL (which
+    was fixed: its arity is the source's).  What is still one-parameter is
+    `mojo` and the AST bridge beside it, which is a `lib/ProofLib.lean` change
+    and not a generator fix; `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`
+    records the measurement and the two halves.
+    """
     sh = _model_shape(go_defs, fname)
+    if sh["arity"] > 1:
+        raise NotImplementedError(
+            f"model: {sh['name']} has {sh['arity']} parameters, and the "
+            f"surrounding proof is a one-input theorem: `mojo` is declared "
+            f"`UInt64 -> UInt64`, `eval_eq_mojo` and every run test quantify "
+            f"over one `n`, and ProofLib's AST bridge binds one parameter "
+            f"(`evalFunc`'s environment answers 0 for every name that is not "
+            f"it). Emitting `mojo n := {sh['name']} n` instead is an "
+            f"argument-count error Lean cannot recover from, so the whole "
+            f"proof file fails to elaborate. Widening `mojo` and the bridge to "
+            f"the model's arity is a `lib/ProofLib.lean` change")
     if sh["kind"] == "nullary":
         return sh["name"]
     return f"{sh['name']} " + (f"{arg}.toNat" if sh["ptype"] == "Nat" else arg)
