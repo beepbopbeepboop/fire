@@ -3151,6 +3151,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # no slot", which is the disagreement this whole pass exists to keep
         # apart from "this field is nested".
         slots, nested_slots = {}, {}
+        # `[(chain, "h.a")]` — every `<holder>.<field>.<sole>` this walk found to
+        # be a ONE-word struct's own field, which the rewrite below turns into
+        # the depth-1 `<holder>.<field>` it is. Collected during the walk rather
+        # than rewritten in it, because the walk is iterating the tree the
+        # rewrite mutates, which is the thing the comment on
+        # `_rewrite_nested_method_calls` below is about.
+        one_word_nested = []
         # `@dataclass` makes `==` a FIELD compare, and this is the only place
         # a name's struct is known (the fixpoint above settled the locals, the
         # interprocedural edge settled the parameters), so the desugaring runs
@@ -3259,7 +3266,42 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             # in question and a frame diagnostic would be a
                             # diagnostic about the wrong thing.  Fall through to
                             # the value path, which either lowers the method or
-                            # refuses it with `model.value_method_refusal`.
+                            # refuses it with `model.value_method_refusal` —
+                            # UNLESS the agreed type is a ONE-FIELD struct of
+                            # this module, which is the case where the value in
+                            # the slot IS the receiver the callee expects.
+                            #
+                            # `self.in1.add(v)` with `Outer.in1: Inner` and
+                            # `Inner` one field: `Inner.add`'s `self` is that
+                            # field, the slot holds that field's value, and
+                            # `Inner_add(<load of the slot>, v)` is the call.
+                            # Before this the chain fell through to
+                            # `value_method_refusal`, which says the receiver
+                            # "is a frame slot on this path" — true, and the
+                            # reason it cannot say is that it does not know
+                            # WHICH struct, while the declared type settled
+                            # that two lines above and the refusal is raised
+                            # without being told.
+                            #
+                            # The SAME `nested_fields` entry, so
+                            # `_rewrite_nested_method_calls` does the work and
+                            # there is one rewrite for a depth-2 method
+                            # receiver rather than two. Its docstring scopes it
+                            # to a slot holding a nested FRAME; the two differ
+                            # in what the word is (an address, or a value) and
+                            # not in what the call is — the receiver is one
+                            # argument either way, and the receiver load is the
+                            # ordinary `_load_var` path in both.
+                            one = M.field_type_one_word_struct(cands, outer,
+                                                               structs_by_name)
+                            if one is None:
+                                continue
+                            sole = M.struct_sole_field_name(one)
+                            if sole is None:
+                                raise CodegenError(
+                                    M.one_word_nested_sole_field_refusal(
+                                        f"{base}.{outer}", one))
+                            nested_fields[f"{base}.{outer}"] = one
                             continue
                         # Agreed, and it names a framed struct: the slot holds a
                         # NESTED FRAME, placed in the outer object's own block
@@ -3337,8 +3379,39 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 if nested is None:
                     # Agreed, and not a frame of this unit — so the outer field
                     # is a plain value and the inner name is a member of
-                    # whatever that value is.  Not this pass's business; the
-                    # ordinary value lowering owns it.
+                    # whatever that value is.  Not this pass's business UNLESS
+                    # that value is a one-field struct of this module, which is
+                    # the one case where there IS a business: the word in the
+                    # slot is that struct's only field, so this chain is ONE
+                    # load at the OUTER field's own slot.
+                    #
+                    # `model.field_type_one_word_struct` is the recogniser, and
+                    # it is asked from the SAME `cands`/`structs_by_name` as
+                    # `_typed_nested_frame` above rather than re-derived, so
+                    # "agreed on a type" is one answer with two readers rather
+                    # than two answers that agree by luck.
+                    one = M.field_type_one_word_struct(cands, outer_field,
+                                                       structs_by_name)
+                    if one is None:
+                        # Not one word, or not a struct of this module, or the
+                        # candidates disagree: the inner name is a member of
+                        # whatever the value is, and the ordinary value
+                        # lowering owns it.
+                        continue
+                    sole = M.struct_sole_field_name(one)
+                    if sole is None or sole != node.member:
+                        # A one-field struct whose one field binds no name has
+                        # no word to call, so there is nothing this chain could
+                        # be reading — the same refusal `_sole_field_name`
+                        # raises for a receiver, and for the same reason: a
+                        # wrong name here is a wrong answer, not a failure.
+                        raise CodegenError(
+                            M.one_word_nested_sole_field_refusal(
+                                f"{base}.{outer_field}", one))
+                    # Collected, not placed: see `_one_word_nested_chains` below
+                    # for why the answer is a REWRITE rather than a `_frame_slots`
+                    # entry keyed by the chain.
+                    one_word_nested.append((chain, f"{base}.{outer_field}"))
                     continue
                 # A nested frame read in a value position: two loads, and the
                 # OUTER one is already in `_frame_slots` (the depth-1 MemberExpr
@@ -3463,6 +3536,35 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # it does not.  `model.struct_construction_plan` is the single decision
         # and both backends call it with this table.
         fn._frame_candidates = dict(by_name)
+        # A ONE-word struct held in a HOLDER'S FIELD, which is a depth-2 chain
+        # that is really a depth-1 one, and the rewrite is what says so.
+        #
+        # `o.in1.a` where `Outer.in1` is declared `Inner` and `Inner` has one
+        # field: the slot for `o.in1` HOLDS `Inner`'s value, and `Inner`'s
+        # value IS its one field, so the chain and `o.in1` are the same word.
+        # Rewriting it to the depth-1 spelling is what puts it in `_frame_slots`
+        # under a key the emitters can load: `_emit_frame_load` derives the
+        # holder as `name.rsplit(".", 1)[0]`, so a `_frame_slots` entry keyed by
+        # the CHAIN would ask it for a frame load from a name (`o.in1`) that has
+        # no home of its own — a table entry that satisfies the lookup and then
+        # faults, which is the one outcome this whole pass exists to prevent.
+        #
+        # The alternative was to place the chain in `_frame_slots` with the
+        # OUTER field's slot, which is the same one load with a key shape the
+        # emitters do not understand. Measured, and it is the crash this
+        # replaces: the program builds and dies with SIGSEGV, because the
+        # access is correct and the holder it is derived from is not.
+        #
+        # So it is a REWRITE, and it is the same rewrite `_one_word_field_map`
+        # makes for a receiver — `x.f` becomes `x` — with the frame slot in
+        # place of the receiver. One rule, two bases: `self` (a method of the
+        # struct), a local built from its constructor, a parameter declared as a
+        # one-field struct, and now a holder's field declared as one. All four
+        # rewrite the access rather than teaching the emitters a second shape,
+        # because a second shape is a second thing that can disagree about where
+        # a word lives.
+        if one_word_nested:
+            _rewrite_one_word_nested_fields(fn, one_word_nested)
         # LAST for this function, and after the walk above rather than inside
         # it: the rewrite MUTATES the tree the walk is iterating, and a walk
         # that mutates what it is walking is how a pass ends up seeing a node
@@ -3819,6 +3921,78 @@ def check_frame_holder_rebinds(functions) -> None:
             raise CodegenError(M.holder_rebound_from_a_word_refusal(
                 fn.name, name, value_spelling, frame_spelling,
                 cands))
+
+
+def _rewrite_one_word_nested_fields(fn, chains) -> None:
+    """`o.in1.a` → `o.in1`, for every `(chain, "h.a")` the walk collected.
+
+    The frame-slot base of the rewrite `formal/build.py`'s `_one_word_field_map`
+    makes for a receiver, and the reason it is a REWRITE rather than a
+    `_frame_slots` entry is a measurement rather than a preference.
+
+    `_frame_slots` is keyed `"<holder>.<field>"` and its two readers both
+    derive the holder by `rsplit(".", 1)[0]` — arm64's `_emit_frame_load` and
+    `_emit_frame_store`, and x86-64's pair. A key of `o.in1.a` therefore
+    satisfies the lookup and then asks for a frame load whose holder is
+    `o.in1`, a name with no register home and no slot of its own, and the
+    program builds and dies with SIGSEGV. Keyed by the OUTER field instead
+    (`o.in1` at `o`'s `in1` slot) is the same one load under a key both readers
+    understand — because the rewrite's whole claim is that the two spellings
+    ARE the same word, so the depth-1 key is not an approximation of the
+    depth-2 one, it is it.
+
+    `chains` is the walk's own list rather than a re-derivation: it was built
+    from the same `cands`/`structs_by_name` and the same
+    `model.field_type_one_word_struct` answer as the rest of that walk, so
+    re-deriving here would be a second recognition of "is this field a one-word
+    struct's own field" that agrees with the first until the day it does not.
+
+    Matched by SPELLING the whole chain, not by rewriting any depth-2
+    MemberExpr whose outer field looks right: `outer.inner` where `outer`'s
+    declared type is a one-word struct is the same access only when `inner` is
+    that struct's SOLE field, and the walk is what established that. A chain it
+    did not name is either a value read (`outer` holds an `Int32`) or a nested
+    frame read (`outer` holds a framed struct), both of which already lower
+    through the tables this does not touch.
+    """
+    spellings = {chain: outer for chain, outer in chains}
+    if not spellings:
+        return
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        for name in node.__dataclass_fields__:
+            if name in ("line", "col"):
+                continue
+            node.__setattr__(name, _rewrite_one_word_nested_field(
+                getattr(node, name), spellings))
+
+
+def _rewrite_one_word_nested_field(node, spellings):
+    """`_rewrite_one_word_nested_fields` for one subtree, returning the
+    replacement for `node` itself.
+
+    The recursion has to be able to REPLACE the node it is handed, not only its
+    children, because `o.in1.a` is the top of the expression at the places this
+    is reached — `return o.in1.a`, `o.in1.a + 1`. A rewrite that could only
+    rewrite in place would handle `o.in1.a + 1` and silently leave `return
+    o.in1.a` standing, which is the half that then reaches the emitter with no
+    slot and is refused by name.
+    """
+    if isinstance(node, list):
+        for i, x in enumerate(node):
+            node[i] = _rewrite_one_word_nested_field(x, spellings)
+        return node
+    if isinstance(node, F.MemberExpr):
+        chain = _member_chain(node)
+        outer = spellings.get(chain)
+        if outer is not None:
+            root, member = outer.split(".", 1)
+            return F.MemberExpr(obj=F.IdentExpr(name=root), member=member)
+    for name in getattr(node, "__dataclass_fields__", {}):
+        if name in ("line", "col"):
+            continue
+        setattr(node, name,
+                _rewrite_one_word_nested_field(getattr(node, name), spellings))
+    return node
 
 
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:

@@ -5291,6 +5291,144 @@ INIT_FIELD_TYPE_REFUSALS = [
      "refuse:is a METHOD of the nested Inner frame rather than one of its "
      "fields", None),
 ]
+# ── a ONE-WORD struct held in a HOLDER'S FIELD ──────────────────────────────
+#
+# The value `S()` in the construction group below is a WORD. When `S` has more
+# than one field the word is the ADDRESS of its frame; when it has exactly one,
+# the word IS that field. Both spellings of a struct value have to lower, and the
+# second reached a holder's FIELD through a chain the frame analysis had no
+# lowering for.
+#
+# `o.in1.a`, where `Outer.in1` is declared `Inner` and `Inner` has one field:
+# the slot for `o.in1` holds `Inner`'s value, and `Inner`'s value is its one
+# field, so the chain and `o.in1` are the SAME word and one load answers both.
+# That was refused with `model.field_access_refusal`'s `holder=True` sentence —
+# "the frame analysis and the emitter disagree about this function's receivers
+# — a compiler bug rather than a limit of the path" — and neither half was true:
+# the analysis was right that there is no nested frame, and the emitter was
+# right that the chain had no slot, because the load had not been placed.
+#
+# `bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md` filed this as
+# "the two passes disagree about `struct_is_framed`" and offered to stop the
+# demotion that produced the one-field struct as its semantically honest repair.
+# The trigger is not the demotion: the same refusal, byte-identical, comes out of
+# a `struct Inner` that declares exactly ONE field and no class-level default at
+# all — which is why the second case below is that spelling and not the
+# defaulted one. What was missing was the lowering, for every one-field nested
+# field rather than for the defaulted ones.
+ONE_WORD_NESTED_CASES = [
+    # THE DOC'S REPRODUCER, verbatim, and 8 is CPython's answer: `Inner.add(2)`
+    # is 1 + 2 and `self.tag` is 5. It reads through a nested METHOD CALL, so it
+    # needs both halves of the lowering — the chain becomes the slot, and the
+    # slot becomes the receiver.
+    ("one_word_nested_demoted_width_method_call",
+     "struct Inner:\n"
+     "    var a: Int = 0\n"
+     "    var b: Int = 0\n"
+     "    var c: Int = 0\n"
+     "\n"
+     "    fn add(self, v: Int) -> Int:\n"
+     "        return self.a + v\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn go(self, v: Int) -> Int:\n"
+     "        return self.in1.add(v) + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    return o.go(2)\n", 8, None),
+    # The SAME lowering with NO class-level default anywhere — `Inner` declares
+    # one field and the others do not exist. This is the case that decides the
+    # doc's option (A) against its option (B): if the demotion were what flipped
+    # the width, this one would build and the defaulted one would not. Both were
+    # refused, identically, so there is no demotion to un-do and no layout the
+    # fix could be cementing.
+    ("one_word_nested_declared_single_field_read",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "\n"
+     "    fn add(self, v: Int) -> Int:\n"
+     "        return self.a + v\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn go(self, v: Int) -> Int:\n"
+     "        return self.in1.a + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    return o.go(2)\n", 6, None),
+    # …and the WRITE half, read back on the CALLER's own side, because the two
+    # reach different code: `o.in1.a = 1` is a store through the chain and
+    # `o.in1.a + o.tag` is a load through it. A rewrite that only handled the
+    # read would leave the store writing a word nothing reads back, and this
+    # program answers 106 rather than 6 only if the store landed.
+    ("one_word_nested_write_is_read_back",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "\n"
+     "    fn add(self, v: Int) -> Int:\n"
+     "        return self.a + v\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn go(self, v: Int) -> Int:\n"
+     "        return self.in1.a + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    return o.go(2) + o.in1.a * 100\n",
+     106, None),
+    # TWO objects, which is what makes the placement claim load-bearing. A
+    # rewrite that handed one object's slot key for the other's chain would read
+    # one object's field out of the other's storage, and the two different `tag`
+    # values (5 and 20) and two different `in1.a` values (1 and 4) make it
+    # distinguishable: `o1.go(2)` is 8 and `o2.go(3)` is 27, so 107 — under 256,
+    # because the exit status is a byte and 278 truncated to 22, which would
+    # stop distinguishing anything. Every way of reading one object through the
+    # other lands elsewhere: both through `o1` gives 89, both through `o2` 41.
+    ("one_word_nested_two_objects_do_not_alias",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "\n"
+     "    fn add(self, v: Int) -> Int:\n"
+     "        return self.a + v\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn go(self, v: Int) -> Int:\n"
+     "        return self.in1.add(v) + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o1 = Outer()\n"
+     "    var o2 = Outer()\n"
+     "    o1.tag = 5\n"
+     "    o1.in1.a = 1\n"
+     "    o2.tag = 20\n"
+     "    o2.in1.a = 4\n"
+     "    return o1.go(2) * 10 + o2.go(3)\n",
+     107, None),
+]
+
 # ── wave 5 (E2): the three CONSTRUCTION shapes ─────────────────────────────
 #
 # `S()`, `S(a, b, …)` and `S(x)` are three lowerings, and until now only the
@@ -10299,7 +10437,8 @@ def main():
                   + DECLARED_TYPE_REFUSALS
                   + ASSIGNED_TYPE_CASES + ASSIGNED_TYPE_REFUSALS \
                   + INIT_FIELD_TYPE_CASES \
-                  + INIT_FIELD_TYPE_REFUSALS
+                  + INIT_FIELD_TYPE_REFUSALS \
+                  + ONE_WORD_NESTED_CASES
                   + OVERLOAD_LAYOUT_CASES + OVERLOAD_REFUSALS
                   + OVERLOAD_DISPATCH_REFUSALS
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS

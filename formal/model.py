@@ -12376,6 +12376,99 @@ def frame_field_type_candidates(structs, name, decls: dict):
     return (st, (False, rows))
 
 
+def field_type_one_word_struct(structs, name, decls: dict):
+    """The ONE-FIELD struct of this module every candidate agrees `name` holds.
+
+    The third answer `frame_field_type_candidates` does not distinguish, and
+    the only one of the three that is a LOWERING rather than a verdict.
+
+    That function returns `None` for "agreed, and not a frame of this unit",
+    which is right as a verdict — a frame slot holds one word and there is no
+    second layout to read through — but it is three different facts wearing one
+    answer:
+
+      * the agreed type is a scalar or a host type (`Int32`, a `List`, a
+        pointer).  There is nothing to read a field out of.
+      * the agreed type names NO struct of this module.  Same.
+      * **the agreed type names a struct of this module whose receiver is its
+        one field** (`struct_is_one_field`).  The word in the slot IS that
+        field's value, so `<holder>.<name>.<sole field>` is ONE load at
+        `<holder>.<name>`'s own slot and not a second layout at all.
+
+    Only the third has a lowering, and without this the depth-2 branch in
+    `formal/build.py` declined it as "agreed, and not a frame" and the emitter
+    then reported `field_access_refusal`'s `holder=True` sentence — "the frame
+    analysis and the emitter disagree about this function's receivers — a
+    compiler bug rather than a limit of the path".  Neither half was true. The
+    frame analysis was RIGHT (there is no nested frame) and the emitter was
+    right that the access had no slot; what was missing was the one load.
+
+    This is the same scalar replacement `formal/build.py`'s `_one_word_field_map`
+    computes for a receiver (`self`, a local built from a constructor, a
+    parameter declared as a one-field struct) — that function rewrites `x.f` to
+    `x`, and this is the frame-slot spelling of the identical fact. Reading it
+    off the DECLARED type rather than off a binding is what makes it available
+    here: the field's slot is placed by the holder's layout, and the struct is
+    named by the class body, so there is no binding to find.
+
+    **Why the DEMOTION that produced the one-field struct is not in question.**
+    `bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md` filed this
+    as "the two passes disagree about `struct_is_framed`" and offered to stop
+    the demotion (its option B) as the semantically honest repair. Measured here:
+    the same refusal, byte-identical, with a `struct Inner` that declares
+    exactly ONE field and no class-level default at all — so the demotion is not
+    the trigger and there is no layout to un-cement. What was missing was the
+    lowering, and it was missing for every one-field nested field rather than
+    for the defaulted ones. Two of three fields defaulted builds; one does not,
+    and the difference is the width and nothing else.
+
+    Returns None for every other case, and `disagree` is not spelled here: a
+    caller that gets None cannot tell "not one word" from "disagree", and both
+    are answers to the same question ("is there one load for this"), which is
+    the question the caller asked. A caller that needs the distinction asks
+    `field_type_is_value` for it, exactly as `frame_field_type_candidates`'s own
+    docstring says its callers should.
+    """
+    rows, bases, have = field_type_rows(structs, name, decls), set(), 0
+    for _sn, base, _ann, _why, _ev in rows:
+        if base is not None:
+            bases.add(base)
+            have += 1
+    if not rows or have != len(rows) or len(bases) > 1:
+        return None
+    st = structs_declared(bases.pop(), decls)
+    if st is None or not struct_is_one_field(st):
+        return None
+    return st
+
+
+def one_word_nested_sole_field_refusal(slot: str, st) -> str:
+    """`slot.f` where `f` is not the one field of the one-word struct in `slot`.
+
+    The third of the three refusals this lowering can raise, and the only one
+    about a name rather than about a layout. `field_type_one_word_struct`
+    agreed the slot holds a one-field struct of this module; this is the case
+    where the field being read through it is not that struct's one field, so
+    there is no word to read and no second layout to read it from.
+
+    The alternative answers were measured and are all worse. Continuing to the
+    value path reaches the emitter with no slot for the chain, and the emitter
+    reports `field_access_refusal`'s `holder=True` sentence — "the frame
+    analysis and the emitter disagree about this function's receivers — a
+    compiler bug rather than a limit of the path" — which is false of both
+    halves: the analysis placed the chain correctly and the emitter asked for
+    a load that does not exist because the name does not. And guessing the
+    field's slot index would be the wrong answer rather than a failure, which
+    is the outcome every refusal in this family exists to prevent.
+    """
+    return (f"{slot} is a {st.name} frame slot and every binding of it agrees "
+            f"its declared type is a {st.name}, which has exactly one field "
+            f"and whose receiver IS that field — so {slot} holds the value of "
+            f"that one field and there is no second layout to read anything "
+            f"else out of. Read the field you mean, or give {st.name} a field "
+            f"for it")
+
+
 def field_type_is_value(structs, name, decls: dict) -> bool:
     """True when every candidate AGREES the field is not a frame of this unit.
 
