@@ -214,6 +214,24 @@ def _lower_StringLiteral(gen, node):
         return gen._lower_IdentExpr(gimple_ctypes.IdentExpr(name=val))
     val, is_fstring = gen._decode_str_literal_text(val)
     if not is_fstring:
+        # A RAW literal's escapes are its CHARACTERS, and `_c_escape` passes a
+        # recognised escape through unchanged on the reasoning that the C
+        # compiler will decode it — which is right for `"a\nb"` and wrong for
+        # `r"a\nb"`, where the C compiler decodes a backslash the source asked
+        # to keep. Doubling the backslash FIRST is what makes `_c_escape` see no
+        # escape to pass through: it escapes `\\` as `\\\\`, the C literal
+        # carries one backslash, and the emitted bytes are the four characters
+        # the source wrote. Measured on this tree before this line: `r"p\nq"`
+        # was THREE characters on all three engines where CPython says four;
+        # `fire_compiler.decoded_literal` fixes the interpreter and the formal
+        # backends, and this is what fixes the compiled path.
+        #
+        # `is_raw` is read off the NODE rather than the text because
+        # `_strip_string_prefix_and_quotes` has already stripped the `r` by the
+        # time `val` exists — `fire_compiler.py` records it on the literal for
+        # exactly this reason.
+        if getattr(node, 'is_raw', False):
+            val = val.replace('\\', '\\\\')
         escaped = gimple_ctypes._c_escape(val)
         # GIMPLE: char[] arrays can't be implicitly assigned to char* locals.
         # Register in the module-level string pool (emitted as C global char arrays)

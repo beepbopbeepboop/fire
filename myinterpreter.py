@@ -4768,33 +4768,7 @@ class Interpreter:
                 # degradation behavior this already had.
                 return MojoString(value)
             return MojoString(result)
-        return MojoString(self._decode_c_escapes(value))
-
-    @staticmethod
-    def _decode_c_escapes(s: str) -> str:
-        """This tree's ONE C-escape decoder, which lives in `fire_compiler`
-        beside `_strip_string_prefix_and_quotes` — the module CLAUDE.md makes
-        the single source of truth for the front end.
-
-        The parser strips a string literal's outer quotes but leaves escape
-        sequences as raw two-character runs (backslash + letter), because the
-        compiled path hands the text to a C compiler, which decodes them. A
-        consumer that does not hand the text to a C compiler decodes it here
-        instead, which is what realigns this interpreter with `mojo build`
-        (`"ab\ncd"` is 5 characters, not 6).
-
-        This used to be a second, private copy of that table. It is a delegate
-        now: the formal backends' interning path needs the same decode, and two
-        copies of an escape table is two chances to disagree — see
-        `bugs/FORMAL_string_literal_escape_is_not_decoded.md`, where the third
-        consumer having no copy at all was a measured wrong answer on both
-        architectures (`len("a\nb")` was 4).
-
-        Note the compiled path does not preserve raw (r"...") strings either —
-        that's a shared, pre-existing limitation recorded on
-        `fire_compiler.decode_c_escapes`, so decoding here removes an
-        interp-vs-compiled divergence rather than introducing one."""
-        return N.decode_c_escapes(s)
+        return MojoString(N.decoded_literal(expr))
 
     def _format_fstring_body(self, body: str) -> str:
         # Parse an f-string body (prefix/quotes already stripped) into its

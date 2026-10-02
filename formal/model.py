@@ -8095,8 +8095,8 @@ def comptime_val_kind(vals: dict, name: str):
     return None
 
 
-def print_literal(text: str) -> str:
-    """`text` as a fragment of a `print` format string.
+def print_literal(lit) -> str:
+    """A string LITERAL as a fragment of a `print` format string.
 
     Only `%` is transformed, and only because a format string is not a string:
     `print("100% done")` has to reach printf as `100%% done` or the `%` starts a
@@ -8134,17 +8134,22 @@ THE TEXT IS DECODED FIRST, and the order is the whole of it. A literal
     newline byte is not a backslash and passes through untouched. So the format
     string reaches the image as the text this function decoded, which is the
     only order in which `%` and `\\n` can both be right."""
-    return F.decode_c_escapes(text).replace("\\", "\\\\").replace("%", "%%")
+    return F.decoded_literal(lit).replace("\\", "\\\\").replace("%", "%%")
 
 
-def print_format(fragments: list, sep: str = " ", end: str = "\n") -> str:
+def print_format(fragments: list, sep=" ", end="\n") -> str:
     """The format string for a `print` of `fragments`, in order.
 
     A fragment is either a conversion (`%s`, `%lld`, `%llu`) or literal text
     that has already been through `print_literal`. `sep` goes BETWEEN operands
     (never before the first, and never after the last — Python's rule, and the
     one that makes `print("a", "b")` read `a b` rather than ` a b`), and `end`
-    closes the line."""
+    closes the line.
+
+    `sep` and `end` are whatever `print_literal` accepts: a literal NODE when
+    the caller wrote `print(sep=…)`, and the plain already-decoded default
+    otherwise. Both spellings go through the same function so a raw `sep` and a
+    decoded one cannot be answered by two different rules."""
     parts = []
     for i, frag in enumerate(fragments):
         if i and sep:

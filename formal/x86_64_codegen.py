@@ -1712,31 +1712,37 @@ class X86_64Codegen:
         self._emit_stmt(F.AssignStmt(target=F.IdentExpr(name=target),
                                      value=value, line=0, col=0))
 
-    def _intern_string(self, s: str) -> str:
+    def _intern_string(self, s) -> str:
         """Return a stable data label for `s`, emitting the bytes on first use.
 
         The bytes live after all the code (see `compile`), so a string is
         read-only data in the image's text — the same place the arm64 backend
         puts them.
 
+        `s` is a `StringLiteral` node or a plain string, and the reason is the
+        same as on arm64: the node carries `is_raw`, which is what tells
+        `r"a\\nb"` (four characters, a literal backslash and an `n`) from
+        `"a\\nb"` (three, a newline) once `_strip_string_prefix_and_quotes` has
+        stripped the prefix and the quotes. A plain string is already-decoded
+        text and is taken at face value.
+
         THE decode point for a string literal on this backend, and it is here
         rather than at the call sites because every byte of every string on this
         path goes through this one function — and because this path is the one
         engine in the repository that does NOT hand the literal's text to a C
         compiler, which is where `fire_compiler.py` leaves escapes decoded-by-
-        proxy. `fire_compiler.decode_c_escapes` is the tree's single decoder
-        (the interpreter and the arm64 backend delegate to the same one);
-        without this call `len("a\nb")` was 4 on a formal image and the printed
+        proxy. `fire_compiler.decoded_literal` is the tree's one reader of that
+        question (the interpreter and the arm64 backend delegate to the same
+        one); without it `len("a\\nb")` was 4 on a formal image and the printed
         bytes carried a literal backslash, on both architectures, while
-        `fire.py run` and `fire.py build` both printed a real newline. See
-        `bugs/FORMAL_string_literal_escape_is_not_decoded.md`.
+        `fire.py run` and `fire.py build` both printed a real newline.
 
         Decoding BEFORE the intern lookup is what makes interning by content
         right: two literals differing only in escape spelling (`"\\t"` and a
         spelled tab) now get the same key, which is what `==` on a string
         address already assumes.
         """
-        s = F.decode_c_escapes(s)
+        s = F.decoded_literal(s)
         if s in self._str_intern:
             return self._str_intern[s]
         label = f"str_{self._str_counter}"
@@ -2438,7 +2444,7 @@ class X86_64Codegen:
         frags, operands = [], []
         for a in args:
             if isinstance(a, F.StringLiteral):
-                frags.append(M.print_literal(a.value))
+                frags.append(M.print_literal(a))
                 continue
             kind = self._expr_str_kind(a)
             if kind == M.STR_KIND:
@@ -2460,7 +2466,14 @@ class X86_64Codegen:
 
         `file=` is refused unless it is stdout, because this model has exactly
         one stream and a `file=sys.stderr` that quietly went to stdout would be
-        a program whose diagnostics are missing rather than one that failed."""
+        a program whose diagnostics are missing rather than one that failed.
+
+        `sep` and `end` come back as the literal NODES and not as `.value`,
+        which is the whole reason this signature is unchanged while its body is
+        not: `print(sep=r"\\t")` must print a backslash and a `t`, and
+        `print_literal` can only know that from the node. The defaults are
+        plain strings, which `print_literal` takes at face value — they are
+        already-decoded text."""
         sep, end = " ", "\n"
         for k, v in e.kwargs:
             if not isinstance(v, F.StringLiteral):
@@ -2470,9 +2483,9 @@ class X86_64Codegen:
                     f"the line ending are baked into the format string, which "
                     f"is built before the call is emitted")
             if k == "sep":
-                sep = v.value
+                sep = v
             elif k == "end":
-                end = v.value
+                end = v
             elif k == "file":
                 if not (isinstance(v, F.MemberExpr) and v.member == "stdout"):
                     raise CodegenError(
@@ -3042,8 +3055,8 @@ class X86_64Codegen:
             # it to False because `bool("")` is False made the
             # both-operands-literal case disagree with the call the same
             # expression makes when either side is a name.
-            needle = F.decode_c_escapes(left.value)
-            haystack = F.decode_c_escapes(right.value)
+            needle = F.decoded_literal(left)
+            haystack = F.decoded_literal(right)
             found = needle == "" or needle in haystack
             self._emit_mov_imm(Reg.RAX, (0 if found else 1) if invert
                                else (1 if found else 0))
@@ -4084,7 +4097,7 @@ class X86_64Codegen:
             # -4, not -3: the 7-byte encoding is REX, opcode, ModRM, disp32,
             # so the displacement FIELD starts 4 bytes before the end (and
             # there is no SIB byte in front of it to skip).
-            self.asm.emit_label_rip(self._intern_string(expr.value),
+            self.asm.emit_label_rip(self._intern_string(expr),
                                     here_offset=-4)
             return
 

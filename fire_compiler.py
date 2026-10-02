@@ -235,6 +235,18 @@ class StringLiteral:
     line: int = 0
     col: int = 0
     is_bytes: bool = False
+    # `r"..."` / `R"..."`: the body is RAW SOURCE TEXT that must NOT have its
+    # escapes decoded. Recorded rather than inferred, because
+    # `_strip_string_prefix_and_quotes` strips the `r` and the body is
+    # indistinguishable from a non-raw literal's afterwards — and
+    # `decode_c_escapes`, which every engine now calls, has no other way to
+    # know. CPython keeps `r"a\nb"` at four characters; without this flag the
+    # shared decode would make it three in all three engines at once, which is
+    # a divergence introduced by CONSOLIDATING the decoder rather than one that
+    # consolidation removed. `False` for every literal with no `r`, and for
+    # every literal this parser does not build (a fold, a manifest value, a
+    # synthesized format), all of which are already-decoded text.
+    is_raw: bool = False
 
 @dataclass
 class TstringLiteral:
@@ -1309,6 +1321,37 @@ def decode_c_escapes(s: str) -> str:
             out.append(c); i += 1; continue
         out.append(c); i += 1
     return ''.join(out)
+
+def decoded_literal(lit) -> str:
+    """`lit`'s body with its escapes decoded — or NOT, for a raw literal.
+
+    THE reader every engine uses instead of calling `decode_c_escapes` on a
+    `StringLiteral.value` directly, and the distinction is the whole of it: the
+    `r` prefix is stripped by `_strip_string_prefix_and_quotes` and is
+    otherwise unrecoverable from the body, so `r"a\\nb"` and `"a\\nb"` are the
+    same four characters by the time a consumer sees them. CPython keeps the
+    first at four and makes the second three.
+
+    Consolidating the decoder into one function would otherwise have introduced
+    that divergence in all three engines at once — the formal backends were the
+    only ones decoding, and they decoded raw literals wrongly; making the
+    interpreter and the compiled path join them by way of a shared table is
+    only an improvement if the table is asked about the PREFIX as well as the
+    escapes. `StringLiteral.is_raw` carries the answer from the parser, which
+    is the only place it still exists.
+
+    A plain STRING is returned unchanged rather than decoded. That is the other
+    half of the same rule: a fold, a manifest value, a synthesized format
+    string and `print_format`'s default `sep`/`end` are all already-decoded
+    text, and a synthesized `StringLiteral` carries `is_raw=False` for the same
+    reason — there was no source prefix for it to record. Decoding either would
+    be decoding something twice, which is how `"a\\\\nb"` becomes a newline when
+    the source wrote a backslash."""
+    if isinstance(lit, str):
+        return lit
+    if getattr(lit, "is_raw", False):
+        return lit.value
+    return decode_c_escapes(lit.value)
 
 def _ends_inside_string(line: str) -> bool:
     r"""True when `line` stops part-way through an unterminated string literal.
@@ -4539,6 +4582,39 @@ class Parser:
                 _has_b = True
         return _has_b
 
+    def _raw_string_is_raw(self, raw: str) -> bool:
+        """True when a STRING token carries an `r`/`R` prefix before its quote.
+
+        The sibling of `_raw_string_is_bytes`, and it exists because
+        `decode_c_escapes` is now the ONE decoder every engine calls (see that
+        function), so a raw literal has to be able to say "leave me alone" —
+        `r"a\nb"` is four characters to CPython and must be four here too, and
+        without this the shared decode would turn it into a newline in all
+        three engines at once. The prefix is stripped by
+        `_strip_string_prefix_and_quotes` and otherwise thrown away, so this
+        reads it off the RAW token before that happens.
+        """
+        prefix_len = 0
+        while prefix_len < len(raw) and prefix_len < 2:
+            _c = raw[prefix_len]
+            _is_prefix_char = (_c == 'f' or _c == 'F' or _c == 'r' or _c == 'R'
+                                or _c == 'b' or _c == 'B' or _c == 'u' or _c == 'U'
+                                or _c == 't' or _c == 'T')
+            if not _is_prefix_char:
+                break
+            prefix_len += 1
+        prefix = raw[:prefix_len]
+        rest = raw[prefix_len:]
+        if len(rest) < 1:
+            return False
+        _rc = rest[0]
+        if _rc != '"' and _rc != "'":
+            return False
+        for _pc in prefix:
+            if _pc == 'r' or _pc == 'R':
+                return True
+        return False
+
     def _decode_bytes_literal(self, raw: str) -> str:
         """Strip a `b'...'` token's prefix+quotes and decode its escape
         sequences to a latin-1 string carrying one character per output
@@ -4634,7 +4710,18 @@ class Parser:
             _val = ''
             for _r in raws:
                 _val += self._strip_string_prefix_and_quotes(_r)
-            return StringLiteral(_val, line=line, col=col)
+            # `is_raw` is the AND over the run: an implicitly-concatenated
+            # sequence is raw only if every part of it is, because the merged
+            # body is one string and one of its halves must not have been
+            # decoded. `r"a\n" "b"` is a backslash-n followed by a `b` and the
+            # other way round is a newline followed by a `b`, and the second is
+            # not something the caller wrote.
+            _all_raw = True
+            for _r in raws:
+                if not self._raw_string_is_raw(_r):
+                    _all_raw = False
+                    break
+            return StringLiteral(_val, line=line, col=col, is_raw=_all_raw)
         _merged = ''
         for _r in raws:
             _merged += self._string_literal_inner(_r)
@@ -4697,7 +4784,8 @@ class Parser:
                 return StringLiteral(self._decode_bytes_literal(_raw0),
                                      line=line, col=col, is_bytes=True)
             return StringLiteral(self._strip_string_prefix_and_quotes(_raw0),
-                                 line=line, col=col)
+                                 line=line, col=col,
+                                 is_raw=self._raw_string_is_raw(_raw0))
         if t.kind == "LBRACKET": return self._parse_list_or_compr()
         if t.kind == "LBRACE": return self._parse_dict_or_set()
         if t.kind == "LPAREN":
