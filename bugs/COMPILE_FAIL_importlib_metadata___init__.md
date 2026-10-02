@@ -1,5 +1,47 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
+## Status (2026-10-01 — STILL a RESOURCE failure, now measured twice and with the ceiling raised; explicitly NOT a verdict either way)
+
+The 2026-09-30 entry below refused to call its single 8 GB run a verdict,
+because `memslot` killed it before it finished. Re-run on this tree at
+**both** ceilings, it is killed again, and neither run says anything about
+whether the file compiles:
+
+```
+tools/memslot.py --gb 8  -- ... fire.py build ... importlib/metadata/__init__.py
+  → memcap: BREACH  8.9 GB >  8.0 GB ceiling (111%)   peak observed before the kill: 8.9 GB
+  → exit 125, 0 `error:` lines
+
+tools/memslot.py --gb 20 -- ... fire.py build ... importlib/metadata/__init__.py
+  → memcap: BREACH 20.7 GB > 20.0 GB ceiling (103%)   peak observed before the kill: 20.7 GB
+  → exit 125, 0 `error:` lines
+```
+
+Two things this measurement DOES establish, both of them new:
+
+- **The runaway is still here and is still growing past 20 GB**, so the
+  `ctypes/util.py` entry's "that one is gone" does not generalise — it was
+  that closure, not this one. `bugs/CODEGEN_bootstrap_resource_blowup.md` /
+  `bugs/PERF_memory_over_4gb_is_a_bug.md` remain the right places; this is
+  the same shape, not a new finding.
+- **23 sibling modules are compiled (as soft fallbacks) before the kill**,
+  and the last diagnostic is `glob.py` refusing on
+  ``next(...) on next(IdentExpr) has no lowering`` — the `next()` refusal
+  just filed as `CODEGEN_itertools_filterfalse_has_no_lowering.md`, which
+  is a real blocker for `importlib/resources/readers.py`'s closure too. So
+  there is a *known, filed, narrow* blocker in this closure as well as the
+  memory one, and the memory one is reached first.
+
+**Not established:** whether this file compiles. Getting a verdict needs a
+ceiling above ~21 GB or a memory-fixed tree; this is the integrator's
+call, not a light worker's. The 2026-09-03 entry's specific claim — that
+`_convert_egg_info_reqs_to_simple_reqs`'s nested helpers cannot have their
+parameters typed because `sections`' element type is not threaded into
+them — is still the right hypothesis to check first and is unchanged by
+anything on this branch.
+
+Doc kept open. **Explicitly not a re-verification, and not a verdict.**
+
 ## Status (2026-09-30, branch work/compile-fail-stdlib-misc — NOT REPRODUCED and NOT CLEARED: killed for memory before any verdict)
 
 The one attempt this session was **not a verdict in either direction**, and

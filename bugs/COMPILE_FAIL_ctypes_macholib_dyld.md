@@ -1,5 +1,45 @@
 # COMPILE_FAIL: Lib/ctypes/macholib/dyld.py
 
+## Status (2026-10-01 — re-measured: the entry below still holds exactly, ONE refused generator, dyld.py's own compile unit still clean)
+
+`python3 fire.py build -o .tmp/out/dyld/dyld
+/Users/mrs/net/Python-3.14.6/Lib/ctypes/macholib/dyld.py` under
+`tools/memslot.py --gb 8`: exit 1, **`macholib/dyld.py` contributes ZERO
+`error:` lines** (`grep -c "macholib/dyld.py"` over the `error:` lines is
+0), and the whole-program build is refused by the same single
+module-level generator refusal the 2026-09-30 entry below records:
+
+```
+cannot compile module: function(s) dyld_default_search (generator
+function(s), contain a `yield`/`yield from`) ...
+Unsupported shape(s): dyld_default_search: every `yield` must carry a
+value, and all values must agree on one scalar type (int64_t/double/_Bool).
+```
+
+So the 2026-08-06 five-bullet cluster is confirmed resolved in full, the
+three-generator count is still one, and the remaining blocker is one
+function's yield-slot agreement — unchanged, feature-sized, and not
+attempted this session.
+
+**Why the yields cannot be typed** is the same shape as
+`Lib/importlib/metadata/__init__.py`'s
+`_convert_egg_info_reqs_to_simple_reqs` (see that doc): this
+generator's own yields are `name`, `os.path.join(path, framework['name'])`
+and `os.path.basename(name)` — all strings in real Python. The element
+type of `framework['name']` (a subscript of a value returned by the
+foreign `framework_info`) is not threaded into the generator body's
+yield-slot inference, so `_generator_yield_ctype` cannot pin one scalar
+type and refuses honestly rather than miscompiling.
+
+Deliberately NOT attempted: this is the same cross-module
+struct-typed-subscript-element-typing gap as the metadata doc, and
+`dyld.py` is not one of the tighter reproductions of it. The narrower
+`/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py` build, which reaches
+this file, does now compile further than it did — see that doc's 2026-10-01
+entry — but stops on its own `tempfile` symbols, not on this generator.
+
+Doc kept open on one generator, unchanged.
+
 ## Status (2026-09-30, branch work/compile-fail-stdlib-misc — THREE refused generators down to ONE, and its own compile unit has been clean for several rounds)
 
 Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/ctypes/macholib/dyld.py`

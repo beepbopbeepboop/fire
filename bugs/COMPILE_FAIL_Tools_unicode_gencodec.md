@@ -4,6 +4,50 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-10-01 — BUILD IS exit 0; all four remaining items are RUNTIME content divergences, and item 1 is now root-caused to a filed, three-function defect)
+
+`python3 fire.py build -o .tmp/out/gencodec/gencodec
+/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py` under
+`tools/memslot.py --gb 8`: **exit 0, zero `error:` lines**, an 80 KB
+executable. (The `-o` target's parent directory must exist — `-o
+.tmp/out/gencodec` alone fails at LINK with `ld: open() failed` — which
+is not a compiler bug.)
+
+So this doc's original COMPILE_FAIL premise is long gone; what is left is
+what the 2026-08-25 entry below called "the compile itself and the whole
+convertdir control flow are correct". Measured side-by-side against real
+CPython 3.14.7 on the same one-file directory (`run/readme.md` plus a
+subdirectory), all four of that entry's items reproduce unchanged:
+
+| | CPython | compiled |
+|---|---|---|
+| `converting …` line | `converting readme.md to readme.py and readme.mapping` | identical |
+| header | `""" Python Character Mapping Codec readme generated from 'run/readme.md' with gencodec.py.` | `… Codec readme generated from '4385725232' …` |
+| entry lines | `    97: 0x0020,` etc. | literally `    (): (0x%0*X, 0x%0*X),` |
+| `readme.mapping` | 577 bytes | **0 bytes** |
+
+**Item 1 (the pointer digits) is ROOT-CAUSED and filed as
+`CODEGEN_string_arg_type_lost_across_forwarding_hop.md`** — reduced from
+this file's `convertdir` → `pymap` → `codegen` chain to three functions,
+and the mechanism is not the call-site-argument-shape visibility the
+2026-08-25 entry guessed but an ORDERING fact: the free-function scalar
+observation loop runs before any function's parameters are refined, so a
+parameter passed straight through a forwarding hop is recorded as
+no-evidence and never re-examined. Not fixed here — the fix is a bounded
+fixpoint on shared cross-call type machinery, and `_arg_scalar_type`'s
+own docstring records the `ntpath.split` regression that a single
+un-fixpointed flip causes.
+
+Items 2-4 are unchanged and un-attempted: `%`-formatting of runtime-boxed
+values has no lowering (`_lower_percent_format` handles statically-string
+operands only), `codecs.make_encoding_map` is unmodelled so
+`decoding_table` never gets built, and `marshal.dump` has no runtime
+implementation at all (real CPython's binary marshal format is a
+standalone feature).
+
+Doc kept open on three runtime-content items, one of them now with a
+filed root cause and a named next step.
+
 ## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): build exit 0; runtime content gaps byte-identical to the 2026-08-26 diagnosis
 
 Fresh end-to-end rebuild (exit 0, ~75s) + run against current tree past

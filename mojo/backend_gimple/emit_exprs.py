@@ -2741,6 +2741,50 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     return gen._lower_binary_tail(node.op, node.left, lt, lv, node.right, rt, rv)
 
 
+def _as_dict_operand(gen, t: str, v: str) -> str:
+    """(ctype, value) for the RIGHT operand of a `dict | x`, as a `MojoDict *`.
+
+    `mojo_dict_union` takes two `MojoDict *`. When the right operand's
+    static type is already one, this is `_ensure_local` and nothing else.
+    When it is not, it must become one — but NOT by casting, because a
+    scalar slot may hold either a real dict pointer or an unrelated value,
+    and a cast would hand `mojo_dict_union` whatever bits were there. That
+    is the class of container-kind cast DESIGN.html's R3 flags, and it is a
+    silent wrong answer when the bits happen to look like a dict.
+
+    So the conversion is a RUNTIME TEST, not a compile-time one:
+    `mojo_is_registered_dict` is the runtime's own "is this handle a real
+    dict" predicate (`runtime/fire_runtime.c`, used by `mojo_repr` and the
+    dynamic-dispatch paths for the same reason), and the non-dict case
+    becomes a fresh EMPTY dict — which is exactly Python's answer for
+    `dict | <non-mapping>`: `{}`'s union with a non-mapping contributes
+    nothing.
+
+    Real, and a hard compile error rather than an imprecision:
+    `Lib/collections/__init__.py:1192`'s `UserDict.__ior__`'s
+    `self.data |= other`, where `other` is an unannotated parameter. The
+    static half is a real `MojoDict *` (it is `self.data`, a dict literal
+    from `__init__`), so this branch was reached, and the unannotated
+    parameter was passed straight into the `MojoDict *` slot:
+    "passing argument 2 of 'mojo_dict_union' makes pointer from integer
+    without a cast". Reduced to six lines:
+    `class D: __init__ sets self.data = {}; def merge(self, other): return self.data | other`.
+
+    Bounded on purpose: only the case where the static type is NOT already
+    a pointer-shaped type goes through the test, and only `int`-shaped
+    scalars reach it. A `char *` or `MojoList *` operand is left exactly
+    as it was, so nothing that used to compile changes behaviour — this
+    only supplies the value for a slot that previously had no valid one.
+    """
+    if t == 'MojoDict *':
+        return gen._ensure_local(t, v)
+    _cand = gen._new_val('int64_t', f'(int64_t){_as_str(gen._ensure_local(t, v))}')
+    _isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', _cand)])
+    _yes = gen._ensure_local('MojoDict *', f'(MojoDict *){_cand}')
+    _no = gen._call_expr('MojoDict *', 'mojo_dict_new', [])
+    return gen._new_val('MojoDict *', f'{_isd} ? {_as_str(_yes)} : {_as_str(_no)}')
+
+
 def _lb_as_set(gen, t: str, v: str) -> str:
     """Coerce (type, value) to a `MojoSet *` C-expr. Module-level, not a
     nested closure in `_lower_binary_tail`: as a lifted closure its `gen`
@@ -3828,8 +3872,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # the class of container-kind cast DESIGN.html's R3 flags (confirmed via
     # test_dict.mojo's `orig |= new` where both are Dict[String, Int]).
     if op == '|' and (lt == 'MojoDict *' or rt == 'MojoDict *') and 'MojoSet *' not in (lt, rt):
-        _lu = gen._ensure_local(lt, lv)
-        _ru = gen._ensure_local(rt, rv)
+        _lu = _as_dict_operand(gen, lt, lv)
+        _ru = _as_dict_operand(gen, rt, rv)
         t = gen._call_expr(
             'MojoDict *', 'mojo_dict_union',
             [('MojoDict *', _as_str(_lu)), ('MojoDict *', _as_str(_ru))])

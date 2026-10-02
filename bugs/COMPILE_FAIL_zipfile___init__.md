@@ -1,5 +1,113 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-10-01 — the `'open'` ambiguity blocker is FIXED, and this file's own errors are down to 21; three of the six classes below are closed)
+
+The single named blocker every entry below tracks is gone, and one of the
+two error classes its own Status newly recorded is closed too. Measured
+on this tree (`python3 tools/memslot.py --gb 8 --label zipfix2 -- python3
+fire.py build -o .tmp/out/zipfile2
+/Users/mrs/net/Python-3.14.6/Lib/zipfile/__init__.py`): **exit 1, 186
+`error:` lines, 21 of them in `zipfile/__init__.py`**, down from 191/24
+immediately after the ambiguity fix.
+
+**Fixed: the `mojo_max`/`mojo_min` arity class (3 of those 24).**
+`n = max(n, self.MIN_READ_SIZE)` at line 1180 (and `min(n,
+self._compress_left)` at 1202-1203) is a 2-arg `max`/`min` — a SCALAR
+comparison — but `_ITERABLE_CONSUMING_BUILTINS` in
+`mojo/middle/infra_infer.py` lists `max`/`min` because their
+*one*-argument form reduces an iterable. So `_infer_param_types` marked
+the unannotated `n` `is_iterated`, typed it `MojoList *`, and the call
+lowered to the runtime's single-iterable `int64_t mojo_max(void *args)`:
+"too many arguments to function 'mojo_max'; expected 1, have 2". Fixed by
+gating that signal on arity for `max`/`min`/`divmod`/`round`, with
+`test_gimple.py::test_scalar_arity_min_max_params_are_not_containers`
+covering all three arities on both pipelines. `grep mojo_max .tmp/zipfix2.log`
+is now **0**.
+
+**Root cause of the original blocker** (which was filed as
+`bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md`,
+now fixed and removed): `gen_module_impl`'s transitive-discovery loop
+registered every inlined sibling's top-level FunctionDef names into
+`_own_imported_func_home` as well as `_imported_func_home`. Tier 2 is
+documented as "THIS exact gen_module call's own FromImportStmt scan …
+never shared across temp_gens", and a sibling's *definition* is neither.
+The collision rule on top turned two such registrations into
+`_AMBIGUOUS_FUNC_HOME`, which `_func_qualifier` refuses for EVERY
+reference to the name program-wide — so six unrelated siblings each
+defining `open` made every bare `open(...)` in the closure uncompilable,
+including zipfile's, which are the builtin. Fixed by dropping the
+duplicated tier-2 registration (the `_imported_func_home.setdefault`
+directly above it already records the same fact, in the tier that is
+*documented* for whole-program observations). Regression:
+`test_link_mode.py::test_builtin_open_is_not_ambiguous_from_transitive_siblings`
+— its siblings' `open` bodies print, so the test asserts by their absence
+that the builtin ran.
+
+**A separate bare-`import` defect found while measuring this, filed not
+fixed:** a bare `import X` + `<X>.<free_fn>(...)` module-qualified call
+answers 0 on the link/build path where the same source is correct on the
+single-TU inline path and where `from X import fn` is correct everywhere.
+See `bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md`. It
+is the shape behind four of `Lib/ctypes/util.py`'s errors, not this
+file's.
+
+**This file's own 21 remaining errors** (it contributed ZERO before the
+ambiguity fix, because the refusal fired first — so every claim in the
+entries below that its compile unit was clean was true only of a build
+that never got to check it):
+
+- **9 × cross-module struct-method / free-function symbols not declared in
+  this TU** — `ArgumentParser___init__`, `_add_argument`, `_parse_args`.
+  These are a DOWNSTREAM CONSEQUENCE, not a shape of their own, and the fix
+  is not in zipfile: `argparse` itself refuses to compile in this closure
+  (`cannot coerce MojoList * to MojoDict * (incompatible container kinds)
+  … value='_t229' dest='args'`), so its symbols are never defined and every
+  reference to them becomes an implicit declaration. The two errors at
+  `zipfile/__init__.py:2383-2397` disappear the moment `argparse`
+  compiles; a minimal two-file probe confirms the module-qualified struct
+  path itself is sound (a bare `import lib` + `lib.Thing(1).go(2)`
+  compiles, links and prints the right answer, at both module and
+  function-body import scope).
+- **12 × a `zipfile/_path`-internal genexp/annotation shape** at
+  `__init__.py:741` and `:752` (`non-trivial conversion in 'component_ref'` /
+  `'var_decl'`, and the `int64_t *` ↔ `int64_t` round-trip that follows):
+  `zipfile._path`'s own `CompleteDirs`/`iterdir` declarations emit invalid
+  C, and zipfile's use of them inherits it. This is the largest remaining
+  class and the most specific to this file.
+
+Downstream, `pathlib/__init__.py` is the largest single contributor (37
+× `expected expression before '(' token` — a `match`/`case` or slice shape
+zipfile's closure reaches that the interpreter suites do not), then
+`compression/zstd/_zstdfile.py` (23 × pointer↔scalar `char *`/`int64_t`
+coercions) and `shutil.py`. Each is a separate doc's subject; none is
+specific to zipfile's codegen.
+
+Doc kept open on two named classes, both with a filed root cause.
+
+## Status (2026-09-30 — supersedes nothing; kept for the `open` ambiguity's history)
+
+Re-ran everything on that branch rather than trusting the entries below.
+
+**`Lib/zipfile/__init__.py` itself contributes ZERO `error:` lines.** Not
+"no errors reached" — its compile unit is inline-compiled into the
+whole-program unit and gcc accepts it. The file is still not BUILT,
+because the program it belongs to is refused as a unit:
+
+```
+Error building: cannot compile module: 'open' is ambiguous — this program
+transitively imports two different sibling modules that both define a free
+function named 'open', ... and no enclosing `from X import ...` statement
+in the current lexical scope binds the name for this specific reference.
+```
+
+Root-caused with an instrumented `_note_own_func_home` trace, and filed as
+`bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md`
+with the tier fix it needs. NOT attempted there: it is a change to
+`_func_qualifier`'s tier order, which
+`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
+owns and which several recent entries here flag as easy to regress into a
+SILENT wrong call.
+
 ## Status (2026-09-30, branch work/compile-fail-stdlib-misc — this file's OWN compile unit is now CLEAN; the whole-program build is refused by one honest, precisely-root-caused ambiguity message)
 
 Re-ran everything on this branch rather than trusting the entries below.

@@ -1,5 +1,58 @@
 # COMPILE_FAIL: Lib/ctypes/util.py
 
+## Status (2026-10-01 — this file's own errors are ONE defect, now root-caused to a bare-`import` module-qualified call; filed as `CODEGEN_bare_import_module_qualified_call_answers_zero.md`)
+
+Re-measured on this tree, and the file's remaining errors are fewer and
+better understood than the entry below records. `python3 fire.py build
+/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py` under
+`tools/memslot.py --gb 8` (peak 0.4 GB) gives **4 `error:` lines, all
+this file's**:
+
+```
+ctypes/util.py:221:10: error: implicit declaration of function 'shutil_which_15d274'
+ctypes/util.py:228:10: error: implicit declaration of function 'tempfile_NamedTemporaryFile_100b86'
+ctypes/util.py:228:8:  error: assignment to '_TemporaryFileWrapper *' from 'int' makes pointer from integer without a cast
+ctypes/util.py:246:3:  error: implicit declaration of function 'tempfile__TemporaryFileWrapper_mojo_close'
+```
+
+(One more than the 2026-09-30 entry's three: `shutil_which_15d274` at
+line 221 is the same defect and was not in that count.)
+
+**These are not a `tempfile` symbol-visibility gap.** The entry below
+guessed that `tempfile`'s free function and struct-method symbols were
+never declared; they are declared, and the modules themselves resolve and
+compile — an instrumented `_compile_imported_module` trace shows
+`shutil` → `code=True`, 93 top-level statements, and `tempfile` →
+`code=True`, 48, both reached twice. The real defect is upstream of any
+declaration: **all four are module-qualified calls on a module reached by
+a BARE `import`** — `shutil.which(...)` at 221 (this file's line 2,
+`import shutil`) and `tempfile.NamedTemporaryFile()` / `temp.close()` at
+228/246 (line 203, a function-body `import re, tempfile`). The symbol
+each call site emits is well-formed and module-qualified
+(`shutil_which_15d274`, `tempfile_NamedTemporaryFile_100b86`,
+`tempfile__TemporaryFileWrapper_mojo_close`) — but nothing in this
+translation unit defines any of them, so gcc reports each as an implicit
+declaration.
+
+Reduced to a two-file repro and root-caused in
+`bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md`: a bare
+`import X` records `imported_symbols['X']` for the MODULE and nothing for
+its members, so `_func_mangleable` answers False for `X.fn` and the call
+lowers to a weak `0`-returning stub. In the reduced case this is a silent
+wrong answer (exit 0, prints 0); here the same mechanism surfaces as
+gcc's implicit-declaration errors because the stub path's guard does not
+fire for the already-mangled name.
+
+Note that `shutil`'s and `tempfile`'s *compiled text* still does not reach
+the output TU despite `code=True` — a second, separate question the
+reduced repro does not raise, recorded there.
+
+Doc kept open, now on a filed and root-caused defect rather than a
+guessed one. **Not attempted here:** the area is not one of this
+worker's claims, and the fix requires answering what `load_module`'s
+export table says about a bare-imported module's members — a question the
+`from X import Y` path already answers and this one never asks.
+
 ## Status (2026-09-30, branch work/compile-fail-stdlib-misc — no longer RSS-bound; 45 `error:` lines, 3 of them this file's, all one cross-module-`tempfile` class)
 
 Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
