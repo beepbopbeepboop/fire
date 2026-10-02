@@ -1,9 +1,34 @@
 # RUNTIME: an int64 dict key in [2^31, 2^47) is dereferenced as a `char *`
 
-## Status (2026-10-01 — PARTIALLY FIXED: the codegen now supplies the answer
-## where it can; the predicate itself is unchanged and still red)
+## Status (2026-10-02 — the codegen supplies the answer in four places now;
+## the PREDICATE is still unchanged and `ptrreg-boxed-str` is still red)
 
 Landed, in this order of importance:
+
+0. **2026-10-02: two more producers for `gen._int_word_vals`**, so the
+   "monotone-safe, pure gain" argument below has two more instances of it.
+   `_lower_UnaryOp` records `-n` / `~n` on an operand already recorded, and
+   `_lower_binary`'s arithmetic tail records an integer result from two
+   operands already recorded (read BEFORE the coercion block replaces the
+   operand temps, marked at the final `t = lv op rv`, because every early
+   return in between produces something that is not an integer). Neither
+   involves inference, which is the whole reason they are safe: a miss falls
+   back to the runtime's own discriminator, never to a crash.
+   Measured: the case below SIGSEGVs on `bc17a62b` and matches CPython here.
+
+   - `test_gimple_runner.py`'s `gimple_computed_dict_key_above_2gb_is_an_
+     integer` — four shapes, one per way a large key can be *computed* rather
+     than written: `i + 1` from a large literal, `-1`, literal + literal, and
+     a small local times a large literal. `-1` is in the list because a
+     negative word is OUTSIDE the predicate's window (a huge `uint64`), so the
+     crash there is in the assignment rather than the lookup, and it is the
+     shape that would pass a test written only for the positive range.
+
+   Still not covered, and still the honest limit: an integer that arrives
+   through an unannotated/erased parameter, a value read out of a
+   heterogeneous container, or a call result. Those are not "no producer" but
+   "needs real type inference", which is `mojo/middle/`'s to own — see the
+   second bullet of the exact-next-step section below, unchanged.
 
 1. **The codegen supplies the answer wherever it PROVABLY knows it.** A new
    positive record, `gen._int_word_vals`, is the exact complement of
@@ -60,9 +85,20 @@ Two directions, and they are genuinely different jobs:
 
 * **Widen `_int_word_vals`.** Every additional producer is monotone-safe — a
   miss falls back to today's behaviour, never to a crash — so this is pure
-  gain. The obvious next ones: `_lower_UnaryOp` (`-n`, `~n`) and `_lower_binary`
-  where both operands are already in the set, which together cover `d[i + 1]`
-  and `d[-1]`. Beyond that it needs real type inference, which is
+  gain. `_lower_UnaryOp` (`-n`, `~n`) and `_lower_binary`'s arithmetic tail
+  (both operands recorded) are DONE (2026-10-02, the Status section at the top).
+  The next ones in the same spirit, none of which needs inference:
+  `_lower_CompareChain` (a comparison yields a `_Bool`, not an int64 word, so
+  this is deliberately NOT one of them — the useful shape is a comparison whose
+  result is immediately used as a dict key, which is not worth a producer), the
+  `%`/`//` helpers (`_lower_floordiv`, `_lower_percent`'s generic numeric arm),
+  and a call whose return type this codegen has RESOLVED to `int64_t`
+  (`func_return_types` already records that, so a call returning `int64_t` from
+  a known-int function is the same argument one level up — but note the
+  resolution is a C type, and an erased `int64_t` return is exactly the case
+  that is NOT evidence, so this needs the resolution and the erasure told
+  apart, which is the same problem one level down).
+  Beyond the mechanical producers it needs real type inference, which is
   `mojo/middle/`'s to own and not this file's.
 * **Make the predicate sound**, which means giving the runtime provenance
   rather than a range: a registry of every string the program can hold, fed by
@@ -202,3 +238,7 @@ Concretely:
   present and an absent large key, and the `lambda` string-key case that must
   keep going through the `_kw` twin. SIGSEGVs on the parent commit. It is the
   test that covers what landed; the `boxedstr` group covers what did not.
+- `test_gimple_runner.py`'s `gimple_computed_dict_key_above_2gb_is_an_integer`
+  (added 2026-10-02 with the two producers above): the same end-to-end shape
+  for a key that is COMPUTED, in four spellings, pinned to CPython's answers.
+  SIGSEGVs on `bc17a62b` for the whole program.

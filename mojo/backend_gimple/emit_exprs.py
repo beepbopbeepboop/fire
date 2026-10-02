@@ -934,6 +934,17 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
         actual_ot = 'int64_t'
         actual_ov = ip
     t = gen._new_val(actual_ot, f"{c_op}{actual_ov}")
+    # `-n` and `~n` on a value the codegen already knows is an integer produce
+    # an integer, with no inference involved — the same argument that makes
+    # `_lower_IntLiteral` seed `gen._int_word_vals`, extended one operator.
+    # Monotone-safe by construction: a miss falls back to the runtime's own
+    # range-only discriminator, never to a crash, which is the property that
+    # makes every producer here worth adding
+    # (bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md). It is what
+    # makes `d[-1]` an ordinary dict entry point instead of a `strcmp` of
+    # address 0xFFFF...FF.
+    if c_op in ('-', '~') and actual_ot in ('int', 'int64_t') and ov in gen._int_word_vals:
+        gen._int_word_vals.add(t)
     return actual_ot, t
 
 
@@ -3951,6 +3962,25 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         ba = gen._call_expr('MojoSet *', 'mojo_set_difference', [('MojoSet *', b), ('MojoSet *', a)])
         return 'MojoSet *', gen._call_expr('MojoSet *', 'mojo_set_union',
                                             [('MojoSet *', ab), ('MojoSet *', ba)])
+    # Integer arithmetic on two operands the codegen already KNOWS are
+    # integers produces an integer — the same no-inference argument that seeds
+    # `gen._int_word_vals` from `_lower_IntLiteral`, one operator wider. It is
+    # what makes `d[i + 1]` an ordinary dict entry point instead of a `strcmp`
+    # of a computed address (bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_
+    # pointer.md), and it is monotone-safe: a miss falls back to the runtime's
+    # own range-only discriminator, never to a crash, which is the property
+    # that makes every producer here worth adding.
+    #
+    # Read HERE, before the coercion block, because that block replaces `lv`
+    # and `rv` with fresh temps that carry no record — and marked at the very
+    # end, because every early `return` between here and there produces
+    # something that is not an integer (a float, a string, a container) or is
+    # not this expression's value at all.
+    _int_word_result = (lt in ('int', 'int64_t') and rt in ('int', 'int64_t')
+                        and c_op in ('+', '-', '*', '/', '%', '&', '|', '^',
+                                     '<<', '>>')
+                        and lv in gen._int_word_vals
+                        and rv in gen._int_word_vals)
     # Cast operands to result type to satisfy GIMPLE strict type checking
     arith_type = gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
     if lt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
@@ -4012,6 +4042,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'char *', t
     t = gen._new_temp(res_type)
     gen._emit(f"  {t} = {lv} {c_op} {rv};")
+    if _int_word_result and res_type in ('int', 'int64_t'):
+        gen._int_word_vals.add(t)
     return res_type, t
 
 

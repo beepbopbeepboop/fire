@@ -5970,6 +5970,43 @@ def main():
 main()
 """, "1\n2\nTrue\nFalse\n7\n7\n")
 
+    # The next two producers of the same fact, so the case above is not the
+    # only thing standing between a computed large key and a SIGSEGV.
+    # `gen._int_word_vals` records "this value holds a plain Python integer",
+    # and it was seeded only from `_lower_IntLiteral` — so `i + 1`, `-1` and
+    # `j * 1000000000` were all still asked of the runtime's range-only
+    # discriminator, which calls every positive int64 in [2^31, 2^47) a
+    # pointer. Both of these are now seeded: `-n`/`~n` in `_lower_UnaryOp` on
+    # an operand already recorded, and integer arithmetic in
+    # `_lower_binary`'s tail on two operands already recorded. Neither involves
+    # inference, which is what keeps the table monotone-safe — a miss falls
+    # back to today's behaviour and never to a crash.
+    #
+    # Every shape SIGSEGVs on the tree before this: `i + 1` computed from a
+    # large literal, `-1` (a negative word is outside the predicate's window,
+    # so it is the ASSIGNMENT that must recognise it), a literal-plus-literal,
+    # and a product of a small local by a large literal.
+    test_gimple_stdout("gimple_computed_dict_key_above_2gb_is_an_integer", """\
+def main():
+    i = 2999999999
+    d = {}
+    d[i + 1] = 7
+    print(d[i + 1])
+    e = {}
+    e[-1] = 9
+    print(e[-1])
+    f = {}
+    f[3000000000 + 1] = 3
+    print(f[3000000001])
+    g = {}
+    j = 5
+    g[j * 1000000000] = 1
+    print(g[j * 1000000000])
+    print(3000000000 in e)
+    print(-1 in e)
+main()
+""", "7\n9\n3\n1\nFalse\nTrue\n")
+
     # The CONSTRUCTOR half of the same cross-call struct contract
     # (the ctor-direction cross-call struct contract in `module_gen.py`'s
     # constructor observation pass). The receiver
