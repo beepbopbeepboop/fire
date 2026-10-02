@@ -7180,6 +7180,33 @@ def _lower_slice_bounds(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
 
 def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.obj)
+    # A BOXED receiver carries its real kind in `_actual_types`, and every
+    # other container dispatch in this codegen resolves it through
+    # `_get_actual_type` before choosing a helper (`_lower_Subscript`'s
+    # `ot = gen._get_actual_type(ot, ov)` plus its cast, `_gen_print`, the
+    # `in` test). Slicing was the one that did not, so it fell through
+    # every branch below to the generic pointer-arithmetic fallback and did
+    # INTEGER addition on the box: a module-level `L = [10, 20, 30, 40]`
+    # reads back as an `int64_t` field, so `L[1:]` emitted `t + 1` and
+    # printed `33067958273` where CPython prints `[20, 30, 40]`. The
+    # subscript form `L[2]` was already right, which is what made this a
+    # silent wrong answer rather than a visible failure.
+    #
+    # The cast is not optional once the type resolves: every branch below
+    # spells `ov` as a real pointer, so resolving the type without also
+    # re-typing the value turns `mojo_cstr_slice`'s `char *` argument into a
+    # bare `int64_t` (std/sys/info.mojo's `osver[byte = : osver.find(".")]`
+    # — `-Wint-conversion`). Same two-step int64_t-then-pointer dance, for
+    # the same GIMPLE reason, as `_lower_MemberExpr` just above.
+    _ot_orig = ot
+    ot = gen._get_actual_type(ot, ov)
+    if ot != _ot_orig and ot.endswith(' *') and _ot_orig == 'int64_t':
+        _ov_local = gen._ensure_local('int64_t', ov)
+        _ip_cast = gen._new_temp('int64_t')
+        _np_cast = gen._new_temp(ot)
+        gen._emit(f"  {_ip_cast} = (int64_t){_ov_local};")
+        gen._emit(f"  {_np_cast} = ({ot}){_ip_cast};")
+        ov = _np_cast
     start_v, stop_v = gen._lower_slice_bounds(node)
 
     # `x[a:b]` on a builtin-`bytes` subclass instance -> a plain bytes

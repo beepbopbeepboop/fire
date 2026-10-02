@@ -265,6 +265,77 @@ def main():
 '''
 
 
+@case('multi_kind_global_rebound_in_a_function_is_the_box')
+def _():
+    # The module-GLOBAL twin of `multi_kind_local_is_the_box_not_the_first_
+    # kind`, and the one shape Phase 1.7's global pre-scan structurally
+    # cannot see: `X = <kind A>` at module scope and `global X; X = <kind B>`
+    # inside a function are TWO assignments to ONE binding, so the two types
+    # must be JOINED — and every one of those pre-passes walks module-level
+    # statements only. `X` was therefore frozen at kind A forever, the
+    # cross-function store was coerced to kind A through a pointer cast, and
+    # the very next line — which slices the same global as the list it has
+    # just become — sliced a `char *` and emitted `char * + MojoList *`.
+    #
+    # Real: `Mac/BuildScript/build-installer.py`'s
+    # `FW_VERSION_PREFIX = "--undefined--"  # initialized in parseOptions`
+    # and `FW_VERSION_PREFIX = FW_PREFIX[:] + ["Versions", getVersion()]`.
+    # That file did not build at all before this; it builds now.
+    #
+    # Every line after the reassignment is a DIFFERENT consumer of the same
+    # binding, and each is printed rather than merely compiled: a slice, a
+    # `print` of the global itself (repr dispatch), and a method call on it.
+    # A box that "works" by being read as a `char *` fails all three, and the
+    # `configure()` return additionally pins the `return L[1:]` slice type —
+    # the shape whose `_quick_type` used to answer the box for a global.
+    return '''PREFIX = ["Library", "Frameworks"]
+SUFFIX = "undefined"
+
+
+def configure():
+    global SUFFIX
+    SUFFIX = PREFIX[:] + ["Versions", "3.14"]
+    return SUFFIX[:1]
+
+
+def main():
+    print(configure())
+    print(SUFFIX)
+    print("|".join(SUFFIX))
+'''
+
+
+@case('slicing_a_boxed_global_reads_the_container')
+def _():
+    # A module global is stored in an `int64_t` field — the codebase-wide
+    # convention for a container global — so `L` reads back as a box. Every
+    # other consumer of a box resolves its kind through `_get_actual_type`
+    # (`L[2]` included); the SLICE was the one that did not, and fell
+    # through to the generic pointer-arithmetic fallback, which on an
+    # `int64_t` is INTEGER addition. `L[1:]` emitted `t + 1` and printed
+    # `33067958273` where CPython prints `[20, 30, 40]`.
+    #
+    # Silent because `L[2]` was already right, which is what makes the
+    # subscript-vs-slice disagreement the property under test: the same
+    # binding, read two ways, must give the same answer. `S` is the `char *`
+    # counterpart, because resolving the box through `_get_actual_type` also
+    # newly reaches the `char *` slice branch (`mojo_cstr_slice`) for a
+    # boxed string global, and that must not change.
+    return '''L = [10, 20, 30, 40]
+S = "hello world"
+
+
+def main():
+    print(L[1:])
+    print(L[:2])
+    print(L[2])
+    print(S[6:])
+    print(S[:5])
+    for x in L[1:]:
+        print("item", x)
+'''
+
+
 @case('next_iter_over_a_dict_items_expression')
 def _():
     # `next(iter(<expression>))`, where the expression is not a bare name.

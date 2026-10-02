@@ -709,6 +709,40 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
 
 
+def _note_global_store_types(gen, tname: str, vtype: str, v: str) -> None:
+    """Carry a value stored into a module global's type knowledge forward to
+    the global's NAME, so the read path can dispatch on the container it
+    really holds.
+
+    Both arms of "this assignment writes a globals-struct field" — the
+    `global x` store inside a function body and the module-level store in
+    `_toplevel()` — call this. They were two hand-maintained copies of the
+    same three facts, and they had already drifted: the `_in_toplevel_gen`
+    arm carried the `_actual_types` propagation and the `_func_declared_
+    globals` arm did not, so a `global N = <list>` followed by a read of `N`
+    in the same function read the boxed `int64_t` back with no kind at all.
+
+    `_actual_types` is the whole point. Without it a boxed `MojoDict *` /
+    `MojoList *` stored in a global loads back as a plain `int64_t` and the
+    subscript dispatch falls through to the generic `MojoList *` cast path
+    (BUG-2026-044). With it, `_lower_IdentExpr`'s global-read arm copies the
+    name's entry onto the read-back temp, which is what lets the next line
+    slice a list that the previous line made a list.
+    """
+    if vtype == 'MojoDict *':
+        if v in gen._dict_val_types:
+            gen._dict_val_types[tname] = gen._dict_val_types[v]
+            if v in gen._dict_nested_val_types:
+                gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
+    elif vtype == 'MojoList *':
+        if v in gen._elem_types:
+            gen._elem_types[tname] = gen._elem_types[v]
+            if v in gen._nested_elem_types:
+                gen._nested_elem_types[tname] = gen._nested_elem_types[v]
+    if v in gen._actual_types:
+        gen._actual_types[tname] = gen._actual_types[v]
+
+
 def _gen_stmt_AssignStmt(gen, node):
     if isinstance(node.target, gimple_ctypes.IdentExpr) \
             and getattr(node, 'value', None) is not None:
@@ -891,16 +925,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # Without this, _dict_val_types[name] is never set for globals,
             # and d["key"] on a global dict falls back to mojo_dict_get_int
             # instead of mojo_dict_get_str — see BUG-2026-043.
-            if vtype == 'MojoDict *':
-                if v in gen._dict_val_types:
-                    gen._dict_val_types[tname] = gen._dict_val_types[v]
-                    if v in gen._dict_nested_val_types:
-                        gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
-            elif vtype == 'MojoList *':
-                if v in gen._elem_types:
-                    gen._elem_types[tname] = gen._elem_types[v]
-                    if v in gen._nested_elem_types:
-                        gen._nested_elem_types[tname] = gen._nested_elem_types[v]
+            _note_global_store_types(gen, tname, vtype, v)
             return
         # Genuine module-scope statement (we're generating THIS module's own
         # _toplevel()/_{module}_toplevel() body — see _in_toplevel_gen) whose
@@ -937,29 +962,12 @@ def _gen_stmt_AssignStmt(gen, node):
             # struct field's real declared C type, not the semantic one.
             gtype = gen._global_dst_ctype(tname)
             gen._safe_coerce_emit(vtype, gtype, v, field_ref)
-            # Propagate dict/list/set value-type tracking for module-level
-            # globals — the same fix as the _func_declared_globals branch above,
-            # but for the toplevel-gen path that module-level assignments take.
-            if vtype == 'MojoDict *':
-                if v in gen._dict_val_types:
-                    gen._dict_val_types[tname] = gen._dict_val_types[v]
-                    if v in gen._dict_nested_val_types:
-                        gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
-            elif vtype == 'MojoList *':
-                if v in gen._elem_types:
-                    gen._elem_types[tname] = gen._elem_types[v]
-                    if v in gen._nested_elem_types:
-                        gen._nested_elem_types[tname] = gen._nested_elem_types[v]
-            # Propagate _actual_types so the global load path (line 6481)
-            # sets the correct actual type instead of gtype (which may be
-            # int64_t).  Without this, a boxed MojoDict* or MojoList* stored
-            # in a global variable is loaded back as plain int64_t and the
-            # subscript dispatch falls through to the generic MojoList*
-            # cast path — see BUG-2026-044.
-            if vtype.endswith(' *') and v in gen._actual_types:
-                gen._actual_types[tname] = gen._actual_types[v]
-            elif v in gen._actual_types:
-                gen._actual_types[tname] = gen._actual_types[v]
+            # Same tracking as the `_func_declared_globals` branch above —
+            # one helper for both, because they are two arms of the same
+            # decision (a store into this module's globals struct) and the
+            # `_func_declared_globals` arm was missing the `_actual_types`
+            # half that this one had.
+            _note_global_store_types(gen, tname, vtype, v)
             return
         # Regular local variable assignment
         if tname not in gen.var_types:

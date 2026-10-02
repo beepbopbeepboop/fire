@@ -657,7 +657,29 @@ def _quick_type(gen, node) -> str:
         return 'int64_t'
     # A slice's type is the type of the object being sliced (mirrors _lower_slice:
     # list slice -> list, str slice -> str, plain pointer -> same pointer).
-    if isinstance(node, gimple_ctypes.SliceExpr): return gen._quick_type(node.obj)
+    if isinstance(node, gimple_ctypes.SliceExpr):
+        _st = gen._quick_type(node.obj)
+        if _st == 'int64_t' and isinstance(node.obj, gimple_ctypes.IdentExpr):
+            # The object is a MODULE GLOBAL of this compile, whose semantic
+            # type this estimator otherwise never consults (`var_types` is
+            # per-function and has no entry for it), so `L[1:]` was the box
+            # and every consumer of the slice — `_collect_return_types` first
+            # of all — typed it as a scalar. That made `def pick(): return
+            # L[1:]` infer `int64_t`, and `print(pick())` then formatted the
+            # list POINTER as a decimal.
+            #
+            # Restricted to the box: a name this function types itself is
+            # already answered above, and the ownership guard mirrors
+            # `_lower_IdentExpr`'s bare-name global read (the table is
+            # whole-program-shared and keyed by bare name, so an inlined
+            # sibling module's same-named global is not this module's).
+            _sn = _as_str(node.obj.name)
+            _g2m = getattr(gen, '_global_to_module', {}) or {}
+            _own = getattr(gen, 'module_name', '') or 'root'
+            if _sn in (getattr(gen, '_global_var_types', None) or {}) and (
+                    _g2m.get(_sn) is None or _as_str(_g2m.get(_sn)) == _own):
+                _st = gen._global_var_types[_sn]
+        return _st
     if isinstance(node, gimple_ctypes.SubscriptExpr):
         # container[idx]: result is the container's element type, read from the
         # same side-tables the subscript lowering uses. Covers nested reads
