@@ -796,10 +796,17 @@ def test_a_linked_dylib_whose_source_is_gone_is_still_refused(tmpdir, _):
     correct verdict, since emitting a `BL` against a symbol nothing defines, or
     guessing a layout, is the outcome the whole mechanism exists to prevent.
 
-    (The refusal's WORDING still names a constructor this module does not
-    declare; it cannot be fixed where it is raised, which is about the variable
-    rather than the type. Filed as
-    `bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`.)
+    And the refusal's REPAIRS have to be the two that exist for this program.
+    It used to say "`b` is bound here as a parameter" and "bind the base from a
+    constructor THIS MODULE declares", both of which are false about the file in
+    front of the reader: `b` is `var b = Bag()`, and `Bag` is declared in a file
+    this build cannot read, so it is not a constructor this module declares and
+    cannot become one. The two clauses the message carries now are the
+    declaration must be VISIBLE (an import brings one, a `--link-dylib` library
+    brings one while its source is readable) and do NOT re-declare the struct
+    here — which would be a different type with the same name, and the layout
+    the library's methods use would not be it.
+    (`bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`.)
     """
     import json
     fresh_cas()
@@ -820,6 +827,17 @@ def test_a_linked_dylib_whose_source_is_gone_is_still_refused(tmpdir, _):
     result, _out = build(root, "prog.aout", expect_ok=False,
                          extra=["--link-dylib", dylib])
     refuses(result, "is a field access through 'b'")
+    text = result.stderr or result.stdout
+    for gone in ("is bound here as a parameter",
+                 "constructor this module declares (`x = S()`)"):
+        check(gone not in text,
+              f"the refusal still claims {gone!r}, which is false about a "
+              f"library whose source this build cannot read: {text[-400:]}")
+    for want in ("whose declaration THIS IMAGE can see",
+                 "Do not re-declare the struct here"):
+        check(want in text,
+              f"the refusal does not offer {want!r}, so the reader is sent "
+              f"after a repair that does not exist: {text[-400:]}")
 
 
 # ── (3b) the same three arity questions with no DECLARATION to read ─────────

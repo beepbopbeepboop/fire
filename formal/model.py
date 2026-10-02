@@ -17819,7 +17819,26 @@ def field_access_refusal(name: str, fn_name: str, root: str,
     `holder` says whether the build DID recognise `root` as a frame receiver —
     when it did, a disagreement is a bug in the frame analysis and the message
     says so; when it did not, the honest statement is that this path has no
-    type inference, so a name bound from a parameter cannot be classified."""
+    type inference, so a name this image cannot classify cannot be classified.
+
+    **What this function deliberately does NOT say.** It is raised from an
+    emitter's slot-allocator fall-through, and an emitter is handed a SLOT KEY
+    and nothing else: it cannot see how `root` was bound, only whether the frame
+    analysis recognised it. The first version of this message asserted "`root` is
+    bound here as a parameter", which is a claim about the caller's source that
+    the raiser had no way to know and which was false about a real program —
+    `var b = Bag(); b.n = 4` against a `--link-dylib` library whose source was
+    no longer readable, where the binding is a construction and the struct is
+    declared in a file this build does not have
+    (`bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`). So the
+    message states what the raiser knows — the base is not classified, and a
+    field needs a classification to be lowered — and the REPAIRS are the two
+    that are actually available, which is the other half of that document's
+    finding: "bind the base from a constructor THIS MODULE declares" is
+    impossible to follow for a struct this module does not and cannot declare,
+    and suggesting the reader declare it here would be worse than useless — it
+    would be a DIFFERENT type with the same name, and the frame the library's
+    methods are called on would not be it."""
     who = f"{fn_name}: " if fn_name else ""
     if holder:
         return (f"{who}{name!r} is a field of {root!r}, which the build "
@@ -17834,12 +17853,16 @@ def field_access_refusal(name: str, fn_name: str, root: str,
             f"three ways and which one applies is decided by the BINDING of "
             f"the base, not by a type: a one-field struct's receiver IS its "
             f"field, a multi-field struct's receiver is the address of a "
-            f"frame, and an ordinary word is an integer. {root!r} is bound "
-            f"here as a parameter, so none of the three is established, and a "
+            f"frame, and an ordinary word is an integer — and nothing this "
+            f"image can see about {root!r}'s binding establishes which, so a "
             f"store to the field with no home lands in a register the next "
             f"function reads as its first parameter. Bind the base from a "
-            f"constructor this module declares (`x = S()`), or declare the "
-            f"field's type so the base is not typeless")
+            f"constructor whose declaration THIS IMAGE can see (`x = S()`): an "
+            f"`import` brings the declaration with it, and a `--link-dylib` "
+            f"library brings one when the source it was built from is still "
+            f"readable. Do not re-declare the struct here — that is a "
+            f"different type with the same name, and the layout the library's "
+            f"methods use would not be it")
 
 
 # ── How a call's arguments bind: the ONE shape, read by everything ─────────
