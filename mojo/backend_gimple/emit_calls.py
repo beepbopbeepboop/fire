@@ -4763,22 +4763,35 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     _local = _gld.bound_local_name(gen, node)
     _cbody = getattr(gen, '_cur_func_body', None)
     if _cbody and _local and _local != '?':
+        _lpns = _gld._param_names(node)
+        _nparams = len(node.params)
         for _cn in _gld._walk_body(_cbody):
             if (not isinstance(_cn, gimple_ctypes.CallExpr)
                     or not isinstance(_cn.func, gimple_ctypes.IdentExpr)
                     or _as_str(_cn.func.name) != _local):
                 continue
-            for _cai, _caa in enumerate(_cn.args or []):
-                if _cai >= len(node.params):
+            # Index-walks, not an `enumerate` unpack: a two-element for-target
+            # unpack boxes both slots on the self-hosted path, which is why the
+            # file's own `_lower_fnptr_call_value` comment says to index
+            # `_ap[0]` / `_ap[1]` instead of unpacking them.
+            _cargs = _cn.args or []
+            for _cai in range(len(_cargs)):
+                if _cai >= _nparams:
                     break
-                if gimple_exprtypes.expr_provably_str(_caa):
-                    _may_str.add(_gld._param_names(node)[_cai])
+                if _cai >= len(_lpns):
+                    break
+                if gimple_exprtypes.expr_provably_str(_cargs[_cai]):
+                    _may_str.add(_lpns[_cai])
     if _may_str:
         _mi = getattr(gen, '_int64_may_hold_str', None)
         if _mi is None:
             _mi = {}
             gen._int64_may_hold_str = _mi
-        _mi.setdefault(lifted_name, set()).update(_may_str)
+        # Named local, not a chained `setdefault(...).update(...)`: the
+        # intermediate has no static type self-hosted (the `_scalar_obs`
+        # loop in module_gen.py splits its own out for this reason).
+        _mset = _mi.setdefault(lifted_name, set())
+        _mset.update(_may_str)
 
     # A lambda that reads an ENCLOSING FUNCTION'S LOCAL cannot be lifted to a
     # top-level C function as-is: there is no env to read it from, and the

@@ -6502,9 +6502,22 @@ def gen_module_impl(self, stmts):
             _cs_fn = _as_funcdef_node(_cs_s)
             _gmi_scopes.extend(_gmi_scope_bodies(_as_list(_cs_fn.body),
                                                  _as_str(_cs_fn.name)))
-    # (owning scope name, source name, lifted name, unannotated param names)
-    _gmi_nested: list = []
-    for _scope_name, _scope_body in _gmi_scopes:
+    # PARALLEL LISTS, not tuples indexed positionally through a for-target
+    # unpack: on the self-hosted path a multi-element `for` target erases
+    # each element to int64_t (`discover_closures` and `lambdareduce` both
+    # document that trap at length, and `_walk_own_body`'s own comment
+    # records the generator variant of it), so a `(owner, src, lifted, …)`
+    # tuple would arrive here with boxed strings that never compare equal to
+    # the name they should and a silent no-op in the compiled compiler.
+    _gmi_own: list = []
+    _gmi_src: list = []
+    _gmi_lift: list = []
+    _gmi_pn: list = []
+    _gmi_def: list = []
+    for _gscope_i in range(len(_gmi_scopes)):
+        _scope_ent = _gmi_scopes[_gscope_i]
+        _scope_name = _as_str(_scope_ent[0])
+        _scope_body = _scope_ent[1]
         for _lsc in _walk_ast(_scope_body):
             if not isinstance(_lsc, FunctionDef):
                 continue
@@ -6513,21 +6526,28 @@ def gen_module_impl(self, stmts):
                     and not getattr(_lsf, 'is_generator', False)):
                 continue
             _lpn: list = []
-            for _lpp, _lpt in (_as_list(_lsf.params) or []):
-                _lp_n = _as_str(_lpp)
-                if _lp_n.startswith('*'):
+            _lpar = _as_list(_lsf.params) or []
+            for _lp_i in range(len(_lpar)):
+                _lpp = _as_str(_lpar[_lp_i][0])
+                _lpt = _lpar[_lp_i][1]
+                if _lpp.startswith('*'):
                     continue
                 if _lpt is not None:
                     continue                    # respect explicit annotation
-                _lpn.append(_lp_n)
+                _lpn.append(_lpp)
             if not _lpn:
                 continue
             _lname = _as_str(_lsf.name)
-            _gmi_nested.append((_scope_name, _lname,
-                                closure_lifted_name(_scope_name, _lname),
-                                _lpn, _lsf))
+            _gmi_own.append(_scope_name)
+            _gmi_src.append(_lname)
+            _gmi_lift.append(closure_lifted_name(_scope_name, _lname))
+            _gmi_pn.append(_lpn)
+            _gmi_def.append(_lsf)
     _gmi_rec: dict = {}
-    for _scope_name, _scope_body in _gmi_scopes:
+    for _gscope_i in range(len(_gmi_scopes)):
+        _scope_ent = _gmi_scopes[_gscope_i]
+        _scope_name = _as_str(_scope_ent[0])
+        _scope_body = _scope_ent[1]
         _gmi_calls: list = []
         self._calls_in_stmts(_scope_body, _gmi_calls)
         for _gcall in _gmi_calls:
@@ -6537,36 +6557,39 @@ def gen_module_impl(self, stmts):
             # The def's OWN scope wins over a same-named one elsewhere: two
             # unrelated functions can each nest a `helper`, and the enclosing
             # scope is what says which of them this call site means.
-            _gmatch = None
-            # Index-walk, NOT a tuple-unpack `for` target: a multi-element unpack
-            # in a for target erases each element to int64_t on the self-hosted
-            # path (the trap `discover_closures` and `lambdareduce` each
-            # document at length), and a boxed name never compares equal.
-            for _gni in range(len(_gmi_nested)):
-                _gent = _gmi_nested[_gni]
-                _gown = _as_str(_gent[0])
-                _gsrc = _as_str(_gent[1])
-                _glift = _as_str(_gent[2])
-                _gpn = _gent[3]
-                if _gsrc != _gcallee:
+            # The def's OWN scope wins over a same-named one elsewhere: two
+            # unrelated functions can each nest a `helper`, and the enclosing
+            # scope is what says which of them this call site means. Index
+            # walks over the parallel lists above, never a for-target unpack
+            # (see their own note).
+            _gmatch = -1
+            for _gni in range(len(_gmi_src)):
+                if _as_str(_gmi_src[_gni]) != _gcallee:
                     continue
-                if _gmatch is None:
-                    _gmatch = (_glift, _gpn)
-                if _gown == _scope_name:
-                    _gmatch = (_glift, _gpn)
+                if _gmatch < 0:
+                    _gmatch = _gni
+                if _as_str(_gmi_own[_gni]) == _scope_name:
+                    _gmatch = _gni
                     break
-            if _gmatch is None:
+            if _gmatch < 0:
                 continue
-            _glift, _gpn = _gmatch
+            _glift = _as_str(_gmi_lift[_gmatch])
+            _gpn = _gmi_pn[_gmatch]
             _gargs = _as_list(_gcall.args) or []
+            _gslot = _gmi_rec.setdefault(_glift, set())
             for _gi in range(len(_gargs)):
                 if _gi >= len(_gpn):
                     break
                 if _arg_scalar_type(_scope_name, _gargs[_gi], deep_str=True) != 'char *':
                     continue
-                _gmi_rec.setdefault(_glift, set()).add(_gpn[_gi])
+                _gslot.add(_gpn[_gi])
     for _grk in _gmi_rec:
-        self._int64_may_hold_str.setdefault(_grk, set()).update(_gmi_rec[_grk])
+        # `setdefault` into a NAMED local, then merge into it: the chained
+        # `d.setdefault(k, set()).update(...)` form has no static type on its
+        # intermediate result self-hosted, which is why the `_scalar_obs`
+        # loop above splits its own out (see its comment).
+        _grk_names = self._int64_may_hold_str.setdefault(_grk, set())
+        _grk_names.update(_gmi_rec[_grk])
     # Pass 1.3d-struct: the same unanimity-over-call-sites contract as the
     # loop above, for a REGISTERED STRUCT pointer.
     #
@@ -6604,7 +6627,8 @@ def gen_module_impl(self, stmts):
     # `gimple_dynamic_attribute_real_storage_and_attributeerror`). A method
     # call, by contrast, has exactly one lowering — the struct's own mangled
     # method — so there is nothing for the name-based fallback to get right.
-# Past 1.3d proper: propagate the may-hold-a-string property out of the
+
+    # Past 1.3d proper: propagate the may-hold-a-string property out of the
     # slots recorded above. It is one property of a VALUE, and a value is not
     # confined to the slot it arrived in -- `y = x` copies it, `return x`
     # publishes it to every caller, and a caller hands its own property to the
@@ -6654,21 +6678,27 @@ def gen_module_impl(self, stmts):
     # under the latter, and it has to be the enclosing scope's entry: two
     # unrelated functions can each nest a `helper`.
     _nested_lifted: dict = {}
-    # Index-walk, NOT a tuple-unpack `for` target: a multi-element unpack
-    # in a for target erases each element to int64_t on the self-hosted
-    # path (the trap `discover_closures` and `lambdareduce` each
-    # document at length), and a boxed name never compares equal.
-    for _gni in range(len(_gmi_nested)):
-        _gent = _gmi_nested[_gni]
-        _gown = _as_str(_gent[0])
-        _gsrc = _as_str(_gent[1])
-        _glift = _as_str(_gent[2])
-        _gpn = _gent[3]
-        _nested_lifted.setdefault(_gown, {})[_gsrc] = _glift
+    for _gni in range(len(_gmi_src)):
+        _gown = _as_str(_gmi_own[_gni])
+        _gsrc = _as_str(_gmi_src[_gni])
+        _glift = _as_str(_gmi_lift[_gni])
+        _gpair = _nested_lifted.setdefault(_gown, {})
+        _gpair[_gsrc] = _glift
 
     def _gmi_param_names(params) -> list:
-        return [_as_str(_pn) for _pn, _pt in (_as_list(params) or [])
-                if not _as_str(_pn).startswith('*')]
+        # A plain loop, not a comprehension with a two-element for-target
+        # unpack: both halves of that idiom are individually documented traps
+        # on the self-hosted path (a comprehension's target unpack boxes both
+        # slots -- `discover_closures`' `self_/moa/` example -- and this
+        # file's own `_record_param_elem` comment repeats it).
+        out = []
+        par = _as_list(params) or []
+        for i in range(len(par)):
+            pn = _as_str(par[i][0])
+            if pn.startswith('*'):
+                continue
+            out.append(pn)
+        return out
 
     for _fname, _fn in _fn_by_name.items():
         _params[_fname] = _gmi_param_names(_fn.params)
@@ -6700,18 +6730,15 @@ def gen_module_impl(self, stmts):
     # in a for target erases each element to int64_t on the self-hosted
     # path (the trap `discover_closures` and `lambdareduce` each
     # document at length), and a boxed name never compares equal.
-    for _gni in range(len(_gmi_nested)):
-        _gent = _gmi_nested[_gni]
-        _gown = _as_str(_gent[0])
-        _gsrc = _as_str(_gent[1])
-        _glift = _as_str(_gent[2])
-        _gpn = _gent[3]
+    for _gni in range(len(_gmi_src)):
+        _glift = _as_str(_gmi_lift[_gni])
+        _gpn = _gmi_pn[_gni]
         _params[_glift] = list(_gpn)
         _calls[_glift] = []
         _rets[_glift] = []
         _copies[_glift] = []
         _glift_rename = _nested_lifted.get(_glift, {})
-        _gdef = _gent[4]
+        _gdef = _gmi_def[_gni]
         for _nd in _walk_ast(_as_list(_gdef.body)):
             if (isinstance(_nd, gimple_ctypes.AssignStmt)
                     and isinstance(_nd.target, IdentExpr)

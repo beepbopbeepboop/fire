@@ -4921,9 +4921,13 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  free ({t});')
         if i < len(parts) - 1:
             _emit_literal_print(' ', print_fn)
-    for _ch_w, _ch_s in _cstr_held:
+    # Index-walk, not a two-element for-target unpack: that boxes both slots
+    # on the self-hosted path (`_lower_fnptr_call_value`'s own comment gives
+    # the rule for the same shape).
+    for _ch_i in range(len(_cstr_held)):
         gen._emit_call('void', '', 'mojo_cstr_or_int_release',
-                       [('int64_t', _ch_w), ('char *', _ch_s)])
+                       [('int64_t', _cstr_held[_ch_i][0]),
+                        ('char *', _cstr_held[_ch_i][1])])
     _emit_literal_print('\\n', print_fn)
 
 

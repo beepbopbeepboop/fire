@@ -3661,7 +3661,16 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             # than by the rule -- an accident that breaks the moment one side
             # is spelled as a NULL-typed local instead of the literal.
             _t = gen._new_temp('_Bool')
-            gen._emit(f'  {_t} = {1 if op == "==" else 0};')
+            # A named local, NOT a conditional expression inside the f-string.
+            # The self-hosted backend compiles an f-string interpolation by
+            # COMPILING it as its own expression, and a nested string literal
+            # inside `{...}` is not something it can parse: the whole-closure
+            # `--dump` emitted the literal text `{1 if op == "}` and the
+            # resulting C did not compile, which is exactly what the `selfhost`
+            # gate step reports (checked_run's "self-host compile/link
+            # regressed").
+            _ans = 1 if op == '==' else 0
+            gen._emit(f'  {_t} = {_ans};')
             return '_Bool', _t
         if _ptr_ty == 'char *':
             # Same shape as the `is`/`is not` pointer-identity case below
@@ -3700,7 +3709,10 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             _real = gen._get_actual_type(_ptr_ty, _ptr_val)
             if not (_as_str(_real).endswith(' *')):
                 _t = gen._new_temp('_Bool')
-                gen._emit(f'  {_t} = {1 if op == "!=" else 0};')
+                # Named local, not an in-f-string conditional — see the
+                # identical arm above for why.
+                _ans = 1 if op == '!=' else 0
+                gen._emit(f'  {_t} = {_ans};')
                 return '_Bool', _t
 
     # String equality: char*, int64_t-stored-char*, or string literals → strcmp
