@@ -23,7 +23,7 @@ import re
 import sys
 import zlib
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
+from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -631,20 +631,16 @@ def _split_top_level_commas(s: str) -> list[str]:
     """Split `s` on commas that are not nested inside ([{ }]). Used to pull
     just the element-type segment out of a multi-arg bracket annotation like
     `UnsafePointer[X, SomeOrigin]` without splitting inside a nested `X` that
-    itself contains a bracketed, comma-bearing type arg (e.g. `Tuple[Int, Int]`)."""
-    parts, depth, buf = ([], 0, [])
-    for c in s:
-        if c in '([{':
-            depth += 1
-        elif c in ')]}':
-            depth = max(0, depth - 1)
-        if c == ',' and depth == 0:
-            parts.append(''.join(buf))
-            buf = []
-        else:
-            buf.append(c)
-    parts.append(''.join(buf))
-    return parts
+    itself contains a bracketed, comma-bearing type arg (e.g. `Tuple[Int, Int]`).
+
+    This is fire_compiler.split_top_level_commas under the name this module's
+    ~25 callers already use, and it is an ALIAS rather than a second copy: the
+    same bracket-aware split serves a bracket annotation AND an
+    unpacking-target string, and a trailing-comma 1-tuple target is only
+    expressible if every reader drops the empty slot it leaves (see
+    fire_compiler.py's "Unpacking-target representation" section). Two copies
+    would be free to disagree about exactly that."""
+    return split_top_level_commas(s)
 
 def _class_attr_ctype(v) -> str | None:
     """C pointer type for a container-valued class-body attribute initializer
@@ -1759,17 +1755,17 @@ def _compute_exc_descendants(all_struct_defs):
 def _unpack_target_leaf_names(target: str) -> list:
     """Flatten a tuple-unpack target string (`'(a, b)'`,
     `'(a, (b, (c, d)))'`, ... — the exact text _parse_unpack_target
-    preserves) into its LEAF variable names. Bracket-aware at every
-    level: a naive `.split(',')` tore nested slots into paren-carrying
-    fragments that then leaked into declared-name sets (or worse, into
-    emitted C declarations verbatim)."""
-    t = target.strip()
-    if t.startswith('(') and t.endswith(')'):
-        names = []
-        for part in _split_top_level_commas(t[1:-1]):
-            names.extend(_unpack_target_leaf_names(part))
-        return names
-    return [t] if t else []
+    preserves) into its LEAF variable names.
+
+    `fire_compiler.for_target_names` under the name this module's callers
+    already use, and an alias rather than a second walk: this is a
+    representation fire_compiler.py OWNS (see its "Unpacking-target
+    representation" section), and a second recursion over the same text is
+    exactly where the `(a,)` / `(a)` confusion came from — this copy stripped
+    the outer parens and recursed unconditionally, so it read a
+    parenthesised single NAME as a one-slot group and a 1-tuple as the same
+    thing. It is also what knows about the trailing comma."""
+    return for_target_names(target)
 
 def _declared_vars_body(stmts) -> set[str]:
     """Variables declared in a statement list (does not cross FunctionDef boundaries)."""
@@ -1780,10 +1776,16 @@ def _declared_vars_body(stmts) -> set[str]:
         elif isinstance(node, ForStmt):
             tgt = node.target
             name = tgt if isinstance(tgt, str) else getattr(tgt, 'name', '')
-            if isinstance(name, str) and name.startswith('(') and name.endswith(')'):
+            # Every target shape through the ONE leaf-name reader, with no
+            # "is it parenthesised?" test of its own. That test is what this
+            # used to do, and it is the reason a 1-tuple `'(a,)'` and a
+            # parenthesised name `'(a)'` were indistinguishable here: both
+            # took the paren branch and both produced the same one-element
+            # set, which happened to be right for NAMES and is why the
+            # distinction had to be pushed down to `for_target_is_tuple`
+            # rather than fixed here.
+            if isinstance(name, str) and name:
                 result.update(_unpack_target_leaf_names(name))
-            elif name:
-                result.add(name)
             result |= _declared_vars_body(node.body)
         elif isinstance(node, IfStmt):
             result |= _declared_vars_body(node.then_body)

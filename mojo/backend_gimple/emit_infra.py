@@ -3573,10 +3573,14 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     # every emitted reference. FRESH name, not `it_val = _as_str(it_val)`:
     # reassigning the param re-widens it via the same unification.
     _iv = _as_str(it_val)
-    # Detect tuple unpacking target: "_, av" or "(_, av)"
+    # Detect tuple unpacking target: "_, av" or "(_, av)" — and the 1-tuple
+    # `(_,)` / `_,`, which unpacks too. `for_target_is_tuple` is the one reader
+    # of that difference; reading "is there a comma in the text?" here is what
+    # made `[x for (x,) in pairs_of_one]` bind the whole 1-tuple to `x` and
+    # print `(0,)` where CPython prints `0`.
     target_str = gen0.target.strip()
     inner_str = target_str[1:-1].strip() if (target_str.startswith('(') and target_str.endswith(')')) else target_str
-    if ',' in inner_str:
+    if gimple_ctypes.for_target_is_tuple(target_str):
         # Tuple target: each element of the outer list is a sub-list
         # (tuple). Mirrors _gen_for_list's identical, already-fixed
         # per-slot logic (see its own comment for the history): pick
@@ -3796,9 +3800,14 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     _inner_str = (_target_str[1:-1].strip()
                   if (_target_str.startswith('(') and _target_str.endswith(')'))
                   else _target_str)
-    is_tuple_target = (',' in _inner_str and tuple_slot_ctypes is not None)
+    # `for_target_is_tuple`, not "does the text contain a comma": a 1-tuple
+    # target is spelled `'(a,)'` and the comma is the only thing that says so,
+    # so a comma test here has to be the one that knows about it (see
+    # fire_compiler.py's "Unpacking-target representation").
+    is_tuple_target = (gimple_ctypes.for_target_is_tuple(_target_str)
+                       and tuple_slot_ctypes is not None)
     if is_tuple_target:
-        var_names = [v.strip() for v in _inner_str.split(',')]
+        var_names = gimple_ctypes.target_slots(_inner_str)
     else:
         var_names = None
         gen._declare_var(gen0.target, vct,
@@ -4216,16 +4225,19 @@ def _eval_const_bool(gen, node) -> bool | None:
                                            _comptime_call_hook(gen))
 
 def _split_top_level_comma(s: str) -> list[str]:
-    """Split s by top-level commas only (bracket-aware)."""
-    parts, depth, start = [], 0, 0
-    for i, c in enumerate(s):
-        if c in '([': depth += 1
-        elif c in ')]': depth -= 1
-        elif c == ',' and depth == 0:
-            parts.append(s[start:i].strip())
-            start = i + 1
-    parts.append(s[start:].strip())
-    return parts
+    """Split s by top-level commas only (bracket-aware), stripped.
+
+    `fire_compiler.target_slots` under the name this package's callers use
+    (including `GimpleGen._split_top_level_comma`, which forwards here), and an
+    alias rather than a second implementation. This copy tracked `(`/`[` but
+    not `{`, and kept the empty slot a trailing comma produces — so the 1-tuple
+    target `'(a,)'`, whose comma is the ONLY thing distinguishing it from a
+    parenthesised single name, reached every one of this package's ~14 readers
+    as a two-element list with a variable named `''` in it. fire_compiler.py
+    owns the target representation (see its "Unpacking-target
+    representation" section) and this is where the empty-slot rule is paid
+    for once."""
+    return gimple_ctypes.target_slots(s)
 
 # Per-part parse results for `_dedup_variadic_externs`, keyed by the part's
 # exact text: (concrete, variadic) function names, or None-absent.

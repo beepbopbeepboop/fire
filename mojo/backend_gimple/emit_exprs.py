@@ -5035,6 +5035,23 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         gen._emit(f"  {t} = 0;")
         return 'int', t
 
+    # Normalize every `for` clause's target, not just the first's: a chained
+    # comprehension (`[x for a in xs for (b) in a.ys]`) has the same
+    # parenthesised-single-name shape in each of its own clauses.
+    #
+    # A PARENTHESISED SINGLE NAME — `[x for (x) in xs]` — is one binding,
+    # spelled `'(x)'` by the parser, while the 1-tuple `[x for (x,) in xs]` is
+    # `'(x,)'` and DOES unpack (fire_compiler.py's "Unpacking-target
+    # representation"). Peel the redundant parens here, ONCE, so the ~20
+    # `_compr_*_loop` sites below — each of which uses `gen0.target` as a C
+    # IDENTIFIER in a `_declare_var`, a `_cname` or an f-string — see a bare
+    # name for a one-target comprehension. Same reasoning, and the same single
+    # entry point, as `_gen_stmt_ForStmt`'s normalization. Idempotent, so a
+    # re-lowered comprehension lands the same way.
+    for _gen0 in node.generators:
+        if isinstance(_gen0.target, str) and not gimple_ctypes.for_target_is_tuple(_gen0.target):
+            _gen0.target = gimple_ctypes.for_target_single_name(_gen0.target)
+
     gen0 = node.generators[0]
 
     if node.kind == 'list':

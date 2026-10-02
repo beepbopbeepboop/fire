@@ -723,10 +723,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             and it.func.index.name in gen._comptime_list_asts):
         list_ast = gen._comptime_list_asts[it.func.index.name]
         var0 = node.target
-        if isinstance(var0, str) and var0.startswith('(') and var0.endswith(')'):
-            tgt_names = gen._split_top_level_comma(var0[1:-1])
+        if gimple_ctypes.for_target_is_tuple(var0):
+            tgt_names = gimple_ctypes.target_slots(var0[1:-1].strip())
         else:
-            tgt_names = [var0]
+            tgt_names = gimple_ctypes.for_target_names(var0)
         for el in list_ast.elements:
             el_args = el.args if isinstance(el, gimple_ctypes.CallExpr) else [el]
             if len(el_args) < len(tgt_names):
@@ -830,9 +830,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # loop target's C variable gets overwritten with), and force a fresh,
     # non-colliding C declaration for the loop target (see
     # `_declare_var(force=True)`).
-    target_names = (gen._split_top_level_comma(var[1:-1])
-                     if isinstance(var, str) and var.startswith('(') and var.endswith(')')
-                     else [var])
+    target_names = gimple_ctypes.for_target_names(var)
     shadow_name = None
     if (isinstance(it, gimple_ctypes.IdentExpr) and it.name in target_names
             and it_val == gen._c_names.get(it.name, it.name)):
@@ -1056,7 +1054,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     and isinstance(node.iterable.func, gimple_ctypes.MemberExpr)
                     and node.iterable.func.member == 'items'
                     and not node.iterable.args
-                    and not (var.startswith('(') and var.endswith(')')))
+                    and not gimple_ctypes.for_target_is_tuple(var))
                 gen._emit_label(bb_dict)
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
                 if _it_is_items:
@@ -1130,7 +1128,7 @@ def _gen_for_zip_longest(gen, node):
     if len(args) != 2:
         raise ValueError("only the 2-sequence zip_longest shape is supported")
     target = node.target
-    if not (isinstance(target, str) and target.startswith('(') and target.endswith(')')):
+    if not gimple_ctypes.for_target_is_tuple(target):
         raise ValueError("zip_longest lowering needs a tuple loop target")
     tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
     if len(tgt_names) != 2:
@@ -1364,7 +1362,7 @@ def _gen_for_zip(gen, node):
     # fire_compiler.py's own `for op, operand in zip(node.ops,
     # node.operands[1:]):`, silently dropping the rest of `emit`).
     target = _as_str(node.target)
-    if not (target.startswith('(') and target.endswith(')')):
+    if not gimple_ctypes.for_target_is_tuple(target):
         raise ValueError("zip() lowering needs a tuple loop target")
     tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
     if len(tgt_names) != len(args):
@@ -1696,8 +1694,14 @@ def _gfd_flatten_target(gen, vn: str, acc: list) -> None:
 
 def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
                    share_var_with_sibling_arm: bool = False):
-    # Handle tuple unpacking: for (a, b) in list_of_tuples:
-    is_tuple = var.startswith('(') and var.endswith(')')
+    # Handle tuple unpacking: for (a, b) in list_of_tuples — and the 1-tuple
+    # `for (a,) in ...`, which unpacks too. `for_target_is_tuple` is what says
+    # so: a parenthesised single NAME (`for (a) in ...`) binds the whole item
+    # and must NOT be unpacked, and the two spellings differ by exactly one
+    # comma that the parser now keeps (fire_compiler.py's "Unpacking-target
+    # representation"). Reading the parens alone treated both as unpack, so
+    # `for (a,) in [(1,)]` printed `1` where CPython prints `(1,)`.
+    is_tuple = gimple_ctypes.for_target_is_tuple(var)
     elem = None if is_tuple else gen._elem_of(it_val)
     if is_tuple:
         # Bracket-aware split (a naive `inner.split(',')` turned a nested
@@ -2143,8 +2147,11 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
 def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
                   int_keys: bool = False):
     """for k in dict — iterates over keys as char *."""
-    # Handle tuple target like '(name, alias)' — declare each name separately
-    is_tuple = var.startswith('(') and var.endswith(')')
+    # Handle tuple target like '(name, alias)' — declare each name
+    # separately. `for_target_is_tuple`, so the 1-tuple `for (k,) in d.items()`
+    # unpacks and the parenthesised single name `for (k) in d` does not; see
+    # _gen_for_list's note.
+    is_tuple = gimple_ctypes.for_target_is_tuple(var)
     if is_tuple:
         inner = var[1:-1].strip()
         var_names = gen._split_top_level_comma(inner)
@@ -2693,7 +2700,8 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     # single-name declare below, unchanged prior behavior).
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
     tuple_slot_nested = api.get('tuple_slot_nested')
-    is_tuple_target = var.startswith('(') and var.endswith(')') and tuple_slot_ctypes is not None
+    is_tuple_target = (gimple_ctypes.for_target_is_tuple(var)
+                       and tuple_slot_ctypes is not None)
     if is_tuple_target:
         var_names = gen._split_top_level_comma(var[1:-1])
     else:

@@ -371,10 +371,17 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     for n in _walk(fn):
         if not isinstance(n, N.ForStmt):
             continue
-        tname = n.target.name if isinstance(n.target, N.IdentExpr) \
-            else (n.target if isinstance(n.target, str) else None)
-        if tname is None or tname in env:
+        # ONE name only, and read through `for_target_names` so a redundant
+        # `for (v) in <list>` (`'(v)'`) contributes `v` rather than the string
+        # `"(v)"`. A multi-slot target is skipped: this env holds one element
+        # kind per name, and a tuple-yielding iterable's slots are not that —
+        # the previous code stored the whole target text `'(a, b)'` as the key,
+        # which no lookup could ever match, so skipping is the same
+        # observable behaviour without the junk entry.
+        tnames = N.for_target_names(n.target)
+        if len(tnames) != 1 or tnames[0] in env:
             continue
+        tname = tnames[0]
         it = n.iterable
         ek = None
         if isinstance(it, N.IdentExpr):
@@ -1933,7 +1940,11 @@ def _async_for_ok(fn: N.FunctionDef) -> bool:
     _async_for_drive_stmts desugars."""
     for n in _walk(fn):
         if isinstance(n, N.ForStmt) and getattr(n, 'is_async', False):
-            if not isinstance(n.target, str) or ',' in n.target:
+            # `for_target_is_tuple`, so the 1-tuple `async for (x,) in ...` is
+            # refused here for the reason it is un-desugarable (one name, but
+            # the item is unpacked) rather than accepted by a comma test that
+            # the parser used to make unanswerable.
+            if not isinstance(n.target, str) or N.for_target_is_tuple(n.target):
                 return False
             if _await_target_name(n.iterable) is None:
                 return False

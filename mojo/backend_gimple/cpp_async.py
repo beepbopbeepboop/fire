@@ -1100,19 +1100,24 @@ _HELPER_FREE_BUILTINS = frozenset({
 def _hbn_add_target(bound: set, t) -> None:
     """Hoisted out of `_helper_bound_names` (was a recursive nested
     closure) — the lifted-closure-env determinism fix. `bound` (set)
-    threaded and annotated."""
+    threaded and annotated.
+
+    Bound NAMES, not slots, so this is `for_target_names` (the shared leaf
+    walk) with the `*` stripped — the same shape
+    `mojo/middle/boundnames.py::_lbn_target_names` needs, and the same
+    reason: the previous private copy did a bare `s[1:-1].split(',')`, which
+    tore a nested target into paren-carrying fragments and — because it
+    recursed on the paren branch only — could not tell `'(a)'` from a
+    1-tuple `'(a,)'`."""
     if isinstance(t, str):
-        s = t.strip()
-        if s.startswith('(') and s.endswith(')'):
-            for part in s[1:-1].split(','):
-                part = part.strip().lstrip('*').strip()
-                if part:
-                    bound.add(part)
-        elif s:
-            bound.add(s.lstrip('*').strip())
-    elif isinstance(t, gimple_ctypes.IdentExpr):
+        for name in gimple_ctypes.for_target_names(t):
+            if name:
+                bound.add(name.lstrip('*').strip())
+        return
+    if isinstance(t, gimple_ctypes.IdentExpr):
         bound.add(t.name)
-    elif isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+        return
+    if isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
         for e in t.elements:
             _hbn_add_target(bound, e)
 

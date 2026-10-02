@@ -16,6 +16,7 @@ from fire_compiler import (
     NonlocalStmt,
     IdentExpr, IfStmt, ListExpr, MultiAssignStmt, TryStmt, TupleExpr,
     VarDecl, WhileStmt, WithStmt, _as_str,
+    for_target_names, target_slots,
 )
 
 
@@ -65,31 +66,18 @@ class _OrderedNames:
 def _lbn_split_commas(s: str) -> list:
     """Split on top-level commas only (paren depth 0).
 
-    A naive `.split(',')` tore nested tuple-target slots into paren-
-    carrying fragments (`'(_n, (_mod, _sem))'` → `'_n'`, `'(_mod'`,
-    `'_sem)'`). Shared by `_lbn_target_names` and formal's for-target
-    emit."""
-    parts = []
-    depth = 0
-    cur = []
-    for ch in s:
-        if ch == "(":
-            depth += 1
-            cur.append(ch)
-        elif ch == ")":
-            depth -= 1
-            cur.append(ch)
-        elif ch == "," and depth == 0:
-            part = "".join(cur).strip()
-            if part:
-                parts.append(part)
-            cur = []
-        else:
-            cur.append(ch)
-    part = "".join(cur).strip()
-    if part:
-        parts.append(part)
-    return parts
+    `fire_compiler.target_slots` under the name this module's callers use
+    (formal's for-target emit imports it directly), and an alias rather than a
+    second implementation. This copy tracked `(`/`)` but not `[`/`]`, so a
+    comprehension's list-pattern target `for [a, b] in xs` was split into
+    `'[a'` and `'b]'` and both leaked into a bound-name set as if they were
+    variables. One bracket-aware splitter now serves the target string, and
+    the fire_compiler one is the only place a target's commas are read.
+
+    `target_slots` also drops the empty slot a 1-tuple target's trailing
+    comma leaves (`for (a,) in xs` is spelled `'(a,)'`), which this copy turned
+    into a variable named `''`."""
+    return target_slots(s)
 
 
 def _lbn_target_names(t) -> list:
@@ -102,34 +90,18 @@ def _lbn_target_names(t) -> list:
     including nested `"(a, (b, c))"`), never an IdentExpr. Missing the str
     case dropped every for-loop variable from the shared bound set (formal
     register allocation then aliased the loop counter onto the X19
-    fallback). Returns LEAF names only (nested groups flattened)."""
-    if isinstance(t, str):
-        name = t.strip()
-        if name.startswith("(") and name.endswith(")"):
-            names = []
-            for part in _lbn_split_commas(name[1:-1]):
-                names.extend(_lbn_target_names(part))
-            return names
-        # Bare comma form: comprehension Generator.target is the parser's
-        # `"(a, b)"` spelling WITHOUT the surrounding parens (`"a, b"`).
-        if "," in name:
-            names = []
-            for part in _lbn_split_commas(name):
-                names.extend(_lbn_target_names(part))
-            if names:
-                return names
-        if name.startswith("*"):
-            # Starred leaf (`*_` / `*rest`): bind the name after `*`.
-            name = name[1:].strip()
-        return [name] if name else []
-    if isinstance(t, IdentExpr):
-        return [t.name]
-    if isinstance(t, (TupleExpr, ListExpr)):
-        names = []
-        for e in t.elements:
-            names.extend(_lbn_target_names(e))
-        return names
-    return []
+    fallback). Returns LEAF names only (nested groups flattened).
+
+    The walk itself is `fire_compiler.for_target_names` — the representation
+    is fire_compiler.py's to own, and a private copy is what let a 1-tuple
+    target and a parenthesised single name be indistinguishable (they have
+    the same leaves; only `for_target_is_tuple` can tell them apart, and this
+    function never needed to). What stays here is the one thing that is
+    about BOUND NAMES rather than about parsing: a starred leaf binds the
+    name after the `*`, because `*rest` is a binding rule and not a
+    spelling."""
+    names = for_target_names(t)
+    return [n[1:].strip() if n.startswith('*') else n for n in names]
 
 
 def _lbn_walk(bound: set, global_declared: set, nodes) -> None:

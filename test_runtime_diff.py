@@ -26,8 +26,14 @@ Statuses:
 
 Usage:
     python3 test_runtime_diff.py [file.mojo ...]
+    python3 test_runtime_diff.py --case NAME [NAME ...]
 
 With no file arguments, runs the built-in corpus of small programs.
+`--case NAME` runs named entries of that corpus, which is how a
+CPython-comparable case gets CPython: `run_file` deliberately has no third
+opinion, because a file on disk is not necessarily valid Python, while a
+built-in case always is. The whole corpus JIT-compiles every program, so
+`--case` is also the cheap way to run ONE of them.
 """
 import os
 import sys
@@ -365,6 +371,75 @@ BUILTIN_PROGRAMS = {
                     total = total + i * j
             print(total)
     """),
+    # A 1-TUPLE for-target and a PARENTHESISED SINGLE NAME are different
+    # targets. The parser spelled both `"(a)"`, so "is there a comma?" — the
+    # question every consumer asked — could not tell them apart, and BOTH
+    # engines bound the whole item: `for (a,) in [(1,), (2,)]` printed `1` / `2`
+    # where CPython prints `(1,)` / `(2,)`, exit 0, no diagnostic
+    # (bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md).
+    # CPython-comparable because the two engines were wrong in the SAME
+    # direction here, which is exactly the case a plain engine-vs-engine diff
+    # cannot see.
+    #
+    # Every spelling of each target is in the one program, and each line is a
+    # different question: the parenthesised 1-tuple, the bare 1-tuple, the
+    # parenthesised single name, the bare name, the 2-tuple, and the nested
+    # 1-tuple — the last two are the regression guard for the fix's own two
+    # failure modes (dropping a trailing comma, and reading a group's text as
+    # a single name).
+    "for_target_one_tuple_vs_paren_name": textwrap.dedent("""\
+        def main():
+            # 1-tuple: unpack each item's single element.
+            for (a,) in [(1,), (2,)]:
+                print(a)
+            for b, in [(3,), (4,)]:
+                print(b)
+            # Parenthesised single NAME: bind the whole item.
+            for (c) in [(5,), (6,)]:
+                print(c)
+            for d in [(7,), (8,)]:
+                print(d)
+            # 2-tuple, both spellings, and the nested 1-tuple.
+            for (e, f) in [(9, 10)]:
+                print(e, f)
+            for g, h in [(11, 12)]:
+                print(g, h)
+            for (i, (j,)) in [(13, (14,))]:
+                print(i, j)
+            # A comprehension's target has its own parser path
+            # (`_parse_generator_target`) and produced `'a'` for `a,` — the
+            # comma dropped outright, which is not even the same wrong answer.
+            print([k for (k,) in [(15,), (16,)]])
+            print([m for m, in [(17,), (18,)]])
+            print([(n) for (n) in [(19,), (20,)]])
+            print([(o, p) for (o, p) in [(21, 22)]])
+    """),
+    # The same distinction through a DICT and through a NESTED group, because
+    # those two for-loop lowerings are separate code with their own "is this a
+    # tuple target" test: `_gen_for_dict` and the interpreter's binder.
+    #
+    # Two shapes deliberately left OUT, each for a reason that is its own bug
+    # and not this one:
+    #   * `for (v) in d.items(): print(v)` puts a [key, value] PAIR in the loop
+    #     variable and this runtime has no repr for a pair-valued variable — the
+    #     compiled path prints the MojoList pointer (it was wrong before this fix
+    #     too, differently: the paren test unpacked the pair's slot 0). See
+    #     bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md.
+    #   * `for first, *rest in ...` — a starred slot is lowered as a variable
+    #     literally named `*rest`, so the body reads 0. See
+    #     bugs/CODEGEN_starred_rest_in_a_for_target_is_a_slot_named_star.md.
+    "for_target_one_tuple_dict_and_nested": textwrap.dedent("""\
+        def main():
+            d = {"a": 1, "b": 2}
+            for (k, v) in d.items():
+                print(k, v)
+            for k2, v2 in d.items():
+                print(k2, v2)
+            for (only,) in [(7,), (8,)]:
+                print(only)
+            for (a2, (b2, c2)) in [(9, (10, 11))]:
+                print(a2, b2, c2)
+    """),
     "dict_ops": textwrap.dedent("""\
         def main():
             var d = {"a": 1, "b": 2}
@@ -378,7 +453,48 @@ BUILTIN_PROGRAMS = {
                 total = total + x
             print(total)
     """),
-    # A comprehension with MORE THAN ONE `for` clause. `_lower_comprehension`
+    # A comprehension's `for` target is a FRESH BINDING: it must not share the
+    # enclosing function's C variable for the same source name. It did not —
+    # `_compr_list_loop` declared the target without
+    # `force=_compr_target_is_shadowed(...)`, the argument its three sibling
+    # comprehension loops pass, so first-decl-wins kept whatever was already
+    # live under that name (bugs/CODEGEN_comprehension_target_shadows_struct_local.md).
+    # With a `struct` pointer live under the name the shape did not compile at
+    # all (gcc "non-trivial conversion in 'var_decl'"), which is how it was
+    # found; with a `char *` live it compiled and printed string ADDRESSES.
+    #
+    # The comprehension is deliberately NOT inside a branch: a comprehension in
+    # an `if` body loses its RESULT list's element type, which is a separate
+    # bug (bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md)
+    # and would mask what this case is about.
+    "comprehension_target_shadows_an_enclosing_local": textwrap.dedent("""\
+        class Token:
+            def __init__(self, kind):
+                self.kind = kind
+
+        def pick(s):
+            return Token(s)
+
+        def struct_pointer_live():
+            t = pick("outer")
+            i = 0
+            while i < 2:
+                t = pick("loop")
+                i = i + 1
+            return [t for t in ["a", "b"]]
+
+        def char_star_live():
+            t = "outer"
+            i = 0
+            while i < 2:
+                t = "loop"
+                i = i + 1
+            return [t for t in ["c", "d"]]
+
+        def main():
+            print(struct_pointer_live())
+            print(char_star_live())
+    """),
     # binds only `node.generators[0]` and every `_compr_*_loop` helper takes a
     # single generator, so the extra clauses were silently dropped -- exit 0,
     # wrong answer. `for i in range(5) for j in range(5)` gave a 5-element
@@ -833,6 +949,13 @@ BUILTIN_PROGRAMS = {
 CPYTHON_COMPARABLE = {
     "minimal_main", "function_def", "method_call_result",
     "dict_get_none_guard",
+    # Both engines answered these the SAME wrong way before the for-target
+    # fix, so an engine-vs-engine diff was clean while both printed `1` where
+    # CPython prints `(1,)`. The third opinion is the only thing that could
+    # have seen it.
+    "for_target_one_tuple_vs_paren_name",
+    "for_target_one_tuple_dict_and_nested",
+    "comprehension_target_shadows_an_enclosing_local",
 }
 
 
@@ -873,7 +996,14 @@ def main():
 
     counts = {'PASS': 0, 'FAIL': 0, 'JIT-COMPILE-FAILED': 0, 'TIMEOUT': 0, 'ERROR': 0}
 
-    if len(sys.argv) > 1:
+    if len(sys.argv) > 2 and sys.argv[1] == '--case':
+        unknown = [n for n in sys.argv[2:] if n not in BUILTIN_PROGRAMS]
+        if unknown:
+            print("no such built-in case: " + ", ".join(unknown), file=sys.stderr)
+            sys.exit(2)
+        for name in sys.argv[2:]:
+            counts[run_program_source(name, BUILTIN_PROGRAMS[name])] += 1
+    elif len(sys.argv) > 1:
         for path in sys.argv[1:]:
             counts[run_file(path)] += 1
     else:
