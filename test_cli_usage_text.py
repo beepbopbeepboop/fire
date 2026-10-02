@@ -216,8 +216,8 @@ def test_no_hardcoded_tool_name_left_in_source():
 # with thirty branches in flight: the check fails when a file GAINS one, never
 # when it loses one, so a stale command cannot be introduced, a cleaned-up file
 # stays green until its entry is dropped, and nobody else's branch goes red for
-# a prose edit it did not make.  `bugs/DOCS_mojo_command_name_in_comments.md`
-# is what this ratchets; the sweep that emptied it is `git log -S'fire dylib'`.
+# a prose edit it did not make.  The sweep it ratchets is the commit that
+# added this check; the doc it belonged to was deleted with that sweep.
 _STALE_COMMAND = re.compile(
     r'\bmojo (?:build|run|repl|dylib|formalbuild|--formal|--dump|--jit|-h|-v)\b')
 _LEGACY_NAMES_OKAY = {

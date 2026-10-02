@@ -725,7 +725,7 @@ class _OutputLock:
     Python's sake: in the compiled path a `with` item with NO `as` target
     contributes nothing to the teardown list, so `__exit__` is never called at
     all (measured; filed as
-    `bugs/CODEGEN_with_no_as_target_drops_exit.md`)."""
+    that bug's doc, deleted with its fix)."""
 
     fd: int
 
@@ -1047,7 +1047,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     #
     # `as _lock_fd` is not decoration: it is what makes the compiled path emit
     # the `__exit__` call at all (see `_OutputLock`'s own note, and
-    # bugs/CODEGEN_with_no_as_target_drops_exit.md).
+    # the doc for that, deleted with its fix).
     with _OutputLock(out) as _lock_fd:
         if use_cache:
             # Re-checked under the lock: a caller that queued behind another

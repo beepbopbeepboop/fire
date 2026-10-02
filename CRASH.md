@@ -30,9 +30,8 @@ predicate. **Not fixed** — this is a handoff.
 > it as the source of the argument they are making. Deleting it would turn
 > those into dangling prose, and a reader who wants to know what "the CRASH.md
 > fix" was — which is what all six are pointing at — needs §3. Measured
-> 2026-10-01; the question was open in
-> `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md`, which is now
-> deleted with its fix. The `| ab-native | EXPECTED |` row in §2 is correct as
+> 2026-10-01; the question was open in a doc of its own, now deleted
+> with its fix. The `| ab-native | EXPECTED |` row in §2 is correct as
 > of the same date (`disabled=`), and a table row naming a marked test is
 > checked against the registry by `test_suite.py`, so this file cannot go stale
 > on that point again.

@@ -233,7 +233,8 @@ def compile_program(input_file, src, output=None, run=True,
             objects.append(cas.get_or_build(_key, '.o', _mk)[0])
 
     # Optional runtime units (build_config's registry -- see
-    # bugs/CODEGEN_optional_runtime_units_not_linked.md). runtime/ holds six C
+    # build_config.py's own header, where the bug is described). runtime/
+    # holds six C
     # units and only fire_runtime.c was in a build path, while the headers of
     # the other four are `#include`d into EVERY generated TU (module_gen.py's
     # preamble) and all their signatures sit in gimple_codegen._KNOWN_SIGS --
