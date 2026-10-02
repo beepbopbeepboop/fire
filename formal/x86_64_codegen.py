@@ -4579,6 +4579,23 @@ class X86_64Codegen:
         # were written to the same wrong rule (the rule itself is
         # `model.shift_saturated_is_zero`; the arithmetic `>>` case is not 0,
         # which is why only the SIGN is left to a run-time fact).
+        #
+        # …and a literal NEGATIVE amount is refused, which is the build-time
+        # half of the same rule: the amount is decidable here, and a refusal
+        # names the line where the run-time trap in `_emit_shift_reg` can only
+        # leave a status behind. It has to come BEFORE the saturation test,
+        # because a negative amount is below 64 and would otherwise fall
+        # through to the register form and be masked. `model`'s
+        # `shift_amount_is_trap` is the decision, so arm64 asks the same
+        # question and words it identically.
+        #
+        # `fold_literal_expr` rather than this backend's `_static_int`: both
+        # read a literal, but the shared folder is the one that also answers
+        # `0 - 1` and `1 * -1`, and `0 - 1` is the spelling the reproducer in
+        # the bug doc used.
+        known = M.fold_literal_expr(e.right)
+        if M.shift_amount_is_trap(known):
+            raise CodegenError(M.negative_shift_refusal(op, known))
         if lit is not None and M.shift_saturates(lit):
             self._emit_expr(e.left)
             self._emit_saturated(op, signed)
@@ -4604,29 +4621,42 @@ class X86_64Codegen:
         THE ONE register-form shift emitter on this backend; RAX holds the
         value and RCX the amount on entry, and RAX is the result on exit.
 
-        The amount is compared against 64 and a saturating branch taken
-        BEFORE the shift, because the three x86 shift forms do not agree
-        about an out-of-range count and agreeing with none of them is not a
-        rule: `SHR`/`SAR` saturate at 63 (so `x >> 64` would be `x >> 63`,
-        which is 1 for a negative operand where Python says 0), while `SHL`
-        masks the count to 6 bits (so `x << 64` is `x`). One comparison
-        covers all three, and the saturated value is the same one arm64
-        computes — `model.shift_saturated_is_zero` is the rule and this is
-        only its instruction selection.
+        THREE answers for the amount, in this order, and the order is the whole
+        content of this function:
 
-        The compare is SIGNED, matching arm64's and for the same reason: an
-        amount of 64 or more saturates, and a NEGATIVE one (which CPython
-        rejects with ValueError, and which this path has always handed to
-        the hardware) keeps the masking it had. Unsigned, a negative amount
-        would take the saturating branch and answer 0 — a third wrong answer
-        rather than the one that is there now. See
-        bugs/FORMAL_negative_shift_amount_masks_instead_of_raising.md.
+        1. **Negative** → `exit(SHIFT_TRAP_STATUS)`. A negative amount is not a
+           shift distance, so there is no value to compute; the hardware masks
+           `SHL`'s count to 6 bits, so `x << -1` was `x << 63`. Both
+           compares are SIGNED, and the negative one runs FIRST for exactly
+           the reason `model.shift_amount_is_trap` is a separate rule from
+           `shift_saturates`: a negative amount is below 64, so unsigned it
+           would take the saturating branch and answer 0 — a third wrong
+           answer rather than the one that was there.
+        2. **At or past the width** → the saturated value. One comparison
+           covers all three x86 shift forms, which do not agree about an
+           out-of-range count: `SHR`/`SAR` saturate at 63 (so `x >> 64` would
+           be `x >> 63`, which is 1 for a negative operand where Python says
+           0), while `SHL` masks the count to 6 bits (so `x << 64` is `x`).
+           The saturated value is the same one arm64 computes —
+           `model.shift_saturated_is_zero` is the rule and this is only its
+           instruction selection.
+        3. **In range** → the shift instruction.
+
+        The trap is the same `exit` the divide-by-zero arm of `_emit_div_mod`
+        emits, and the same status (`model.SHIFT_TRAP_STATUS`), so "this
+        program has no answer" is one answer on this path. A statically
+        negative amount never reaches here — `_emit_shift` refuses it at build
+        time, which is the half that can name the line.
         """
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
+        neg_label = f"{fn}_sh{sid}_neg"
         sat_label = f"{fn}_sh{sid}_sat"
         end_label = f"{fn}_sh{sid}_end"
+        self.asm.emit(encode_cmp_r64_imm32(Reg.RCX, 0))
+        self._record_cond_branch()
+        self._emit_jcc(COND_L, neg_label)
         self.asm.emit(encode_cmp_r64_imm32(Reg.RCX, M.SHIFT_WIDTH))
         self._record_cond_branch()
         self._emit_jcc(COND_GE, sat_label)
@@ -4635,6 +4665,13 @@ class X86_64Codegen:
         self._emit_jmp(end_label)
         self.asm.label(sat_label)
         self._emit_saturated(op, signed)
+        self._emit_jmp(end_label)
+        # The negative-amount trap, laid out after the saturating arm so both
+        # arms are reached by one short forward branch and neither falls into
+        # the other. The same `exit` (and the same status) the divide-by-zero
+        # arm of `_emit_div_mod` emits.
+        self.asm.label(neg_label)
+        self._emit_call_exit(M.SHIFT_TRAP_STATUS)
         self.asm.label(end_label)
 
     def _emit_saturated(self, op: str, signed: bool) -> None:

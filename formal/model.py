@@ -1751,17 +1751,80 @@ def call_callee_name(func) -> str | None:
 SHIFT_WIDTH = 64
 SHIFT_AMOUNT_MASK = 63
 
+# The status a trapped run-time fact leaves behind. It is the SAME status the
+# divide-by-zero arm of each backend's shift/div emitter already exits with, so
+# "this program could not be answered" is one answer on this path rather than
+# one per check — and it is a named constant rather than a literal repeated in
+# four emitters, because the test asserts the two architectures AGREE on it and
+# a literal in each arm is how they would stop agreeing.
+SHIFT_TRAP_STATUS = 1
+
 
 def shift_saturates(amount, width: int = SHIFT_WIDTH) -> bool:
     """Whether a shift by `amount` is at or past the word's width.
 
     `amount` is whatever the source says: a Python int, possibly a variable's
     unknown value (None, which is never saturating) or a negative one. A
-    negative amount is NOT saturating here — CPython raises `ValueError` for
-    it, and this path's existing behaviour for a negative amount is to let the
-    hardware mask it, which is a separate question from this one and is not
-    what this function is deciding."""
+    negative amount is NOT saturating here — `shift_amount_is_trap` is what
+    decides that one, and asking this function about it would be asking the
+    wrong question: an amount past the width is a VALUE this path knows how to
+    answer, and an amount below zero is a fact it has no value for."""
     return amount is not None and amount >= width
+
+
+def shift_amount_is_trap(amount) -> bool:
+    """Whether a shift AMOUNT is one this path refuses rather than masks.
+
+    The third of the three answers a shift amount can have, and the only one
+    of them that is not a value: an amount at or past the word's width
+    SATURATES (`shift_saturated_is_zero`) and an amount in range SHIFTS, but a
+    NEGATIVE amount is not a shift distance at all. CPython raises
+    `ValueError: negative shift count` for it, and the answer this path had
+    instead was the hardware's: `LSL`/`ASR`/`LSR` use the low six bits of the
+    shift register, so `-1 & 63` is 63 and `1 << -1` was `1 << 63` —
+    `-9223372036854775808`, a plausible high-bit-set word rather than a
+    failure, and `8 >> -1` was `0`.
+
+    The SIGN is a run-time fact (the amount is usually a variable), so this
+    function is asked about a static amount and the emitters ask the same
+    question of the register with a signed compare. It is `True` for a
+    statically-known negative amount and `False` for an unknown one (None) or a
+    non-negative one.
+
+    A "saturate to 0" answer would be a fabrication rather than an
+    approximation, and it is worth saying why rather than leaving it as an
+    option: `x << -1` is not `0` in any reading, and answering 0 would be as
+    wrong as answering `1 << 63`. It is also the answer a saturation rule
+    written with an UNSIGNED compare gives — a negative amount is below 64
+    unsigned's way round — which is the specific trap this shape is separated
+    from `shift_saturates` to keep out of."""
+    return isinstance(amount, int) and not isinstance(amount, bool) \
+        and amount < 0
+
+
+def negative_shift_refusal(op: str, amount) -> str:
+    """The build-time refusal for a shift by a statically negative amount.
+
+    A literal amount is decidable before anything is emitted, and a build-time
+    diagnostic NAMES THE LINE where a run-time trap can only say "something
+    went wrong" — so the two are not alternatives, and this is the one that
+    fires when the build can decide. The run-time trap (`SHIFT_TRAP_STATUS`,
+    read by both backends' register-form shift emitter) is what covers the
+    variable amount, which is the common case.
+
+    One wording for both architectures, from `model.py` rather than from each
+    emitter, for the reason every other rule here lives here: a diagnostic that
+    differs between the two backends is not a diagnostic, it is two facts about
+    one construct."""
+    mask_bits = SHIFT_AMOUNT_MASK.bit_length()
+    return (f"a shift by a negative amount: `{op} {amount}` shifts by "
+            f"{amount}, which is not a shift distance — CPython raises "
+            f"`ValueError: negative shift count` for it, and this path has no "
+            f"value to answer with, since the hardware masks the amount to its "
+            f"low {mask_bits} bits and answers a different shift entirely. The "
+            f"amount has to be a non-negative distance, which a program "
+            f"computes with `& {SHIFT_AMOUNT_MASK}` or a conditional of its "
+            f"own")
 
 
 def shift_saturated_is_zero(op: str, signed: bool) -> bool:

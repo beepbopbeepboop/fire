@@ -8938,8 +8938,99 @@ SHIFT_CASES = [
     # satisfied by refusing to decide at all.
     ("signed_shift_by_unsigned_amount_stays_arithmetic",
      "def sshr(x: Int, n: UInt64) -> Int:\n    return x >> n\n"
-     "def main(k: Int) -> Int:\n"
-     "    if sshr(0 - 5, 1) == 0 - 3:\n        return 1\n    return 0\n", 1, None),
+     "def main(k: Int) -> Int:\n    if sshr(0 - 5, 1) == 0 - 3:\n        return 1\n    return 0\n", 1, None),
+    # ── a NEGATIVE shift AMOUNT is a trap, not a masked shift ─────────────
+    #
+    # The third of the three answers a shift amount can have, and the only one
+    # that is not a value. `LSL`/`ASR`/`LSR` use the low six bits of the shift
+    # register, so `-1 & 63` is 63: `1 << -1` was `-9223372036854775808`
+    # (`1 << 63`) and `8 >> -1` was `0`, on BOTH backends, identically, while
+    # CPython raises `ValueError: negative shift count` for both. The wrong
+    # answer here is a plausible word rather than a failure — a deliberate
+    # high-bit set — which is what makes it worth a row of its own.
+    #
+    # Two halves, because the amount is usually a VARIABLE and a build-time
+    # diagnostic cannot see a variable's value:
+    #
+    #   * a static negative amount is REFUSED at build time, by name, from
+    #     `model.negative_shift_refusal` — one wording read by both backends,
+    #     because a diagnostic that differs between the two architectures is
+    #     not a diagnostic. `0 - 1` rather than `-1` on purpose: it is the
+    #     spelling the bug doc's reproducer used, and it is the one a
+    #     literal-only `_static_int` does NOT see, so a fix that read the
+    #     amount with this backend's private helper would pass the `-1` row
+    #     and fail this one.
+    #   * a run-time negative amount TRAPS with `model.SHIFT_TRAP_STATUS`, the
+    #     same status the divide-by-zero arm leaves behind, so "this program
+    #     has no answer" is one answer on this path.
+    #
+    # The trap rows are exit-status assertions and not `refuse:` cases, which
+    # is the point: a run-time trap is not a build refusal, and the two
+    # backends have to agree on the STATUS, not merely both fail to build.
+    ("refuse_negative_literal_shift_amount_shl",
+     "def main(k):\n    printf(\"%ld\", 1 << 0 - 1)\n    return 0\n",
+     "refuse:a shift by a negative amount", None),
+    ("refuse_negative_literal_shift_amount_shr",
+     "def main(k):\n    printf(\"%ld\", 8 >> 0 - 1)\n    return 0\n",
+     "refuse:a shift by a negative amount", None),
+    # `-1` spelled as a unary minus, which the immediate form's `0 <= v` range
+    # check also rejects — so this row is here to say the two spellings of one
+    # literal reach the same refusal rather than one of them being emitted.
+    ("refuse_negative_unary_shift_amount",
+     "def f(x):\n    return x << -1\n"
+     "def main(k):\n    printf(\"%ld\", f(1))\n    return 0\n",
+     "refuse:a shift by a negative amount", None),
+    # The run-time halves. `n` is negative only because main says so, which is
+    # what makes them run-time facts rather than build-time ones: the build
+    # cannot refuse a program whose amount is a variable, so the answer has to
+    # be a status the two backends agree on.
+    #
+    # 1 and 8 are the two values the bug doc measured, so the rows are the
+    # reproducer itself rather than a shape near it.
+    ("negative_shift_amount_traps_shl",
+     "def shl(x, n):\n    return x << n\n"
+     "def main(k):\n    var neg = 0 - 1\n"
+     "    printf(\"l=%ld\", shl(1, neg))\n    return 0\n", 1, ""),
+    ("negative_shift_amount_traps_shr",
+     "def shr(x, n):\n    return x >> n\n"
+     "def main(k):\n    var neg = 0 - 1\n"
+     "    printf(\"r=%ld\", shr(8, neg))\n    return 0\n", 1, ""),
+    # The AUGMENTED spelling, which reaches `_emit_shift_reg` without passing
+    # through the binary form at all — so a trap installed only in
+    # `_emit_div_shift_pow`/`_emit_shift` would leave `y <<= neg` masking
+    # exactly as it did before. This is the same second-emitter hole the
+    # saturation rows above are about, in the other direction.
+    ("negative_augmented_shift_amount_traps",
+     "def main(k):\n    var neg = 0 - 1\n    var y = 3\n"
+     "    y <<= neg\n    printf(\"%ld\", y)\n    return 0\n", 1, ""),
+    # …and the SUBSCRIPT target, which is the third caller of
+    # `_emit_shift_reg` on x86-64 (`p[0] <<= n`). A trap that only the name
+    # and binary spellings reach is a trap two of three callers do not have.
+    ("negative_subscript_augmented_shift_amount_traps",
+     "def main(k):\n    var neg = 0 - 1\n"
+     "    var p = [3, 4]\n    p[0] <<= neg\n"
+     "    printf(\"%ld\", p[0])\n    return 0\n", 1, ""),
+    # THE GUARD, and it is the row that makes the five above mean something: a
+    # trap installed by comparing the amount UNSIGNED would take the
+    # saturating branch instead and answer 0 for every one of them — a THIRD
+    # wrong answer, and one that still "passes" a test that only asserted a
+    # non-zero exit on a program that traps anyway. So the amount 63 and the
+    # amount 0 — the two nearest non-negative values to the boundary the trap
+    # sits on, one on each side of 64's predecessor — must still SHIFT.
+    #
+    # 63 rather than 12 because 12 is the row `lsl_variable_amount_12` already
+    # covers: this one is about the boundary, and 63 is the largest amount the
+    # hardware and this path agree to shift by.
+    ("negative_shift_trap_leaves_amount_63_shifting",
+     "def f(x, n):\n    return x << n\n"
+     "def main(k):\n    printf(\"%lx\", f(1, 63))\n    return 0\n", 0,
+     "8000000000000000"),
+    # …and amount 0, the other side. A trap written as `CMP amount, #0; B.GE`
+    # instead of `B.LT` would take it for every shift and this row is what
+    # catches that.
+    ("negative_shift_trap_leaves_amount_0_shifting",
+     "def f(x, n):\n    return x << n\n"
+     "def main(k):\n    printf(\"%ld\", f(7, 0))\n    return 0\n", 0, "7"),
 ]
 
 
