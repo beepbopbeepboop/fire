@@ -9,6 +9,36 @@ today, not what is acceptable. Read every number in that table as a debt, not a 
 The ceilings and `tools/memslot.py`'s reservations exist to keep a runaway from taking the
 machine down while these are being paid off. They are not a licence.
 
+## Progress against this standard, 2026-10-02 (`work/bugs4-9`)
+
+Four measurements on this branch, all of them narrow and reproducible, none of
+them the self-hosted subject:
+
+| what | before | after | where |
+|---|---|---|---|
+| `print` of a container in a loop (`gimple_printed_container_does_not_grow`, seven shapes x 60000) | 87.2 MB | **12.8 MB** | `PERF_printed_container_repr_leaks_its_cat_buffers.md` |
+| a per-character string scan (`gimple_char_scan_allocates_nothing_per_character`, 16M characters) | 246.7 MB | **1.6 MB** | `PERF_char_scan_leak_residual_21_bytes_per_char.md` |
+| a printed container's own report (`print(xs)` x 200000) | 99.7 MB | — | same |
+| an integer that reached a dict key as a computed address | SIGSEGV | correct | `RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md` |
+
+Two are orders of magnitude under the 3-4 GB line and always were; what they
+were is *unbounded*, which is the same defect at a scale this standard does not
+name. Both are per-character and per-element, so they scale with the INPUT, and
+the input this project cares about is `fire.py` — which is why they show up in
+the self-hosted column below as a rounding error next to the 28-34 GB that is
+actually there, and why fixing them is not a move against this standard. They
+are recorded because a leak whose slope is 16 B per character is 4.8 million
+`malloc(2)`s over one pass of the compiler's own tokenizer, and a standard that
+only counts the big numbers is a standard that cannot see the shape.
+
+**Nothing on this branch moves the 27.6-33.8 GB below.** That number is set by
+item 2 (the leak hunt on `mojoc --dump-full fire.py`) and item 3 (free what a
+pass has finished with), both of which need the whole-closure run the
+integrator owns. `PERF_selfhost_memory_leak_hunt.md`'s site list was re-checked
+item by item on 2026-10-02: three of its six entries are already fixed or
+mis-attributed, and the one that is genuinely open (the container-kind registry)
+is not fixable at its own site — its size IS the leak count.
+
 ## What was measured (this session's gates, `native-dumpfull` peak RSS)
 
 | gate | peak | note |
