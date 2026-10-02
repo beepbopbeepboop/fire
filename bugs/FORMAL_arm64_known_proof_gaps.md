@@ -3,8 +3,9 @@
 **Not re-measured on 2026-10-02.** The counts below (`41 pass / 4 known-gap /
 0 fail`, measured 2026-10-01) are the last real run, and nothing that session
 changed reaches a proof: two `formal/model.py` walks were made iterative (both
-proved answer-preserving by a differential over 781 real function bodies and
-1,463 generated statement lists — see `bugs/FORMAL_arm64_slice_concat_and_with_refusal.md`
+proved answer-preserving by a differential over all 733 function bodies in
+this worktree's 107 `.mojo` files (none of which failed to parse) and 1,463
+generated statement lists — see `bugs/FORMAL_arm64_slice_concat_and_with_refusal.md`
 and the commits behind them), a `with … as y:` alias is now stored before the
 body is walked, and two `call_callee_name` guards in
 `struct_returned_frame_sites` / `_frame_return_status` close a specialization

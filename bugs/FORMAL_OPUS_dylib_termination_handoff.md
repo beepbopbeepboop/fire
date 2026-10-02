@@ -20,9 +20,10 @@ still stand:
   statement stream and recursive only into an `if`'s branches. It used to
   recurse once per SIBLING, which is a `RecursionError` from the frame-return
   fixpoint on any long body that returns a frame. Its answer is unchanged: a
-  differential run of the old walk against the new one over every function body
-  in this repository and `std/` (781 bodies) and over 1,463 generated statement
-  lists covering every arm of the predicate found **0 disagreements**.
+  differential run of the old walk against the new one over all
+  **733 function bodies in this worktree's 107 `.mojo` files** — `std/` is not
+  present here, so the corpus is this tree — and over **1,463 generated statement
+  lists** covering every arm of the predicate found **0 disagreements**.
 * `formal/model.py::read_before_store` — a `with … as y:` alias is now added to
   `stored` BEFORE the body is walked, because it is bound before the body runs.
   Strictly fewer refusals, and none of them was true: the one it removes named
