@@ -10271,6 +10271,9 @@ def struct_declared_names(struct_def) -> list:
 #      materializing rewrite in formal/build.py would have to reach the
 #      receiver spelling too. Keeping the name a field gets it right for free,
 #      and the existing `struct_default_word_int` case is that program.
+#      …and this clause is the one a `comptime` binding is exempt from, for the
+#      reason the carve-out at the end of this section gives: a `comptime`
+#      binding has no word behind it, so there is no slot to keep.
 #   3. Nothing in the translation unit WRITES it through any object —
 #      `obj.NAME = …`, `obj.NAME += …`, `for obj.NAME in …`, `del obj.NAME`
 #      (see `unit_field_evidence`). This is the load-bearing clause, and the
@@ -10327,6 +10330,45 @@ def struct_declared_names(struct_def) -> list:
 # NOT buy is a receiver that has real instance state: `GimpleGen` has 248 of
 # those, so the sixteen files refused on it are still refused, and the honest
 # summary of that half is in the sweep's own numbers rather than here.
+#
+# ── The one name this rule does NOT decide: a `comptime` binding ───────────
+#
+# `comptime NAME = …` in a class body is not one more class-level name for this
+# rule to weigh. The PARSER has already decided it, in the shape of the tree:
+# `fire_compiler.py`'s `_parse_struct` moves every `ComptimeVarStmt` of the body
+# into `StructDef.comptime_aliases` and leaves it out of `StructDef.fields`
+# entirely, so the name is not in any of the tables above even before this
+# rule runs — it is in no table at all, which is the defect
+# `struct_comptime_aliases` below exists to close.
+#
+# Two consequences follow, and they are why this is a carve-out rather than a
+# clause:
+#
+#   * CLAUSE 2 does not apply to it. Clause 2 keeps a name that a method reaches
+#     through the receiver (`self.NAME`) a FIELD, because for a class-level
+#     assignment the receiver may BE the field — a one-field struct's receiver is
+#     its field, `struct_default_word` put the value there, and demoting the name
+#     would leave the read falling to a slot nothing writes. A `comptime` binding
+#     has no such word: there is no slot for it, which is exactly why the parser
+#     kept it out of `fields`, and a `self.NAME` read of one is the binding's
+#     value (myinterpreter's `_eval_member_of` resolves `obj._mojo_class.
+#     comptime_aliases[member]` for exactly that name, after the instance fields
+#     and the methods and before raising). So the alias is decided by the
+#     LANGUAGE here, not by evidence, and the evidence rule takes over only for
+#     the direction the rule is lopsided towards: a unit that WRITES the name, or
+#     one whose writes cannot be read at all, still gets it as a field.
+#   * Its VALUE is not necessarily a literal. `comptime rank = Self.element_types
+#     .length` and `comptime is_flat = Self.rank == Self.flat_rank` are both real
+#     new-modular stdlib (`utils/coord.mojo:214,220`), and a computation is not
+#     something a read can inline without a comptime evaluator this path has not
+#     got. So "is a class-level constant" and "can a read of it be answered" stay
+#     two separate questions: the first is answered here, the second by
+#     `class_constant_word` at the read, which refuses by name.
+#
+# A name in BOTH places — `comptime X = 1` in a body that also declares
+# `var X: Int` — is a FIELD. The declaration is the stronger evidence, it is what
+# the positional-constructor rule fills slots from, and it is the direction every
+# doubt in this section resolves.
 
 # The name-less attribute writers, and what to do about each. `setattr` and
 # `delattr` with a string LITERAL name are readable, and the name is added to
@@ -10546,28 +10588,45 @@ def _split_declaration(struct_def):
                 fields.append(name)
             else:
                 constants.append((name, getattr(field, "value", None)))
-    # A `comptime NAME = expr` in the class body, which is in NO field list at
-    # all (see `struct_comptime_aliases`) and used to be classified by nothing.
-    # It is a class value by construction — evaluated once, at struct-definition
-    # time, in the class body's own scope, with no instance in hand — so the
-    # only question the rule above has to answer about it is whether this
-    # PROGRAM stores into it, and that is clauses 3 and 5 verbatim: a name
-    # written through any object in this unit, or any unit with a write whose
-    # name cannot be read, keeps the alias as a FIELD, because then the value
-    # is per-instance and the slot the write lands in is the only copy of it.
-    # The reference engine agrees about which of the two it is: an instance read
-    # consults the instance dict before the alias table
-    # (`myinterpreter`'s member read), so `obj.A = 5` really does change what
-    # `obj.A` says, and folding the declared 10 into it would be a wrong
-    # answer rather than a refusal.
+    # A `comptime NAME = expr` binding, which the parser put in
+    # `comptime_aliases` and NOT in `fields` (see the carve-out at the end of the
+    # rule above). It is appended AFTER the declared names, so every ordering
+    # this file guarantees — declaration order for a positional constructor, and
+    # the per-method order of the loop below — is unchanged by its presence; a
+    # name that moves position in a diagnostic is a change nobody asked for.
     #
-    # NO evidence, no claim: like every other name here, an alias in a struct
-    # nothing attached evidence to is left where the pre-rule path left it —
-    # counted as a field if a method reaches it, and a constant nobody may
-    # substitute. That is the safe direction and it is not a gap in the rule;
-    # it is the rule's own clause ("no evidence attached keeps every class-level
-    # name as a field"), and `attach_field_evidence`'s docstring says why the
-    # two must not disagree.
+    # It is a class value by construction: evaluated once, at struct-definition
+    # time, in the class body's own scope, with no instance in hand. So the only
+    # question the rule above has to answer about it is whether this PROGRAM
+    # stores into it, and that is clauses 3 and 5 verbatim: a name written
+    # through any object in this unit, or any unit with a write whose name cannot
+    # be read, keeps the alias as a FIELD, because then the value is
+    # per-instance and the slot the write lands in is the only copy of it. The
+    # reference engine agrees about which of the two it is: an instance read
+    # consults the instance dict BEFORE the alias table (`myinterpreter`'s member
+    # read), so `obj.A = 5` really does change what `obj.A` says, and folding
+    # the declared 10 into it would be a wrong answer rather than a refusal.
+    #
+    # **Clauses 3 and 5 decide it and clause 2 does NOT**, and the difference
+    # between the two loops is the whole point: `reached` is what this method's
+    # body spells as `self.NAME`, and for a `comptime` binding that spelling is a
+    # READ of the binding rather than of a field, so consulting it here would put
+    # back exactly the refusal this closes. A unit that ASSIGNS the name
+    # (`self.rank = …`, `o.rank += 1`, `setattr(o, "rank", v)`,
+    # `Point(rank=1)`) still gets a FIELD, and that arrives through `written` —
+    # the same clause 3 that carries the rest of the rule, and the direction
+    # every doubt here resolves.
+    #
+    # **NO evidence, no claim**, and that is the rule rather than an omission: a
+    # struct this function returns None for — a module parsed without the unit's
+    # write census — is not asked the question at all, and
+    # `_pre_rule_field_names` below counts every DECLARED name as a field and
+    # knows nothing of a `comptime` binding, so a read of one there is a
+    # refusal ("Coord has no field 'rank'") rather than a read of a slot whose
+    # value nothing wrote. Counting the binding as a field instead would have
+    # manufactured the 0 that clause 3's own reasoning above is careful never to
+    # substitute, and `attach_field_evidence`'s docstring says why the two must
+    # not disagree.
     for name, value in struct_comptime_aliases(struct_def).items():
         if not isinstance(name, str) or name in seen:
             # already a field or a constant: the class body declared the name
@@ -10575,7 +10634,7 @@ def _split_declaration(struct_def):
             # this table has always used.
             continue
         seen.add(name)
-        if name in written or dynamic:
+        if dynamic or name in written:
             fields.append(name)
         else:
             constants.append((name, value))
@@ -10589,10 +10648,118 @@ def _split_declaration(struct_def):
     for method in struct_methods(struct_def):
         touched = _receiver_names(getattr(method, "body", None), receivers)
         for name in sorted(touched):
-            if name not in seen:
-                seen.add(name)
-                fields.append(name)
+            if name in seen:
+                continue
+            seen.add(name)
+            fields.append(name)
     return (fields, constants)
+
+
+def struct_comptime_aliases(struct_def) -> dict:
+    """The struct's `comptime NAME = …` bindings: `{name: value node}`.
+
+    One value for every instance, published by the class and stored nowhere —
+    which is what makes a `comptime` binding a class-level CONSTANT in the sense
+    `struct_class_constants` means, and is why the two tables cannot be derived
+    from different places. The parser has said so in the shape of the tree rather
+    than in a convention anyone has to remember: `fire_compiler.py`'s
+    `_parse_struct` collects every `ComptimeVarStmt` of the class body into
+    `StructDef.comptime_aliases` and leaves it out of `StructDef.fields`, and
+    `myinterpreter.execute_StructDef` evaluates the dict once at
+    class-definition time — so a read is answered from it, through the receiver
+    as well as through the class name
+    (`myinterpreter._eval_member_of`, after the instance fields and the methods
+    and before the `AttributeError`).
+
+    Before this existed the names were in NO table on this path, and each of the
+    three that should have had one answered consistently and wrongly:
+    `struct_field_names` (they are not in `fields`), `struct_class_constants`
+    (which walked `fields`), and the constant-substitution rewrite in
+    `formal/build.py` (which reads that table). A read of one therefore arrived
+    at the member-access lowering as a name the struct does not have, and was
+    refused with a sentence about a run-time `AttributeError` in a program that
+    does not raise — `res._InjectedValues` in `std/iter/__init__.mojo`, declared
+    fourteen lines above the read. That is
+    `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`, and this
+    function is the whole of the fix's first half.
+
+    NOT the whole of it: whether a read can be ANSWERED is still
+    `class_constant_word`'s question, asked at the read. A binding's value may be
+    a computation (`comptime rank = Self.element_types.length`,
+    `utils/coord.mojo:214`), and a `comptime` binding whose right-hand side
+    mentions a runtime parameter is refused by name rather than inlined — which
+    is the same verdict a non-literal class-level constant already gets, and for
+    the same reason."""
+    return dict(getattr(struct_def, "comptime_aliases", None) or {})
+
+
+def struct_derived_names(struct_defs, name: str) -> set:
+    """Every struct in `struct_defs` whose BASE CLOSURE contains `name`.
+
+    Transitive, because a question about inheritance has to be: `struct
+    GrandChild(Child)` where `struct Child(Base)` derives from `Base` through a
+    level this function never looks at, and a rule that answered "nothing
+    derives from `Base`" about that would be answering a question about a
+    different program. The closure is a fixed point rather than one pass for the
+    same reason — the fixed point is the set, and one pass over the direct bases
+    is a prefix of it.
+
+    Returns struct NAMES, so a caller with a list of StructDefs can index it."""
+    derived, grew = set(), True
+    names = [getattr(st, "name", None) for st in struct_defs or []]
+    while grew:
+        grew = False
+        for st in struct_defs or []:
+            own = getattr(st, "name", None)
+            if own in derived or own is None:
+                continue
+            if any(b == name or b in derived
+                   for b in (getattr(st, "bases", None) or [])):
+                derived.add(own)
+                grew = True
+    return {n for n in derived if n in set(names)}
+
+
+def struct_is_derived_from(struct_defs, name: str) -> bool:
+    """True when some struct in `struct_defs` names `name` in its `bases`.
+
+    The one question a `comptime` binding's VALUE cannot be asked without, and
+    the reason the substitution in `formal/build.py` stops at the base class.
+
+    `struct Child(Base)` overrides `Base`'s `comptime rank` for every instance
+    of `Child` — `myinterpreter.execute_StructDef` merges the bases' aliases in
+    first and the child's own second, so the child's value is the one a read of
+    `self.rank` inside a method `Base` declares resolves to when the receiver is
+    a `Child`. Substituting `Base`'s literal at that read would print the parent's
+    value for a child, which is a wrong answer and not a refusal.
+
+    It cannot be checked the other way round either, because the interpreter also
+    copies the base's METHODS onto the child: a method `Base` declares is called
+    with a `Child` receiver (`_method_owners` dispatches by name and no struct in
+    this unit inherits the method into its own `methods` list), so "the method is
+    declared on `Base`" says nothing about which alias table the receiver's class
+    has.
+
+    Which is why the disqualification is per NAME and not per struct:
+    `formal/build.py` withholds exactly the bindings a subclass REDECLARES, so a
+    `Child(Base)` that overrides `rank` makes `self.rank` unanswerable inside a
+    method `Base` declares while leaving every other name of `Base` answerable.
+    A subclass that inherits the name cannot change it — the interpreter merges
+    the bases' aliases into the child and the child adds its own, so an inherited
+    binding reads exactly as the base declared it.
+
+    Use `struct_derived_names` for the transitive closure; this is the direct
+    question and it is what the docstring above is about.
+
+    A limitation worth stating rather than hiding: `struct Child(Base)` is the
+    only inheritance this parser records, and the base may arrive from an IMPORTED
+    module, where `struct_defs` holds the imported declarations too — so a
+    derivation from a module this unit never parsed is not visible here. That is
+    not a hole in the rule but a fact about where the tables come from, and it is
+    the direction the answer already takes: a struct whose bases this function
+    cannot read is not disqualified by anything it cannot read."""
+    return any(name in (getattr(st, "bases", None) or [])
+               for st in struct_defs or [])
 
 
 def _receiver_names(node, receivers) -> set:
@@ -10607,7 +10774,17 @@ def struct_class_constants(struct_def) -> list:
 
     The complement of `struct_field_names`, and empty for every struct with no
     evidence attached — where nothing can be told apart, so everything stays a
-    field and there is no constant to speak of."""
+    field and there is no constant to speak of.
+
+    Two things count as a class-level constant and only one of them is spelled
+    `NAME = value` in `StructDef.fields`: a `comptime NAME = …` binding, which the
+    parser keeps in `comptime_aliases` and never puts in `fields` at all, is
+    stored nowhere per instance and so is exactly as much a constant as the other
+    kind. `struct_comptime_aliases` is the accessor and the note above
+    `_split_declaration` is the rule; the two are kept apart because "is a
+    constant" (this function) and "can this read be answered"
+    (`class_constant_word`, asked at the read) are different questions, and only
+    the first is answered here."""
     split = _split_declaration(struct_def)
     return list(split[1]) if split is not None else []
 
@@ -10663,9 +10840,17 @@ def _pre_rule_field_names(struct_def) -> list:
 
     What `struct_field_names` returns for a struct with no evidence attached,
     and what it returned for every struct before this rule existed. Kept as its
-    own function rather than inlined so the two derivations cannot drift apart
-    in their handling of `__slots__` and of `self.<name>` — the parts that are
-    not about constants at all."""
+own function rather than inlined so the two derivations cannot drift apart
+    in their handling of `__slots__` and of `self.<name>` — the parts that
+    are not about constants at all.
+
+    It knows NOTHING of a `comptime` binding, deliberately. With no evidence
+    there is no clause 3 to ask, and the two answers available are a field —
+    whose slot nothing writes, so a read of it fabricates a 0 — and a constant,
+    which cannot be substituted without the write census that is exactly what is
+    missing. The refusal is the honest answer, so a binding stays invisible here
+    and a struct nobody attached evidence to reports the read as a name it does
+    not have."""
     names, seen = [], set()
 
     def add(name):
@@ -17095,6 +17280,16 @@ def subscript_chain_text(expr) -> str:
     idx = expr.index if isinstance(expr, F.SubscriptExpr) else None
     if isinstance(idx, (F.TupleExpr, F.ListExpr)):
         inner = ", ".join(expr_spelling(e) for e in (idx.elements or []))
+    elif isinstance(idx, F.IntLiteral) and getattr(idx, "raw", None) == "":
+        # A PLACEHOLDER index, and the source had no 0 there: the parser keeps
+        # `IntLiteral(value=0, raw='')` for a subscript whose contents it does
+        # not keep in `index` — an empty `x[]`, a star-unpacked `Tuple[*Ts]`,
+        # and a keyword-attribute subscript (see `_parse_subscript`'s three
+        # `raw=''` constructions). Spelling it `Tuple[0]` states that the file
+        # contains a 0, which is the kind of false claim this function exists to
+        # avoid, so it is spelled as the placeholder it is — the same `{…}`
+        # convention a dict display already uses here.
+        inner = "…"
     else:
         inner = expr_spelling(idx)
     if isinstance(base, F.IdentExpr):
@@ -17119,8 +17314,21 @@ def expr_spelling(node) -> str:
     a model function must not reach up into the build pass for a string."""
     if isinstance(node, F.IdentExpr):
         return node.name
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
-        return f"{node.func.name}({', '.join(expr_spelling(a) for a in (node.args or []))})"
+    if isinstance(node, F.CallExpr):
+        # The callee is spelled by the same two helpers as any other position,
+        # so `TypeList.reduce[Self._mapper]()` and `Intrinsics.read[0]()` come
+        # out as themselves. Restricting this arm to a bare `IdentExpr` callee
+        # printed `CallExpr` — a bare placeholder, in a diagnostic whose whole
+        # job is to name the thing — for every specialization in the new-modular
+        # stdlib (`_integral_type_of[Self.dtype]()`, 100+ of them).
+        return (f"{expr_spelling(node.func)}"
+                f"({', '.join(expr_spelling(a) for a in (node.args or []))})")
+    if isinstance(node, F.UnaryOp):
+        # `-1` is an IntLiteral inside a UnaryOp, and `type(node).__name__` is
+        # what the fallback below said about it — "UnaryOp" in a sentence about
+        # a class attribute whose value the reader is being sent to look at.
+        word = "not " if node.op == "not" else node.op
+        return f"{word}{expr_spelling(node.operand)}"
     if isinstance(node, F.MemberExpr):
         return member_chain_text(node)
     if isinstance(node, F.SubscriptExpr):
@@ -17133,6 +17341,19 @@ def expr_spelling(node) -> str:
         inner = ", ".join(expr_spelling(e) for e in (node.elements or []))
         return (f"[{inner}]" if isinstance(node, F.ListExpr)
                 else f"({inner})")
+    if isinstance(node, F.StringLiteral) and isinstance(node.value, str):
+        # QUOTED, and that is the whole of this arm: the `("value", "name")`
+        # loop below prints `str("a")`, which is `a` — a bare name the file does
+        # not contain, where the source wrote `"a"`. A diagnostic that
+        # reproduces the file with a token missing sends the reader looking for
+        # an identifier, and this function's contract is that its output is the
+        # source's own spelling. `repr` is the closest available rendering for
+        # the general case (it is what the source would have to write for the
+        # same characters) and `b'…'` is kept for the bytes form so a bytes
+        # literal is not quoted as text.
+        if getattr(node, "is_bytes", False):
+            return "b" + repr(node.value.encode("utf-8", "surrogateescape"))
+        return repr(node.value)
     if isinstance(node, F.DictExpr):
         return "{…}"
     for attr in ("value", "name"):

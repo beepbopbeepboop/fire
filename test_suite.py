@@ -2939,6 +2939,7 @@ UNREGISTERED = {
     'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
     'test_formal_trait_module.py': _FORMAL_SUITE_REASON,
     'test_formal_type_application.py': _FORMAL_SUITE_REASON,
+    'test_formal_x86_64_parity.py': _FORMAL_SUITE_REASON,
 
     # ── the encoders, differentially, against the platform assembler ──
     'test_arm64_emission.py': 'A hand count that the new arm64 instructions '
