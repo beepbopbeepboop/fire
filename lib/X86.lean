@@ -332,6 +332,24 @@ def x86_sign_extend8 (v : UInt64) : UInt64 :=
 def x86_sign_extend16 (v : UInt64) : UInt64 :=
   if v &&& 0x8000 != 0 then v ||| 0xffffffffffff0000 else v
 
+/-- `cqo`: RDX = the SIGN EXTENSION of the whole 64-bit RAX — all ones if bit
+    63 is set, zero otherwise.  This is NOT `x86_sign_extend32`, which is
+    `movsxd`/`cdq`: it keeps the low 32 bits and extends bit 31, so it returns
+    `v` itself for every value whose bit 31 is clear.
+
+    Reached for a WRONG answer rather than a missing one, because `cqo` is
+    always immediately followed by an `idiv`, and `idiv` reads RDX:RAX as the
+    dividend: a `cdq` leaves RAX there, so the model divides
+    `RAX * 2^64 + RAX` where the hardware divides `RAX`.  Measured on
+    `formal/examples/udivmod.mojo` (`(n / 7) + (n % 7)`, `n = 10`), where the
+    answer is 4 and the model returned 7905747460161236410 — which is
+    `(10 * 2^64 + 10) / 7` truncated into 64 bits, plus `(10 * 2^64 + 10) % 7`.
+    Every value with bit 31 clear was wrong this way and every example that
+    divides went through it, so the agreement count in
+    `formal/x86_64_model_test.py` was carrying one wrong answer per divide. -/
+def x86_cqo (v : UInt64) : UInt64 :=
+  if x86_msb v then 0xffffffffffffffff else 0
+
 
 /-- `v` as a signed 64-bit number. -/
 def x86_signed (v : UInt64) : Int :=
@@ -388,8 +406,10 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
     let v := mem_read_bytes s.mem (s.rsp.toNat) 8
     some { x86_set_reg s r v with rsp := s.rsp + 8, rip := rip + 2 }
   else if op = 0x99 && w then
-    -- cqo: RDX = the sign extension of RAX
-    some { s with rdx := x86_sign_extend32 s.rax, rip := rip + 2 }
+    -- cqo: RDX = the sign extension of the whole 64-bit RAX.  `x86_cqo`, and
+    -- NOT `x86_sign_extend32`: see its own docstring for what the difference
+    -- costs on the very next instruction.
+    some { s with rdx := x86_cqo s.rax, rip := rip + 2 }
   else if 0xb8 ≤ op && op ≤ 0xbf && w then
     -- mov r64, imm64
     let v := mem_read_bytes code (rip + 2) 8

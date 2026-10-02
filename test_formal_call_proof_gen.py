@@ -192,6 +192,78 @@ class TestGeneratorSource(unittest.TestCase):
         self.assertTrue(hasattr(G, "_no_value_model"),
                         "_no_value_model is the single place that says so")
 
+    def test_every_fallthrough_of_the_expression_model_refuses(self):
+        """The three shapes a TEXT check cannot see, exercised for real.
+
+        `_expr_go` used to answer `(0 : UInt64)` for a NAME its environment
+        does not bind, for an OPERATOR it has no meaning for, and for an
+        expression FORM it does not recognise. Each of those turns "the model
+        cannot say what this is" into "the model says it is zero", and the
+        consequence is not a gap: the generator goes on to emit a universal
+        theorem about a zero-valued model, and Lean accepts it because the
+        generator can find a closing tactic. So the assertion is on the
+        RAISE, and it is built rather than written — a fabricated fallback
+        would have to be reinstated for these to pass, and the fallback is
+        exactly what `_no_value_model` and `_call_go` were added to remove.
+
+        Nothing in `formal/examples/` reaches any of the three (both backends
+        measure 41/4/0 and 45/0/0 before and after), which is exactly why they
+        were absorbed silently until now: a guard nothing exercises is a
+        guard nobody has checked.
+        """
+        import formal.arm64_proof_gen as G
+        import fire_compiler as F
+
+        # 1. a name the model's environment does not bind — `x` is bound by no
+        #    parameter and by no assignment on the way to the read.
+        with self.assertRaises(NotImplementedError) as caught:
+            G._expr_go(G.Var("x"), "n", {"n": "n"})
+        self.assertIn("`x` is read here", str(caught.exception))
+
+        # 2. an operator with no Lean meaning.  `at` is not in the vocabulary
+        #    `_lean_op` maps onto, and nothing turns it into one.
+        with self.assertRaises(NotImplementedError) as caught:
+            G._expr_go(F.BinaryOp(op="at", left=G.Int(1), right=G.Int(2)),
+                       "n", {"n": "n"})
+        self.assertIn("has no meaning this model can render",
+                      str(caught.exception))
+
+        # 3. an expression FORM with no case at all — a list literal, which is
+        #    a shape the language has and the model has no domain for. A `str`
+        #    would not do: a String IS answered, as the model's own documented
+        #    0 for a value with no numeric reading.
+        with self.assertRaises(NotImplementedError) as caught:
+            G._expr_go(F.ListExpr(elements=[]), "n", {"n": "n"})
+        self.assertIn("a ListExpr has no value in the semantic model",
+                      str(caught.exception))
+
+    def test_a_modelled_expression_still_renders(self):
+        """The control for the three refusals above, so they are not a blanket.
+
+        Every form `_expr_go` DOES model has to keep rendering a term rather
+        than start refusing — a guard that refuses everything is not a guard,
+        it is a different backend, and the corpus counts would not move far
+        enough to say so.
+        """
+        import formal.arm64_proof_gen as G
+        import fire_compiler as F
+        env = {"n": "n"}
+        cases = [
+            (G.Var("n"), "n"),
+            (G.Bool(True), "(1 : UInt64)"),
+            (G.Bool(False), "(0 : UInt64)"),
+            (F.UnaryOp(op="-", operand=G.Var("n")), "(0 - n)"),
+            (F.BinaryOp(op="+", left=G.Int(1), right=G.Int(2)),
+             f"({G._uint64_lit(1)} + {G._uint64_lit(2)})"),
+        ]
+        for node, want in cases:
+            with self.subTest(node=type(node).__name__):
+                self.assertEqual(G._expr_go(node, "n", env), want)
+        # An integer literal is rendered through `_uint64_lit` rather than
+        # written out here, so this case cannot rot when the literal spelling
+        # changes: the test would be asserting a rendering nobody maintains.
+        self.assertEqual(G._expr_go(G.Int(7), "n", env), G._uint64_lit(7))
+
     def test_model_shape_reader_handles_all_three_shapes(self):
         import formal.arm64_proof_gen as G
         cases = [

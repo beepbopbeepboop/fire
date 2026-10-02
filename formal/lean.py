@@ -81,20 +81,30 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def _olean_key(stem: str, source: str, lean: str) -> str:
+def _olean_key(stem: str, source: str, lean: str, source_digest: str = "") -> str:
     """CAS key for a library .olean: the source bytes, the module name and the
     toolchain. Lean's output for a given (source, version) pair is
     deterministic, so this is a hit on every machine and every rebuild after
-    the first — ProofLib.olean alone is 27MB and takes ~90s to produce."""
+    the first — ProofLib.olean alone is 27MB and takes ~90s to produce.
+
+    `source_digest` is the EFFECTIVE digest (`_effective_digest`), not this
+    module's own bytes, and that is load-bearing: `work.lean` imports `X86`,
+    so an edit to `X86.lean` changes what `work.olean` MEANS while leaving
+    `work.lean` byte-identical. Keyed on its own bytes alone, the cas would
+    serve the `work.olean` elaborated against the previous X86 — the exact
+    "wrong artifact served from cache, silently" failure the self-host
+    fingerprint rules exist to prevent, one module down. It defaults to this
+    module's own digest so a caller that has not computed the effective one
+    gets the old key rather than a key with a hole in it."""
     import cas
     with open(source, "rb") as f:
         return "leanlib/" + cas.hash_parts(
-            b"lean-olean-v1", stem.encode(), lean_version(lean).encode(), f.read())
-
+            b"lean-olean-v2", stem.encode(), lean_version(lean).encode(),
+            (source_digest or _sha256_file(source)).encode(), f.read())
 
 def _library_is_current(source: str, olean: str, stamp: str,
                         source_digest: str) -> bool:
-    """Is this .olean built from exactly these source bytes?
+    """Is this .olean built from exactly this source AND the imports it names?
 
     Purely content-based, with no mtime in the decision: `touch
     lib/ProofLib.lean` (or a git checkout, or an editor that rewrites mtimes)
@@ -104,7 +114,14 @@ def _library_is_current(source: str, olean: str, stamp: str,
     records the source digest the .olean was built from *and* a digest of the
     .olean itself, so an edit invalidates, a touch does not, and an .olean
     swapped out from under the stamp invalidates too.
-    """
+
+    `source_digest` is the EFFECTIVE digest — this module's own bytes AND every
+    library module it imports, transitively — and that is the second half of
+    the rule. The stamp used to record this module's own bytes alone, so
+    editing `X86.lean` left `work.olean` (built from `work.lean`, which
+    `import X86`) in place: every later `lean` run then recompiled the stale
+    import inside the checker, with no error anywhere and a memory bill an
+    order of magnitude over the honest one. See `_effective_digest`."""
     if not (os.path.isfile(olean) and os.path.isfile(stamp)):
         return False
     try:
@@ -117,11 +134,78 @@ def _library_is_current(source: str, olean: str, stamp: str,
     return _digest(olean).hex() == recorded_olean
 
 
-def _write_stamp(stamp: str, source: str, olean: str) -> None:
+def _write_stamp(stamp: str, source: str, olean: str,
+                 source_digest: str = "") -> None:
+    """Record which source a .olean was built from, so a later run is a stat.
+
+    `source_digest` is the EFFECTIVE digest the currency check compares
+    against, for the reason `_effective_digest` gives; the default is this
+    module's own bytes, which is what a tree with no imports has."""
     tmp = f"{stamp}.tmp.{os.getpid()}"
     with open(tmp, "w") as f:
-        f.write(f"{_sha256_file(source)} {_digest(olean).hex()}\n")
+        f.write(f"{source_digest or _sha256_file(source)} "
+                f"{_digest(olean).hex()}\n")
     os.replace(tmp, stamp)
+
+
+def _module_imports(source: str) -> set:
+    """The `LIBRARY_MODULES` names this library source's `import` lines name.
+
+    Read from the source rather than hard-coded, because the import graph is
+    the thing that has to stay right and a table beside it is a second copy of
+    it to forget. `import Lean` and anything outside `LIBRARY_MODULES` are not
+    this mechanism's business — those are pinned by the toolchain half of the
+    key instead."""
+    names = set()
+    try:
+        with open(source, "r", errors="replace") as f:
+            for line in f:
+                if not line.startswith("import "):
+                    continue
+                name = line[len("import "):].strip().split()
+                if name:
+                    names.add(name[0])
+    except OSError:
+        return names
+    return names & set(LIBRARY_MODULES)
+
+
+def _effective_digest(stem: str, lib_dir: str, _seen=None) -> str:
+    """A digest over `stem`'s own source AND every library module it imports.
+
+    **The staleness this closes.** A Lean `.olean` embeds its imports'
+    definitions, so `work.olean` — built from `work.lean`, which is
+    `import ProofLib` + `import X86` and about 700KB of code — MEANS something
+    different after an edit to `X86.lean`. The currency check compared only the
+    module's own bytes, so such an edit left `work.olean` in place and every
+    later `lean` run silently recompiled the stale import inside the checker:
+    measured, `python3 test_formal.py` went from 1.2 GB across 31 processes to a
+    32 GB kill, with no error anywhere, because nothing was wrong with any
+    single file — the artifact the checker read was simply not the artifact its
+    source now describes. And the CAS key had the same hole, which is worse: a
+    hit would have served that stale `.olean` to every machine.
+
+    Transitive, and cycle-safe (`_seen`): `Contracts` imports `ProofLib` and
+    `Refine`, `Refine` imports `ProofLib`, and a future cycle must not hang
+    the build. One hash per module per run, so the whole library is a handful
+    of 27MB reads rather than one per dependent."""
+    import hashlib
+    seen = set() if _seen is None else _seen
+    if stem in seen:
+        return ""
+    seen.add(stem)
+    path = os.path.join(lib_dir, stem + ".lean")
+    if not os.path.isfile(path):
+        return ""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    deps = sorted(_module_imports(path))
+    for dep in deps:
+        h.update(dep.encode())
+        h.update(_effective_digest(dep, lib_dir, seen).encode())
+    return h.hexdigest()
 
 
 def _acquire_build_lock(olean: str, timeout: float) -> int:
@@ -528,7 +612,8 @@ def library_census(lean: str, lib_dir: str, timeout: int = 1200,
             out[stem] = _LIB_CENSUS[stem]
             continue
         try:
-            key = _olean_key(stem, source, lean)
+            key = _olean_key(stem, source, lean, _effective_digest(stem,
+                                                                   lib_dir))
         except Exception:
             # An unreadable source or a broken store means UNMEASURED, which
             # the caller reports as such. It must not be an exception: this is
@@ -550,7 +635,8 @@ def library_census(lean: str, lib_dir: str, timeout: int = 1200,
         for stem in missing:
             source = os.path.join(lib_dir, stem + ".lean")
             try:
-                got = _census_lookup(_olean_key(stem, source, lean))
+                got = _census_lookup(_olean_key(
+                    stem, source, lean, _effective_digest(stem, lib_dir)))
             except Exception:
                 got = None
             if got is not None:
@@ -589,9 +675,9 @@ def library_census(lean: str, lib_dir: str, timeout: int = 1200,
                 _LIB_CENSUS[stem] = got
                 out[stem] = got
                 try:
-                    _census_publish(_olean_key(stem, os.path.join(lib_dir,
-                                                                stem + ".lean"),
-                                              lean), got)
+                    _census_publish(_olean_key(
+                        stem, os.path.join(lib_dir, stem + ".lean"), lean,
+                        _effective_digest(stem, lib_dir)), got)
                 except Exception:
                     pass
     finally:
@@ -677,7 +763,7 @@ def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
         stamp = olean + ".srcsha256"
         if not os.path.isfile(source):
             continue
-        digest = _sha256_file(source)
+        digest = _effective_digest(stem, lib_dir)
         if _library_is_current(source, olean, stamp, digest):
             continue
         # Pre-stamp trees (fresh clone, or an olean built by the Makefile):
@@ -686,9 +772,9 @@ def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
         # _write_stamp is itself atomic.
         if (not os.path.isfile(stamp) and os.path.isfile(olean)
                 and os.path.getmtime(olean) >= os.path.getmtime(source)):
-            _write_stamp(stamp, source, olean)
+            _write_stamp(stamp, source, olean, digest)
             continue
-        key = _olean_key(stem, source, lean)
+        key = _olean_key(stem, source, lean, digest)
         fd = _acquire_build_lock(olean, timeout)
         try:
             # DOUBLE-CHECK under the lock. Everyone else in the fan-out is
@@ -727,7 +813,7 @@ def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
                     _read_lines(source))
                 _LIB_CENSUS[stem] = got
                 _census_publish(key, got)
-            _write_stamp(stamp, source, olean)
+            _write_stamp(stamp, source, olean, digest)
         finally:
             _release_build_lock(fd)
 

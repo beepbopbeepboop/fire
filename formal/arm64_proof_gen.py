@@ -491,9 +491,32 @@ def _pow_model(l: str, r: str, e) -> str:
 
 def _expr_go(e, param: str, env: dict, vtypes: dict = None,
              call_types: dict = None, scope=None) -> str:
-    """Translate a Mojo expression to a Lean UInt64 term for the model."""
+    """Translate a Mojo expression to a Lean UInt64 term for the model.
+
+    **Every fall-through refuses**, and that is the whole contract.  This used
+    to end in `return "(0 : UInt64)"` for an expression form it did not
+    recognise and to answer `env.get(e.name, "(0 : UInt64)")` for a NAME the
+    environment does not bind — so "the model cannot say what this is" became
+    "the model says it is zero", and a program whose model was zero for every
+    input emitted a universal theorem about zero that Lean accepted, because
+    the generator could find a closing tactic.  `_no_value_model` (a field read,
+    a subscript) and `_call_go` (a callee with no model) already refuse; these
+    two are the same rule for the two shapes those two cannot see.
+
+    The direction is deliberate and is the one the rest of this file takes: a
+    stated gap costs a program its proof, and a fabricated model costs it a
+    proof of something FALSE.  Both callers behave — `x86_64_proof_gen.py`
+    catches the refusal and emits its documented `NOTE:`, and the arm64 caller
+    propagates it — so "refuse" and "documented gap" are the same outcome here
+    and neither is a build failure.
+    """
     if isinstance(e, Var):
-        return env.get(e.name, "(0 : UInt64)")
+        if e.name in env:
+            return env[e.name]
+        raise NotImplementedError(
+            f"model: `{e.name}` is read here and this generator binds it to "
+            f"nothing (the model's environment is {sorted(env)}); answering 0 "
+            f"would be a statement about the source rather than a model of it")
     if isinstance(e, Int):
         return _uint64_lit(e.value)
     if isinstance(e, Bool):
@@ -555,13 +578,20 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
                     else f"({_truth_go(e.left, param, env, vtypes, call_types, scope)} {j} "
                          f"{_truth_go(e.right, param, env, vtypes, call_types, scope)})")
             return f"(if {body} then (1 : UInt64) else (0 : UInt64))"
-        return "(0 : UInt64)"
+        raise NotImplementedError(
+            f"model: the operator `{e.op!r}` has no meaning this model can "
+            f"render; answering 0 would be a statement about the source "
+            f"rather than a model of it")
     if isinstance(e, Call):
         return _call_go(e, param, env, scope, _expr_go)
     if isinstance(e, (F.MemberExpr, F.SubscriptExpr)):
         _no_value_model(e, "struct field read" if isinstance(e, F.MemberExpr)
                         else "list subscript")
-    return "(0 : UInt64)"
+    raise NotImplementedError(
+        f"model: a {type(e).__name__} has no value in the semantic model (a "
+        f"`UInt64 → UInt64` function over the source's arithmetic); refusing "
+        f"rather than modelling it as 0, which would be a false statement "
+        f"about the source")
 
 
 def _expr_bool_go(e, param: str, env: dict, scope=None) -> str:
