@@ -268,6 +268,65 @@ CASES = [
     ("match_wildcard_then_store_ok",
      "    match n:\n        case _:\n            p = 1\n"
      "    p = 2\n    return p\n", "ok"),
+    # A `case` pattern that is a bare name nothing has bound is a CAPTURE in
+    # this compiler (`fire_compiler.py`'s MatchStmt and
+    # `myinterpreter.py`'s `execute_MatchStmt`), and a capture binds the
+    # subject before the arm's body runs — the same shape as a `for` target and
+    # a `with` alias, and the third of the three
+    # `bugs/FORMAL_a_local_read_before_its_first_assignment.md` names. The arm
+    # was refused for reading its own capture.
+    ("match_capture_is_bound_in_its_own_arm_ok",
+     "    match n:\n        case 0:\n            return 1\n        case other:\n"
+     "            sink(other)\n    return 0\n", "ok"),
+    # …and it is bound in THAT arm only. One case's capture is not in scope in
+    # another's, which is why the names are a per-block `seed` and not more of
+    # the match head's definitions: CPython raises here (`a` is not defined
+    # anywhere in the harness, so `NameError`).
+    ("match_capture_is_not_in_scope_in_another_arm_refused",
+     "    match n:\n        case 0:\n            sink(a)\n        case other:\n"
+     "            sink(other)\n    return 0\n", "refuse"),
+    # THE ROW THAT PINS THE PER-ARM `seed`, and the reason it is not "add the
+    # captures to the match head's definitions". Here the SECOND case is the one
+    # that captures, and the first arm reads that name: the capture makes `a` a
+    # local of `probe`, so CPython raises `UnboundLocalError` at `probe(0)`.
+    # Put the captures on the head instead and `a` would be in scope in an arm
+    # that never tried to bind it, which is the worse of the two errors — a
+    # defect this analysis exists to find.
+    ("a_later_case_capture_is_not_in_scope_in_an_earlier_arm_refused",
+     "    match n:\n        case 0:\n            sink(a)\n        case a:\n"
+     "            sink(a)\n    return 0\n", "refuse"),
+    # A GUARD makes the case refutable however its pattern reads, so an EARLIER
+    # case can match and the match then falls through to the code after it on a
+    # path where the capture was never bound. (The guard failing does NOT undo
+    # the binding — measured on CPython 3.11, `return other` after a
+    # `case other if other > 5` returns the subject for every value — so the
+    # path that matters is the one an earlier case takes, which is what this
+    # body writes.) CPython raises `UnboundLocalError` there, because the
+    # capture makes `other` a local of `probe`.
+    ("match_guarded_capture_falls_through_to_a_read_refused",
+     "    match n:\n        case 0:\n            sink(0)\n"
+     "        case other if other > 5:\n            sink(other)\n"
+     "    sink(other)\n    return 0\n", "refuse"),
+    # The mirror of that row and the reason the capture is a per-arm `seed` and
+    # not a match-wide definition: an EARLIER case matching means the capture
+    # case is never tried, so a read after the match is a real defect even
+    # though the match ends in an irrefutable capture. CPython raises
+    # `UnboundLocalError` at `probe(0)` and `probe(1)`; `case other` alone is
+    # not enough to make `other` dominate the join.
+    ("match_capture_after_an_earlier_case_matched_refused",
+     "    match n:\n        case 0:\n            sink(0)\n        case other:\n"
+     "            sink(other)\n    sink(other)\n    return 0\n", "refuse"),
+    # THE PIN that says `_match_case_binds` stops at a bare name on purpose.
+    # `match` here is switch-style equality dispatch, not PEP 634 structural
+    # pattern matching, so `case [a, b]` evaluates the list `[a, b]` and
+    # compares it with `==`: `a` and `b` are READS. CPython binds them, so this
+    # row is a deliberate divergence and not an oracle failure — which is
+    # exactly the sort of row the fourth column exists for.
+    ("match_sequence_pattern_binds_nothing_here_refused",
+     "    match n:\n        case [a, b]:\n            sink(a + b)\n"
+     "        case _:\n            return 0\n    return 0\n", "refuse",
+     "`match` is equality dispatch in this compiler, so a pattern's "
+     "sub-expressions are reads and not bindings — see `_match_case_binds`"),
 
     # ── `del`: removes a name from the definitely-stored set without storing
     #    anything, so a `del` on one path IS a read-before-store on the other.

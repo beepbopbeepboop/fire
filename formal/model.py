@@ -2080,9 +2080,17 @@ class _Block:
     `defs` is what the block's own statements STORE, and `kills` is what they
     `del`. Both are needed and they are not inverses: `del x` removes a name
     from the definitely-stored set without storing anything, which is what
-    makes `del x` on one arm of a branch a read-before-store on the other."""
+    makes `del x` on one arm of a branch a read-before-store on the other.
 
-    __slots__ = ("index", "stmts", "succs", "preds", "defs", "kills")
+    `seed` is the one thing a block's IN set contains for a reason other than
+    its predecessors: a binding that happens BEFORE the block, for the block's
+    own subtree only. A `match` case's capture pattern is the construct that
+    needs it (`_match_case_binds`), and it is a separate field rather than more
+    `defs` precisely because `defs` is visible to every successor and `seed` is
+    not — see `_match_case_binds` for why one case's capture must not be in
+    scope in another case's arm."""
+
+    __slots__ = ("index", "stmts", "succs", "preds", "defs", "kills", "seed")
 
     def __init__(self, index, stmts):
         self.index = index
@@ -2091,6 +2099,7 @@ class _Block:
         self.preds: list = []
         self.defs: set = set()
         self.kills: set = set()
+        self.seed: set = set()
 
     def __repr__(self):
         return (f"<block {self.index}: {len(self.stmts)} stmt(s), "
@@ -2176,6 +2185,59 @@ def _case_is_wildcard(case) -> bool:
             continue
         return False
     return True
+
+
+def _match_case_binds(case) -> set:
+    """The names a `case`'s patterns bind, in that case's arm only.
+
+    **This is `match` as THIS compiler implements it, and not PEP 634.**
+    `fire_compiler.py`'s `MatchStmt` and `myinterpreter.py`'s
+    `execute_MatchStmt` are explicit that a `case` pattern is a switch-style
+    equality comparison — the patterns are evaluated as ordinary expressions —
+    with ONE exception: a bare name that is not already bound in scope is a
+    genuine PEP 634 capture, binds the subject, and always matches. So the
+    names a pattern binds are exactly its bare non-`_` identifiers, and
+    `case [a, b]` binds NOTHING: `a` and `b` there are ordinary reads of a list
+    expression that is then compared with `==`, which is why this collector does
+    not descend into a pattern's sub-expressions. A structural-pattern walk
+    would be a second, wrong answer about what the source means.
+
+    A capture binds BEFORE the arm's body runs, which makes it the same shape as
+    a `for` target and a `with` alias: a binding that exists before the value
+    the body sees. `bugs/FORMAL_a_local_read_before_its_first_assignment.md`
+    names this as the next shape to check after `with`, and checking it found
+    that the arm's body was refused for reading its own capture:
+
+        def f(n):
+            match n:
+                case 0:
+                    return 1
+                case other:            # a capture: `other` is not bound yet
+                    sink(other)        # refused: "other is read before …"
+
+    **Why the names are a per-block `seed` and not more of the match head's
+    `defs`.** A `defs` entry is in every successor's IN set, so putting the
+    captures there would make one case's binding visible in ANOTHER case's arm
+    — which would hide this real defect:
+
+        def f(n):
+            match n:
+                case 0:
+                    sink(a)          # `a` is bound only by the other arm
+                case [a]:
+                    sink(a)
+
+    CPython raises `UnboundLocalError` in the first arm (`a` is a local of `f`
+    because the capture binds it somewhere in the body), and a check that let it
+    through would be the worse of the two errors. `_Block.seed` is the one
+    field the intersection does not take away and only this case's own subtree
+    ever sees.
+    """
+    binds: set = set()
+    for p in (getattr(case, "patterns", None) or []):
+        if isinstance(p, F.IdentExpr) and p.name != "_":
+            binds.add(p.name)
+    return binds
 
 
 def _cfg_int_literal(e) -> object:
@@ -2348,15 +2410,27 @@ def _build_cfg(body) -> tuple:
         blocks.append(b)
         return b
 
-    def open_block(stmts, pending: list) -> _Block:
-        """Open a block for `stmts` and make every `pending` exit reach it."""
+    def open_block(stmts, pending: list, seed=None) -> _Block:
+        """Open a block for `stmts` and make every `pending` exit reach it.
+
+        `seed` is `_Block.seed`: names this block's IN set has for a reason
+        other than its predecessors, and only this block's own subtree sees
+        them. It is a parameter here rather than something `run` sets
+        afterwards because the FIRST block of an arm is opened from three
+        different places (a statement, a control-flow statement's header, and
+        `take()`), and a seed that only some of them applied would be a rule
+        that fires on some `match` arms and not others — which
+        `FORMAL_read_before_store_dominating_store.md` names as the specific
+        way a partial rule is worse than none."""
         b = new(stmts)
+        if seed:
+            b.seed |= set(seed)
         for p in pending:
             if p is not None and 0 <= p < len(blocks):
                 blocks[p].succs.append(b.index)
         return b
 
-    def run(stmts, loops: list, pending: list) -> list:
+    def run(stmts, loops: list, pending: list, seed=None) -> list:
         """Emit `stmts`, returning the indices that fall through to the end.
 
         `pending` holds the exits that reach the FIRST statement here; the
@@ -2364,7 +2438,10 @@ def _build_cfg(body) -> tuple:
         the run are what the caller joins to whatever comes next. A `break` or
         `continue` returns `[]` — control does not fall through — while adding
         itself to the loop stack, which is how the loop's own join collects it.
-        """
+
+        `seed` names are put on the FIRST block this run opens and nowhere
+        else, so the whole arm's subtree inherits them and the block after the
+        statement does not."""
         if not pending:
             # A run nothing can reach. It still gets a block, so an
             # unreachable region cannot leave a hole in the index space the
@@ -2372,20 +2449,28 @@ def _build_cfg(body) -> tuple:
             b = new([])
             pending = [b.index]
         cur = None
+        seed_left = set(seed) if seed else None
+
+        def first(stmts, pending: list) -> _Block:
+            """`open_block` for the first block of this run, taking the seed."""
+            nonlocal seed_left
+            b = open_block(stmts, pending, seed_left)
+            seed_left = None
+            return b
 
         def take() -> _Block:
             """The block the next straight-line statement joins, opening one
             if a control-flow statement closed the previous."""
             nonlocal cur, pending
             if cur is None:
-                cur = open_block([], pending)
+                cur = first([], pending)
                 pending = [cur.index]
             return cur
 
         for s in (stmts or []):
             kind = type(s).__name__
             if kind == "IfStmt":
-                cond = open_block([s], pending)
+                cond = first([s], pending)
                 pending = [cond.index]
                 cur = None
                 arms = [getattr(s, "then_body", None) or []]
@@ -2401,7 +2486,7 @@ def _build_cfg(body) -> tuple:
                 pending = arm_exits
                 continue
             if kind in ("WhileStmt", "ForStmt", "ComptimeForStmt"):
-                head = open_block([s], pending)
+                head = first([s], pending)
                 pending = [head.index]
                 cur = None
                 loop_body = getattr(s, "body", None) or []
@@ -2458,13 +2543,13 @@ def _build_cfg(body) -> tuple:
                 cur = None
                 continue
             if kind == "WithStmt":
-                w = open_block([s], pending)
+                w = first([s], pending)
                 pending = run(getattr(s, "body", None) or [], loops,
                               [w.index])
                 cur = None
                 continue
             if kind == "TryStmt":
-                t = open_block([s], pending)
+                t = first([s], pending)
                 pending = [t.index]
                 cur = None
                 arm_exits = run(getattr(s, "body", None) or [], loops,
@@ -2503,14 +2588,17 @@ def _build_cfg(body) -> tuple:
                 cur = None
                 continue
             if kind == "MatchStmt":
-                m = open_block([s], pending)
+                m = first([s], pending)
                 pending = [m.index]
                 cur = None
                 arm_exits: list = []
                 exhaustive = False
                 for c in (getattr(s, "cases", None) or []):
+                    # The case's own captures seed THIS arm and no other: see
+                    # `_match_case_binds`, which is also why they are a `seed`
+                    # and not more of the match head's `defs`.
                     arm_exits += run(getattr(c, "body", None) or [], loops,
-                                     [m.index])
+                                     [m.index], seed=_match_case_binds(c))
                     if _case_is_wildcard(c):
                         exhaustive = True
                 # A `match` with no matching case FALLS THROUGH to whatever
@@ -2529,7 +2617,7 @@ def _build_cfg(body) -> tuple:
                 pending = arm_exits
                 continue
             if kind in ("BreakStmt", "ContinueStmt"):
-                b = open_block([s], pending)
+                b = first([s], pending)
                 if loops:
                     if kind == "BreakStmt":
                         loops[-1]["exits"].append(b.index)
@@ -2630,6 +2718,10 @@ def _definitely_stored(blocks: list, entry: int, seed: set) -> dict:
     everything = set()
     for b in blocks:
         everything |= b.defs
+        # A seeded name is in a block's IN set with no definition anywhere that
+        # would have put it there (`_Block.seed`), so the top-initialization
+        # has to know it exists or the first narrowing round drops it again.
+        everything |= b.seed
     for node in iter_nodes([b.stmts for b in blocks]):
         everything |= set(_expr_reads(node, set()).keys())
     universe = everything | set(seed)
@@ -2652,6 +2744,13 @@ def _definitely_stored(blocks: list, entry: int, seed: set) -> dict:
                 # case `kills` exists for.
                 p_out = (out[p] | blocks[p].defs) - blocks[p].kills
                 merged = set(p_out) if merged is None else (merged & p_out)
+            if merged is not None:
+                # A `seed` is not reachable from any predecessor and the
+                # intersection cannot restore it, so it is added AFTER it —
+                # which is the whole reason it is a field of its own rather
+                # than a def of this block (that would leak into successors
+                # outside the arm). See `_match_case_binds`.
+                merged |= b.seed
             if merged is not None and merged != out[b.index]:
                 out[b.index] = merged
                 changed = True
