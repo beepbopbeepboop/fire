@@ -1873,11 +1873,38 @@ def gen_module_impl(self, stmts):
             # `strutil._iter_significant_lines(infile)` shape.
             _xg_calls = []
             for _xg_fd in stmts:
-                if not isinstance(_xg_fd, FunctionDef):
+                if isinstance(_xg_fd, FunctionDef):
+                    for _xg_n3 in _walk_ast(_xg_fd.body):
+                        if isinstance(_xg_n3, CallExpr):
+                            _xg_calls.append((_xg_n3, _xg_fd))
+            # MODULE-level statements, with a `None` enclosing context. These
+            # were simply not in the set of sites either contract below saw,
+            # which is the whole of
+            # bugs/hard/CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md:
+            # a module-scope `insp.Parameter('v', 7)` / `Parameter('v', 7)`
+            # records no cross-module constructor field hint, so the imported
+            # module compiled `self.v = v` at the `int64_t` default against a
+            # `char *` field and the client's own `x.v` read back the boxed
+            # pointer's decimal with exit 0. The function-scope spelling of
+            # the same two lines was always right, which is what made this
+            # look scope-dependent rather than like a missing site.
+            #
+            # `None` is already a value both consumers handle: the generator
+            # contract's `_xg_enc_map` lookup is guarded by
+            # `_xg_enclosing is not None`, and the constructor contract below
+            # ignores the enclosing context entirely.
+            #
+            # A `StructDef` is skipped rather than descended into, because its
+            # methods' bodies are already covered above with the method as the
+            # enclosing context; walking it here would re-record every one of
+            # them with `None`, and a container-typed field forwarded through
+            # a method parameter is a case the enclosing context decides.
+            for _xg_top in stmts:
+                if isinstance(_xg_top, (FunctionDef, StructDef)):
                     continue
-                for _xg_n3 in _walk_ast(_xg_fd.body):
+                for _xg_n3 in _walk_ast(_xg_top):
                     if isinstance(_xg_n3, CallExpr):
-                        _xg_calls.append((_xg_n3, _xg_fd))
+                        _xg_calls.append((_xg_n3, None))
 
             for _xg_call, _xg_enclosing in _xg_calls:
                 if isinstance(_xg_call.func, gimple_ctypes.IdentExpr):

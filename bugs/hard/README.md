@@ -16,7 +16,6 @@ Last updated 2026-10-01.
 
 | doc | one line |
 |---|---|
-| `CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md` | a cross-module struct constructor called at **module scope** (not inside a function) is mistyped, in BOTH import spellings and neither is the import seam: the bare-`import` spelling prints the object's own pointer as a decimal with exit 0, the `from`-import spelling fails the build outright with `non-trivial conversion in 'var_decl'`. The same four cases inside a function body, and the same two cases with the class in the same file, are all correct. Found 2026-09-30 next to the deleted row below. |
 | `CODEGEN_function_scoped_import_module_not_inlined.md` | a function-scoped `from X import Y` records Y's signature/exports and then returns without compiling the module: Y's `X.Y(...)` construction returns `0`, and reading a class attribute prints `unavailable in compiled mode` with exit 0. The module-scoped spelling of the same import works. **New 2026-09-26.** |
 
 ## PARTIAL — the recorded gap is fixed; named residue remains
@@ -198,12 +197,20 @@ is to write both spellings of the same program down side by side and diff
 their answers, which took two builds here and would have closed the row on
 2026-09-27.
 
-The residue the closure turned up belongs to a different bug and is filed in
-this directory:
-
-| found while fixing it | filed as |
-|---|---|
-| the same cross-module construction at **module scope** rather than inside a function is mistyped in BOTH import spellings — a pointer decimal, exit 0, on one, a hard `non-trivial conversion` build failure on the other | `bugs/hard/CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md` |
+The residue the closure turned up belonged to a different bug. It was
+**fixed and deleted on 2026-10-02**: a cross-module struct constructor
+called at **module scope** (rather than inside a function) was mistyped
+in BOTH import spellings — a pointer decimal, exit 0. The cause was a
+missing set of CALL SITES, not a missing seam: the cross-module
+constructor field-type hint pre-pass in `module_gen.py` collected its
+sites by walking `FunctionDef` bodies only, so a module-level
+`insp.Parameter('v', 7)` was in no collected set and the imported module
+compiled `self.v = v` at the `int64_t` default against a `char *` field.
+It was filed on 2026-09-30, three days after the row above, by the same
+kind of one-spelling-at-a-time reading that row records — and the two
+are the same lesson from opposite ends, since this one's own first
+measurement blamed module SCOPE when the function-scope spelling of the
+same two lines had been right all along.
 
 ### 2026-10-01: the two-hop row above, and a fourth instance of cause (c) — closed by a MERGE, not by an edit
 

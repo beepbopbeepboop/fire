@@ -535,6 +535,112 @@ def test_bare_import_sibling_struct_field_through_module() -> bool:
     return ok
 
 
+def test_module_scoped_cross_module_struct_ctor_both_import_spellings() -> bool:
+    """A cross-module struct CONSTRUCTOR called at MODULE scope, in BOTH
+    import spellings, with the field read straight off the result.
+
+    `bugs/hard/CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md`
+    (deleted by this fix; the mechanism is recorded in the pre-pass's own
+    comment in `module_gen.py` and in `bugs/hard/README.md`'s 2026-10-02
+    entry). Both arms printed the `Parameter *`'s own pointer
+    bits as a decimal with exit 0, where CPython prints `v`, and the
+    function-scoped spelling of the same two lines was correct throughout —
+    which is what made it look scope-dependent rather than like a missing set
+    of call sites.
+
+    The mechanism, measured in one `compile_linked` dump of the module-scope
+    case against the function-scoped one: the cross-module constructor
+    FIELD-TYPE hint pre-pass collects its call sites by walking
+    `FunctionDef` bodies only, so a module-level `insp.Parameter('v', 7)` was
+    in no collected set. With no hint, the IMPORTED module compiled
+    `self.v = v` at the `int64_t` default while the client's own `x.v` was
+    typed `char *` from the string literal, and the value round-tripped
+    through an integer. It was not the import seam (both spellings were
+    equally affected, and both are correct inside a function) and not
+    module scope alone (the same-file case is correct at module scope).
+
+    Both arms are asserted, and the module-scope `show(...)` variant is in
+    `test_module_scoped_cross_module_ctor_arg_through_a_param` — a fix that
+    only repaired the direct-field-read spelling would leave that one red.
+    """
+    pkg = {
+        'insp.py': _LABEL_PY,
+        'f5.py': (
+            'import insp\n'
+            '\n'
+            'x = insp.Parameter(\'v\', 7)\n'
+            'print(x.v)\n'
+        ),
+        'f5b.py': (
+            'from insp import Parameter\n'
+            '\n'
+            'x = Parameter(\'v\', 7)\n'
+            'print(x.v)\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'f5.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'f5.py')
+        rc2, stdout2 = _build_and_run(pkg, 'f5b.py', td)
+        py_rc2, py_stdout2 = _cpython_run(td, 'f5b.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and rc2 == 0 and py_rc2 == 0 and stdout2 == py_stdout2
+          and stdout.strip() == 'v' and stdout2.strip() == 'v')
+    if not ok:
+        print(f"  ✗ module_scoped_cross_module_struct_ctor_both_import_spellings: "
+              f"bare rc={rc} stdout={stdout!r} (CPython rc={py_rc} "
+              f"{py_stdout!r}) | from rc={rc2} stdout={stdout2!r} "
+              f"(CPython rc={py_rc2} {py_stdout2!r})")
+    return ok
+
+
+def test_module_scoped_cross_module_ctor_arg_through_a_param() -> bool:
+    """The same module-scope construction, but the object is passed to a
+    free function that calls a METHOD on it — the shape
+    `test_bare_import_sibling_struct_ctor_through_module` covers inside a
+    function body, and the one that reached the constructor-field-hint
+    pre-pass's *sibling* contract too. Both import spellings again, because
+    the missing call sites were in a collector shared by both.
+
+    Without a field-type hint the imported module's `__init__` typed `v`
+    `int64_t`, and `show` then received the boxed pointer: `v` came back as a
+    decimal address.
+    """
+    pkg = {
+        'insp.py': _LABEL_PY,
+        'f6.py': (
+            'import insp\n'
+            '\n'
+            'def show(p):\n'
+            '    return p.label()\n'
+            '\n'
+            'print(show(insp.Parameter(\'v\', 7)))\n'
+        ),
+        'f6b.py': (
+            'from insp import Parameter\n'
+            '\n'
+            'def show(p):\n'
+            '    return p.label()\n'
+            '\n'
+            'print(show(Parameter(\'v\', 7)))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'f6.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'f6.py')
+        rc2, stdout2 = _build_and_run(pkg, 'f6b.py', td)
+        py_rc2, py_stdout2 = _cpython_run(td, 'f6b.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and rc2 == 0 and py_rc2 == 0 and stdout2 == py_stdout2
+          and stdout.strip() == 'v' and stdout2.strip() == 'v')
+    if not ok:
+        print(f"  ✗ module_scoped_cross_module_ctor_arg_through_a_param: "
+              f"bare rc={rc} stdout={stdout!r} (CPython rc={py_rc} "
+              f"{py_stdout!r}) | from rc={rc2} stdout={stdout2!r} "
+              f"(CPython rc={py_rc2} {py_stdout2!r})")
+    return ok
+
+
 def test_dotted_sibling_import_qualifier_agrees() -> bool:
     """`from p.sub import tri` — a DOTTED module name — at MODULE scope, and
     again from inside a function. The mangled symbol's two halves come from
@@ -596,6 +702,8 @@ CASES = [
     test_sibling_class_constructor_field_function_scoped,
     test_bare_import_sibling_struct_ctor_through_module,
     test_bare_import_sibling_struct_field_through_module,
+    test_module_scoped_cross_module_struct_ctor_both_import_spellings,
+    test_module_scoped_cross_module_ctor_arg_through_a_param,
     test_dotted_sibling_import_qualifier_agrees,
 ]
 
