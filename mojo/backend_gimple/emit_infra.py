@@ -1201,6 +1201,34 @@ _FRESH_STRING_RETURNS = frozenset([
 ])
 
 
+def carry_callable_ret_types(gen, src: str, dst: str) -> None:
+    """Copy the three "what does this callable really return" side tables
+    from the key `src` to the key `dst`.
+
+    Every one of these tables is keyed by the NAME a value is read under, and
+    the name changes twice on the way from a lambda to a call site: the value
+    is materialized into a temp (`_lower_LambdaExpr`), bound to a target by an
+    assignment or declaration, and — for a MODULE-level target — read back
+    through a fresh temp at every use. A table entry that does not survive
+    those hops is lost, and the consumer has no other source: the
+    `mojo_fnptr_call_N` / `mojo_bound_method_call_N` helpers are the
+    homogenized `int64_t` convention (correct for the box they hand back,
+    wrong for the value inside it), so with the type missing a `lambda: False`
+    prints `0`, a `lambda: "hi"` prints its own pointer decimal and
+    `m.truthy` bound to a global prints `1`.
+
+    ONE definition, used by every hop, because the four store sites (local
+    assignment, local `var`, and the two module-global store branches) and the
+    global-read site were five separate hand-written copies of the same three
+    lines — and the two global-store copies omitted all three, which is
+    exactly the case that was broken. A copy that is forgotten is silent: the
+    program keeps running and prints a plausible wrong value with exit 0."""
+    for _tbl in (gen._callable_ret_types, gen._dict_callable_ret,
+                 gen._bound_method_ret_types):
+        if src in _tbl:
+            _tbl[dst] = _tbl[src]
+
+
 def note_fresh_result(gen, t: str) -> None:
     """A container-display lowering (`[...]`, `{...}`, a comprehension) calls
     this with the temp it is about to return: the display always builds a new

@@ -228,6 +228,67 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
                 pass
 
 
+def test_gimple_matches_cpython(name: str, mojo_src: str):
+    """Compile, run, and require the COMPILED program's stdout and exit code
+    to be byte-identical to CPython's on the same source.
+
+    Stronger than `test_gimple_stdout`, which pins an answer this file has to
+    keep in sync by hand, and the right shape for the class of bug where the
+    compiled path produces a PLAUSIBLE wrong value: a `lambda: False` called
+    through a module global printed `0`, and no fixed expectation written
+    after the bug would have said `0` was wrong — only CPython does. It also
+    cannot rot: if the compiler starts diverging, this fails.
+
+    CPython is run first and a non-zero exit or empty output from it is
+    reported as the test program's own problem, not a compiler failure —
+    otherwise a program that raises would 'pass' by matching an empty string
+    on both sides.
+    """
+    global _PASS, _FAIL, _TIMEOUT
+    exe_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py',
+                                         delete=False) as f:
+            f.write(mojo_src)
+            entry = f.name
+        try:
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                timeout=30)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr.decode('utf-8', 'replace')[:300]}) — the "
+                      f"test program itself is wrong, not the compiler")
+                _FAIL += 1
+                return
+            want_out = py.stdout
+            want_rc = py.returncode
+        finally:
+            os.unlink(entry)
+        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        got = subprocess.run([exe_path], capture_output=True, timeout=30,
+                             env=_SCRIBBLE_ENV)
+        if got.stdout == want_out and got.returncode == want_rc:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: CPython {want_out!r} exit {want_rc}, "
+                  f"compiled {got.stdout!r} exit {got.returncode}")
+            _FAIL += 1
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _TIMEOUT += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        if exe_path:
+            try:
+                os.unlink(exe_path)
+            except OSError:
+                pass
+
+
 def test_gimple_diagnostic(name: str, mojo_src: str, expected_stderr: str,
                            expected_stdout: str = None, expected_return: int = 0):
     """Assert the compiled program prints `expected_stderr` on stderr and,
@@ -1120,6 +1181,155 @@ def main():
     print(plain())
 main()
 """, "True\nFalse\nTrue\nFalse\n1.5\nhi\nFalse\n")
+
+    # The MODULE-LEVEL spelling of the test above, and the one that was broken.
+    # `gimple_callable_value_keeps_its_return_type` puts its lambdas inside
+    # `main()`, where a read of the local returns the variable's own C name and
+    # the callable's return type survives to the call site. At module scope the
+    # target is a field of this module's globals struct, so the store takes a
+    # different path from a local assignment AND every read mints a fresh temp
+    # — and all three of the "what does this callable really return" tables
+    # (`_callable_ret_types`, `_dict_callable_ret`, `_bound_method_ret_types`)
+    # were dropped at BOTH of those hops, silently. `mojo_fnptr_call_N` is the
+    # homogenized `int64_t` convention (right for the box it hands back, wrong
+    # for the value inside), so with the type missing every module-level
+    # callable printed the box:
+    #
+    #     e = lambda: False; print(e())          -> 0            (False)
+    #     e = lambda: "hi";  print(e())          -> 4330320072   (its own pointer)
+    #     d = {"k": lambda: True}; print(d["k"]()) -> 0           (True)
+    #     f = m.truthy;      print(f())          -> 1            (True)
+    #
+    # CPython-compared rather than pinned, because every answer here is the one
+    # a reader would otherwise have to take on trust: `0` looks like a
+    # plausible printing of a boolean until you see CPython print `False`.
+    test_gimple_matches_cpython("gimple_module_level_callable_keeps_its_return_type", """\
+e = lambda: False
+print(e())
+e2 = lambda x: x > 1
+print(e2(5))
+print(e2(0))
+e3 = lambda: "hi"
+print(e3())
+e4 = lambda: 1.5
+print(e4())
+e5 = lambda: 42
+print(e5())
+e6 = lambda: not False
+print(e6())
+d = {"k": lambda: True}
+print(d["k"]())
+""")
+
+    # A second hop through the same tables — a module global that holds
+    # another global's callable (`alias = e`), and a dict of callables
+    # aliased the same way. Each hop re-keys the tables on a new name, so a
+    # carry that only handled the first would still print `0` here, and a
+    # dict-of-lambdas alias additionally goes through the separate
+    # `_dict_callable_ret` table.
+    test_gimple_matches_cpython("gimple_module_level_callable_alias_keeps_its_return_type", """\
+e = lambda: False
+alias = e
+print(alias())
+d = {"k": lambda: True}
+d2 = d
+print(d2["k"]())
+""")
+
+    # ── `with` teardown: the `as` target is optional, and so is running
+    # ── __exit__ at all (bugs/CODEGEN_with_no_as_target_drops_exit.md).
+
+    # `with C():` with NO `as` target used to drop the teardown entirely. The
+    # five index-parallel per-item lists `_gen_stmt_WithStmt` feeds
+    # `_with_emit_exits` from were appended INSIDE
+    # `if item.alias is not None:`, so a no-`as` item appended nothing:
+    # `has_exit` stayed False, no `setjmp`-protected region was emitted, and
+    # the exit walk iterated an empty list. `__enter__` ran, the body ran, and
+    # `__exit__` never did — with exit 0, on every `with` over a class that has
+    # one.
+    #
+    # The interpreter is the reference and gets this right, and
+    # `test_runtime_diff.py`'s A/B engine comparison CANNOT see it even in
+    # principle: the two engines differ on the OUTPUT, and here the output can
+    # be byte-identical (the body worked) while the teardown never ran. So the
+    # only shape that catches it is one where `__exit__` PRINTS — which is what
+    # both spellings below do, each on the same class so the only difference
+    # between the two halves is the `as`.
+    #
+    # Found on a lock (`build_stdlib_dylib`'s publish lock, commit ccd83a2b):
+    # a `with` on a cross-process lock object that never releases it wedges
+    # every other process wanting the same lock for the life of the tree, so
+    # this is not only a per-iteration leak.
+    test_gimple_matches_cpython("gimple_with_no_as_target_still_calls_exit", """\
+class Ctx:
+    def __init__(self, n):
+        self.n = n
+    def __enter__(self):
+        print("enter", self.n)
+        return self.n * 10
+    def __exit__(self, a, b, c):
+        print("exit", self.n)
+
+def with_alias():
+    with Ctx(1) as v:
+        print("as", v)
+
+def without_alias():
+    with Ctx(2):
+        print("noas")
+
+with_alias()
+without_alias()
+""")
+
+    # The exceptional and early-exit paths, which are separate emission sites
+    # and separate bugs — all silent, all with exit 0:
+    #   * a `raise` in the body has to unwind through the bb_exc arm, which
+    #     emits the exit again, so `__exit__` must appear exactly ONCE (twice
+    #     would be a different wrong answer, and a visible one);
+    #   * a `return` out of the body used to emit the teardown AFTER the
+    #     `return`, i.e. the cleanup was itself unreachable — same for the
+    #     `continue`/`break` arm, which popped the exception stack and emitted
+    #     nothing else.
+    # Those two leaked on the `as` spelling too, so they are pre-existing and
+    # independent of the no-`as` fix; they are here because a no-`as` `with`
+    # only reaches the setjmp region at all now that it registers.
+    test_gimple_matches_cpython("gimple_with_teardown_on_raise_return_and_loop_exit", """\
+class Ctx:
+    def __init__(self, n):
+        self.n = n
+    def __enter__(self):
+        print("enter", self.n)
+        return self.n
+    def __exit__(self, a, b, c):
+        print("exit", self.n)
+
+def raising():
+    try:
+        with Ctx(1):
+            print("raising")
+            raise ValueError("boom")
+    except ValueError:
+        print("caught")
+
+def returning():
+    with Ctx(2):
+        print("returning")
+        return 7
+
+def looping():
+    for i in range(3):
+        with Ctx(3 + i):
+            print("loop", i)
+            if i == 1:
+                continue
+            if i == 2:
+                break
+
+raising()
+print("ret", returning())
+looping()
+""")
 
     test_gimple_stdout("gimple_list_sort_method_in_place", """\
 def main():

@@ -38,6 +38,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
+import mojo.backend_gimple.emit_infra as ginf
 
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
@@ -621,6 +622,19 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             # [1, 8]]`. Mirrors the _dict_nested_val_types copy just above.
             if name in gen._nested_elem_types:
                 gen._nested_elem_types[t] = gen._nested_elem_types[name]
+        # The CALLABLE side tables, same hop and same reason as the three just
+        # above — see `ginf.carry_callable_ret_types`'s docstring for why a
+        # module-level callable lost what it returns. Reading a global mints a
+        # FRESH temp, and `_lower_fnptr_call_value` keys its lookup on the C
+        # expression it was handed, not on the Mojo name, so without this copy
+        # every module-level callable printed the homogenized `int64_t` box:
+        #     e = lambda: False;  print(e())  ->  0         (False)
+        #     d = {"k": lambda: True}; print(d["k"]())  ->  0  (True)
+        #     f = m.truthy;      print(f())  ->  1         (True)
+        # while the identical spelling inside a `def` was already right — a
+        # local read returns the variable's own C name, which is the whole
+        # difference between the two.
+        ginf.carry_callable_ret_types(gen, name, t)
         # Resolve the C decl type through the same own-overlay helper the
         # module-globals struct field freeze (gen_module_impl's
         # `_declared_globals` loop) and the assignment-site coercion
