@@ -209,6 +209,53 @@ CASES = [
      "    printf(\"r=%d back=%d\", r, 1 if is_less(b, a) else 0)\n"
      "    return 7\n",
      "r=1 back=0"),
+    # ── what a SUBSCRIPT yields ──
+    #
+    # A container's ELEMENT kind is a fact the literal states and the use site
+    # was not asking.  `print()` is where it is first demanded, because `print`
+    # is the one builtin that must decide between two renderings before it emits
+    # anything, and refusing it was the visible half of a gap that also made
+    # `printf`'s classification and every other pre-emit decision unanswerable
+    # for the same expression.
+    #
+    # A DICT is the case that was missing, and the reason is visible in the kind
+    # table rather than in the emitter: a list literal classified as
+    # `list:<elem>` and a dict literal as a bare `list`, so `list_elem_kind` had
+    # nothing to hand a subscript of one and every use site had to refuse.
+    # Measured before the fix, on both architectures, for all three of these:
+    #
+    #     build: print() cannot tell whether SubscriptExpr is a string or a
+    #     number on the formal arm64 path
+    ("a_local_dict_element_prints",
+     "def main(n):\n"
+     "    var d = {\"a\": 10, \"b\": 20}\n"
+     "    print(\"v:\", d[\"a\"])\n"
+     "    return 0\n",
+     "v: 10\n"),
+    # The SAME literal at MODULE level, which is a different reader of it: the
+    # kind comes from the `__DATA` slot's initializer rather than from the
+    # function's flow.  One spelling working and the other refusing would make
+    # the answer depend on where a name was spelled, which is the one thing a
+    # value model exists to prevent.
+    ("a_module_global_dict_element_prints",
+     "D = {\"a\": 10, \"b\": 20}\n"
+     "\n"
+     "def main(n):\n"
+     "    print(\"v:\", D[\"a\"])\n"
+     "    return 0\n",
+     "v: 10\n"),
+    # And the STRING row, because the two kinds are what `print` is choosing
+    # between and a fix that only answered the integer one would have narrowed
+    # a refusal rather than removed it.  The element is a `char *` to interned
+    # bytes (`GlobalDataImage.string_cells`), so the `%s` conversion is the
+    # whole of what the word is.
+    ("a_module_global_list_of_strings_element_prints",
+     "L = [\"x\", \"y\"]\n"
+     "\n"
+     "def main(n):\n"
+     "    print(\"v:\", L[0])\n"
+     "    return 0\n",
+     "v: x\n"),
 ]
 
 # ── the tuple-store target shapes ──
@@ -641,6 +688,20 @@ REFUSALS = [
      "    printf(\"lt=%d\", 1 if p < q else 0)\n"
      "    return 0\n",
      "orders the ADDRESS of a Pair FRAME"),
+    # A DICT WHOSE VALUES DISAGREE, and it is here rather than only in the
+    # passing cases because it is the SAFETY PROPERTY of the element kind they
+    # now carry: `{"a": 10, "b": "text"}` states two kinds, and a kind table
+    # that picked either one would print an interned address as a number or a
+    # number as text — the failure mode the whole element-kind work is arranged
+    # to prevent.  `run_refusal` is the instrument, because the defect would be
+    # SHARED by the two backends (they read one kind table) and so cannot be
+    # seen by requiring them to agree.
+    ("a_dict_whose_values_disagree_is_refused",
+     "def main(n):\n"
+     "    var d = {\"a\": 10, \"b\": \"text\"}\n"
+     "    print(\"v:\", d[\"a\"])\n"
+     "    return 0\n",
+     "cannot tell whether SubscriptExpr"),
 ]
 
 

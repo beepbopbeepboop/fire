@@ -9590,6 +9590,48 @@ def _kind_of_elements(elems) -> str | None:
     return kinds.pop() if len(kinds) == 1 else None
 
 
+def container_literal_elem_kind(node) -> str | None:
+    """What a subscript of the container LITERAL `node` yields, or None.
+
+    The one reader of "what do this container's elements hold", asked of the
+    initializer that states it, and it is asked in two places that used to
+    disagree — which is why it is one function rather than two rules:
+
+      * a dict literal bound to a LOCAL (`d = {"a": 10}`), through
+        `ValueKinds.kind_of`, and
+      * a container literal bound at MODULE level (`D = {"a": 10}`), through
+        `global_slot_kind`, whose slot records the same initializer.
+
+    Only a DICT is a new answer. A list/tuple/set literal already classified by
+    element (`list_kind(_kind_of_elements(...))`), and a dict did not — it
+    classified as a bare `LIST_PREFIX`, so `list_elem_kind` had nothing to hand
+    back and every use site that must decide before emitting refused. `print()`
+    is the one those programs meet first:
+
+        d = {"a": 10, "b": 20}
+        print("Value of a:", d["a"])   # -> print() cannot tell whether
+                                       #    SubscriptExpr is a string or a number
+
+    The VALUES and not the keys, because a dict blob is `[npairs][k0][v0]…` and
+    a subscript of it is a key SCAN that leaves the value in hand
+    (`arm64_codegen._emit_dict_lookup_addr`); the kind asked for is therefore the
+    value's, and `_kind_of_elements` over the keys would claim a string element
+    where the word read out is a number.
+
+    `_kind_of_simple` underwrites on purpose: it classifies a LITERAL, so
+    `{i: 100 + i for i in range(3)}[2]` stays undecided rather than guessing
+    from the first operand of an arithmetic form. Unanimity is the other half
+    of the safety argument — a dict whose values disagree claims nothing, which
+    is what keeps this from being a way to print one of two kinds as the other.
+    """
+    if isinstance(node, F.DictExpr):
+        values = [p[1] for p in (node.pairs or []) if len(p) >= 2]
+        return _kind_of_elements(values)
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return _kind_of_elements(node.elements or [])
+    return None
+
+
 def _kind_of_simple(e) -> str | None:
     """The kind of an expression that needs nothing but itself to classify."""
     if isinstance(e, F.StringLiteral):
@@ -10008,10 +10050,17 @@ class ValueKinds:
         if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
             return list_kind(_kind_of_elements(e.elements))
         if isinstance(e, F.DictExpr):
-            return LIST_PREFIX
+            # The VALUES, because that is what a subscript of a pair blob
+            # yields — the same element the layout interleaves them in
+            # (`_emit_dict`), read here by the one function every container
+            # literal's element kind comes from.
+            return list_kind(container_literal_elem_kind(e))
         if isinstance(e, F.Comprehension):
             if e.kind == "dict":
-                return LIST_PREFIX
+                # `e.element` is the dict comprehension's VALUE (`e.key` is the
+                # key), so this is the same arm as the `DictExpr` above and not
+                # the key/value unification a LIST comprehension does below.
+                return list_kind(_kind_of_simple(e.element))
             ek = _kind_of_simple(e.element)
             if e.key is not None:
                 ek = _unify(ek, _kind_of_simple(e.key))
@@ -19554,14 +19603,31 @@ def global_slot_kind(name: str):
     everywhere else (`ValueKinds.kind_of`), and this path's dict is a pair blob
     with a count in its first word, which is all `len` needs. The dict-vs-
     sequence distinction that a SUBSCRIPT needs is not a kind question and is
-    `global_slot_is_dict`'s."""
+    `global_slot_is_dict`'s.
+
+    A blob's kind carries its ELEMENT kind, read from the initializer that
+    stated it (`container_literal_elem_kind`), and that is the same answer
+    `ValueKinds.kind_of` gives the same literal bound to a local — so
+    `D = {"a": 10}` at module level and `d = {"a": 10}` inside a function are
+    one question with one answer, and `print(d["a"])` stops being a refusal in
+    one spelling only. The slot's own `site` is the initializer statement, which
+    is what makes the read a question about the source rather than about the
+    words the linker happened to lay out.
+
+    ONLY a slot whose initializer is a literal says this. A blob written by a
+    function (`global L; L[0] = 5` on a list of strings) has an initializer
+    that states no element kind, and `container_literal_elem_kind` answers None
+    for it, which leaves the bare `LIST_PREFIX` — an honest "a container, and
+    nothing here says what is in it" rather than a claim about a word that is
+    written at run time."""
     slot = module_slot(name)
     if slot is None:
         return None
     if slot.init[0] == "str":
         return STR_KIND
     if slot.init[0] == "blob":
-        return LIST_PREFIX
+        elem = container_literal_elem_kind(getattr(slot.site, "value", None))
+        return list_kind(elem)
     return None
 
 
