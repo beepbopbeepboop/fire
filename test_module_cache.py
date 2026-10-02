@@ -990,9 +990,23 @@ def test_sb1_mojo_build_cli_wrapper_modules(wd):
             f.write(src)
 
     exe = os.path.join(proj, 'main')
-    r = subprocess.run(
-        [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=120)
+    # A BUILD, not a run, and the timeout is the file's own exec budget rather
+    # than a bare literal: this call escaped as an uncaught TimeoutExpired and
+    # took the whole file with it, so every check after this one was silently
+    # not run — which is what happened in a `modcache` run alongside four other
+    # suites at -j18 (2026-10-02, 429 s of wall clock, this build at 120.0 s).
+    # A timeout here is LOAD, not a wrong answer, and it has to read as a
+    # failed check rather than as the end of the file — the same reasoning, and
+    # the same `_TIMED_OUT_PREFIX`, as `_run` above.
+    try:
+        r = subprocess.run(
+            [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
+            cwd=proj, capture_output=True, text=True,
+            timeout=EXE_TIMEOUT_S * 2)
+    except subprocess.TimeoutExpired as e:
+        r = subprocess.CompletedProcess(
+            e.cmd, -1, stdout='', stderr=f'{_TIMED_OUT_PREFIX} after '
+            f'{EXE_TIMEOUT_S * 2}s building main.mojo')
     check("SB-1 (fire.py build CLI): two sibling modules' same-named free "
           "function build without a redefinition error",
           'redefinition of' not in r.stderr and 'redefinition of' not in r.stdout,
