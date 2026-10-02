@@ -81,6 +81,8 @@ import subprocess
 import sys
 import tempfile
 
+import test_formal_dylib as D        # noqa: E402  (shared two-backend runner)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 900
@@ -468,6 +470,15 @@ def prod_source():
 # ── build, run, compare ─────────────────────────────────────────────────────
 
 def build(src, name, arch, tmpdir):
+    """`fire.py build --formal` of one program on one architecture.
+
+    Only `group_absent` needs this — the other groups go through
+    `both_ways`, which is the shared two-architecture runner in
+    `test_formal_dylib.py` and which builds AND runs and compares the two
+    architectures with each other. Keeping the single-architecture build here as
+    well is deliberate: `absent` asserts that a build FAILS, so there is no
+    image to run and it is checking a different thing from every other group.
+    """
     path = os.path.join(tmpdir, name + ".mojo")
     with open(path, "w") as f:
         f.write(src)
@@ -479,15 +490,6 @@ def build(src, name, arch, tmpdir):
     return r, out
 
 
-def run(out, arch):
-    argv = [out]
-    if arch == "x86_64" and sys.platform == "darwin":
-        argv = ["arch", "-x86_64", out]        # Rosetta 2
-    r = subprocess.run(argv, capture_output=True, timeout=RUN_TIMEOUT, cwd=HERE)
-    return r.returncode, r.stdout.decode("latin-1"), \
-        r.stderr.decode("utf-8", "replace")
-
-
 class Failure(Exception):
     pass
 
@@ -497,50 +499,41 @@ def check(cond, msg):
         raise Failure(msg)
 
 
-def both_ways(archs, tmpdir, name, src, fn, verbose, cross=None):
-    """Build and run `src` on every arch, and hand `fn(arch, records)` each.
+def backends():
+    """The architectures this host can run a formal image on.
 
-    `fn` raises on a disagreement; this is the whole of the two-architecture
-    machinery, so no group can accidentally run on one architecture, and no
-    group can skip the cross-architecture comparison by forgetting it.
-
-    `cross` is an OPTIONAL filter applied to each architecture's records before
-    they are compared with each other, and it exists for one measured reason:
-    the `consts` group's PRINTED doubles cannot be compared across
-    architectures, because a `double` is `XMM0` on x86-64 and `d0` on arm64
-    and nothing on this path moves a word between them. The group's own `fn`
-    already declines to compare those records against CPython on x86-64; this is
-    the matching half, so the two exclusions are in one place and neither of
-    them can be forgotten on its own. It is a filter rather than a flag because
-    "which records are architecture-independent" is a property of the RECORDS
-    and belongs next to the parsing that produced them.
+    `test_formal_dylib.py`'s `rosetta()` is the shared spelling of "and what to
+    print if it cannot", and it is shared because three hostmod suites now ask
+    the same question and three copies of it would be three places to keep true.
     """
-    got = {}
-    for arch in archs:
-        r, out = build(src, name, arch, tmpdir)
-        if r.returncode != 0:
-            raise Failure(f"[{arch}] build failed: "
-                          f"{(r.stderr or r.stdout).strip()[-400:]}")
-        rc, so, se = run(out, arch)
-        if rc != 0:
-            raise Failure(f"[{arch}] image exited {rc}: {se.strip()[:200]!r}")
-        recs = [rec for rec in so.split(REC) if rec]
-        fn(arch, recs)
-        got[arch] = recs
-    if len(got) == 2:
-        a, b = archs
-        keep = cross or (lambda recs: recs)
-        ra, rb = keep(got[a]), keep(got[b])
-        diff = [(x, y) for x, y in zip(ra, rb) if x != y]
-        check(not diff,
-              f"{len(diff)} of {len(ra)} records differ between {a} and {b}; "
-              f"math.mojo is pure integer work with no libc call at all, so a "
-              f"disagreement here is a two-architecture lowering bug with "
-              f"nothing in the module to blame. First three:\n      " +
-              "\n      ".join(f"{a} {x!r}, {b} {y!r}" for x, y in diff[:3]))
+    if not D.host_machine():
+        return []
+    ok, why = D.rosetta()
+    if not ok:
+        print(f"note: x86-64 half SKIPPED — {why}")
+        return ["arm64"]
+    return list(D.BACKENDS)
+
+
+def both_ways(archs, tmpdir, name, src, fn, verbose, cross=None):
+    """Build and run on every architecture in `archs`, and compare them.
+
+    A thin wrapper over `test_formal_dylib.py`'s `build_and_run`, which is where
+    that machinery lives for every host module's suite. The wrapper exists for
+    two reasons and neither is convenience: the groups here want a NAME and a
+    VERBOSE flag rather than a backends tuple, and `consts` needs the `cross`
+    filter that `build_and_run` takes. What the wrapper does NOT do is decide
+    anything — the cross-architecture comparison, the record split and the "the
+    image crashed" report all live in the shared runner, so a second copy of
+    them could not drift from the first without being visible.
+    """
     if verbose:
-        print(f"    built and run on {' and '.join(archs)}")
-    return got[a]
+        print(f"    building and running on {' and '.join(archs)}")
+    try:
+        return D.build_and_run(src, name, tmpdir, fn, backends=archs,
+                               cross=cross)
+    except D.Failure as e:
+        raise Failure(str(e)) from None
 
 
 # ── the groups ──────────────────────────────────────────────────────────────
@@ -910,18 +903,6 @@ GROUPS = {
 }
 
 
-def x86_supported():
-    """Whether this host can run an x86-64 image, and why not if it cannot.
-
-    Rosetta 2 on Apple Silicon; anything else is skipped rather than failed,
-    with the reason printed — the same rule `test_formal_os_backing.py` follows.
-    """
-    if platform.machine() in ("arm64", "aarch64"):
-        return True, ""
-    return False, (f"host is {platform.machine()}; an x86-64 image needs "
-                   f"Rosetta 2, which only Apple Silicon has")
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -937,10 +918,7 @@ def main():
             print(f"ERROR: unknown group {nm!r}; known: {sorted(GROUPS)}",
                   file=sys.stderr)
             return 2
-    ok86, why86 = x86_supported()
-    archs = ["arm64"] + (["x86_64"] if ok86 else [])
-    if not ok86:
-        print(f"note: x86-64 half SKIPPED — {why86}")
+    archs = backends()
     failed = []
     with tempfile.TemporaryDirectory() as tmpdir:
         for nm in names:

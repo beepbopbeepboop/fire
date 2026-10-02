@@ -1,7 +1,7 @@
 """The C library this module needs, and nothing else.
 
-Every call into libSystem that `os`, `os.path` and `platform` make is spelled
-here, once, and nowhere else. Three reasons, in the order they mattered while
+Every call into libSystem that `os`, `os.path`, `platform` and `shutil` make is
+spelled here, once, and nowhere else. Three reasons, in the order they mattered while
 writing it.
 
   `platform` is here for the same reason the other two are, and it is worth
@@ -28,6 +28,18 @@ writing it.
    question with a short, complete answer, and it is the answer in this file.
    Every name below was measured to bind on this target before it was relied
    on.
+
+   `shutil` is in the list because it is the one module in `formal/hostmods/`
+   that COPIES BYTES, and the stdio calls are how: `fopen`/`fwrite`/`fread`/
+   `fclose` rather than the three-argument `open`/`write`/`read`, because
+   `fs_open_ro` below says in so many words that this path lowers `open` itself
+   and refuses the C library's own spelling of it — there is no `open(p, flags,
+   mode)` to call. A `FILE *` is a POINTER, so it is a word, and `fopen` takes a
+   MODE STRING, which is the one thing this path does have a literal spelling
+   for. `fs_read`'s docstring says "this path has no `FILE`", which is about
+   the struct and not about the pointer and is worth keeping in mind when
+   reading the two against each other: there is no `FILE` to declare a field
+   on, and every `FILE *` is one word, which is all a descriptor needs to be.
 
 3. THE STRING PRIMITIVES ARE NOT STRING FEATURES. Concatenation, `strip`,
    `replace` and `split` are refused on this path because a string is a bare
@@ -353,7 +365,21 @@ def str_rstrip_len(s, m) -> int:
 
 
 def str_chr_from(s, i, c) -> str:
-    """Pointer to the first `c` at or after `s[i]`, or 0."""
+    """Pointer to the first `c` at or after `s[i]`, or 0.
+
+    **`c` IS A CHARACTER CODE AND NOT A STRING**, which the signature does not
+    say and which cost an afternoon the first time it was called from another
+    module: `strchr`'s second parameter is an `int`, so `str_chr_from(s, 0, "/")`
+    hands it a `char *` as a character and it finds nothing, EVER — every input
+    answers 0. The one caller in this tree, `os/path/__init__.mojo`'s
+    `normpath`, passes `SLASH = 47` for exactly this reason, and `47` next to
+    `str_chr_from` in that file is the documentation. This docstring is here so
+    that the next reader does not have to find it.
+
+    So the whole of `shutil`'s `PATH` splitting spells `":"` as 58 and `"/"` as
+    47, and `formal/hostmods/shutil.mojo`'s `_has_slash` says why at its own
+    definition.
+    """
     return strchr(s + i, c)
 
 
@@ -449,6 +475,126 @@ def fs_read(fd, buf, n) -> int:
     The caller loops.
     """
     return read(fd, buf, n)
+
+
+def fs_fopen(p, mode) -> int:
+    """`fopen(p, mode)`: a `FILE *`, or 0.
+
+    THE WRITING PATH, and it goes through the stdio calls rather than through
+    `open(2)` for the reason this file's header gives: `open` on this path is a
+    LOWERED BUILTIN that takes a mode string and refuses any other spelling, so
+    `O_WRONLY | O_CREAT | O_TRUNC` is not available even though libSystem has
+    the function that takes it. `fopen` takes the same information as the
+    spelling this path has, so "wb" here means exactly what `O_WRONLY |
+    O_CREAT | O_TRUNC, 0666` means — with the one difference that matters and is
+    CPython's own: `fopen`'s mode gives NO PERMISSIONS argument, so the file is
+    created with the umask's default (0644 with the usual umask 022), and
+    `shutil.copyfile` therefore produces the same mode CPython's
+    `shutil.copyfile` produces only because CPython also does not chmod. That
+    is measured by `test_formal_shutil.py`, which copies a file both ways and
+    compares the resulting `st_mode`.
+
+    The `FILE *` is carried as an `int`, which is the pointer value model and is
+    what every pointer here is (`fs_readdir`'s docstring says the same).
+    """
+    return fopen(p, mode)
+
+
+def fs_fwrite(f, buf, n) -> int:
+    """`fwrite(buf, 1, n, f)`: items written, which is `n` or fewer.
+
+    The size argument is `1` so the return value is a BYTE COUNT and compares
+    with what the caller asked for; `fwrite(buf, n, 1, f)` would return 0 or 1
+    and say nothing about a short write.
+    """
+    return fwrite(buf, 1, n, f)
+
+
+def fs_fread(f, buf, n) -> int:
+    """`fread(buf, 1, n, f)`: items read — bytes, 0 at end of file.
+
+    The complement of `fs_fwrite`, and the reason `shutil` needs it: `fs_read`
+    works on a bare DESCRIPTOR and this path cannot make a bare descriptor for
+    writing, so the copy loop reads and writes through stdio on both sides.
+    Reading and writing through different interfaces would work too, and would
+    be one function fewer — but it would leave the caller mixing a descriptor
+    and a `FILE *` for the same file, which is the kind of asymmetry that costs
+    an afternoon later.
+    """
+    return fread(buf, 1, n, f)
+
+
+def fs_fclose(f) -> int:
+    """`fclose(f)`: 0 on success. FlUSHES, which is the whole reason stdio is
+    used at all: a `FILE *`'s buffer reaches the filesystem at `fclose`, so a
+    copy that never closes leaves an empty destination and a zero exit status.
+    """
+    return fclose(f)
+
+
+def fs_utimes(p, asec, ausec, msec, musec) -> int:
+    """`utimes(p, {atime, mtime})`: 0 on success, -1 on failure.
+
+    THE `struct timeval` IS BUILT HERE AND NOT BY THE CALLER, because its
+    layout is the ABI's rather than the source's: two `{ time_t tv_sec;
+    suseconds_t tv_usec }`, eight bytes each on a 64-bit target, 32 bytes in
+    total, and a caller that assembled it would be writing four offsets it has
+    no way to check. Same rule as `struct stat` above, for the same reason, and
+    for the same reason the offsets are written out here rather than trusted:
+    the seconds fields are at 0 and 16 and the microsecond fields at 8 and 24.
+
+    `ausec` and `musec` are separate PARAMETERS rather than one nanosecond
+    number because `struct stat`'s time fields are nanoseconds
+    (`st_mtimespec.tv_nsec` at offset 56) while `timeval`'s are microseconds,
+    and a caller reading a stat and setting a timeval has to divide. Doing the
+    division in the caller is honest about where it happens; doing it here would
+    hide a rounding decision inside a wrapper.
+    """
+    var tv: Pointer[UInt8] = malloc(32)
+    memset(tv, 0, 32)
+    _put_time(tv, 0, asec, ausec)
+    _put_time(tv, 16, msec, musec)
+    var rc = utimes(p, tv)
+    free(tv)
+    return rc
+
+
+def _put_time(tv: Pointer[UInt8], at, sec, usec) -> int:
+    """Seconds at `tv + at` and microseconds at `tv + at + 8`, little-endian.
+
+    One byte at a time through `le64` for the reason every other reader in this
+    file is: the source declares no struct, so a load of the field's declared
+    width is what C does and a wider read would be a guess about alignment.
+    """
+    _put_le64(tv + at, sec)
+    _put_le64(tv + at + 8, usec)
+    return 0
+
+
+def _put_le64(tv: Pointer[UInt8], v) -> int:
+    """Little-endian 64-bit STORE of `v` at `tv`, byte by byte.
+
+    THE STORE COUNTERPART of `le64`, and it exists because this file had a
+    reader for every field it wanted and no writer for any of them. A caller
+    cannot write into a `struct` it does not declare any more than it can read
+    one, and this is the same constraint on the other side: `memset` a whole
+    buffer and then set two words in it. It is eight one-byte `memset`s, which
+    is what `le64`'s reader already costs.
+
+    `v >> 8` and `v >> 16` and so on are ARITHMETIC SHIFTS on a 64-bit word, so
+    the byte extracted is the one the platform's `little-endian` means. A
+    big-endian target would need `le64`'s reader mirrored here, and this file's
+    `be64` already says the same thing about its own reader.
+    """
+    memset(tv, v & 255, 1)
+    memset(tv + 1, (v >> 8) & 255, 1)
+    memset(tv + 2, (v >> 16) & 255, 1)
+    memset(tv + 3, (v >> 24) & 255, 1)
+    memset(tv + 4, (v >> 32) & 255, 1)
+    memset(tv + 5, (v >> 40) & 255, 1)
+    memset(tv + 6, (v >> 48) & 255, 1)
+    memset(tv + 7, (v >> 56) & 255, 1)
+    return 0
 
 
 def fs_mkdir(p, mode) -> int:

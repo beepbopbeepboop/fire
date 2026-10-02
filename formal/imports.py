@@ -122,8 +122,13 @@ HOST_UNREACHABLE = frozenset((
     "traceback", "gc", "atexit", "signal", "warnings", "dis",
     # Process-wide reporting machinery, which is a host object by construction.
     "logging", "unittest", "unittest.mock",
-    # A terminal, or a writable filesystem this target does not get.
-    "getpass", "webbrowser", "tempfile", "shutil",
+    # A terminal. `tempfile` is here for the `TMPDIR`-derived half of that
+    # sentence rather than the terminal half, and `shutil` WAS here too — under
+    # "a writable filesystem this target does not get", which was FALSE and is
+    # now `formal/hostmods/shutil.mojo`; `get_terminal_size` is the half that
+    # survived the removal and is absent in that module with the reason at its
+    # own definition.
+    "getpass", "webbrowser", "tempfile",
     # A library outside libSystem, so linking it would contradict the premise
     # that a formal image links libSystem and nothing else.
     "zlib", "gzip", "locale",
@@ -329,6 +334,28 @@ HOST_MODELLED = frozenset((
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
     "weakref", "pprint", "reprlib", "pickle",
+    #   `shutil`  — `formal/hostmods/shutil.mojo`, checked against CPython's own
+    #     `shutil` on a real filesystem by `test_formal_shutil.py`: `copyfile`
+    #     over a source larger than its own copy buffer, `copy`/`copy2`'s
+    #     one observable difference (the mode and not the time, and both),
+    #     `copymode`, `copystat`, `move`, `rmtree`, `copytree` and `which` over
+    #     a `PATH` corpus chosen for its branches. It was in `HOST_UNREACHABLE`,
+    #     not here, so its removal is a REVERSAL of a permanent-fact claim and
+    #     the reason is worth stating: that claim said "a writable filesystem
+    #     this target does not get", and `formal/hostmods/os/__init__.mojo` has
+    #     had `mkdir`, `makedirs`, `remove`, `rmdir`, `rename`, `replace` and
+    #     `chmod` for a while — `test_formal_os.py` runs 75 filesystem
+    #     operations against the real filesystem — so the filesystem half was
+    #     false and only the TERMINAL half is not. What it adds to make the copy
+    #     possible is `fopen`/`fwrite`/`fread`/`fclose` and `utimes` in
+    #     `formal/hostmods/os/_syscalls.mojo`, because this path lowers `open`
+    #     itself and refuses the C library's three-argument spelling of it.
+    #     What it cannot answer is at the top of that file: `disk_usage` is a
+    #     three-tuple (`bugs/FORMAL_time_struct_shaped_answers.md`),
+    #     `get_terminal_size` is the terminal that IS unavailable, `move` has no
+    #     cross-device fallback because `errno` cannot be bound
+    #     (`__error` has a leading underscore), and the archives are a library
+    #     with a struct layout nobody in the sweep asks for.
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same
