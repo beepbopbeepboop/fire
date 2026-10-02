@@ -3375,6 +3375,36 @@ class X86_64Codegen:
         raise CodegenError(M.frame_container_operand_refusal(
             op, M.spelled(obj), [st.name for st in cands]))
 
+    def _refuse_non_container_operand(self, op: str, obj) -> None:
+        """Raise if `obj` is a plain WORD this function bound to an integer.
+
+        The same third arm of the container family as arm64's, asked at the
+        same choke point and for the same reason: `a = 5` is neither a FRAME
+        ADDRESS nor a `char *`, so nothing refused it, the blob walk read a
+        count out of the integer and computed an element address of `5 + 8`.
+        Measured on BOTH architectures, `a[0] = 1` builds, links and dies of
+        SIGSEGV at run time with the build green. The shared text is
+        `model.non_container_subscript_refusal`, so the two architectures
+        cannot describe one construct differently — and cannot disagree about
+        WHICH bases qualify, which is the half that is a language question
+        rather than a wording one.
+
+        BARE NAME ONLY, for the reason `_refuse_frame_container_operand` above
+        gives, and a PARAMETER is deliberately not this case: `is_bound_in_the
+        _body` asks where the binding came from, because an unannotated
+        parameter is seeded to INT_KIND and every container-taking function in
+        the corpus has one.
+        """
+        if not isinstance(obj, F.IdentExpr):
+            return
+        name = obj.name
+        if not self._vkinds.is_bound_in_the_body(name):
+            return
+        if self._expr_str_kind(obj) != M.INT_KIND:
+            return
+        raise CodegenError(M.non_container_element_refusal(
+            op, M.spelled(obj), self.func_name or "<module>"))
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
 
@@ -3393,6 +3423,7 @@ class X86_64Codegen:
         confidently wrong. `model.multi_index_refusal_for` is the shared text,
         so the two cannot drift again."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        self._refuse_non_container_operand("a subscript", e.obj)
         self._sub_width = 8
         if M.is_external_call_template(e):
             # The twin of arm64's check, and the same reasoning: `M.iter_nodes`
@@ -3704,6 +3735,7 @@ class X86_64Codegen:
         # field as the count — see `model.frame_container_operand_refusal` for
         # the measurement, which is a wrong answer rather than a crash.
         self._refuse_frame_container_operand("a membership test", right)
+        self._refuse_non_container_operand("a membership test", right)
         self._emit_expr(left)
         self._push_slot(Reg.RAX)                   # needle
         self._emit_expr(right)
@@ -3765,6 +3797,7 @@ class X86_64Codegen:
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_non_container_operand("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
             from mojo.middle.boundnames import _lbn_target_names
             tnames = _lbn_target_names(stmt.target) \
@@ -4945,6 +4978,7 @@ class X86_64Codegen:
         (exit 139). `model.string_slice_refusal` holds the message and the
         argument for lowering the suffix case later."""
         self._refuse_frame_container_operand("a slice", obj)
+        self._refuse_non_container_operand("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))
         if sreason is not None:

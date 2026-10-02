@@ -3019,6 +3019,68 @@ def frame_container_operand_refusal(op: str, spelled: str, struct_names):
         f"it is the only reading there is")
 
 
+def non_container_element_refusal(op: str, spelled: str,
+                                  function: str) -> str:
+    """Why an ELEMENT of a value that is not a container is refused. A refusal.
+
+    The third arm of the family `frame_container_operand_refusal` and
+    `string_iteration_refusal` belong to, and the only one whose operand is an
+    ordinary WORD: the other two are a frame address and a `char *`, both of
+    which the analysis can name, while `a = 5` is neither and so matched no arm
+    of it. Every container lowering reads eight bytes at offset 0 of its base
+    and calls the result a COUNT, then reads or writes at `base + 8 + 8k` — so
+    for an integer the address is the integer:
+
+        def main(n: Int) -> Int:
+            var a = 5
+            a[0] = 1
+            printf("a=%d", a)
+
+    which stores at address 5. Measured on BOTH architectures: the build is
+    green and the image dies of SIGSEGV, exit 139. The read and the slice of the
+    same base fault the same way, which is why this is asked from the emitters'
+    subscript AND slice choke points rather than from the store alone. That is
+    the whole of the badness — a program that compiles, links, runs, and faults
+    on its fifth statement, which is the class of defect this backend's refusal
+    discipline exists to convert into a message, and the class
+    `frame_container_operand_refusal` was written for.
+
+    **What is refused, and what is deliberately not.** A base that a statement
+    of THIS function bound to something whose kind is an integer. A parameter
+    is not this case, and the reason is the shape of what is known rather than
+    a politeness toward the corpus: `ValueKinds` seeds an unannotated parameter
+    to `INT_KIND` because a word arriving from a caller is a word, so
+    `def at(xs, i): return xs[i]` — which builds, answers, and is what every
+    container-taking function in the corpus looks like — has a base whose kind
+    says "integer" and is not one. `ValueKinds.is_bound_in_the_body` is what
+    separates the two, and both backends ask it at their choke points so a
+    read, a store and an augmented assignment all get this answer and the two
+    architectures cannot disagree about which bases qualify.
+
+    `op` is the only thing that varies between those call sites — `a subscript`,
+    `a slice` — and it is a parameter rather than a constant so the message says
+    which of them the reader is looking at, for the same reason
+    `frame_container_operand_refusal` takes one.
+    """
+    return (
+        f"{op} of `{spelled}` asks for a container element, and `{spelled}` "
+        f"is a value this function bound to an integer. Every container "
+        f"lowering starts by reading eight bytes at offset 0 of its base and "
+        f"calling the result a COUNT — that is the blob's header word — and "
+        f"then reads or writes at `base + 8 + 8k`, so the element address "
+        f"here is the integer itself plus 8. Measured on BOTH architectures, "
+        f"this builds, links, and then dies of SIGSEGV at run time with the "
+        f"build green, because it reads or stores through a number rather than "
+        f"through an address into anything. Refused here rather than emitted: "
+        f"an integer is the one kind of word on this path whose container "
+        f"reading is not merely wrong but unmapped. What the same source can "
+        f"do instead: index a list or tuple you built (`xs[i]` over "
+        f"`[1, 2, 3]`), or take the container as a PARAMETER of {function}, "
+        f"where the caller's value decides and the subscript is answered for "
+        f"its callers too"
+    )
+
+
 def string_iteration_refusal(where: str, function: str) -> str:
     """Why ITERATING a `char *` is refused. Always a refusal.
 
@@ -8457,6 +8519,30 @@ class ValueKinds:
         return None
 
     # ── querying ───────────────────────────────────────────────────────
+
+    def is_bound_in_the_body(self, name: str) -> bool:
+        """True when a statement of this function bound `name` itself.
+
+        The question a kind cannot answer, and the reason the container
+        operations cannot treat `INT_KIND` as "not a container" on its own: an
+        unannotated parameter is SEEDED to `INT_KIND` above, because a word
+        arriving from a caller is a word — so `def at(xs): return xs[0]`, which
+        builds and answers, has a base whose kind says "integer" and which is
+        not one. What separates it from `a = 5` is where the binding came from:
+        a parameter's value is whatever the caller passed, which nothing in this
+        image can see, while `a = 5` is a statement in this function and the 5
+        is the whole of what is known about `a`.
+
+        A module global is deliberately neither bound nor absent: `name_kind`
+        may classify it from its initializer, and a global's element access is
+        an ordinary program, so it is not in this set.
+
+        Exposed because both backends' subscript paths ask it at their single
+        choke point, and asking the question in two places is how the two
+        architectures would come to disagree about which bases are containers.
+        """
+        return (name in self.locals and name not in self._param_names
+                and name not in self._conflicts)
 
     def name_kind(self, name: str):
         """What the local `name` holds, or None if this does not say."""

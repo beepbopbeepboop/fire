@@ -2181,6 +2181,7 @@ dylib_exports: list = None, globals_base: int = None,
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_non_container_operand("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
             tnames = _lbn_target_names(stmt.target) if isinstance(
                 stmt.target, str) else []
@@ -3513,6 +3514,38 @@ dylib_exports: list = None, globals_base: int = None,
         raise CodegenError(M.frame_container_operand_refusal(
             op, M.spelled(obj), [st.name for st in cands]))
 
+    def _refuse_non_container_operand(self, op: str, obj) -> None:
+        """Raise if `obj` is a plain WORD this function bound to an integer.
+
+        The third arm of the container family, and the one that had no arm at
+        all: `frame_container_operand_refusal` fires for a FRAME ADDRESS and
+        the string paths fire for a `char *`, and `a = 5` is neither, so the
+        blob walk read a count out of the integer and computed an element
+        address of `5 + 8`. Measured on BOTH architectures, `a[0] = 1` builds,
+        links and dies of SIGSEGV at run time with the build green. See
+        `model.non_container_subscript_refusal` for the whole of it.
+
+        BARE NAME ONLY, for the same reason `_refuse_frame_container_operand`
+        is: `h.xs[i]` on a field declared `List[Int]` is what that declaration
+        is FOR, and the frame-holder table is about addresses rather than
+        fields.
+
+        A PARAMETER is deliberately not this case, and `is_bound_in_the_body`
+        is the question that says so rather than the kind: an unannotated
+        parameter is seeded to INT_KIND because a word from a caller is a word,
+        so every container-taking function in the corpus has a base whose kind
+        says "integer". Binding site is what separates that from `a = 5`.
+        """
+        if not isinstance(obj, F.IdentExpr):
+            return
+        name = obj.name
+        if not self._vkinds.is_bound_in_the_body(name):
+            return
+        if self._expr_str_kind(obj) != M.INT_KIND:
+            return
+        raise CodegenError(M.non_container_element_refusal(
+            op, M.spelled(obj), self.func_name or "<module>"))
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
         """X0 = &obj[index]. Blob path bounds-checkes (exit 1 on OOB).
 
@@ -3527,6 +3560,7 @@ dylib_exports: list = None, globals_base: int = None,
         contract for) and the second emitted a store through a computed
         address. Both now say no."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        self._refuse_non_container_operand("a subscript", e.obj)
         if M.is_external_call_template(e):
             # The ONE place an `external_call[...]` is a subscript that is not
             # the callee of a call, and `M.multi_index_refusal_for` above (and
@@ -5247,6 +5281,7 @@ dylib_exports: list = None, globals_base: int = None,
         # field as the count — see `model.frame_container_operand_refusal` for
         # the measurement, which is a wrong answer rather than a crash.
         self._refuse_frame_container_operand("a membership test", right)
+        self._refuse_non_container_operand("a membership test", right)
         if type(right) not in (F.IdentExpr, F.CallExpr, F.ListExpr,
                                F.TupleExpr, F.MemberExpr, F.SubscriptExpr,
                                F.SliceExpr, F.Comprehension, F.SetExpr,
@@ -6805,6 +6840,7 @@ dylib_exports: list = None, globals_base: int = None,
 
     def _emit_slice_parts(self, obj, start_e, stop_e, step_e) -> None:
         self._refuse_frame_container_operand("a slice", obj)
+        self._refuse_non_container_operand("a slice", obj)
         """`obj[start:stop:step]` → new list blob in X0.
 
         Defaults: start=0, stop=count, step=1 (None nodes). Negative bounds
