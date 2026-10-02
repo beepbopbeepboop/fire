@@ -305,9 +305,26 @@ HOST_MODELLED = frozenset((
     #     measurement — the annotation shapes build and run, and a name used as
     #     a VALUE is still refused, so the erasure is not a promise the module
     #     makes.
+    #   `math`  — `formal/hostmods/math.mojo`, the SEVEN functions in CPython's
+    #     `math` that answer an INTEGER (`gcd` / `lcm` / `isqrt` / `factorial`
+    #     / `comb` / `perm` / `prod`), plus the IEEE-754 bit patterns of the
+    #     five float constants, checked name by name against CPython's own
+    #     `math` by `test_formal_math.py`. Everything else in CPython's `math`
+    #     takes and answers a `float`, and that is not a missing libc call:
+    #     libSystem has every one of them, and a `double` does not travel in an
+    #     integer register on either ABI (arm64 `d0`, SysV x86-64 `XMM0`), so
+    #     calling `sqrt(x)` here would hand the C library a garbage bit pattern
+    #     and return a plausible wrong answer. `floor`/`ceil`/`trunc`/`round`/
+    #     `fabs` are absent for that reason and not because their integer case
+    #     is hard: for an integral argument each of them answers the argument,
+    #     and a `floor` that returns its argument is `copy.copy`. What the
+    #     module cannot answer is at the top of that file: a binomial
+    #     coefficient or a factorial above 64 bits is -1 rather than a wrapped
+    #     number, which is a status because there are no exceptions here
+    #     (FORMAL.md phase 7).
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "math", "random", "decimal", "fractions",
+    "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
