@@ -9363,11 +9363,37 @@ EQ_DISPATCH_CASES = [
      "    return bump()\n",
      "refuse:G is read in bump() at `G + 1`", None),
     # The sibling the filing did not mention: the same name WRITTEN through a
-    # `global` declaration, which the language allows and the value model has
-    # nowhere for.  There is no storage a write could outlive a frame in, so both
-    # emitters treat the declaration as a no-op — CPython answers 6 and 6 where
-    # this path answered 10601485 and 5 on arm64 and 11 and 5 on x86-64.
-    ("a_mutated_module_global_is_refused",
+    # `global` declaration, which the language allows.  It USED to be refused,
+    # because a formal value lives in a function's own stack scratch and there
+    # was nowhere for a write to a module-level name to outlive a frame in — so
+    # both emitters treated the declaration as a no-op and CPython's 6 and 6
+    # came out as 10601485 and 5 on arm64 and 11 and 5 on x86-64, with the two
+    # architectures unable to agree on the first number because it was never
+    # computed.
+    #
+    # `formal-module-globals` landed the `__DATA` slot that write can be
+    # redirected into, and `formal/build.py`'s `_collect_shadowed_global_reads`
+    # gates the finding on `declared_globals & assigned - module_slots()`, so a
+    # name that HAS a slot is no longer a finding.  The gate's own comment
+    # carries the measurement (6 of `test_formal_globals.py`'s 17 cases before,
+    # 0 after, and the image answers CPython), and `test_formal_globals.py` was
+    # updated with it — this row was left behind asserting a refusal the module
+    # no longer owes, and it was red for that reason alone
+    # (bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_
+    # landed.md).
+    #
+    # So the row asserts the BUILT program's own answer, which is CPython's:
+    # `bump()` makes `G` 6 and returns 6, `rd()` reads back 6, and `main`
+    # returns 12 — so the exit status is 12.  Renamed from
+    # `a_mutated_module_global_is_refused`, because a row whose name says
+    # `_is_refused` and whose expectation says otherwise is a lie in the
+    # registry; three older bug docs quote the old name in transcripts of runs
+    # that happened when it was accurate.
+    #
+    # The shape `test_formal_globals.py` does not cover is the `return` of the
+    # global from inside the writing function, which is why this row is worth
+    # keeping rather than folding into that file.
+    ("a_mutated_module_global_is_computed",
      "G = 5\n"
      "def bump():\n"
      "    global G\n"
@@ -9377,7 +9403,7 @@ EQ_DISPATCH_CASES = [
      "    return G\n"
      "def main(n):\n"
      "    return bump() + rd()\n",
-     "refuse:G is declared `global` in bump() and assigned there", None),
+     12, None),
 ]
 
 

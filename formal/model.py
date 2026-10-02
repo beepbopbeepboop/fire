@@ -12452,7 +12452,26 @@ def frame_len_refusal(spelled: str, struct_names) -> str:
 
 
 def mutated_module_global_refusal(name: str, fn_name: str) -> str:
-    """Why a function cannot WRITE a module global it declares `global`.
+    """Why a function cannot WRITE a module global it declares `global` — and
+    WHEN this still applies, which is narrower than the rest of this docstring
+    suggests.
+
+    **A `__DATA` slot changes the answer, and this message is now only for the
+    names that do NOT have one.**  `formal-module-globals` landed per-module
+    storage, so a module-level name with a slot is one some function writes
+    through `global`, its value changes while the program runs, and the write
+    has somewhere real to go; `formal/build.py`'s
+    `_collect_shadowed_global_reads` gates the finding on
+    `declared_globals & assigned - module_slots()` for exactly that reason.
+    Measured, from that gate's own comment: the case was 6 of
+    `test_formal_globals.py`'s 17 before the gate and 0 after, and the image
+    answers CPython (`G = 5` with `global G; G = G + 1` called twice, read back
+    after: 7). The numbers quoted in the rest of this docstring — 10601485 and
+    5, 11 and 5 — are therefore the PRE-slot measurement, and they are the
+    right answer for the no-slot case this message is still reached for. The
+    sibling row in `test_formal_run.py` that used to assert this refusal for a
+    slotted `G` is now `a_mutated_module_global_is_computed` and asserts exit
+    12, which is CPython's.
 
     The design decision this path already made and this message reports is in
     the comment above `GlobalSymbol`: a module-level name is either FOLDED — its
@@ -12465,9 +12484,9 @@ def mutated_module_global_refusal(name: str, fn_name: str) -> str:
     "the declaration is a no-op and the following AssignStmt still targets the
     local", with the same words in x86-64's.
 
-    So `global G; G = G + 1` writes a LOCAL, and the module's `G` keeps the value
-    it was folded with — and the two architectures disagree about the local while
-    both are wrong.  Measured, on
+    So `global G; G = G + 1` on a name with no slot writes a LOCAL, and the
+    module's `G` keeps the value it was folded with — and the two architectures
+    disagree about the local while both are wrong.  Measured, on
 
     ```
     G = 5
