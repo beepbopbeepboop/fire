@@ -657,6 +657,43 @@ def _lower_int_dict_items(gen, recv) -> tuple:
     return 'MojoList *', t
 
 
+def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
+    """The `MojoList *` to iterate for a BOXED (int64_t) handle whose element
+    type is POSITIVELY known, or None when there is no such evidence.
+
+    This is the one definition of that rule, shared by every lowering that
+    otherwise has to emit the runtime dict-or-list dispatch: `_gen_for_iter`
+    (a bare `for <t> in <param>:`) and `_gen_for_enumerate`
+    (`enumerate(<param>)`). Both need it, they need it for the same reason,
+    and two copies of a rule about when a dispatch arm is provably dead is
+    how they drift.
+
+    The rule: `gen._elem_types` is only ever recorded for a LIST value — a
+    literal, a cross-call parameter contract, a struct field — and a dict's
+    keys are always strings, so an entry that is present and is not the
+    `int64_t` "nothing known" default is positive evidence that the handle
+    is a list AND the element type to read it with. The dict (and set) arm
+    is then provably dead, and skipping it is not an optimization: both arms
+    bind the SAME loop variable, `_declare_var` is first-decl-wins, so
+    emitting the dead arm declares one variable with two incompatible types
+    and `gcc -fgimple` rejects the whole function ("assignment to
+    'FunctionDef *' from incompatible pointer type 'char *'", or, for a
+    `double` element against a `char *` dict key, "pointer value used where a
+    floating-point was expected").
+
+    Returns None for the untyped case, and the caller falls back to emitting
+    the dispatch exactly as before.
+    """
+    if lst_type not in ('int', 'int64_t', 'void *'):
+        return None
+    elem = gen._elem_of(lst_val)
+    if not elem or elem == 'int64_t':
+        return None
+    lp = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(lst_type, lst_val))
+    gen._elem_types[lp] = elem
+    return lp
+
+
 def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # `for m in <compile-time-known-pattern>.finditer(text):` — see
     # regex_compile.py / BACKLOG-CODEGEN.md §4f. Checked structurally,
@@ -1009,22 +1046,23 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # pair-accessor gap (counter/interval/_unicode/string_slice
             # stdlib modules regress) — see A5-BUG.md. Keep this patch in
             # the tree as the starting point for resolving the frontier.
-            # POSITIVE EVIDENCE the boxed handle is a LIST: a tracked element
-            # type that is a real (non-boxed) pointer can only have been
-            # recorded for a list. Take the list path directly instead of
-            # emitting the runtime dict-or-list dispatch below, whose dict
-            # arm would bind this same loop variable to a `char *` KEY.
-            # `_declare_var` is first-decl-wins, so the two arms otherwise
-            # declare one variable with two incompatible types and GCC
-            # rejects the dead dict arm outright ("assignment to
-            # 'FunctionDef *' from incompatible pointer type 'char *'").
-            # The dict arm is provably dead for such a value anyway.
-            _boxed_elem = gen._elem_of(it_val)
-            if (it_type in ('int', 'int64_t', 'void *') and _boxed_elem
-                    and _boxed_elem != 'int64_t' and _boxed_elem.endswith(' *')):
-                _lp_known = gen._coerce_to_type(
-                    'int64_t', 'MojoList *', gen._to_int64(it_type, it_val))
-                gen._elem_types[_lp_known] = _boxed_elem
+            # POSITIVE EVIDENCE the boxed handle is a LIST, and the element
+            # type to read it with: skip the runtime dict-or-list dispatch
+            # entirely. `_boxed_list_ptr` owns that rule and its rationale;
+            # this is one of its two callers.
+            #
+            # This is what closes the GENERATOR's version of the shape: a
+            # generator's params cross as untyped `int64_t` slots, so
+            # `def rows(data): for r in data: yield r` called
+            # `rows([1.5, 2.5])` had no element type here at all, the dict arm
+            # won the shared `r`, and the `double` yield slot could not be fed
+            # from a `char *` (a hard `gcc -fgimple` "pointer value used where a
+            # floating-point was expected"). The element ctype reaches
+            # `_elem_types` via `_mojo_coro_param_elem_kinds` ->
+            # `_param_elem_types` -> `gen_func`. See
+            # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+            _lp_known = _boxed_list_ptr(gen, it_type, it_val)
+            if _lp_known is not None:
                 gen._gen_for_list(var, _lp_known, node.body)
             elif it_type in ('int', 'int64_t', 'void *'):
                 bb_dict = gen._new_bb(); bb_list = gen._new_bb()
@@ -1573,14 +1611,27 @@ def _gen_for_enumerate(gen, node):
         if lst_val in gen.var_types and gen.var_types[lst_val] == 'int64_t':
             list_ptr = gen._coerce_to_type('int64_t', 'MojoList *', lst_val)
     else:
-        # DESIGN.html R1/R5: dict/set materialization (`enumerate(d)`/
-        # `enumerate(s)` — real Python semantics: a dict's KEYS, a set's
-        # elements, not a reinterpret of the header) shares
-        # _materialize_as_list with all()/any()/str.join()/bytes.join()/
-        # shlex.join(); a genuinely-unknown boxed handle is now also
-        # runtime-guarded (mojo_is_registered_dict/_set) there instead of
-        # blindly assuming list.
-        list_ptr = gen._materialize_as_list(lst_type, lst_val)
+        # Same positive-list-evidence shortcut as `_gen_for_iter`, same
+        # helper, same reason (`_boxed_list_ptr`): without it
+        # `enumerate(<list param>)` materialized the param through the
+        # dict/set/list dispatch into a FRESH temp that carries no element
+        # type, so `for i, v in enumerate(xs)` read every value with
+        # `mojo_list_get_int` and printed a list of floats as their raw
+        # IEEE-754 bit patterns -- even though the identical program with a
+        # bare `for v in xs:` was correct. See
+        # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+        _lp_known = _boxed_list_ptr(gen, lst_type, lst_val)
+        if _lp_known is not None:
+            list_ptr = _lp_known
+        else:
+            # DESIGN.html R1/R5: dict/set materialization (`enumerate(d)`/
+            # `enumerate(s)` — real Python semantics: a dict's KEYS, a set's
+            # elements, not a reinterpret of the header) shares
+            # _materialize_as_list with all()/any()/str.join()/bytes.join()/
+            # shlex.join(); a genuinely-unknown boxed handle is now also
+            # runtime-guarded (mojo_is_registered_dict/_set) there instead of
+            # blindly assuming list.
+            list_ptr = gen._materialize_as_list(lst_type, lst_val)
 
     elem = gen._elem_of(list_ptr)
     gen._declare_var(idx_var, 'int64_t')

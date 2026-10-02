@@ -6194,24 +6194,54 @@ def main():
     # still compiles, and a yielded param with UNANIMOUS call sites still
     # resolves to the right type. Both are ordinary compiles, so assert on
     # the generated C rather than on stdout.
+    #
+    # (a) used to be `g(3)` and `g(5)` with the comment "call sites
+    # disagree" -- two ints, which AGREE, so the `len(kinds) > 1` branch never
+    # fired and the narrowness this test is named for was never exercised at
+    # all (bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md, "A test
+    # hole found on the way"). The conflict now really exists: `x` is
+    # unannotated and its two call sites pass an int and a `char *`, while
+    # `y` -- the param actually yielded -- is unanimous `double`. `x` is
+    # never READ in the body, so this is decidable without a tagged ABI and
+    # has a correct answer to assert, which the old arithmetic-use version
+    # did not: reading a genuinely conflicting param is the cross-cutting
+    # one-C-type-per-slot limitation, and asserting a value for it would
+    # assert the wrong answer. See
+    # bugs/CODEGEN_param_ctype_conflicting_call_sites.md.
     def test_conflicting_callsite_gate_is_narrow():
         global _PASS, _FAIL
         name = "conflicting_callsite_gate_is_narrow"
-        # (a) param used only arithmetically, call sites disagree: the
-        #     yielded value is unaffected, so this must still lower.
-        n2 = compile_to_gimple("""\
-def g(x):
-    var t = 0
-    for i in range(x):
-        t = t + i
-    yield t
+        # (a) a genuinely conflicting unannotated param that is NOT yielded:
+        #     the yielded value is unaffected, so this must still lower --
+        #     AND the yielded slot must still come out `double`, which is
+        #     what proves the conflict on `x` did not poison the generator.
+        #     Wrapped so an over-broad refusal is reported as this test's
+        #     failure with the compiler's own message, rather than aborting
+        #     the whole suite (the same shape as
+        #     `conflicting_callsite_yield_kind_refused_not_miscompiled`).
+        try:
+            n2 = compile_to_gimple("""\
+def g(x, y):
+    yield y
 
 def main():
-    for v in g(3):
+    for v in g(1, 3.5):
         print(v)
-    for v in g(5):
+    for v in g("s", 1.5):
         print(v)
 """)
+        except Exception as e:
+            print(f"FAIL  {name}: a conflict on a param that is NOT yielded "
+                  f"must not refuse, but this was refused: {e}")
+            _FAIL += 1
+            return
+        if '__mgco_g_value (MojoGenerator *)' not in n2 or \
+                'double __mgco_g_value' not in n2:
+            print(f"FAIL  {name}: a conflict on a param that is NOT yielded "
+                  f"must not refuse, and must not degrade the yielded param's "
+                  f"slot -- expected a double yield slot, got:\n{n2[-3000:]}")
+            _FAIL += 1
+            return
         # (b) yielded param, but every call site agrees: resolves normally.
         c = compile_to_gimple("""\
 def g(x):

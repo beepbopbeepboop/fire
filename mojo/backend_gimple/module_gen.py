@@ -5545,6 +5545,22 @@ def gen_module_impl(self, stmts):
             if not _fp_pn.startswith('*'):
                 _fp_names.append(_fp_pn)
         _free_params[_as_str(_fp_s.name)] = _fp_names
+        # A synthesized coroutine BODY (`__mgco_<g>_body`) carries the C
+        # element ctype its generator's list parameters had, decided from the
+        # unanimous cross-call-site contract before the lowering REPLACED the
+        # generator's own FunctionDef — so this is the last point at which
+        # that evidence exists at all. Folded into the same table, under the
+        # body's own name, because `emit_funcs.gen_func` already seeds
+        # `_elem_types` from exactly this table for every function it
+        # lowers: one consumer, one table, no second seeding path. (Iterate
+        # the dict + index, not `.items()`: a tuple-unpacking `for` target
+        # is not lowered correctly when this file is self-compiled — see
+        # `gen_func`'s own note on `_pe`.)
+        _pe_body = getattr(_fp_s, '_mojo_coro_param_elem_kinds', None)
+        if _pe_body:
+            _pe_d = self._param_elem_types.setdefault(_as_str(_fp_s.name), {})
+            for _pe_k in _pe_body:
+                _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), None)
 
     def _record_param_elem(callee, pname, e, ne):
         # `_as_str` on both NAME params: a nested function's untyped params
@@ -5711,6 +5727,7 @@ def gen_module_impl(self, stmts):
                 _fe, _fne = _static_arg_elems(a, elem, nested)
                 if _fe is not None:
                     _record_param_elem(callee, pnames[i], _fe, _fne)
+
                 st = _arg_scalar_type(caller_name, a)
                 if st:
                     # Split the chained `_scalar_obs.setdefault(callee, {})
@@ -5797,6 +5814,7 @@ def gen_module_impl(self, stmts):
                 _me, _mne = _static_arg_elems(_ma, _melem, _mnested)
                 if _me is not None:
                     _record_param_elem(_mcallee, _mpn[_mi], _me, _mne)
+
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
     # against struct types (`for s in stmts: if isinstance(s, FunctionDef)`)
