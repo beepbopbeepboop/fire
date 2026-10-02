@@ -3475,8 +3475,8 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'must not be able to do')
     check('dangling refs: it does not invent one — a cited doc that EXISTS is '
           'not reported',
-          'bugs/FORMAL_arm64_right_shift_is_always_arithmetic.md' in have
-          and 'FORMAL_arm64_right_shift_is_always_arithmetic.md' not in by_doc
+          'bugs/FORMAL_known_limits.md' in have
+          and 'FORMAL_known_limits.md' not in by_doc
           and 'CODEGEN_ab_native_fails.md' not in by_doc,
           f'the walk found {len(have)} docs under bugs/; a walk that reports '
           f'every citation would make the census meaningless, so the '
@@ -3488,10 +3488,17 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     # The two the bug doc named, by file and by name — the specific defect,
     # asserted directly rather than read out of a total, because a census check
     # cannot tell "fixed" from "the number went down".
+    #
+    # The control doc of the check above is `FORMAL_known_limits.md` and not the
+    # right-shift doc this used to name: that one is DELETED (its fix landed, so
+    # CLAUDE.md's rule removed it), and a control that asserts "this doc exists"
+    # about a deleted doc fails for a reason that has nothing to do with the walk.
+    # `FORMAL_known_limits.md` is cited from 38 files, so the branch is exercised
+    # by a real corpus rather than by a name nothing mentions.
     gone = {('test_formal_hashlib.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_'
              'every_amount_above_8.md'),
-            ('bugs/FORMAL_arm64_right_shift_is_always_arithmetic.md',
-             'FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md')}
+            ('test_formal_run.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_every_'
+             'amount_above_8.md')}
     still = [f'{f}: {d}' for f, d in sorted(gone)
              if any(d == n for n, _ln in by_file.get(f, ()))]
     check('dangling refs: the two this bug named are rewritten by symptom',

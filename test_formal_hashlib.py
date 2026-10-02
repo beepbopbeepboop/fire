@@ -43,9 +43,15 @@ which produce plausible wrong answers rather than refusals:
     diagnosis. `test_formal_run.py` asserts the refusal, and
     `formal/build.py` emits it.
   * `UInt64 >> Int` shifted ARITHMETICALLY, because the shift AMOUNT's type
-    was promoted into the decision that the VALUE's type should make. That
-    one's doc is still open — `bugs/FORMAL_arm64_right_shift_is_always_arithmetic.md`,
-    kept as a correction to a misdiagnosed repro rather than deleted.
+    was promoted into the decision that the VALUE's type should make. Fixed:
+    `formal/model.py`'s `shift_signedness` reads the LEFT operand alone, and
+    `test_formal_run.py` carries the five rows. The bug's doc is deleted with
+    its fix; the one durable thing in it was a fact about the LANGUAGE rather
+    than about this compiler, and it is `FORMAL.md` §4 decision 5 — `>>` on a
+    signed value is arithmetic, so a "make every `>>` logical" fix would have
+    passed that document's own repro and broken Python, and `>>>` is not the
+    way to spell the alternative because it does not parse here and CPython
+    3.14.7 rejects it too.
   * a shift of 64 or more WRAPPED (the amount was masked to the register width)
     instead of saturating. The rule is `formal/model.py`'s
     `shift_saturated_is_zero`, and both backends branch on it.

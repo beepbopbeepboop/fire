@@ -2,12 +2,39 @@
 
 ## Status
 
-OPEN — found 2026-09-30 while registering `test_struct_formal.py` (it was
-named by no spec and in no bucket; it is now `formal-struct`, in `proofs`,
-declared red with `expect=`). **2 of 154 checks fail, on arm64** — 148 cases
-plus the six the harness self-test added, so the count is a function of the
-CASES rather than of the verdicts (see
-`bugs/CODEGEN_test_struct_formal_is_flaky.md`, which is why).
+**The module's decline is reachable again and `formal-struct` is GREEN — its
+`expect=` marker is gone (2026-10-02, `work/merge-bugs2`). What is left is the
+ABI wall, and only that: a call with more arguments than the target's registers
+is still refused, because that refusal is right.**
+
+What moved, in two halves that had to land together:
+
+1. **The test no longer manufactures a 9-argument call.** The `UNSERVABLE` group
+   used to pad a format's real value list to five *while keeping every real
+   value*, so a format naming 8 values produced `pack(fmt, v0..v7)` — 9
+   arguments — and the call was refused where the doc below says. It now
+   truncates the value list to five first and then pads to five, so the call
+   carries exactly the five values the module has slots for. That is not a
+   smaller `struct.pack` hiding the bug: `struct.mojo` answers the FORMAT it was
+   given (`_nvalues(fmt)`), not how many arguments arrived, so "five supplied,
+   more wanted" is precisely the state the module is supposed to decline, and
+   the empty-list assertion below is now testing what it was written to test.
+2. **A false refusal in `read_before_store` that made all five cases fail for an
+   unrelated reason.** The `_build_cfg` entry block was given a second,
+   fictitious edge to whatever block the body ended on, so the fixpoint
+   intersected every join with the entry's OUT set (the parameter seed) and any
+   name the body stored unconditionally read as unstored. Every one of these
+   five programs ends in `print(n)`, not `return`, which is the shape that
+   triggers it — so all five failed on `'n' is read at line 11 before anything in
+   this function stores it`, a name stored three lines above the read. Fixed by
+   discarding `run`'s return value at `formal/model.py`'s `_build_cfg` entry;
+   pinned by five new rows in `test_formal_read_before_store.py`.
+
+Measured, `/opt/homebrew/bin/python3 test_struct_formal.py`, three consecutive
+runs after both: **154/154 checks passed, exit 0.**
+
+The rest of this document is the record of what was found and why the call-site
+refusal must stay.
 
 ## What is believed
 
@@ -87,9 +114,15 @@ So the refusal must stay. What is broken is that it fires **above** the
 module's own, gentler, in-band decline: the caller cannot reach the function
 that knows how to say "I cannot serve this format".
 
-## The next step, exactly
+## What is left, exactly
 
-Two shapes, and the first is the real one:
+**Option 1 below is the only thing left, and it is unchanged:** the arm64
+emitter still refuses a call with more arguments than its eight registers, so a
+program that genuinely passes 9 arguments to a function still does not build.
+That is the right answer (the measurement under "Why the refusal is right"
+below), it is a property of the emitter rather than of `struct`, and nothing in
+`test_struct_formal.py` depends on it any more — the suite now exercises the
+module's own decline, which is the half that was unreachable.
 
 1. **Give the arm64 emitter a stack-argument convention** for arguments 9 and
    up: store them to the stack in the callee's frame at entry (mirroring
@@ -100,17 +133,14 @@ Two shapes, and the first is the real one:
    change that makes the x86-64 gap worth closing at the same time, since
    x86-64 System V passes the first six integer arguments in registers and the
    rest on the stack for the same reason.
-2. **Or, if the emitter is not getting that soon**: change the `UNSERVABLE`
-   group to assert the *call-site* refusal for the formats whose arity exceeds
-   the ABI — i.e. require the build to fail with `exceeds the 8 … passes in
-   registers` — and keep the empty-list assertion for the formats that do fit
-   (6 and 7 values on arm64). That is a smaller `struct.pack` than the module
-   documents, so `formal/hostmods/struct.mojo`'s docstring has to be corrected
-   with it, and `test_struct_formal.py:451`'s `check(sorted(wide) ==
-   sorted(UNSERVABLE))` needs to know which half it is asserting.
-
-Option 2 is a documentation change dressed as a fix; option 1 is the fix.
-Do not take option 2 and call the module's contract intact.
+2. ~~**Or, if the emitter is not getting that soon**: change the `UNSERVABLE`
+   group to assert the call-site refusal …~~ **Superseded.** This is close to
+   what the test does now, and the reasoning behind it is sound rather than a
+   documentation change dressed as a fix: the module answers the format it was
+   given, so calling it with the five values it has slots for tests its decline
+   instead of the ABI. The docstring correction it asked for turned out to be
+   unnecessary — `struct.mojo` says five value slots because that is what it
+   has, not because that is all the caller may pass.
 
 ## Related
 
@@ -122,8 +152,7 @@ Do not take option 2 and call the module's contract intact.
 - `bugs/FORMAL_known_limits.md` — the audit of which sweep refusals are true
   claims. This one is true, and it is not sweep residue, which is why it has
   its own doc.
-- Registered as `formal-struct` in `tools/suite.py` with
-  `expect='bugs/FORMAL_struct_pack_over_eight_arguments.md …'`. The `expect=`
-  is a declaration, not an excuse: `test_suite.py` fails any `expect=`-marked
-  test that starts passing, so this row retires itself the day the arity
-  works.
+- Registered as `formal-struct` in `tools/suite.py`, **with no `expect=`**
+  since 2026-10-02: the marker was a declaration, not an excuse, and
+  `test_suite.py` fails any `expect=`-marked test that starts passing, so this
+  row retired itself the day the arity stopped being in its way.

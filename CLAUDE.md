@@ -335,8 +335,12 @@ mark it with a reason and a bug-doc link.
   interpreter-oracle bug belongs there, not in `test_runtime_diff.py`.
 
 Current `EXPECTED` entries, and the one `DISABLED` entry. The table below is
-the five whose COST is worth a column of its own: two heavyweight steps and the
-three formal host-module suites. The remaining `expect=` jobs are the compiled-
+the four whose COST is worth a column of its own: two heavyweight steps and two
+formal host-module suites (`formal-struct` was the third and lost its `expect=`
+on 2026-10-02 — the two failures it named were a `read_before_store` false
+refusal that fired on every program whose last statement is not a `return`, and
+a test that manufactured a 9-argument call the ABI cannot make; both gone, and
+`test_struct_formal.py` measures 154/154). The remaining `expect=` jobs are the compiled-
 path async/await cluster, all cheap (0.0-0.2 GB, 1.2-11.6 s each) and all in
 `coroutine` and `x86` — registered in NO bucket at all until 2026-10-01, each
 measured one at a time before being named, with the measurement at its
@@ -353,7 +357,6 @@ nothing else).
 | `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
 | `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
 | `bootstrap-stage2-dumps` | `expect=` (`SELFHOST_STAGE2_STALL`) | the compiled binary dumping every source | 47 items x 0.5 GB, `tiny` (4 GB) each |
-| `formal-struct` | `expect=` (`bugs/FORMAL_struct_pack_over_eight_arguments.md`) | `struct.pack`/calcsize against CPython | 2 of 154 cases; `proofs` |
 | `formal-toplevel` | `expect=` (`bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md`) | a module body runs, diffed against CPython | 2 of 70 cases; `proofs` |
 | `formal-module-attr` | `expect=` (`bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md`) | `mod.NAME` on both backends | 1 of 11 cases; `proofs` |
 

@@ -2094,13 +2094,16 @@ test('formal-hashlib', [PY, 'test_formal_hashlib.py'], mem='tiny',
 # through, and the reason its test compares BYTES rather than counting them: a
 # subtly wrong byte packer produces a malformed binary that still links.
 #
-# RED, and registered red rather than excused — the estate check's own rule,
-# and the reason it exists: a declared red is a report and an unrun red is
-# silence. 2 of 154, and the next step is written down in
-# bugs/FORMAL_struct_pack_over_eight_arguments.md: `pack(fmt, v0..v7)` is a
-# 9-argument call, and a formal arm64 call is limited to the 8 its ABI passes
-# in registers, so the call is refused before `struct.mojo`'s own "return an
-# empty list" decline can happen.
+# GREEN, and it was registered RED. It carried
+# `expect='bugs/FORMAL_struct_pack_over_eight_arguments.md …'` because the two
+# 8-value formats produced a 9-argument `pack()` call, which a formal arm64 call
+# cannot make — the call was refused above `struct.mojo`'s own "return an empty
+# list" decline, so the decline was unreachable. That test now hands the call
+# exactly the five values the module has slots for, on the measured ground that
+# the module answers the FORMAT it was given (`_nvalues(fmt)`) rather than the
+# number of arguments that arrived, so "five supplied, more wanted" is exactly
+# the state under test. The ABI wall itself is untouched and still documented
+# in bugs/FORMAL_struct_pack_over_eight_arguments.md §"What is left".
 #
 # `proofs` and not `check` for a reason the solo number hides: 43 s alone, and
 # 201 s measured in a `-j4` run beside the other seven (it is 154 checks, most
@@ -2113,13 +2116,9 @@ test('formal-hashlib', [PY, 'test_formal_hashlib.py'], mem='tiny',
 # used to move with its own verdicts — 122, 127, 144, 145, 147, 148 across six
 # runs of one tree — which is a suite a reader learns to re-run, and a re-run
 # that comes back green is not evidence. Every case now costs a fixed number of
-# checks whatever happened to it, so the denominator is a function of the cases
-# and the two declared failures stay the only two.
+# checks whatever happened to it, so the denominator is a function of the cases.
 test('formal-struct', [PY, 'test_struct_formal.py'], mem='tiny',
      deps=['preflight'],
-     expect='bugs/FORMAL_struct_pack_over_eight_arguments.md — a formal arm64 '
-            'call is limited to 8 register arguments, so struct.pack cannot be '
-            'called for a format naming 8 values',
      extra=['test_struct_formal.py', 'formal'] + FORMAL_BUILD_INPUTS,
      desc='struct: calcsize/pack/pack_into byte-for-byte against CPython struct')
 # A module's top-level statements RUN. A file whose whole body was
