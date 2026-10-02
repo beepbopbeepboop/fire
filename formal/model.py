@@ -10141,9 +10141,10 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
     frame address and the 13-file `builtin_slice.mojo` row was refused for a
     struct-typed field the source says is a single slot
     (`bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`).
-    `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` records the
-    census of the SIBLING shape — a bare `self.helper` in VALUE position, which
-    is genuinely ambiguous and is deliberately not touched by this change.
+    The SIBLING shape — a bare `self.helper` in VALUE position, which is not a
+    call at all — is not this guard's business and is not settled here either;
+    `struct_receiver_reads` is what decides it, by demoting a name the struct
+    declares as a method and never stores into.
 
     The subscript's own base is unwrapped for the guard and the brackets are
     then walked, so a subscript on a FIELD (`self.items[0]`) still contributes
@@ -10177,9 +10178,11 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
     disagreed about what a tuple is — which is what `iter_nodes` is shared for
     and says so in its own docstring. It is the last of three such spellings
     this function has had to be taught; the bracketed method call in this
-    docstring is the second, and
-    `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` is the record of
-    all three."""
+    docstring is the second. The third — the value-position method reference,
+    which this walker deliberately KEEPS counting and `struct_receiver_reads`
+    demotes — is the other half of the pair, and both are pinned together by
+    `test_formal_bracketed_method_field_set.py`'s field-set group, which is where
+    a change to either has to show up."""
     if isinstance(node, (list, tuple)):
         for x in node:
             _self_field_names(x, out, receivers)
@@ -10767,10 +10770,14 @@ def _split_declaration(struct_def):
     # METHOD and never stores into is a BOUND METHOD here, not a field, and
     # counting it invented a slot that nothing writes — so every read of it
     # returned zero, which is a number the source never wrote.
-    # `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` has the
-    # reproducer and the census; the demotion itself is
-    # `struct_receiver_reads`, and both halves of Python's shadowing rule are in
-    # it.
+    # The reproducer for that zero is `test_formal_bracketed_method_field_set.py`'s
+    # `a_value_position_method_reference_is_not_a_field` /
+    # `a_method_name_the_struct_stores_into_is_still_a_field` pair: the first
+    # says a bare read of a method name is not a field, and the second says a
+    # store of the SAME name still is. Neither row means anything without the
+    # other — a demotion that ignored the store would delete real storage and
+    # build, which is the failure a layout bug is worst at, because nothing
+    # refuses it.
     for method in struct_methods(struct_def):
         touched = struct_receiver_reads(struct_def, receivers, method)
         for name in sorted(touched):
