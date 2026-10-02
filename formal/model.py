@@ -2573,8 +2573,39 @@ def _build_cfg(body) -> tuple:
     # predecessor, which is the edge that makes the seed reach anything: a body
     # emitted with an empty pending list opens its own unreachable first block,
     # and every block after it then inherits the universe.
+    #
+    # `run`'s RETURN VALUE IS NOT AN EDGE OUT OF THE ENTRY, and reading it as one
+    # was a wrong refusal rather than a coarse one. What it returns is "the
+    # indices that fall through to the end" — the blocks control leaves the
+    # FUNCTION by — and attaching those to the entry says the entry branches
+    # straight to them, which is false: the only edge into the body is the one
+    # `open_block` makes from `pending`, one line above. The consequence was
+    # that a function whose LAST STATEMENT IS A LOOP gave its loop header and
+    # its latch a second, false predecessor in the entry, and a
+    # definitely-stored fixpoint intersects over predecessors:
+    #
+    #     def f(a):            header.IN = entry.OUT & preheader.OUT
+    #         x = a + 1                  = {params} & {…, x}     = {params}
+    #         while 1:            body.IN  = header.OUT & latch.OUT
+    #             if x > 3:               — `x` is not in either
+    #                 return x
+    #         x = x + 1
+    #
+    # which refused a name that a statement three lines above stores, and did it
+    # with a message asserting that CPython raises `UnboundLocalError` for the
+    # program. It does not. Measured on this tree, `formal/hostmods/re.mojo`'s
+    # `_p_alt` is the real instance — `pend = entry` at line 1397, read at 1401,
+    # and CPython is silent — and that one refusal is what
+    # `sweep:repo-b` measured as `codegen/dependency` on two repo files that
+    # import `re`.
+    #
+    # Dropping the edge is strictly more accurate rather than merely more
+    # permissive: the fall-off-the-end blocks keep the edges control really
+    # reaches them by, and a block that genuinely has no predecessor is
+    # unreachable, which `_definitely_stored`'s top-initialisation already
+    # answers correctly (it keeps the universe and so reports no read).
     entry = new([])
-    entry.succs += run(body, [], [entry.index])
+    run(body, [], [entry.index])
     for b in blocks:
         for d in b.succs:
             if d is not None and 0 <= d < len(blocks):

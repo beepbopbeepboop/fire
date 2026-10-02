@@ -198,6 +198,77 @@ CASES = [
      "    for i in range(n):\n        for j in range(3):\n            pass\n"
      "    return j\n", "refuse"),
 
+    # ── the loop is the LAST STATEMENT: the case every row above dodged ────
+    #
+    # Every loop row in this file has a statement AFTER the loop — a `return t`,
+    # a `return p` — and that is not a style choice, it is what hid a wrong
+    # refusal. `_build_cfg` used to attach `run`'s return value to the ENTRY
+    # block's successors, and what `run` returns is "the blocks control leaves
+    # the FUNCTION by". So when the last statement is a loop, those blocks ARE
+    # the loop's header and its latch, and they acquired a second, false
+    # predecessor: the entry. A definitely-stored fixpoint intersects over
+    # predecessors, so the header's IN became `{parameters}` instead of
+    # `{…, x}`, and every name stored before the loop looked unstored inside it.
+    #
+    # The refusal was not merely coarse — it asserted a falsehood:
+    # `_p_alt` in `formal/hostmods/re.mojo` stores `pend = entry` at line 1397
+    # and reads it at 1401, and the message said CPython raises
+    # `UnboundLocalError` for the program. It does not. That one refusal is
+    # what `sweep:repo-b` measured as `codegen/dependency` on two repo files
+    # that import `re`, and `test_re_formal.py` went from 6 of 264 checks to
+    # 994 of 1008 when it was removed.
+    #
+    # So: the read is inside the loop and the store is before it, and CPython
+    # runs this for every probe value.
+    ("store_before_a_trailing_while_ok",
+     "    x = n + 1\n"
+     "    while 1:\n"
+     "        if x > 3:\n"
+     "            return x\n"
+     "        x = x + 1\n", "ok"),
+    ("store_before_a_trailing_for_ok",
+     "    total = 0\n"
+     "    for i in range(3):\n        total = total + i\n"
+     "    return total\n", "ok"),
+    # THE DIRECTION THAT MATTERS MOST, and the reason this is a fix and not a
+    # relaxation: the trailing loop must not make the analysis STOP refusing.
+    # Here the store is in one arm of an `if` that precedes the loop, so the
+    # path where `n <= 2` reaches the read with nothing stored, and CPython
+    # raises `UnboundLocalError` there. A "fix" that dropped the entry edge
+    # carelessly — or that turned the header's IN into a union — would pass the
+    # two rows above and fail this one.
+    ("one_arm_store_before_a_trailing_loop_still_refused",
+     "    if n > 2:\n        x = 1\n"
+     "    while 1:\n"
+     "        if x > 3:\n"
+     "            return x\n"
+     "        x = x + 1\n", "refuse"),
+    # …and the same for `for`, where the header's own exit edge (`range(3)`
+    # provably runs the body once) is the path that must not wash the
+    # pre-loop store out.
+    ("one_arm_store_before_a_trailing_for_still_refused",
+     "    if n > 2:\n        total = 1\n"
+     "    for i in range(3):\n        total = total + i\n"
+     "    return total\n", "refuse"),
+    # A `while` whose condition is DECIDABLE on entry is the shape the row
+    # `while_body_store_refused` above says the analysis must not refuse; with
+    # the loop trailing there is no statement after it to hide behind, so this
+    # is the decidable-condition case in its own right.
+    ("decidable_while_condition_trailing_ok",
+     "    x = n + 1\n"
+     "    while 1 < 2:\n"
+     "        if x > 3:\n"
+     "            return x\n"
+     "        x = x + 1\n", "ok"),
+    # …and an UNDECIDABLE one still refuses, which is the row that keeps the
+    # previous fix's limit in place rather than quietly widened by this one.
+    ("undecidable_while_condition_trailing_refused",
+     "    if n > 2:\n        t = 1\n"
+     "    while n > 0:\n"
+     "        if t > 3:\n"
+     "            return t\n"
+     "        t = t + 1\n    return t\n", "refuse"),
+
     # ── `try`: the arms are a SET, and `finally` is reached from all of them ──
     ("every_handler_stores_ok",
      "    try:\n        p = 1\n    except ValueError:\n        p = 2\n"
