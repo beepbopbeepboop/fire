@@ -1563,6 +1563,46 @@ def main():
 main()
 """, "1\n")
 
+    # A capture DISCOVERY gap, not a truthiness gap, which is what
+    # bugs/CODEGEN_captured_string_local_reads_falsey.md reported it as. The
+    # lambda-capture scan walked a hand-grown list of AST child fields, and a
+    # field that was not on it was an UNDER-approximation of what the body
+    # reads: the name never reached the env struct, and the body read a hard
+    # `(int64_t)0; /* ct param or undeclared: p */` for it. `p` read as 0, so
+    # `p` was falsey, so `sorted` saw all-equal keys and preserved insertion
+    # order — which is why the symptom read as "sorted() didn't sort".
+    #
+    # The field list is now every child-node field on the parser's AST
+    # dataclasses, as one table. Each line below is a field that was missing,
+    # and each is a name the body really does read:
+    #   condition  — `d[k] if s else 0`, the doc's own shape
+    #   index      — `d[p]`, a captured name as a subscript key
+    #   pairs      — `{'k': s}`, a captured name as a dict value (the list
+    #                said `key`/`val`, which no AST node has had for a while)
+    #   start/stop — `s[1:]`
+    #   operands   — `0 < n < 3`, a comparison chain
+    #   kwargs     — `two(a=1, b=n)`
+    # Every spelling prints CPython's answer, and each one printed a
+    # plausible number or string before, at exit 0.
+    test_gimple_stdout("gimple_lambda_capture_of_every_ast_child_field", """\
+def two(a, b):
+    return a - b
+
+def main():
+    d = {'b': 2, 'a': 1}
+    p = 'b'
+    s = 'abc'
+    n = 1
+    print(sorted(d, key=lambda k: d[k] if s else 0))
+    print((lambda: d[p])())
+    print((lambda: {'k': s})())
+    print((lambda: s[1:])())
+    print((lambda: 0 < n < 3)())
+    print((lambda: two(a=1, b=n))())
+    print(sorted(d, key=lambda k: d[k] if n else 0))
+main()
+""", "['a', 'b']\n2\n{'k': 'abc'}\nbc\nTrue\n0\n['a', 'b']\n")
+
     # …as a sorted() key, the shape that also required the forward
     # declaration to mirror the definition's own parameter resolution (the
     # call site binds the dict's `char *` key element to the lambda's

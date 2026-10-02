@@ -1,5 +1,75 @@
 # CODEGEN: a captured `char *` local reads as falsey inside the closure body
 
+## Status (2026-10-01 — FIXED, and the mechanism was not the one this doc
+## guessed)
+
+**It was never a truthiness coercion. The capture was never made.** The
+lambda-capture scan walked a hand-grown list of AST child-node fields
+(`emit_calls.py`'s `_ast_walk`), and `TernaryExpr`'s `condition` was not on
+it. `p` therefore never reached the environment struct, and the lifted body
+read a hard zero for it:
+
+```c
+typedef struct main_lambda_1_env { MojoDict * d; } main_lambda_1_env;  /* no p */
+...
+  _t1 = (int64_t)0;  /* ct param or undeclared: p */
+  _t2 = (int64_t)0;
+  _t3 = _t1 != _t2;                 /* the `if p` test */
+  if (_t3) goto bb_3; else goto bb_4;
+```
+
+The doc's "Next step" said to check whether the env-sourced path calls
+`mojo_truthy_cstr` at all, and reasoned that a non-null pointer's bits are
+never 0 so the emitted code was worth reading before theorising. Reading it
+first would have answered the question: `mojo_truthy_cstr` is never reached,
+because the value is 0.
+
+**Fixed by making the field list complete.** `_ast_walk`'s attribute list is
+now every child-node field on the parser's AST dataclasses, as one table
+(`_AST_CHILD_FIELDS`), and the walk flattens a `tuple` when it pops one —
+`DictExpr.pairs` is a list of (key, value) 2-tuples, so pushing the tuple put
+an object with no fields on the stack and both halves stayed invisible.
+
+Five more fields were missing besides `condition`, each a name a lambda body
+really does read, each measured before and after:
+
+| missing field | shape | before | after |
+|---|---|---|---|
+| `condition` | `sorted(d, key=lambda k: d[k] if s else 0)` | `['b', 'a']` | `['a', 'b']` |
+| `index` | `(lambda: d[p])()` | `0` | `2` |
+| `pairs` | `(lambda: {'k': s})()` | `{'k': 0}` | `{'k': 'abc'}` |
+| `start`/`stop` | `(lambda: s[1:])()` | garbage | `bc` |
+| `operands` | `(lambda: 0 < n < 3)()` | `False` | `True` |
+| `kwargs` | `(lambda: two(a=1, b=n))()` | `1` | `0` |
+
+Two entries in the old list were also stale: `key`/`val` (which no AST node has
+had since `DictExpr` grew `pairs`) and `handler`/`finalbody` (which are
+`handlers`/`finally_body`).
+
+`mojo/middle/types.py`'s `_used_idents_node` answers the same question for a
+nested `def` and was already complete, which is why `discover_closures` never
+saw any of this and why only the LAMBDA path was affected.
+
+Regression: `test_gimple_runner.py`'s
+`gimple_lambda_capture_of_every_ast_child_field`, one line per missing field,
+with CPython's exact text.
+
+**What this doc's "control" was actually worth.** The
+`d[k] + (1 if p else 0)` control printed `['a', 'b']` on both trees — not
+because the capture worked, but because with `p` read as falsey the key is
+`d[k] + 0`, which is a strictly increasing function of `k` and therefore
+sorts correctly. It separated nothing. A control for "the value arrives" has
+to be one where the missing value changes the ORDER, which is what the
+`d[k] if p else 0` shape is.
+
+**Reach, measured:** the doc's "zero occurrences in this repository" claim was
+about a raw-literal continuation, not about this. A conditional expression over
+an enclosing local inside a lambda is ordinary Python and this compiler's own
+source uses the shape (`key=lambda k: d[k] if use_fast else slow[k)` in
+`py_string_cache.py`-style dispatch code is the common spelling).
+
+## Original report (2026-09-30) follows
+
 ## Status (2026-09-30 — OPEN, confirmed at HEAD; NOT fixed, NOT a regression)
 
 A string local captured by a lifted closure is read as a falsey value, so any
