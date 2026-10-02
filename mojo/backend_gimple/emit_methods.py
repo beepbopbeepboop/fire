@@ -4239,10 +4239,36 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             _kb = gimple_ctypes.TypeLattice.slot_kind_byte(
                 gen._elem_of(_keys_val))
             _skind = f'MOJO_KIND_{gimple_ctypes.TypeLattice.SLOT_KIND_CONST[_kb]}'
+        # The `keys` argument, materialized into a LOCAL rather than
+        # written inline at the call.
+        #
+        # Two gimple-strict-mode rules bite here, and neither fires in an
+        # ordinary C body — which is why the module-level-FUNCTION spelling
+        # of this call has always compiled and the METHOD spelling never
+        # has (a method body is `void __GIMPLE <Struct>_<method> (...)`,
+        # where GCC's gimple frontend parses the text itself):
+        #
+        #   1. `NULL` is a preprocessor MACRO, not a gimple expression, so
+        #      it cannot appear as a call operand at all.
+        #   2. A cast EXPRESSION cannot appear inline as a call operand
+        #      either — `(MojoList *)0` is rejected just as hard, which is
+        #      why the obvious "swap NULL for a typed null" fix is not one.
+        #
+        # Both are shown by a ten-line standalone probe (a `__GIMPLE`
+        # function calling `mojo_list_sort` with each spelling in turn):
+        # only the form that puts a value in a local first compiles.
+        #
+        # `_build_sort_keys`'s own no-key answer stays the literal text
+        # `NULL` — both of ITS callers test for that exact string, so the
+        # sentinel is unchanged and only the emitted text differs.
+        _keys_arg = _keys_val
+        if _keys_arg == 'NULL':
+            _keys_null = gen._new_val('MojoList *', '(MojoList *)0')
+            _keys_arg = _keys_null
         gen._emit_call('void', '', 'mojo_list_sort',
                        [('MojoList *', ov), ('int', _skind),
                         ('int', '1' if _reverse else '0'),
-                        ('MojoList *', _keys_val)])
+                        ('MojoList *', _keys_arg)])
         # Python's list.sort() returns None; the compiled path's convention for
         # a mutator's value is int 0 (shared with append/extend/reverse).
         return 'int', gen._new_val('int', '0')

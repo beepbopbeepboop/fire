@@ -7944,8 +7944,99 @@ print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_list_sort_in_a_method_body_is_gimple_legal():
+        """`self.<field>.sort()` inside a METHOD must compile.
+
+        `l.sort()`'s lowering passed the `keys` argument as the literal
+        text `NULL`, which is a preprocessor macro rather than a gimple
+        expression, and — the part that makes it a hard error rather than a
+        wrong answer — a cast expression cannot appear inline as a gimple
+        call operand either, so the obvious typed-null substitution fails
+        just as hard. Both only bite in a `__GIMPLE`-tagged body, which is
+        what a METHOD's body is; the identical call in a module-level
+        function's body is plain C that GCC lowers itself, which is exactly
+        why this never showed up as a function-level case.
+
+        Real: `Lib/collections/__init__.py:1347`'s `UserList.sort`'s
+        `self.data.sort(*args, **kwds)`, reduced to a method whose body
+        calls `.sort()` on a list field.
+
+        All three call shapes are in one program — bare, `reverse=True`,
+        and `key=lambda v: -v` — because the `keys` argument is the one
+        that was illegal and the other two are what prove the fix did not
+        break them by taking a different path. Asserted against CPython's
+        stdout, and on BOTH pipelines."""
+        global _PASS, _FAIL
+        name = "list_sort_in_a_method_body_is_gimple_legal"
+        src = '''\
+class C:
+    def sort(self):
+        self.d = [3, 1, 2]
+        self.d.sort()
+        print(self.d)
+        self.d.sort(reverse=True)
+        print(self.d)
+        self.d.sort(key=lambda v: -v)
+        print(self.d)
+
+C().sort()
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'list_sort.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'ls_{mode}.c')
+                exe = os.path.join(td, f'ls_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_cursor_advance_has_no_cast_operand_in_gimple()
     test_scalar_arity_min_max_params_are_not_containers()
+    test_list_sort_in_a_method_body_is_gimple_legal()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()
