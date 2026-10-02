@@ -76,7 +76,7 @@ decoded"), which is the right answer and CPython's.
 
 ### What the suite still assumes
 
-`test_re_formal.py`'s `mojo_str` (line ~307) writes every corpus pattern and
+`test_re_formal.py:315`'s `mojo_str` writes every corpus pattern and
 subject into the generated program, and its docstring says:
 
 > A string literal on the formal path is interned VERBATIM and its escapes are
@@ -128,7 +128,7 @@ is a disagreement between the harness and the runtime, not a defect in `re`.
     want: [-99, 0, -99, 1, 1, 2, …]
 
 Status 3 with the spans blanked is `search`'s `e != 0` arm returning
-`_prepare`'s error, and `formal/hostmods/re.mojo:1444`'s "nothing may be LEFT
+`_prepare`'s error, and `formal/hostmods/re.mojo:1442`'s "nothing may be LEFT
 OVER" check is what sets it: one backslash is not a complete atom. **This is the
 one of the three whose residual may be a real `re` gap** — once `mojo_str` is
 fixed the pattern will be a genuine escaped backslash, and whether `_p_atom`
