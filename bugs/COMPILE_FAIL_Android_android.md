@@ -1,5 +1,57 @@
 # COMPILE_FAIL: Android/android.py
 
+## Status 2026-10-01 — unchanged; the blocker is one dynamic callee, and the runtime half that would handle it already exists
+
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Android/android.py`
+on this tree: **exit 1**, one refusal, the same one the two most recent
+substantive entries below describe:
+
+```
+cannot compile module: asyncio.run(...) requires either a bare call to a
+supported compiled async function, or a name this function binds from such a
+call, as its argument -- got a non-call expression that is not a known
+coroutine handle, and driving it would reinterpret an arbitrary value as a
+coroutine handle
+```
+
+The site is `Android/android.py:1028`, inside a dispatch table:
+
+```python
+dispatch = {"configure-build": configure_build_python, ..., "env": env}
+result = dispatch[context.subcommand](context)
+if asyncio.iscoroutine(result):
+    asyncio.run(result)
+```
+
+`result` is bound from a call through a dict SUBSCRIPT, so it is neither a
+bare call to a known `async def` nor a name this function's own body binds
+from one — the two shapes `_scan_handle_vars` recognises. Nothing about that
+is fixable by widening the recogniser: the callee is chosen at runtime, so no
+static evidence exists, and the refusal's own wording ("would reinterpret an
+arbitrary value as a coroutine handle") is the reason it must stay.
+
+The seven "re-verified, DOCUMENTED-NOT-FIXED, unchanged" entries that used to
+sit above the substantive ones are removed, per CLAUDE.md: they are the exact
+pattern a `bugs/` entry is supposed to stop being.
+
+### The observation worth keeping
+
+The refusal is about COMPILATION, and the honest answer to it already exists
+one layer down: `__mojo_async_run_gen` checks its argument against the live
+handle registry and raises Python's own `ValueError: a coroutine was
+expected` for anything that is not a live handle (see the 2026-09-27 entry's
+"Half 2"). So the runtime can already do the right thing with a value the
+compiler cannot vouch for; the compiler simply refuses to emit the call
+rather than emit a call the runtime will police.
+
+That makes the next step narrower than "compiled async" suggests: teach
+`asyncio.iscoroutine(x)` to lower to that same registry check (returning a
+real `_Bool`), and let the `if` that guards `asyncio.run` be recognised as
+the guard it is. That is control-flow-sensitive reasoning about a guard the
+source already wrote, which is a real design question and not a narrow fix —
+but it is a bounded one, and it is the reason this file is worth another pass
+rather than being closed as feature-sized.
+
 ## Status (2026-09-27, later — the `asyncio.run(<non-literal>)` bridge is built: BOTH halves, the static inference and the checked runtime entry point)
 
 The entry below correctly identified that this needed two halves and that
@@ -189,119 +241,6 @@ Unchanged in direction, now with a measured floor:
    test at the runtime boundary plus the static inference to feed it).
 2. Then the async-subprocess/stream composition layer, which is the real
    blocker for all 9 functions and is not attempted here.
-
-## Status (re-verified 2026-08-26, this session, master fast-forwarded to `9c0e7a8` — DOCUMENTED-NOT-FIXED, unchanged)
-
-Fresh isolated `compile_to_gimple_with_cpp` probe (post this session's own
-`filter(func, iterable)` coroutine-body codegen addition, gimple_cpp_
-core.py/gimple_exprtypes.py — see COMPILE_FAIL_importlib_metadata___
-init__.md's 2026-08-26 entry). Byte-for-byte identical refusal: the same
-10 `async def` functions + `async_process` async generator, all rejected
-by `_async_quick_eligible`'s await-shape pre-filter before any per-
-function translation attempt (`create_subprocess_exec(...)`, `process.
-communicate()`/`.wait()`, `stream.readexactly(...)`, a local `wait_for`
-helper — none recognized). `filter()` is unrelated to this file's
-blocker (no `filter(...)` calls anywhere in android.py). Confirmed
-independently: real async-subprocess/stream I/O composition is a
-genuine, feature-sized Awaitable-protocol extension to the async
-codegen's suspension machinery, not a narrow fix — same conclusion as
-every prior session across this campaign. Not attempted (would require
-a new scheduler primitive: allocatable Future/pipe handles with waiter
-queues and cross-coroutine wakeup, the same shared-machinery scope
-`COMPILE_FAIL_asyncio_queues.md` documents in detail). No change.
-
-Source file: `/Users/mrs/net/Python-3.14.6/Android/android.py`
-
-(Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
-
-## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, unchanged)
-
-Re-read `_async_quick_eligible` (`gimple_exprtypes.py:184-255`) directly
-rather than trusting prior doc conclusions, then ran a fresh isolated
-`gimple_codegen.compile_to_gimple_with_cpp(do_imports=False)` probe.
-Byte-for-byte identical refusal to every prior entry: the same 10
-`async def` functions + `async_process` async generator. Confirmed from
-the source itself that the whitelist covers only `asyncio.sleep(...)`,
-calls to already-compiled sibling `async def`s, `asyncio.sock_recv(fd)`,
-`create_task(...)`/`create_raising_task(...)`, and comptime-bracket
-nested-async calls — `create_subprocess_exec(...)`,
-`process.communicate()`/`.wait()`, `stream.readexactly(...)`, and a
-local `wait_for` helper are all genuinely outside it. Widening this to
-real subprocess/stream async I/O composition is the same feature-sized
-Awaitable-protocol gap as `COMPILE_FAIL_asyncio_queues.md`. Not
-attempted; no code change.
-
-## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd` — DOCUMENTED-NOT-FIXED, unchanged)
-
-Fresh safety-wrapped `python3 fire.py build /Users/mrs/net/Python-3.14.6/Android/android.py`
-against this worktree (fast-forwarded to master `e60b9cd`, the current
-integration tip). Byte-for-byte identical refusal to every prior pass:
-the same 10 `async def` functions + `async_process` async generator,
-refused for the same reason (`await` targets outside
-`_async_quick_eligible`'s whitelist: `create_subprocess_exec(...)`,
-`process.communicate()`/`.wait()`, `stream.readexactly(...)`, a local
-`wait_for` helper). Real async-subprocess/stream I/O composition
-remains feature-sized; per this session's mandate (do not attempt the
-tracked async-codegen feature project), not attempted. No change.
-
-## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — DOCUMENTED-NOT-FIXED, unchanged)
-
-Fresh safety-wrapped `python3 fire.py build .../Android/android.py`
-against this worktree (includes this session's dict-keyed %-formatting
-landing, commit `e1e12bb`): byte-for-byte identical refusal to every
-prior pass — the same 10 `async def` functions + `async_process` async
-generator, refused before any per-function eligibility attempt because
-their `await` targets (`create_subprocess_exec(...)`,
-`process.communicate()`/`.wait()`, `stream.readexactly(...)`, a local
-`wait_for` helper) are all outside `_async_quick_eligible`'s whitelist.
-Real async-subprocess/stream I/O composition remains feature-sized; not
-attempted. No change.
-
-## Status (re-verified 2026-08-26, worktree fix/rest-remainder17 — DOCUMENTED-NOT-FIXED, unchanged)
-
-Fresh full `python3 fire.py build /Users/mrs/net/Python-3.14.6/Android/
-android.py` against this worktree (branched from master `1e0f3f2`,
-`build/libmojostdlib.dylib` freshly rebuilt, 0 skips). Byte-for-byte
-identical refusal to every prior pass: the same 10 `async def`
-functions + `async_process` async generator, refused before any
-per-function eligibility attempt because their `await` targets
-(`create_subprocess_exec(...)`, `process.communicate()`/`.wait()`,
-`stream.readexactly(...)`, a local `wait_for` helper) are all outside
-`_async_quick_eligible`'s whitelist. This session's own fixes (dynamic
-exception-value re-raise; MemberExpr-receiver `.append()`/`.clear()`/
-`.add()`) are unrelated to the `await`-shape pre-filter. Real
-async-subprocess/stream I/O composition remains feature-sized; not
-attempted. No change.
-
-## Status (re-verified 2026-08-25, worktree fix/rest-remainder14 — DOCUMENTED-NOT-FIXED, unchanged)
-
-Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Android/android.py`
-against this worktree (branched from master `f65502d`), run under the
-safety-rule watcher. Byte-for-byte identical refusal to every prior
-pass: the same 10 `async def` functions + `async_process` async
-generator, refused before any per-function eligibility attempt because
-their `await` targets (`create_subprocess_exec(...)`,
-`process.communicate()`/`.wait()`, `stream.readexactly(...)`, a local
-`wait_for` helper) are all outside `_async_quick_eligible`'s whitelist.
-This is exactly the "real async-subprocess I/O" feature-sized case this
-session's own mandate explicitly flags as out of scope. Not attempted.
-No change.
-
-## Status (re-verified 2026-08-25, worktree fix/rest-remainder12 — DOCUMENTED-NOT-FIXED, unchanged)
-
-Re-ran an isolated `compile_to_gimple` check fresh, after this
-session's 4 coroutine-emitter fixes landed elsewhere (see
-COMPILE_FAIL_Apple___main__.md: `mojo_c_getenv`/platform/subprocess
-runtime-call whitelist, zero-arg `print()`, string-repeat `*`, f-string
-interpolation in `_cpp_expr`). None touch `_async_quick_eligible`'s
-await-shape pre-filter, which is this file's actual blocker. Confirmed
-byte-for-byte identical refusal to the 2026-08-23 entry below (same 10
-async functions + `async_process` async-generator, same reason: their
-`await` targets — `create_subprocess_exec(...)`, `process.communicate()`
-/`.wait()`, `stream.readexactly(...)`, a local `wait_for` helper — are
-all outside the whitelist). Real async-subprocess/stream I/O
-composition remains feature-sized (same family as
-COMPILE_FAIL_asyncio_queues.md's await-shape gap); not attempted.
 
 ## Status (re-verified 2026-08-23, wt09 fix/stdlib-mods `945af88` — DOCUMENTED-NOT-FIXED)
 

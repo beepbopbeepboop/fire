@@ -1,5 +1,36 @@
 # COMPILE_FAIL: Lib/socket.py — an unrelated grab-bag of compile gaps (title STALE)
 
+## Status 2026-10-01 — re-measured; past the entry below's blocker, and now failing inside `Lib/enum.py`
+
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py` on
+this tree: **exit 1**, and the failure has MOVED — it is no longer in `socket.py`
+at all:
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/enum.py:380:25: error: passing argument 1 of
+'mojo_list_len' makes pointer from integer without a cast [-Wint-conversion]
+  380 |   already = set(value) & set(self._member_names)
+```
+
+That is a real change from the 2026-09-30 entry, and worth naming what caused
+it rather than leaving the next reader to re-derive it: the container-kind
+coercion guard (`_sce_simple_emit`) plus the multi-kind-local and boxed-value
+fixes landed after that entry now let `socket.py`'s own grab-bag of shapes
+compile far enough that the closure reaches `Lib/enum.py`, which it did not
+before.
+
+`Lib/enum.py:380` is itself a `for`-target/`self._member_names` list-length
+read on an `int64_t`-typed receiver — the boxed-value class. It is the same
+shape as `bugs/CODEGEN_unannotated_dict_param_value_type_not_propagated.md`
+(newly filed this session: a value whose real C type is known at the binding
+site but not at the use site), one indirection further in.
+
+The 2026-09-30 entry's advice still stands and is still the right order:
+this file only becomes tractable when the individual gaps are fixed on their
+own merits — `operator.py`'s `partial`/lambda lowering first, which the entry
+measures as the largest bucket (~19 sites). It is not a single-cause fix and
+should not be attempted as one.
+
 ## Status (2026-09-30 — rewritten; not an import-qualifier bug, not attempted)
 
 The title is STALE, and for the same reason as its `Lib/contextlib`

@@ -4,6 +4,36 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-01 — unchanged; one blocker, shared with c_common/tables.py
+
+Re-measured on the current tree (`python3 fire.py build`, sources copied from
+`/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/` into `.tmp/ca/`). The sole
+remaining refusal is still a SINGLE shape, unchanged:
+
+```
+Unsupported shape(s): check_all: unsupported for-loop iterable type: CallExpr.
+```
+
+Nothing moved. `check_all` (c_analyzer/__init__.py:92) binds `check` to a
+CALLABLE-VALUE local by the outer loop and then calls it to get the iterable:
+
+```python
+def check_all(analysis, checks, *, failfast=False):
+    for check in checks or ():
+        for data, failure in check(analysis):
+            ...
+```
+
+This is the SAME blocker now in front of
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (`read_table`'s
+`for row in _get_reader(lines, ...)`, where `_get_reader` is a
+default-valued callable parameter). One fix, three files — that doc's
+"Next step" still names the three things the shape needs.
+
+The imported-module floor (`c_parser.info` / `._func_body` / `c_parser.match`)
+is also unchanged, and is now filed on its own rather than carried here:
+`bugs/COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md`.
+
 ## Status 2026-09-30 — two of three of this file's own blockers gone; one remains, and is shared with two other files
 
 Re-verified against the current tree (`python3 fire.py build`, sources copied

@@ -1,5 +1,50 @@
 # COMPILE_FAIL: Mac/BuildScript/build-installer.py
 
+## Status 2026-10-01 — root cause 1 only, unchanged; the accumulated re-verification history is gone
+
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
+on this tree: **exit 1, exactly one own-file error**, byte-identical to every
+prior measurement:
+
+```
+build-installer.py:704:17: error: invalid operands to binary + (have 'char *' and 'MojoList *')
+```
+
+Root cause 2 (dict-keyed `%`-format) stays fixed. Root cause 1 — Phase 1.7's
+global pre-scan being blind to a cross-function `global` reassignment — is
+unchanged, and the 2026-09-27 entry below still has the best analysis of it,
+including the three re-derivation sites and why an implementation was
+rejected. **Read that entry rather than re-deriving it.**
+
+The eight "re-verified, byte-identical, unchanged, no code change" entries
+that used to sit above it have been removed: they cost a future session real
+time to re-read and change nothing, which is exactly what CLAUDE.md says a
+`bugs/` entry should stop being.
+
+### One correction to that entry, from measuring it again
+
+It records that a guard placed in `_gscan_declare_global` was measured to be a
+no-op because `gname` is already in `_declared_globals` by then, and that
+`global_decls` "is not emitted at all", and it concludes the real field
+emitter is still unidentified. The site IS identifiable now, and it is not
+`_gscan_declare_global`:
+
+`_declared_globals` feeds the field-freeze loop at `module_gen.py`'s
+`for gname in sorted(_declared_globals):`, whose `_own_t =
+self._own_overlay_global_ctype(gname)` is the authoritative resolution — the
+same `_own_overlay_global_ctype` the assignment sites use through
+`_global_dst_ctype`. Its result is appended as the `(name, ctype, mtype)`
+triple in `self._module_globals[current_mod_name]`, and THAT list is what
+`_mg_list`/`globals_struct_lines` turns into the actual
+`typedef struct _root_toplev { ... }` text (`  {_ct} {_c_field_name(_gn)};`).
+
+So the reconciliation does not need a fourth site: there are two, this one and
+`_gscan_declare_global`, and they must agree because both already route
+through `_own_overlay_global_ctype`. `_own_global_var_types` is the overlay
+`_own_overlay_global_ctype` reads, which is why the rejected attempt's
+`_phase17_scan_global_reassignments` pass was the right shape and the wrong
+place to put the conclusion.
+
 ## Status (2026-09-27 — root cause 1 re-derived in detail and an implementation ATTEMPTED AND REJECTED; the doc's own diagnosis is confirmed correct, and the blocker is now narrower than "high-risk shared machinery")
 
 The doc's analysis below is **confirmed accurate**, re-measured on this tree.
@@ -83,32 +128,6 @@ Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): unchanged, single error, only root cause 1 remains
-
-Fresh `python3 fire.py build .../Mac/BuildScript/build-installer.py`
-against this worktree (fast-forwarded to master `43fb291`, which
-includes this session's loop-as-expression/Float64(str)/StringSlice
-landings — none touch global-type prescan or `%`-formatting): exactly
-one `error:` line, byte-identical to every prior re-verify —
-`704:17: invalid operands to binary + (have 'char *' and 'MojoList *')`.
-Root cause 1 (Phase-1.7 global prescan blind to cross-function `global`
-reassignment) remains explicitly high-risk shared machinery per the
-analysis below; not attempted. No code change.
-
-## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd` — unchanged, only root cause 1 remains)
-
-Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Mac/
-BuildScript/build-installer.py` against this worktree (fast-forwarded
-to master `e60b9cd`, which already includes the `e1e12bb` dict-format
-fix below): exit 1, exactly one `error:` line remaining —
-`704:17: invalid operands to binary + (have 'char *' and 'MojoList *')`
-— root cause 2 (dict-keyed `%`-format) stays fixed, confirmed gone.
-Root cause 1 (Phase 1.7 global prescan blind to cross-function `global`
-reassignment) is unchanged and remains explicitly high-risk shared
-machinery per the analysis below; per this session's mandate (do not
-attempt broad, high-risk changes to shared lowering machinery), not
-attempted. Doc stays open on root cause 1 alone.
-
 ## Status (updated 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — ROOT CAUSE 2 FIXED in shared source; only the excluded high-risk root cause 1 remains)
 
 Fresh safety-wrapped `fire.py build`: of the three long-standing
@@ -146,29 +165,6 @@ test_module_cache.py 76/76, check-selfhost clean, stdlib dylib rebuild
 2 skips = this worktree's pre-existing baseline (io.mojo/process.mojo
 dup/pipe libc conflicts, A/B-verified against a stashed tree — not
 attributable). Doc stays open on root cause 1 alone.
-
-## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c): byte-identical errors, both root causes unchanged
-
-Fresh `fire.py build`: exact same three diagnostics
-(`704:17` char*+MojoList*; `1447:17`/`1456:17` int64_t % MojoDict*),
-zero new own-file errors. Root cause 1 (Phase-1.7 global prescan blind
-to cross-function `global` reassignment) is explicitly high-risk shared
-machinery per the analysis below; root cause 2 needs a genuinely new
-runtime dict-keyed `%`-format primitive. Neither touched by any of this
-campaign's recent landings (generator-return-slot, super()/
-self.__class__, str-method families, etc. — none affect global-type
-prescan or `%`-formatting). Not attempted. No code change.
-
-## Status (re-verified 2026-08-25, wtOpencode_group3): byte-identical errors, both root causes unchanged
-
-Fresh safety-wrapped `fire.py build`: rc=1 with exactly the same
-three diagnostics (`704:17` char*+MojoList*; `1447:17`/`1456:17`
-int64_t % MojoDict*) and zero new own-file errors. Root cause 1
-(Phase-1.7 global prescan blind to cross-function `global`
-reassignment) remains explicitly high-risk shared machinery per the
-analysis below — untouched. Root cause 2 (dict-keyed runtime
-%-formatting needs a new C runtime primitive) remains a feature
-project — untouched. No code change; doc stays open.
 
 ## Status (2026-08-25, worktree fix/rest-remainder12): re-verified — STILL-OPEN, byte-identical errors.
 
