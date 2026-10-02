@@ -3784,6 +3784,20 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     return 'MojoList *', res
 
 
+# The iterable C types `_lower_comprehension` has a real arm for: a `range`
+# is a NODE shape (`is_range`), not a type, so it is not in here. Anything
+# outside this set reaching that function's dispatch produced an empty
+# comprehension with a `/* TODO: comprehension over <type> */` marker and no
+# diagnostic, which is why the callers that can see an ambiguous handle have to
+# resolve it themselves rather than hand it over. Named here, beside the one
+# caller that needs it, so it cannot drift from `_lower_comprehension`'s own
+# dispatch chain — check them against each other if either changes.
+_COMPREHENSION_ITER_TYPES = (
+    'MojoList *', 'MojoStr *', 'char *', 'MojoDict *', 'MojoSet *',
+    'MojoGenerator *',
+)
+
+
 def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Shared `set(iterable)` / `list(iterable)` lowering: build a
     synthetic `{x for x in <arg>}` / `[x for x in <arg>]` Comprehension
@@ -3848,28 +3862,72 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
         # `var_types` lowers straight back to itself with this ctype.
         gen.var_types[_av] = _at
         _arg0 = gimple_ctypes.IdentExpr(_av, node.line, node.col)
-    # `list(<a list>)` is a slot-for-slot copy, so the result describes its
-    # slots exactly as the source does — and for a list that carries its own
-    # per-slot kinds (a `struct.unpack` of a mixed format, a heterogeneous
-    # literal) that description is the only thing standing between a copy and
-    # raw IEEE-754 bit patterns. The comprehension below emits the copy as an
-    # explicit append loop, which loses the kinds by itself, so hand them
-    # over once it has run. Done at RUNTIME lookup rather than from the
-    # codegen's own table on purpose: the source is reached through a value
-    # the codegen may have no kinds for (a copy of a copy, a list returned
-    # from a function) while the runtime does. Only for `list` — a `set`
-    # re-reads its elements through the set's own per-slot accessors and
+    # `list` and `tuple` both walk their argument through the comprehension
+    # below, which dispatches on the argument's STATIC type and has no arm for
+    # a value of unknowable kind — it emits `/* TODO: comprehension over
+    # int64_t */` and produces an EMPTY list. That is how
+    # `self.func_param_types[_mangled] = list(_pcs)` silently became `[]` for
+    # every `GimpleGen_*` signature in the SELF-HOSTED compiler (the frozen
+    # signature table's element type is erased there, so `_pcs` arrives as a
+    # bare handle), and how `list(_dflts)` walked a list of `(name, default)`
+    # pairs as though it were a dict.
+    #
+    # So resolve the argument ONCE, here — one lowering, no duplicated side
+    # effects — and if its kind is not statically knowable, hand it to the
+    # `_materialize_as_list` chokepoint DESIGN.html R1/R5 exists for. That
+    # helper already answers "give me a list I can walk" for an ambiguous
+    # handle by consulting the runtime registries (`mojo_is_registered_dict`
+    # /`_set`) instead of guessing, and it is what keeps `list(x)` agreeing
+    # with `all(x)`, `enumerate(x)` and `','.join(x)` about what an ambiguous
+    # handle is. Reusing it is the point: a second spelling of that dispatch
+    # here is exactly the kind of drift the R1 consolidation removed.
+    #
+    # `_copy_src` is the per-slot kinds hand-off: `list(<a list>)` is a
+    # slot-for-slot copy, so the result must describe its slots exactly as the
+    # source does — for a list carrying its own per-slot kinds (a
+    # `struct.unpack` of a mixed format, a heterogeneous literal) that
+    # description is the only thing standing between a copy and raw IEEE-754
+    # bit patterns. The comprehension emits the copy as an explicit append
+    # loop, which loses the kinds by itself. Looked up at RUNTIME rather than
+    # from the codegen's own table on purpose: the source is reached through a
+    # value the codegen may have no kinds for (a copy of a copy, a list
+    # returned from a function) while the runtime does. Only for `list` — a
+    # `set` re-reads its elements through the set's own per-slot accessors and
     # genuinely produces a different container.
     _copy_src = None
-    if kind == 'list':
-        _lt, _lv = gen.lower_expr(_arg0)
-        if _lt == 'MojoList *':
-            # Same anti-double-side-effect discipline as the set branch
-            # above: re-use the value we just lowered, do not lower the
-            # argument expression a second time.
-            gen.var_types[_lv] = _lt
-            _arg0 = gimple_ctypes.IdentExpr(_lv, node.line, node.col)
-            _copy_src = _lv
+    if kind == 'list' or kind == 'tuple':
+        _ct, _cv = gen.lower_expr(_arg0)
+        if _ct == 'MojoList *':
+            # Hand the ALREADY-lowered value on as a plain name rather than
+            # re-lowering `node.args[0]` (which would emit its side effects
+            # twice); a name registered in `var_types` lowers straight back to
+            # itself with this ctype.
+            gen.var_types[_cv] = _ct
+            _arg0 = gimple_ctypes.IdentExpr(_cv, node.line, node.col)
+            if kind == 'list':
+                _copy_src = _cv
+        elif ((gen._get_actual_type(_ct, _cv) or _ct)
+              not in _COMPREHENSION_ITER_TYPES):
+            # Opaque handle: get a walkable list for it, per the dispatch
+            # above. A dict materializes its KEYS and a set its own insertion
+            # order, which is what Python does for both.
+            #
+            # Only for a type NOBODY can read, and deliberately NOT for one
+            # `_get_actual_type` merely refines to `MojoList *`: that arm is
+            # left to `_lower_comprehension`, which re-lowers the iterable
+            # into a fresh temp and carries the element-type record onto that
+            # new name (see its own `_get_actual_type` block). Substituting
+            # the pre-existing boxed name here instead loses that record, and
+            # the record is the only thing that says whether the slots hold
+            # ints or strings — `list(ident([1, 2, 3]))` next to
+            # `",".join(ident(["a", "b"]))` in one function read the first
+            # through `mojo_list_get_str` and stopped compiling.
+            _ml = gen._materialize_as_list(
+                gen._get_actual_type(_ct, _cv) or _ct, _cv)
+            gen.var_types[_ml] = 'MojoList *'
+            _arg0 = gimple_ctypes.IdentExpr(_ml, node.line, node.col)
+            if kind == 'list':
+                _copy_src = _ml
     gen.temp_counter += 1
     var = f"_ctor_elem{gen.temp_counter}"
     synth_gen = gimple_ctypes.Generator(target=var, iterable=_arg0, conditions=[],
@@ -6250,6 +6308,25 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # emitted.
     if ret_type == 'MojoList *' and fname_raw in getattr(gen, '_return_maybe_kinds', ()):
         gen._maybe_kinds_vals.add(t)
+    # ...and, for a returned heterogeneous list LITERAL, the per-slot kinds
+    # themselves. Same whole-program scan (`_infer_return_maybe_kinds`), same
+    # key, one step finer: the boolean above can only tell a read with no
+    # compile-time index to ask the runtime, while a literal's slot kinds ARE
+    # compile-time facts and die at the function boundary unless they are
+    # carried. Seeded under `_struct_slot_kinds` — the table that already
+    # means "the per-slot kinds of this value, known statically", filled for a
+    # `struct.unpack` result — so every statically indexed read (the MojoList
+    # subscript arm below, `a, b = t` destructuring, the whole-result repr)
+    # picks its accessor with no new site. Without it:
+    # `def mixed(x: Float64, s: String): return [x, 1, s]` gave the caller's
+    # local the unknown-element default `str`, `a[0]` handed `2.5`'s
+    # IEEE-754 bits to `strlen` (SIGSEGV), and `a[2]` answered the decimal of
+    # its own pointer — bugs/CODEGEN_list_element_read_defaults_to_str_across
+    # _a_call.md.
+    if ret_type == 'MojoList *':
+        _rsk = getattr(gen, '_return_value_slot_kinds', {}).get(fname_raw)
+        if _rsk:
+            gen._struct_slot_kinds[t] = _rsk
     return ret_type, t
 
 
@@ -6799,6 +6876,17 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                                        f"mojo_list_get_int ({ov}, {idx64})")
                     return 'MojoBytes *', gen._new_val(
                         'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
+                if _skd == 'str':
+                    # A `char *` slot, held in the raw int64_t slot (see
+                    # fire_runtime.h's MojoList comment), so this is the
+                    # string accessor and NOT a coercion: the word IS the
+                    # pointer. `'str'` reaches this table two ways — a
+                    # `struct.unpack` format can never produce it, so it is
+                    # always a heterogeneous list LITERAL, including one that
+                    # came back through a `return`
+                    # (`gen._return_value_slot_kinds`).
+                    return 'char *', gen._new_val(
+                        'char *', f"mojo_list_get_str ({ov}, {idx64})")
                 return 'int64_t', gen._new_val(
                     'int64_t', f"mojo_list_get_int ({ov}, {idx64})")
         suf  = gimple_ctypes.TypeLattice.list_suffix(elem)

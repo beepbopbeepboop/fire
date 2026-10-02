@@ -358,18 +358,132 @@ def _seed_selfhost_return_elem_types(self):
             self._return_elem_types[_k] = _e
 
 
-def _returns_kinds_valued(node) -> bool:
+def _param_slot_kinds(params) -> dict:
+    """`{parameter name: per-slot kind byte}` for the ANNOTATED parameters of
+    a function definition.
+
+    This pre-pass runs over every body BEFORE the per-function locals exist,
+    so `gen._quick_type(IdentExpr('x'))` for a parameter answers the erased
+    `int64_t` for every parameter in the program — which is exactly what
+    made the list-literal arm of `_returns_kinds_valued` answer "homogeneous"
+    for `return [x, 1, s]` and hand a float's bits to `strlen`. A parameter's
+    DECLARED type is not erased: it is the annotation, and it is what the
+    slot will hold. Unannotated parameters contribute nothing, so the answer
+    stays as weak as it was for them rather than being invented.
+
+    `gimple_ctypes._mojo_type` is the shared annotation-to-C-type answer
+    (`_quick_type` itself goes through `_TYPE_MAP`), so the kind byte comes
+    from the same table the emitter's own `slot_kind_byte` mapping uses.
+    """
+    out = {}
+    if not params:
+        return out
+    for _p in params:
+        try:
+            _nm, _ann = _p[0], _p[1]
+        except (TypeError, IndexError):
+            continue
+        if not isinstance(_ann, str) or not _ann:
+            continue
+        out[_as_str(_nm)] = gimple_ctypes.TypeLattice.slot_kind_byte(
+            gimple_ctypes._mojo_type(_ann))
+    return out
+
+
+def _list_literal_slot_kinds(gen, node, param_kinds=None) -> list:
+    """`gen._struct_slot_kinds`' long-form spelling (`'double'` / `'str'` /
+    `'bytes'` / `'int'`) of a heterogeneous list LITERAL's per-slot kinds, or
+    `[]` for anything that is not one.
+
+    This is the per-index half of `_returns_kinds_valued`'s list arm, and it
+    has to be computed from the same inputs or the two disagree about which
+    literals are heterogeneous — so it shares `_param_slot_kinds` and
+    `TypeLattice.slot_kind_byte`, and the one-byte runtime alphabet
+    (`'d'`/`'p'`/`'s'`/`'l'`/`'i'`, `mojo_list_set_kinds`'s) is translated to
+    the long form `_struct_slot_kinds` uses. `'l'` (a nested container slot)
+    and `'n'` (`None`) fold to `'int'`: a raw word IS the right read for
+    both — the pointer, and 0 — and the alternative would be a per-slot
+    pointer type this table has never carried.
+
+    `[]` for a `*`-unpack element, matching the boolean arm: no compile-time
+    slot count means no per-slot kinds at all."""
+    if not isinstance(node, gimple_ctypes.ListExpr):
+        return []
+    _long = {'d': 'double', 'p': 'str', 's': 'bytes'}
+    out = []
+    for _el in node.elements:
+        if isinstance(_el, gimple_ctypes.UnaryOp) and _el.op == '*':
+            return []
+        if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
+                isinstance(_el, gimple_ctypes.IdentExpr)
+                and _el.name == 'None')):
+            out.append('int')
+            continue
+        if isinstance(_el, gimple_ctypes.IdentExpr) and param_kinds:
+            _pk = param_kinds.get(_as_str(_el.name))
+            if _pk is not None:
+                out.append(_long.get(_pk, 'int'))
+                continue
+        out.append(_long.get(gimple_ctypes.TypeLattice.slot_kind_byte(
+            gen._quick_type(_el)), 'int'))
+    return out
+
+
+def _returns_kinds_valued(gen, node, param_kinds=None) -> bool:
     """True when `node` is an expression that produces a value whose
     per-slot element kinds are recorded on the VALUE itself — a
-    `struct.unpack` of a format that mixes kinds, or a `Struct` handle's
-    `unpack`/`iter_unpack` on such a format. The kinds then survive a
+    `struct.unpack` of a format that mixes kinds, a `Struct` handle's
+    `unpack`/`iter_unpack` on such a format, or a list LITERAL whose
+    elements are not all the same kind. The kinds then survive a
     `return` even though the compile-time NAME they were recorded against
     does not, which is the whole reason this question needs answering at
     the callee (see `_infer_return_maybe_kinds`).
 
     Only literal formats answer, the same bar `_struct_ctor_format` sets:
     a computed format is not statically known, and guessing would be the
-    wrong-static-answer failure the whole table exists to avoid."""
+    wrong-static-answer failure the whole table exists to avoid.
+
+    The list-literal arm was MISSING, and the omission is what
+    `bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md` is:
+    `_lower_list_literal` records the per-slot kinds of a heterogeneous
+    literal on the value (`mojo_list_set_kinds`) and marks it in
+    `gen._maybe_kinds_vals` — but only while THAT function is being
+    lowered. A `return [x, 1, s]` therefore described itself perfectly
+    and lost every word of it at the boundary, because this function
+    (which decides the cross-function half) did not recognise the one
+    producer that is not a `struct.unpack`. So
+    `def mixed(x: Float64, s: String): return [x, 1, s]` bound to a local in
+    the caller left that local's element type at the unknown-element default
+    `str`, and every read of it went through `mojo_list_get_str` — so `a[0]`,
+    which holds `2.5`'s IEEE-754 bit pattern `0x4004000000000000`, was handed
+    to `strlen` and the program died with SIGSEGV. Marking the callee makes
+    the call site register the result in `_maybe_kinds_vals`
+    (`emit_calls.py`'s `_lower_named_call`), which is the flag the subscript
+    and iteration lowerings already consult for `mojo_list_get_boxed`.
+
+    The "not all the same kind" test is the emitter's own, applied
+    statically: one kind byte per element, from `_param_slot_kinds` where the
+    element is a bare parameter, else `_quick_type`. A `*`-unpack element has
+    no compile-time slot count and so no static per-slot kinds at all —
+    answering False for it keeps that case exactly where it was."""
+    if isinstance(node, gimple_ctypes.ListExpr):
+        _kinds = set()
+        for _el in node.elements:
+            if isinstance(_el, gimple_ctypes.UnaryOp) and _el.op == '*':
+                return False
+            if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
+                    isinstance(_el, gimple_ctypes.IdentExpr)
+                    and _el.name == 'None')):
+                _kinds.add('n')
+                continue
+            if isinstance(_el, gimple_ctypes.IdentExpr) and param_kinds:
+                _pk = param_kinds.get(_as_str(_el.name))
+                if _pk is not None:
+                    _kinds.add(_pk)
+                    continue
+            _kinds.add(gimple_ctypes.TypeLattice.slot_kind_byte(
+                gen._quick_type(_el)))
+        return len(_kinds) > 1
     if not isinstance(node, gimple_ctypes.CallExpr):
         return False
     f = node.func
@@ -391,7 +505,7 @@ def _returns_kinds_valued(node) -> bool:
     return False
 
 
-def _infer_return_maybe_kinds(gen, body) -> bool:
+def _infer_return_maybe_kinds(gen, body, params=None) -> tuple:
     """Does any `return` in this body hand back a kinds-carrying value?
 
     The cross-function half of the per-slot-kinds mechanism. A
@@ -411,30 +525,46 @@ def _infer_return_maybe_kinds(gen, body) -> bool:
     not — recorded rather than approximated, since over-approximating here
     would only cost a boxed read on a value the runtime then reports as
     unboxed, while under-approximating costs a wrong answer, and a missing
-    case is a missing case either way."""
+    case is a missing case either way.
+
+    Returns `(maybe_kinds, slot_kinds)`:
+    `maybe_kinds` is the BOOLEAN half, which reaches the call site as
+    `gen._return_maybe_kinds` and becomes a `mojo_list_get_boxed` read for a
+    subscript or iteration with no compile-time index;
+    `slot_kinds` is the PER-INDEX half, the long-form kind name of every slot
+    of a returned heterogeneous list literal (`'double'` / `'str'` / `'bytes'`
+    / `'int'`, the spelling `gen._struct_slot_kinds` already uses). That one
+    is what makes a STATICALLY indexed read exact — `a[2]` on
+    `[x, 1, s]` has to come back as a `char *`, and the boolean alone can only
+    say "ask the runtime", which for a `char *` slot answers with the raw word.
+    `''` when nothing per-index is known."""
+    _pk = _param_slot_kinds(params)
     bound: set = set()
+    kinds_out = ''
     for _round in range(2):
         found = False
         for nd in _walk_ast(body):
             if (isinstance(nd, gimple_ctypes.AssignStmt)
                     and isinstance(nd.target, gimple_ctypes.IdentExpr)):
-                if _returns_kinds_valued(nd.value) or (
+                if _returns_kinds_valued(gen, nd.value, _pk) or (
                         isinstance(nd.value, gimple_ctypes.IdentExpr)
                         and nd.value.name in bound):
                     bound.add(nd.target.name)
             elif (isinstance(nd, gimple_ctypes.VarDecl) and nd.name
-                    and _returns_kinds_valued(getattr(nd, 'value', None))):
+                    and _returns_kinds_valued(gen, getattr(nd, 'value', None), _pk)):
                 bound.add(nd.name)
             elif isinstance(nd, gimple_ctypes.ReturnStmt):
                 v = getattr(nd, 'value', None)
-                if _returns_kinds_valued(v):
+                if _returns_kinds_valued(gen, v, _pk):
                     found = True
+                    kinds_out = (_list_literal_slot_kinds(gen, v, _pk)
+                                 or kinds_out)
                 elif (isinstance(v, gimple_ctypes.IdentExpr)
                       and v.name in bound):
                     found = True
         if found:
-            return True
-    return False
+            return True, kinds_out
+    return False, kinds_out
 
 
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
@@ -4603,22 +4733,35 @@ def gen_module_impl(self, stmts):
     # per nesting level. Memoised by body identity so a body is walked once
     # per compile even when the enclosing structure revisits it.
     _mk_cache: dict = {}
-    def _mk(name, body):
+    def _mk(name, body, params=None):
+        # Memoised by body identity, NOT by `(body, params)`: two definitions
+        # never share a body node, and the params are that node's own, so
+        # keying on the body alone is both correct and the wider reuse.
         _k = id(body)
         _v = _mk_cache.get(_k)
         if _v is None:
-            _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body)
-        if _v:
+            _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body, params)
+        _maybe, _slotkinds = _v
+        if _maybe:
             self._return_maybe_kinds.add(name)
+        if _slotkinds:
+            # A returned HETEROGENEOUS list literal, per slot. The boolean
+            # table above only reaches the call site as "ask the runtime",
+            # which is enough for a computed subscript and not enough for
+            # `a[2]`; this one reaches it as the exact kind of every slot, in
+            # the same long-form spelling `gen._struct_slot_kinds` carries for
+            # a `struct.unpack` result, so the statically indexed reads pick
+            # their accessor from it unchanged.
+            self._return_value_slot_kinds[name] = _slotkinds
     for s in all_functions:
         if not _is_foreign_main(s) and isinstance(s, FunctionDef):
-            _mk(s.name, s.body)
+            _mk(s.name, s.body, s.params)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             _sk = _as_structdef_node(s)
             for _m in _sk.methods:
                 if _m.name != '__init__':
-                    _mk(f"{_sk.name}_{_m.name}", _m.body)
+                    _mk(f"{_sk.name}_{_m.name}", _m.body, _m.params)
     for _pass2c_iter in range(8):
         _c_changed = False
         for s in all_functions:

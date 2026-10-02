@@ -2094,6 +2094,16 @@ class GimpleGen:
         # reason — see _infer_return_maybe_kinds in
         # mojo/backend_gimple/module_gen.py.
         self._return_maybe_kinds: set = set()
+        # Function name -> the per-slot kind of EVERY slot of a returned
+        # heterogeneous list literal, in `gen._struct_slot_kinds`' long-form
+        # spelling ('double' / 'str' / 'bytes' / 'int'). The set above is the
+        # boolean half of the same question and answers only "ask the
+        # runtime", which is what a subscript with no compile-time index
+        # needs; this one answers it per index, which is what `a[2]` on
+        # `[x, 1, s]` needs to come back as a `char *` rather than the raw
+        # word. Both filled by the same whole-program scan — see
+        # _infer_return_maybe_kinds in mojo/backend_gimple/module_gen.py.
+        self._return_value_slot_kinds: dict[str, list] = {}
         self._nested_elem_types: dict[str, str] = {}
         self._param_struct_types: dict[str, str] = {}
         self._dict_val_types: dict[str, str] = {}

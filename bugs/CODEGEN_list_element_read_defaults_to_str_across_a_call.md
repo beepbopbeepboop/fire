@@ -8,10 +8,8 @@ a `List[String]` whose element reads back as an INT, this is an unannotated
 cause in the direction that matters, so it is filed separately rather than
 folded in.
 
-## Status (2026-09-30 — OPEN, reproduced on current master, NOT caused by any
-of the memory-ownership work of 2026-09-30; the repro below segfaults
-identically with the pre-fix `runtime/fire_runtime.c` AND with every ownership
-rule in doc/MEMORY.html §3 disabled)
+## Status (2026-10-30 — the SIGSEGV is fixed and every statically indexed
+## read is now exact; ONE read is still wrong and is named below)
 
 ## The bug
 
@@ -71,31 +69,63 @@ same crash, same output, both exit 139.
 
 ## Next step
 
-`a`'s element type. The mechanism that marks a value as "may be boxed"
-(`gen._maybe_kinds_vals` in `gimple_codegen.py`, consulted by
-`emit_exprs`/`emit_calls`/`emit_loops` for `mojo_list_get_boxed`) is seeded
-for a list LITERAL, where the codegen sees every element. A local bound from
-a call never enters it, so the subscript lowering falls back to the local's
-inferred element type — and an unannotated `List` infers to `str`. Either:
+Done — see "What landed" above for what was implemented and for the single
+read (iteration, no compile-time index) that is still wrong and why it needs
+a different mechanism.
 
-1. seed `_maybe_kinds_vals` for a call result whose whole-program callee scan
-   says the returned list is heterogeneous (the same scan that already makes
-   `drop_one()`'s result work — it is present, `gimple_codegen.py`'s
-   return-ELEMENT-type inference, and its result is simply not consulted for
-   this binding), or
-2. make the fallback for an unknown element type fail CLOSED: read the slot
-   through `mojo_list_get_boxed` and let the runtime decide, instead of
-   committing to `str` and handing a float's bits to `strlen`.
+## What landed (2026-10-30), and the one read that is still wrong
 
-(2) is the more robust of the two and is the same shape as the rule this
-repo already states for the ownership predicates — an uncertain guess must
-resolve to "ask the runtime", never to "dereference it" — but (1) is the
-smaller change and would leave the `str` fallback in place for the cases it
-does not cover.
+The doc's option (1) — "seed the mechanism for a call result whose
+whole-program callee scan says the returned list is heterogeneous" — is what
+was implemented, and it needed the scan to learn a second thing.
 
-While in there, the same lowering is what makes
-`CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md`'s repro read
-a `String` slot as an int; both are one bug ("the element type of a list is
-recorded where the list is built, and never travels with the value to the
-subscript") seen from two ends, and fixing the read path for both is
-probably less work than two directional fixes.
+`_infer_return_maybe_kinds` is the pass that decides the cross-function half.
+It recognised ONE producer of a kinds-carrying value, `struct.unpack` of a
+mixed format, and not the other: a heterogeneous list LITERAL. So
+`return [x, 1, s]` described itself perfectly while its own function was being
+lowered and lost every word of it at the boundary. It now returns
+`(maybe_kinds, slot_kinds)`:
+
+* `maybe_kinds` joins the existing `_return_maybe_kinds` set, so the call site
+  registers the result in `gen._maybe_kinds_vals` — the flag the subscript and
+  iteration lowerings already consult. That is the fail-closed half the doc
+  asked for as option (2): the read goes through `mojo_list_get_boxed`, which
+  asks the runtime, instead of committing to `str` and handing a float's bits
+  to `strlen`. **The SIGSEGV is gone.**
+* `slot_kinds` is new (`gen._return_value_slot_kinds`) and is the per-INDEX
+  half: the long-form kind of every slot of a returned heterogeneous literal,
+  in the same spelling `gen._struct_slot_kinds` already carries for a
+  `struct.unpack` result, seeded at the call site so every statically indexed
+  reader picks its own accessor with no new site. `'str'` is a new kind name
+  there (a `char *` slot is the raw word, so it reads through
+  `mojo_list_get_str`), and it is what makes `a[2]` answer `yy` instead of the
+  decimal of its own pointer.
+
+The one remaining wrong read: **ITERATION**, where there is no compile-time
+index to pick an accessor from.
+
+    for v in a:
+        print(v)
+
+prints `2.5`, `1`, and then the decimal of the string slot's own pointer. The
+boolean half reaches the loop body, the loop reads through `mojo_list_get_boxed`
+— which is right for the numeric slot and, for a `char *` slot, returns the
+raw word — and nothing downstream knows the word is a pointer. A statically
+indexed read has a per-slot answer to consult; a loop variable does not.
+
+Making it right is per-ELEMENT runtime typing in the loop body, and it is the
+same project as
+`bugs/CODEGEN_materialized_container_has_no_element_type.md` (a value whose
+container KIND is a runtime fact has the same problem for its ELEMENT type).
+Do them together; the shared piece is a runtime-dispatching element reader that
+a consumer can ask per slot.
+
+## Verified
+
+```
+python3 test_gimple.py            352 passed, 1 failed
+    (the one failure is py_tokenize's ABI table, another worker's fix in flight —
+     see the Status note at the end)
+python3 .tmp/probe2.py <fixture>  single-TU and link-mode MATCH CPython for
+    print(a[0]) / print(a[1]) / print(a[2]) / len(a)
+```

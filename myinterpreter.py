@@ -133,6 +133,49 @@ class Scope:
             raise NameError(f"name '{name}' is not defined")
 
 
+def _split_invoker(owner_interp, args) -> tuple:
+    """`(interpreter, args)` for a call that may still carry the interpreter
+    as its first positional argument.
+
+    Three spellings of "call me with the interpreter" reach a `MojoFunction`,
+    and all three have to land on the same answer:
+
+    1. `Interpreter.invoke` (and `MojoInstance`'s `method(interpreter, self)`)
+       volunteer it positionally — the historical, mandatory convention;
+    2. a BUILTIN that received the function as a callback
+       (`sorted(key=f)`, `min(key=f)`, `map(f, xs)`, `list.sort(key=f)`) calls
+       `f(*args)` with no interpreter at all, which used to hand the callee's
+       FIRST REAL ARGUMENT over as the interpreter and die in `_invoke` with
+       "AttributeError: 'int' object has no attribute 'scope'";
+    3. an IMPORTED function, where the caller's interpreter and the one that
+       DEFINED the function are different objects (`fire.py run` gives every
+       imported module its own `Interpreter`, so `main` calling
+       `alpha_module.sb1_probe_amb` arrives with the caller's instance in
+       `args[0]` and the callee records the module's own).
+
+    So the leading argument is recognised by TYPE, not by identity with
+    `owner_interp`: case 3 is exactly the case where identity is the wrong
+    test, and getting it wrong there passed the interpreter through as the
+    function's first real argument — `sb1_probe_amb(x)` computed
+    `<Interpreter> + 111` and died with "unsupported operand type(s) for +:
+    'Interpreter' and 'int'" (test_module_cache.py's SB-1 per-scope-import
+    row, which asserts the interpreter path and the compiled path agree).
+
+    Identity is still consulted as a SECOND test, for a hand-constructed
+    `MojoFunction` nobody recorded an owner on; and a positional fallback
+    keeps the old convention working for one. A Mojo program cannot pass an
+    `Interpreter` as a real argument in any spelling this file supports, so
+    recognising one can never eat a value.
+    """
+    if args and isinstance(args[0], Interpreter):
+        return args[0], args[1:]
+    if owner_interp is not None:
+        return owner_interp, args
+    if args:
+        return args[0], args[1:]
+    return owner_interp, args
+
+
 class MojoFunction:
     """Represents a function defined in Mojo code."""
     def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
@@ -178,21 +221,15 @@ class MojoFunction:
         # key, a callback this compiler never sees) has the same hole.
         #
         # So the interpreter is resolved HERE, from the function's own record
-        # of the interpreter that defined it, and a leading argument that IS
-        # that interpreter is dropped for compatibility with `invoke` (and
-        # with `MojoInstance`'s `method(interpreter, self)` callers). The
-        # alternative — making every callback-taking builtin wrap its callback
-        # in `_MojoInvokeWrapper` the way `map[f](...)` already does — leaves
-        # the hole open for every callback site nobody enumerated.
-        interp = self._interp
-        if interp is not None:
-            if args and args[0] is interp:
-                args = args[1:]
-        elif args:
-            # No recorded owner (a hand-constructed MojoFunction): fall back
-            # to the old positional convention rather than failing.
-            interp = args[0]
-            args = args[1:]
+        # of the interpreter that defined it, and the positional convention
+        # `Interpreter.invoke` still uses is recognised by `_split_invoker` —
+        # which also covers the case where the two interpreters are NOT the
+        # same object, which an imported function always is.
+        #
+        # The alternative — making every callback-taking builtin wrap its
+        # callback in `_MojoInvokeWrapper` the way `map[f](...)` already does
+        # — leaves the hole open for every callback site nobody enumerated.
+        interp, args = _split_invoker(self._interp, args)
         return self._invoke(interp, {}, args, kwargs)
 
     def __getitem__(self, item):
@@ -1030,15 +1067,11 @@ class _MojoBoundComptimeFunction:
         # `f[DType](x)` curried into a callable is handed to builtins as an
         # ordinary value (`sorted(xs, key=f[Int])`), so — exactly as in
         # `MojoFunction.__call__` — the interpreter is resolved from the
-        # underlying function's own record rather than demanded positionally.
+        # underlying function's own record rather than demanded positionally,
+        # through the same `_split_invoker` (an imported generic function has
+        # the same two-different-interpreters shape as any other).
         func = self.func
-        interp = func._interp
-        if interp is not None:
-            if args and args[0] is interp:
-                args = args[1:]
-        elif args:
-            interp = args[0]
-            args = args[1:]
+        interp, args = _split_invoker(func._interp, args)
         return func._invoke(interp, self.comptime_bindings, args, kwargs)
 
 
@@ -1090,14 +1123,11 @@ class MojoOverloadSet:
     def __call__(self, *args, **kwargs):
         # `interpreter` used to be a required first positional argument; see
         # `MojoFunction.__call__` for why it no longer is and how it is
-        # resolved instead.
-        interp = self._interp
-        if interp is not None:
-            if args and args[0] is interp:
-                args = args[1:]
-        elif args:
-            interp = args[0]
-            args = args[1:]
+        # resolved instead. An overload SET's candidates come from one module
+        # and its call sites can come from another, so the two interpreters are
+        # routinely different objects — which is why `_split_invoker`
+        # recognises the leading argument by type.
+        interp, args = _split_invoker(self._interp, args)
         for spec in self.candidates:
             if self._matches(spec, args, kwargs):
                 func = spec[0]

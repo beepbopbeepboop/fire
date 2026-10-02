@@ -7145,6 +7145,8 @@ class Dialog:
         self.widgetName = widgetName
     def show(self):
         return self.widgetName
+def pass_through(w):
+    return w
 def main():
     a = Dialog(5)
     print(a.widgetName)
@@ -7152,7 +7154,143 @@ def main():
     print(Dialog(2.5).show())
     print(Dialog(True).show())
     print(Dialog("plain").show())
-    print(len(Dialog(7).widgetName))
+    print(Dialog(pass_through("boxed")).show())
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_ctor_of_a_container_reaches_the_comprehension():
+        """`list(x)` / `tuple(x)` / `set(x)` must COPY x, whatever reached
+        them — including a value whose container kind is not a compile-time
+        fact.
+
+        `_lower_comprehension` dispatches on the argument's STATIC type and has
+        no arm for a boxed `int64_t`/`void *`: it emitted
+        `/* TODO: comprehension over int64_t */` and produced an EMPTY list.
+        That is how `self.func_param_types[_mangled] = list(_pcs)` silently
+        became `[]` for every `GimpleGen_*` signature in the SELF-HOSTED
+        compiler (that table's element type is erased there, so `_pcs`
+        arrives as a bare handle), and how `list(_dflts)` walked a list of
+        `(name, default)` pairs as though it were a dict.
+
+        `def ident(x): return x` reproduces the erased shape in ordinary
+        source: the call's declared return type is its parameter's, so the
+        result is a boxed handle with no container kind attached. The list,
+        `tuple`, `sorted`, `sum`, `all`, `join` and `enumerate` rows are here
+        because they are the ones this change makes exactly right, and because
+        the last four share the chokepoint and must not drift from it.
+
+        `list(<a plain int>)` and `list(<a boxed dict>)` are NOT asserted
+        here, and both are named in the docstring's neighbour bug docs:
+        CPython raises TypeError where the compiled path answers `[]` for the
+        first (a SIGSEGV until this same change's fail-closed arm —
+        `bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md`), and a
+        boxed dict's keys come back as their own addresses for the second
+        (`bugs/CODEGEN_materialized_container_has_no_element_type.md`).
+
+        A STRING argument is not asserted either, and that is a real defect
+        rather than a fixture convenience: `list(ident([1, 2, 3]))` in the
+        same function as `list(ident("abc"))` reads the first list's slots
+        with `mojo_list_get_str`, because one function's return ELEMENT type
+        is inferred once for the whole program and the string call site wins.
+        Measured, both pipelines: `["\\x18", "\\x1a", "�", "\\x02",
+        "\\x01"]` where CPython printed `[1, 2, 3]` — a five-element list of
+        bytes read out of a three-element int list. Recorded in
+        bugs/CODEGEN_return_element_type_is_unified_across_call_sites.md.
+        """
+        global _PASS, _FAIL
+        name = "ctor_of_a_container_reaches_the_comprehension"
+        src = '''\
+def ident(x):
+    return x
+def main():
+    print(list(ident([1, 2, 3])))
+    print(tuple(ident([1, 2, 3])))
+    print(sorted(ident([3, 1, 2])))
+    print(sum(ident([1, 2, 3])))
+    print(all(ident([1, 2, 3])))
+    print(",".join(ident(["a", "b"])))
+    print(len(list(enumerate(ident(["x", "y"])))))
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_returned_heterogeneous_list_keeps_its_slot_kinds():
+        """A list literal's per-slot kinds must survive a `return`.
+
+        `_lower_list_literal` records them on the VALUE
+        (`mojo_list_set_kinds`) and marks it in `gen._maybe_kinds_vals` — but
+        only while THAT function is being lowered. The compile-time NAME they
+        were recorded against dies at the boundary, and
+        `_infer_return_maybe_kinds` is the pass that exists to carry the fact
+        across; it recognised `struct.unpack` and nothing else, so the one
+        producer that is not a `struct.unpack` was the one it missed.
+
+        The cost was a segfault. `a`'s element type fell back to the
+        unknown-element default `str`, so EVERY read of it went through
+        `mojo_list_get_str` — and `a[0]` holds `2.5`'s IEEE-754 bit pattern
+        `0x4004000000000000`, which `strlen` walked to and died on
+        (bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md).
+
+        Both halves are asserted. The indexed reads need the per-slot kinds to
+        cross the boundary (the new `_return_value_slot_kinds`); the
+        ITERATION read needs only the boolean, and prints the string slot as
+        the decimal of its own pointer — recorded in the doc's Status as the
+        remaining half, because making it right needs per-slot runtime typing
+        in the loop body rather than an accessor choice.
+
+        The parameters are ANNOTATED on purpose: a parameter's declared type is
+        the only static evidence about what a slot will hold at this stage
+        (`_quick_type` on a parameter answers the erased `int64_t` before any
+        function's locals exist), and the unannotated spelling of the same
+        program has no such evidence to offer."""
+        global _PASS, _FAIL
+        name = "a_returned_heterogeneous_list_keeps_its_slot_kinds"
+        src = '''\
+def mixed(x: Float64, s: String):
+    return [x, 1, s]
+def main():
+    a = mixed(2.5, "yy")
+    print(a[0])
+    print(a[1])
+    print(a[2])
+    print(len(a))
 main()
 '''
         want = _cpython_stdout(src)
@@ -7969,7 +8107,14 @@ main()
         functions differ ONLY in whether their format argument is a literal
         or a variable, so a regression that widened the new guard (or a
         pre-existing bug that narrowed it) cannot pass one and fail the
-        other unnoticed."""
+        other unnoticed.
+
+        `_infer_return_maybe_kinds` returns `(maybe_kinds, slot_kinds)` — the
+        boolean half and the per-index half — so this reads element 0 of the
+        pair. `slot_kinds` is `''` for a `struct.unpack` result (that producer
+        has no per-slot spelling to carry; only a list literal does), which is
+        asserted too, since a nonempty answer here would mean the new
+        list-literal arm is answering for something it should not."""
         global _PASS, _FAIL
         name = "struct_unpack_computed_format_keeps_literal_half"
         src = '''\
@@ -7984,16 +8129,18 @@ def computed(fmt, buf):
         mg = __import__('mojo.backend_gimple.module_gen', fromlist=['x'])
         stmts = gimple_codegen.Parser(
             gimple_codegen.py_tokenize(src)).parse_module()
-        answers = {getattr(st, 'name', None):
-                   mg._infer_return_maybe_kinds(None, st.body)
-                   for st in stmts if getattr(st, 'name', None) in
-                   ('literal', 'computed')}
+        raw = {getattr(st, 'name', None):
+               mg._infer_return_maybe_kinds(None, st.body, st.params)
+               for st in stmts if getattr(st, 'name', None) in
+               ('literal', 'computed')}
+        answers = {k: v[0] for k, v in raw.items()}
         want = {'literal': True, 'computed': False}
         bad = {k: answers.get(k) for k, v in want.items() if answers.get(k) is not v}
+        bad.update({f"{k}.slot_kinds": v[1] for k, v in raw.items() if v[1]})
         if bad:
             print(f"FAIL  {name}: wrong static-kinds answer(s) {bad} "
-                  f"(want {want}); a computed format must answer False and a "
-                  f"literal mixed format True")
+                  f"(want {want} and no per-slot kinds); a computed format "
+                  f"must answer False and a literal mixed format True")
             _FAIL += 1
             return
         print(f"PASS  {name}")
@@ -8122,6 +8269,8 @@ outer([10, 20, 30])
     test_callable_return_type_survives_its_carrier()
     test_variadic_lambda_lowers_as_gimple_in_every_body()
     test_scalar_given_a_char_star_parameter_is_stringified()
+    test_ctor_of_a_container_reaches_the_comprehension()
+    test_a_returned_heterogeneous_list_keeps_its_slot_kinds()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

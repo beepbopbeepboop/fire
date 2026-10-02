@@ -2860,6 +2860,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         result = gen._new_temp('MojoList *')
         bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
         bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
+        bb_list = gen._new_bb(); bb_none = gen._new_bb()
         bb_after = gen._new_bb()
         isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', it64)])
         gen._emit(f"  if ({isd}) goto {bb_dict}; else goto {bb_not_dict};")
@@ -2867,6 +2868,22 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         _dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
         _dk = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', _dp)])
         gen._emit(f"  {result} = {_dk};")
+        # NO `gen._elem_types[result]` here, and that is load-bearing rather
+        # than an omission. This arm merges FOUR different containers into one
+        # temp, and the element type is a property of WHICH ONE, so a record
+        # made for the dict branch is a lie for the other three: recording
+        # `char *` (dict keys are strings) retyped the loop variable of every
+        # non-dict consumer, so `a, b = <a boxed int tuple>` read its two
+        # slots with `mojo_list_get_str` and `yield a + b` printed the decimal
+        # of the first slot's own pointer — the generator suite's
+        # `generator_pops_heterogeneous_tagged_stack` and
+        # `generator_pops_stack_two_level_tuple_unpack` both went from `7/99/3`
+        # to `4382923312/99/4382923328` on that one line. The
+        # `src_type == 'MojoDict *'` arm above can record `char *` because
+        # there is exactly one arm. An element type that is only knowable per
+        # runtime branch needs a per-slot runtime read (`mojo_list_get_boxed`
+        # + the tagged reader `_tagged_dyn_read` consumes), which is the open
+        # half — bugs/CODEGEN_materialized_container_has_no_element_type.md.
         gen._emit(f"  goto {bb_after};")
         gen._emit_label(bb_not_dict)
         iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', it64)])
@@ -2877,8 +2894,34 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._emit(f"  {result} = {_sl};")
         gen._emit(f"  goto {bb_after};")
         gen._emit_label(bb_not_set)
+        # The unguarded `(MojoList *)value` this replaces walked `value->len`
+        # off whatever address it was handed, and an address that is not a
+        # list is not something to walk: a plain int, a bool, a float's bit
+        # pattern, a struct type-tag, a function pointer, a `mojo_box_t` box
+        # (whose first word is a MAGIC, not a `data` pointer — reading it as a
+        # MojoList reads the magic as `data` and `bits` as `len`). So ask the
+        # registry instead of casting, which is the same fail-closed rule the
+        # dict and set arms above already follow.
+        isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', it64)])
+        gen._emit(f"  if ({isl}) goto {bb_list}; else goto {bb_none};")
+        gen._emit_label(bb_list)
         _lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
         gen._emit(f"  {result} = {_lp};")
+        gen._emit(f"  goto {bb_after};")
+        gen._emit_label(bb_none)
+        # NOT a container at all: a plain int, a bool, a float's bit pattern, a
+        # struct type-tag, a function pointer — every shape that reaches an
+        # iterable-typed slot in this dynamic model. Answer an EMPTY list
+        # rather than walk it, because walking it is the crash this test
+        # exists to stop: `list(12345678)`, `all(<a small int>)` and
+        # `','.join(<a struct tag>)` all died with SIGSEGV before it. An
+        # empty answer is what every consumer that reached here already
+        # produced on the pre-R1 path, so this is strictly the removal of a
+        # segfault. CPython raises TypeError for all of these; making that a
+        # real refusal is the open half, recorded in
+        # bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md.
+        _ne = gen._call_expr('MojoList *', 'mojo_list_new', [])
+        gen._emit(f"  {result} = {_ne};")
         gen._emit_label(bb_after)
         return result
     return gen._coerce_to_type(src_type, 'MojoList *', value)
@@ -3059,11 +3102,15 @@ def _list_repr_fn(gen, rav: str) -> str:
     return '_mojo_repr_list'
 
 
-# The one-byte-per-slot spelling of a `struct.unpack` result's per-slot kinds
-# ('i'/'d'/'s'), interned as a string-pool constant, or None when the value has
-# no known kinds or its kinds are all the same (see _list_repr_fn's last branch).
-# The bytes are from a fixed alphabet, so the pooled string needs no C escaping.
-_STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's'}
+# The one-byte-per-slot spelling of a VALUE's per-slot kinds, interned as a
+# string-pool constant, or None when the value has no known kinds or its kinds
+# are all the same (see _list_repr_fn's last branch). The bytes are from the
+# fixed `mojo_list_set_kinds` alphabet, so the pooled string needs no C
+# escaping. 'str' -> 'p' is the `char *` slot, which only a heterogeneous list
+# LITERAL records (a `struct.unpack` format has no such code) and which
+# reaches here either from the literal itself or across a `return`
+# (`gen._return_value_slot_kinds`).
+_STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's', 'str': 'p'}
 
 
 def _struct_slot_kind_bytes(gen, rav: str) -> str | None:
