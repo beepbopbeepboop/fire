@@ -709,8 +709,19 @@ _REFUSAL_FAMILIES = (
     ("unsupported call target", "unsupported node"),
     # MLIR. Three different wordings reach this bucket: the attribute template
     # itself, the dialect operation, and the bare builtin spelling.
+    #
+    # The dialect operation marker is `dialect OPERATION`, not the old "MLIR
+    # dialect construct": `formal/model.py`'s `mlir_dialect_op_refusal` now
+    # classifies the operation by what it DENOTES (an effect, an elementwise
+    # arithmetic result, or a value needing a fact this path lacks), so its
+    # messages name the operation and no longer contain that phrase. The OLD
+    # marker is kept because it is still reachable — a call site that knows only
+    # the `__mlir_` name and no operation still emits it — and because a marker
+    # list that drops the wording it is currently matching is how a family
+    # silently empties. `test_refusal_taxonomy.py` has a sample per wording.
     ("MLIR attribute template", "MLIR construct"),
     ("MLIR dialect construct", "MLIR construct"),
+    ("dialect OPERATION", "MLIR construct"),
     ("__mlir_", "MLIR construct"),
     # The two halves of an MLIR TEMPLATE that name something with no value here
     # rather than a dialect attribute: a `__mlir_type` is a TYPE, and the
