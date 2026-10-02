@@ -2784,6 +2784,7 @@ class GimpleGen:
         'mojo_str_rpartition':   ('MojoList *', ['char *', 'char *']),
         'mojo_c_getenv':         ('char *',     ['char *']),
         'mojo_char_to_str':      ('char *',     ['char']),
+        'mojo_char_at_str':      ('char *',     ['char *', 'int64_t']),
         'mojo_ord':              ('int64_t',    ['char *']),
         'mojo_chr':              ('char *',     ['int64_t']),
         'mojo_read_type_tag':    ('int64_t',    ['int64_t']),
