@@ -5547,6 +5547,107 @@ ONE_WORD_NESTED_CASES = [
      "    o2.in1.a = 4\n"
      "    return o1.go(2) * 10 + o2.go(3)\n",
      107, None),
+    # The four below are the chain that is the LOCAL'S OWN, where the base is a
+    # ONE-FIELD struct rather than a frame — so there is no frame slot and no
+    # `field_type_one_word_struct`; the whole chain is `formal/build.py`'s
+    # `_one_word_field_map` and `_rewrite_self_fields`, and the base is `var a =
+    # Root()` rather than a frame holder. Every one of these was refused before
+    # `_one_word_sole_field_chain` existed, with a message naming a name the
+    # source never wrote: the rewrite collapsed the FIRST level of `a.x.w.v`
+    # and left `a.v` standing, which is in no register home and no frame slot.
+    #
+    # 195 is 451 & 255 and the truncation is deliberate: `a.get()` is 41 and
+    # `a.x.w.v` is 41, and 451 does not fit an exit status, so the case would
+    # be 195 on both architectures and under CPython's own byte semantics.
+    ("one_word_nested_local_chain_is_one_local",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "struct Mid:\n"
+     "    var w: Leaf\n"
+     "struct Root:\n"
+     "    var x: Mid\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.x.w.v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    a.x.w.v = 41\n"
+     "    return a.get() + a.x.w.v * 10\n", 195, None),
+    # TWO objects, which is what makes the chain's claim a claim about storage
+    # and not about a name. `a.get()` is 4 and `b.get()` is 30, so 304 & 255 is
+    # 48; a rewrite that shared one word between them would return 4 + 4*10.
+    ("one_word_nested_local_chain_two_objects_do_not_alias",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "struct Mid:\n"
+     "    var w: Leaf\n"
+     "struct Root:\n"
+     "    var x: Mid\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.x.w.v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    var b = Root()\n"
+     "    a.x.w.v = 4\n"
+     "    b.x.w.v = 30\n"
+     "    return a.get() + b.get() * 10\n", 48, None),
+    # The WRITE half alone, because a rewrite that only handled the read would
+    # build this program and return 0: the chain is a store target here and
+    # nothing ever reads the field back, so a dropped store is invisible.
+    ("one_word_nested_local_chain_writes_and_reads_back",
+     "struct Leaf:\n"
+     "    var v: Int\n"
+     "struct Mid:\n"
+     "    var w: Leaf\n"
+     "struct Root:\n"
+     "    var x: Mid\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    a.x.w.v = 7\n"
+     "    return a.x.w.v\n", 7, None),
+    # The same word spelled with the SAME NAME at every level, which is what
+    # separates matching a chain from matching a count: `a.q.q.r` has three
+    # field reads and the chain is `("q", "q")`, so a rewrite that compared
+    # lengths would leave the third one standing. It is legal Mojo and it is
+    # the shape a length-based version gets wrong.
+    ("one_word_nested_local_chain_repeats_its_field_name",
+     "struct Leaf:\n"
+     "    var r: Int\n"
+     "struct Mid:\n"
+     "    var q: Leaf\n"
+     "struct Root:\n"
+     "    var q: Mid\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Root()\n"
+     "    a.q.q.r = 7\n"
+     "    return a.q.q.r\n", 7, None),
+    # The BOUNDARY, and the case that says the chain is a chain and not a
+    # length: `Pair` declares TWO fields, so `x.p` is a FRAME address and
+    # `x.p.a` is a load at a frame base. Collapsing it to `x` would read `x`'s
+    # own word as an `a`, and 34 is 3*10 + 4 — the answer only if the chain
+    # stopped exactly where the identity does.
+    ("one_word_nested_chain_stops_at_a_framed_field",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "struct Box:\n"
+     "    var p: Pair\n"
+     "\n"
+     "def mk() -> Pair:\n"
+     "    var q = Pair()\n"
+     "    q.a = 3\n"
+     "    q.b = 4\n"
+     "    return q\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Box()\n"
+     "    x.p = mk()\n"
+     "    return x.p.a * 10 + x.p.b\n", 34, None),
 ]
 
 # ── a DECLARED frame parameter handed a frame-RETURNING call ────────────────

@@ -5888,8 +5888,41 @@ def _refuse_holder_use(fn, node, holders, by_name, why, reason=None) -> None:
         f"what is still open about it")
 
 
+def _one_word_sole_field_chain(st, structs_by_name: dict) -> tuple:
+    """`("inner", "v")` for a one-word struct whose field is another's, etc.
+
+    The chain of field names a word is stored under, as far as the DECLARED
+    types keep saying the same thing.  `struct OneWord` with sole field `v: Int`
+    is the word `v`; `struct Box` with sole field `inner: OneWord` is that same
+    word, because the receiver of a one-field struct IS its field and the
+    receiver of `OneWord` is `v` — so `b.inner.v` and `b` and `b.inner` are
+    three spellings of ONE local.  The walk stops at the first field whose
+    declared type is not a one-field struct of this module, because that is
+    where the identity ends: a two-field struct in the slot is a FRAME, and
+    `b.inner.v` is then a load at a frame base and not a spelling of `b` at
+    all.  That stopping point is load-bearing, not a limitation — see
+    `_rewrite_self_fields`, whose whole claim is that the chain it is given is
+    the whole chain.
+
+    Read off the DECLARATION (`model.struct_field_type`) rather than inferred
+    from a binding, for the reason `field_type_one_word_struct` gives: the
+    field's own type is named by the class body, so there is no binding to
+    find and no second recognition of the fact to disagree with this one.  The
+    `seen` set is a cycle guard, and it is needed rather than defensive —
+    `struct A: var a: A` is a type that parses.
+    """
+    chain, seen = [], set()
+    while st is not None and st.name not in seen and M.struct_is_one_field(st):
+        seen.add(st.name)
+        field = _sole_field_name(st)
+        chain.append(field)
+        base = M.struct_field_type(st, field, structs_by_name)[0]
+        st = structs_by_name.get(base) if base else None
+    return tuple(chain)
+
+
 def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
-    """{local name: its field name} for locals holding a one-word struct.
+    """{local name: the SOLE-FIELD CHAIN it holds} for one-word-struct locals.
 
     Found from the binding, not inferred: a local initialised from a one-word
     struct's constructor holds that struct's only field, and nothing else on
@@ -5903,6 +5936,13 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
     is the struct the caller's own `self` rewrite below already handles — so
     the two never both fire for one name and cannot disagree about which field
     a name means.
+
+    The value is a CHAIN rather than one field name because the identity does
+    not stop at one level: `_one_word_sole_field_chain` has the argument, and a
+    map that recorded only the first name made `_rewrite_self_fields` rewrite
+    the first level of `b.inner.v` and leave `b.v` standing — a name that is in
+    no register home and no frame slot, so the emitter refused a field access
+    the source never wrote.
     """
     mapping = {}
     for node in M.iter_nodes(fn.body):
@@ -5918,12 +5958,12 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
             continue
         st = structs_by_name.get(value.func.name)
         if st is not None and M.struct_is_one_field(st):
-            mapping[target] = _sole_field_name(st)
+            mapping[target] = _one_word_sole_field_chain(st, structs_by_name)
     for pname, pst in M.parameter_declared_structs(
             fn, structs_by_name, owner).items():
         if pname in mapping or not M.struct_is_one_field(pst):
             continue
-        mapping[pname] = _sole_field_name(pst)
+        mapping[pname] = _one_word_sole_field_chain(pst, structs_by_name)
     return mapping
 
 
@@ -5951,7 +5991,8 @@ def _sole_field_name(st) -> str:
 
 
 def _rewrite_self_fields(node, mapping: dict):
-    """`x.f` -> `x` where `mapping[x] == f`, returning any replacement node.
+    """`x.f[.g…]` -> `x` when every field read is a sole field, replacing the
+    node itself.
 
     This is what makes a one-word struct's field and its receiver the SAME
     storage. Without it the two are separate: `c.n = x` wrote a `c.n` slot
@@ -5959,17 +6000,49 @@ def _rewrite_self_fields(node, mapping: dict):
     zero and every accessor returned a constant — a program that builds, runs,
     and computes the wrong answer. Rewriting the access is what keeps the
     field and the value identical, rather than leaving the codegen to
-    reconcile two spellings of one word."""
+    reconcile two spellings of one word.
+
+    The WHOLE chain is matched, and the node is REPLACED, which is the part
+    that was wrong before. The previous version recursed into the children
+    first and only then asked whether the node it now held was one of the
+    mapped shapes, so for `b.inner.v` with `mapping[b] == ("inner", "v")` it
+    rewrote the inner `b.inner` and returned `b.v` — one level short, a name
+    in no register home and no frame slot, refused as a field access through a
+    base the source never spelled. Matched on the whole chain, `b.inner.v` is
+    the local `b` and the program builds. `_rewrite_one_word_nested_field` a
+    few hundred lines below is the frame-slot half of this same rewrite and
+    has always matched the whole chain, for the same reason.
+
+    A chain LONGER than the map's is not rewritten at this level, and that is
+    not a gap: `_one_word_sole_field_chain` stops where the identity stops, so
+    a longer chain reads through a field whose declared type is a multi-field
+    struct — a frame — and belongs to the nested-frame path rather than to
+    this one.
+    """
     if isinstance(node, list):
         for i, x in enumerate(node):
             node[i] = _rewrite_self_fields(x, mapping)
         return node
-    if (isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr)
-            and mapping.get(node.obj.name) == node.member):
-        return F.IdentExpr(name=node.obj.name)
+    if isinstance(node, F.MemberExpr):
+        root, _, path = _member_chain(node).partition(".")
+        sole = mapping.get(root)
+        if sole and _is_sole_field_prefix(path, sole):
+            return F.IdentExpr(name=root)
     for name in getattr(node, "__dataclass_fields__", {}):
         setattr(node, name, _rewrite_self_fields(getattr(node, name), mapping))
     return node
+
+
+def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
+    """True when `path` (`"inner.v"`) is the first steps of the chain.
+
+    The comparison is on the SPELLING and not on the length, so a chain that
+    diverges at its second level is not a prefix: `b.inner.pad` against
+    `("inner", "v")` names a field the chain never reached, and rewriting it
+    would read `b`'s word as though it were that field's storage.
+    """
+    fields = path.split(".")
+    return bool(fields) and fields == list(sole[:len(fields)])
 
 
 def _constant_read_sites(fn, structs_by_name: dict, owner=None,
@@ -8811,12 +8884,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                                  method_owners.get(fn.name),
                                  _method_receiver_bases(fn))
         # A method's `self` IS the field; a local initialised from a one-word
-        # constructor holds that struct's only field directly.
+        # constructor holds that struct's only field directly.  The chain, not
+        # the first name, for the reason `_one_word_sole_field_chain` gives.
         mapping = _one_word_field_map(fn, structs_by_name,
                                       method_owners.get(fn.name))
         st = method_owners.get(fn.name)
         if st is not None and M.struct_is_one_field(st):
-            mapping["self"] = _sole_field_name(st)
+            mapping["self"] = _one_word_sole_field_chain(st, structs_by_name)
         _rewrite_self_fields(fn.body, mapping)
         # A class-level CONSTANT is not part of any value, so it is not
         # lowered as a field: it is materialized where it is read. Without
