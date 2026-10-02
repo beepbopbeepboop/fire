@@ -2208,9 +2208,21 @@ def read_before_store(fn, params: set = None, placed: set = None):
         if kind == "WithStmt":
             for it in (getattr(s, "items", None) or []):
                 walk_expr(getattr(it, "expr", None))
+            # The `as` ALIAS is bound BEFORE the body runs — that is what
+            # `with … as y:` means, and it is what both emitters already do
+            # (`arm64_codegen._emit_with` / `x86_64_codegen._emit_with` store the
+            # alias to the context expression's own value and then emit the
+            # body). Adding the store AFTER the body walked it reported the
+            # body's own read of the alias as a read before anything stored
+            # it, which is not true of the program: measured, `with 7 as y: x =
+            # y` was refused on BOTH architectures with a message about
+            # `UnboundLocalError` for a program CPython does not even run
+            # (`with 7` is a `TypeError: 'int' object does not support the
+            # context manager protocol`), so the diagnostic named neither the
+            # construct nor a language error the reader could reproduce.
+            stored |= stores_of(s)
             for b in (getattr(s, "body", None) or []):
                 walk_stmt(b)
-            stored |= stores_of(s)
             return
         if kind == "TryStmt":
             for b in (getattr(s, "body", None) or []):

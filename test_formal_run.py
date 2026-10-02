@@ -168,6 +168,24 @@ CASES = [
     ("for_range_break", "def f(n):\n    for i in range(0, 100):\n"
                         "        if i > 3:\n            break\n"
                         "    return i\n", 4, None),
+    # A `with … as y:` TARGET is a store, and `y` is bound BEFORE the body
+    # runs — so reading it inside the body is not reading an uninitialised
+    # name. The read-before-store walk added the alias AFTER walking the body,
+    # so it reported exactly that, on BOTH architectures, with a message about
+    # `UnboundLocalError` for a program CPython does not run at all (`with 7` is
+    # a TypeError: 'int' object does not support the context manager protocol)
+    # — a diagnostic naming neither the construct nor an error the reader can
+    # reproduce.
+    #
+    # The expected answer is the two emitters' own documented lowering, not
+    # CPython's: with no `__enter__`/`__exit__` on this path the alias is bound
+    # to the context expression's VALUE and the body runs on the fall-through
+    # (`arm64_codegen._emit_with` and its x86-64 twin say so). 7 is what that is
+    # for `with 7 as y`, and `x = y` inside the body is what proves the alias
+    # was stored before the body rather than after it.
+    ("with_alias_is_bound_before_the_body",
+     "def main():\n    x = 0\n    with 7 as y:\n        x = y\n"
+     "    printf(\"x=%d\", x)\n    return x\n", 7, "x=7"),
     ("seven", "def seven():\n    return 7\n", 7, None),
     ("absval", "def absval(n):\n    if n > 0:\n        return n\n"
                "    else:\n        return 0 - n\n", 10, None),
