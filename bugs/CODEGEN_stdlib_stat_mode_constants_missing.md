@@ -1,5 +1,41 @@
 # Compiled `stat` has no mode constants, so any module touching `stat.S_IR*` dies at startup
 
+## Status (2026-10-01 — NOT FIXABLE FROM THIS REPOSITORY; the fix site is out of tree)
+
+Measured here rather than assumed, and the measurement changes what the next
+session should do: **there is no `stat` module in this repository at all**, so
+step 1 of the original "Next step" below cannot be taken from here.
+
+    $ grep -rn "S_ISDIR\|S_ISREG\|S_IWUSR\|S_IFMT" --include=*.py --include=*.c --include=*.h .
+    runtime/fire_runtime.c:8268:  return (stat(p, &st) == 0 && S_ISDIR(st.st_mode));
+    runtime/fire_runtime.c:8389:  return (stat(p, &st) == 0 && S_ISREG(st.st_mode));
+    ... (plus test/formal references)
+
+Those are the *libc* `S_ISDIR`/`S_ISREG` used by `os.path.isdir`/`isfile`. There
+is not one `S_IRUSR`/`S_IRWXG`/`S_IFMT` **Python-level** constant anywhere in
+the tree — the compiled `stat` module's globals come from a stdlib that is not
+part of this checkout:
+
+    $ python3 -c "from module_loader import STDLIB_PATH; print(STDLIB_PATH)"
+    /Users/mrs/net/chatgpt/claude/new-modular/Mojo/stdlib
+
+which is outside this repository (and outside the per-worker worktrees, which
+are sandboxed to their own tree). The doc's other anchors are the same story:
+`_c_common_toplevel` and `_parser__regexes_toplev` are named as the registries
+this would be added to, and **neither name occurs anywhere in this tree**, so
+they belong to that out-of-tree stdlib too.
+
+So the fix belongs in the stdlib checkout that `module_loader.STDDLIB_PATH`
+names: add the mode/flag constants to that `stat` module's source (or to the
+module-globals registry it uses), and re-measure `c_parser/datafiles.py` there.
+Nothing in this repository needs to change for it, which is why nothing in this
+repository was changed.
+
+**State: OPEN. NOT fixed — and not fixable from this tree.** The bug itself
+(reproduced below by the reporter) is real and unchanged.
+
+## Original report (2026-09-2x)
+
 **State: OPEN. NOT fixed. Found while re-verifying
 `bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_datafiles.md`; a separate bug
 from that one, which is now fixed.**
