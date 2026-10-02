@@ -576,6 +576,234 @@ X86_ABI_PARITY = [
 ]
 
 
+# ── the CENSUS: one walk per struct, and the same answers it gave ───────────
+#
+# (name, mojo_source, expected_field_names)
+#
+# `model.struct_method_receiver_reads` exists because the per-method question
+# behind every row above was answered by re-running the whole-struct store
+# census once PER METHOD: `struct_receiver_reads(st, receivers, method)` called
+# `struct_receiver_stores(st, receivers)`, and both of its callers ask it in a
+# loop over `st`'s methods.  That is what put 361 of the 644 files in the
+# 2026-10-02 sweep's `tool` class with no verdict at all — every one a timeout
+# at `-t 30`, none a memory kill.
+#
+# So these rows assert THREE things, and the third is the one that would catch
+# the next re-introduction:
+#
+#   1. the derived field set is what the rows above already pin;
+#   2. each method's demoted set equals the formula the per-method question
+#      used to compute, spelled out here independently of the implementation
+#      (`_receiver_names` less `struct_demoted_method_names`) — the differential
+#      direction, so a change that made the fast path answer something else
+#      fails rather than passing by agreeing with itself;
+#   3. deriving the whole field set asks `struct_receiver_stores` EXACTLY ONCE,
+#      whatever the method count.  A row that only checked (1) and (2) would
+#      pass on the quadratic version, which is the whole reason it existed.
+#
+# The sources are chosen for the shapes the rule turns on, not for size:
+CENSUS_CASES = [
+    # A DECLARED name that is also a method name.  This is the row that pins the
+    # difference between the two questions the derivation asks: `size`'s read of
+    # `self.helper` is a BOUND METHOD and is demoted out of `size`'s field set,
+    # while the class body's own `var helper` is storage the language spells out,
+    # so the name is in the struct's field list anyway.  Getting this wrong in
+    # either direction is a layout change, and the undemoted union the
+    # class-level clause uses is now derived from the same walk as the per-method
+    # sets — so the pair is what says those two answers came from one walk.
+    ("a_declared_name_that_is_also_a_method_stays_a_field",
+     "struct C:\n"
+     "    var helper: Int = 2\n"
+     "    var other: Int = 3\n"
+     "    def helper(self) -> Int:\n"
+     "        return self.other\n"
+     "    def size(self) -> Int:\n"
+     "        return self.helper\n",
+     ["helper", "other"]),
+
+    # The store half of Python's shadowing rule, in a DIFFERENT method from the
+    # read: `__init__` writes `self.helper`, so every method of this struct sees
+    # `helper` as an instance attribute.  With three methods the old shape ran
+    # the census three times here, and this is the row where a census that ran
+    # once but read only the CALLING method's body would delete real storage.
+    ("a_store_in_another_method_keeps_the_name_a_field",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "    def helper(self) -> Int:\n"
+     "        return 1\n"
+     "    def __init__(self):\n"
+     "        self.helper = 7\n"
+     "    def go(self) -> Int:\n"
+     "        return self.helper\n",
+     ["_value", "helper"]),
+
+    # `this` rather than `self`, and the store inside a NESTED def.  Both are
+    # about the CENSUS rather than about the walk: `struct_receivers` has to
+    # name the receiver for a store to be seen at all, and the store census
+    # (`iter_nodes`) descends into a nested `FunctionDef` while the read walk
+    # (`_self_field_names`) deliberately does not — a nested `def`'s `self` is a
+    # closure over the same object, so `this.v = …` there IS an instance store,
+    # and a census that stopped descending would report `v` as never written.
+    ("a_store_through_this_and_inside_a_nested_def_is_a_field",
+     "struct D:\n"
+     "    var v: Int\n"
+     "    def bump(this):\n"
+     "        def inner():\n"
+     "            this.v = this.v + 1\n"
+     "        inner()\n"
+     "        return this.v\n",
+     ["v"]),
+
+    # The three assignment SPELLINGS the census recognises — a chain, an
+    # augmented assign and a tuple target — because a store census that missed
+    # one of them would demote a real field name on any struct that also
+    # declares a method by that name.
+    ("chained_augmented_and_tuple_stores_are_all_stores",
+     "struct E:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def set_both(self):\n"
+     "        self.a = self.b = 0\n"
+     "        self.a += 1\n"
+     "        self.a, self.b = self.b, self.a\n",
+     ["a", "b"]),
+]
+
+# ── `_constant_read_sites`: only the sites the body can spell ───────────────
+#
+# (name, mojo_source, function_name, expected_site_keys)
+#
+# A site is keyed `"<base>.<name>"` and the only things that ever look one up are
+# `_constant_read_spelling`, which builds the key from a `MemberExpr` over an
+# `IdentExpr`, and `_apply_constant_sites`, which matches exactly that shape —
+# both over the body being rewritten.  So a struct whose name the body never
+# spells has no site anybody can reach, and `formal/build.py` used to ask every
+# struct in the module for its class constants once per function anyway (400,000
+# such questions on `gimple_codegen.py`, 87% of that build's time).
+#
+# The first row is the direction that MATTERS — every site the body can spell is
+# still there, which is what a too-eager filter would lose — and the second is
+# the direction that pays: the unread one is gone.  A filter that dropped both
+# would pass the second and fail the first.
+SITE_FILTER_CASES = [
+    ("every_class_constant_the_body_spells_is_still_a_site",
+     "struct A:\n"
+     "    comptime K: Int = 3\n"
+     "    var n: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.n + A.K\n"
+     "\n"
+     "struct B:\n"
+     "    comptime J: Int = 4\n"
+     "    var m: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.m + B.J\n"
+     "\n"
+     "def go(a) -> Int:\n"
+     "    return A.K + B.J\n",
+     "go", ["A.K", "B.J"]),
+
+    ("a_struct_the_body_never_spells_contributes_no_site",
+     "struct A:\n"
+     "    comptime K: Int = 3\n"
+     "    var n: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.n + A.K\n"
+     "\n"
+     "struct B:\n"
+     "    comptime J: Int = 4\n"
+     "    var m: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.m + B.J\n"
+     "\n"
+     "def go(a) -> Int:\n"
+     "    return A.K\n",
+     "go", ["A.K"]),
+]
+
+
+def run_census_case(case, tmpdir, verbose):
+    """The field set, the per-method sets against the old formula, ONE census.
+
+    Read through `formal.build.parse_module` rather than `fire_compiler` alone
+    because the evidence `_split_declaration` needs is attached there — a struct
+    with no evidence attached reports no split at all, and this file's other
+    field-set rows go through `struct_field_names` with that evidence absent on
+    purpose (`_pre_rule_field_names`), which is a DIFFERENT rule with a
+    different answer for a declared name that is also a method.
+    """
+    import fire_compiler as F
+    import formal.build as FB
+    import formal.model as M
+
+    name, source, want = case
+    stmts = FB.parse_module(source, name + ".mojo")
+    structs = [s for s in stmts if isinstance(s, F.StructDef)]
+    if len(structs) != 1:
+        return False, f"the case declares {len(structs)} structs, expected 1"
+    st = structs[0]
+    got = M.struct_field_names(st)
+    if got != want:
+        return False, f"struct_field_names == {got}, expected {want}"
+
+    receivers = M.struct_receivers(st)
+    demoted = M.struct_demoted_method_names(st, receivers)
+    per_method = M.struct_method_receiver_reads(st, receivers)
+    if len(per_method) != len(M.struct_methods(st)):
+        return False, (f"{len(per_method)} read sets for "
+                       f"{len(M.struct_methods(st))} methods")
+    for method, reached, fields in per_method:
+        spelled = M._receiver_names(getattr(method, "body", None), receivers)
+        if reached != spelled:
+            return False, (f"{method.name}: reached {sorted(reached)} is not "
+                           f"what the body spells {sorted(spelled)}")
+        if fields != spelled - demoted:
+            return False, (f"{method.name}: demoted set {sorted(fields)} is not "
+                           f"the old per-method formula "
+                           f"{sorted(spelled - demoted)}")
+
+    calls = []
+    real = M.struct_receiver_stores
+
+    def counted(struct_def, receivers_arg):
+        calls.append(1)
+        return real(struct_def, receivers_arg)
+
+    M.struct_receiver_stores = counted
+    try:
+        M.struct_field_names(st)
+    finally:
+        M.struct_receiver_stores = real
+    n_methods = len(M.struct_methods(st))
+    if len(calls) != 1:
+        return False, (f"deriving the field set of a {n_methods}-method struct "
+                       f"asked struct_receiver_stores {len(calls)} times; it is "
+                       f"a property of the STRUCT, so it is asked once")
+    if verbose:
+        print(f"      field set {got}; {n_methods} methods, 1 census")
+    return True, ""
+
+
+def run_site_filter_case(case, tmpdir, verbose):
+    """The sites a rewrite could consult are exactly the ones it could match."""
+    import fire_compiler as F
+    import formal.build as FB
+
+    name, source, fn_name, want = case
+    stmts = FB.parse_module(source, name + ".mojo")
+    structs = {s.name: s for s in stmts if isinstance(s, F.StructDef)}
+    fns = [s for s in stmts if getattr(s, "name", None) == fn_name]
+    if len(fns) != 1:
+        return False, f"the case declares {len(fns)} functions named {fn_name}"
+    sites = FB._constant_read_sites(fns[0], structs, None, None)
+    got = sorted(sites)
+    if got != sorted(want):
+        return False, f"constant-read sites {got}, expected {sorted(want)}"
+    if verbose:
+        print(f"      sites {got}")
+    return True, ""
+
+
 def build_formal(src, out, backend):
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            f"--backend={backend}", "-o", out, src]
@@ -776,6 +1004,8 @@ def main(argv=None):
 
     runners = (("differential", DIFF_CASES, run_diff_case),
                ("field set", FIELDSET_CASES, run_fieldset_case),
+               ("census", CENSUS_CASES, run_census_case),
+               ("site filter", SITE_FILTER_CASES, run_site_filter_case),
                ("refusal", REFUSALS, run_refusal_case),
                ("x86-64 ABI", X86_ABI_PARITY, run_x86_abi_case),
                ("known gap", KNOWN_GAPS, run_known_gap_case))

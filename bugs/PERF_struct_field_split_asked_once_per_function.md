@@ -1,0 +1,114 @@
+# PERF: `struct_field_names` is still asked once per FUNCTION, so the largest compiler sources still miss the sweep's timeout
+
+**Status: OPEN, and it is what is left of the 2026-10-02 sweep's `tool` class.**
+The 361 files with no verdict were ALL timeouts at `-t 30` (not one a memory
+kill, not one a driver error — measured by parsing the sweep log: 361
+`TOOL: … (timeout (> 30s))` and zero of any other `tool` cause). Most of that is
+fixed and landed (`struct_method_receiver_reads`, `struct_demoted_method_names`,
+the per-class field-name caches in `iter_nodes` / `_self_field_names`,
+`_constant_read_sites`' spelling filter, `model.class_constant_candidates`); on a
+26-file sample chosen to be the LARGEST of the 361, 25 now reach a verdict at
+`-t 120` where none did. One file does not, and this is its doc.
+
+## The measurement (2026-10-02 tree + this branch's fixes, arm64, `-j4`)
+
+```
+python3 tools/memslot.py --gb 8 --label t -- \
+  python3 tools/formal_sweep.py -j 4 -t 120 --allow-concurrent --no-stdlib \
+  $(cat .tmp/sample-files.txt)
+-> 25 of 26 verdicts;  TOOL: formal/arm64_codegen.py  (timeout (> 120s))
+```
+
+Standalone, `build --formal --no-prove` on that file: **40.3s CPU**, ~95-137s
+wall on a host at load ~66 on 18 cores. Every other file in the sample is
+between 3 and 25s CPU.
+
+## The shape that is left
+
+`formal/model.py`'s `_split_declaration` derives a struct's whole field set, and
+deriving it walks EVERY method body of that struct twice (the `iter_nodes` store
+census in `struct_receiver_stores`, the `_self_field_names` read walk in
+`struct_method_receiver_reads`). The derivation is a function of the struct's
+AST, and it is correct to re-derive it — but its ASKERS are per-function, so a
+module with F functions whose methods all live on one big struct pays F walks of
+that struct:
+
+```
+formal/arm64_codegen.py:  1,836 _split_declaration calls over 81 distinct structs,
+                           1,074 of them on ARM64Codegen (177 methods, 15k lines)
+```
+
+Callers, by share of the build (sampled, arm64):
+
+| caller | share | reached through |
+|---|---|---|
+| `struct_field_names` | **81.6%** | — |
+| `struct_field_count` | 54.3% | `struct_fits_one_word` (39.7%), the frame pass's width checks |
+| `struct_demoted_method_names` / `struct_receiver_stores` | 57.1% | the store census inside every derivation |
+| `struct_is_one_field` | 26.6% | `build.py`'s `_one_word_field_map`, `_one_word_sole_field_chain`, `_frame_receivers` |
+| `struct_frame_slots` | 27.3% | `build.py`'s `_struct_methods` |
+
+So: `formal/build.py`'s `_prepare_functions` loop asks "is this struct one word?"
+and "what are its fields?" once per function, and each ask is a fresh walk of
+the owner's 177 method bodies.
+
+## Why a memo is NOT the obvious fix, stated so the next pass does not try it
+
+The derivation cannot be cached across the `_prepare_functions` loop, because
+**that loop mutates the very bodies the derivation reads, in place**, between
+two asks of the same struct:
+
+* `_return_the_receiver` sets `ReturnStmt.value` on an existing node and appends
+  to `fn.body`;
+* `_rewrite_self_fields` REPLACES list elements (`node[i] = …`), keeping the
+  list's length — so a length- or identity-based validity token cannot see it;
+* `_apply_constant_sites` replaces nodes in the same way;
+* `_flatten_closures` / `_lift_lambdas` assign a fresh `fn.body`.
+
+The consequence is not hypothetical: for a ONE-field struct, `self.f` becomes
+`self`, so after the rewrite the struct reaches and stores neither `f` nor the
+name — and a class-level-declared `f` is the only thing keeping it in the field
+set. A stale entry therefore produces a field set with a field MISSING, i.e. a
+frame laid out one slot short, which builds and computes the wrong answer. This
+is why the shipped fixes are all redundancy removal within one derivation
+rather than a cache across them.
+
+## The two next steps, in the order I would take them
+
+1. **Memoize the derivation, with the invalidation the invariant actually
+   allows.** Inside `_prepare_functions`'s per-function loop the ONLY body
+   mutated at iteration *k* is `functions[k]`, so the ONLY struct whose
+   derivation can change is `method_owners.get(functions[k].name)`. A memo keyed
+   by `id(struct_def)` in `formal/model.py`, invalidated once per iteration for
+   that one owner (and in `attach_field_evidence`, which re-attaches evidence to
+   structs this unit imported, and in `formal/dataclass_transform.py`, which
+   rewrites method bodies before the loop) is sound **if** that list of
+   invalidation points is complete — which is the whole of the work, and it wants
+   the same treatment `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
+   gave the equivalent question on the compiled side. It takes
+   `formal/arm64_codegen.py` from 1,074 walks of `ARM64Codegen` to ~177 (one per
+   method) or better, which is the missing 2 orders of magnitude.
+2. **Or make one derivation cheaper, which needs no invalidation at all.** The
+   store census (`struct_receiver_stores`, 57% here) is a full `iter_nodes` walk
+   that only cares about `AssignStmt` / `AugAssignStmt` / `MultiAssignStmt`
+   targets, and a statement is never reachable only through an EXPRESSION field —
+   so a statement-position walk finds exactly the same assignments over ~8x fewer
+   nodes. The same walk could then also collect the receiver reads
+   (`_self_field_names`' answer), taking two walks per method body down to one.
+   Ceiling: about 1.5x on this file, i.e. 40s -> ~27s CPU, which would put it
+   inside `-t 30` on an unloaded machine. Both halves want a differential test
+   over the corpus — the harness that proved the field-name caches equivalent
+   (675 files parsed, node sequences identity-compared) is the shape to reuse,
+   and the `iter_nodes` vs statement-position assignment sets have to be compared
+   on every one of them.
+
+Neither is attempted here: this branch's changes are equivalence-only
+redundancy removal, and (1) is a cache whose failure mode is a silently
+mis-laid-out frame.
+
+**Not run by this pass** (light worker; the integrator owns them): `make gate`,
+`make check`, `compile_stdlib.py`, `build_stdlib_dylib.py`, and the self-host
+steps — `formal/model.py` and `formal/build.py` are inside the self-hosted
+compile closure, so `mojoc` builds, the three `stage*` steps,
+`stdlib-dylib`'s `skip <module>:` count and `stdlib-syntax`'s unexpected count
+are owed for the changes that DID land.

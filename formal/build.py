@@ -6703,26 +6703,36 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
     if not structs_by_name:
         return sites
     bound = _names_bound_in(fn)
-    # The names this body SPELLS, which is what decides the loop below, and the
-    # reason the loop is not over `structs_by_name` unconditionally: a site is
-    # keyed `"<base>.<name>"` and the only thing that ever looks one up is a
-    # `MemberExpr` over an `IdentExpr` in THIS body — `_constant_read_spelling`
-    # builds the key from exactly that node and `_apply_constant_sites` matches
-    # exactly that shape. So a struct whose name this body never spells has no
-    # site anybody can reach, and asking it for its class constants walks every
-    # method of every struct in the module once per function.
+    # The names this body SPELLS — its base names and its member names, which are
+    # what decides the loop below. A site is keyed `"<base>.<name>"` and the only
+    # thing that ever looks one up is a `MemberExpr` over an `IdentExpr` in THIS
+    # body — `_constant_read_spelling` builds the key from exactly that node and
+    # `_apply_constant_sites` matches exactly that shape. So a struct this body
+    # cannot spell a read of has no site anybody can reach, and asking it for its
+    # class constants walks every method of every struct in the module once per
+    # function.
     #
-    # Measured on `gimple_codegen.py` (arm64, the worst case in the tree):
-    # 400,000 struct-constant questions for ~100 structs and ~2,000 functions,
-    # and 87% of the build's time. The filter is a superset — `iter_nodes`
-    # descends into every dataclass field, so anything `_apply_constant_sites`
-    # can reach is in `spelled` — which is the direction that cannot lose a
-    # site: a name it lists is still asked, a name it does not is one no node
-    # in this body could have matched.
-    spelled = {node.name for node in M.iter_nodes(getattr(fn, "body", None) or [])
-               if isinstance(node, F.IdentExpr)}
+    # Measured on `gimple_codegen.py` (arm64): 400,000 struct-constant questions
+    # for ~100 structs and ~2,000 functions, and 87% of that build's time. On
+    # `formal/arm64_codegen.py` the residue after the base-name filter is
+    # `ARM64Codegen` asked 2,948 times — 177 methods, walked each time, for a
+    # class that DECLARES NOTHING, so every one of those walks could only return
+    # an empty list. Hence `class_constant_candidates`, which answers "could this
+    # struct have a class constant at all?" from the class body alone.
+    #
+    # Both filters are supersets of what the rewrite can match — `iter_nodes`
+    # descends into every dataclass field, and a constant is by definition a
+    # declared name — which is the direction that cannot lose a site.
+    spelled, members = set(), set()
+    for node in M.iter_nodes(getattr(fn, "body", None) or []):
+        if isinstance(node, F.IdentExpr):
+            spelled.add(node.name)
+        elif isinstance(node, F.MemberExpr):
+            members.add(node.member)
     for st in structs_by_name.values():
         if st.name in bound or st.name not in spelled:
+            continue
+        if not M.class_constant_candidates(st) & members:
             continue
         for name, _default in M.struct_class_constants(st):
             sites[f"{st.name}.{name}"] = (
@@ -6743,6 +6753,15 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
         inherits it changes nothing, so disqualifying the whole struct would
         refuse a program whose answer is exact."""
         shadowed = _overridden_comptime_names(structs_by_name, st)
+        # The same two filters as the loop above, for the same reason: a site
+        # keyed `"<holder>.<name>"` is reachable only through a `MemberExpr` over
+        # an `IdentExpr` this body spells, and `name` has to be a name the class
+        # body declared. The receiver case is the one that pays — it is asked
+        # once per receiver spelling of the function's OWN struct, for every
+        # function in the module, which is 2,948 full walks of `ARM64Codegen` on
+        # `formal/arm64_codegen.py`.
+        if not M.class_constant_candidates(st) & members:
+            return
         for name, _default in M.struct_class_constants(st):
             kind = _constant_kind(st, name)
             if comptime_only and kind != "comptime":

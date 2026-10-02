@@ -12616,6 +12616,36 @@ def _receiver_names(node, receivers) -> set:
     return out
 
 
+def class_constant_candidates(struct_def) -> set:
+    """Every name `struct_class_constants` could possibly return for this struct.
+
+    A NECESSARY condition, and cheap where the real question is not: the rule
+    `_split_declaration` applies is that a class constant is a name the CLASS
+    BODY declared — a `StructDef.fields` entry, or a `comptime` binding, which
+    the parser keeps in `StructDef.comptime_aliases` and never puts in `fields` —
+    that is not written, not reached and not dynamically written. Every other
+    clause of that rule is about the unit's write census, which is what makes
+    the answer expensive: deciding it walks every method body of the struct (see
+    `struct_method_receiver_reads`). The set of NAMES cannot contain anything the
+    class body did not declare, so for a struct that declares nothing this
+    answers the question without the walk — and a struct that declares nothing
+    is the common case in a compiler's own sources, where `formal/arm64_codegen.py`'s
+    `ARM64Codegen` is 177 methods and zero class-level values.
+
+    It is a filter, not an answer: `set() ⊆ struct_class_constants(st)` always,
+    and a non-empty set here says nothing about whether any of those names is a
+    constant. A caller that needs the answer asks the real question."""
+    out = set()
+    for field in struct_fields(struct_def):
+        name = struct_field_name(field)
+        if isinstance(name, str):
+            out.add(name)
+    for name in struct_comptime_aliases(struct_def):
+        if isinstance(name, str):
+            out.add(name)
+    return out
+
+
 def struct_class_constants(struct_def) -> list:
     """`(name, default_node)` per class-level constant, in declaration order.
 
