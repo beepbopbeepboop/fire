@@ -299,7 +299,7 @@ def test_every_declaration_is_seen():
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula — a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    # 543 -> 546 (2026-10-02, `bugs4-9`), THREE names:
+    # 543 -> 548 (2026-10-02, `bugs4-9`), FIVE names:
     #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr
     #       walker is a chain of. It was a file-local `_cat_free` in
     #       fire_runtime.c and is now PUBLIC because the repr walkers the
@@ -320,8 +320,17 @@ def test_every_declaration_is_seen():
     #       the allocating slice was there; 16.06 B per character of every
     #       string scan was the result. NOT the caller's to free, so it is
     #       deliberately absent from the codegen's `_FRESH_STRING_RETURNS`.
-    # Three, taken from the call.
-    for header, want in (('fire_runtime.h', 546),
+    #   +2  `mojo_raise_not_implemented` (the sixth typed raiser, beside the
+    #       five above) and `mojo_module_not_compiled`, the codegen's half of
+    #       it: a method call on a bare-imported module this compile never
+    #       compiled used to return the module marker (an int64_t 0) unchanged,
+    #       so `argparse.ArgumentParser(...)` "constructed" a parser that is not
+    #       one and every later method echoed it back, silently, until an
+    #       unrelated attribute read died naming an attribute of a class the
+    #       program never built. Raising at the CALL is where it becomes true,
+    #       and it is catchable.
+    # Five, taken from the call.
+    for header, want in (('fire_runtime.h', 548),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

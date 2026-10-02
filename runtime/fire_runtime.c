@@ -8145,6 +8145,47 @@ void mojo_raise_index_error(char *detail) {
     mojo_raise();
 }
 
+/* `NotImplementedError: <detail>` — the sixth typed raiser, same mechanism and
+ * same hardcoded-tag derivation as the five above. It exists for ONE caller and
+ * that caller is the whole reason it is a RAISER rather than a printed note:
+ * a call on a module this compile never compiled (`argparse`,
+ * CPython's `Apple/__main__.py`) used to be answered with the receiver
+ * unchanged, so `ArgumentParser(...)` "constructed" the module marker (an
+ * int64_t 0), `add_argument`/`parse_args` echoed it back, and the program
+ * computed with a parser that is not a parser until the first attribute read
+ * off the result died with an `AttributeError` naming an attribute of a class
+ * the program never built
+ * (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+ *
+ * Raising at the CALL is the point where it becomes true, and it is
+ * catchable, so a program that legitimately probes for the capability can
+ * still say so. Nothing here is a claim that argparse is unimplementable —
+ * it is a whole subsystem, the same size class as the pickle engine judged
+ * out of scope in dbpickle.md — only that a silent 0 is the wrong answer. */
+#define _MOJO_EXC_TAG_NOTIMPLEMENTEDERROR 108472663
+
+void mojo_raise_not_implemented(char *detail) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "NotImplementedError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_NOTIMPLEMENTEDERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+/* The codegen's half of the same decision, as ONE runtime entry point so the
+ * message cannot drift between the two spellings. `module` is the module name
+ * as the program wrote it; `member` is what it called on it. */
+void mojo_module_not_compiled(char *module, char *member) {
+    char msg[256];
+    snprintf(msg, sizeof msg,
+             "%s.%s: module '%s' is not compiled into this binary",
+             module ? module : "?", member ? member : "?",
+             module ? module : "?");
+    mojo_raise_not_implemented(msg);
+}
+
 /* The two ways a tuple refuses to be mutated, as CPython words them. Both
  * share mojo_require_mutable_list's typed-exception mechanism and the same
  * hardcoded-tag derivation as the four raisers above; they live here rather

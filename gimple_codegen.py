@@ -2553,6 +2553,15 @@ class GimpleGen:
         # build already uses (real body generation, not just field-type
         # registration), since there's no dylib to link its methods from.
         self._link_inline_modules: set = set()
+        # local name -> the module string, for a bare `import M [as L]` whose
+        # module this compile cannot resolve; '' for every other name. The
+        # consumer is `_uncompiled_module_marker` in emit_methods.py, which
+        # needs the filesystem answer (`module_loader.can_resolve_module_path`)
+        # once per name rather than once per call site. Keyed on the SAME
+        # `_module_alias_names` set, for the ambiguity that set's own docstring
+        # records: `imported_symbols` also holds every `from X import name`
+        # binding, and an unresolved one has the same dict shape.
+        self._uncompiled_marker_cache: dict = {}
         # Imported names that are generic templates (not concrete exports):
         # name -> the module source path, used to instantiate at call sites.
         self._imported_generics: dict = {}

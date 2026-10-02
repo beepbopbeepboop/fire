@@ -4196,6 +4196,55 @@ fn main():
     # answered True and the two families disagreed with the reference. The
     # honest answer is the raise, which is what CPython gives; a wrong-length
     # fill is the same shape of error.
+    # A call on a MODULE MARKER — a bare `import M` for a module this compile
+    # cannot resolve, so `M` is an `int64_t` global initialised to 0 — used to
+    # be answered by the generic scalar passthrough, which returns the receiver
+    # unchanged. So `argparse.ArgumentParser(...)` "constructed" a 0,
+    # `add_argument`/`parse_args` echoed the 0 back, and the program computed
+    # with a parser that is not a parser, silently, until the first attribute
+    # read off the result died naming an attribute of a class the program never
+    # built: CPython's own `Apple/__main__.py --help` printed usage and exited
+    # 0, and this printed `Unhandled exception: AttributeError:
+    # cross_build_dir` and exited 0 too
+    # (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+    #
+    # The raise happens at the CALL, which is where it becomes true, and it is
+    # catchable — which is the second half of the assertion: a program that
+    # probes for the capability can still say so, and a raise that could not be
+    # caught would be a strictly worse stub than the silent one it replaces.
+    #
+    # `argparse` is the whole of the first program because it is the case the
+    # doc measured; the second is a lowercase member of the same marker, which
+    # is the same silent-0 shape and used to print `1` (see the note on
+    # `gimple_module_marker_lowercase_member_raises` below).
+    test_gimple_runtime_error("gimple_module_marker_call_raises", """\
+import argparse
+
+def main():
+    p = argparse.ArgumentParser(description="demo")
+    p.add_argument("--x", type=int)
+    print(p.parse_args())
+""", "NotImplementedError: argparse.ArgumentParser: module 'argparse' is not "
+       "compiled into this binary")
+
+    # The SAME program must still run to completion when the program itself
+    # handles the absence — the point of raising rather than aborting. `try` /
+    # `except NotImplementedError` is the shape a real consumer would use to
+    # fall back to its own argument parsing.
+    test_gimple_stdout("gimple_module_marker_call_is_catchable", """\
+import argparse
+
+def main():
+    try:
+        p = argparse.ArgumentParser(description="demo")
+        print("constructed")
+    except NotImplementedError as e:
+        print("fell back")
+""", "fell back\n")
+
+    # `bytes` raises are the same mechanism reached a different way; keeping
+    # this one next to the module-marker case is the point — an unavailable
+    # thing should say so, whichever route it took to be unavailable.
     test_gimple_runtime_error("gimple_bytes_isprintable_raises", """\
 fn main():
     print(b'a'.isprintable())

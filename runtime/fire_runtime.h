@@ -1271,6 +1271,18 @@ void        mojo_raise_type_error(char *detail);
  * (mojo_bytes_partition's empty separator). */
 void        mojo_raise_value_error(char *detail);
 void        mojo_raise_index_error(char *detail);
+/* Raises a real, catchable NotImplementedError for `detail` — the sixth typed
+ * raiser, same mechanism and same tag derivation as the five above. */
+void        mojo_raise_not_implemented(char *detail);
+/* The codegen's half of that decision, for the ONE case where a silent answer
+ * is the wrong one: a call on a module this compile never compiled
+ * (`import argparse` + `argparse.ArgumentParser(...)`). That used to answer
+ * with the receiver unchanged, so every method on it echoed a module marker
+ * back and the program computed with a parser that is not a parser until an
+ * unrelated attribute read died naming an attribute of a class the program
+ * never built. Raises at the CALL, which is where it becomes true and is
+ * catchable. See mojo_module_not_compiled's own comment in fire_runtime.c. */
+void        mojo_module_not_compiled(char *module, char *member);
 /* Runtime %-style string formatting with a DYNAMIC (non-literal) template:
  *
  *   char *out = mojo_str_format_dict("usage: %(prog)s v%(ver)d", d);
