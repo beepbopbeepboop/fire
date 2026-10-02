@@ -9,6 +9,29 @@ State at `96d5d8a`. My commits this thread: `c967b5d` (a claim I retracted),
 emitter, **committed deliberately broken**), `ca63039` (IR files brought into
 line with §11.5), `e0af987` (the loop-fuel change).
 
+## Status, 2026-10-02 (`formal3-2-r2-r2`): both TASKS are now owned by
+`FORMAL_OPUS_dylib_termination_handoff.md`, and one of them is partly LANDED
+
+**Read the sibling before starting either of these.** `bugs/FORMAL_OPUS_dylib_termination_handoff.md`
+is the same thread's later handoff for the same two subjects, it is a claimed
+item (`bug:FORMAL_OPUS_dylib_termination_handoff`), and it names the write set
+outright: **`lib/ProofLib.lean` and `formal/arm64_proof_gen.py`**. Those are
+where both of this document's remaining items live, so this document's remaining
+work is that worker's and not a second attempt at it. This one is kept because
+§5, §6 and §7 are the measurements and the traps and neither document restates
+them, and because the two together are one bug read at two dates.
+
+| this doc's task | where it is now |
+|---|---|
+| §3 TASK 1 — `hreg` exhausts `maxHeartbeats` | `OPUS-1` and `OPUS-3` in the sibling. **The unfold §3 asked for has landed**: `formal/arm64_proof_gen.py`'s `_dylib_contract_proof` now emits `simp only [S…, st…, start, body, arm64_reg, arm64_set_reg, _VALUE_SIMP]` before `bv_decide` on both `hreg` and `hx30` (the `_UNF` set), which is §3's "discharge the frame round trip before `bv_decide` ever sees the composed effect" as a simp set rather than as per-step lemmas. The sibling measures what that cost and what is still left; I did not re-run Lean, so read its numbers rather than mine |
+| §4 TASK 2 — the loop-aware termination bound | `OPUS-4` in the sibling, and the sibling says the same thing this doc does: **a scheme extension, not a fix**, and the "fuel grows with `n`" half is already in the type (`e0af987`) and is not a termination proof. The sibling also names what this doc calls the risk — `OPUS-5`, that a depth-indexed `FrameBound` is re-threading work, not a discharged hypothesis |
+
+§1's red (`formal-dylib`, `d9443ed` committed deliberately broken) is still the
+red the sibling is measuring, and still must not be made green by reverting it.
+I did not run Lean for this status: everything above is read off the emitter
+source and the sibling's own record, and it is labelled as such rather than
+presented as a re-measurement.
+
 ---
 
 ## 1. `formal-dylib` is RED, and that is the intended state

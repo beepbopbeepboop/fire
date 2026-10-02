@@ -59,6 +59,23 @@ _CALLEE_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 # refuse.
 _ABI_ARG_REGS = 8
 
+# How many incoming arguments this backend passes IN TOTAL — eight in registers
+# plus a stack area for the rest.  AAPCS has a stack convention and it is
+# implemented, not refused: argument `8 + k` lives at `[SP + 8k]` as the callee
+# enters, so a ninth argument is an ordinary load from the caller's frame rather
+# than a hole.  The refusal that used to sit at `_ABI_ARG_REGS` on both ends was
+# true about the register count and wrong about the consequence: it meant
+# `struct.pack("<IIQQQQQQ", v0..v7)` could not reach its own module's documented
+# "a format I cannot serve returns an empty list" contract, which is
+# `bugs/FORMAL_struct_pack_over_eight_arguments.md` in full.
+#
+# The bound is a FRAME bound and not an ABI one: every parameter past the
+# eighth needs a home (a callee-saved register or a spill slot), and the spill
+# area is finite.  Sixteen stack arguments is far past any call in this corpus
+# and well inside `_SCRATCH`, so the number is a backstop rather than a design
+# choice.
+_MAX_INCOMING_ARGS = 24
+
 # The local a frame-returning function keeps the CALLER'S block address in.
 # A name rather than a dedicated register, so the word goes through the same
 # register-or-spill-slot home every other local has; the leading underscores
@@ -1037,7 +1054,7 @@ dylib_exports: list = None, globals_base: int = None,
         # parameters first (the call site passes them ahead of the runtime
         # ones), then its runtime parameters.
         incoming = M.incoming_args(f)
-        if len(incoming) > _ABI_ARG_REGS:
+        if len(incoming) > _MAX_INCOMING_ARGS:
             # The other end of the same refusal. `_emit_call` catches a call
             # SITE with too many arguments, but a function can also be REACHED
             # without one — a dylib export, a reflection-resolved call, an
@@ -1047,9 +1064,18 @@ dylib_exports: list = None, globals_base: int = None,
             # of such a name then loaded whatever the slot held, so the value
             # was not merely wrong but BUILD-DEPENDENT. Refusing here means
             # the arity is rejected whichever way the function is entered.
+            #
+            # The limit is `_MAX_INCOMING_ARGS` and not `_ABI_ARG_REGS` because
+            # the ninth argument onwards is a STACK argument, not an error: AAPCS
+            # puts arguments 0..7 in X0..X7 and the rest in the caller's frame at
+            # ascending offsets from the SP the callee enters with. See
+            # `_load_home_from_stack` below, which is the other half of the same
+            # convention as `_emit_call`'s `SUB`/`ADD`.
             raise CodegenError(
                 f"{f.name}: {len(incoming)} parameters exceeds the "
-                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
+                f"{_MAX_INCOMING_ARGS} the formal arm64 ABI passes ("
+                f"{_ABI_ARG_REGS} in registers and "
+                f"{_MAX_INCOMING_ARGS - _ABI_ARG_REGS} on the stack)")
         for i, (pname, ptype) in enumerate(incoming):
             if i == 0:
                 # Already in X19 by the unconditional save above, which also
@@ -1069,6 +1095,23 @@ dylib_exports: list = None, globals_base: int = None,
             # requirement and is not a parameter: it is an address, so it must
             # not be narrowed to a declared width.
             self._load_home_from_reg(pname, i, ptype)
+        # …and the ones past the eighth, which AAPCS does NOT pass in a
+        # register.  Argument `8 + k` arrives at `[SP_in + 8k]`, and `SP_in` is
+        # the SP this function was called with — which the prologue above has
+        # already moved past, so the address is the frame pointer plus the
+        # sixteen bytes of saved FP/LR: `[X29 + 16 + 8k]`.  Every one of those
+        # offsets is ABOVE X29 and every spill slot is below it, so a parameter
+        # home can never land on the argument it is being loaded from.
+        #
+        # Before this existed the answer was to refuse, and the refusal was
+        # right about the ABI and wrong about the consequence: `pack(fmt, v0..v7)`
+        # is nine arguments, and it is `formal/hostmods/struct.mojo`'s OWN
+        # documented "a format I cannot serve returns an empty list" contract
+        # that the caller could never reach.  `bugs/FORMAL_struct_pack_over_eight_
+        # arguments.md` has the measurement and both halves of the mechanism.
+        for i, (pname, ptype) in enumerate(incoming):
+            if i >= _ABI_ARG_REGS:
+                self._load_home_from_stack(pname, i, ptype)
         # The RETURNED-FRAME hidden word, moved from the register the caller
         # passed it in to its home, in the same place and for the same reason
         # as the parameters above: every incoming argument is caller-saved, so
@@ -1464,6 +1507,30 @@ dylib_exports: list = None, globals_base: int = None,
             self._store_var(name, src)
             return None
         return None
+
+    def _load_home_from_stack(self, name: str, index: int, ptype=None):
+        """`[SP_in + 8·(index - 8)]` → this local's home, the stack half of AAPCS.
+
+        The counterpart of `_load_home_from_reg` for the arguments that have no
+        register, and it delegates to that function for the write so the two
+        ends of the convention share one home-assignment rule: `X16` here is
+        exactly `X<src>` there.
+
+        The offset is `[X29 + 16 + 8·(index - 8)]`, positive and small (a
+        function with 24 arguments and five saved pairs puts the last one at
+        X29+112), so it is a plain unsigned scaled `LDR` and no scratch
+        register is spent computing an address — which matters because X17 IS
+        the address scratch `_store_var` uses on the spill path, and borrowing
+        it here would overwrite the value before the store.
+
+        A comptime parameter is already a full word with no declared width to
+        normalize to, which is why `ptype=None` skips the extend — the same
+        rule `_load_home_from_reg` applies, and for the same reason: narrowing a
+        pointer to a declared width would truncate half of it.
+        """
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 29,
+                                           16 + 8 * (index - _ABI_ARG_REGS)))
+        self._load_home_from_reg(name, 16, ptype)
 
     def _no_home(self, name: str) -> str:
         """The refusal for a name with no register, spill slot or frame slot.
@@ -2181,6 +2248,7 @@ dylib_exports: list = None, globals_base: int = None,
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_non_container_operand("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
             tnames = _lbn_target_names(stmt.target) if isinstance(
                 stmt.target, str) else []
@@ -3090,10 +3158,10 @@ dylib_exports: list = None, globals_base: int = None,
             # an integer — the pointer's own value, so the program printed
             # 4335747904 where it meant to print `darwin`.
             return M.dylib_export_return_kind(
-                M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name,
-                                      self._dylib_forwarded)
-                or self._aliased_export(name))
+                M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name))
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:
@@ -3551,6 +3619,64 @@ dylib_exports: list = None, globals_base: int = None,
         raise CodegenError(M.frame_container_operand_refusal(
             op, M.spelled(obj), [st.name for st in cands]))
 
+    def _refuse_frame_order_operand(self, op: str, operand) -> None:
+        """Raise if `operand` is a bare name this function holds as a FRAME.
+
+        The ORDERING sibling of `_refuse_frame_container_operand`, and asked
+        from the same table for the same reason: `x < y` on two multi-field
+        structs reached the flag-setting compare of two ADDRESSES, so which way
+        it branched was decided by where the allocator put the two objects —
+        measured on both architectures, `lt=1 gt=0 le=1 ge=0` for two objects
+        holding EQUAL field values. `model.frame_order_operand_refusal` is the
+        shared text, so x86-64 cannot describe the same construct differently,
+        and both backends ask it at BOTH comparison sites (`_emit_binop` for a
+        value and `_emit_branch_unless_cmp` for a condition) — the choke-point
+        argument `bugs/FORMAL_string_value_model.md` makes for `if s < t:`
+        bypassing `_emit_binop`, which is exactly how a string comparison came
+        to be a diagnostic in one context and a branch in the other.
+        """
+        if (op not in M._FRAME_ORDER_OPS
+                or not isinstance(operand, F.IdentExpr)
+                or operand.name not in self._frame_holders):
+            return
+        cands = self._frame_candidates.get(operand.name) or ()
+        reason = M.frame_order_operand_refusal(op, operand,
+                                              [st.name for st in cands])
+        if reason is not None:
+            raise CodegenError(reason)
+
+    def _refuse_non_container_operand(self, op: str, obj) -> None:
+        """Raise if `obj` is a plain WORD this function bound to an integer.
+
+        The third arm of the container family, and the one that had no arm at
+        all: `frame_container_operand_refusal` fires for a FRAME ADDRESS and
+        the string paths fire for a `char *`, and `a = 5` is neither, so the
+        blob walk read a count out of the integer and computed an element
+        address of `5 + 8`. Measured on BOTH architectures, `a[0] = 1` builds,
+        links and dies of SIGSEGV at run time with the build green. See
+        `model.non_container_element_refusal` for the whole of it.
+
+        BARE NAME ONLY, for the same reason `_refuse_frame_container_operand`
+        is: `h.xs[i]` on a field declared `List[Int]` is what that declaration
+        is FOR, and the frame-holder table is about addresses rather than
+        fields.
+
+        The kind is read from `own_shape_kind` and NOT from `_expr_str_kind`,
+        and that is the whole of the narrowing: `INT_KIND` is this model's
+        DEFAULT for a word, so a parameter (`def at(xs): return xs[0]`), a call
+        result (`ys = h.get()`) and a loop variable (`for row in rows:`) all
+        carry it while being containers, and reading it as a claim refuses
+        three correct programs — `own_shape_kind`'s docstring has the measured
+        table. What it answers is "did a statement of THIS function say so",
+        which is the difference between `a = 5` and every one of them.
+        """
+        if not isinstance(obj, F.IdentExpr):
+            return
+        if self._vkinds.own_shape_kind(obj.name) != M.INT_KIND:
+            return
+        raise CodegenError(M.non_container_element_refusal(
+            op, M.spelled(obj), self.func_name or "<module>"))
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
         """X0 = &obj[index]. Blob path bounds-checkes (exit 1 on OOB).
 
@@ -3565,6 +3691,7 @@ dylib_exports: list = None, globals_base: int = None,
         contract for) and the second emitted a store through a computed
         address. Both now say no."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        self._refuse_non_container_operand("a subscript", e.obj)
         if M.is_external_call_template(e):
             # The ONE place an `external_call[...]` is a subscript that is not
             # the callee of a call, and `M.multi_index_refusal_for` above (and
@@ -3972,6 +4099,54 @@ dylib_exports: list = None, globals_base: int = None,
                     f"print a literal, or bind it to a literal first")
             operands.append(a)
         return frags, operands
+
+    def _printf_arg_is_text(self, arg):
+        """True / False / None: does this `printf` vararg hold text.
+
+        The three-way answer `model.printf_text_conversion_refusal` is written
+        against, and the distinction is the whole of the narrowing. A STRING
+        LITERAL is text without any question asked. A name `_expr_str_kind`
+        classifies `STR_KIND` is text for the reason that classification exists.
+        A bare name a statement of THIS function bound to an INTEGER on that
+        statement's own shape is NOT text — that is `ValueKinds.own_shape_kind`,
+        the same predicate the container-element refusal asks, so one evidence
+        test answers "is this an element address" and "is this a string" and the
+        two architectures cannot disagree about which names carry it.
+
+        Everything else is `None` — the source does not say. That includes an
+        UNANNOTATED PARAMETER, which is a word this build cannot classify, and
+        refusing it would refuse `def show(s): printf("[%s]", s)` for every
+        caller that passes a string: measured working, both architectures, exit
+        0 and `[abc]`. `None` is the permissive direction by design and
+        `printf_text_conversion_refusal`'s docstring says why at length.
+        """
+        if isinstance(arg, F.StringLiteral):
+            return True
+        if M.string_operand_is_string(self._expr_str_kind(arg)):
+            return True
+        if (isinstance(arg, F.IdentExpr)
+                and self._vkinds.own_shape_kind(arg.name) == M.INT_KIND):
+            return False
+        return None
+
+    def _refuse_printf_text_conversion(self, name, e: F.CallExpr) -> None:
+        """Raise when `e` hands a `%s` conversion something that is not text.
+
+        A no-op for every callee the model's set does not name, and for a call
+        whose format is not a LITERAL: the argument arithmetic needs the
+        conversions enumerated, and a format in a variable cannot be. Both are
+        the model's decision rather than this one's — it is asked with the
+        callee name and the arguments and answers for itself, so x86-64's copy
+        of this method is two lines of delegation and the two cannot come
+        apart.
+        """
+        args = list(e.args or [])
+        fmt = args[0] if args else None
+        reason = M.printf_text_conversion_refusal(
+            name, fmt.value if isinstance(fmt, F.StringLiteral) else None,
+            args[1:], self._printf_arg_is_text)
+        if reason is not None:
+            raise CodegenError(reason)
 
     def _print_kwargs(self, e: F.CallExpr):
         """`print`'s `sep=` / `end=` / `file=`, as (sep, end). Only literals.
@@ -4522,10 +4697,17 @@ dylib_exports: list = None, globals_base: int = None,
 
         The blob is `[count:i64][elem0]…` in the frame, so there is no room to
         grow one: the capacity is a compile-time number (`_scan_list_caps`)
-        and the store is checked against it, exiting(1) rather than writing
-        past the blob. Appending more times than the scan found — inside a
-        loop — therefore stops the program instead of quietly corrupting the
-        frame, the same bargain `xs[i]` out of range makes.
+        and the store is checked against it, refusing to write past the blob.
+        Appending more times than the scan found — inside a loop — therefore
+        stops the program instead of quietly corrupting the frame, the same
+        bargain `xs[i]` out of range makes.
+
+        The stop is LOUD. It used to be a bare `exit(1)` with nothing on either
+        stream, which is the worst of the three answers this backend can give:
+        not a wrong number a reader can compare, not a named refusal they can
+        act on, but silence. `model.list_append_overflow_message` (shared with
+        x86-64, so the two machines cannot name this limit differently) is
+        written to fd 2 first, through `write(2)`, and then the program stops.
 
         Returns 0, which is this model's `None`: `list.append` returns None,
         and nothing in the language can observe the difference between that and
@@ -4572,11 +4754,40 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
         self.asm.label(oob)
+        self._emit_overflow_diagnostic(
+            M.list_append_overflow_message(
+                recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
         self.asm.emit(encode_movz_xd_imm(0, 1))
         self.asm.emit(encode_movz_xd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
         self.asm.label(ok)
         self.asm.emit(encode_movz_xd_imm(0, 0))     # None
+
+    def _emit_overflow_diagnostic(self, text: str) -> None:
+        """`write(2, text, len)` — say WHICH bound was hit before stopping.
+
+        The shared half of every bounded-container stop on this path, and the
+        reason it goes through `write(2)` rather than the raw syscall the exit
+        beside it uses: the exit sequence above is the Darwin one this backend
+        already emits everywhere, but `write`'s syscall number is not what makes
+        this a good message — the fact that the same C library call works on
+        both platforms is, and `write` is the one call whose interface this
+        value model can satisfy with nothing but an interned label and an
+        immediate.
+
+        SP is 16-byte aligned here (the append's own `stp` pushed a multiple of
+        16), which is what AAPCS and the C library both assume at a call, so no
+        extra adjustment is needed and the pushed base/value stay readable.
+        X0-X2 are free: the values the append needed are already in X4 (base)
+        and the out-of-range path discards them.
+        """
+        label = self._intern_string(text)
+        _emit_sub_imm(self.asm, 31, 31, 16)
+        self.asm.emit_adrp_add(1, label)
+        self.asm.emit(encode_movz_xd_imm(0, 2))              # fd = stderr
+        self.asm.emit(encode_movz_xd_imm(2, len(text)))      # length
+        self._emit_extern_call("write", 3)
+        _emit_add_imm(self.asm, 31, 31, 16)
 
     def _emit_file_write(self, e: F.CallExpr) -> None:
         """`f.write(s)` — `write(fd, s, strlen(s))` through the C library.
@@ -4893,6 +5104,10 @@ dylib_exports: list = None, globals_base: int = None,
         }
         if op in cmp_conds:
             u, s = cmp_conds[op]
+            # A FRAME ADDRESS has no order, and the flag-setting compare below
+            # would decide one by where the allocator put the two objects.
+            self._refuse_frame_order_operand(op, e.left)
+            self._refuse_frame_order_operand(op, e.right)
             if op in ("==", "!=") and self._emit_strcmp_flags(e.left, e.right):
                 self.asm.emit(encode_cset_xd_cond(
                     0, "ne" if op == "!=" else "eq"))
@@ -5141,6 +5356,13 @@ dylib_exports: list = None, globals_base: int = None,
         # here rather than in `_emit_branch_unless_cmp` because that function is
         # reached from the for-range test too, which builds its own operands and
         # has no operator to decide with.
+        # …and the FRAME ADDRESS row, asked here for the same reason: a
+        # comparison in a condition never reaches `_emit_binop`, so a check
+        # asked only there would leave `if x < y:` branching on two addresses
+        # while `r = x < y` is a build error. Two spellings of one question
+        # disagreeing is how a wrong BRANCH gets in.
+        self._refuse_frame_order_operand(cond.op, cond.left)
+        self._refuse_frame_order_operand(cond.op, cond.right)
         if cond.op in ("==", "!=") \
                 and self._emit_strcmp_flags(cond.left, cond.right):
             self._record_cond_branch()
@@ -5307,6 +5529,7 @@ dylib_exports: list = None, globals_base: int = None,
         # field as the count — see `model.frame_container_operand_refusal` for
         # the measurement, which is a wrong answer rather than a crash.
         self._refuse_frame_container_operand("a membership test", right)
+        self._refuse_non_container_operand("a membership test", right)
         if type(right) not in (F.IdentExpr, F.CallExpr, F.ListExpr,
                                F.TupleExpr, F.MemberExpr, F.SubscriptExpr,
                                F.SliceExpr, F.Comprehension, F.SetExpr,
@@ -5386,18 +5609,28 @@ dylib_exports: list = None, globals_base: int = None,
     def _extern_decl_for(self, name: str):
         """The declaration of an IMPORTED callee `name`, or None.
 
-        Keyed by the SYMBOL the call binds, and the entry is found by the same
-        two steps in the same order as `_extern_symbol` — the plain export
-        lookup, then the import alias — so the declaration handed to
-        `bind_call_arguments` is always the one whose parameter list the call
-        is actually being checked against. Asking by bare name instead would be
-        a way to hand a call the signature of a same-named function in a
-        different library.
+        Keyed by the SYMBOL the call binds, and the entry is found by
+        `model.dylib_callee_export` — the one resolution, in the same order as
+        `_extern_symbol` — so the declaration handed to `bind_call_arguments` is
+        always the one whose parameter list the call is actually being checked
+        against. Asking by bare name instead would be a way to hand a call the
+        signature of a same-named function in a different library.
+
+        The `forwarded` table reaches this through that shared resolution, and
+        that is load-bearing rather than tidiness: a re-exported callee
+        (`pkg.f`, where `pkg/__init__` is nothing but `from .sub import f`) is
+        published by the PACKAGE's manifest and nowhere else, so a lookup that
+        left it out found no declaration, and a call with no declaration is a
+        call whose arguments are passed unexamined — `pkg.f(1, 2, 3)` dropped
+        the third and `pkg.f(1)` read the second out of an uninitialized
+        register, printing two different numbers on the two architectures. It
+        is the same defect `test_formal_cross_module.py` pins for the bare
+        spelling, reached by the dotted one.
         """
-        entry = M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name)
-        if entry is None:
-            entry = self._aliased_export(name)
+        entry = M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name)
         if entry is None:
             return None
         return self._extern_decls.get(entry.get("symbol"))
@@ -5586,10 +5819,7 @@ dylib_exports: list = None, globals_base: int = None,
                 f"image built and then failed to load). The by-reference "
                 f"receiver that gives one is switched off "
                 f"({M.WIDE_RECEIVER_ENV}=0)")
-        if e.kwargs:
-            raise CodegenError(M.construction_keyword_refusal(
-                name, [k for k, _v in e.kwargs]))
-        if e.args:
+        if e.args or e.kwargs:
             # A ONE-FIELD struct with an argument is a positional construction
             # whose store is free: the receiver IS the field, so the argument
             # is not stored anywhere, it is the result.  The old text here —
@@ -5599,6 +5829,14 @@ dylib_exports: list = None, globals_base: int = None,
             # it stopped being the reason at the same moment.  What is still
             # refused is what the DECISION refuses, by name: see
             # `model.struct_construction_plan`.
+            #
+            # Keywords come through the SAME decision rather than being refused
+            # here, and that is the point of asking it: a keyword naming this
+            # struct's one field is the value the field is given, exactly as a
+            # positional argument is, and `S(field=…)` with no positional is
+            # the construction at its class-level default. Which of those three
+            # it is depends on the field's declared default, which is the
+            # DECISION's business and not this loop's.
             #
             # A struct that DECLARES an `__init__` is the one case where the
             # result is not simply the argument: the constructor's body decides
@@ -5611,13 +5849,23 @@ dylib_exports: list = None, globals_base: int = None,
                 self._return_types)
             if refusal is not None:
                 raise CodegenError(refusal)
-            if plan[0] == M.CONSTRUCTION_INIT:
+            if plan[0] in (M.CONSTRUCTION_INIT, M.CONSTRUCTION_DEFAULT):
+                # One word, so nothing is stored anywhere: the receiver IS the
+                # field and the LAST value is the whole result.  Empty stores
+                # is `S()` against a constructor with nothing to assign, which
+                # is the same fresh word either way.
+                #
+                # `CONSTRUCTION_DEFAULT` is here for the case where every
+                # argument a partial construction carried was one the plan
+                # consumed against a field that already carries its own
+                # declared default, so nothing is left to store and the result
+                # is the class-level one.
                 if plan[1]:
                     self._emit_expr(plan[1][-1][2])
                     return
                 self._emit_fresh_one_word(name, st)
                 return
-            self._emit_expr(e.args[0])
+            self._emit_expr(M.construction_supplied_argument(e))
             return
         self._emit_fresh_one_word(name, st)
 
@@ -5704,8 +5952,8 @@ dylib_exports: list = None, globals_base: int = None,
         # …and then the constructor's own stores, for the one shape that has
         # them.  Empty for `S()`, which is why this is the same code as the
         # default constructor's rather than a fourth copy of it.
-        for _field, slot, value in (plan[1] if shape == M.CONSTRUCTION_INIT
-                                    else ()):
+        for _field, slot, value in (plan[1] if shape ==
+                                    M.CONSTRUCTION_INIT else ()):
             self._emit_block_store(site, slot, value)
         self._emit_frame_nested_addresses(site)
         # …and once more at the end, because the address is the RESULT and
@@ -6001,18 +6249,42 @@ dylib_exports: list = None, globals_base: int = None,
             raise CodegenError(
                 f"unsupported call target on the formal arm64 path "
                 f"(got {type(e.func).__name__})")
+        # The three builtins this emitter intercepts by BARE NAME, read out of
+        # `model.EMITTER_BUILTINS` rather than spelled here, for the reason that
+        # table's comment gives: the set of names a backend compiles itself is a
+        # fact three places have to agree on — this chain, the x86-64 one, and
+        # `model.FRAME_VARIADIC_BUILTIN_CALLS` — and three hand-written copies of
+        # it are three chances for a caller to be told a callee is compiled when
+        # it is not, or the reverse. `_emit_range_list` takes the ARGS LIST and
+        # the other two take the CallExpr; that asymmetry is the emitter's and is
+        # why the table names the method rather than dispatching it.
         if not is_extern_call and name == "range":
             self._emit_range_list(list(e.args))
             return
-        if not is_extern_call and name == "len":
-            self._emit_len(e)
-            return
-        if not is_extern_call and name == "print":
-            self._emit_print(e)
-            return
+        if not is_extern_call and M.emitter_lowers(name):
+            if name == "len":
+                self._emit_len(e)
+                return
+            if name == "print":
+                self._emit_print(e)
+                return
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
+        # `%s` OF SOMETHING THAT IS NOT TEXT, asked here for the same reason
+        # `print` is intercepted two lines above and not left to the extern
+        # path: the format string is the SOURCE's, and this is the last place
+        # both the format and the varargs are in hand together.  `print` builds
+        # its own format and so cannot get it wrong; `printf` takes one
+        # unchecked all the way to C, where `%s` walks bytes at the address it
+        # is handed looking for a NUL.  Measured with this refusal lifted, on
+        # both architectures: `a = 5; printf("[%s]", a)` builds, runs, prints
+        # nothing and dies of SIGSEGV, exit 139.  The decision and the message
+        # are `model.printf_text_conversion_refusal`, shared with x86-64; it
+        # gates on the resolved CALLEE rather than on `is_extern_call`, so
+        # `external_call["printf", Int32](fmt, n)` — which reaches this same
+        # line with `name == "printf"` — is asked the same question.
+        self._refuse_printf_text_conversion(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return
@@ -6099,6 +6371,23 @@ dylib_exports: list = None, globals_base: int = None,
             # flush=True) and pass positional args only — same ABI the
             # extern path already uses for zero-kwarg calls.
             args = list(e.args)
+            # …and the count is checked against what the MANIFEST publishes,
+            # because "no declaration to read" must not mean "no contract to
+            # obey". `extern_call_count_refusal` is the shared rule and returns
+            # "" for every case it cannot decide, which is most of them (the
+            # runtime dylib publishes no contract at all). Before it, a call
+            # whose library shipped without its sources dropped its extra
+            # arguments and read its missing ones out of an uninitialized
+            # register — measured, `two(1, 2, 3)` printing 12 and `two(1)`
+            # printing 1798665114 where CPython refuses both.
+            refusal = M.extern_call_count_refusal(
+                name, len(args),
+                M.dylib_callee_export(self._dylib_by_name,
+                                      self._dylib_by_module,
+                                      self._dylib_forwarded,
+                                      self._import_aliases, name))
+            if refusal:
+                raise CodegenError(refusal)
         else:
             # An extern callee whose DECLARATION is known goes through the same
             # binder as a local one. That is the whole fix for a default
@@ -6198,21 +6487,71 @@ dylib_exports: list = None, globals_base: int = None,
         # The frame case still gets the construct's OWN sentence, which
         # names the hidden word and the budget it ran into rather than
         # reporting a count the reader cannot account for.
-        if nargs > _ABI_ARG_REGS:
-            if sret_site is not None:
-                raise CodegenError(
-                    M.returned_frame_convention_refusal(name, len(args))
-                    or f"calling {name}() needs one hidden word for the "
-                       f"caller's block and there is no argument register "
-                       f"left for it")
+        # AAPCS splits the arguments: the first eight in X0..X7 and the rest in
+        # the caller's frame at ascending offsets from the SP the callee enters
+        # with.  Both halves are implemented, so the refusal below is a FRAME
+        # bound rather than the ABI's register count — it used to be
+        # `nargs > _ABI_ARG_REGS`, which was true about X0..X7 and wrong about
+        # the consequence: `pack(fmt, v0..v7)` is nine arguments and the
+        # alternative it protected against (evaluate the extra arguments, drop
+        # them, and branch) built an image that read the ninth parameter as
+        # ZERO — measured, `nine(1,...,9)` returned 1 where the source says
+        # 90001.  A wrong value is strictly worse than a refusal, but so is a
+        # refusal to a program the ABI can express, and this one can.
+        n_stack = max(0, nargs - _ABI_ARG_REGS)
+        if nargs > _MAX_INCOMING_ARGS:
             raise CodegenError(
                 f"call {name}(): {nargs} arguments exceeds the "
-                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
-        # AAPCS: pass up to 8 integer args in X0..X7. Evaluate left-to-right,
-        # spilling each result so nested evaluations (which clobber X0/X1/X2)
-        # don't destroy earlier arguments. Pop in reverse so arg0 lands in X0.
-        # Second slot of each push/pop is XZR so loads never clobber a live arg.
-        for arg in args:
+                f"{_MAX_INCOMING_ARGS} the formal arm64 ABI passes "
+                f"({_ABI_ARG_REGS} in registers and "
+                f"{_MAX_INCOMING_ARGS - _ABI_ARG_REGS} on the stack)")
+        # The returned-frame hidden word IS an argument — the callee reads it
+        # out of the register after the last source one — so eight source
+        # arguments to a frame-returning function is a NINE-argument call. It
+        # has to land in a REGISTER: the callee reads it at index
+        # `len(incoming)` by `_load_home_from_reg` and has no stack convention
+        # for it, so this is the one case the split above cannot absorb and it
+        # keeps the construct's OWN sentence rather than a count the reader
+        # cannot account for.
+        if sret_site is not None and len(args) >= _ABI_ARG_REGS:
+            raise CodegenError(
+                M.returned_frame_convention_refusal(name, len(args))
+                or f"calling {name}() needs one hidden word for the "
+                   f"caller's block and there is no argument register "
+                   f"left for it")
+        # The outgoing-argument area, reserved FIRST and as a multiple of 16 so
+        # SP is still aligned at the call (AAPCS requires it, and every other
+        # SP movement in this backend is a multiple of 16 for the same reason).
+        # Reserving before anything is evaluated is what makes the slots below
+        # safe: an argument expression that itself CALLS pushes and pops
+        # symmetrically, so it works strictly under the area this reserved and
+        # cannot land in it.
+        stack_bytes = 0
+        if n_stack:
+            stack_bytes = 16 * ((n_stack + 1) // 2)
+            _emit_sub_imm(self.asm, 31, 31, stack_bytes)
+        # The STACK arguments first, each stored into the slot the callee will
+        # read it from.  FIRST is load-bearing and not a style preference: the
+        # register arguments below are spilled with a `STP [SP, #-16]!` each,
+        # so evaluating them first would move SP 128 bytes down and every
+        # `[SP + 8k]` above would land in the register spill area instead of
+        # the reserved outgoing slots.  Measured before this was reordered, with
+        # the offsets correct for the SP at the time: `nine(1..9)` returned 37
+        # where the source says 45, and `ten(1..10)` returned 0 where it says
+        # 1000000010 — the ninth argument read as zero, which is the wrong value
+        # the ORIGINAL refusal existed to prevent, arriving by a different road.
+        #
+        # Storing them before the register spills is also what makes a nested
+        # call in a stack argument safe: with the area reserved and nothing else
+        # pushed yet, that nested call pushes strictly below it.
+        for k in range(n_stack):
+            self._emit_expr(args[_ABI_ARG_REGS + k])
+            self.asm.emit(encode_str_xt_xn_imm(0, 31, 8 * k))
+        # The register arguments. Evaluate left-to-right, spilling each result
+        # so nested evaluations (which clobber X0/X1/X2) don't destroy earlier
+        # arguments. Pop in reverse so arg0 lands in X0. Second slot of each
+        # push/pop is XZR so loads never clobber a live arg.
+        for arg in args[:_ABI_ARG_REGS]:
             self._emit_expr(arg)
             self.asm.emit(encode_stp_sp_pre(0, 31))
         if sret_site is not None:
@@ -6221,7 +6560,7 @@ dylib_exports: list = None, globals_base: int = None,
             self._emit_frame_base(self._ret_frame_base + sret_site[1])
             self.asm.emit(encode_mov_zr_xn(0, 9))
             self.asm.emit(encode_stp_sp_pre(0, 31))
-        for i in range(nargs - 1, -1, -1):
+        for i in range(min(nargs, _ABI_ARG_REGS) - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))
             if i != 0:
                 self.asm.emit(encode_mov_zr_xn(i, 0))
@@ -6230,6 +6569,30 @@ dylib_exports: list = None, globals_base: int = None,
             # the BL, the GOT slot and the bind stream all name the symbol the
             # library actually defines.
             symbol = self._extern_symbol(name)
+            # A VARIADIC callee whose arguments overflow the registers is
+            # refused rather than guessed at, and the gate is
+            # `variadic_named_args` and NOT `is_extern`: an ordinary dylib
+            # export — `struct.mojo`'s own `pack`, which is what this whole
+            # change is for — has a normal C signature, and the stack slots
+            # above are exactly where its ninth argument belongs. What is
+            # refused is the one case where two conventions land on one SP:
+            # `_emit_variadic_area` lays a variadic tail out at `[SP + 8i]` as
+            # it stands at the call, which is where the outgoing stack
+            # arguments now are, and nothing states an order between them.
+            # Nothing in this corpus needs it — every `printf` in the tree is
+            # under the register count — and emitting a layout that has not
+            # been measured is what this backend's refusal discipline exists to
+            # prevent. `M.VARIADIC_SLOTS` already bounds the `...` tail.
+            if n_stack and M.variadic_named_args(symbol) is not None:
+                raise CodegenError(
+                    f"call {name}(): {nargs} arguments puts "
+                    f"{n_stack} of them past the {_ABI_ARG_REGS} "
+                    f"argument registers, and {name} is a VARIADIC C entry "
+                    f"point, whose unnamed arguments this path lays out in a "
+                    f"separate stack area — two conventions on one SP with no "
+                    f"order stated between them. Pass fewer arguments, or wrap "
+                    f"the call in a function of this module that takes the "
+                    f"values as parameters")
             area = self._emit_variadic_area(symbol, len(args))
             self.asm.emit_extern_bl(symbol)
             if area:
@@ -6237,6 +6600,8 @@ dylib_exports: list = None, globals_base: int = None,
         else:
             self.asm.emit(encode_bl(0))
             self.asm.emit_label_rel(name, here_offset=-4)
+        if stack_bytes:
+            _emit_add_imm(self.asm, 31, 31, stack_bytes)
         if ext_return is not None:
             self._emit_extern_return(ext_return)
 
@@ -6846,6 +7211,13 @@ dylib_exports: list = None, globals_base: int = None,
                 raise CodegenError(
                     f"unsupported compare-chain operator {op!r} on the "
                     f"formal arm64 path")
+        # The CHAIN is a separate emitter that never went through
+        # `_emit_binop` — the `s += t` lesson again, one loop over.  Each link
+        # compares the same two adjacent operands a plain comparison would, so
+        # each link asks the same frame-ordering question.
+        for i, op in enumerate(ops):
+            self._refuse_frame_order_operand(op, operands[i])
+            self._refuse_frame_order_operand(op, operands[i + 1])
 
         self._if_counter += 1
         cid = self._if_counter
@@ -6884,7 +7256,6 @@ dylib_exports: list = None, globals_base: int = None,
         self._emit_slice_parts(expr.obj, expr.start, expr.stop, expr.step)
 
     def _emit_slice_parts(self, obj, start_e, stop_e, step_e) -> None:
-        self._refuse_frame_container_operand("a slice", obj)
         """`obj[start:stop:step]` → new list blob in X0.
 
         Defaults: start=0, stop=count, step=1 (None nodes). Negative bounds
@@ -6902,6 +7273,8 @@ dylib_exports: list = None, globals_base: int = None,
         both backends, `s = "abcde"; printf("[%s]", s[1:])` died with SIGSEGV
         (exit 139). `model.string_slice_refusal` holds the message and the
         argument for lowering the suffix case later."""
+        self._refuse_frame_container_operand("a slice", obj)
+        self._refuse_non_container_operand("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))
         if sreason is not None:

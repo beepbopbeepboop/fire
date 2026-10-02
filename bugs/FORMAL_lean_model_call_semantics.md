@@ -1,8 +1,19 @@
 # [3] The Lean model — what landed, and what did not
 
-**Status: landed in `lib/`, verified, with one named gap and one blocking
-hand-off.** This is the [3] scope from FORMAL.md §11.2: `lib/ProofLib.lean`,
+**Status: landed in `lib/`, verified, and only ONE gap remains of the three this
+document listed — `Total` for a looping export, which is now KNOWN FALSE rather
+than merely unproved and whose home is `FORMAL_contract_work_handoff.md`.**
+This is the [3] scope from FORMAL.md §11.2: `lib/ProofLib.lean`,
 `lib/Refine.lean`, `lib/X86.lean`, and nothing else.
+
+**Re-measured 2026-10-01, and the useful part of the re-measurement is what is
+NO LONGER true:**
+
+| "What did NOT land" said | now |
+|---|---|
+| the x86-64 `rip` half of the call/return round trip — "one medium induction in `mem`" | **DONE.** `mem_read_bytes_write_same` (`lib/X86.lean:1577`) is that induction, `mem_write_bytes_tail` + `mem_read_bytes_congr` are the pointwise byte lemma, and `x86_call_ret_round_trip` proves both halves together. It is in the file; the doc's own diagnosis of what was missing was right down to the mask |
+| `Total` (uniform termination) | **not proved, and now REFUTED.** `ProofLib.total_refuted_backward_branch : ¬ Total backward_branch_image backward_branch_export` — so the `sorry` over it for a looping export sits on a false statement, which is a sharper thing to hand the integrator than "not proved". The full hand-off is `bugs/FORMAL_contract_work_handoff.md` |
+| the x86-64 generator wiring (A1) | still open. `formal/x86_64_endtoend_test.py` is in nobody's write set, so it is a second interface request. The two facts A1 needed "both of which now exist in `lib/X86.lean`" — two successors and a separation fact — are present, so what is left is the tree-building |
 
 ## The measured before
 
@@ -114,7 +125,9 @@ there, `arm64_step` decodes nothing, returns `none`, and the whole run is
 
 **x86-64** `x86_call_post` / `x86_at_target` / `x86_ret_post`, and
 `x86_call_ret_balances_stack` + `x86_call_return_slot_separated` (both proved).
-The separation lemma is the fact A1 names.
+The separation lemma is the fact A1 names. The round trip itself is complete too
+— see "The x86-64 `rip` half" under "What did NOT land", which is now a record
+of a gap that has since been closed.
 
 ## What did NOT land
 
@@ -138,26 +151,83 @@ design question.** It is the next piece of phase 4.
 The per-argument half *is* checkable, which is why `Total` is a stated
 obligation and not a hole in `lib/`.
 
-### The x86-64 `rip` half of the call/return round trip
+**Re-measured 2026-10-01: the step bound was the wrong repair, and the
+obligation is FALSE for a looping export.** `lib/ProofLib.lean` now carries
 
-`x86_call_ret_balances_stack` proves the stack-pointer half. The `rip` half —
-that the `ret` lands on `m + 5` — additionally needs a read-of-write lemma for
-`mem_read_bytes`/`mem_write_bytes`, which this file does not have:
+```
+theorem total_refuted_backward_branch :
+    ¬ Total backward_branch_image backward_branch_export := by …
+```
 
-    mem_read_bytes (mem_write_bytes m a v 8) a 8 = v
+with the argument recorded above the theorem — `runExport`'s fuel is the
+binding constraint, so the refutation is over the single-argument form rather
+than every `n`, and the "same would hold for every `n`" is the structural fact.
+So this is no longer "stated and not proved"; it is a `sorry` sitting on a
+statement the library itself refutes, which is a sharper thing to hand over and
+a different repair: either `runExport`'s fuel becomes a function of `n` (which
+changes the meaning of [3]'s `export_result_spec`) or `Total` is weakened. That
+choice is `bugs/OPUS.md` §4.1's, and the full hand-off —
+`bugs/FORMAL_contract_work_handoff.md` — is where it lives. **Not this
+document's to close, and not claimed here.**
 
-That statement is **false as a general-width claim** (at width 0 the read is 0
-whatever `v` is), so it needs a mask to induct on, and the induction needs the
-pointwise byte lemma because the tail of the step compares a `k`-write at
-`a+1` against a `k+1`-write at `a`, which agree everywhere except at `a`:
+### The x86-64 `rip` half of the call/return round trip — **DONE since this was written**
 
-    ∀ n m a v, mem_read_bytes (mem_write_bytes m a v n) a n = v &&& lowMask n
+It is no longer a gap, and it was never a design question — it was the two
+lemmas this section named, and both are in `lib/X86.lean`:
 
-That is **one medium induction in `mem`**, and it is the whole of what stands
-between this and a complete x86-64 round trip. Recorded in the docstring of
-`x86_call_ret_balances_stack` rather than asserted, because a theorem that
-quietly stops at the register file is how the old `Semantics` came to state
-`True`.
+* `mem_read_bytes_write_same` (`X86.lean:1577`) —
+  `∀ n, mem_read_bytes (mem_write_bytes m a v n) a n = v &&& lowMask n`, the
+  masked induction, with `lowMask` and `lowMask_eight` beside it. This section's
+  argument for the MASK is the theorem's own docstring: "at `n = 0` nothing is
+  written and nothing reads back, so the unmasked claim would be false exactly
+  where the induction starts."
+* `mem_write_bytes_tail` + `mem_read_bytes_congr` — the pointwise byte lemma the
+  tail of the step needs, because the `k`-write at `a+1` and the `(k+1)`-write at
+  `a` agree everywhere except at `a`.
+
+With them **both halves of the round trip are proved and combined**:
+
+```
+x86_call_ret_balances_stack … : (x86_ret_post …).rsp = s.rsp
+x86_call_ret_restores_rip   … : (x86_ret_post …).rip = m + 5
+x86_call_ret_round_trip     … : … .rsp = s.rsp ∧ … .rip = m + 5
+```
+
+The `m + 5 < 2 ^ 64` hypothesis on the `rip` theorem is deliberate and is this
+document's own disease caught in the act: a return address is a `UInt64`, so
+`UInt64.ofNat (m + 5)` truncates and the conclusion needs `m + 5` to fit — true
+of every real instruction address and unprovable of a bare `Nat`. Asserting it
+without the hypothesis would be the `True`-shaped trap this section was written
+to police. And `x86_call_ret_round_trip` takes the same three step hypotheses
+as the stack-pointer theorem rather than inventing its own, with the reason
+recorded at the call site: "the first version of this theorem tried to
+discharge them with `rfl`, which cannot work … Passing a dummy `code` would
+have made the whole statement vacuous -- a theorem about a machine that never
+ran -- which is the same disease as the old `Semantics`, one layer down."
+
+The text below is kept because it is what the two lemmas are, and because it
+records why the round trip was not attempted before them.
+
+> `x86_call_ret_balances_stack` proves the stack-pointer half. The `rip` half —
+> that the `ret` lands on `m + 5` — additionally needs a read-of-write lemma for
+> `mem_read_bytes`/`mem_write_bytes`, which this file does not have:
+>
+>     mem_read_bytes (mem_write_bytes m a v 8) a 8 = v
+>
+> That statement is **false as a general-width claim** (at width 0 the read is 0
+> whatever `v` is), so it needs a mask to induct on, and the induction needs the
+> pointwise byte lemma because the tail of the step compares a `k`-write at
+> `a+1` against a `k+1`-write at `a`, which agree everywhere except at `a`:
+>
+>     ∀ n m a v, mem_read_bytes (mem_write_bytes m a v n) a n = v &&& lowMask n
+>
+> That is **one medium induction in `mem`**, and it is the whole of what stands
+> between this and a complete x86-64 round trip. Recorded in the docstring of
+> `x86_call_ret_balances_stack` rather than asserted, because a theorem that
+> quietly stops at the register file is how the old `Semantics` came to state
+> `True`.
+
+`mem_read_bytes_write_same` IS that one medium induction.
 
 ### The x86-64 generator wiring (A1)
 

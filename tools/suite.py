@@ -488,6 +488,16 @@ MEASURED_PEAK_GB = {
     'formal-receiver-position': (0.07, 'measured'),  # 2 s, 12 cases
     'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases
     'formal-x86-dylib':       (0.09, 'measured'),   # 2 s, 9 cases
+    # Two suites the estate check caught with no spec naming them, measured
+    # 2026-10-02 the same way (one at a time under `tools/memslot.py --gb 8`,
+    # arm64, python 3.14.7) before being registered rather than excused: at
+    # 8.5 s and 2.8 s they are the CHEAPEST formal coverage in the tree, and
+    # `formal-receiver-position`'s own 2 s is the nearest neighbour. The
+    # alternative — a 39th entry in `test_suite.py`'s UNREGISTERED — would
+    # have been a permanent excuse for a test that costs less than the poll
+    # that measures it.
+    'formal-read-before-store': (0.08, 'measured'),  # 8.5 s, 61 cases, no builds
+    'formal-receiver-spelling': (0.08, 'measured'),  # 2.8 s, 3 differential cases
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -2161,21 +2171,18 @@ test('formal-dataclasses', [PY, 'test_dataclasses_formal.py'],
 # `mod.NAME`: a call, a RE-EXPORTED call, a submodule chain, and a module-level
 # constant, each built for both architectures and run — plus the three shapes
 # that must stay refused, each with a message that names its own reason, and the
-# manifest that is the contract between the two. 10.3 s, 0.07 GB.
+# manifest that is the contract between the two. 18/18. 10.3 s, 0.07 GB.
 #
-# RED, and registered red rather than excused, for the same reason
-# `formal-struct` above is: a declared red is a report and an unrun red is
-# silence. 1 of 11, and both halves of it are written down in
-# bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md.
+# GREEN, and the marker is gone rather than relaxed: the one red case was a
+# bracketed call to a private name, refused as a specialization whose brackets
+# have nowhere to bind rather than as the export gap it is. The export rule is
+# asked first now for a bracketed callee whose base name the defining module
+# does not publish, so the two facts are told apart by the link line instead of
+# being conflated (`formal/build.py`'s `_bracketed_export_gap`); a bracketed
+# callee the module DOES publish keeps the brackets' own refusal, which is the
+# sentence that is true of it.
 test('formal-module-attr', [PY, 'test_formal_module_attr.py'], mem='tiny',
      deps=['preflight'],
-     expect='bugs/FORMAL_bracketed_private_name_refused_as_a_specialization.md '
-            '— 1 of 18: a bracketed call to a private name is refused as a '
-            'specialization whose brackets have nowhere to bind, rather than '
-            'as the export gap it is (a leading `_` is private). The older '
-            'doc for this case records a dangling symbol on arm64 and an '
-            'unsupported call target on x86-64; both of those are fixed, and '
-            'the two backends now agree',
      extra=['test_formal_module_attr.py', 'formal/model.py',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='mod.NAME: calls, re-exports, chains, constants and attribute '
@@ -2224,23 +2231,19 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
 # memcap's own report rounds to 0.1 GB and eight of these ten are under it.
 
 # `external_call["sym", RetType](...)`: the construct that was the terminal
-# refusal behind the largest single family in the sweep residue. 29 cases, and
+# refusal behind the largest single family in the sweep residue. 30 cases, and
 # the needle half of the file is as load-bearing as the answer half: a refusal
 # that stops being made is a wrong program, so both directions are pinned.
 #
-# RED, and registered red rather than excused, for the same reason
-# `formal-struct` above is. 1 of 29: `env_round_trip` declares its `getenv`
-# return type as `_CPointer[UInt8, UntrackedOrigin[mut=False]]`, and the tuple
-# subscript in THAT ANNOTATION is refused as a value subscript before the
-# `external_call` itself is ever read. The construct is right — a two-argument
-# subscript on a type is not a two-dimensional index — and it is being asked the
-# question at the wrong moment; see
-# bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md.
+# NOT red any more. It carried `expect=` for one case — `env_round_trip`, which
+# declares its `getenv` return type as `_CPointer[UInt8, UntrackedOrigin[mut=False]]`,
+# where the tuple subscript in THAT ANNOTATION was refused as a value subscript
+# before the `external_call` itself was ever read. The construct was right and
+# it was being asked the question at the wrong moment: `model.type_position_nodes`
+# now tells the module-symbols walk which brackets sit in a TYPE position, so it
+# stops asking what they mean at runtime.
 test('formal-external-call', [PY, 'test_formal_external_call.py'],
      mem='tiny', deps=['preflight'],
-     expect='bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md '
-            '— 1 of 29: a two-argument type subscript inside the external_call '
-            'bracket is refused as a value subscript',
      extra=['test_formal_external_call.py', 'formal/build.py',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='external_call[sym, RetType]: both the answers and the refusals')
@@ -2343,6 +2346,40 @@ test('formal-x86-dylib', [PY, 'test_formal_x86_64_dylib.py'], mem='tiny',
             'formal/elf.py', 'formal/build.py',
             'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='an x86-64 module dylib that calls out, built, signed and run')
+
+# ── the two the estate check caught on master, 2026-10-02 ──────────────────
+# The same check, the same hole, one landing later: `formal/model.py`'s CFG
+# dominance fix (`f1ad7dc7`) and the ONE-rule-for-receiver change before it
+# (`44e90eec`) each landed with a test file, and neither was registered, so
+# `suite-self-test` went red naming exactly these two.
+#
+# Registered rather than excused, and the deciding number is the cost: 8.5 s
+# and 2.8 s, both under 0.1 GB, so neither is anywhere near the "too expensive
+# to run a known answer" line that `UNREGISTERED` exists for (the fifteen
+# formal suites it already excuses build and RUN images for minutes each).
+# `formal-receiver-position`, at 2 s, is the nearest registered neighbour and
+# `formal-read-before-store` is the second-cheapest analysis suite in the tree.
+#
+# `read_before_store` is the more interesting of the two as a unit test: it
+# asks the analysis directly and uses CPython as the oracle IN BOTH
+# directions — a refusal must be one CPython also makes, and a non-refusal
+# must be one CPython does not — so it covers shapes (`try`/`except` with a
+# `return` in the `finally`, a `break` out of one arm, a wildcard `match` arm)
+# that a build-and-run row would each cost a compiler invocation to reach.
+test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_formal_read_before_store.py', 'formal/model.py'],
+     desc='read-before-store dominance, against CPython in both directions')
+# Every case is DIFFERENTIAL and each `this` case has a `self` twin that has
+# to compute the same thing, which is what stops the file from passing for the
+# wrong reason (a build that stopped taking ANY receiver would satisfy "the
+# `this` case prints 31" if the two spellings were not compared). It builds
+# and runs on both backends, so `FORMAL_BUILD_INPUTS` is in its key.
+test('formal-receiver-spelling', [PY, 'test_formal_receiver_spelling.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_formal_receiver_spelling.py', 'formal/model.py',
+            'formal/build.py'] + FORMAL_BUILD_INPUTS,
+     desc='a receiver spelled `this`, diffed against a `self` twin and CPython')
 
 # ── not the compiler: the CPU reference the Metal path is checked against ───
 # `test_llm/` is a self-contained sub-project: a ~1M-parameter linear-attention
@@ -2490,7 +2527,15 @@ BUCKETS = {
               # only differential arm64-vs-x86-64 evidence for the examples —
               # measured 45/45 in 29.6 s at 0.1 GB. It is in `x86` too, where
               # the rest of the x86-64 picture already is.
-              'new-syntax-parse', 'x86-examples'],
+              'new-syntax-parse', 'x86-examples',
+              # …and the two the estate check named on 2026-10-02, measured at
+              # 8.5 s and 2.8 s and at under 0.1 GB each, which is cheaper than
+              # most of what is already here (`formal-sys` is 6.9 s,
+              # `formal-ast` 1.4 s). Both are formal backend coverage, and both
+              # are in `proofs` as well so that bucket stays the whole formal
+              # picture; the reason to name a cheap test in two buckets is the
+              # reason `x86-examples` is named in two.
+              'formal-read-before-store', 'formal-receiver-spelling'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -2546,11 +2591,15 @@ BUCKETS = {
                # missing pieces of it. `formal-value-model` and
                # `formal-receiver-position` are two of the largest formal
                # bodies of test in the tree, so the gap was not marginal.
-               'formal-external-call', 'formal-json', 'formal-pathlib',
-               'formal-method-param-field', 'formal-receiver-position',
-               'formal-small-hosts', 'formal-specialization',
-               'formal-target-queries', 'formal-value-model',
-               'formal-x86-dylib'],
+'formal-external-call', 'formal-json', 'formal-pathlib',
+                'formal-method-param-field', 'formal-receiver-position',
+                'formal-small-hosts', 'formal-specialization',
+                'formal-target-queries', 'formal-value-model',
+                'formal-x86-dylib',
+                # …and the two the estate check named on 2026-10-02, for the
+                # same reason and with the same cost measurement: cheap enough
+                # that `check` runs them and `proofs` is only naming them.
+                'formal-read-before-store', 'formal-receiver-spelling'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,

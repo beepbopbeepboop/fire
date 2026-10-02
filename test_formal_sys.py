@@ -31,9 +31,14 @@ part that makes it a module:
      is, rather than as the host-import refusal it used to be. The
      classifier's quoted-name rule asks the BUILD's resolver whether the
      module has a source, and this is the case that made that necessary;
-  8. the ONE thing this module cannot do is pinned as a measurement, so the
-     next reader finds it in the test rather than rediscovering it: a string
-     escape is not interpreted on this path.
+  8. a string literal's escapes are DECODED on this path, as CPython
+     decodes them, and the byte counts the module's two writers return say
+     so. This one used to be the module's headline limitation, measured and
+     pinned as such — until 9023031b moved the escape decoder into
+     `fire_compiler.decode_c_escapes` and gave the formal backends the same
+     one every other engine already used. It is kept as a test rather than
+     dropped because it is the only place the module's writers are checked
+     against CPython's own answer for a literal with an escape in it.
 
 Invoked directly:
     python3 test_formal_sys.py [-v]
@@ -96,6 +101,12 @@ USE_SYS_EXPECT = ("3.14.6 (fire formal backend)\n"
 
 # The two writers, checked through the module and by their return value, so a
 # `write(2)` that returned -1 could not pass as "it printed something".
+#
+# The source holds a real backslash and an `n`, and CPython decodes that to a
+# newline — measured, `sys.stderr.write("to stderr\n")` returns 10 and leaves
+# the nine characters plus a real line break on the descriptor. So the counts
+# printed here are 10 and 10 and not the 11 and 11 this test asserted while
+# the literal reached the image undecoded (before 9023031b).
 WRITE_SYS = """\
 import sys
 
@@ -200,14 +211,16 @@ def main():
   return 0
 """
 
-# A string escape is not interpreted on this path: the bytes are what the
-# source said. Pinned so the limitation is a measurement in the estate rather
-# than a surprise in a bug report.
+# A string escape, which IS interpreted on this path: the bytes are what
+# CPython makes of the source. The count the writer returns is checked too,
+# so a backend that decoded the escape but still counted the source's
+# characters cannot pass.
 ESCAPES = """\
 import sys
 
 def main():
-  sys.write_stderr("a\\nb")
+  n = sys.write_stderr("a\\nb")
+  print(n)
   return 0
 """
 
@@ -433,18 +446,19 @@ def test_the_two_writers_reach_the_right_descriptors(tmp, _shared):
 
     The byte count is checked as well as the text, because a `write(2)` that
     failed returns -1 and prints nothing, and "the program produced no
-    complaint" is not the same as "it wrote". The count is 11 and not 10
-    because the source holds a real backslash and an `n` — see the escape
-    test — so the two functions' answers are also a check that the module is
-    measuring the bytes it actually wrote.
+    complaint" is not the same as "it wrote". The count is 10 — the nine
+    characters of the text plus the newline the source's `\\n` decodes to —
+    and CPython returns 10 for the same call, so the two agree. It was 11
+    while a literal reached the image undecoded, before 9023031b; see the
+    escape test below, which is where that decoding is pinned.
     """
     ran = build_and_run(workdir(tmp, "write"), "sys_write", WRITE_SYS)
-    check(ran.stderr == "to stderr\\n",
-          f"stderr was {ran.stderr!r}, expected the literal bytes "
-          f"{'to stderr' + chr(92) + 'n'!r} — see the escape test for why")
-    check(ran.stdout == "to stdout\\n11\n11\n",
-          f"stdout was {ran.stdout!r}: expected the literal bytes, then the "
-          f"two byte counts 11 and 11")
+    check(ran.stderr == "to stderr\n",
+          f"stderr was {ran.stderr!r}, expected the nine characters and the "
+          f"newline the source's escape decodes to")
+    check(ran.stdout == "to stdout\n10\n10\n",
+          f"stdout was {ran.stdout!r}: expected the decoded text, then the "
+          f"two byte counts 10 and 10")
 
 
 def test_dotted_calls_resolve_by_module_identity(tmp, _shared):
@@ -505,21 +519,27 @@ def test_the_documented_spelling_exits(tmp, _shared):
     check(ran.stdout == "before\n", f"stdout was {ran.stdout!r}")
 
 
-# ── what the module cannot do, pinned as a measurement ─────────────────────
+# ── string literals: the escapes are decoded, as CPython decodes them ──────
 
-def test_string_escapes_are_not_interpreted(tmp, _shared):
-    """`"a\\nb"` is five bytes, not a newline and four bytes.
+def test_string_escapes_are_interpreted_as_cpython_does(tmp, _shared):
+    """`"a\\nb"` is three bytes and a newline, not a backslash and an `n`.
 
-    Not a bug in `sys` — a property of string literals on this path, pinned
-    here because the module's two writers are the obvious place a reader meets
-    it, and `sys.mojo`'s docstring says a newline has to be a real byte. If
-    this test ever goes red the limitation was fixed, and the docstring and
-    this comment are what should be updated with it.
+    This was the module's headline limitation and the reason its two writers
+    were documented as needing a REAL newline in the source. 9023031b fixed
+    it: `fire_compiler.decode_c_escapes` is now the one decoder every engine
+    calls, so the formal backends decode what `fire.py run`, `fire.py build`
+    and CPython have always decoded. Checked against CPython's own answers —
+    `sys.stderr.write("a\\nb")` writes three bytes and returns 3 — because
+    "the escapes are decoded" is only half the claim; the module has to
+    measure the DECODED length too, or `strlen` is counting the source.
     """
     ran = build_and_run(workdir(tmp, "escape"), "sys_escape", ESCAPES)
-    check(ran.stderr == "a\\nb",
-          f"stderr was {ran.stderr!r}: string escapes are now interpreted on "
-          f"this path, so sys.mojo's note about real newlines is stale")
+    check(ran.stderr == "a\nb",
+          f"stderr was {ran.stderr!r}: expected a real newline between the two "
+          f"letters, the way CPython decodes this literal")
+    check(ran.stdout == "3\n",
+          f"stdout was {ran.stdout!r}: expected the write(2) byte count 3 — "
+          f"three decoded bytes, not the five characters of the source")
 
 
 # ── the sweep's verdict ────────────────────────────────────────────────────
@@ -579,8 +599,8 @@ TESTS = [
     ("a dotted call the module does not export is refused",
      test_a_dotted_call_the_module_does_not_export_is_refused),
     ("the documented spelling exits", test_the_documented_spelling_exits),
-    ("string escapes are not interpreted",
-     test_string_escapes_are_not_interpreted),
+    ("string escapes are interpreted as CPython does",
+     test_string_escapes_are_interpreted_as_cpython_does),
     ("the sweep calls a sys refusal a codegen finding",
      test_the_sweep_calls_a_sys_refusal_a_codegen_finding),
 ]

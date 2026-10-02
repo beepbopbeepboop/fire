@@ -1,5 +1,13 @@
 # FORMAL_field_access_refusal_names_the_wrong_module: the refusal is about a variable, and the advice names a declaration the reader does not have
 
+**Status: the MESSAGE is fixed (2026-10-02); the build-pass refusal is not, and
+is what is left.** `model.field_access_refusal` no longer claims a binding it
+cannot see and no longer offers a repair that cannot be followed. Measured on
+the case below, both architectures, with
+`test_formal_cross_module.py`'s `a linked dylib whose source is gone is still
+refused` asserting both directions — that the two false clauses are gone and
+that the two available repairs are present.
+
 **Area:** CODEGEN/FORMAL (arm64 + x86-64): `formal/model.py`'s
 `field_access_refusal`, reached from both emitters' slot-allocator
 fall-through. Diagnostic only — **nothing is silently wrong**, and the
@@ -73,6 +81,29 @@ declaration this image can see — an import brings one with it, and a
 `--link-dylib` library brings one if the source it was built from is
 still readable". That is strictly better than today's sentence and needs
 no new table, at the cost of not naming the library.
+
+**That narrower alternative is what landed (2026-10-02), and the unbacked
+`"{root} is bound here as a parameter"` clause went with it** — the
+raiser cannot see a binding at all, so the sentence that asserted one
+was the same defect as the repair, not a separate one. The message now
+carries both of step 3's warnings: the declaration must be VISIBLE (an
+import brings one with it, a `--link-dylib` library brings one while the
+source it was built from is readable), and re-declaring the struct in
+the importing file is a *different* type with the same name whose layout
+is not the one the library's methods were compiled against.
+
+**What is left is steps 1 and 2** — the build-pass refusal, which is the
+only part that can NAME the library. It is not done, and the reason is
+worth recording rather than leaving to a reader to discover:
+`check_construction_shapes` can see that `b` was constructed from a name
+it does not have a struct for, but it cannot see whether the struct's
+DECLARATION was reachable, which is the fact the message would have to
+report. `formal/imports.py`'s `{struct name: install name}` table from
+the `kind: "method"` exports — the table this document records as tried
+and removed — is what answers that, and it is what step 1 actually needs
+rather than the empty-argument-list scan as written: `Bag()` in the
+reproducer has an empty argument list by accident of the example, and a
+`Bag(1, 2)` would slip past it.
 
 ## What is NOT wrong here
 

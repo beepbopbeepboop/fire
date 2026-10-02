@@ -360,6 +360,54 @@ REFUSALS = [
      "    r.b = 8\n"
      "    return ask[1](0, r)\n",
      "which is lowered as an operation on a VALUE"),
+
+    # A METHOD called on a SUBSCRIPTED receiver — `bs[0].get()` — refused for
+    # the receiver's TYPE and not at the LINK LINE.
+    #
+    # This is the shape whose previous answer was a link-audit sentence:
+    #
+    #     the image would bind 1 symbol(s) that nothing provides: get.
+    #     Nothing on this link line defines them …
+    #
+    # which is a diagnosis about where the symbol should have come from, for a
+    # defect in how the call was written — `_rewrite_method_calls` lifts
+    # `recv.m(...)` to `Struct_m(recv, …)` only when `recv` is a bare name, and
+    # `bs[0]` is not one, so the dotted spelling fell through to a call against a
+    # symbol spelled after the METHOD. The link audit caught it only because
+    # nothing else claimed `get`; had the name collided with a C library symbol
+    # the image would have bound that and computed a plausible wrong number.
+    #
+    # `bs` is a list literal of `Box()`, so the element type is statically
+    # obvious and this program is answerable — inferring it is the capability
+    # `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` records, and it is
+    # not what this case asserts. What it asserts is that the missing fact is
+    # NAMED instead of the link line.
+    ("refuse_a_method_call_on_a_subscripted_receiver",
+     "struct Box:\n"
+     "    var k: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.k\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var bs = [Box(), Box()]\n"
+     "    bs[0].k = 3\n"
+     "    return bs[0].get()\n",
+     "What is missing is the receiver's TYPE"),
+
+    # …and the receiver is quoted back AS THE SOURCE SPELLS IT.  `bs[0]`, not
+    # `bs[IntLiteral]` — a refusal whose evidence is an AST node class name is a
+    # refusal a reader has to decode before they can act on it, and this is a
+    # separate assertion because a spelling fix and a refusal fix are two
+    # changes that can each land alone.
+    ("refuse_a_subscripted_receiver_is_spelled_as_written",
+     "struct Box:\n"
+     "    var k: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.k\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var bs = [Box(), Box()]\n"
+     "    bs[0].k = 3\n"
+     "    return bs[0].get()\n",
+     "`bs[0].get(…)` cannot be lowered"),
 ]
 
 # ── the comptime ABI, now on BOTH architectures ────────────────────────────

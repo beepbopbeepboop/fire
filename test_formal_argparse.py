@@ -658,17 +658,21 @@ def test_the_module_builds_on_its_own(tmp, _shared):
     subject is a comparison inside `_lookup` — a module none of the 36 had
     anything to do with.
 
-    So: the module as a translation unit, with nothing importing it, on the
-    default backend (arm64, which is the target the corpus above is run on).
+        So: the module as a translation unit, with nothing importing it, on the
+        default backend (arm64, which is the target the corpus above is run on).
 
-    Not asserted for x86_64, and that is a real gap rather than a shrug: on that
-    backend the build stops earlier, in `os/_syscalls.mojo`'s own dylib
-    ("main executable failed strict validation"), before argparse's body is
-    reached, so nothing here has measured whether this module lowers on that
-    backend at all. The whole per-module, per-backend table is in
-    bugs/FORMAL_x86_64_hostmods_that_do_not_build.md, with the two reasons x86-64
-    has fewer of them than arm64 — and asserting it here would turn a red about
-    one module into a red about two.
+        x86-64 is not asserted HERE and does not need to be: the per-module,
+        per-backend table is `test_formal_hostmods_census.py`, which builds all
+        sixteen host modules on both backends and is where a row about one
+        module belongs — so a red about this module's arm64 build and a red
+        about this module's x86-64 build stay two different failures with two
+        different subjects.  (This docstring used to say x86-64 was not
+        measured because the build "stops earlier, in `os/_syscalls.mojo`'s own
+        dylib ('main executable failed strict validation')".  That was true when
+        it was written and is no longer: the dylib emitter's defect is fixed,
+        every module in the table builds on x86-64 but two, and argparse is one
+        of the fourteen that do.)
+
 
     The build is a cold one: this file points GMOJO_HOME at a private CAS per
     process, so a dylib published by an earlier run cannot answer for this

@@ -305,7 +305,19 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         cfile, ofile = os.path.join(wd, mangled + '.c'), os.path.join(wd, mangled + '.o')
         with open(cfile, 'w') as f:
             f.write(c)
-        subprocess.run([gcc, *_OBJ_FLAGS, '-c', '-o', ofile, cfile], check=True)
+        # The gcc stderr travels in the exception. `check=True` raises
+        # CalledProcessError, which carries no output, so a build that failed
+        # here reported only "Command ... returned non-zero exit status 1" —
+        # and the caller that most needs it (`_ensure_generic_struct`, which
+        # elaborates a struct into a constructor call) turned it into a
+        # silently different program. See that function's own comment.
+        _cc = subprocess.run([gcc, *_OBJ_FLAGS, '-c', '-o', ofile, cfile],
+                             capture_output=True, text=True)
+        if _cc.returncode != 0:
+            raise RuntimeError(
+                f"gcc -c failed for the monomorphized {mangled} "
+                f"(exit {_cc.returncode}); generated C is at {cfile}\n"
+                + (_cc.stderr or _cc.stdout or '')[-2000:])
         if gen.generated_cpp:
             gxx = find_gxx()
             cppfile = os.path.join(wd, mangled + '_async.cpp')

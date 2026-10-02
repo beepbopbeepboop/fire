@@ -730,6 +730,7 @@ int         mojo_str_eq(MojoStr *a, MojoStr *b);
 char        mojo_str_char_at(MojoStr *s, int64_t i);
 void        mojo_str_print(MojoStr *s);
 char       *mojo_char_to_str(char c);
+char       *mojo_char_at_str(char *s, int64_t i);   /* s[i] as a 1-char str */
 int64_t     mojo_ord(char *s);
 char       *mojo_chr(int64_t code);
 

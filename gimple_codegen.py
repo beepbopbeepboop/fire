@@ -2651,6 +2651,16 @@ class GimpleGen:
         self._extra_search_paths: list = []
         # Imported generic struct name -> module source path (slice 5).
         self._imported_generic_structs: dict = {}
+        # Why an imported generic struct could NOT be elaborated for a
+        # construction, one entry per occurrence. The codegen falls back to
+        # the un-elaborated template (see
+        # `emit_resolve._ensure_generic_struct`, which measures that fallback
+        # as load-bearing), so this list is the only evidence that what came
+        # out is a DIFFERENT program from the one the source says — and
+        # `build_stdlib_dylib.compile_module_to_c_cached` reads it to refuse
+        # to publish such a module into the content-addressed store, where a
+        # one-off failure would otherwise be served forever.
+        self._generic_struct_elaboration_failures: list = []
         # Imported overloaded function name -> module source path (slice 4).
         self._imported_overloads: dict = {}
         # typedefs for elaborated (monomorphized) structs, emitted in the preamble.
@@ -2784,6 +2794,7 @@ class GimpleGen:
         'mojo_str_rpartition':   ('MojoList *', ['char *', 'char *']),
         'mojo_c_getenv':         ('char *',     ['char *']),
         'mojo_char_to_str':      ('char *',     ['char']),
+        'mojo_char_at_str':      ('char *',     ['char *', 'int64_t']),
         'mojo_ord':              ('int64_t',    ['char *']),
         'mojo_chr':              ('char *',     ['int64_t']),
         'mojo_read_type_tag':    ('int64_t',    ['int64_t']),

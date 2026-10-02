@@ -1072,10 +1072,9 @@ class TestPerFileMemoryCeiling(unittest.TestCase):
     """One file's build is bounded, and a file that hits the bound is a file
     the sweep classifies and moves past — not a file that ends the run.
 
-    This is the mechanism behind bugs/FORMAL_sweep_killed.md: the arm64 sweep of
-    2026-10-01 was SIGKILLed with nothing but its 5-line header in the output,
-    and the structural reason a single file could do that is that nothing was
-    between one build and the machine.
+    The arm64 sweep of 2026-10-01 was SIGKILLed with nothing but its 5-line
+    header in the output, and the structural reason a single file could do
+    that is that nothing was between one build and the machine.
     """
 
     def test_the_build_runs_under_memcap_not_bare(self):
@@ -1337,10 +1336,12 @@ class TestSweepLock(unittest.TestCase):
     The lock is here because two same-arch sweeps share the formal module-dylib
     output directory and the ledger, and a manifest in that directory is
     rewritten IN PLACE (`write_dylib_manifest` opens it `w`), so a reader in one
-    sweep can observe the other's half-written JSON. That is what the
-    `json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)` in
-    bugs/FORMAL_sweep_tool_json_decode_error.md is; the lock stops the pair from
-    running together rather than trying to make the shared write safe.
+    sweep can observe the other's half-written JSON — which is what the
+    `json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)`
+    rows in the `tool` class are. The lock stops the pair from running
+    together; the shared write itself is made safe separately, through
+    `formal/build.py`'s `_write_json_atomic` (see
+    `test_formal_manifest_atomic.py`), so this is belt to that braces.
     """
 
     def test_a_second_sweep_of_the_same_arch_is_refused(self):

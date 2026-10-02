@@ -196,6 +196,207 @@ CASES = [
      "    a[bump()] += 100\n"
      "    sys.stdout.write(\"%d %d %d\" % (a[0], a[1], a[2]))\n"
      "    return 0\n"),
+    # `len` is on this list because the two architectures answered it the SAME
+    # wrong way, which is the shape a one-backend fix would hide: `_emit_call`
+    # special-cased `range` and treated every other callee as a known function
+    # or an extern, and `len` matched neither, so it became a call to a libc
+    # symbol that does not exist.  Both backends therefore returned whatever
+    # the call left in the return register — measured, -6 for `len(range(10))`
+    # on BOTH — and one architecture being right would have been as much a bug
+    # as both being wrong.  (`bugs/FORMAL_x86_64_formal_backend_gaps.md`.)
+    #
+    # Four operand shapes in one line, because the fix is not one rule and the
+    # four are the four ways to be wrong about it:
+    #
+    #   * a `range` blob — the count field at offset 0;
+    #   * a LIST literal and a list LOCAL — the same field, and the local is the
+    #     one a fall-through reads through an unclassified word;
+    #   * a string LOCAL — a bare `char *`, and its length is a COMPUTATION
+    #     (`strlen`) rather than a field, because a NUL-terminated run has no
+    #     count word.  Measured before the fix, on both architectures:
+    #     1819043176 = 0x6C6C6568 = "hell" read little-endian;
+    #   * a string that is a METHOD RESULT — `lstrip` yields an INTERIOR
+    #     pointer, so this is the case that pins the scan to the NUL from
+    #     wherever the pointer starts rather than from the original literal.
+    #     Measured before the fix, on both: 536897896 = 0x20006869, "hi"
+    #     followed by the two spaces that had just been trimmed.
+    #
+    # The empty string is here too, because a scan that forgets the terminator
+    # walks off the end of the buffer, and 0 is the answer that says it did not.
+    #
+    # TWO printfs, not one, and the reason is this suite's own subject rather
+    # than taste: SysV x86-64 passes six integer arguments in registers, so a
+    # single `printf` of seven values is refused on x86-64 and built on arm64 —
+    # which is a different divergence than the one this case exists to close
+    # (bugs/FORMAL_x86_64_argument_registers.md).  A case that tripped it would
+    # report that filing and not this one.
+    ("len_of_every_operand_shape",
+     "def main():\n"
+     "    m = \"hello\"\n"
+     "    w = \"  hi\".lstrip()\n"
+     "    e = \"\"\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"%d %d %d %d\", len(m), len(w), len(e), len(xs))\n"
+     "    printf(\" %d %d %d\", len([1, 2, 3, 4]), len(range(10)), len([]))\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    m = \"hello\"\n"
+     "    w = \"  hi\".lstrip()\n"
+     "    e = \"\"\n"
+     "    xs = [1, 2, 3]\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (len(m), len(w), len(e), len(xs)))\n"
+     "    sys.stdout.write(\" %d %d %d\" % (\n"
+     "        len([1, 2, 3, 4]), len(range(10)), len([])))\n"
+     "    return 0\n"),
+    # THE SAME TUPLE STORE INSIDE `__init__`, WHICH USED TO BE A REFUSAL AND IS
+    # NOT ONE ANY MORE — it is in `CASES` because both backends now answer it
+    # with CPython's answer, and this row was the reason the shared REFUSALS list
+    # is shorter than it was.
+    #
+    # `h.x, h.y = p, q` outside a constructor reached a different pass from the
+    # same SPELLING inside one, and the constructor-with-arguments inline needed
+    # the body to BE a straight line of `self.<field> = …` stores.  A tuple
+    # target is not, so it was refused — which was only correct while BOTH
+    # machines said so, and x86-64 used to reach its own `_emit_tuple_assign` and
+    # refuse with a different sentence ("tuple assignment targets must be plain
+    # names on the formal x86-64 path").  Two architectures, two refusals, one
+    # program.
+    #
+    # `_init_statement_field_stores` is what closed it: one table for the single
+    # and the tuple target shape, so the inline performs the tuple store and
+    # `CONSTRUCTION_INIT` carries it.  Measured after the merge:
+    #
+    #     CPython  't=7'
+    #     arm64     exit=0 stdout='t=7'
+    #     x86-64    exit=0 stdout='t=7'
+    #
+    # So the row is here rather than in REFUSALS, where it asserted a refusal
+    # that no longer fires.  The construct it was filed for — the SPELLING being
+    # two-architecture-specific — is still what this file is for; what changed is
+    # that both machines now agree on the answer instead of on the refusal.
+    ("tuple_target_in_a_constructor_body_answers_on_both",
+     "class Tail:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x, self.y = p, q\n"
+     "    def total(self):\n"
+     "        return self.x + self.y\n"
+     "def main(n):\n"
+     "    var t = Tail(3, 4)\n"
+     "    printf(\"t=%d\", t.total())\n"
+     "    return 0\n",
+     "import sys\n\nclass Tail:\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x, self.y = p, q\n"
+     "    def total(self):\n"
+     "        return self.x + self.y\n\n"
+     "def main():\n"
+     "    t = Tail(3, 4)\n"
+     "    sys.stdout.write(\"t=%d\" % t.total())\n"
+     "    return 0\n"),
+    # THE AUGMENTED FORM OF THE FOUR OPERATORS THE ALU TABLE CANNOT EXPRESS.
+    # `/` `//` `%` are a ONE-operand instruction whose zero arm is a trap and
+    # `**` is an unroller, so `_ALU_RR` holds none of them and neither does the
+    # shift table. arm64's `_emit_aug_assign` has always routed all four to the
+    # same two helpers its binary form uses (`_emit_div_shift_pow`); x86-64's
+    # twin had no such route, so `x /= 2`, `x //= 2`, `x %= 2` and `x **= 2`
+    # were REFUSED by name on this backend while arm64 built and ran them — four
+    # spellings of one construct, and a two-architecture disagreement about
+    # ordinary Python that nothing here could see, because every other case in
+    # this file reached the operator through a pointer or a list element rather
+    # than through a name.
+    #
+    # All four in one program, because a delegation that added `/=` and stopped
+    # there would pass a program that used only `/=`.
+    ("aug_division_and_power_on_a_name",
+     "def main():\n"
+     "    a = 20\n"
+     "    a //= 3\n"
+     "    b = 20\n"
+     "    b %= 6\n"
+     "    c = 3\n"
+     "    c **= 3\n"
+     "    d = 20\n"
+     "    d /= 4\n"
+     "    printf(\"%d %d %d %d\", a, b, c, d)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    a = 20; a //= 3\n"
+     "    b = 20; b %= 6\n"
+     "    c = 3;  c **= 3\n"
+     "    d = 20; d /= 4\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (a, b, c, d))\n"
+     "    return 0\n"),
+    # `**` WITH AN EXPONENT ABOVE TWO, in the BINARY form, because the fix above
+    # is a delegation and a delegation can carry a wrong answer with it:
+    # x86-64's `_emit_pow` unrolled a small literal exponent by copying the
+    # accumulator into R11 and popping that same accumulator back into RAX, so
+    # both registers held one word and every step computed `acc * acc`. The
+    # answer was `base ** (2 ** (lit - 1))` — `3 ** 3` answered 81 where the
+    # source says 27, and `3 ** 8` answered 3**128 — built, ran, and disagreed
+    # with arm64, with the whole suite green throughout because exponent 2 is
+    # the one value a squaring gets right and it was the only exponent anything
+    # tested.
+    #
+    # Exponents 3, 4, 5, 8 and 8 over a second base, so a fix that repaired the
+    # first iteration of the unroll and left the rest answers 81 where the source
+    # says 27. The last two are the same exponent over two bases because the
+    # squaring is wrong by a different factor in each, and a base of 1 or 0 hides
+    # it entirely — so neither appears here.
+    ("literal_power_above_two",
+     "def main():\n"
+     "    printf(\"%d %d %d %d %d\", 3 ** 3, 3 ** 4, 3 ** 5, 2 ** 8, 3 ** 8)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    sys.stdout.write(\"%d %d %d %d %d\" % (3 ** 3, 3 ** 4, 3 ** 5,\n"
+     "                                            2 ** 8, 3 ** 8))\n"
+     "    return 0\n"),
+    # THE SAME DELEGATION THROUGH A FRAME SLOT, which is a different route and
+    # not a variation: a plain name loads and stores a local, while `self.x`
+    # goes through `_member_slot_key` into the frame's slot array, and
+    # `_emit_div_mod`/`_emit_pow` reach the target through `_emit_expr` /
+    # `_store_var` rather than through the local path.  A delegation that named
+    # the target correctly but stored it as a local would compute 101 and keep
+    # it in a register, and the case above — which reads a name — would still
+    # pass.
+    #
+    # TWO fields on purpose.  A one-field struct's receiver IS its field rather
+    # than a frame address (`model.struct_fits_one_word` says the same thing in
+    # its own words), and on this backend a field stored by a zero-argument
+    # `__init__` of a one-field struct reads back as 0
+    # (`bugs/FORMAL_one_field_struct_field_stored_in_a_zero_arg_init_reads_as_zero.md`),
+    # so a one-field spelling of this case would be measuring that bug and not
+    # this construct.
+    ("aug_division_through_a_frame_slot",
+     "class Pair:\n"
+     "    def __init__(self):\n"
+     "        self.n = 20\n"
+     "        self.m = 3\n"
+     "\n"
+     "    def shrink(self):\n"
+     "        self.n //= 2\n"
+     "        self.m %= 2\n"
+     "        return self.n * 10 + self.m\n"
+     "\n"
+     "def main():\n"
+     "    var p = Pair()\n"
+     "    printf(\"%d\", p.shrink())\n"
+     "    return 0\n",
+     "import sys\n\nclass Pair:\n"
+     "    def __init__(self):\n"
+     "        self.n = 20\n"
+     "        self.m = 3\n"
+     "\n"
+     "    def shrink(self):\n"
+     "        self.n //= 2\n"
+     "        self.m %= 2\n"
+     "        return self.n * 10 + self.m\n"
+     "\n"
+     "def main():\n"
+     "    p = Pair()\n"
+     "    sys.stdout.write(\"%d\" % p.shrink())\n"
+     "    return 0\n"),
 ]
 
 
@@ -216,6 +417,56 @@ REFUSALS = [
      "    printf(\"%d\\n\", len(a[0]))\n"
      "    return 0\n",
      "'+=' on two strings is refused"),
+    # `@=` IS THE ONE AUGMENTED SPELLING NEITHER MACHINE LOWERS, and the needle
+    # is the OPERATOR LIST rather than the words around it, because the two
+    # messages necessarily differ in those: `formal/x86_64_codegen.py` says "on
+    # the formal x86-64 path (supports …)" and its arm64 twin says "(formal
+    # arm64 path supports …)".  Both build that list from `model.AUG_OPS`, so
+    # this row is the anti-rot for that sharing: an edit that adds an operator to
+    # one backend's own table instead of the shared constant makes the two
+    # lists differ and this fails, which is the failure mode the shared
+    # constant exists to prevent.
+    #
+    # It also says which spelling is left: `/=` `//=` `%=` `**=` were on this
+    # list until the delegation that removed them, and `+= -= *= &= |= ^= <<=
+    # >>=` never were.
+    ("aug_matmul_refused_with_the_same_operator_list",
+     "def main():\n"
+     "    var m = Mat()\n"
+     "    m.v @= m.w\n"
+     "    return m.v\n"
+     "\n"
+     "struct Mat:\n"
+     "    var v: Int\n"
+     "    var w: Int\n",
+     "+ - * / // % & | ^ << >> **"),
+]
+
+# The other direction, and it is a PER-PLATFORM limit rather than a shared one:
+# a NINE-argument call.  arm64 grew AAPCS's stack-argument convention on
+# 2026-10-01, so argument 8 travels in the caller's frame and both ends of it
+# load and store there; x86-64's SysV convention — six integer argument
+# registers and then the stack — is still unimplemented here, so the ninth
+# argument is still refused there.  Both answers are correct for their
+# platform, and the point of pinning the x86-64 one is that it is a STATED
+# LIMIT rather than an oversight: if a later change implements the SysV stack
+# area, this case starts failing and says so
+# (`bugs/FORMAL_struct_pack_over_eight_arguments.md` §"the x86-64 gap", which
+# is the same wall from the `struct.pack` side).
+#
+# `test_formal_run.py`'s `nine_arguments_arrive` is the arm64 half, and the
+# nine-parameter CALLEE with no call site is pinned there too — a dylib export
+# is the only way to reach a function without a call site, and
+# `_load_home_from_stack` is what such a function's prologue uses.
+X86_ONLY_REFUSALS = [
+    ("nine_arguments_are_still_refused_on_x86_64",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n"
+     "    return 0\n",
+     "9 arguments exceeds the"),
 ]
 
 
@@ -304,6 +555,35 @@ def run_refusal(name, mojo_src, needle, tmpdir, verbose):
     return True, ""
 
 
+def run_x86_refusal(name, mojo_src, needle, tmpdir, verbose):
+    """`run_refusal` for a limit that is ONE PLATFORM's, not the model's.
+
+    `run_refusal` requires both backends to refuse with the same words, which
+    is the right assertion for a construct absent from the value model and the
+    WRONG one here: arm64 lowers a nine-argument call, because AAPCS's stack
+    area is implemented on it. So this builds x86-64 only, requires the refusal,
+    and — deliberately — does NOT require arm64 to refuse, because a later
+    change implementing the SysV stack area would make arm64's behaviour
+    irrelevant to this case rather than wrong.
+    """
+    src = os.path.join(tmpdir, name + ".mojo")
+    with open(src, "w") as f:
+        f.write(mojo_src)
+    out = os.path.join(tmpdir, f"{name}.x86_64")
+    rc, text = build(src, out, "x86_64")
+    if rc == 0:
+        return False, ("x86-64 BUILT a construct its own SysV convention does "
+                       "not yet implement (six integer argument registers, and "
+                       "the stack area past them is unimplemented here); the "
+                       "binary is the real answer")
+    if needle not in text:
+        return False, (f"x86-64 refused, but not naming {needle!r}: "
+                       f"{text.strip()[-200:]}")
+    if verbose:
+        print(f"      x86-64 refused, naming {needle!r}")
+    return True, ""
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -316,10 +596,14 @@ def main():
             print(f"  case    {name}")
         for name, _s, needle in REFUSALS:
             print(f"  refusal {name}  ({needle!r})")
+        for name, _s, needle in X86_ONLY_REFUSALS:
+            print(f"  x86-only refusal {name}  ({needle!r})")
         return 0
 
-    known = {c[0] for c in CASES} | {c[0] for c in REFUSALS}
-    wanted = [(c, False) for c in CASES] + [(c, True) for c in REFUSALS]
+    known = ({c[0] for c in CASES} | {c[0] for c in REFUSALS}
+             | {c[0] for c in X86_ONLY_REFUSALS})
+    wanted = ([(c, False) for c in CASES] + [(c, True) for c in REFUSALS]
+              + [(c, "x86") for c in X86_ONLY_REFUSALS])
     if args.cases:
         missing = set(args.cases) - known
         if missing:
@@ -331,7 +615,10 @@ def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         for (name, mojo_src, third), is_refusal in wanted:
             try:
-                if is_refusal:
+                if is_refusal == "x86":
+                    ok, detail = run_x86_refusal(name, mojo_src, third, tmpdir,
+                                                 args.verbose)
+                elif is_refusal:
                     ok, detail = run_refusal(name, mojo_src, third, tmpdir,
                                              args.verbose)
                 else:

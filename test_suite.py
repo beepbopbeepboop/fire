@@ -2933,6 +2933,25 @@ UNREGISTERED = {
     'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
     'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
     'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
+    # NOT the reason above, and deliberately said so: this one is CHEAP.
+    # Measured 2026-10-02 on the merge of work/merge-formal4, `python3
+    # tools/memslot.py --gb 8 -- python3 test_formal_hostmods_census.py`:
+    # **17.5 s wall, 0.1 GB peak, 16 modules x 2 backends, 4/4 properties** —
+    # which is the same cost class as `formal-globals` above (registered) and
+    # `formal-ast` (in `check`), so by the cost rule in CLAUDE.md it wants a
+    # REGISTRATION, not an excuse: nothing here is over 4 GB or over a few
+    # minutes. It is listed rather than registered because this merge is not
+    # where a registry row is added — the file arrived with work/merge-formal4
+    # and the row belongs to whoever registers it. Exact next step: `test(
+    # 'formal-hostmods-census', [PY, 'test_formal_hostmods_census.py'],
+    # mem='tiny', deps=['preflight'], extra=['test_formal_hostmods_census.py',
+    # 'formal'] + FORMAL_BUILD_INPUTS, desc='every formal/hostmods module
+    # builds as a program on both backends, and x86-64 is a subset of arm64')`.
+    'test_formal_hostmods_census.py': 'The host-module census: every '
+        '`formal/hostmods` module built as a program on BOTH backends, asserting '
+        'that x86-64 is a SUBSET of arm64 — the one divergence a per-backend '
+        'test cannot see. Cheap (17.5 s, 0.1 GB measured) and green (4/4), so '
+        'it wants registering rather than listing; the row is spelled out above.',
     'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
     'test_formal_platform.py': _FORMAL_SUITE_REASON,
     'test_formal_recursion_contract.py': _FORMAL_SUITE_REASON,
@@ -2976,7 +2995,7 @@ UNREGISTERED = {
     'test_formal_mlir_precedence.py': 'WHICH of the two MLIR refusals answers a '
         'template, and that the answer is the same on both backends: seven '
         'cases, each asserted to refuse on BOTH architectures with the same '
-        'sentence (bugs/FORMAL_mlir_refusal_preemption.md). Build-only, but '
+        'sentence (formal/build.py`s `first_mlir` pre-pass). Build-only, but '
         'twice per case, because a backend that answers differently about one '
         'construct is the defect this file exists for.',
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '

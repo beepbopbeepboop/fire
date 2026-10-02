@@ -37,9 +37,8 @@ chain's terminal — used to name something other than MLIR: 6 files moved to th
 MLIR refusal, 0 moved off it, and 0 changed verdict class, so nothing that
 built started failing. They are `std/atomic/atomic.mojo`,
 `std/builtin/globals.mojo`, `std/memory/unsafe.mojo`, `std/sys/_assembly.mojo`,
-`std/sys/intrinsics.mojo`, `std/utils/numerics.mojo`. The doc is
-`bugs/FORMAL_mlir_refusal_preemption.md`, which carries the full table and the
-scope boundary this suite's cases were drawn from.
+`std/sys/intrinsics.mojo`, `std/utils/numerics.mojo`. The mechanism is
+`formal/build.py`'s `first_mlir`, which this suite's cases were drawn to pin.
 
 THE BOUNDARY, stated because it is a decision and not an accident: the
 pre-emption is per FUNCTION. A construct that cannot be lowered at all

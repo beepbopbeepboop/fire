@@ -321,10 +321,12 @@ CAUSES = (
     # records for an earlier row and which no marker can express: the same
     # sentence is produced whether the name is missing (3 of the 5 — and for
     # those, CPython raises `AttributeError`, because nothing in the tree ever
-    # assigns the name) or present as a `comptime` class member the field
-    # census does not read (2 of the 5, correct Mojo that raises nothing, and
-    # `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md` has
-    # the measurement). So the label claims neither: the per-file split is in
+    # assigns the name) or present as a `comptime` class member (2 of the 5,
+    # correct Mojo that raises nothing). The census now reaches an IMPORTED
+    # module's classes (`formal/imports.py`'s `_attach_declared_census`), so
+    # what is left in that second arm is a member whose VALUE is not a literal
+    # — a true refusal about a value this path cannot materialise. So the label
+    # still claims neither: the per-file split is in
     # `bugs/FORMAL_sweep_work_map_2026-10-01_b3.md`, and a reader who trusts
     # the message's own "In Python this is an AttributeError" clause will be
     # wrong about 2 of these 5.
@@ -414,9 +416,14 @@ CAUSES = (
     # cannot see a target that passes six, and reading a 56-file row as part of
     # `other refusal` is how the previous map had to identify it by hand.
     # Not a bug — it is the two ABIs. It is still the largest single-file
-    # difference between the backends and it is worth 51 files behind
-    # `re.mojo` alone (see `bugs/FORMAL_x86_64_hostmods_that_do_not_build.md`
-    # §Failure 2, and `formal2-x86-parity`, which holds the claim).
+    # difference between the backends, and the host module it costs is
+    # `fnmatch.mojo` — `match_core(7)` is the one over-wide function left in
+    # `formal/hostmods` (both `re.mojo` and `hashlib.mojo` had theirs narrowed,
+    # so the "51 files behind `re.mojo` alone" figure this comment used to
+    # quote is no longer measurable).  See
+    # `bugs/FORMAL_x86_64_argument_registers.md` for the limit and its
+    # measurement, and `test_formal_hostmods_census.py` for the per-module,
+    # per-backend table it produces.
     ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
      (("the formal arm64 ABI passes in registers",),
       ("the formal x86-64 ABI passes in registers",))),

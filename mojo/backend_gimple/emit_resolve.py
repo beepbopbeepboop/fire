@@ -2602,7 +2602,41 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         module_src = open(source).read()
         import elaborate
         info = elaborate.Elaborator().elaborate_generic_struct(module_src, base_name, type_args)
-    except Exception:
+    except Exception as e:
+        # `None` here means "not a generic struct I can elaborate", and the
+        # call site reads it as exactly that: it falls through to the plain
+        # struct-constructor path and lowers `Struct[Args](...)` against the
+        # RAW TEMPLATE, whose type parameters are unbound and so typed
+        # `int64_t`. The obvious fix — raise instead of swallowing — was
+        # measured and it is wrong. Over the stdlib's own `std/` subtree (252
+        # files, 2026-10-02) it takes six currently-compiling files to a hard
+        # failure, among them `List[String]` in std/os/os.mojo and
+        # `Array[Int, 3]` in std/python/_cpython.mojo: the elaborator's bound
+        # check rejects types that genuinely conform. So the fall-through
+        # stays, and what changed is what happens to the RESULT.
+        #
+        # The reason is recorded on the generator, which is what makes the
+        # module that comes out of here UNCACHEABLE
+        # (`build_stdlib_dylib.compile_module_to_c_cached`): one swallowed
+        # failure used to write a wrong module into the content-addressed
+        # store under the current compiler fingerprint, so every later run
+        # replayed the wrong artifact and the failure outlived the condition
+        # that caused it. `test/iter/test_ref_iteration.mojo` is the instance
+        # that reached a gate: with the elaboration unavailable,
+        # `for ref x in list` binds `x` to `int64_t` instead of
+        # `MoveOnlyInt *` and `x.value += 1` becomes gcc's `request for
+        # member 'value' in something not a structure or union`.
+        #
+        # The recorded reason is the whole point of keeping it: the elaborator
+        # raises `ConformanceError` on purpose (a deliberate compile error)
+        # and everything else it raises comes from the nested `gcc -c` over
+        # the monomorphized template, whose stderr
+        # `monomorphize.instantiate` now carries into the exception. Without
+        # that, the failure had to be inferred from a gcc error three stages
+        # downstream.
+        gen._generic_struct_elaboration_failures.append(
+            f"{base_name}[{', '.join(type_args)}] from {source}: "
+            f"{type(e).__name__}: {e}")
         gimple_ctypes._debug_note('generic struct elaboration failed')
         info = None
     if not info or not info['fields']:

@@ -939,6 +939,172 @@ def test_struct_method_across_modules(tmpdir, _shared):
               f"the trie is missing the method export {e['symbol']}")
 
 
+# A library that CONSTRUCTS its own struct.  `STRUCT_LIB` above declares one
+# and only ever constructs it in the IMPORTER, so nothing in it exercises the
+# library's own `Counter()` — and that omission is the whole of the gap this
+# case covers: a struct crosses the boundary as a LAYOUT, not as a symbol
+# (`reflect.emit_table_c` skips `SYM_TYPE` entries, so `_Counter` is never
+# defined anywhere), while the codegen recognises an `S(...)` constructor by
+# consulting the struct table it is HANDED.  On the dylib path that table was
+# not handed over, so a constructor in the library's own body fell through the
+# ordinary call path and became a BL against a symbol nothing defines, and the
+# build failed with "the library would bind 1 symbol(s) that nothing provides:
+# Counter" — a link-line diagnosis for a codegen omission, naming neither the
+# constructor nor the file.
+SELF_CTOR_LIB = """\
+struct Counter:
+  var n: Int
+  var tag: Int
+
+def make(n: Int) -> Int:
+  var c = Counter()
+  c.n = n
+  c.tag = 1
+  return c.n + c.tag
+
+def make_static(n: Int) -> Int:
+  var c = Counter()
+  c.n = n
+  c.tag = 2
+  return c.n * 10 + c.tag
+"""
+
+
+def test_a_library_may_construct_its_own_struct(tmpdir, _shared):
+    """`Counter()` inside the LIBRARY, which is a different thing from
+    `Counter()` in the importer.
+
+    The answer is asserted rather than the build succeeding, because a library
+    that compiled the constructor to the WRONG value would link perfectly: the
+    two library functions are separate symbols, so `make` being wrong cannot
+    affect `make_static`, and only their sum pins both. Measured against
+    CPython's own reading of the same three functions, which gives `make(10)`
+    = 11, `make_static(10)` = 102 and the program 13.
+
+    The `Counter()` in the importer is already covered by
+    `test_struct_method_across_modules`; what is new here is the one INSIDE
+    `make`/`make_static`, in the library's own compilation."""
+    root = os.path.join(tmpdir, "selfctor")
+    os.makedirs(root)
+    write_tree(root, {
+        "clib.mojo": SELF_CTOR_LIB,
+        "cuser.mojo": ("from clib import make, make_static\n"
+                       "\n"
+                       "def main() -> Int:\n"
+                       "  return make(10) + make_static(10) - 100\n"),
+    })
+    fresh_cas()
+    _result, out = build(root, "cuser.aout")
+    code, err = run(out)
+    # 11 + 102 - 100 = 13, CPython's answer for the same three functions.
+    check(code == 13,
+          f"a library constructing its own struct returned {code}, expected 13 "
+          f"(make(10)=11 and make_static(10)=102); stderr: {err}. If this "
+          f"build refused with \"would bind 1 symbol(s) that nothing "
+          f"provides: Counter\", the library's struct declarations did not "
+          f"reach the emitter — a class crosses as a layout, so there is no "
+          f"`Counter` symbol for the dangling call to have found.")
+
+
+# A module that exports only a GENERIC, so the import has no symbol to bind.
+# `generic_funcs` is `reflect.collect_exports_src`'s own exclusion
+# (`re.findall(r'\b(?:fn|def)\s+(\w+)\s*\[', src)`), so the empty export set here
+# is the real rule and not a hand-built shape — `doc/ABI.md`'s Generics section
+# is explicit that a generic is not a single boundary symbol.
+GENERIC_LIB = """\
+def widen[T: Intable](v: T) -> T:
+  return v
+
+def helper(x: Int) -> Int:
+  return x + 1
+"""
+
+
+def test_an_imported_generic_is_refused_as_an_export_gap(tmpdir, _shared):
+    """A bare `widen(5)` must be refused naming the EXPORT RULE, and must not
+    reach the link audit.
+
+    Before, the bare spelling was exempted as a callee and emitted as a `BL`,
+    and the build failed with
+
+        the image would bind 1 symbol(s) that nothing provides: widen.
+        … Deciding which is a question for the assembler, and it is asked
+        nowhere in this backend
+
+    — a message about the LINK LINE for a fact the build already knew, and one
+    whose own text admits the question was never asked. The bare spelling is
+    the one a reader is most likely to have written, so it is the one that was
+    worst served.
+
+    The BRACKETED spelling is in the same case because it is the same call, and
+    it is asserted only to refuse and to stay off the link line: which of the
+    two messages it should carry is
+    `bugs/FORMAL_bracketed_private_name_refused_as_a_specialization.md`'s
+    subject and its own claim, so this test does not decide it."""
+    root = os.path.join(tmpdir, "genericcallee")
+    os.makedirs(root)
+    write_tree(root, {
+        "glib.mojo": GENERIC_LIB,
+        "guser.mojo": ("from glib import widen\n"
+                       "\n"
+                       "def main() -> Int:\n"
+                       "  return widen(5)\n"),
+        "gbrack.mojo": ("from glib import widen\n"
+                        "\n"
+                        "def main() -> Int:\n"
+                        "  return widen[Int](5)\n"),
+    })
+    fresh_cas()
+    for program in ("guser", "gbrack"):
+        result = run_fire(["build", "--formal", "--no-prove",
+                           "-o", os.path.join(tmpdir, program + ".aout"),
+                           os.path.join(root, program + ".mojo")], cwd=root)
+        text = (result.stderr or "") + (result.stdout or "")
+        check(result.returncode != 0,
+              f"{program}.mojo BUILT: a call to a generic the exporting module "
+              f"keeps off the boundary cannot bind, so an image that compiled "
+              f"is an image with a dangling call in it")
+        check("binds 1 symbol(s) that nothing provides" not in text,
+              f"{program}.mojo reached the LINK AUDIT, which names the link "
+              f"line rather than the export rule that emptied it: "
+              f"{text.strip()[-400:]}")
+    # …and the BARE one, which is what this change is about, must name the rule.
+    result = run_fire(["build", "--formal", "--no-prove",
+                       "-o", os.path.join(tmpdir, "guser.aout"),
+                       os.path.join(root, "guser.mojo")], cwd=root)
+    text = (result.stderr or "") + (result.stdout or "")
+    check("does not export it" in text and "widen" in text,
+          f"a bare call to an imported generic must be refused as an export "
+          f"gap naming the name: {text.strip()[-400:]}")
+
+
+def test_a_bare_call_to_an_exported_name_still_binds(tmpdir, _shared):
+    """The control for the case above, and the guard on its scope.
+
+    `helper(5)` is a bare callee in the same position as `widen(5)`, in the same
+    module, differing only in that `helper` IS exported. The new refusal asks
+    "does any library on this link line publish this name", so a predicate that
+    had drifted to "is this name imported" — or that read the manifests a
+    second way and got a different answer than the emitter — would refuse a
+    program that works. It builds, RUNS, and returns 7 (= 5 + 1, plus the 1 the
+    program adds)."""
+    root = os.path.join(tmpdir, "genericctl")
+    os.makedirs(root)
+    write_tree(root, {
+        "glib.mojo": GENERIC_LIB,
+        "gctl.mojo": ("from glib import helper\n"
+                      "\n"
+                      "def main() -> Int:\n"
+                      "  return helper(5) + 1\n"),
+    })
+    fresh_cas()
+    _result, out = build(root, "gctl.aout")
+    code, err = run(out)
+    check(code == 7,
+          f"a bare call to an exported name returned {code}, expected 7; "
+          f"stderr: {err}")
+
+
 def test_one_word_struct_field_is_the_value(tmpdir, _shared):
     """`c.n` and `c` must be the SAME word for a one-field struct.
 
@@ -2017,6 +2183,12 @@ TESTS = [
      test_no_import_needs_no_dylib),
     ("a struct method is callable across modules",
      test_struct_method_across_modules),
+    ("a library may construct its own struct",
+     test_a_library_may_construct_its_own_struct),
+    ("an imported generic is refused as an export gap",
+     test_an_imported_generic_is_refused_as_an_export_gap),
+    ("a bare call to an exported name still binds",
+     test_a_bare_call_to_an_exported_name_still_binds),
     ("a one-word struct's field IS its value",
      test_one_word_struct_field_is_the_value),
     ("a struct too wide for one word is refused with the switch off",

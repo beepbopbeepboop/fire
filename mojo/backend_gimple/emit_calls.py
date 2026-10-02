@@ -6974,26 +6974,22 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # `rest[0]` in _strip_string_prefix_and_quotes.
             cp = gen._new_val('char *', f'(char *){gen._ensure_local(ot, ov)}')
             idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-            gen._ptr_helpers_needed.add('char')
-            addr = gen._new_val('char *', f"_mojo_at_char ({cp}, {idx64})")
             # `s[i]` on a str is a 1-char STRING, not a character code —
             # the same rule as _gen_for_cstr / _compr_cstr_loop (see those
-            # for what returning a bare `char` broke). `mojo_char_to_str`
-            # is the existing helper; `rest[0]` comparing against a quote
-            # literal is the canonical use.
-            # `mojo_cstr_slice` rather than a `char`-taking helper:
-            # gimple rejects a `char` argument ("invalid argument to
-            # gimple call" — a char is promoted to int64_t non-trivially).
-# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
-            # operand. `_t = _i + (int64_t)1` is rejected at gimplification
-            # with "expected expression before '(' token" -- a HARD error
-            # under `gcc -fgimple`, so it takes out the whole self-host
-            # closure, not just this subscript. The `LL` suffix is the
-            # tree's existing idiom for a width-correct int64_t literal
-            # (`0LL` appears throughout the generated C) and needs no cast.
-            _one_cs = gen._new_val('int64_t', f"{idx64} + 1LL")
+            # for what returning a bare `char` broke). `mojo_char_at_str` is
+            # `mojo_char_to_str` reached through the string and the index,
+            # because gimple rejects a `char` argument ("invalid argument
+            # to gimple call" — a char is promoted to int64_t
+            # non-trivially) so the two-step spelling is not available here.
+            # It shares mojo_char_to_str's immortal 256-entry table, so a
+            # character costs no allocation; `mojo_cstr_slice(s, i, i + 1)`
+            # was correct and leaked one malloc per character, owned by
+            # nobody (see runtime/fire_runtime.c's own comment and
+            # bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md).
+            # `_mojo_at_char` is not emitted here: it returns a pointer INTO
+            # the string, which is not NUL-terminated and so is not a str.
             return 'char *', gen._new_val(
-                'char *', f"mojo_cstr_slice ({cp}, {idx64}, {_one_cs})")
+                'char *', f"mojo_char_at_str ({cp}, {idx64})")
         # A STRING index proves the container is a dict even when its own
         # type is opaque: no list is indexable by a string. `pat.fields`
         # in ast_rewriter.py is exactly this — the A5 boxed-member read
@@ -7161,8 +7157,31 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # p[i] via _mojo_at_ helper (ptr arithmetic not allowed in __GIMPLE)
     et = gimple_ctypes._elem_type(ot)
     cn = gimple_ctypes._c_id(et)
-    gen._ptr_helpers_needed.add(et)
     idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+    # A `char *` is this codegen's plain `str`, so `_elem_type` says `char`
+    # and the generic branch below would hand back the character CODE — as a
+    # pointer INTO the string, which is not even NUL-terminated. But `s[i]` on
+    # a Python str is a 1-char STRING, the same rule as _gen_for_cstr /
+    # _compr_cstr_loop / the boxed-string subscript branch above, all of which
+    # return `char *`. Without it every string index disagreed with every
+    # string iteration: `s[0]` was 97 while `for c in s` bound 'a'.
+    #
+    # FIRST, before the `_mojo_at_char` helper is asked for and its result
+    # bound to a temp: that temp is dead on this path, and a dead assignment
+    # in the generated C is a reader's false lead about what the subscript
+    # costs (it is how the leak below survived a reading of the C).
+    if et == 'char':
+        # `mojo_char_at_str` rather than a `char`-taking helper: gimple
+        # rejects a `char` argument ("invalid argument to gimple call"),
+        # since a char is promoted to int64_t non-trivially. It is
+        # `mojo_char_to_str` reached through the string and the index, so it
+        # shares the immortal 256-entry table — a character costs no
+        # allocation. `mojo_cstr_slice(ov, i, i + 1)` was correct and leaked
+        # one malloc per character with no owner; see the boxed-receiver
+        # branch above, which is the same shape and the same fix.
+        return 'char *', gen._new_val(
+            'char *', f"mojo_char_at_str ({ov}, {idx64})")
+    gen._ptr_helpers_needed.add(et)
     addr = gen._new_val(ot, f"_mojo_at_{cn} ({ov}, {idx64})")
     # Can't dereference void* (no element type); return the pointer itself
     if et == 'void':
@@ -7171,27 +7190,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     if et in gen.struct_field_types:
         t = gen._new_val('int64_t', f"(int64_t){addr}")
         return 'int64_t', t
-    # A `char *` is this codegen's plain `str`, so `_elem_type` says `char`
-    # and the generic branch below would hand back the character CODE. But
-    # `s[i]` on a Python str is a 1-char STRING — the same rule as
-    # _gen_for_cstr / _compr_cstr_loop / the boxed-string subscript branch
-    # above, all of which now return `char *` via `mojo_char_to_str`.
-    # Without it every string index disagreed with every string iteration:
-    # `s[0]` was 97 while `for c in s` bound 'a'.
-    if et == 'char':
-        # `mojo_cstr_slice` rather than a `char`-taking helper: gimple
-        # rejects a `char` argument ("invalid argument to gimple call"),
-        # since a char is promoted to int64_t non-trivially.
-# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
-        # operand. `_t = _i + (int64_t)1` is rejected at gimplification
-        # with "expected expression before '(' token" -- a HARD error
-        # under `gcc -fgimple`, so it takes out the whole self-host
-        # closure, not just this subscript. The `LL` suffix is the
-        # tree's existing idiom for a width-correct int64_t literal
-        # (`0LL` appears throughout the generated C) and needs no cast.
-        _one_gs = gen._new_val('int64_t', f"{idx64} + 1LL")
-        return 'char *', gen._new_val(
-            'char *', f"mojo_cstr_slice ({ov}, {idx64}, {_one_gs})")
     t = gen._new_val(et, f"*{addr}")
     return et, t
 
