@@ -2306,20 +2306,6 @@ def _loop_body_always_runs(s) -> bool:
         return False
     return False
 
-    if kind in ("ForStmt", "ComptimeForStmt"):
-        it = getattr(s, "iterable", None)
-        if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return bool(getattr(it, "elements", None))
-        if isinstance(it, F.StringLiteral):
-            return bool(it.value)
-        if isinstance(it, F.CallExpr):
-            func = getattr(it, "func", None)
-            if (isinstance(func, F.IdentExpr) and func.name == "range"
-                    and not (getattr(it, "kwargs", None) or [])):
-                return bool(_range_is_nonempty(list(it.args or [])))
-        return False
-    return False
-
 
 def _build_cfg(body) -> tuple:
     """`(blocks, entry index)` for a function body.
@@ -2573,8 +2559,40 @@ def _build_cfg(body) -> tuple:
     # predecessor, which is the edge that makes the seed reach anything: a body
     # emitted with an empty pending list opens its own unreachable first block,
     # and every block after it then inherits the universe.
+    #
+    # `run`'s RETURN VALUE IS NOT EDGED FROM THE ENTRY, and that is the whole
+    # reason the `+=` is not here. `run` returns the exits that fall off the
+    # end of the body it was given, and every one of them is already reachable
+    # from its real predecessors: the `open_block` calls inside `run` are what
+    # linked them. Adding an entry edge to them as well asserts a path the
+    # source does not have — from the function's first instruction straight
+    # into the middle of the body — and the fixpoint pays for it, because the
+    # entry's OUT is just the parameter names:
+    #
+    #     def f(n):
+    #         p = 1
+    #         while n:
+    #             q = p
+    #             n = n - 1
+    #
+    # The `while` is the body's LAST statement, so `run` returns the loop's
+    # exit blocks; edgeing the entry to them makes the loop header's IN the
+    # intersection of the preheader's OUT with the PARAMETER set, `p` drops
+    # out of it, and `read_before_store` refuses a program CPython runs.
+    # Measured: this fired on `formal/hostmods/re.mojo`'s `_p_alt`, whose
+    # `while 1:` is its last statement, and the refusal it produced — "'pend' is
+    # read at line 1401 before anything in this function stores it", against a
+    # `pend = entry` three lines above — took `re` out of the backend and with
+    # it every file that imports it.
+    #
+    # Removing the edges can only REMOVE refusals, never add one: an entry with
+    # no successor makes `_definitely_stored` top-initialize everything
+    # downstream, which is the safe direction for a name nothing path stores.
+    # For a straight-line body it changes nothing at all — `run` returns the
+    # block the entry already points at, so the `+=` was only ever a duplicate
+    # edge there.
     entry = new([])
-    entry.succs += run(body, [], [entry.index])
+    run(body, [], [entry.index])
     for b in blocks:
         for d in b.succs:
             if d is not None and 0 <= d < len(blocks):
