@@ -188,6 +188,23 @@ both were unbuildable for unrelated reasons before.
 shared model is measured against: **PASS=580 FAIL=1 before (the stale row),
 PASS=581 FAIL=0 after.**
 
+### 3.5 Every narrow suite that covers the changed code, on this branch
+
+| suite | result |
+|---|---|
+| `python3 test_formal_read_before_store.py` | PASS=66 FAIL=0 (56 before; +10 new rows) |
+| `python3 test_struct_formal.py` | 168/168 (148 before; +10 cases in one new test) |
+| `python3 test_formal_run.py` | PASS=581 FAIL=0 |
+| `python3 test_formal_globals.py` | PASS=19 FAIL=0 (the module-global capability the row in §3.3 belongs to) |
+| `python3 test_formal_specialization.py` | PASS=7 FAIL=0 (named by `_unstored_read`'s own comment as the case a generic's parameters must not be refused for) |
+| `formal_sweep.py formal/hostmods` | 16 files, 16 pass, 100 % |
+
+**No gate was run** — this is a light worker and `make gate` is the integrator's
+over everyone's work. `formal/model.py` is shared by every formal build, so the
+integrator's `gate` is the thing that has to say these three fixes are safe
+across the 37 other jobs in the `proofs` bucket; the six rows above are the
+narrowest set that touches the changed code, and they are all green.
+
 ## 4. The remaining causes, each with its next step
 
 ### 4.1 `len()` of a value the source does not classify — 3 files, 1 construct
