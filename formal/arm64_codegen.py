@@ -8227,28 +8227,49 @@ dylib_exports: list = None, globals_base: int = None,
 
 
 def _always_returns(stmts: list) -> bool:
-    """Whether a statement list provably returns on every path."""
-    if not stmts:
-        return False
-    st = stmts[0]
-    rest = stmts[1:]
-    if isinstance(st, F.ReturnStmt):
-        return True
-    if isinstance(st, F.IfStmt):
-        if not st.else_body and not st.elifs:
-            return _always_returns(rest)  # if can fall through; check rest
-        if not _always_returns(st.then_body):
-            return _always_returns(rest)
-        for _c, body in (st.elifs or []):
-            if not _always_returns(body):
-                return _always_returns(rest)
-        if st.else_body and not _always_returns(st.else_body):
-            return _always_returns(rest)
-        # All branches return — but statements after the if still matter.
-        return _always_returns(rest) if rest else True
-    if isinstance(st, F.WhileStmt):
-        return _always_returns(rest)  # the loop body may not run
-    return _always_returns(rest)
+    """Whether a statement list provably returns on every path.
+
+    ITERATIVE over the sibling stream, recursive only into the branches of a
+    compound statement.  That split is not a style choice: the previous
+    version recursed once per SIBLING (`return _always_returns(rest)`), so a
+    function of N statements needed N Python frames and a straight-line
+    `main` of a little over a thousand statements died with a bare
+    `RecursionError` — the whole diagnostic, naming a function whose name
+    says nothing about the program.  A generated program is exactly that
+    shape (a few hundred `printf` calls in one function), and the sibling
+    count is unbounded where the block NESTING depth is not, so the limit
+    was an artefact of the walk rather than a property of the analysis.
+
+    The predicate is unchanged, statement for statement: a `return` answers
+    True; an `if` answers True when every one of its branches does, and
+    otherwise falls through to the statements after it; a loop always falls
+    through, because its body may not run.  An `if` with neither `elif`s nor
+    an `else` has one branch, cannot answer for all of them, and falls
+    through — which is why the branch count is the test, and why an EMPTY
+    `else_body` (`[]`, not `None`) is still no `else`."""
+    cur = stmts or []
+    i, n = 0, len(cur)
+    while i < n:
+        st = cur[i]
+        i += 1
+        if isinstance(st, F.ReturnStmt):
+            return True
+        if isinstance(st, F.IfStmt):
+            branches = [st.then_body]
+            branches += [b for _c, b in (st.elifs or [])]
+            if st.else_body:
+                branches.append(st.else_body)
+            # Fewer than two branches: the `if` can fall through, so it says
+            # nothing about the statements after it — the same answer the
+            # recursive walk gave, reached a different way.
+            if len(branches) >= 2 and all(_always_returns(b) for b in branches):
+                # All branches return — but statements after the if still
+                # matter, and a list that ends here has reached its end.
+                if i >= n:
+                    return True
+        # A loop, an `if` that falls through, and anything else all answer
+        # the same question: is there a `return` later in this list?
+    return False
 
 
 def _reg_num(reg: str) -> int:

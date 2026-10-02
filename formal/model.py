@@ -14576,24 +14576,32 @@ def returns_on_every_path(stmts) -> bool:
     the same function and do not agree (x86-64's returns True for a return
     ANYWHERE in the list, arm64's walks to the end); this one is the only one
     consulted for the returned-frame decision, and it is the stricter of the
-    two on purpose."""
-    if not stmts:
-        return False
-    st, rest = stmts[0], stmts[1:]
-    if isinstance(st, F.ReturnStmt):
-        return True
-    if isinstance(st, F.RaiseStmt):
-        return True
-    if isinstance(st, F.IfStmt):
-        if not returns_on_every_path(st.then_body):
-            return False
-        for _cond, body in (st.elifs or []):
-            if not returns_on_every_path(body):
+    two on purpose.
+
+    Iterative over the sibling stream and recursive only into an `if`'s
+    branches, for the reason `formal/arm64_codegen.py`'s `_always_returns`
+    now carries: a walk that recursed once per sibling needed one Python
+    frame per statement, and this one is asked about every function in the
+    module — so a long straight-line body died with a `RecursionError` from
+    the frame-return fixpoint, which is a worse place to be told about it
+    than from the emitter."""
+    cur = stmts or []
+    i, n = 0, len(cur)
+    while i < n:
+        st = cur[i]
+        i += 1
+        if isinstance(st, (F.ReturnStmt, F.RaiseStmt)):
+            return True
+        if isinstance(st, F.IfStmt):
+            if not returns_on_every_path(st.then_body):
                 return False
-        if st.else_body is None:
-            return False
-        return returns_on_every_path(st.else_body)
-    return returns_on_every_path(rest)
+            for _cond, body in (st.elifs or []):
+                if not returns_on_every_path(body):
+                    return False
+            if st.else_body is None:
+                return False
+            return returns_on_every_path(st.else_body)
+    return False
 
 
 def frame_binding_target(node):

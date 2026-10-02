@@ -128,6 +128,25 @@ CASES = [
      "def f(n):\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n    e = 5\n"
      "    g = 6\n    h = 7\n    i = 8\n    j = 9\n    k = 10\n    l = 11\n"
      "    return l + k + j\n", 30, None),
+    # A LONG BODY, which is a different axis from spilling: this walk used to
+    # recurse once per SIBLING statement, so a function of N statements needed
+    # N Python frames and a straight-line body of a little over a thousand
+    # statements died with a bare `RecursionError` — no `build:` prefix, no
+    # source line, no construct named. Nothing about the SOURCE was wrong
+    # (`printf` lowers), and a generated program is exactly this shape, which
+    # is why it is a generated case rather than a written one: no hand-written
+    # function in this file is 2,001 statements long, so only a generator
+    # reaches the limit at all.
+    #
+    # The last statement prints and the function RETURNS, so the case also
+    # pins the walk's answer rather than only its termination: `i >= n` at the
+    # end of the list is the branch the old code reached with `rest`, and a
+    # dropped implicit `return 0` would still exit 0 while printing the wrong
+    # thing.
+    ("a_two_thousand_statement_body_builds_and_runs",
+     "def main(n):\n"
+     + "".join(f'    printf("{i}=%d@@", {i})\n' for i in range(2000))
+     + "    return 42\n", 42, "1999=1999@@"),
     # for-range loops. The exit test is the whole loop: before it, the
     # lowering computed a CSET and never branched on it, so EVERY one of these
     # hung rather than returning a wrong number -- which is why they need to be
