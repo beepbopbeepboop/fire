@@ -5336,10 +5336,24 @@ _OWNED_STACK_PUSH_RUNTIME_FN = {
 def _vetted_struct_ctor_name(gen, value) -> str:
     """`S` when `value` is a constructor call `S(...)` of a struct the ownership
     analysis vetted (its `__init__` retains nothing, no base class) and whose
-    layout codegen knows; '' otherwise."""
+    layout codegen knows; '' otherwise.
+
+    `S` is resolved through `gen._struct_import_aliases` FIRST, exactly as
+    `_lower_call` resolves it, because this reservation is frame storage for
+    the instance THAT constructor builds and the two have to name the same
+    struct. A name reached through an alias (`Alias = mod.Thing`, or
+    `from mod import Thing as Alias`) resolves to the aliased struct here and
+    to the same one in the constructor; resolving it in only one of the two
+    emits a reservation nothing ever initialises, typed after a struct the
+    function does not build — and when the alias happens to be spelled like a
+    struct type in the same translation unit (`Lit` for both
+    `mojo/middle/offload.py`'s local alias and `ast_rewriter.py`'s class),
+    the local shadows the type and gcc rejects the declaration outright
+    (`expected ';' before '_owned_storage2_node'`)."""
     if not (isinstance(value, CallExpr) and isinstance(value.func, IdentExpr)):
         return ''
-    sname = _as_str(value.func.name)
+    sname = (getattr(gen, '_struct_import_aliases', None) or {}).get(
+        _as_str(value.func.name), _as_str(value.func.name))
     if sname in gen._analysis_structs and sname in gen.struct_field_types \
             and sname not in gen._dict_subclass_structs:
         return sname
