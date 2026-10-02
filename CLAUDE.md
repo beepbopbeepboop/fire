@@ -382,11 +382,19 @@ left to rot**: `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 
 that no exit code reports. Divergences themselves:
 `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`.
 
-**The gate is otherwise clean**: `check` 11/11, `coro` 20/20, `stdlib` 2/2,
-`mojoc` builds, `bootstrap` green through `stage2-cc`. (Those counts are a claim
-about a *run*, so only a gate run establishes them; `check` has since gained
-members, so read the current tally off `build/suite.log` rather than this line —
-see `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md`.)
+**The gate is otherwise clean, and deliberately no file here says how many.** A
+tally is a claim about a *run*, and a run is not a property of the tree: it
+goes stale underneath a change made in none of the files that state it. This
+sentence was the third file to be caught that way (it said `check` 11/11 when
+the bucket held 22 tests and then again when it held 36), which is the
+argument for removing the number rather than for refreshing it. The current
+figures are the last line of `build/suite.log`, and the bucket's SIZE —
+`check` 36 tests, `gate` 65, `proofs` 40 as of 2026-10-01 — is `make
+check-plan` / `python3 tools/suite.py --dry-run check`, which reads the
+registry and is therefore a fact about the tree rather than about a run. A doc
+that states a test's STATUS is checked against the registry by `test_suite.py`;
+a doc that states a tally is not, because there is nothing to check it against
+until somebody runs the gate.
 
 ## Known failures: `expect=` or `disabled=`, decided by cost
 
