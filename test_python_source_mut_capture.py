@@ -172,6 +172,55 @@ def test_inner_plain_assign_still_shadows_locally_compiled():
           out == "1\n", detail=repr(out))
 
 
+# SIBLING closures over one shared env. `discover_closures` gives a
+# mutually-calling group ONE env struct holding the UNION of their captures,
+# so a capture ANY member can reassign (`total`) is stored BY REFERENCE for
+# the whole group -- `int64_t * total` in the typedef -- while the other two
+# stay by value. The sibling-to-sibling env copy (`_lower_outer_closure_call`)
+# is the one site that has to know that: it used to type its copy temp from
+# `ci.captures` (the capture's VALUE type), so it loaded the box pointer into
+# an `int64_t` and gcc rejected the store with a bare int64_t/pointer
+# mismatch. Shape of `mojo/middle/offload.py`'s `rewrite_fused_loop`, whose
+# `fusable`/`walk` pair is what first reached gcc in the self-host closure.
+_SIBLING_SHARED_ENV_SRC = """\
+def sibling_env(items):
+    total = 0
+
+    def keep(st):
+        if st > 10:
+            return None
+        return st * 2
+
+    def walk(seq):
+        nonlocal total
+        out = []
+        for st in seq:
+            fused = keep(st)
+            if fused is not None:
+                out.append(fused)
+            total += 1
+        return out
+
+    got = walk(items)
+    print(len(got), got[0], got[1], total)
+
+
+def main():
+    sibling_env([1, 2, 30])
+
+
+main()
+"""
+
+
+def test_sibling_closures_share_a_by_reference_env_field_compiled():
+    """CPython-verified: 2 2 4 3. Before the fix this was a hard gcc
+    `-Wint-conversion` pair, so the module did not compile at all."""
+    out = _build_and_run_compiled(_SIBLING_SHARED_ENV_SRC)
+    check("compiled: sibling closures forward a by-reference env field -> 2 2 4 3",
+          out == "2 2 4 3\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

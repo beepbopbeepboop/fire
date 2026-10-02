@@ -9335,7 +9335,8 @@ def gen_module_impl(self, stmts):
                 if ci.env_struct and ci.env_struct not in self._emitted_structs:
                     parts.append(f"typedef struct {ci.env_struct} {{")
                     for vname, vtype in ci.captures:
-                        field_ctype = f"{vtype} *" if vname in ci.mut_names else vtype
+                        field_ctype = gimple_ctypes._env_field_ctype(
+                            ci, _as_str(vname))
                         parts.append(f"  {field_ctype} {_c_field_name(vname)};")
                     parts.append(f"}} {ci.env_struct};")
                     parts.append('')
@@ -9940,7 +9941,8 @@ def gen_module_impl(self, stmts):
                 if ci.env_struct and ci.env_struct not in self._emitted_structs:
                     parts.append(f"typedef struct {ci.env_struct} {{")
                     for vname, vtype in ci.captures:
-                        field_ctype = f"{vtype} *" if vname in ci.mut_names else vtype
+                        field_ctype = gimple_ctypes._env_field_ctype(
+                            ci, _as_str(vname))
                         parts.append(f"  {field_ctype} {_c_field_name(vname)};")
                     parts.append(f"}} {ci.env_struct};")
                     parts.append('')

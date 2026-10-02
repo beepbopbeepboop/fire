@@ -4134,11 +4134,34 @@ def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallE
             gen._emit(f'  {new_env} = {gimple_ctypes._safe_name("_alloc_" + ci.env_struct)} ();')
             for vname, vtype in ci.captures:
                 fld = gimple_ctypes._c_field_name(vname)
+                # The FIELD's type, not the capture's value type: a
+                # by-reference capture (`ci.mut_names`) is a pointer to the
+                # owner's box, and this store is the only thing that has to
+                # agree with the typedef. See
+                # `gimple_ctypes._env_field_ctype`.
+                fct = gimple_ctypes._env_field_ctype(ci, _as_str(vname))
                 if vname in _cur_caps:
-                    tmp = gen._new_val(vtype, f'{_cur_env}->{fld}')
+                    # Forwarding from THIS closure's own env, which holds the
+                    # name under its OWN field type: `_gimple_mut_ptr` is the
+                    # box pointer `_gen_lifted_closure` preloaded for a
+                    # by-reference capture, so it is both the discriminator
+                    # and the value (a by-value capture arrives through
+                    # `_env-><name>`, and a value the callee wants by
+                    # reference has to be boxed -- through a plain local,
+                    # because GIMPLE cannot take a component_ref's address).
+                    _own_box = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
+                    if _own_box:
+                        tmp = gen._new_val(
+                            fct, _own_box if fct.endswith(' *') else f'*{_own_box}')
+                    elif fct.endswith(' *'):
+                        _cur_t = _as_str(_cur_caps.get(vname) or 'int64_t')
+                        _boxed = gen._new_val(_cur_t, f'{_cur_env}->{fld}')
+                        tmp = gen._new_val(fct, f'&{_boxed}')
+                    else:
+                        tmp = gen._new_val(fct, f'{_cur_env}->{fld}')
                     gen._emit(f'  {new_env}->{fld} = {tmp};')
                 elif vname in gen.var_types:
-                    gen._safe_coerce_emit(gen.var_types.get(vname, vtype), vtype,
+                    gen._safe_coerce_emit(gen.var_types.get(vname, vtype), fct,
                                           gen._write_dest(vname),
                                           f'{new_env}->{fld}')
             full_arg_pairs = [(f'{ci.env_struct} *', new_env)] + arg_pairs
