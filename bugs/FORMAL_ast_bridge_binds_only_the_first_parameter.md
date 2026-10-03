@@ -31,9 +31,17 @@ on the definition.
 Both generators now emit the whole list, through one shared reader
 (`_param_list_lean`, imported by the x86-64 one), and the generated text changed
 in exactly three places per proof: `MojoFunc.mk "f" ["n"]`, `evalFunc ast cf [n]`
-and `evalFunc ast cf [(UInt64.ofNat v)]`. `MojoEnv` was added to the four simp
-sets that unfold `evalFunc`, and the three hand-written env-lemma sites now
-`simp only [… MojoEnv]`.
+and `evalFunc ast cf [(UInt64.ofNat v)]`.
+
+`MojoEnv` had to be REACHABLE from five simp sets and nothing else changed: the
+two `simp only [… evalFunc, evalBody, evalBodyEnv, evalExpr]` sites (the
+tree-recursion `hunf` and the fuel-bounded `evalFuncF` one) gained it in the
+list, and the three general `simp +decide […]` sets (arm64's two, x86-64's one)
+name it. **The hand-written `henv0`/`henv`/`henv` lemmas are unchanged** — which
+is the whole reason `MojoEnv` is two structural recursions and not a `zip`: for
+one parameter its term is already `fun name => if name == p₀ then v₀ else 0`
+after a single unfolding, so the lemmas the recursion and while-while proofs
+state about `envOf` still apply to it without being rewritten.
 
 **What is NOT done, and it is the part that still refuses the program:** step 3
 and step 5 below. `mojo` is still `def mojo (n : UInt64) : UInt64`, `eval_eq_mojo`
