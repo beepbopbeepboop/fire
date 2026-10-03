@@ -559,6 +559,40 @@ CASES = [
      "    p = 1\n    if n:\n        return p\n    return 0\n", "ok",
      "every arm terminates, so `run` returns [] and there is no spurious entry "
      "edge to remove — this is the case the coarse form of the rule gets wrong"),
+    # ── (c) a function that FALLS OFF THE END after a LOOP ─────────────────
+    # Group (a) covers a fall-off-the-end whose tail is straight-line and (b)
+    # one whose tail is the control-flow statement itself.  This is the shape
+    # the corpus uses most and neither group reproduces: a loop that may
+    # `break` or run to its own end, then a trailing CALL whose result is
+    # discarded — a mutator that leaves its result in the array, which is
+    # ordinary code and is what `std/collections/binary_heap.mojo`'s
+    # `_heapify_up` is.  `_build_cfg` gave the ENTRY block an edge to that last
+    # block, so every store in the body stopped dominating the read after the
+    # loop and correct stdlib Mojo was reported as an `UnboundLocalError` the
+    # program does not have.  `struct_check` below is the structural pin; these
+    # rows are the behavioural one, and the first is `_heapify_up` reduced to
+    # its shape.
+    ("fall_off_the_end_after_a_loop_break_ok",
+     "    t = 1\n    while n > 0:\n        if t > 2:\n            break\n"
+     "        n = n - 1\n    print(t)\n", "ok"),
+    ("fall_off_the_end_after_a_for_break_ok",
+     "    t = 0\n    for i in range(3):\n        if i:\n"
+     "            break\n    print(t)\n", "ok"),
+    ("fall_off_the_end_after_an_if_ok",
+     "    t = 1\n    if n:\n        p = 2\n    print(t)\n", "ok"),
+    ("fall_off_the_end_inside_a_try_ok",
+     "    t = 1\n    try:\n        p = 2\n    except ValueError:\n"
+     "        p = 3\n    print(t)\n", "ok"),
+    # …and the check must not have been weakened into silence to get there.
+    # The last block still INTERSECTS the paths that reach it: a store in one
+    # arm of an `if` is not a dominating store, and this program raises
+    # `UnboundLocalError` at `probe(0)`, so it is still a refusal.
+    ("fall_off_the_end_store_in_one_arm_still_refused",
+     "    if n:\n        q = 1\n    print(q)\n", "refuse"),
+    ("fall_off_the_end_del_on_one_arm_still_refused",
+     "    t = 1\n    if n:\n        del t\n    print(t)\n", "refuse"),
+    ("fall_off_the_end_read_of_nothing_stored_still_refused",
+     "    if n:\n        pass\n    print(q)\n", "refuse"),
 ]
 
 
@@ -613,6 +647,13 @@ def the_function(stmts):
 # path the program has is not a conservative extra edge: it is a claim that
 # control reaches the end of the function having stored nothing, which is a
 # program CPython does not have.
+# The second half of the group: a function that FALLS OFF THE END.  A `return`
+# TERMINATES, so `_build_cfg`'s `run` returns no fall-through exit and the entry
+# block has nothing spurious to point at — which is why the defect this table
+# pins (`entry.succs += run(...)`, an edge from the function's first block to
+# its last) was invisible to a table of bodies that all end in one.  The
+# bodies below are the shapes that give `run` something to return: a loop, a
+# `break` out of it, a branch, and one that ends in `return` for the contrast.
 ENTRY_SHAPES = [
     ("entry_reaches_only_the_first_statement",
      "    q = 1\n    return q\n", [1]),
@@ -624,6 +665,21 @@ ENTRY_SHAPES = [
      "    for i in range(n):\n        sink(i)\n", [1]),
     ("a_body_of_only_pass_still_has_one_successor",
      "    pass\n", [1]),
+    # `std/collections/binary_heap.mojo`'s `_heapify_up` reduced to its shape:
+    # a store 15 lines above the read it used to be reported for.
+    ("entry_does_not_reach_the_read_after_a_loop_that_falls_off_the_end",
+     "    t = 1\n    while n > 0:\n        t = t - 1\n    print(t)\n", [1]),
+    ("entry_does_not_reach_the_read_after_a_break",
+     "    t = 1\n    for i in range(3):\n        if i:\n"
+     "            break\n    print(t)\n", [1]),
+    ("entry_does_not_reach_the_read_after_an_if",
+     "    t = 1\n    if n:\n        t = 2\n    print(t)\n", [1]),
+    ("entry_does_not_reach_the_read_after_an_if_with_no_else",
+     "    if n:\n        t = 2\n    print(0)\n", [1]),
+    # …and the contrast row: this one ends in `return`, so there was never an
+    # exit to edge and it builds today and built before the fix.
+    ("entry_reaches_only_the_first_statement_before_a_return",
+     "    t = 1\n    if n:\n        t = 2\n    return t\n", [1]),
 ]
 
 # (name, body, the block that holds the `sink` inside the `else`)
@@ -678,7 +734,15 @@ def check_try_else_shape() -> list:
 
 
 def check_entry_shape() -> list:
-    """Every failure in ENTRY_SHAPES, as strings."""
+    """Every failure in ENTRY_SHAPES, as strings.
+
+    Two statements of the same invariant, because either alone is satisfiable
+    by a builder that got the answer wrong: the successor LIST (nothing but the
+    body's first block, in that order) and the predecessor lists, where only
+    that same first block may name the entry.  A builder that emitted the
+    fictitious edge and then never recorded who it came from would pass the
+    first check's `succs` in one direction only.
+    """
     bad = []
     for name, body, want in ENTRY_SHAPES:
         fn = the_function(parse_module("def probe(n):\n" + body,
@@ -687,7 +751,16 @@ def check_entry_shape() -> list:
         got = blocks[entry].succs
         if got != want:
             bad.append(f"{name}: the entry block's successors are {got}, "
-                       f"not {want}")
+                       f"not {want} — an edge from the function's first block "
+                       f"to a later one is a path that runs none of the body "
+                       f"and the fixpoint reads it as one ({len(blocks)} "
+                       f"blocks)")
+        first = min(blocks[entry].succs or [entry])
+        for b in blocks:
+            if b.index != entry and entry in b.preds and b.index != first:
+                bad.append(f"{name}: block {b.index} lists the entry block as "
+                           f"a predecessor; only the body's first block "
+                           f"({first}) may")
     return bad
 
 

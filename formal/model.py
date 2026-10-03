@@ -2823,7 +2823,10 @@ def _build_cfg(body) -> tuple:
     #     the read (`work/merge-bugs2`).
     #
     # `_definitely_stored` intersects over a join's predecessors, so the one
-    # impossible path discarded every definition the body made.
+    # impossible path discarded every definition the body made. A block that
+    # falls out of the end of the body needs no successor for the fixpoint
+    # either: it is the last block, and `_definitely_stored` reads IN sets, not
+    # exits.
     #
     # Removing the edges can only REMOVE refusals, never add one: an entry with
     # no successor makes `_definitely_stored` top-initialize everything
@@ -6050,25 +6053,41 @@ VALUE_METHOD_RECEIVERS = {
 #
 # The ALIAS FAMILY is here for the same reason and is not a new fact: every name
 # below is `= Pointer[…]` or `= Optional[Pointer[…]]` in the language's own
-# `memory/pointer.mojo` (measured 2026-10-02 at lines 133-211), so each one is a
-# pointer by definition and the table's question — "does this name say a
-# pointer" — has the same answer for all of them. Leaving them out is what made
-# `std/os/env.mojo` REFUSE `external_call["getenv", OptionalPointer[UInt8,
-# ImmUntrackedOrigin]]` with "this path has no value of that kind to put in the
-# return register": a one-word nullable address, refused because the table had
-# never heard of the name, and `external_call_return_kind`'s own docstring says
-# a pointer "is an address, so `word`, and it needs no pointee" while the table
-# it consults said the name was not one. A name this path cannot read is the
-# safe direction, so the absence was not a wrong answer — but it was a refusal
-# of a construct the table's own rule already answers, on a file the sweep
-# reaches (`env.mojo`, and every `getpwuid`/`PyObject_Malloc` in `pwd/` and
-# `python/bindings.mojo` that spells its return type the same way).
+# `std/memory/pointer.mojo` (measured 2026-10-02 at lines 130-211), so each one
+# is a pointer by definition and the table's question — "does this name say a
+# pointer" — has the same answer for all of them.  They are here for the reason
+# `_CPointer` is: a declared return type is a type EXPRESSION, and the alias is
+# a module-level `comptime` binding this path does not resolve, so the NAME is
+# the whole of the evidence there is.  The `//` in each declaration separates
+# the keyword-only `mut` from the positional `T`, and `OptionalPointer`'s own
+# signature ELIDES the `mut: Bool, //` parameter — so the pointee is still the
+# first positional type argument, which is what the four call sites in the tree
+# agree on (`std/os/env.mojo:78` `OptionalPointer[UInt8, ImmUntrackedOrigin]`
+# for `char *`, `std/pwd/_linux.mojo:48` `OptionalPointer[_C_Passwd,
+# UntrackedOrigin[mut=True]]` for `struct passwd *`, and
+# `std/memory/memory.mojo:477`/`:483` with `mut=True` spelled as a keyword).
 #
-# `pointee_args` reads the first argument that is not an attribute, and the
-# `mut: Bool, //` parameter ELISION in `OptionalPointer`'s own signature is what
-# keeps that right for it: `OptionalPointer[UInt8, ImmUntrackedOrigin]` spells
-# two positional arguments for three parameters, so the positional sequence is
-# `(T, origin)` exactly as it is for `Pointer` itself.
+# Leaving them out is what made `std/os/env.mojo` REFUSE
+# `external_call["getenv", OptionalPointer[UInt8, ImmUntrackedOrigin]]` with
+# "this path has no value of that kind to put in the return register": a
+# one-word nullable address, refused because the table had never heard of the
+# name, and `external_call_return_kind`'s own docstring says a pointer "is an
+# address, so `word`, and it needs no pointee" while the table it consults said
+# the name was not one.  It is an `Optional[Pointer]`, which is one word with 0
+# meaning None — the same answer `_CPointer` already gives for the same C
+# function.  A name this path cannot read is the safe direction, so the absence
+# was not a wrong answer, but it was a refusal of a construct the table's own
+# rule already answers, on a file the sweep reaches (`env.mojo`, and every
+# `getpwuid`/`PyObject_Malloc` in `pwd/` and `python/bindings.mojo` that spells
+# its return type the same way).
+#
+# The three `*OpaquePointer` aliases are the exception to "the pointee is the
+# first positional argument", and the exception is SAFE rather than tidy: they
+# expand to `Pointer[NoneType, origin]`, so their first positional argument is
+# the ORIGIN, and a name that is not a pointee is not in `POINTEE_WIDTHS` — so
+# `opaque.value()` is refused by the width table rather than loaded at a width
+# nothing established.  They are here for `external_call_return_kind`, where the
+# question is only "is the whole register the answer", and an opaque pointer is.
 POINTER_TYPE_CTORS = ("Pointer", "UnsafePointer", "_CPointer", "CPointer",
                       "DTypePointer", "Reference",
                       "OptionalPointer", "MutPointer", "ImmPointer",

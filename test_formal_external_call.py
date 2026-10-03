@@ -590,11 +590,18 @@ def model_cases():
                 spec('def f(s):\n    return external_call["getenv", '
                      '_CPointer[UInt8, UntrackedOrigin[mut=False]]](s)\n'),
                 ("getenv", M.EXTERN_RETURN_WORD, None)))
-    # The same type under the name `std/os/env.mojo` spells it NOW (measured
-    # 2026-10-02: `_CPointer` appears nowhere in `new-modular`'s `std/`), and
-    # the alias family around it. All of them are `= Pointer[…]` or
-    # `= Optional[Pointer[…]]` in `memory/pointer.mojo:133-211`, so the return
-    # register is the address in every case and the answer is one word.
+    # THE SAME C FUNCTION, SPELLED THE WAY `std/os/env.mojo:78` SPELLS IT NOW
+    # (measured 2026-10-02: `_CPointer` appears nowhere in `new-modular`'s
+    # `std/`), and the alias family around it.  Each of those names is
+    # `= Pointer[…]` or `= Optional[Pointer[…]]` in `memory/pointer.mojo:133-211`
+    # and is a `comptime` type ALIAS this path reads by NAME rather than
+    # resolving — a declared return type is a type EXPRESSION and the alias is a
+    # module-level `comptime` binding, so the name is the whole of the evidence.
+    # `getenv` returns `char *`, which is one word with 0 meaning None (the same
+    # answer `_CPointer` already gave for it), and `env.mojo`'s own `if not ptr:`
+    # is what reads it; `external_call_return_kind`'s own docstring says a
+    # pointer "is an address, so `word`, and it needs no pointee", so the return
+    # register is the address in every case.
     for spelling in ("OptionalPointer[UInt8, ImmUntrackedOrigin]",
                      "MutPointer[UInt8, MutUntrackedOrigin]",
                      "ImmPointer[UInt8, ImmUntrackedOrigin]",
@@ -606,6 +613,19 @@ def model_cases():
                 spec('def f(s):\n    return external_call["getenv", '
                      'OptionalPointer[UInt8, ImmUntrackedOrigin]](s)\n'),
                 ("getenv", M.EXTERN_RETURN_WORD, None)))
+    # …and the LOAD half, which would be a WRONG ANSWER rather than a refusal if
+    # the alias's parameter order were read wrongly: the `//` in the alias
+    # declaration separates the keyword-only `mut` from the positional `T`, so
+    # the pointee is the first POSITIONAL type argument.  The four call sites in
+    # the tree agree, and the second and third spellings are
+    # `std/memory/memory.mojo:477` and `std/pwd/_linux.mojo:48`.
+    out.append(("optional_pointer_pointee_is_the_first_positional_arg",
+                M.pointee_args("OptionalPointer[UInt8, ImmUntrackedOrigin]"),
+                ["UInt8", "ImmUntrackedOrigin"]))
+    out.append(("optional_pointer_keyword_mut_is_not_the_pointee",
+                M.pointee_args("OptionalPointer[mut=True, NoneType, "
+                               "MutAnyOrigin]"),
+                ["NoneType", "MutAnyOrigin"]))
     out.append(("spec_void",
                 spec('def f():\n    external_call["abort", NoneType]()\n'),
                 ("abort", M.EXTERN_RETURN_VOID, None)))
