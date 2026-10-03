@@ -17,9 +17,10 @@ against it, and §3's family table is superseded by §0.2's.**
 count what the proof generator emits over a hand-built corpus of 60 functions.
 §0.4 counts what happens over a GENERATED corpus, because that is the only way to
 ask the question the rest of this document cannot: whether a proof Lean ACCEPTS
-is a proof about what the program MEANS. On this tree the answer is **40 of 40
-programs on x86-64 and 8 of 8 on arm64, with zero soundness findings** — and it
-took one generator blocker out of the proof layer to be able to ask it at all.
+is a proof about what the program MEANS. On this tree the answer is **64 of 64
+programs (40 x86-64, 24 arm64) with zero soundness findings**, over 372 image
+runs compared with CPython — and it took TWO generator blockers out of the
+proof layer to be able to ask it at all.
 
 **What this measures, and the one number nobody had.** `tools/formal_sweep.py`
 covers the *code generator's* language coverage and deliberately builds
@@ -206,13 +207,12 @@ python3 tools/memslot.py --gb 8 --label ppf-x86 -- \
   python3 -u tools/formal_proof_fuzz.py --count 40 --arch x86_64 -j 2 -t 400 \
   --work .tmp/ppf/x86            # 555 s wall, 6.8 GB peak — the COLD run
 python3 tools/memslot.py --gb 8 --label ppf-arm -- \
-  python3 -u tools/formal_proof_fuzz.py --count 8 --arch arm64 -j 1 -t 900 \
-  --work .tmp/ppf/arm            # 294 s wall, 6.0 GB peak
+  python3 -u tools/formal_proof_fuzz.py --count 24 --arch arm64 -j 1 -t 900 \
+  --work .tmp/ppf/arm           # ~2 min a program, 6.0 GB peak
 ```
 
 `bugs/sweeps/proof_fuzz_2026-10-04_x86_64.jsonl` (40 programs) and
-`…_arm64.jsonl` (20 of a planned 24; the ledger is per program, so a run
-stopped part way still publishes what it measured). The x86-64 warm re-run is
+`…_arm64.jsonl` (24). The x86-64 warm re-run is
 **52 s** for all 40 verdicts — every Lean verdict is content-addressed
 (`formal/lean.py`'s CAS) and the rest is codegen — and it reproduced the cold
 run's classes exactly, which is the CAS doing its job and not a claim that the
@@ -222,15 +222,15 @@ hole-free `pass` rows come from, so it is the half worth spending the memory on.
 
 | | x86-64 | arm64 |
 |---|---|---|
-| programs | 40 | 20 |
-| image runs compared against CPython | **228** | **120** |
+| programs | 40 | 24 |
+| image runs compared against CPython | **228** | **144** |
 | `pass` — proof typechecks, **0 holes** | 0 | **8** |
 | `admitted` — typechecks, N holes | **30**, every one at **N = 2** | 0 |
 | `lean-rejected` | 10 | 2 |
-| `lean-memory-exceeded` (not a verdict — §0.3) | 0 | 9 |
+| `lean-memory-exceeded` (not a verdict — §0.3) | 0 | **14** |
 | `proof-refused` / `codegen-refused` / `proof-crash` | 0 | 0 |
-| reached Lean at all | **40 of 40** | **20 of 20** |
-| `match` — image and CPython agreed at every input | **40** | **20** |
+| reached Lean at all | **40 of 40** | **24 of 24** |
+| `match` — image and CPython agreed at every input | **40** | **24** |
 | **`SOUNDNESS-MISMATCH`** | **0** | **0** |
 
 **The x86-64 row moved while this section was being written, and the movement is
@@ -250,9 +250,12 @@ The one-argument half is unmoved (23 admitted / 7 rejected before and after),
 which is what "at arity one the two environments are the same single entry"
 predicts and is the reason `formal/examples` is byte-identical throughout.
 
-**What the zero is and is not.** It is 276 comparisons over 48 programs in which
+**What the zero is and is not.** It is 372 comparisons over 64 programs in which
 every image answered CPython, and every proof Lean accepted was therefore a proof
-about a model that computes those programs correctly. It is NOT a statement that
+about a model that computes those programs correctly. Only 38 of the 64 had a
+proof Lean accepted at all (30 x86-64 `admitted` + 8 arm64 `pass`); the other 26
+are the honest half of the measurement — 16 of them Lean could not hold in
+memory, and 12 it rejected — and a verdict nobody read is not a verdict. It is NOT a statement that
 the model is right: it is bounded by the corpus (one function, `int` only,
 no loop, no call, no container — the shape the model can state at all, §0.4's
 own limit and `bugs/FORMAL_known_limits.md`'s) and by the typed model being
@@ -261,7 +264,8 @@ wrap-around oracle, and an oracle built from the same reading of the language as
 the model under test cannot catch that model). §6's `~x` row is outside this
 corpus by construction: it is in `formal/macho_linker.py`, not in a program.
 
-**The `pass` rows are the ones worth having** — 8 of them on arm64. Those are proofs
+**The `pass` rows are the ones worth having** — 8 of them on arm64, against 14
+programs Lean could not hold in memory and 2 it rejected. Those 8 are proofs
 with **no hole anywhere in the chain** — machine ≡ bytes ≡ AST ≡ `mojo` — for
 generated programs nobody wrote. On x86-64 a hole-free `pass` is not reachable at
 all (the generator's declared floor is exactly 2), so the tool's `--holes-below`
