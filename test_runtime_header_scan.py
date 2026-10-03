@@ -266,8 +266,28 @@ def test_every_declaration_is_seen():
     #       as bool-valued and read the flag off it; the pair that arrived sets
     #       the value's kind at the store, which is what stops one bool value
     #       from poisoning its neighbours' repr.
-    # Read off the call on the merged header: 541.
-    for header, want in (('fire_runtime.h', 541),
+    # Read off the call on the merged header: 542.
+    #
+    # 541 -> 542 (2026-10-02): `mojo_char_at_str`, from 5ba5a8aa ("a character is
+    # an immortal table entry, not a malloc per character") -- the commit that
+    # fixed the char-scan leak. It added one declaration line to
+    # fire_runtime.h and did not bump this ladder, so `rthdrscan` went red in
+    # the same commit and has been red on origin/master since. Bisected with a
+    # worktree: 37/37 at 5ba5a8aa^, 36/37 at 5ba5a8aa itself. Which is the
+    # whole argument for reading this number off the call rather than trusting
+    # the commit that changed the header: the commit that adds a declaration is
+    # exactly the commit that has to remember to.
+
+    # `py_tokenize_named` is deliberately NOT an entry, and two separate merges
+    # have now settled that rather than adding one. It is not in
+    # `_NO_OVERLOAD_MANGLE` (only `py_tokenize` is), so a generated call would
+    # reach it under a mangled name and a bare-name declaration here could never
+    # be that call's prototype -- and nothing calls it from generated code at
+    # all, its callers being Python (formal/build.py, the lexing tests), which
+    # take the prototype from the definition. Declaring it would put a fact in
+    # this header that nothing checks and nothing could use: it would make the
+    # number 542, not 541. See the header's own comment.
+    for header, want in (('fire_runtime.h', 542),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

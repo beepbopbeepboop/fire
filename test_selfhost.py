@@ -146,10 +146,12 @@ def closure_coroutines_are_lowerable() -> bool:
     sys.path.insert(0, REPO)
     import cas
     import mojo.middle.coro as coro
-    from fire_compiler import Parser, py_tokenize
+    import gimple_codegen
+    from gimple_codegen import GimpleGen, Parser, py_tokenize
 
     checked = 0
     offenders = []
+    fell_back = []
     for name in cas.selfhost_inputs():
         if not name.endswith('.py'):
             continue
@@ -162,16 +164,73 @@ def closure_coroutines_are_lowerable() -> bool:
         stmts = Parser(py_tokenize(src)).with_filename(path).parse_module()
         lowered, _meta = coro.lower(stmts)
         left = _unlowered_coroutines(lowered)
-        if left:
-            offenders.append((name, left))
+        if not left:
+            continue
+        # Left behind by A3 is NECESSARY but not SUFFICIENT for the link
+        # failure this guard exists to catch. What actually breaks the link is
+        # a generator the C++20 path then CLAIMS: its definitions go into the
+        # companion .cpp that `compile_module_to_c` discards. A generator the
+        # C++ path also refuses makes the whole module RAISE, and the caller
+        # falls back to interpreting it from source -- no .c, no dangling
+        # reference, nothing to link.
+        #
+        # The first version of this check reported the A3 leftover alone and
+        # was wrong on exactly that distinction: it named
+        # `mojo/middle/infra_infer.py`'s `_each_binding`/`walk`, which
+        # `compile_module_to_c` refuses outright --
+        #
+        #     RuntimeError: cannot compile module: function(s) _each_binding,
+        #     walk (generator function(s), contain a `yield`/`yield from`)
+        #
+        # -- verified by calling `compile_module_to_c` on it, which raises and
+        # emits no C at all. So the guard was red on a tree with no link error
+        # in it, which is the one thing a guard must never be: it teaches the
+        # reader to ignore it.
+        #
+        # So ask the C++ path directly, per leftover generator, which is the
+        # only thing that decides it. Cheap because it runs only on the two or
+        # three generators A3 declines, not on all {checked} modules.
+        gen = GimpleGen(emit_entry_points=False, module_name=name)
+        gen._current_filename = path
+        claimed = []
+        refused = []
+        for _fn in _find_functions(lowered, set(left)):
+            try:
+                gen._gen_cpp_generator_unit(_fn)
+                claimed.append(_fn.name)
+            except Exception:
+                refused.append(_fn.name)
+        if claimed:
+            offenders.append((name, claimed))
+        if refused:
+            fell_back.append((name, refused))
     print(f"  self-host closure: {checked} modules, every generator/async "
-          f"lowered in place: {not offenders}")
+          f"lowered in place or its module refused whole: {not offenders}")
     for name, left in offenders:
-        print(f"  ✗ {name}: the stack-switch lowering left "
-              f"{', '.join(sorted(set(left)))} — its coroutine symbols would "
-              f"be referenced but never defined (see "
+        print(f"  ✗ {name}: the C++20 coroutine path claims "
+              f"{', '.join(sorted(set(left)))}, and that path's definitions "
+              f"live in a companion .cpp this build does not link (see "
               f"bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md)")
+    for name, left in fell_back:
+        print(f"  · {name}: {', '.join(sorted(set(left)))} declined by BOTH "
+              f"backends, so the module refuses and is interpreted from "
+              f"source — safe, nothing to link")
     return not offenders
+
+
+def _find_functions(stmts, names: set) -> list:
+    """The top-level FunctionDefs in `stmts` whose name is in `names`.
+
+    Deliberately top-level only. The C++ generator unit is translated for a
+    MODULE's own top-level generators; a nested `def`'s generator is reached
+    through its enclosing function's body, and looking for it here would
+    report a name the C++ path never claimed and so never dropped."""
+    import fire_compiler as N
+    out = []
+    for _s in stmts:
+        if isinstance(_s, N.FunctionDef) and getattr(_s, 'name', '') in names:
+            out.append(_s)
+    return out
 
 
 def run_produced_binary(exe: str, td: str) -> tuple:

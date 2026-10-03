@@ -730,6 +730,7 @@ int         mojo_str_eq(MojoStr *a, MojoStr *b);
 char        mojo_str_char_at(MojoStr *s, int64_t i);
 void        mojo_str_print(MojoStr *s);
 char       *mojo_char_to_str(char c);
+char       *mojo_char_at_str(char *s, int64_t i);   /* s[i] as a 1-char str */
 int64_t     mojo_ord(char *s);
 char       *mojo_chr(int64_t code);
 
@@ -1817,8 +1818,16 @@ int mojo_eval(int expr, MojoDict *globals, MojoDict *locals);
  * looks at the Python call site. That is why the filename-carrying lexer
  * entry point is a separate function, `py_tokenize_named(src, filename)`,
  * whose arity the codegen derives from its definition like any other's.
+ *
+ * `py_tokenize_named` is deliberately NOT declared here. It is not in
+ * `_NO_OVERLOAD_MANGLE` (only `py_tokenize` is), so generated code would
+ * reach it under a mangled name and this bare-name declaration could never
+ * be the prototype such a call matched; and nothing calls it from generated
+ * code at all -- its callers are Python (formal/build.py, the lexing tests),
+ * which get their prototype from the definition. Declaring it would add a
+ * fact to this header that nothing checks and nothing could use.
  * test_selfhost.py's `pinned_prototypes_match_their_definitions` checks
- * this line against the source. */
+ * the `py_tokenize` line below against the source. */
 MojoList *py_tokenize(char *source);  /* lexer.tokenize -> list[Token] */
 /* Parser is defined as a struct in generated code; no function stub needed */
 char *gimple_codegen_compile_to_gimple(char *source, int do_imports, char *filename);  /* compile_to_gimple function */

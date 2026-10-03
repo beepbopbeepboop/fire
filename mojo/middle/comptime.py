@@ -91,11 +91,44 @@ def fold_arith(op: str, left: int, right: int):
     operator it uses is also valid on pointers). The annotations say what the
     caller has already established. Only called once both operands are
     narrowed to numbers, so the folding matches Python's exactly, bools
-    included (`True + True` is 2 either way)."""
+    included (`True + True` is 2 either way).
+
+    `//` is here because the RUNTIME already lowers it on every compiled path
+    (arm64 UDIV/SDIV through `_emit_div_shift_pow`, x86-64 IDIV through
+    `_emit_div_mod`, and both spell it as integer division — the same
+    instruction sequence `/` gets), and because the reference interpreter
+    folds it (`myinterpreter.py`'s binary-op table: `elif op == '//': return
+    left // right`). Its absence here was a three-way divergence for one
+    source: `comptime c = 7 // 2` printed `3` under `python3 fire.py run`,
+    ran at RUNTIME as `3` when the same `//` sat outside the `comptime`, and
+    was REFUSED by every compiled backend as "does not fold to a compile-time
+    constant". A folder that declines an operator the same build emits for it
+    is not being conservative, it is answering a different question from the
+    one it is asked.
+
+    The DIVISION-BY-ZERO guard is the other half of the same repair and was
+    already missing for `/`: `left // right` with a literal-zero divisor raised
+    out of here, out of `eval_const`, and out of the backend — measured, and it
+    is a CRASH rather than a refusal, which is the worst of the three answers
+    because a crash has no message to act on:
+
+        $ python3 fire.py build --formal --no-prove -o t t.mojo   # comptime c = 1 / 0
+        build: division by zero
+        ZeroDivisionError: division by zero
+
+    Returning None is what every other unanswerable shape here returns, and
+    the caller turns it into `comptime_fold_refusal` — the honest answer,
+    naming the construct. `formal/arm64_codegen.py`'s runtime division traps
+    the same case at RUN time (`_emit_div_shift_pow`'s div0 arm exits with
+    `SHIFT_TRAP_STATUS`), so folding it is not what decides whether the
+    program divides by zero; only whether the BUILD does."""
     if op == '+':   return left + right
     if op == '-':   return left - right
     if op == '*':   return left * right
-    if op == '/':   return left // right
+    if op in ('/', '//'):
+        if right == 0:
+            return None
+        return left // right
     if op == 'and': return left and right
     if op == 'or':  return left or right
     return None

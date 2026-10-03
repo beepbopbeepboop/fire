@@ -608,6 +608,45 @@ def main():
     print(show(a, 2))
 """, must_have=[], must_not_have=["_mg_pack_char"])
 
+    # A character costs NO allocation, on either spelling. `s[i]` and
+    # `for c in s` used to reach `mojo_cstr_slice(s, i, i + 1)` — a correct
+    # NUL-terminated 1-char string, allocated per character and owned by
+    # nobody, which was the whole of the char-scan residual (1226 bytes a
+    # pass over a 96-character line, measured; 246.7 MB over the 4.8M
+    # characters this tripwire runs). Both now reach
+    # `mojo_char_at_str`, which is `mojo_char_to_str` reached through the
+    # string and the index — gimple refuses a `char` argument, which is why
+    # the two-step spelling was never available — and lands in its immortal
+    # 256-entry table.
+    #
+    # Asserted on the SHAPE, and both ways: the slice is in `must_not_have`
+    # because a lowering that still emitted it would print exactly the right
+    # answers and leak, which is the failure
+    # `test_gimple_runner.py`'s `gimple_char_scan_allocates_nothing_per_
+    # character` tripwire exists to catch at 246 MB and a `test_c_shape`
+    # case catches at zero cost. `_mojo_at_char` is in `must_not_have` for
+    # the subscript because it returns a pointer INTO the string — not
+    # NUL-terminated, so not a str — and it used to be emitted alongside the
+    # slice as a dead assignment.
+    test_c_shape("a_character_is_an_immortal_table_entry_not_a_slice", """\
+def at(s: String, i: Int) -> String:
+    return s[i]
+
+
+def scan(s: String) -> Int:
+    var n = 0
+    for c in s:
+        if c == "x":
+            n += 1
+    return n
+
+
+def main():
+    print(scan("axbxc"))
+    print(at("hello", 1))
+""", must_have=["mojo_char_at_str ("],
+       must_not_have=["mojo_cstr_slice (", "_mojo_at_char"])
+
     # The per-slot-kinds marker must not outlive its function; the reasoning
     # and the hand-reduced collision are in the helper's own docstring.
     test_kinds_marker_scope()

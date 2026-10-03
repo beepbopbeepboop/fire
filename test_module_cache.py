@@ -362,6 +362,104 @@ def test_elaboration_generic_struct(wd):
         os.remove(bl)
 
 
+# ── a failed elaboration compiles, but is NOT cached ──────────────────────
+def test_elaboration_failure_is_not_cached(wd):
+    """What `_ensure_generic_struct` does when the elaborator raises, and what
+    `compile_module_to_c_cached` then does with the result.
+
+    The codegen falls back to lowering the construction against the struct's
+    UN-ELABORATED template, whose type parameters are unbound and therefore
+    typed `int64_t` — so the C is a different program from the one the source
+    says. That fallback is load-bearing and stays: turning it into a refusal
+    was measured on the stdlib's own `std/` subtree (252 files) and took six
+    currently-compiling files to a hard failure, `List[String]` in
+    std/os/os.mojo among them.
+
+    What must not happen is that such a module reaches the content-addressed
+    store. One swallowed failure published a wrong `.ci` under the current
+    compiler fingerprint, and `test/iter/test_ref_iteration.mojo` then reached
+    a gate as an UNEXPECTED `stdlib-syntax` failure — gcc's `request for
+    member 'value' in something not a structure or union`, on a line about
+    iterators — an hour after the transient that caused it had ended. The
+    condition had ended; the artifact had not.
+
+    So: forced failure here, and the two properties are that the compile still
+    succeeds (no new refusal) and that a second `compile_module_to_c_cached`
+    of the same inputs REBUILDS rather than replaying a published artifact.
+    """
+    import elaborate
+    from gimple_codegen import compile_linked
+    mod = ("struct Box[T]:\n    var value: T\n"
+           "fn unbox(self) -> T:\n        return self.value\n")
+    bl = os.path.join(RUNTIME, 'el_boxfail.mojo')
+    open(bl, 'w').write(mod)
+    client = ("from el_boxfail import Box\n"
+              "fn main():\n    var b = Box[Int64](42)\n"
+              "    var y = b.unbox()\n    print(y)\n")
+    real_instantiate = mm.instantiate
+    reason = 'forced: the instantiation could not be built'
+
+    def _boom(*a, **k):
+        raise RuntimeError(reason)
+
+    try:
+        mm.instantiate = _boom
+        try:
+            code, _d, objs, _cpp, _cxx = compile_linked(client)
+            check("elaborate: a failed struct elaboration still compiles "
+                  "(the template fallback is load-bearing)", True)
+            check("elaborate: ... and the fallback is the un-elaborated one",
+                  'Box_Int64' not in code,
+                  "the instantiation went through despite the failure")
+        except Exception as e:
+            check("elaborate: a failed struct elaboration still compiles "
+                  "(the template fallback is load-bearing)", False,
+                  f"{type(e).__name__}: {str(e)[:200]}")
+        # Now the cache contract, on the entry point where the publish
+        # decision is made. It has to be a MISS, because that is the only
+        # path that builds: start from no artifact at all, build through the
+        # forced failure, and look at what the store holds afterwards.
+        path = os.path.join(RUNTIME, 'el_boxfail_client.mojo')
+        open(path, 'w').write(client)
+        csrc = open(path).read()
+        bsd._stdlib_compile_cache.clear()
+        key = cas.stdlib_compile_key(csrc, path, 'el_boxfail_client')
+        stale = cas.lookup(key, '.ci')
+        if stale:
+            os.unlink(stale)          # a MISS is the whole point; see above
+        try:
+            t1 = bsd.compile_module_to_c_cached(csrc, path, 'el_boxfail_client')
+            check("elaborate: a module built through a failed elaboration is "
+                  "NOT published",
+                  cas.lookup(key, '.ci') is None,
+                  "the degraded artifact reached the content-addressed store")
+            check("elaborate: ... and the reason for the degradation is "
+                  "reported rather than swallowed",
+                  any('could not be built' in d
+                      for d in bsd.last_degradations()),
+                  f"last_degradations() = {bsd.last_degradations()[:2]}")
+            check("elaborate: ... and the degradation names the struct, its "
+                  "type args and its source",
+                  any('Box[Int64]' in d and 'el_boxfail.mojo' in d
+                      for d in bsd.last_degradations()),
+                  f"last_degradations() = {bsd.last_degradations()[:2]}")
+            bsd._stdlib_compile_cache.clear()
+            misses = cas.stats['misses']
+            t2 = bsd.compile_module_to_c_cached(csrc, path, 'el_boxfail_client')
+            check("elaborate: ... so the next run REBUILDS it rather than "
+                  "replaying a wrong artifact",
+                  cas.stats['misses'] == misses + 1 and t1 == t2,
+                  f"misses did not advance: {cas.stats['misses']} vs {misses}")
+        finally:
+            stale = cas.lookup(key, '.ci')
+            if stale:
+                os.unlink(stale)
+            os.remove(path)
+    finally:
+        mm.instantiate = real_instantiate
+        os.remove(bl)
+
+
 # ── Elaboration slice 4: overload resolution ─────────────────────────────
 def test_elaboration_overload(wd):
     import elaborate
@@ -892,9 +990,23 @@ def test_sb1_mojo_build_cli_wrapper_modules(wd):
             f.write(src)
 
     exe = os.path.join(proj, 'main')
-    r = subprocess.run(
-        [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=120)
+    # A BUILD, not a run, and the timeout is the file's own exec budget rather
+    # than a bare literal: this call escaped as an uncaught TimeoutExpired and
+    # took the whole file with it, so every check after this one was silently
+    # not run — which is what happened in a `modcache` run alongside four other
+    # suites at -j18 (2026-10-02, 429 s of wall clock, this build at 120.0 s).
+    # A timeout here is LOAD, not a wrong answer, and it has to read as a
+    # failed check rather than as the end of the file — the same reasoning, and
+    # the same `_TIMED_OUT_PREFIX`, as `_run` above.
+    try:
+        r = subprocess.run(
+            [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
+            cwd=proj, capture_output=True, text=True,
+            timeout=EXE_TIMEOUT_S * 2)
+    except subprocess.TimeoutExpired as e:
+        r = subprocess.CompletedProcess(
+            e.cmd, -1, stdout='', stderr=f'{_TIMED_OUT_PREFIX} after '
+            f'{EXE_TIMEOUT_S * 2}s building main.mojo')
     check("SB-1 (fire.py build CLI): two sibling modules' same-named free "
           "function build without a redefinition error",
           'redefinition of' not in r.stderr and 'redefinition of' not in r.stdout,
@@ -1397,6 +1509,7 @@ def main():
         test_elaboration_generic_call(wd)
         test_elaboration_inference_and_comptime(wd)
         test_elaboration_generic_struct(wd)
+        test_elaboration_failure_is_not_cached(wd)
         test_elaboration_overload(wd)
         test_elaboration_trait_conformance(wd)
         test_reflected_struct_import(wd)

@@ -2651,6 +2651,16 @@ class GimpleGen:
         self._extra_search_paths: list = []
         # Imported generic struct name -> module source path (slice 5).
         self._imported_generic_structs: dict = {}
+        # Why an imported generic struct could NOT be elaborated for a
+        # construction, one entry per occurrence. The codegen falls back to
+        # the un-elaborated template (see
+        # `emit_resolve._ensure_generic_struct`, which measures that fallback
+        # as load-bearing), so this list is the only evidence that what came
+        # out is a DIFFERENT program from the one the source says — and
+        # `build_stdlib_dylib.compile_module_to_c_cached` reads it to refuse
+        # to publish such a module into the content-addressed store, where a
+        # one-off failure would otherwise be served forever.
+        self._generic_struct_elaboration_failures: list = []
         # Imported overloaded function name -> module source path (slice 4).
         self._imported_overloads: dict = {}
         # typedefs for elaborated (monomorphized) structs, emitted in the preamble.
@@ -2784,6 +2794,7 @@ class GimpleGen:
         'mojo_str_rpartition':   ('MojoList *', ['char *', 'char *']),
         'mojo_c_getenv':         ('char *',     ['char *']),
         'mojo_char_to_str':      ('char *',     ['char']),
+        'mojo_char_at_str':      ('char *',     ['char *', 'int64_t']),
         'mojo_ord':              ('int64_t',    ['char *']),
         'mojo_chr':              ('char *',     ['int64_t']),
         'mojo_read_type_tag':    ('int64_t',    ['int64_t']),
@@ -3146,11 +3157,29 @@ class GimpleGen:
         # ONE parameter, matching `def py_tokenize(src: str)` and the pinned
         # declaration in runtime/fire_runtime.h. The filename-carrying variant
         # is `py_tokenize_named(src, filename)`, an ordinary function whose arity
-        # this codegen derives from its definition. This entry is read to coerce
-        # ARGUMENT types at a call site and to take a return type, never to emit
-        # a prototype, so a stale arity here is a coercion imprecision — but
-        # test_gimple.py checks it against the real signature anyway, because
-        # the header copy next to it IS a prototype and the two must agree.
+        # this codegen derives from its definition.
+        #
+        # This used to list two, describing `py_tokenize(src, filename="")` — a
+        # DEFAULTED second parameter. That is right about the failure mode (a
+        # defaulted parameter still occupies a slot, and the self-host
+        # MATERIALIZES it at every call site, so `filename=""` is an ABI change
+        # however invisible it looks in Python) and wrong about the fix, because
+        # the default is gone: the function is one argument now. A two-parameter
+        # entry is wrong at both ends — every caller passes one argument and the
+        # C function takes one — so GCC rejected the whole self-host build with
+        # ~24 x "too few arguments to function 'py_tokenize'; expected 2, have 1"
+        # while fire.ci's own prototype and definition were already correct.
+        #
+        # `py_tokenize_named` deliberately gets NO entry here. Nothing calls it
+        # from generated code (its callers are Python: formal/build.py and the
+        # lexing tests), and it is not in `_NO_OVERLOAD_MANGLE`, so a generated
+        # call would reach it under a mangled name that this bare-name table
+        # could never match. An entry here would be an unchecked fact about an
+        # unreachable name — and nothing checks this table at all: the
+        # signature-vs-source test in test_gimple.py reads `_SELFHOST_SIGS`, not
+        # `_LIBC_SIGS`, so the real protection for `py_tokenize` is the pinned
+        # header declaration that test_selfhost.py's
+        # `pinned_prototypes_match_their_definitions` checks.
         'py_tokenize':              ('MojoList *', ['char *']),
         'Parser_parse_module':   ('MojoList *', ['Parser *']),
         'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),

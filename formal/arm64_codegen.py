@@ -66,8 +66,10 @@ _ABI_ARG_REGS = 8
 # than a hole.  The refusal that used to sit at `_ABI_ARG_REGS` on both ends was
 # true about the register count and wrong about the consequence: it meant
 # `struct.pack("<IIQQQQQQ", v0..v7)` could not reach its own module's documented
-# "a format I cannot serve returns an empty list" contract, which is
-# `bugs/FORMAL_struct_pack_over_eight_arguments.md` in full.
+# "a format I cannot serve returns an empty list" contract.  That filing is
+# deleted — it asked for exactly this and for the same convention against
+# x86-64's register file, which `formal/x86_64_codegen.py` now has too, so the
+# two backends are the one number rather than two.
 #
 # The bound is a FRAME bound and not an ABI one: every parameter past the
 # eighth needs a home (a callee-saved register or a spill slot), and the spill
@@ -2917,7 +2919,8 @@ dylib_exports: list = None, globals_base: int = None,
             string_names=STRING_TYPE_NAMES,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
-            declared_kind=self._declared_kind_for(name))
+            declared_kind=self._declared_kind_for(name),
+            ctor_field_value=self._ctor_field_value_for(name))
         self._vkinds_cache[name] = vk
         return vk
 
@@ -2987,6 +2990,50 @@ dylib_exports: list = None, globals_base: int = None,
             return None
 
         return kind_of_slot
+
+    def _ctor_field_value_for(self, fn_name):
+        """`ctor_field_value` bound to `fn_name`, for `ValueKinds`.
+
+        The hook that answers "what did the construction put in this field",
+        and the whole of it is `model.struct_ctor_field_value` asked with THIS
+        UNIT'S struct table. That table is the only reason a hook exists at all:
+        `ValueKinds` reads one function's source and has no way to know that
+        `Point` is a struct, what its `__init__` stores, or which of its methods
+        write a field — and a backend that asked those questions itself would be
+        a second implementation of `init_body_stores`, which is the one function
+        the emitters build a construction from.
+
+        Three gates, and each is a refusal rather than a guess:
+
+          * the callee must be a struct THIS unit declares. A struct of another
+            module has no `__init__` here to read, and a name that is a
+            function rather than a type is not a construction at all.
+          * it must be a FRAMED struct (more than one field). A one-word
+            struct's receiver IS its field, which `_declared_kind_for` answers
+            from the declaration, and this hook must not be a second opinion
+            about the same word.
+          * no OTHER method may write the field
+            (`struct_field_written_outside_init`). The kind is about the slot,
+            and a setter that ran between the construction and the read makes
+            the constructor's argument a statement about the past.
+
+        `fn_name` is accepted and unused, deliberately: the two `ValueKinds`
+        hooks have the same signature because both are per-FUNCTION questions,
+        and a hook that ignored the function it was asked about would be the
+        kind of thing that looks right until two functions in one module
+        disagree.
+        """
+        structs = self._structs
+
+        def ctor_field_value(struct_name, call, field):
+            st = structs.get(struct_name)
+            if st is None or not M.struct_is_framed(st):
+                return None
+            if M.struct_field_written_outside_init(st, field):
+                return None
+            return M.struct_ctor_field_value(st, call, field, structs)
+
+        return ctor_field_value
 
     def _slot_declared_annotation(self, expr):
         """`(annotation, kind)` a frame slot's field DECLARES, or None.
@@ -4329,7 +4376,9 @@ dylib_exports: list = None, globals_base: int = None,
             raise CodegenError(
                 f"{_dotted(e.func)}() takes no keyword arguments on the formal "
                 f"arm64 path (got {[k for k, _v in e.kwargs]})")
-        how = M.builtin_value_method(method) or M.pointer_bounded_method(method)
+        how = (M.builtin_value_method(method)
+               or M.pointer_bounded_method(method)
+               or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
         elif how == "file_write":
@@ -4342,6 +4391,14 @@ dylib_exports: list = None, globals_base: int = None,
             self._emit_str_affix(e, at_end=how == "str_endswith")
         elif how == "str_find":
             self._emit_str_find(e)
+        elif how == "str_identity":
+            # A string -> `char *` conversion, which is the IDENTITY here: a
+            # `String` on this path is its own address, and the `CStringSpan` it
+            # becomes is a ONE-FIELD struct whose value IS that field
+            # (`model.STRING_IDENTITY_METHODS`).  Emitting the receiver is the
+            # whole lowering, and it is `std/os/env.mojo`'s every `external_call`
+            # argument — measured, that file's terminal cause before this arm.
+            self._emit_expr(e.func.obj)
         elif how == "str_count":
             # EXPLICIT, and it was implicit until this wave: `count`'s lowering
             # was the `else` below, so every method name with no lowering of its
@@ -4369,14 +4426,14 @@ dylib_exports: list = None, globals_base: int = None,
             #
             # `count` is now an explicit arm above, and this arm means what it
             # says: a method with no lowering is refused as one.  It should be
-            # unreachable — every `how` both tables produce is covered by an arm
-            # above — and saying so is the point: an unreachable arm that once
-            # silently did the wrong thing is worth making a loud one.
+            # unreachable — every `how` all three tables produce is covered by
+            # an arm above — and saying so is the point: an unreachable arm that
+            # once silently did the wrong thing is worth making a loud one.
             raise CodegenError(
                 f"{_dotted(e.func)}() is a method call on a value and this "
                 f"backend has no lowering for {method!r}, which reached the "
                 f"value-method dispatch with `how` = {how!r}. Every lowering "
-                f"both tables name is matched by an explicit arm above, so this "
+                f"every table names is matched by an explicit arm above, so this "
                 f"is a table entry with no arm rather than a construct: "
                 f"`method` resolved to {how!r} and nothing claimed it. Refused "
                 f"rather than lowered as the nearest arm, which is how a "
@@ -4433,6 +4490,13 @@ dylib_exports: list = None, globals_base: int = None,
             ).format(dotted=_dotted(e.func)))
         _load, width, signed = how
         self._emit_expr(obj)                    # X0 = the address
+        if _load == "identity":
+            # A NULLABLE POINTER's `value()` is `Optional.value()`, the UNWRAP,
+            # and the receiver IS the pointer (`model.nullable_pointer_unwrap`).
+            # Nothing is emitted after the receiver: the answer is the word that
+            # is already in X0. The load below would read the FIRST BYTE of the
+            # pointee instead, which is what this used to do — measured, SIGSEGV.
+            return
         if width == 1:
             self.asm.emit(encode_ldrsb_xt_xn_imm(0, 0, 0) if signed
                           else encode_ldrb_wd_wn(0, 0, 0))

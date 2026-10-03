@@ -287,12 +287,36 @@ HOST_MODELLED = frozenset((
     #     measurement — the annotation shapes build and run, and a name used as
     #     a VALUE is still refused, so the erasure is not a promise the module
     #     makes.
+    #   `enum`  — `formal/hostmods/enum.mojo`, checked accessor for accessor
+    #     against CPython's own `enum` by `test_formal_core_hostmods.py`, on both
+    #     backends. The module is ONE function (`Enum`) and the interesting part
+    #     is why: an enum member on this path is a CLASS-LEVEL CONSTANT and the
+    #     base is erased, so `class Reg(Enum): RAX = 0` reads `Reg.RAX` as `0`
+    #     with no `enum.mojo` in the tree at all. What the module buys is that
+    #     the import RESOLVES — `type_system.py` and `formal/x86_64.py` each
+    #     `from enum import Enum` on their first line, and without it both are
+    #     refused for a statement that is not wrong. What is NOT the module's is
+    #     `.value` and `.name`: those are attribute reads on a class constant and
+    #     are answered in `formal/model.py` (`enum_member_accessor`) and
+    #     `formal/build.py` (`_enum_member_sites`), because `.value` on a member
+    #     was silently reading 0 where CPython reads the member's value —
+    #     `formal/x86_64.py` does its register arithmetic through it.
+    #   `contextlib`  — `formal/hostmods/contextlib.mojo`, ONE function
+    #     (`nullcontext`), checked against CPython's own for both arities by
+    #     `test_formal_core_hostmods.py` on both backends. It is the one name in
+    #     CPython's `contextlib` whose meaning is fully carried by `with EXPR as
+    #     TARGET` on this path, which binds the target to the expression. The
+    #     neighbours are absent for the reason the module's docstring measures:
+    #     `suppress` needs an exception, `redirect_stdout` needs a stream,
+    #     `contextmanager` is a decorator (silently DROPPED, so it would build
+    #     and do nothing) and `closing` would bind correctly and then silently
+    #     never close anything — the one shape a mirror of CPython must not ship.
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
     "math", "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
-    "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
+    "codecs", "copy", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own

@@ -2773,6 +2773,94 @@ def main():
     print(total)
 """, "4800000\n", 60)
 
+    # A `with` whose teardown is OBSERVABLE, over both spellings and on both
+    # exits. Compiling and RUNNING is the point: the bug this covers emitted
+    # perfectly valid C that simply had no teardown in it, so only the
+    # program's own output can tell.
+    #
+    # Two independent holes, both silent, both in `_gen_stmt_WithStmt`:
+    #   * the five `.append` calls that register an item for teardown sat
+    #     inside `if item.alias is not None:`, so `with C():` registered
+    #     nothing — no `__exit__` at all (bugs/
+    #     CODEGEN_with_no_as_target_drops_exit.md);
+    #   * the `has_exit` pre-scan read `_ctx_sns` only, so an item whose
+    #     teardown is a GENERATOR's final resume+destroy looked like "no
+    #     teardown" too — and then the raise path lost it as well, which for
+    #     `@contextlib.contextmanager` means the `finally` that releases the
+    #     resource never runs.
+    # Each shape is here twice, once with `as` and once without, so neither
+    # hole can be reintroduced behind the other one.
+    _WITH_TEARDOWN_CLASS = """\
+class Tracked:
+    var name: String
+    def __init__(out self, name: String):
+        self.name = name
+    def __enter__(var self) -> Int:
+        print("enter " + self.name)
+        return 7
+    def __exit__(var self) -> Bool:
+        print("exit " + self.name)
+        return False
+"""
+    test_gimple_stdout("gimple_with_without_as_target_still_exits", _WITH_TEARDOWN_CLASS + """
+def main():
+    with Tracked("a"):
+        print("body a")
+    with Tracked("b") as fd:
+        print("body b " + str(fd))
+    print("done")
+""", "enter a\nbody a\nexit a\nenter b\nbody b 7\nexit b\ndone\n")
+
+    test_gimple_stdout("gimple_with_without_as_target_exits_on_the_raise_path",
+                       _WITH_TEARDOWN_CLASS + """
+def main() raises:
+    try:
+        with Tracked("a"):
+            print("body a")
+            raise ValueError("boom")
+    except ValueError:
+        print("caught")
+    print("done")
+""", "enter a\nbody a\nexit a\ncaught\ndone\n")
+
+    # The same two, for the generator arm: a `@contextlib.contextmanager`
+    # whose teardown is a `finally` printing. The compiled `with` lowering
+    # implements contextmanager by driving the handle (first resume is
+    # `__enter__`, the second is `__exit__`), so this is the only way to
+    # check that the second resume happens on the raise path too.
+    _WITH_TEARDOWN_CM = """\
+import contextlib
+
+@contextlib.contextmanager
+def tracked(name: String):
+    print("enter " + name)
+    try:
+        yield
+    finally:
+        print("exit " + name)
+"""
+    test_gimple_stdout("gimple_with_generator_context_manager_exits",
+                       _WITH_TEARDOWN_CM + """
+def main():
+    with tracked("a"):
+        print("body a")
+    with tracked("b") as v:
+        print("body b")
+    print("done")
+""", "enter a\nbody a\nexit a\nenter b\nbody b\nexit b\ndone\n")
+
+    test_gimple_stdout("gimple_with_generator_context_manager_exits_on_the_raise_path",
+                       _WITH_TEARDOWN_CM + """
+def main() raises:
+    try:
+        with tracked("a"):
+            print("body a")
+            raise ValueError("boom")
+    except ValueError:
+        print("caught")
+    print("done")
+""", "enter a\nbody a\nexit a\ncaught\ndone\n")
+
     # Rebuilding a string from its characters must still be right now that the
     # character strings are shared and never freed: `out + ch` frees its own
     # conversion temp only for a number, never for a character (a free of a
@@ -5071,6 +5159,62 @@ fn main():
     print(c)
     print(list(a), list(c))
 """, "[9.5, 1, 'zz']\n9.5\n1\nTrue\n[2.5, 1, 'yy']\n[3.5, 1, 'xx']\n[2.5, 1, 'yy'] [3.5, 1, 'xx']\n")
+
+    # A MIXED LIST LITERAL returned across a function boundary, read at a
+    # computed index. Two hops, because the bug needed both: a helper that
+    # returns a mixed literal, and a wrapper that returns the helper's result
+    # BY NAME. Without the fix the runtime list really is kinds-marked
+    # (`mojo_list_set_kinds` is emitted for it) but the compile-time marker
+    # is missing, so `b[i]` picked an accessor by guesswork and read the
+    # Float64 slot through `mojo_list_get_str` — the printed "pointer" was
+    # the float's own bits, and this SIGSEGVed.
+    #
+    # Asserted over three shapes because each one can be fixed alone: the
+    # direct return, the by-name return through a wrapper (which is what
+    # needs the callee fixpoint), and a HOMOGENEOUS literal that must still
+    # NOT be marked — over-approximating here would cost a boxed read on
+    # every list the program builds, and the third case is what holds that
+    # line.
+    test_gimple_stdout("gimple_kinds_survive_a_mixed_list_literal_returned",
+                       """\
+fn mixed(x: Float64, s: String) -> List:
+    return [x, 1, s]
+
+fn main():
+    var b = mixed(9.5, "zz")
+    print(b)
+    var i = 0
+    print(b[i])
+""", "[9.5, 1, 'zz']\n9.5\n")
+
+    test_gimple_stdout("gimple_kinds_survive_a_mixed_list_returned_by_name",
+                       """\
+fn mixed(x: Float64, s: String) -> List:
+    return [x, 1, s]
+
+fn drop_one() -> List:
+    var first = mixed(1.5, "aa")
+    var kept = mixed(9.5, "zz")
+    return kept
+
+fn main():
+    var b = drop_one()
+    print(b)
+    var i = 0
+    print(b[i])
+""", "[9.5, 1, 'zz']\n9.5\n")
+
+    test_gimple_stdout("gimple_a_homogeneous_list_return_is_not_marked",
+                       """\
+fn three(n: Int) -> List:
+    return [n, n + 1, n + 2]
+
+fn main():
+    var b = three(1)
+    print(b)
+    var i = 0
+    print(b[i])
+""", "[1, 2, 3]\n1\n")
 
     test_gimple_stdout("gimple_struct_uniform_formats_still_uniform", """\
 fn main():
