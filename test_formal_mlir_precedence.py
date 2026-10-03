@@ -61,6 +61,7 @@ Run:  python3 test_formal_mlir_precedence.py [-v] [case ...]
 import argparse
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -98,7 +99,7 @@ REFUSED = [
      "    ]()\n"
      "    print(v)\n"
      "    return 0\n",
-     "is an MLIR dialect construct"),
+     "is a dialect OPERATION"),
     # The same program with the two statements SWAPPED. It is here because a
     # single case cannot tell "the pre-emption is gone" from "the pre-emption
     # happens to agree with source order": this pair can. Reverse-applied, only
@@ -116,7 +117,7 @@ REFUSED = [
      "    var q = Unplaced\n"
      "    print(v)\n"
      "    return 0\n",
-     "is an MLIR dialect construct"),
+     "is a dialect OPERATION"),
     # `__mlir_op` with no bracket at all, which is the spelling §2.2 of
     # bugs/FORMAL_known_limits.md measured building, linking and SEGFAULTING at
     # the first instruction, and which no suite case pinned. It is a limit, and
@@ -129,7 +130,7 @@ REFUSED = [
      "    var a = __mlir_op.`pop.inline_asm`[n]\n"
      "    print(\"a = %llu\\n\", a)\n"
      "    return 0\n",
-     "is an MLIR dialect construct"),
+     "is a dialect OPERATION"),
     # The pre-emption must not DOWNGRADE a more specific refusal to the generic
     # dialect text. This is the other half of the ordering rule: both constructs
     # name MLIR, and the bracketed one has a message about what a template is.
@@ -168,7 +169,131 @@ REFUSED = [
      "    var q = Unplaced\n"
      "    print(\"os=\", os_name)\n"
      "    return 0\n",
-     "'Unplaced' has no home", "is an MLIR dialect construct"),
+     "'Unplaced' has no home", "is a dialect OPERATION"),
+]
+
+# ── WHICH dialect operation, and WHY ───────────────────────────────────────
+#
+# The second half of the same file's subject, and it is a different defect from
+# the one above. Every `__mlir_op` used to be refused with ONE sentence, and that
+# sentence asserted a property of the TARGET — "an MLIR attribute, type or
+# operation has no representation in [a 64-bit word]" — where the property
+# belongs to the OPERATION. Measured over the stdlib (`../new-modular`):
+# 259 sites over 104 operations, and they denote three different things.
+#
+#     14 ops /  76 sites   an EFFECT — a store, a trap, an ownership marker.
+#                          No value, so "no representation" is TRUE of them.
+#     12 ops /  38 sites   ELEMENTWISE arithmetic, where the op NAME does not
+#                          decide the answer: the OPERAND's type does. 26 of
+#                          those 38 sites are over `!kgen.simd<N, DTYPE>`, whose
+#                          own source documents the result as "a new vector
+#                          whose element at position `i` is computed as
+#                          `self[i] + rhs[i]`" — an N-lane VECTOR, not a word.
+#     the rest             a value that needs a FACT this path has no way to
+#                          get: `pop.cmp`'s bracketed predicate, `pop.load`'s
+#                          pointee width, `pop.select`'s BOOL kind.
+#
+# So a table keyed on the operation name alone is not "26 ops waiting for a
+# lowering" — it is 9 word-typed sites and 26 vector-typed ones wearing the same
+# name, and lowering `pop.add(a, b)` to `a + b` would be RIGHT for the 9 and
+# WRONG for the 26: a scalar add of two vector-typed words, which is a
+# plausible-looking number rather than a refusal. `MLIR_ELEMENTWISE_OPS` is
+# therefore not a claim that these denote words, and the row below is what pins
+# that: the elementwise message must NOT say they do.
+#
+# Every case asserts three things on BOTH architectures: the class's own words
+# are present, the operation is NAMED (the old message never named it — it said
+# `__mlir_op`, the PREFIX, for 104 different operations), and the sentences that
+# belong to a DIFFERENT class are absent. The `absent` half is the load-bearing
+# one: a single reword that collapsed the classification back to one sentence
+# would still satisfy the needle and is exactly the regression this file exists
+# to catch.
+CLASSIFIED = [
+    # An EFFECT. Real stdlib source spells this exactly: `std/sys/debug.mojo:20`.
+    # The `absent` is the elementwise clause, which would be FALSE of it — a
+    # trap has no operand type to establish and no result to be a vector of.
+    ("an_effect_operation_says_it_denotes_no_value",
+     "def t() -> Int32:\n"
+     "    __mlir_op.`llvm.intr.debugtrap`()\n"
+     "    return 0\n",
+     "`llvm.intr.debugtrap` is a dialect OPERATION and denotes NO VALUE",
+     "applied ELEMENTWISE"),
+    # The 45-site class. `lit.ownership.mark_initialized` is an ownership
+    # marker: it asserts something about a reference and returns nothing.
+    ("an_ownership_marker_is_an_effect_not_a_value",
+     "def t(p: Int) -> Int:\n"
+     "    return __mlir_op.`lit.ownership.mark_initialized`(p)\n",
+     "`lit.ownership.mark_initialized` is a dialect OPERATION and denotes NO "
+     "VALUE", None),
+    # ELEMENTWISE arithmetic, `std/simd.mojo:1082` verbatim. The `absent` is
+    # the over-claim this measurement exists to prevent: the op name does not
+    # establish that the result is a word, and 26 of the 38 sites say it is not.
+    ("an_elementwise_operation_names_the_operand_type_as_the_missing_fact",
+     "def addit(a: Int, b: Int) -> Int:\n"
+     "    return __mlir_op.`pop.add`(a, b)\n",
+     "`pop.add` is a dialect OPERATION applied ELEMENTWISE",
+     "cannot be GUARDED here"),
+    # The index family, `std/builtin/simd_length.mojo:121` verbatim. Same
+    # classification as `pop.add` and deliberately so: the two are both
+    # elementwise and the message does not claim a word for either, because a
+    # claim keyed on the NAME is what was wrong.
+    ("an_index_operation_is_classified_the_same_way",
+     "def addit(a: Int, b: Int) -> Int:\n"
+     "    return __mlir_op.`index.add`(a, b)\n",
+     "`index.add` is a dialect OPERATION applied ELEMENTWISE", None),
+    # Needs a PREDICATE. `std/simd.mojo:1546` verbatim. The needle names the
+    # missing thing rather than saying "no representation", because the missing
+    # thing is a bracket this path cannot read — six distinct
+    # `#kgen.cmp_pred<…>` values appear in the corpus, and an entry that ignored
+    # the bracket would answer `eq` and `ne` alike, which is a wrong answer
+    # rather than a refusal.
+    ("a_comparison_names_the_predicate_it_cannot_read",
+     "def cmpv(a: Int, b: Int) -> Int:\n"
+     "    return __mlir_op.`pop.cmp`[pred=__mlir_attr.`#kgen.cmp_pred<eq>`](a, b)\n",
+     "`pop.cmp` is a dialect OPERATION whose value could be a word",
+     "applied ELEMENTWISE"),
+    # An UNKNOWN predicate must get the same message as a known one rather than
+    # being answered: the bracket is unread either way, so a table that read
+    # only the name and ignored the predicate would have to answer this one.
+    ("an_unknown_predicate_is_refused_rather_than_answered",
+     "def bad(a: Int) -> Int:\n"
+     "    return __mlir_op.`pop.cmp`[pred=__mlir_attr.`#kgen.cmp_pred<nonesuch>`](\n"
+     "        a, a)\n",
+     "`pop.cmp` is a dialect OPERATION whose value could be a word", None),
+    # `pop.select` is the row the previous census got wrong in the other
+    # direction: it said lowering `pop.select` is a table away, and that
+    # `_select.mojo` waits on it. It does not — its first argument is a BOOL,
+    # and this path has no BOOL kind distinct from an integer, so a select
+    # answered kind-blind would test a `char *` for non-zero and answer 1. The
+    # message says so, and `absent` pins that it does NOT claim the operand type
+    # is the only missing piece.
+    ("a_select_names_the_bool_kind_it_needs",
+     "def s(c: Bool, a: Int, b: Int) -> Int:\n"
+     "    return __mlir_op.`pop.select`(c.__mlir_bool__(), a, b)\n",
+     "`pop.select` is a dialect OPERATION whose value could be a word",
+     "applied ELEMENTWISE"),
+    # An EFFECT the corpus proves: `std/builtin/value.mojo:203` spells it as a
+    # bare statement whose result nothing reads, and `test_formal_run.py`'s
+    # `mlir_dialect_name_is_refused_by_construct` builds exactly this source.
+    # It is the row that says the fallback is REACHABLE only for an operation
+    # nobody classified, and `absent` pins that an effect does not claim to need
+    # an operand type.
+    ("a_materialize_is_an_effect_because_nothing_reads_its_result",
+     "def materialize(value) -> Int:\n"
+     "    __mlir_op.`lit.materialize_into`[value=value](value)\n"
+     "    return 0\n",
+     "`lit.materialize_into` is a dialect OPERATION and denotes NO VALUE",
+     "no lowering table"),
+    # The fallback itself, for an operation no table claims: refused WITHOUT a
+    # claim about what it denotes, which is the honest last resort and the only
+    # place in this file where the message says nothing about the operation.
+    # `pop.fence` is deliberately NOT this row — the corpus proves it an effect
+    # at its one site, and `MLIR_EFFECT_OPS` says so.
+    ("an_unclassified_operation_is_refused_without_a_claim_about_it",
+     "def oddball(value) -> Int:\n"
+     "    return __mlir_op.`dialect.of.mine`[value=value](value)\n",
+     "`dialect.of.mine` is a dialect OPERATION, and this path has no "
+     "lowering table", "applied ELEMENTWISE"),
 ]
 
 # (name, source, expected stdout or None). The other guard, and it is a BUILD
@@ -221,6 +346,28 @@ def run_refused(name, source, needle, absent, tmpdir, verbose):
     return True, ""
 
 
+def run_classified(name, source, needle, absent, tmpdir, verbose):
+    """Both architectures must refuse, and say the same thing.
+
+    The same three assertions `run_refused` makes, and the reason this is a
+    separate runner rather than a flag on that one is that the rows have
+    DIFFERENT semantics for `absent`. In `REFUSED` it is a pre-emption guard — a
+    sentence that must not appear because a more specific construct owns this
+    file. In `CLASSIFIED` it is a classification guard — a sentence belonging to
+    a DIFFERENT class of dialect operation, which a collapsed message would
+    carry and which would make the classification a claim rather than a
+    distinction. One name for both would hide which of the two a failure is, and
+    the second is the one this table exists to prevent.
+
+    Parity is asserted by CONSTRUCTION here rather than by comparing the two
+    texts: the messages come from `formal/model.py`'s tables, which take no
+    architecture argument, so a per-emitter copy of the classification would be
+    the only way to make them differ. Every case runs both backends anyway,
+    because that is what proves no emitter has grown a second opinion.
+    """
+    return run_refused(name, source, needle, absent, tmpdir, verbose)
+
+
 def run_guarded(name, source, want_stdout, tmpdir, verbose):
     """Both architectures must BUILD, and on this one the image must RUN.
 
@@ -254,13 +401,90 @@ def run_guarded(name, source, want_stdout, tmpdir, verbose):
     return True, ""
 
 
+def census_is_complete():
+    """Every dialect operation the stdlib spells must reach a CLASS, not the
+    fallback. A census nobody re-measures rots silently.
+
+    This is the check that makes the classification a census rather than a
+    handful of hand-picked rows, and it is the one that would have caught the
+    error this branch corrects: a set of tables that covered the operations a
+    reader happened to think of reads exactly like a complete one until the
+    corpus is run against it.
+
+    The stdlib lives OUTSIDE this repository, so a checkout without it cannot
+    run this check — and must not fail because of it. The message says so and
+    the check reports SKIPPED, which is a different outcome from PASS on purpose:
+    "there is no corpus here" and "the corpus is fully classified" must not
+    print the same word.
+    """
+    stdlib = os.path.join(HERE, "..", "new-modular", "Mojo", "stdlib", "std")
+    if not os.path.isdir(stdlib):
+        return None, (f"SKIPPED no classification census — {stdlib} is not "
+                      f"present, so the tables cannot be checked against the "
+                      f"corpus they classify")
+    sys.path.insert(0, HERE)
+    import formal.model as M
+    counts, unclassified = {}, {}
+    pat = re.compile(r"__mlir_op\.`([A-Za-z0-9_.]+)`")
+    for root, _dirs, files in os.walk(stdlib):
+        for f in files:
+            if not f.endswith(".mojo"):
+                continue
+            try:
+                text = open(os.path.join(root, f), encoding="utf-8",
+                            errors="replace").read()
+            except OSError:
+                continue
+            for m in pat.finditer(text):
+                op = m.group(1)
+                why = M.mlir_dialect_op_refusal(op)
+                # The class is read off the MESSAGE, not off the tables, so this
+                # measures what the reader gets rather than what the tables say:
+                # a branch that exists but is unreachable from this text fails
+                # here, which is the rot this is for.
+                if "denotes NO VALUE" in why:
+                    k = "effect"
+                elif "cannot be GUARDED" in why:
+                    k = "unguarded"
+                elif "RESULT TYPE is written" in why:
+                    k = "typed-result"
+                elif "over a VECTOR" in why:
+                    k = "vector"
+                elif "applied ELEMENTWISE" in why:
+                    k = "elementwise"
+                else:
+                    k = None
+                counts[k] = counts.get(k, 0) + 1
+                if k is None:
+                    unclassified.setdefault(op, 0)
+                    unclassified[op] += 1
+    fallback = counts.pop(None, 0)
+    if fallback:
+        return False, (
+            f"{fallback} site(s) over {len(unclassified)} operation(s) reach the "
+            f"generic fallback rather than a class, so the refusal for them "
+            f"says only that there is no lowering table: "
+            f"{sorted(unclassified.items(), key=lambda kv: -kv[1])[:12]}")
+    total = sum(counts.values())
+    if total != 259:
+        # Not a failure of the tables — the CORPUS moved, which is worth saying
+        # out loud because every count in the docs is keyed on it.
+        return False, (
+            f"the corpus has {total} `__mlir_op` sites, not the 259 the census "
+            f"and both bug docs record. The tables classify all of them; the "
+            f"NUMBER is stale, so re-measure the docs' counts "
+            f"({counts})")
+    return True, f"all {total} sites over 104 operations classified: {counts}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("cases", nargs="*", help="subset of case names")
     args = ap.parse_args()
 
-    known = {c[0] for c in REFUSED} | {c[0] for c in GUARDED}
+    known = ({c[0] for c in REFUSED} | {c[0] for c in CLASSIFIED}
+             | {c[0] for c in GUARDED})
     if args.cases:
         missing = set(args.cases) - known
         if missing:
@@ -281,6 +505,17 @@ def main() -> int:
                                                     args.verbose))
             except subprocess.TimeoutExpired:
                 checks.append((name, False, "timed out"))
+        for entry in CLASSIFIED:
+            name, source, needle = entry[0], entry[1], entry[2]
+            absent = entry[3] if len(entry) > 3 else None
+            if args.cases and name not in args.cases:
+                continue
+            try:
+                checks.append((name,) + run_classified(name, source, needle,
+                                                      absent, tmpdir,
+                                                      args.verbose))
+            except subprocess.TimeoutExpired:
+                checks.append((name, False, "timed out"))
         for name, source, want_out in GUARDED:
             if args.cases and name not in args.cases:
                 continue
@@ -289,6 +524,18 @@ def main() -> int:
                                                     tmpdir, args.verbose))
             except subprocess.TimeoutExpired:
                 checks.append((name, False, "timed out"))
+
+    # The census, which is a property of the TABLES and not of any one build, so
+    # it runs once with no `cases:` filter and reports its own three outcomes.
+    if not args.cases:
+        ok, detail = census_is_complete()
+        if ok is None:
+            print(f"  {detail}")
+        elif ok:
+            print(f"  PASS  the_classification_covers_the_whole_corpus")
+            print(f"        {detail}")
+        else:
+            print(f"  FAIL  the_classification_covers_the_whole_corpus: {detail}")
 
     passed = failed = 0
     for name, ok, detail in checks:

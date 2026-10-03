@@ -9634,12 +9634,20 @@ WAVE6_NAME_CASES = [
     # fall-through, naming the allocator rather than the construct.  Real
     # stdlib source spells it exactly this way (`std/builtin/value.mojo:203`,
     # `std/sys/debug.mojo:20`).
+    #
+    # The needle is the classified operation wording rather than the old fixed
+    # sentence, because `mlir_dialect_op_refusal` now says what the OPERATION
+    # denotes — this one is `lit.materialize_into`, which is in no table, so it
+    # takes the honest fallback branch and names itself. What the row is about
+    # is unchanged: the construct is refused BY NAME, and both architectures say
+    # the same thing, which is the property `test_formal_mlir_precedence.py`
+    # pins at the level of a whole construct.
     ("mlir_dialect_name_is_refused_by_construct",
      "def materialize(value) -> Int:\n"
      "    return __mlir_op.`lit.materialize_into`[value=value](value)\n\n"
      "def main() -> Int:\n"
      "    return materialize(1)\n",
-     "refuse:is an MLIR dialect construct", None),
+     "refuse:is a dialect OPERATION", None),
 ]
 
 

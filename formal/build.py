@@ -8876,6 +8876,15 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         bracketed = {}
         exempt_roots = set()
         first_mlir = None
+        # The dialect OPERATION each `__mlir_op` root spells, keyed by the
+        # ROOT's identity for the reason `bracketed` is: `iter_nodes` has no
+        # parent, so the name and the operation it applies to are two separate
+        # nodes, and keying on the string would pair one call's name with
+        # another call's operation. Without it the refusal can only name the
+        # `__mlir_` PREFIX, which is what made one sentence cover 104
+        # operations that denote three different things — see
+        # `model.mlir_dialect_op_refusal`.
+        dialect_ops = {}
         for sub in M.iter_nodes(fn.body):
             if isinstance(sub, F.IdentExpr):
                 # `exempt_roots` is the OTHER half of the rule the arm below
@@ -8891,10 +8900,20 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 if first_mlir is None and id(sub) not in exempt_roots \
                         and sub.name.startswith(M.MLIR_DIALECT_PREFIX):
                     first_mlir = bracketed.get(id(sub)) \
-                        or M.mlir_dialect_refusal(sub.name)
+                        or M.mlir_dialect_refusal(sub.name,
+                                                  dialect_ops.get(id(sub)))
                 continue
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
                 continue
+            # The bracketed and dotted spellings both reach here as one node or
+            # a MemberExpr under a SubscriptExpr, and `mlir_dialect_op_name`
+            # unwraps the bracket itself rather than asking twice.
+            op = M.mlir_dialect_op_name(sub)
+            if op is not None:
+                root_ident = sub
+                while isinstance(root_ident, (F.MemberExpr, F.SubscriptExpr)):
+                    root_ident = root_ident.obj
+                dialect_ops.setdefault(id(root_ident), op)
             if M.template_is_answered(sub):
                 # Answered at build time, so nothing is left to refuse about it
                 # and the tree below it is not a use of anything. The rewrite
@@ -9335,8 +9354,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # `model.mlir_dialect_refusal` for why naming it beats the
                 # fallback's "no home", which names a symptom of the register
                 # fall-through and sends the reader to the allocator instead of
-                # to the construct.
-                why = M.mlir_dialect_refusal(name)
+                # to the construct. The OPERATION is passed as well as the name
+                # when `dialect_ops` has it, because the name alone cannot say
+                # which of the several kinds of dialect construct this is: 104
+                # operations over the stdlib denote an effect, an elementwise
+                # arithmetic result or something that needs a fact this path
+                # does not have, and one sentence over all three was false of a
+                # measurable subset.
+                why = M.mlir_dialect_refusal(name, dialect_ops.get(id(node)))
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
             gslot = M.module_slot(name)
             if gslot is not None:
