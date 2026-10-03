@@ -6384,11 +6384,18 @@ ctor_field_value=self._ctor_field_value_for(name),
                 # as the zero-element literal rather than refused: `len()` of it
                 # is 0, which is what the source says.
                 #
-                # With ARGUMENTS it is a genuinely different problem and keeps
-                # its own diagnostic: a blob's size is fixed when the function
-                # is laid out, so one that has to hold n elements needs a frame
-                # reservation sized by a value this compiler does not have.
-                if operands:
+                # With ARGUMENTS it is a different question, and
+                # `model.blob_constructor_lowering` is what decides it — one
+                # predicate for both architectures and for the value model's
+                # `ctor_establishes_slot`, so a kind can never be claimed for a
+                # slot whose constructor store the emitter would refuse.  A blob
+                # that has to HOLD n elements needs a frame reservation sized by
+                # a value this compiler does not have, so it keeps its own
+                # diagnostic; a `capacity=` operand is a reservation rather than
+                # content and lowers as the empty container, with its limits in
+                # that function's docstring.
+                if M.blob_constructor_lowering(name, e.args,
+                                               e.kwargs) is None:
                     raise CodegenError(
                         M.blob_constructor_with_operands_refusal(
                             name, len(operands)))

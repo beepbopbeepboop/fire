@@ -7173,22 +7173,25 @@ ctor_field_value=self._ctor_field_value_for(name),
             # have, which is a change of far more than this construct.
             #
             # What IS closed here is the one bracketed callee this path can
-            # answer, and it is closed by asking the SAME two shared predicates
+            # answer, and it is closed by asking the SAME shared predicates
             # arm64 asks rather than by copying its decision: the base name
-            # (`model.subscript_callee_name`) and whether that name has an
-            # empty form (`model.empty_blob_constructor`). So the two
-            # architectures reach the same answer for `List[Int]()` by the same
+            # (`model.subscript_callee_name`) and whether this construction
+            # lowers (`model.blob_constructor_lowering`, which covers the
+            # zero-operand form and a `capacity=` reservation and refuses
+            # everything else). So the two architectures reach the same answer
+            # for `List[Int]()` and for `List[Int](capacity=n)` by the same
             # rule, and the residual gap stays a gap instead of becoming a
             # third private copy of the flattening.
             base = M.subscript_callee_name(e)
-            if base is not None and M.empty_blob_constructor(base):
-                operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
-                if operands:
-                    raise CodegenError(
-                        M.blob_constructor_with_operands_refusal(
-                            base, len(operands)))
+            if base is not None and M.blob_constructor_lowering(
+                    base, e.args, e.kwargs) is not None:
                 self._emit_empty_blob()
                 return
+            if base is not None and M.empty_blob_constructor(base):
+                operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
+                raise CodegenError(
+                    M.blob_constructor_with_operands_refusal(
+                        base, len(operands)))
             # …and a BRACKETED callee this unit does not compile, asked about
             # by the ONE shared reader arm64 asks too, so the two
             # architectures cannot give different answers about one construct —
@@ -7798,11 +7801,18 @@ ctor_field_value=self._ctor_field_value_for(name),
                 # so the two cannot answer differently about which names have
                 # an empty form.
                 #
-                # With ARGUMENTS it is a genuinely different problem and keeps
-                # its own diagnostic: a blob's size is fixed when the function
-                # is laid out, so one that has to hold n elements needs a frame
-                # reservation sized by a value this compiler does not have.
-                if operands:
+                # With ARGUMENTS it is a different question, and
+                # `model.blob_constructor_lowering` is what decides it — one
+                # predicate for both architectures and for the value model's
+                # `ctor_establishes_slot`, so a kind can never be claimed for a
+                # slot whose constructor store the emitter would refuse.  A blob
+                # that has to HOLD n elements needs a frame reservation sized by
+                # a value this compiler does not have, so it keeps its own
+                # diagnostic; a `capacity=` operand is a reservation rather than
+                # content and lowers as the empty container, with its limits in
+                # that function's docstring.
+                if M.blob_constructor_lowering(name, e.args,
+                                               e.kwargs) is None:
                     raise CodegenError(
                         M.blob_constructor_with_operands_refusal(
                             name, len(operands)))

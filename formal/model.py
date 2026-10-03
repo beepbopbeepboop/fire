@@ -7331,17 +7331,21 @@ def struct_field_kind(struct_def, name, int_names=(), string_names=(),
         correct;
       * a NESTED FRAMED STRUCT, which the constructor PLACES — see
         `struct_nested_frame_fields` — so the slot holds a real frame address
-        whatever the defaults are.
+        whatever the defaults are;
+      * a value a CONSTRUCTOR puts there — `ctor_establishes_slot` below, and
+        the door the other two could never open, because a container has no
+        literal class-level default on this path.
 
     Everything else is None, and None is the answer rather than a gap in the
-    table.  It is what `len(self.xs)` gets for `var xs: List[Int]`, and the
-    reason refusing is right is measured, not inferred: with the kind claimed
-    from the annotation alone, the same program BUILT on both architectures and
-    died with SIGSEGV (exit 139), because the slot held 0 and `len` loaded
-    eight bytes from address 0.  A container default is already refused by
-    name — `struct_frame_representable` says "the default is not a literal" —
-    so the value is unreachable from the declaration in every direction, and
-    `frame_slot_value_refusal` is what says so.
+    table.  It is what `len(self.xs)` gets for `var xs: List[Int]` when nothing
+    puts a list in the slot, and the reason refusing is right is measured, not
+    inferred: with the kind claimed from the annotation alone, the same program
+    BUILT on both architectures and died with SIGSEGV (exit 139), because the
+    slot held 0 and `len` loaded eight bytes from address 0.  A container
+    default is already refused by name — `struct_frame_representable` says "the
+    default is not a literal" — so the value is unreachable from the
+    DECLARATION in every direction, and `frame_slot_value_refusal` is what says
+    so.  It is reachable from the CONSTRUCTOR, which is the third door.
     """
     base, ann, _ev, _why = struct_field_type(struct_def, name, decls)
     if base is None:
@@ -7352,7 +7356,141 @@ def struct_field_kind(struct_def, name, int_names=(), string_names=(),
     default, _payload = struct_field_default(struct_def, name)
     if default in (DEFAULT_INT, DEFAULT_STRING):
         return kind
+    if ctor_establishes_slot(struct_def, name, kind):
+        return kind
     return None
+
+
+def ctor_establishes_slot(struct_def, field: str, kind: str) -> bool:
+    """Do this struct's CONSTRUCTORS put a value of `kind` in `field`?
+
+    The third door of `struct_field_kind`, and the one that exists because a
+    container cannot come in through the other two: this path materializes a
+    container default only as `[]`, and a field declared `var xs: List[Int]` with
+    `= []` is not a program the standard library writes — the shape is a
+    constructor that BUILDS the container.
+
+    **`S()` does run `__init__`, which is what used to be the premise here and
+    is not the question any more.** The lowering inlines the body at the
+    construction site (`init_body_stores`), so a value the constructor assigns is
+    a value the object HAS, at every site, in every function.  So the evidence
+    is the constructor's own store, and four conditions have to hold together:
+
+      * the struct is ONE FIELD (`struct_is_one_field`), so its receiver IS
+        this field.  That is not tidiness: premise (B1) —
+        `FRAME_FIELD_BLOB_PREMISE_B1`, "no executed method writes a container
+        into a field" — is about a container whose lifetime is the ASSIGNING
+        function's while the slot's lifetime is the object's, and a multi-field
+        struct's frame is exactly the object whose lifetime outlives the
+        assigning function.  A one-field struct has no frame at all: the word
+        IS the container address, and its lifetime is the ordinary value path's,
+        which already governs every `var xs = List[Int]()` in the corpus.  This
+        is the same line `formal/build.py`'s `check_frame_field_container_writes`
+        draws, for the same reason.
+      * the struct DECLARES a constructor, and every one of them assigns this
+        field.  A constructor that leaves it alone leaves the class-level
+        default there instead, which for a container is the unrepresentable
+        case the first two doors refuse.
+      * every such store is a value this path MATERIALIZES as `kind`: a
+        container display (`[]`, `[1, 2]`) or a zero-operand construction of an
+        empty container (`List[Int]()`, `Dict()`), which are `_emit_list` and
+        `_emit_empty_blob` respectively — the same two blob layouts `len` reads
+        a count out of.  A store this path cannot evaluate is the absent answer,
+        and `List[Int](capacity=n)` is one, because a blob that must HOLD n
+        elements needs a reservation sized by a value this compiler has not at
+        layout time.
+      * no method OTHER THAN `__init__` writes the field
+        (`struct_field_written_outside_init`), because `ValueKinds` is
+        flow-insensitive by construction and a setter would put something else
+        in the slot with the constructor saying nothing about it.
+
+    The BODY shape is read through `_init_statement_field_stores`, the same
+    table `init_body_stores` inlines from, so this cannot claim a value out of a
+    statement the emitter is going to refuse; and `_init_free_names` is the
+    emitter's own rule about names, so a right-hand side that needs a binding
+    the construction site does not have is refused before this is asked.  The
+    two are not re-derived here and that is the point: a third copy of either
+    question is a third answer.
+
+    **What it does not cover, stated because it is the residual and not a
+    detail.** The claim is about the CONSTRUCTOR, so it is a claim about every
+    way a value of this struct comes into existence being a construction.  A
+    value that arrives without one — a bare `var w: W` that is never assigned —
+    is not something this analysis can rule out at the use site, and a program
+    that does that and then asks for its `len` still faults.  It is the same
+    residual the LITERAL-default door has for a field whose value a later
+    statement overwrites (`a_field_written_after_its_construction_is_refused` is
+    the per-site half of it), and it is refused rather than guessed because the
+    wrong answer is a load from address 0.
+    """
+    if kind is None or not is_list_kind(kind):
+        return False
+    if not struct_is_one_field(struct_def):
+        return False
+    if struct_field_written_outside_init(struct_def, field):
+        return False
+    receivers = struct_receivers(struct_def)
+    saw_ctor = False
+    for method in struct_methods(struct_def):
+        if method.name != "__init__":
+            continue
+        saw_ctor = True
+        stores = []
+        for stmt in (getattr(method, "body", None) or []):
+            if isinstance(stmt, F.PassStmt):
+                continue
+            if isinstance(stmt, F.ExprStmt) and isinstance(stmt.value,
+                                                          F.StringLiteral):
+                continue        # a docstring is a statement with no effect
+            if not isinstance(stmt, F.AssignStmt):
+                return False    # a body `init_body_stores` would refuse
+            pairs = _init_statement_field_stores(stmt, receivers)
+            if not pairs:
+                return False
+            stores.extend(pairs)
+        mine = [value for target, value in stores
+                if isinstance(target, F.MemberExpr) and target.member == field]
+        if not mine or not all(_value_materializes_blob(v) for v in mine):
+            return False
+    return saw_ctor
+
+
+def _value_materializes_blob(value) -> bool:
+    """Whether evaluating `value` here produces a blob on this path.
+
+    Two shapes, and they are the two the emitter already has a layout for:
+    a container display (`_emit_list` lays out `[count][elements…]`) and a
+    construction of an EMPTY container (`_emit_empty_blob`, the same eight bytes
+    with a zero count) — with or without a `capacity=` reservation.  Everything
+    else is False, which is the absent answer rather than a judgement: a name, an
+    arithmetic expression, a container constructor with an operand that is not a
+    reservation, a call to something this path does not place.  The last of
+    those is `List[Int](n)`, which has to HOLD n elements and needs a
+    reservation this compiler does not have at layout time — so it stays
+    refused by name.  The decision is `blob_constructor_lowering` rather than a
+    test spelled here, because the emitter asks the same question and the two
+    answers have to be one.
+    """
+    if isinstance(value, (F.ListExpr, F.DictExpr, F.TupleExpr)):
+        return True
+    if not isinstance(value, F.CallExpr):
+        return False
+    callee = value.func
+    base = callee
+    while isinstance(base, F.SubscriptExpr):
+        base = getattr(base, "obj", None)
+    if not isinstance(base, F.IdentExpr):
+        return False
+    # `blob_constructor_lowering`, not a test spelled here: a kind claimed for a
+    # slot has to come from the same rule the emitter applied, or
+    # `ctor_establishes_slot` would open a door the emitter shuts. That is the
+    # whole reason it is one function — it is what stopped
+    # `std/collections/binary_heap.mojo`, whose SECOND `__init__` builds
+    # `List[Self.T](capacity=capacity)` and whose first one builds
+    # `List[Self.T]()`.
+    return blob_constructor_lowering(
+        base.name, getattr(value, "args", None),
+        getattr(value, "kwargs", None)) is not None
 
 
 def frame_slot_declared_annotation(candidates, name, decls=None) -> str | None:
@@ -13513,9 +13651,16 @@ class ValueKinds:
             # the same line contradicts, and one the two spellings disagreed
             # about (the bracketed one reached `_flat_callee`'s None arm, the
             # bare one reached the type-constructor fallback).
+            # `blob_constructor_lowering` and NOT `empty_blob_constructor`, so
+            # this arm and the emitter's cannot answer differently: a
+            # `capacity=` reservation produces the same empty blob the
+            # zero-operand form does, and a local bound to one of those (`var d =
+            # List[Int](capacity=4)`) was classified an integer while the emitter
+            # emitted a blob for it — so `len(d)` was refused with "an integer
+            # has no length" about a container the same line had just built.
             ctor = subscript_callee_name(e) or callee
-            if ctor is not None and empty_blob_constructor(ctor) \
-                    and not (e.args or e.kwargs):
+            if ctor is not None and blob_constructor_lowering(
+                    ctor, e.args, e.kwargs) is not None:
                 return LIST_PREFIX
             if callee is None:
                 return None
@@ -14787,6 +14932,13 @@ def blob_constructor_with_operands_refusal(callee_name: str, nargs: int) -> str:
     reservation sized by a value the compiler does not have, and emitting it
     anyway would mean a blob whose capacity is whatever the allocator left —
     which is the X19 fall-through this path refuses everywhere else.
+
+    **`capacity=` is no longer one of the refused shapes**, and
+    `blob_constructor_lowering` is what says so instead. The paragraph above is
+    about a blob that has to HOLD `nargs` ELEMENTS; a capacity says how much room
+    to set aside, not what is in the container, and the two are not the same
+    question. The limits of the answer are in that function's docstring and they
+    are the reason this refusal is still reached for every other operand.
     """
     return (
         f"constructing {callee_name}[…](…) with {nargs} argument(s) has no "
@@ -14795,9 +14947,77 @@ def blob_constructor_with_operands_refusal(callee_name: str, nargs: int) -> str:
         f"out [count:i64][element 0]…, so {callee_name}() is eight bytes with a "
         f"zero count in them and lowers, while a blob that has to HOLD {nargs} "
         f"element(s) needs a frame reservation whose size is a value this "
-        f"compiler does not have at layout time. Build the container in the "
-        f"caller and assign the field after construction, or append to a "
+        f"compiler does not have at layout time. (A `capacity=` operand is not "
+        f"in that class — it is a reservation hint and lowers as the empty "
+        f"container; see `model.blob_constructor_lowering`.) Build the container "
+        f"in the caller and assign the field after construction, or append to a "
         f"{callee_name} literal, which reserves the room it needs")
+
+
+# The keyword a container's RESERVATION is spelled with, and the only one. A
+# narrow name on purpose: this is the stdlib's spelling (`List[Self.T](capacity=
+# capacity)` in `std/collections/binary_heap.mojo`, `List(capacity=n)` everywhere
+# else) and a second accepted spelling would be a guess about a keyword this
+# compiler has never seen.
+BLOB_CAPACITY_KEYWORD = "capacity"
+
+# The two answers, named rather than spelled at the two emitters separately.
+BLOB_LOWER_EMPTY = "empty"
+BLOB_LOWER_RESERVED = "reserved"
+
+
+def blob_constructor_lowering(callee_name: str, positional=(),
+                              keywords=()) -> str | None:
+    """How to lower `List[…](…)`, or None when it cannot be lowered.
+
+    ONE decision for both architectures and for every caller that needs to know
+    whether a container construction produces a blob — the emitters, and
+    `_value_materializes_blob`'s question about a constructor store. The last of
+    those is why this is a function and not an emitter arm: a kind claimed for a
+    slot has to come from the same rule the emitter applied, or
+    `struct_field_kind` would open a door the emitter shuts.
+
+      * `BLOB_LOWER_EMPTY` — no operands. Eight bytes with a zero count, which is
+        `_emit_empty_blob` and is the same blob `[]` builds.
+      * `BLOB_LOWER_RESERVED` — every operand is the keyword `capacity`.
+        `blob_constructor_with_operands_refusal`'s own paragraph is about a blob
+        that has to HOLD n ELEMENTS, and a capacity is not that: it says how much
+        room to set aside, and the container it builds is EMPTY either way. So
+        the value is the empty container and the reservation is not modelled.
+      * None — anything else, refused by name.
+
+    **The limits of `BLOB_LOWER_RESERVED`, because an answer with unstated limits
+    is the thing this codebase keeps refusing to ship.** What is dropped is the
+    RESERVATION and nothing else: `len` of the result is 0 and stays 0 until a
+    statement appends, and the count word is a real word in a real eight-byte
+    blob. What is NOT claimed is that appending to it will work: `append` into a
+    blob this path did not reserve the room for is refused by name already
+    (`list.append() is not lowered … the receiver is not a list literal`), so the
+    dropped reservation cannot turn into a write past a blob. And a program that
+    can OBSERVE a capacity is not one this path can run either way —
+    `List.capacity` is not a lowered method and `unsafe_ptr` is refused — so
+    there is no construct whose answer this changes from right to wrong.
+
+    **Measured, on both architectures, on the stdlib file this was found on.**
+    `std/collections/binary_heap.mojo` declares
+    `def __init__(out self, *, capacity: Int): self._data =
+    List[Self.T](capacity=capacity)`, and that ONE store is what kept
+    `model.ctor_establishes_slot` shut for the whole file — the other four
+    hundred lines' worth of constructor evidence were already in order. With this
+    answer, `len(self._data)` in `__len__` lowers and `binary_heap.mojo` stops
+    refusing on it.
+    """
+    if not empty_blob_constructor(callee_name):
+        return None
+    positional = list(positional or ())
+    keywords = list(keywords or ())
+    if not positional and not keywords:
+        return BLOB_LOWER_EMPTY
+    if positional:
+        return None
+    if all(name == BLOB_CAPACITY_KEYWORD for name, _v in keywords):
+        return BLOB_LOWER_RESERVED
+    return None
 
 
 def subscript_callee_names(call) -> list:
@@ -20293,16 +20513,28 @@ def _init_free_names(struct_def, value):
     therefore SKIPPED rather than refused, and skipping it is also what lets the
     rewrite's output stay out of this question: a lift is a different tree (a
     callee name, a node for the receiver, the caller's own expressions where the
-    parameters were) and this walk is about the names the BODY reads.  The three
+    parameters were) and this walk is about the names the BODY reads.
+
+    A TYPE-POSITION name is skipped for a different reason and is not a scope
+    question at all: `Self.T` and a trait conjunction bind nothing, so a name
+    that only ever appears in a type is not one of the locals whose absence at a
+    construction site would make a read pick up whatever register the calling
+    function left in it.  `_init_type_position_names` is the walk that knows
+    which names those are.
+
+    The three
     singletons are excluded because they are the language's own and both
     backends already materialize them (see `_INIT_SINGLETON_NAMES`).
     """
     receivers = struct_receivers(struct_def)
+    type_names = _init_type_position_names(value) - receivers
     locals_ = []
     for node in iter_nodes(value):
         if not isinstance(node, F.IdentExpr) or node.name in _INIT_SINGLETON_NAMES:
             continue
         if node.name in receivers:
+            continue
+        if node.name in type_names:
             continue
         locals_.append(node.name)
     if not locals_:
@@ -20314,6 +20546,56 @@ def _init_free_names(struct_def, value):
         f"or takes, which this body does not substitute for a construction "
         f"argument. Only a bare parameter can be: only a bare parameter has the "
         f"caller's own expression standing in for it at the construction site")
+
+
+def _init_type_position_names(value) -> set:
+    """The names this right-hand side reads in TYPE position, which bind nothing.
+
+    The exception to `_init_free_names`, and it is an exception about NAMES
+    rather than about scopes: a type name is not a value, so it is not one of
+    the locals whose absence at a construction site would make a read pick up
+    whatever register the calling function happened to leave in it.  The
+    emitter resolves `List[Self.T]` through its type-constructor path and never
+    looks for a binding, so refusing it as a free name refuses a name the
+    program does not have.
+
+    **One position, not "any name that looks like a type".** A `CallExpr` whose
+    `func` is a TYPE CONSTRUCTOR — the bare name (`List()`) or a subscript over
+    one (`List[Self.T]()`, `Dict[String, List[Int]]()`) — spells a
+    construction, and every name inside that callee is part of the type being
+    constructed: the base, `Self`, and the type arguments.  A subscript on
+    anything else is a specialization of a FUNCTION, and there the bracket
+    holds an expression this path would have to evaluate, so it is not exempt
+    and the free-name rule reads it exactly as before.  The `&`-conjunction and
+    the rest of `Self.X` are the same statement about type arguments, so the
+    walk covers the whole callee subtree rather than the base alone.
+
+    Measured, and the case is a real stdlib file rather than a synthetic one:
+    `std/collections/binary_heap.mojo`'s `__init__(out self)` is one statement,
+    `self._data = List[Self.T]()`, and it was refused by name with "a read of
+    'List', 'Self' in the right-hand side — a name the `__init__` binds or
+    takes".  Neither name is bound by anything.  A container-backed struct is
+    the shape that needs it: without it, NO field of this shape can be given
+    its value by a constructor, so `struct_field_kind`'s constructor door is
+    unreachable for every one of them.
+    """
+    out = set()
+    for node in iter_nodes(value):
+        if not isinstance(node, F.CallExpr):
+            continue
+        callee = node.func
+        base = callee
+        while isinstance(base, F.SubscriptExpr):
+            base = getattr(base, "obj", None)
+        if not isinstance(base, F.IdentExpr):
+            continue
+        if type_constructor_kind(base.name) is None \
+                and not empty_blob_constructor(base.name):
+            continue
+        for sub in iter_nodes(callee):
+            if isinstance(sub, F.IdentExpr):
+                out.add(sub.name)
+    return out
 
 
 def _init_overload_spelling(overloads) -> str:

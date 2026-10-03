@@ -12328,15 +12328,29 @@ WAVE7_G2_CASES = [
     # here is a bare `self` and the declared type has to be recovered from the
     # struct's one field.
     #
-    # NOT the shape `std/collections/binary_heap.mojo` is in, which is what
-    # this comment used to say: `BinaryHeap` has TWO fields here, because its
-    # comptime parameter `T` is in `struct_field_names` and `struct_is_framed`
-    # counts it, so `BinaryHeap` is a frame and its `len(self)` is the
-    # `__len__` call `formal/build.py`'s `_rewrite_len_on_frame_receivers` now
-    # makes (see `test_formal_frame_len.py`).  A one-field
-    # struct is not a frame, `b` below is a plain word, and the `__len__` on it
-    # is not reached at all — which is why this case still refuses, for the
-    # field-value reason and not for a length reason.
+    # BOTH of these used to be REFUSALS naming "this slot's DECLARED type is
+    # 'List[Int]'", and they are the two halves of the change
+    # `model.ctor_establishes_slot` made: a container cannot come into a slot
+    # through a class-level default on this path (a container default is refused
+    # by name, `struct_frame_representable`: "the default is not a literal"), so
+    # the CONSTRUCTOR was the only remaining door and it was shut.  `S()` DOES
+    # run `__init__` — the body is inlined at the construction site — so a value
+    # the constructor assigns is a value the object has at every site, and 3 is
+    # what `len(b)` returns on both architectures.
+    #
+    # This IS the shape `std/collections/binary_heap.mojo` is in, which is what
+    # this comment used to say and then denied.  It denied it because
+    # `BinaryHeap` measured TWO fields: its comptime parameter `T` was in
+    # `struct_field_names`, `struct_is_framed` counted it, so `BinaryHeap` was a
+    # frame and its `len(self)` became the `__len__` call
+    # `formal/build.py`'s `_rewrite_len_on_frame_receivers` makes (see
+    # `test_formal_frame_len.py`) — a different construct, which
+    # is why the file was refused for a field-VALUE reason on a frame-slot read.
+    # `BinaryHeap[T: Copyable & Comparable & Deinitable]` spells its bound as a
+    # CONJUNCTION, which the parser did not recognise as a bound and filed as a
+    # `VarDecl` field; `fire_compiler._struct_param_is_bound` closes that, and
+    # `BinaryHeap` is one field again.  The first of these two cases is its
+    # `__len__` in miniature and the second is its `__len__` removed.
     ("len_one_word_struct_receiver_is_a_list_field",
      "struct B:\n"
      "    var _data: List[Int]\n"
@@ -12347,7 +12361,7 @@ WAVE7_G2_CASES = [
      "def main(k: Int) -> Int:\n"
      "    var b = B()\n"
      "    return len(b)\n",
-     "refuse:this slot's DECLARED type is 'List[Int]'", None),
+     3, None),
     # The same one-word struct, read through a LOCAL the constructor was bound
     # to rather than through the receiver.  `b` is a plain word on this path —
     # deliberately not a frame holder, because a one-field struct has no frame —
@@ -12360,6 +12374,99 @@ WAVE7_G2_CASES = [
      "def main(k: Int) -> Int:\n"
      "    var b = B()\n"
      "    return len(b)\n",
+     3, None),
+    # ── and the shapes that must STILL be refused, which are the whole of
+    # the gate's safety ──
+    #
+    # Each of these is a case where claiming the kind from the DECLARATION
+    # alone would be a wrong answer, and for the first one the wrong answer was
+    # MEASURED rather than argued: with the kind taken from `var _data:
+    # List[Int]` and nothing else, this built on BOTH architectures, ran, and
+    # died with SIGSEGV (exit 139) — `LDR X0, [X0]` with X0 zero, because the
+    # slot held 0 and `len` read eight bytes from address 0.  A build that stays
+    # green and faults is the failure this suite exists to catch, so the case is
+    # here rather than left to the refusal it is.
+    ("len_one_word_struct_with_no_constructor_is_refused",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     "refuse:this slot's DECLARED type is 'List[Int]'", None),
+    # The constructor's store is not a blob.  `self._data = k` is a WORD, and a
+    # word is not `[count][elements…]`, so `len` still has no count to read —
+    # the constructor door is not "the struct declares a constructor", it is
+    # "every constructor puts a materialized blob in THIS field".
+    ("len_one_word_struct_whose_constructor_stores_a_word_is_refused",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self, k: Int):\n"
+     "        self._data = k\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B(k)\n"
+     "    return len(b)\n",
+     "refuse:this slot's DECLARED type is 'List[Int]'", None),
+    # A container constructor with a `capacity=` RESERVATION, which is a
+    # DIFFERENT question from one that has to hold n elements and so is
+    # answered: a capacity says how much room to set aside, not what is in the
+    # container, and the container is empty either way.  0, not 3 — the count
+    # word of the blob is zero and the reservation is not modelled, which
+    # `model.blob_constructor_lowering` states as its limits.  This store is the
+    # one that kept `ctor_establishes_slot` shut for
+    # `std/collections/binary_heap.mojo`, whose second `__init__` is
+    # `self._data = List[Self.T](capacity=capacity)`.
+    ("len_one_word_struct_constructed_with_a_capacity",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int](capacity=3)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     0, None),
+    # …and the two operand shapes that are STILL a sized blob and so are still
+    # refused.  A positional argument says how many elements the container has,
+    # which is content rather than reservation, and `model` recognises exactly
+    # one reservation keyword because that is the one this stdlib spells.
+    ("len_one_word_struct_constructed_with_a_positional_size_is_refused",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int](3)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     "refuse:has no representation on this path", None),
+    ("len_one_word_struct_constructed_with_an_unknown_keyword_is_refused",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int](reserve=3)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     "refuse:has no representation on this path", None),
+    # A TWO-field struct, where the container door is SHUT.  Premise (B1) —
+    # `FRAME_FIELD_BLOB_PREMISE_B1`, "no executed method writes a container into
+    # a field" — is about the two lifetimes coming apart: the blob would live in
+    # the ASSIGNING function's frame while the slot's lifetime is the object's,
+    # and the object's frame can outlive the assignment.  A one-field struct has
+    # no frame, so its blob is governed by the ordinary value path and the door
+    # is open; a multi-field struct has one, so it stays shut.  Same program as
+    # the first answered case with one `Int` field added, and that one field is
+    # the whole difference.
+    ("len_container_field_of_a_two_field_struct_is_refused",
+     "struct P:\n"
+     "    var _data: List[Int]\n"
+     "    var n: Int\n"
+     "    def __init__(out self):\n"
+     "        self._data = [1, 2, 3]\n"
+     "        self.n = 1\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    return p.size()\n",
      "refuse:this slot's DECLARED type is 'List[Int]'", None),
     # ── (3) the case that is ANSWERED, and is the whole point of the gate ──
     # A LITERAL class-level default IS materialized by the constructor at every
@@ -15341,18 +15448,37 @@ TYPE_APPLICATION_REFUSALS = [
      "    printf(\"ok\")\n"
      "    return 0\n",
      0, "ok"),
-    # WITH ARGUMENTS it is a genuinely different question and gets its own
-    # diagnostic, which says why: a blob's size is fixed when the function is
-    # laid out, so one that must hold n elements needs a reservation sized by a
-    # value the compiler does not have. Before this change it was refused as
-    # "has no representation on this path", which is FALSE about the empty form
-    # and true about this one, and so true of neither — the diagnostic this row
-    # pins is the one that says both halves.
+    # WITH ARGUMENTS that are CONTENT it is a genuinely different question and
+    # gets its own diagnostic, which says why: a blob's size is fixed when the
+    # function is laid out, so one that must hold n elements needs a reservation
+    # sized by a value the compiler does not have. Before the diagnostic existed
+    # this was refused as "has no representation on this path", which is FALSE
+    # about the empty form and true about this one, and so true of neither — the
+    # diagnostic this row pins is the one that says both halves.
+    #
+    # It was `capacity=n`, and `capacity=n` no longer belongs here: a capacity is
+    # a RESERVATION rather than content, so
+    # `model.blob_constructor_lowering` answers it with the empty container and
+    # `len_container_field_constructed_with_a_positional_size_is_refused` is the
+    # row that keeps the class. The needle still says "the empty form is a
+    # different question" because that clause is what makes the refusal a
+    # statement about CONTENT.
     ("blob_constructor_with_operands_is_refused_by_its_own_reason",
      "def main(n: Int) -> Int:\n"
-     "    var xs = List[Int](capacity=n)\n"
+     "    var xs = List[Int](n)\n"
      "    return 0\n",
      "refuse:the empty form is a different question", None),
+    # …and the reservation form, which is the case this file's row above used to
+    # pin as a refusal and which now has to be pinned as an ANSWER instead, or
+    # nothing would notice it changing back. `len(xs)` is 0 because the
+    # container a capacity builds is empty; the room is not modelled and
+    # `blob_constructor_lowering`'s docstring is where that is written down.
+    ("blob_constructor_with_a_capacity_operand_is_the_empty_container",
+     "def main(n: Int) -> Int:\n"
+     "    var xs = List[Int](capacity=n)\n"
+     "    printf(\"n=%d\", len(xs))\n"
+     "    return 0\n",
+     0, "n=0"),
 ]
 
 
