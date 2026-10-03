@@ -56,13 +56,13 @@ from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWOR
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.module_shared import *  # noqa: F401,F403
-# `import *` skips underscore-prefixed names, and this one is the single
-# list the three dispatch-global sites below read. From `mojo.middle.types`
-# rather than `module_shared`, which `gimple_codegen` imports at ITS line 70:
+# `import *` skips underscore-prefixed names, and this is the single accessor
+# the three dispatch-global sites below read. From `mojo.middle.types` rather
+# than `module_shared`, which `gimple_codegen` imports at ITS line 70:
 # reading it from there would close the cycle
 # `module_gen -> module_shared -> gimple_codegen -> module_gen`, and the
 # name would be unavailable at the moment the import ran.
-from mojo.middle.types import _DISPATCH_TABLE_GLOBAL_NAMES
+from mojo.middle.types import dispatch_table_global_ctype
 from mojo.middle.module_shared import (
     _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
@@ -1349,26 +1349,20 @@ def _gmi_expr_provably_str(e) -> bool:
     return False
 
 
-# The hardcoded dispatch tables (`_STMT_DISPATCH` etc.) that get a bare
-# `MojoDict *` / `MojoList *` / `MojoSet *` module-global field rather than
-# the boxed `int64_t` convention. A module-level tuple + explicit `==` loop:
-# `name in <a set literal>` returned True for UNRELATED names on the
-# self-hosted compiled path (`'arr' in _dispatch_names`), declaring an
-# ordinary `arr = [1,2,3]` global as a bare `MojoList *` field (a
-# stage1-vs-stage2 parity break under MOJO_NO_SHIM=1, array_ops_jit.mojo).
-# The same ONE list the global-declaration and seed sites read
-# (module_shared's `_DISPATCH_TABLE_GLOBAL_NAMES`), so a name added there is
-# declared here too. These four used to be separate tuples in four files and
-# only agreed because nobody had moved a global yet.
-_DISPATCH_TABLE_NAMES = _DISPATCH_TABLE_GLOBAL_NAMES
-
-
+# The compiler-internal dispatch/type-table globals (`_STMT_DISPATCH` etc.)
+# that get a bare `MojoDict *` / `MojoList *` / `MojoSet *` module-global field
+# rather than the boxed `int64_t` convention. Membership is
+# `dispatch_table_global_ctype`'s (the ONE table the global-declaration and
+# seed sites also read, so a name added there is declared here too). This used
+# to be a module-level tuple of names with an explicit `==` loop, and before
+# that a set literal: `name in <a set literal>` returned True for UNRELATED
+# names on the self-hosted compiled path (`'arr' in _dispatch_names`),
+# declaring an ordinary `arr = [1,2,3]` global as a bare `MojoList *` field (a
+# stage1-vs-stage2 parity break under MOJO_NO_SHIM=1, array_ops_jit.mojo). The
+# `... is not None` form keeps the dict's own lookup as the only membership
+# test, so the loop that outranked `in` is no longer reachable at all.
 def _is_dispatch_name(_n) -> bool:
-    _ns = _as_str(_n)
-    for _dn in _DISPATCH_TABLE_NAMES:
-        if _ns == _dn:
-            return True
-    return False
+    return dispatch_table_global_ctype(_as_str(_n)) is not None
 
 
 # The container C types a constructor argument is allowed to resolve a
@@ -1379,7 +1373,7 @@ def _is_dispatch_name(_n) -> bool:
 # and is free to widen) is not: an answer here is acted on only when it is
 # unanimous across every call site, and "no evidence" always beats a guess.
 # Kept as a tuple + explicit `==` chain (not a `in <set literal>` test) for
-# the same self-hosted reason `_DISPATCH_TABLE_NAMES` above documents.
+# the same self-hosted reason `_is_dispatch_name` above documents.
 _CTOR_CONTAINER_CTYPES = ('MojoList *', 'MojoDict *', 'MojoSet *')
 
 
@@ -8420,35 +8414,35 @@ def gen_module_impl(self, stmts):
         self, _phase17_mod,
         stmts + (imported_stmts if (self.do_imports or self.link_imports) else []))
 
-    # From the ONE list in module_shared, not a hand-written copy: these three
-    # sites and `_selfhost_module_scalar_globals`'s skip all need the same set
-    # of names, and the copies drifted apart when the globals moved module.
-    _EARLY_DISPATCH_DICTS = set(_DISPATCH_TABLE_GLOBAL_NAMES)
-    _EARLY_DISPATCH_SETS = set()
     # Indexed iteration + `_as_str`, NOT `for _gn, _gt in ....items()`: the
     # self-hosted 2-tuple unpack boxes BOTH slots to int64_t, so `_gn in
-    # self._global_c_decl_types` (plain-str keys) missed, `_gn in
-    # _EARLY_DISPATCH_DICTS` missed, and the final `else` wrote a
-    # decimal-address key with an erased value — `_BIN_OPS`/`_CMP_OPS`
-    # never got the `MojoDict *`/`MojoSet *` cdecl entry this loop exists
-    # to seed, so `_own_overlay_global_ctype`'s container rule could not
-    # return it and the module struct field came out `int64_t _BIN_OPS`
+    # self._global_c_decl_types` (plain-str keys) missed, the dispatch-name
+    # test missed, and the final `else` wrote a decimal-address key with an
+    # erased value — `_BIN_OPS`/`_CMP_OPS` never got their cdecl entry this
+    # loop exists to seed, `_own_overlay_global_ctype`'s container rule could
+    # not return it, and the module struct field came out `int64_t _BIN_OPS`
     # where the shim emits `MojoDict *`.
     _early_gvt_items = list(self._global_var_types.items())
     for _egi in range(len(_early_gvt_items)):
         _gn = _as_str(_early_gvt_items[_egi][0])
         _gt = _early_gvt_items[_egi][1]
-        # Dispatch-table check BEFORE the `already in _global_c_decl_types`
+        # Dispatch-table lookup BEFORE the `already in _global_c_decl_types`
         # skip: the Phase-1.7 scan (above) writes the generic scalar
         # `int64_t` placeholder for any global whose RHS it cannot resolve
         # (`_BIN_OPS = _GD_BIN_OPS`, an imported alias), so testing
         # membership first would skip exactly the names this loop exists to
         # preserve. `_own_overlay_global_ctype`'s documented rule 1 is that
-        # these container entries WIN over a scalar own-conclusion.
-        if _gn in _EARLY_DISPATCH_DICTS:
-            self._global_c_decl_types[_gn] = 'MojoDict *'
-        elif _gn in _EARLY_DISPATCH_SETS:
-            self._global_c_decl_types[_gn] = 'MojoSet *'
+        # these container entries WIN over a scalar own-conclusion — which is
+        # exactly why the answer has to be the name's REAL type and not a
+        # blanket `MojoDict *`: this lands in the SHARED bare-name-keyed
+        # `_global_c_decl_types`, so a wrong kind here re-types the OWNING
+        # module's own correct conclusion ("cannot coerce MojoSet * to
+        # MojoDict *", four modules of the self-host closure). A name the table
+        # does not carry is not forced at all, which is the honest "this scan
+        # knows nothing about it" and leaves the owner's conclusion standing.
+        _forced = dispatch_table_global_ctype(_gn)
+        if _forced is not None:
+            self._global_c_decl_types[_gn] = _forced
         elif _gn in self._global_c_decl_types:
             continue
         elif _gt in ('MojoDict *', 'MojoList *', 'MojoSet *'):
@@ -9559,14 +9553,15 @@ def gen_module_impl(self, stmts):
             # value-correctness issue, and neither hoisting location fixed
             # it — plain lists + `==` sidestep the MojoSet/MojoDict
             # runtime entirely for this specific (tiny, cold) check.
-            # Same ONE list (module_shared's), for the same reason: this copy
-            # was written before the globals moved out of gimple_codegen.py and
-            # had not been updated, so a `from mojo.middle.types import
-            # _TYPE_MAP` declared nothing and every read of it failed at C
-            # compile time. Declared as `MojoDict *` unless the name is a set,
-            # which the seeded cdecl type decides rather than a second list.
-            _dispatch_dict_names = list(_DISPATCH_TABLE_GLOBAL_NAMES)
-            _dispatch_set_names = []
+            # Same ONE table (`dispatch_table_global_ctype`, from
+            # `mojo.middle.types`), for the same reason: this copy was written
+            # before the globals moved out of gimple_codegen.py and had not
+            # been updated, so a `from mojo.middle.types import _TYPE_MAP`
+            # declared nothing and every read of it failed at C compile time.
+            # It needs NO list of its own — not even the dict/set split the
+            # two hand-kept lists used to carry, because the type is now the
+            # table's answer rather than a property of which list a name was
+            # written into.
             # `stmt.name_alias_strs` + `_fi_name`/`_fi_alias`, NOT
             # `stmt.names`/`alias[0]`/`alias[1]` — `FromImportStmt.names`
             # is `list[(str, str|None)]`, and its OWN dataclass docstring
@@ -9592,21 +9587,30 @@ def gen_module_impl(self, stmts):
                 if local_name != orig_name:
                     _check_names.append(local_name)
                 for check_name in _check_names:
-                    if check_name in _dispatch_dict_names and check_name not in _declared_globals:
-                        # The SEEDED type wins over a hard-coded `MojoDict *`:
-                        # a frozenset global (`_C_KEYWORDS`, `_C_RESERVED_FUNCS`)
-                        # is a MojoSet, and declaring it `MojoDict *` makes every
-                        # `in` and every iteration go through dict lowering.
-                        _dct = self._global_var_types.get(check_name) or 'MojoDict *'
+                    _forced = dispatch_table_global_ctype(check_name)
+                    if _forced is not None and check_name not in _declared_globals:
+                        # The SEEDED type wins over the table's, and the
+                        # table's is only the fallback — the same preference as
+                        # before, with a correct fallback instead of a blanket
+                        # `MojoDict *`. A seeded `MojoSet *` for a name that
+                        # looks like a dict table is the owner's own conclusion
+                        # and outranks this site's guess; what was wrong was the
+                        # guess, not the preference.
+                        #
+                        # Both halves matter. That blanket fallback declared a
+                        # frozenset global (`_C_KEYWORDS`, `_C_RESERVED_FUNCS`)
+                        # as a dict whenever nothing was seeded, and because the
+                        # answer lands in the SHARED bare-name-keyed
+                        # `_global_c_decl_types`, `_own_overlay_global_ctype`'s
+                        # rule 1 then made that FOREIGN answer beat the owning
+                        # module's own correct `MojoSet *` — "cannot coerce
+                        # MojoSet * to MojoDict * (incompatible container
+                        # kinds)" for four modules of the self-host closure.
+                        _dct = self._global_var_types.get(check_name) or _forced
                         global_decls.append(f"{_dct} {check_name};")
                         _declared_globals[check_name] = True
                         self._global_c_decl_types[check_name] = _dct
                         self._global_var_types[check_name] = _dct
-                    elif check_name in _dispatch_set_names and check_name not in _declared_globals:
-                        global_decls.append(f"MojoSet * {check_name};")
-                        _declared_globals[check_name] = True
-                        self._global_c_decl_types[check_name] = 'MojoSet *'
-                        self._global_var_types[check_name] = 'MojoSet *'
         elif isinstance(stmt, ImportStmt):
             for local_name in gimple_ctypes._import_local_names(stmt):
                 if local_name not in _declared_globals:
@@ -9859,8 +9863,10 @@ def gen_module_impl(self, stmts):
             # container rule could not return it and the struct field came
             # out `int64_t _BIN_OPS` where the shim emits `MojoDict *`.
             if _is_dispatch_name(gname):
-                _dt = ('MojoSet *' if _as_str(gname) == '_CMP_OPS'
-                       else 'MojoDict *')
+                # The table's REAL type, not `_CMP_OPS`-versus-everything-else:
+                # ten other names here are sets too, and this branch used to
+                # declare all ten of them `MojoDict *`.
+                _dt = dispatch_table_global_ctype(gname)
                 global_decls.append(f"{_dt} {gname};")
                 self._global_var_types[gname] = _dt
                 self._global_c_decl_types[gname] = _dt

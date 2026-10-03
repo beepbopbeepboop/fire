@@ -390,6 +390,7 @@ from mojo.middle.types import (
     _module_init_name, _used_idents_node, _CPP_CALLABLE_CTYPE,
     _CPP_CALLABLE_CTYPE_1ARG,
     _compute_exc_descendants, _unpack_target_leaf_names, _declared_vars_body,
+    dispatch_table_global_ctype,
 )
 from mojo.middle.solvers import (
     _find_idents, _scan_for_escaping, _find_escaping, EscapeAnalyzer,
@@ -4125,12 +4126,11 @@ class GimpleGen:
         Resolution rules, in order:
         1. A CONTAINER-pointer entry in the shared cdecl dict
            (`MojoDict *`/`MojoList *`/`MojoSet *` — the
-           `_EARLY_DISPATCH_DICTS`/`_EARLY_DISPATCH_SETS` dispatch-table
-           registrations and boxed containers) still wins over a scalar
-           own-conclusion exactly as before: those name compiler-internal
-           tables whose real boxed pointer representation this codegen
-           must preserve even when the owning module's own scan froze an
-           int64_t placeholder.
+           `dispatch_table_global_ctype` dispatch-table registrations and
+           boxed containers) still wins over a scalar own-conclusion exactly
+           as before: those name compiler-internal tables whose real boxed
+           pointer representation this codegen must preserve even when the
+           owning module's own scan froze an int64_t placeholder.
         2. Otherwise a SCALAR own-conclusion (`int64_t`, `double`,
            `_Bool`, `char *`) wins unconditionally — including over a
            foreign homonym's NON-container pointer cdecl ('char *',
@@ -4193,9 +4193,7 @@ class GimpleGen:
         if (own in ('MojoDict *', 'MojoList *', 'MojoSet *')
                 and not (cdecl is not None
                          and cdecl in ('MojoDict *', 'MojoList *', 'MojoSet *'))
-                and name not in ('_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
-                                 '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT',
-                                 '_CMP_OPS')):
+                and dispatch_table_global_ctype(name) is None):
             # A NON-dispatch CONTAINER own-conclusion whose shared cdecl is
             # absent OR non-container: the module-global C struct-field
             # convention boxes these as `int64_t`. Returning the raw container

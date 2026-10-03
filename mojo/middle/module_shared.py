@@ -189,9 +189,14 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
     # moved dispatch table then found no cdecl entry -- "struct
     # _mojo_middle_types_toplev has no member named '_TYPE_MAP'".
     #
-    # `_DISPATCH_TABLE_GLOBAL_NAMES` is the ONE list, and both this skip and
-    # `gen_module_impl`'s declaration sites read it.
-    _dispatch_only = set(gimple_ctypes._DISPATCH_TABLE_GLOBAL_NAMES)
+    # `dispatch_table_global_ctype` in `mojo.middle.types` is the ONE table,
+    # and both this skip and `gen_module_impl`'s declaration sites read it.
+    # `... is not None`, not `set(<the table>)`: `set()` over a module-level
+    # container is a shape the self-hosted compiled path gets wrong (a
+    # module-level `set(<tuple literal>)` lowers to a value `len()` cannot
+    # take, "passing argument 1 of 'mojo_list_len' makes pointer from integer
+    # without a cast"), and membership is all this skip ever wanted from it.
+    _dispatch_only = gimple_ctypes.dispatch_table_global_ctype
     _out: dict = {}
     for _f, _stmts in _selfhost_parsed_modules(sd):
         _mod = _selfhost_module_name_for_path(sd, _f)
@@ -199,7 +204,7 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
             if not (isinstance(_s, AssignStmt) and isinstance(_s.target, IdentExpr)):
                 continue
             _n, _v = _s.target.name, _s.value
-            if _n in _out or _n in _dispatch_only:
+            if _n in _out or _dispatch_only(_n) is not None:
                 continue
             if isinstance(_v, IntLiteral):
                 _out[_n] = (_mod, 'int', 'int64_t')
