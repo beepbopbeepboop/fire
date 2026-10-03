@@ -338,6 +338,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # The NAMES of owned locals bound to a closure; the free is emitted for the
     # name at the scope exit.
     gen._owned_closure_names: set = set()
+    # The ENV VARS of nested `def`s this function owns -- a plain malloc block
+    # each, freed with a bare `free` (there is no bound method and no
+    # `_reg_bound_method` entry to drop, so `mojo_closure_free` would be
+    # wrong here). See `register_nested_env_free`.
+    gen._owned_env_names: set = set()
     # Names of values whose per-slot element kinds are recorded ON THE VALUE
     # (`struct.unpack` of a mixed format, and a local bound from one) — the
     # marker that makes a read with no compile-time slot index (iteration, a
@@ -5593,7 +5598,7 @@ def _container_keys_safe(gen, name: str, ctype) -> bool:
     (ownership_destruct.key_views_consumed). Any other type is unaffected."""
     if ctype != 'MojoDict *' and ctype != 'MojoSet *':
         return True
-    return _key_views_ok(gen._own_fn_body, name)
+    return _key_views_ok(gen._cur_func_body, name)
 
 
 def maybe_push_owned_local(gen, name: str, value=None) -> None:
@@ -5632,7 +5637,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
     # bare static function pointer and allocates nothing, never appears there).
     if gen._decl_rhs_val != '' and gen._decl_rhs_val in gen._closure_vals:
         gen._closure_vals.discard(gen._decl_rhs_val)
-        if not _lambda_owned(gen._own_fn_body, name):
+        if not _lambda_owned(gen._cur_func_body, name):
             _drop_owned_candidate(gen, name)
             return
         gen._owned_closure_names.add(name)
@@ -5663,7 +5668,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         # name at the scope exit, long after the temp is gone.
         if rhs in gen._owned_str_elem_vals:
             gen._owned_str_elem_vals.discard(rhs)
-            if not _list_elements_ok(gen._own_fn_body, name):
+            if not _list_elements_ok(gen._cur_func_body, name):
                 # The list owns its strings, but the program may hand an
                 # element pointer out (`kept.append(parts[0])`), and the
                 # element free would then dangle. Fail closed to the plain
@@ -5675,7 +5680,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         # A fresh STRING is owned only if no method call on it can hand back
         # the receiver itself (`t = s.strip()` may alias `s`): see
         # ownership_destruct.receiver_results_consumed.
-        if gen.var_types.get(name) == 'char *' and not _string_uses_ok(gen._own_fn_body, name):
+        if gen.var_types.get(name) == 'char *' and not _string_uses_ok(gen._cur_func_body, name):
             candidates.discard(name)
             gen._owned_str_elem_names.discard(name)
             return
@@ -5779,6 +5784,10 @@ def _emit_owned_local_frees(gen):
         elif name in gen._owned_closure_names:
             # A bound method and the environment it owns (see mojo_closure_free).
             runtime_fn = 'mojo_closure_free'
+        elif name in gen._owned_env_names:
+            # A nested `def`'s environment: a plain malloc block and NO bound
+            # method, so a bare `free` -- see `register_nested_env_free`.
+            runtime_fn = 'free'
         elif name in gen._owned_str_elem_names and ctype == 'MojoList *':
             # Decided at the DECLARATION, where the value was still the temp a
             # `_OWNS_STR_ELEMS` function returned; re-derived here from
@@ -5849,7 +5858,14 @@ def _reset_scope_state(gen) -> None:
     declaring body is being lowered right now."""
     gen._literal_storage = ''
     gen._literal_storage_ctype = ''
-    gen._own_fn_body = []
+    # NOT `gen._cur_func_body`: that is the AST body BEING LOWERED, owned by
+    # `_reset_func` (and by `begin_function`), not per-candidate-set state. Its
+    # only two `reset_no_candidates` callers each call `_reset_func` on the
+    # body they are about to lower immediately before, so resetting it here
+    # did nothing but throw away the one piece of information the ownership
+    # analysis needs about the function in progress -- a struct method's own
+    # body became `[]`, which every "how is this local USED?" question then
+    # answered vacuously, i.e. "no mention, so nothing can hold it, free it".
     gen._scoped_free_candidates = set()
     gen._scope_armed = set()
     gen._scope_live = []
@@ -5864,6 +5880,7 @@ def _reset_scope_state(gen) -> None:
     gen._owned_str_elem_names = set()
     gen._owned_str_elem_vals = set()
     gen._owned_closure_names = set()
+    gen._owned_env_names = set()
     # See `begin_function`'s note: self-hosting cannot infer a set/list
     # field's element type from an assignment, only from this table.
     _fet = gen._field_elem_types.setdefault('GimpleGen', {})
@@ -5874,6 +5891,7 @@ def _reset_scope_state(gen) -> None:
     _fet['_owned_str_elem_names'] = 'char *'
     _fet['_owned_str_elem_vals'] = 'char *'
     _fet['_owned_closure_names'] = 'char *'
+    _fet['_owned_env_names'] = 'char *'
     _fet['_fresh_vals'] = 'char *'
     _fet['_fresh_str_tmps'] = 'char *'
     _fet['_boxed_vals'] = 'char *'
@@ -6239,7 +6257,7 @@ def begin_function(gen, fn) -> None:
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
     _reset_scope_state(gen)
-    gen._own_fn_body = fn.body
+    gen._cur_func_body = fn.body
     gen._int_keyed_dicts = _compute_int_keyed_dicts(fn)
     gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates, gen._analysis_funcs, gen._analysis_structs)
     # A lambda local declared in a LOOP BODY is owned by the body, on the same
@@ -6276,6 +6294,49 @@ def reset_no_candidates(gen) -> None:
     gen._owned_stack_allocated = set()
     gen._int_keyed_dicts = set()
     _reset_scope_state(gen)
+
+
+def register_nested_env_free(gen, def_name: str, env_var: str,
+                             owner_body=None) -> None:
+    """Take ownership of the environment a nested `def` just allocated, when
+    the enclosing function's body proves it cannot escape.
+
+    `_alloc_<name>_env()` is a `malloc` per nested `def` STATEMENT, and
+    nothing freed it: `def helper(n): def inner(x): return x + n; return
+    inner(1)` measured +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) —
+    bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. There
+    is no `MojoBoundMethod` and no `_reg_bound_method` entry here (the call
+    sites are DIRECT — `helper_inner (_env_inner, 1)`), so the teardown is a
+    bare `free` and the unwind entry is `mojo_cleanup_push_ptr`, NOT
+    `mojo_closure_free`, which would read two words of a `helper_inner_env *`
+    as a bound method.
+
+    `ownership_destruct.nested_def_env_owned` is the whole ownership
+    question; everything here is the wiring, and it is the same wiring
+    `_maybe_push_owned_local` does for a capturing lambda's value — register
+    the name, push the thunk at the declaration, let `emit_return_frees` and
+    `emit_fallthrough_frees` free and cancel it. Deliberately NOT
+    scope-registered: the env var is function-scoped
+    (`gen._declare_var` at the nested-`def` STATEMENT), so there is no loop
+    body to register against and the `break`/`continue` half of the block
+    machinery does not apply.
+
+    Fail-closed: an unprovable body leaves the name unregistered, which is
+    today's leak and never a double free.
+    """
+    # `owner_body` is the body of the function this nested `def` is a
+    # STATEMENT of, captured by the caller before anything was lifted -- see
+    # `_gen_stmt_FunctionDef`'s note on why it cannot be `gen._cur_func_body`.
+    # `owner_body is None` means the caller had no body to speak for, and no
+    # proof is no free.
+    if owner_body is None:
+        return
+    if not ownership_destruct.nested_def_env_owned(owner_body, _as_str(def_name)):
+        return
+    gen._owned_env_names.add(env_var)
+    gen._owned_free_candidates.add(env_var)
+    gen._owned_free_pushed.add(env_var)
+    gen._emit(f"  mojo_cleanup_push_ptr ({gen._cname(env_var)});")
 
 
 def emit_return_frees(gen) -> None:

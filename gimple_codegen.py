@@ -2485,7 +2485,7 @@ class GimpleGen:
         self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
         self._fresh_returning: set = set()   # names whose calls return a fresh container
         self._analysis_structs: dict = {}    # see infra_infer._build_analysis_structs
-        self._own_fn_body: list = []   # the analysed function's body (string receiver pre-scan)
+        self._cur_func_body: list = []  # the AST body being lowered (see _reset_func)
         self._decl_value_node = None   # see lower_expr: the decl statement's RHS node
         self._decl_rhs_val: str = ''   # and the value it lowered to
         self._literal_storage: str = ''        # see emit_infra.emit_container_new

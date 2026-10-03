@@ -2955,6 +2955,74 @@ def main():
     print(acc)
 """, "44\n4\n44\n3\n5\n1040000\n")
 
+    # ── A nested `def`'s ENVIRONMENT, which is a bare `malloc` block and NOT a
+    # bound method, so its teardown is `free` and not `mojo_closure_free` --
+    # measured at +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in
+    # bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. One
+    # environment is shared by BOTH of `callee`'s call sites, which is why it
+    # must be freed once at the enclosing function's scope exit rather than at
+    # each call. The last two consumers are the ones that make it an ownership
+    # question rather than a `free`: raised past by an exception (the push the
+    # declaration emitted frees it, the skipped `return` free does not), and a
+    # nested `def` RETURNED to its caller, which is a real escape and must stay
+    # alive -- calling it after `maker` returned is a use-after-free if the
+    # rule is not fail-closed. `Boxed` is the same pair inside a STRUCT METHOD,
+    # whose `_reset_func` is immediately followed by `reset_no_candidates`: the
+    # owning body has to survive that reset or every "how is this name USED?"
+    # question is answered about an empty body, which reads as "nothing can
+    # hold it" and frees BOTH of these.
+    test_gimple_bounded_memory("gimple_nested_def_env_is_freed", """\
+def callee(base: Int) -> Int:
+    def inner(x: Int) -> Int:
+        return x + base
+    return inner(1) + inner(2)
+
+def maker(base: Int):
+    def adder(x: Int) -> Int:
+        return x + base
+    return adder
+
+def boom(base: Int) -> Int:
+    def inner(x: Int) -> Int:
+        return x + base
+    if base > 2:
+        raise ValueError("no")
+    return inner(1)
+
+struct Boxed:
+    var v: Int
+
+    def run(self, base: Int) -> Int:
+        def inner(x: Int) -> Int:
+            return x + base
+        return inner(1) + inner(2)
+
+    def make(self, base: Int):
+        def adder(x: Int) -> Int:
+            return x + base + self.v
+        return adder
+
+def main():
+    var f = maker(10)
+    print(f(1))
+    print(f(2))
+    print(callee(10))
+    var b = Boxed(7)
+    print(b.run(10))
+    print(b.make(10)(1))
+    var total = 0
+    for r in range(4000000):
+        total += callee(6) % 1000
+    print(total)
+    var hits = 0
+    for r in range(20000):
+        try:
+            hits += boom(9)
+        except ValueError as e:
+            hits += 1
+    print(hits)
+""", "11\n12\n23\n23\n18\n60000000\n20000\n", 40)
+
     # ── A callee that provably returns a FRESH STRING hands ownership to its
     # caller, exactly as one returning a fresh container always has
     # (analyze_returns_fresh, which until now accepted only a container

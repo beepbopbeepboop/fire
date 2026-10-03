@@ -63,6 +63,36 @@ from mojo.middle.funcs_shared import (
 )
 
 def _gen_stmt_FunctionDef(gen, node: FunctionDef):
+    # The body that OWNS this nested `def`'s environment — read ONCE, here,
+    # before anything nested is lifted. It is emphatically NOT the AST body of
+    # whatever function was lowered most recently: lifting `mid`'s own body
+    # lowers `inner`'s environment statement, and it is `mid`'s body that owns
+    # that environment, not `outer`'s. That is not a near miss -- `outer`'s
+    # body never mentions `inner` at all, so asking about the wrong body always
+    # answers "yes, safe", and
+    #     def outer():
+    #         total = 0
+    #         def mid():
+    #             def inner(k):
+    #                 nonlocal total
+    #                 total = total + k
+    #             return inner        # <-- a real escape
+    #         f = mid(); f(3); f(4)
+    # emitted `free (_env_inner)` in `mid` immediately after handing that same
+    # pointer back as its return value, and the caller's first `f(3)` then
+    # dereferenced freed memory (SIGSEGV, test_nonlocal.py's "two closure
+    # levels deep" pair). `mid`'s own body DOES mention `inner` as a returned
+    # value, so the same rule asked of the right body declines to free it.
+    #
+    # `gen._cur_func_body` is that right body, and it is right here because
+    # `_reset_func` -- the one place that begins lowering a body -- sets it, so
+    # `_gen_lifted_closure` sets it too. The ownership analysis used to read a
+    # SECOND field for this (`_own_fn_body`), which only `begin_function`
+    # assigned, so every one of those questions was answered about a top-level
+    # function's body even while a closure was being lowered; the two fields
+    # are one field now, and the same class of stale read is documented at
+    # `emit_calls.py`'s `_cur_func_body` note.
+    owner_body = gen._cur_func_body
     # A nested `async def` (not an async generator) — whether nested
     # inside a struct method (device_context.mojo's `async def
     # wrapper(...) capturing -> None:` shape, discovered by gen_module's
@@ -181,6 +211,11 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 cname = gen._write_dest(vname)  # resolve capture path if nested
                 gen._safe_coerce_emit(local_type, _fct, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
         gen._closure_envs[node.name] = env_var
+        # Take ownership of the environment this nested `def` just allocated,
+        # if the enclosing body proves nothing can hold it past this scope.
+        # A no-op otherwise, which is today's leak and never a double free.
+        # See `ginf.register_nested_env_free`.
+        ginf.register_nested_env_free(gen, node.name, env_var, owner_body)
     else:
         gen._closure_envs[node.name] = ''
 
