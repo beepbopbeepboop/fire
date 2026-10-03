@@ -1,5 +1,13 @@
 # FORMAL_time_struct_shaped_answers: five `time` names are absent because their answer is a struct
 
+**Status: UPDATED 2026-10-03 (`work/formal16-8`). Item 1 is CLOSED and item 2 is
+RESOLVED AS A LIMIT, so what is left here is a FACT rather than work: the five
+names are absent because their answer is a STRUCT, a struct cannot cross a module
+boundary on this path, and the API shape that would work around that would be an
+API CPython's `time` does not have — which this module's own docstring rules
+forbid inventing.** Both halves are measured below. Nothing is "fixed" in the
+sense of five names answering, and nothing should be: see item 2.
+
 **Status: OPEN, and a limit rather than a defect — but NOT the limit this doc
 used to name.** It is the reason `localtime`, `gmtime`, `mktime`, `strftime` and
 `get_clock_info` are ABSENT from `formal/hostmods/time.mojo` rather than
@@ -164,7 +172,23 @@ belongs in one place for both backends, as
 That leaves two open items here, and neither is a defect in this tree:
 
 1. **the store** (above) — the only thing between `localtime_year` and an
-   answer;
+   answer. **CLOSED 2026-10-03, measured.** `p.value() = v` through a pointee
+   with a DECLARED type is a store at that pointee's own width, and it builds and
+   RUNS on both architectures: `test_formal_time.py`'s `structroute` group reads
+   `read yes / store yes` on arm64 and on x86-64, 5/5 groups on each. The store is
+   checked by running it and reading the bytes AT and AFTER each pointee, because
+   a store at the wrong width writes the right answer and corrupts the bytes
+   behind it — the one failure a build cannot see. Still refused on both machines
+   by name: a store whose width would be a CHOICE rather than a fact (no recorded
+   pointee, a float/blob/struct pointee, a `p + k` whose element width the
+   declaration does not fix, a read-only page).
+   `FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee.md` is
+   already gone from `bugs/`, so its capability landed and this group is its
+   standing guard. One repair was needed to make the measurement readable: the
+   `unscaled` row's needle was pinned to the refusal's old FRAMING while the
+   refusal is intact on both machines, so `structroute` was red on master for a
+   wording change. The needle is now the sentence's operative clause, with both
+   current sentences quoted in the case's comment.
 2. **the API shape**, still a judgement and still not mine to make: once the
    store lands, `localtime(t)` cannot return a `struct tm` on this path, so the
    choice is nine scalar functions against CPython's one struct, or one function
@@ -172,4 +196,22 @@ That leaves two open items here, and neither is a defect in this tree:
    with a scalar (`getsize`, via `lseek`) rather than a struct, which is a
    reason to prefer the first — but "a program that wants `tm_year` and `tm_mon`
    pays for two libc calls" is the cost, and it was already named here before
-   the store question was answered.
+   the store question was answered. **RESOLVED AS A LIMIT 2026-10-03, and the
+   resolution is that NEITHER candidate shape is available to THIS module.** The
+   `os`/`stat` precedent does not carry, and the difference is the whole answer:
+   `getsize` is a CPython name whose CPython answer IS a number, so answering it
+   with `lseek` answers the same question, whereas `time.localtime_year` is not a
+   CPython name at all — CPython has `localtime`, and its answer is a
+   `struct_time` — so a scalar spelling would be inventing an API, which this
+   module's own rules forbid ("each export is a CPython name with CPython's
+   meaning", and the `now` section below, which declines to add a `now` for
+   exactly this reason). A caller-owned buffer plus an offset is a second invented
+   name for the same reason.
+
+   **So the five names STAY absent**, and `test_formal_time.py`'s `limits` group
+   is the standing statement of that ("5 absent names refused, each naming
+   itself", on both architectures). What would actually answer them is a
+   struct-RETURNING export — the same capability
+   `FORMAL_returned_frame_caller_owned_block.md` gives a function inside one
+   image, and which a dylib boundary does not have — and that is a project rather
+   than a judgement call about five names.

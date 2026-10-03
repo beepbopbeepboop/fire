@@ -3174,6 +3174,37 @@ UNREGISTERED = {
     # ~0.1 GB peak.
     'test_formal_html.py': _FORMAL_SUITE_REASON,
     'test_formal_posixpath.py': _FORMAL_SUITE_REASON,
+    # …and this one is in the group for a different reason, because it is the
+    # CHEAPEST file here by an order of magnitude and its absence from a gate is
+    # a hole rather than a cost: `test_formal_x86_64_call_tree.py` builds NO
+    # image and runs no Lean. It is a unit test of
+    # `formal/x86_64_endtoend_test.py`'s `_tree` over a hand-written
+    # five-instruction body, and it runs in 0.000 s.
+    #
+    # That is the whole point of it. The thing it guards is
+    # `formal/x86_64_endtoend_test.py`'s own entry point, which is 43 Lean
+    # proofs and is one of the eight Lean-checking suites a gate does not run --
+    # so the `call_rel32` arm had no test anybody could run without a Lean
+    # budget. A pin nobody can run is not a pin. (The filing that asked for that
+    # arm is deleted with its fix — `formal/x86_64_endtoend_test.py`'s "no tree"
+    # line now keeps its FORM and `_tree` has the `call_rel32` arm — so the
+    # reference is to the code rather than to a doc that is gone.) Exact next
+    # step:
+    # `test('formal-x86-call-tree', [PY, 'test_formal_x86_64_call_tree.py'], ...)`
+    # in the `x86` bucket beside `formal-x86`: at 0.000 s and 0.0 GB it costs a
+    # gate nothing, so the reason it is declared rather than registered is that
+    # this branch's subject is not the registry.
+    'test_formal_x86_64_call_tree.py':
+        "A UNIT test of formal/x86_64_endtoend_test.py's `_tree`: it builds "
+        "no "
+        'image and runs no Lean, asking the path-tree builder about a '
+        'hand-written five-instruction body, and it runs in 0.000 s. Declared '
+        'rather than registered because the thing it guards (the end-to-end '
+        'driver) is one of the eight Lean-checking suites a gate does not run, '
+        'so the `call_rel32` arm had no affordable test at all -- a pin nobody '
+        'can run is not a pin. Exact next step: '
+        '`test(\'formal-x86-call-tree\', [PY, '
+        '\'test_formal_x86_64_call_tree.py\'], ...)` in the `x86` bucket.',
     'test_formal_platform.py': _FORMAL_SUITE_REASON,
     'test_formal_recursion_contract.py': _FORMAL_SUITE_REASON,
     'test_formal_short_circuit_cond.py': _FORMAL_SUITE_REASON,

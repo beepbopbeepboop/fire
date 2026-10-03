@@ -1172,6 +1172,177 @@ DIFF_CASES = [
      '    print("a=%d b=%d" % (twice(make(3, 4).x), twice(q.y) + q.x), end="")\n'
      "    return 0\n\n"
      "main()\n"),
+    # ── TWO live returned frames, in the four arrangements the ONE defect this
+    # suite was missing a guard for produced ────────────────────────────────
+    #
+    # `two_returned_frames_in_one_function_are_two_blocks` above pins two
+    # returned frames in SEQUENCE. These four pin the arrangements around it,
+    # and they are here because that case could pass with the defect in place:
+    # the x86-64 call site DROPPED the hidden trailing word (the block's address)
+    # from its argument pop loop, so the callee wrote its result through whatever
+    # the previous call had left in the callee-saved register the callee reads it
+    # from.  With two sequential calls to the SAME factory that happens to be one
+    # block used twice, so the sequential case reads the second object's values
+    # under both names and DOES fail -- but the three arrangements below reached
+    # it differently, and none of them had a case:
+    #
+    #   * an ORDINARY CALL between the two, which is not involved at all (its
+    #     own result stayed correct while both frames went wrong) and so says the
+    #     clobber is not "any call";
+    #   * both results live at once as ARGUMENTS of one call, which is the
+    #     cheapest confirmation of the whole thing -- no holder names at all, so
+    #     a "fix" that repaired the binding and not the block would pass every
+    #     other row here and fail this one;
+    #   * a comparison, where a field-wise `__eq__` over two operands that are
+    #     really ONE block reports two DISTINCT values as equal. This is the
+    #     silent-wrong-answer shape: the image exits 0 and prints a plausible
+    #     integer.
+    #
+    # All four were measured against the tree with `6cae9e4b`'s `continue` put
+    # back: arm64 right on every row, x86-64 wrong on every row.
+    ("two_returned_frames_around_an_ordinary_call",
+     "struct Point:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def make(a, b):\n"
+     "    var p = Point()\n"
+     "    p.x = a\n"
+     "    p.y = b\n"
+     "    return p\n\n"
+     "def plain(v):\n"
+     "    return v\n\n"
+     "def main(n):\n"
+     "    var t = make(1, 2)\n"
+     "    var k = plain(9)\n"
+     "    var u = make(10, 20)\n"
+     '    printf("t=%d,%d k=%d u=%d,%d", t.x, t.y, k, u.x, u.y)\n'
+     "    return 0\n",
+     "class Point:\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n\n"
+     "def make(a, b):\n"
+     "    p = Point()\n"
+     "    p.x = a\n"
+     "    p.y = b\n"
+     "    return p\n\n"
+     "def plain(v):\n"
+     "    return v\n\n"
+     "def main():\n"
+     "    t = make(1, 2)\n"
+     "    k = plain(9)\n"
+     "    u = make(10, 20)\n"
+     '    print("t=%d,%d k=%d u=%d,%d" % (t.x, t.y, k, u.x, u.y), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+    # The SECOND row is printed FIRST on purpose.  With one block shared, "the
+    # last block wins" and "the second name wins" are the same answer here and
+    # different answers in the sequential case above, and this is the row that
+    # separates "both names name one block" from anything name-shaped.
+    ("two_returned_frames_printed_in_the_other_order",
+     "struct Point:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def make(a, b):\n"
+     "    var p = Point()\n"
+     "    p.x = a\n"
+     "    p.y = b\n"
+     "    return p\n\n"
+     "def main(n):\n"
+     "    var t = make(1, 2)\n"
+     "    var u = make(10, 20)\n"
+     '    printf("u=%d,%d t=%d,%d", u.x, u.y, t.x, t.y)\n'
+     "    return 0\n",
+     "class Point:\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n\n"
+     "def make(a, b):\n"
+     "    p = Point()\n"
+     "    p.x = a\n"
+     "    p.y = b\n"
+     "    return p\n\n"
+     "def main():\n"
+     "    t = make(1, 2)\n"
+     "    u = make(10, 20)\n"
+     '    print("u=%d,%d t=%d,%d" % (u.x, u.y, t.x, t.y), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+    # No holder names anywhere: both blocks are live at the moment of the outer
+    # call, and `two` reads a field out of each.  A frame-returning call in an
+    # ARGUMENT position is the shape the convention's per-CALL-SITE block was
+    # chosen for, so it is the row that says the reservation is per site.
+    ("two_returned_frames_live_at_once_as_arguments",
+     "struct Point:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def make(a, b):\n"
+     "    var p = Point()\n"
+     "    p.x = a\n"
+     "    p.y = b\n"
+     "    return p\n\n"
+     "def total(p: Point, q: Point) -> Int:\n"
+     "    return p.x * 100 + q.x\n\n"
+     "def main(n):\n"
+     '    printf("v=%d", total(make(1, 2), make(10, 20)))\n'
+     "    return 0\n",
+     "class Point:\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n\n"
+     "def make(a, b):\n"
+     "    p = Point()\n"
+     "    p.x = a\n"
+     "    p.y = b\n"
+     "    return p\n\n"
+     "def total(p, q):\n"
+     "    return p.x * 100 + q.x\n\n"
+     "def main():\n"
+     '    print("v=%d" % total(make(1, 2), make(10, 20)), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+    # The SILENT one: two DISTINCT values, one field-wise comparison, `eq=0`.
+    # There is no crash and no wrong exit status anywhere in this row, which is
+    # why it is the one worth having: every other arrangement here fails loudly
+    # enough to be noticed by a status comparison.
+    #
+    # `make` carries a DECLARED return type and that is not decoration: without
+    # it the comparison is refused, because a call whose result kind nothing
+    # states cannot be classified as a frame (`model`'s frame-vs-value refusal,
+    # which is right and is not this row's subject).  The Mojo column may be
+    # annotated because it is not the column CPython runs -- that is the whole
+    # point of carrying the program twice.
+    ("a_returned_frame_compared_with_a_returned_frame_call",
+     "struct Point:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "    def __eq__(self, other: Point) -> Bool:\n"
+     "        return self.x == other.x and self.y == other.y\n\n"
+     "def make(a: Int, b: Int) -> Point:\n"
+     "    var p = Point()\n"
+     "    p.x = a\n"
+     "    p.y = b\n"
+     "    return p\n\n"
+     "def main(n):\n"
+     "    var t = make(1, 2)\n"
+     '    printf("eq=%d", 1 if t == make(10, 20) else 0)\n'
+     "    return 0\n",
+     "class Point:\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n\n"
+     "    def __eq__(self, other):\n"
+     "        return self.x == other.x and self.y == other.y\n\n"
+     "def make(a, b):\n"
+     "    p = Point()\n"
+     "    p.x = a\n"
+     "    p.y = b\n"
+     "    return p\n\n"
+     "def main():\n"
+     "    t = make(1, 2)\n"
+     '    print("eq=%d" % (1 if t == make(10, 20) else 0), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
 ]
 
 

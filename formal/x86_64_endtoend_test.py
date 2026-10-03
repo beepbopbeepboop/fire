@@ -1410,6 +1410,25 @@ def _tree(code, info, shapes):
     return root
 
 
+#: How much of a "no tree" message the screen shows, by KIND -- and `None`
+#: means "all of it".  The `form` branch is the one that matters: its message is
+#: `no step lemma wired for: <the forms>`, so 38 characters of it are 38 minus
+#: 24 of boilerplate, and a function with two unmodelled forms lost the second
+#: one to the ellipsis.  A reader who cannot see WHICH form has no lemma cannot
+#: act on the row at all, and the form is the whole content of the message --
+#: there is nothing else in it to protect.  The `call` branch keeps its bound
+#: because its message is English prose rather than a list.
+_NO_TREE_CHARS = {"form": None, "call": 60, "loops": 0}
+
+
+def _no_tree_line(kind, detail):
+    """The one line the screen shows for a path that is not a theorem."""
+    if kind == "loops":
+        return "  loops (no finite path tree)"
+    n = _NO_TREE_CHARS.get(kind)
+    return "  no tree: %s" % (detail if n is None else detail[:n])
+
+
 def _nodes(node):
     """How many instructions the tree holds, both arms of every fork included."""
     return 1 + sum(_nodes(k) for k in node.kids)
@@ -2187,13 +2206,13 @@ def main(argv):
                 kind, detail = "form", str(exc)
             if kind == "loops":
                 notree += 1
-                ts = "  loops (no finite path tree)"
+                ts = _no_tree_line(kind, detail)
             elif kind == "call":
                 nocall += 1
-                ts = "  no tree: %s" % detail[:60]
+                ts = _no_tree_line(kind, detail)
             else:
                 noform += 1
-                ts = "  no tree: %s" % detail[:38]
+                ts = _no_tree_line(kind, detail)
         else:
             if ok and not sorries:
                 term_ok += 1

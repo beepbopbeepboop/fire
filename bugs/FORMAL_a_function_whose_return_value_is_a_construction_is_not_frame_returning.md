@@ -145,9 +145,11 @@ wrong answer, on x86-64 only — a net loss on that machine and exactly the
 "a better DIAGNOSIS and a worse INSTRUMENT" trade the surrounding code argues
 against.
 
-That defect is filed, with its own measurements and next step, as
-`bugs/FORMAL_x86_64_two_names_bound_to_returned_frames_read_one_block.md`. It is
-in the same neighbourhood as
+That defect — two names bound to returned frames reading one block, on x86-64
+only — was filed with its own measurements and next step and is now FIXED, so
+its doc is deleted with it; what it cost is recorded by
+`test_formal_returned_frame.py`'s four arrangements of two live returned
+frames. It is in the same neighbourhood as
 `bugs/FORMAL_x86_64_a_field_of_a_returned_frame_in_an_argument_position_segfaults.md`
 (thirteen `test_formal_returned_frame.py` cases, all x86-64), which is a SIGSEGV
 where this one is a wrong number; if they turn out to be one emitter bug, fix that
