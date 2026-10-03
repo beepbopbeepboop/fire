@@ -18382,17 +18382,29 @@ def struct_is_one_field(struct_def) -> bool:
 # The argument conventions that say "this method may change the object its
 # receiver names", as `param_convs` actually spells them.
 #
-# **NOT the surface syntax, and the difference is load-bearing.** The parser
-# folds `inout self` to `mut`, so the string `"inout"` never reaches
-# `param_convs` and an entry for it can never match; it was here until
-# 2026-10-03 and is a lie about the parser's vocabulary rather than a safety
-# net. `var self` and `owned self` fold to `"owned"`, which is deliberately NOT
-# in the list: 195 of the 196 methods in the corpus that declare a non-mutating
-# convention are readers, where `owned` is right, and the one that is a writer is
-# a question about the language's argument model rather than about this path —
-# `bugs/FORMAL_a_var_self_receiver_on_a_one_field_struct_drops_its_store.md`,
-# which also carries the measurement. Kept as a tuple because adding an entry is
-# a decision about the language's conventions, not a detail of the walk below.
+# **NOT the surface syntax, and the difference is load-bearing.** `fire_compiler.py`'s
+# `_CONV_CANON` collapses the spellings onto one canonical string — `inout self`
+# to `mut`, `borrowed self` to `read`, `var self` to `owned` — so `"inout"` never
+# reaches `param_convs` and an entry for it can never match; it was here until
+# 2026-10-03 and is a lie about the parser's vocabulary rather than a safety net.
+#
+# **`owned` is deliberately NOT in the list**, and the measurement that decided it
+# is over this repository's and the stdlib's 690 `.py`/`.mojo` files: 17 methods
+# of a ONE-FIELD struct store that struct's own field, and 13 of them declare
+# `mut` — the convention that makes `receiver_writeback_name` hand the receiver
+# back. Exactly one declares `var self`
+# (`std/python/python_object.mojo`'s `PythonObject.steal_data`, whose file is a
+# host-import this backend never answers), and three declare a plain `self`.
+# Adding `owned` would therefore make ~195 READERS write-back candidates, and for
+# a one-field struct the write-back IS the receiver — so every reader that
+# already returns something would start failing `mutating_receiver_return_refusal`
+# instead. Whether `var self` MAY change the receiver it names is a question
+# about the language's argument model; this path has no representation for
+# ownership transfer either way, so it refuses by name
+# (`RECEIVER_CONVENTION_NAMES`) and says which word of source fixes it.
+#
+# Kept as a tuple because adding an entry is a decision about the language's
+# conventions, not a detail of the walk below.
 MUTATING_RECEIVER_CONVENTIONS = ("out", "mut")
 
 

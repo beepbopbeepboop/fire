@@ -2842,6 +2842,62 @@ CASES = [
      "    printf(\"a=%d\", c.get())\n"
      "    return 0\n",
      "refuse:is not a receiver this path hands back", None),
+    # ── `var self` is a SPELLING this path does not hand back either ────────
+    #
+    # The same rule, one corpus site over, and the pair is a DECISION rather
+    # than two independent facts: `formal/model.py`'s
+    # `MUTATING_RECEIVER_CONVENTIONS` holds `out` and `mut` and NOT `owned`,
+    # which is what `var self` and `owned self` both fold to in the parser. The
+    # corpus is what settled that, measured over 690 `.py`/`.mojo` files with
+    # the rule's own recogniser: 17 methods of a ONE-FIELD struct store that
+    # struct's own field, and 13 of them declare `mut`. Exactly ONE declares
+    # `var self` — `std/python/python_object.mojo`'s `PythonObject.steal_data`
+    # — and its file is a host-import the sweep never answers, so nothing this
+    # path can build changes.
+    #
+    # So the refusal names the convention it read rather than only saying "not
+    # handed back", and the needle below is that name: a message which said
+    # nothing about `var self` would send the reader to look for a one-field
+    # receiver problem, and the fix is one word of source.
+    ("refuse_a_one_field_store_through_a_var_self_receiver",
+     "class Holder:\n"
+     "    def __init__(self):\n"
+     "        self._obj_ptr = 7\n"
+     "\n"
+     "    def steal_data(var self):\n"
+     "        var ptr = self._obj_ptr\n"
+     "        self._obj_ptr = 0\n"
+     "        return ptr\n"
+     "\n"
+     "    def peek(var self):\n"
+     "        return self._obj_ptr\n"
+     "\n"
+     "def main(n):\n"
+     "    h = Holder()\n"
+     "    printf(\"p=%d\", h.steal_data())\n"
+     "    return 0\n",
+     "refuse:`var self` is not a receiver this path hands back", None),
+    # The other half of the decision, and the row that says it is not a blanket
+    # "a `var self` receiver is refused": 195 of the corpus's 196 methods with a
+    # NON-mutating convention are READERS, where `owned`/`var self` is exactly
+    # right. Adding `owned` to the list would make every one of them a
+    # write-back candidate, and for a one-field struct the write-back IS the
+    # receiver — so `mutating_receiver_return_refusal` would start firing on
+    # every reader that already returns something, which is what the corpus
+    # measurement above is counting against. This row is the readers' side of
+    # that trade: `var self` builds, and answers CPython.
+    ("both_arch_a_one_field_reader_through_a_var_self_receiver_still_builds",
+     "class Holder:\n"
+     "    def __init__(self, v):\n"
+     "        self._obj_ptr = v\n"
+     "\n"
+     "    def peek(var self):\n"
+     "        return self._obj_ptr\n"
+     "\n"
+     "def main(n):\n"
+     "    h = Holder(41)\n"
+     "    printf(\"p=%d\", h.peek())\n"
+     "    return 0\n", 0, "p=41"),
 ]
 
 # ── what a method on a VALUE means, per RECEIVER KIND ──────────────────────
