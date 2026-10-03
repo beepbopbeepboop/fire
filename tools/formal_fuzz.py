@@ -2048,7 +2048,8 @@ def check_one(index, args, tmpdir, lock=None):
     finding = classify(results, want_exit, want_out, args)
     rec = {"index": index, "verdict": finding, "text": text,
            "want": {"exit": want_exit, "stdout": want_out}, "results": results}
-    if finding.startswith(("MISMATCH", "ARM64-DIVERGES", "CODEGEN-CRASH")):
+    if finding.startswith(("MISMATCH", "ARM64-DIVERGES", "CODEGEN-CRASH",
+                           "REFUSAL-DIVERGES")):
         # Attribution runs on the MINIMISED program, never on this one: a blame
         # over a forty-statement program names every construct it contains,
         # which is the "there is a known bug in here too" reading this exists to
@@ -2099,7 +2100,27 @@ def classify(results, want_exit, want_out, args):
         return "TIMEOUT"
     if any(r.get("verdict") == "trapped" for r in results.values()):
         return "trapped"
-    if any(r.get("verdict") == "refusal" for r in results.values()):
+    # A REFUSAL is not a finding — a construct with no representation is
+    # CORRECTLY refused, and a fuzzer that counted those as bugs would spend
+    # its whole budget re-discovering `bugs/FORMAL_known_limits.md`.  That is
+    # true of a refusal EVERY engine agrees on, and false of one engine
+    # refusing what another lowered: then the construct IS representable, one
+    # machine says so by running the program, and this one declines it.  That
+    # is the divergence `test_formal_x86_64_parity.py` exists to keep closed,
+    # and reporting it as a plain `refusal` is a hole in this tool rather than
+    # a fact about the backend: the corpus keeps generating the program, it
+    # keeps saving it, and it counts as a clean run.
+    #
+    # Measured on the tree this landed on: `containers` seeds 1000-1499, where
+    # arm64 built and answered a program x86-64 refused with "main: '_cb0' has
+    # no home: the register allocator collected no home for it, so the emitter
+    # and the allocation walk disagree about this function's locals".
+    refusals = [b for b, r in results.items() if r.get("verdict") == "refusal"]
+    answered = [b for b in results if answer(b) is not None]
+    if refusals and answered:
+        return "REFUSAL-DIVERGES-" + "+".join(
+            "X86" if b == "x86_64" else "ARM" for b in refusals)
+    if refusals:
         return "refusal"
     return "match"
 
@@ -2115,6 +2136,20 @@ def report(rec, args):
         return None
     if v == "refusal":
         return f"  refusal  #{rec['index']}"
+    if v.startswith("REFUSAL-DIVERGES"):
+        lines = [f"  {v}  #{rec['index']}",
+                 "      one architecture refused what the other lowered"]
+        if "reduced_from" in rec:
+            lines.append(f"      reduced {rec['reduced_from']} -> "
+                         f"{rec['reduced_to']} bytes")
+        for backend, r in rec["results"].items():
+            if r["verdict"] == "ok":
+                lines.append(f"      {backend:<7} exit={r['rc']} "
+                             f"{shorten(r['stdout'])!r}")
+            else:
+                lines.append(f"      {backend:<7} {r['verdict']}: "
+                             f"{shorten(r['diag'], 220)}")
+        return "\n".join(lines)
     if v == "trapped":
         return f"  trapped #{rec['index']}  (the stack-floor guard; CPython ran "
     lines = [f"  {v}  #{rec['index']}"]
@@ -2252,7 +2287,8 @@ def main():
                     rec["blame"])
                 blamed[key] = blamed.get(key, 0) + 1
             elif rec["verdict"].startswith(("MISMATCH", "ARM64-DIVERGES",
-                                            "CODEGEN-CRASH", "generator")):
+                                            "CODEGEN-CRASH", "generator",
+                                            "REFUSAL-DIVERGES")):
                 findings.append(rec)
     finally:
         subprocess.run(["rm", "-rf", tmpdir])
@@ -2449,16 +2485,37 @@ def resolve_min_kind(args):
     return "any"
 
 
-def _still_fails(text, args):
+def _still_fails(text, args, want=None):
     """Whether `text` still demonstrates the disagreement being minimised.
 
     The predicate is the SAME comparison the run made — CPython against the
     image — so a shrunk program still demonstrates the disagreement rather than
     merely still building.
+
+    `want` is the ORIGINAL program's `{backend: (verdict, diagnostic)}` map, and
+    it is what makes a REFUSAL divergence reducible at all: without it the
+    minimiser has nothing to preserve a refusal against, and reports that a
+    program which still fails "does not fail here any more".
     """
+    # A candidate that does not PARSE cannot demonstrate anything, and it can
+    # reach here: `_statement_spans` builds a span from a block's opening line
+    # to each line inside it, so deleting the first statement of a body deletes
+    # the `def` line with it and leaves an indented file.  Measured on the
+    # refusal-divergence path — the reproducer came back as two unindented-
+    # context lines with no `def`, because a file that does not compile is
+    # "refused" by both the parser and the compiler and so satisfied the
+    # predicate.  The oracle cannot run such a program either, which is why the
+    # existing mismatch path rejected it by accident rather than by a rule.
+    try:
+        compile(PY_DRIVER.replace("@PROGRAM@", text).replace("@TAG@", _RC_TAG),
+                "<shrink candidate>", "exec")
+    except SyntaxError:
+        return False
     name = "min"
     kind = resolve_min_kind(args)
     standalone = []
+    verdicts = {}
+    diags = {}
     with tempfile.TemporaryDirectory(dir=args.work) as td:
         ref, _err = cpython_answer(text, td, name)
         have_oracle = not (isinstance(ref, tuple) and ref and ref[0] == "error")
@@ -2469,11 +2526,46 @@ def _still_fails(text, args):
             if kind == "arm" and backend != "arm64":
                 continue
             r = run_on(backend, text, td, name)
+            verdicts[backend] = r["verdict"]
+            diags[backend] = (r.get("diag") or "")[:60]
             if (have_oracle and r["verdict"] == "ok"
                     and (r["rc"] != want_exit or r["stdout"] != want_out)):
                 return True
             if r["verdict"] in ("crash", "trapped"):
                 standalone.append(r["verdict"])
+        # A REFUSAL DIVERGENCE has to survive the shrink as itself: one engine
+        # refused while another answered.  Preserved here rather than in
+        # `classify` because a minimiser that only knows about wrong ANSWERS
+        # reduces this reproducer to nothing — measured, and it reports "the
+        # program does not fail here any more" about a program that still fails,
+        # because the failure is a refusal rather than an answer.
+        #
+        # With ONE backend there is nothing to diverge from, so the refusal is
+        # the whole predicate.  That is only sound because `--minimize` is
+        # driven by hand: the caller is the one who ran both architectures and
+        # saw one of them answer, and `--min-kind x86` says which refusal to
+        # preserve.  A program both backends refuse minimises happily under
+        # this rule, which costs a `--minimize` invocation and nothing else.
+        # …preserved as ITSELF: the same backend must still refuse, with the
+        # same sentence, while another still answers.  "Still refuses" alone is
+        # NOT enough, and measured: with a single backend under `--min-kind x86`
+        # any refusal satisfies it, so the shrink walked out of `_cb0 has no
+        # home` and into "D7 is read before anything in this function stores
+        # it" — a real refusal, about a real program, and a different bug.
+        # Sixty characters of the diagnostic is the key: long enough to name
+        # the construct, short enough that a line number or a temp's suffix
+        # moving does not lose the reproducer.
+        want_refusals = {b: d for b, (v, d) in (want or {}).items()
+                         if v == "refusal"}
+        if want_refusals:
+            still = all(verdicts.get(b) == "refusal"
+                        and diags.get(b, "")[:40] == d[:40]
+                        for b, d in want_refusals.items() if b in verdicts)
+            return bool(still) and ("ok" in verdicts.values()
+                                    or len(want_refusals) == len(verdicts))
+        if "refusal" in verdicts.values() and (
+                len(verdicts) == 1 or "ok" in verdicts.values()):
+            return True
     # No oracle at all — a program CPython itself refuses to run, which is what
     # a recursion past ITS limit looks like. There is then nothing to compare
     # against, so a mismatch cannot be the predicate; but `--min-kind any` still
@@ -2507,6 +2599,21 @@ def _statement_spans(text):
     return lines, spans
 
 
+def _verdict_map(text, args):
+    """`{backend: (verdict, diagnostic)}` for `text`, over `args.backends`.
+
+    Measured once per shrink rather than once per candidate: every candidate
+    already runs every backend, and this is the ONE extra run that tells the
+    refusal predicate which refusal it is preserving.
+    """
+    out = {}
+    with tempfile.TemporaryDirectory(dir=args.work) as td:
+        for backend in args.backends:
+            r = run_on(backend, text, td, "want")
+            out[backend] = (r["verdict"], (r.get("diag") or "")[:60])
+    return out
+
+
 def shrink(text, args):
     """The smallest sub-program that still fails; `(text, steps)`.
 
@@ -2517,6 +2624,7 @@ def shrink(text, args):
     not a second copy of it in the attribution path.
     """
     steps = 0
+    want = _verdict_map(text, args)
     # 1. statements, largest first (a big `if` goes before the one line inside
     #    it, so the shrink converges on the OUTER construct when both work)
     changed = True
@@ -2531,7 +2639,7 @@ def shrink(text, args):
             if not cand.strip():
                 continue
             steps += 1
-            if _still_fails(cand, args):
+            if _still_fails(cand, args, want):
                 text = cand
                 changed = True
                 break
@@ -2548,7 +2656,7 @@ def shrink(text, args):
         for a in alts:
             steps += 1
             cand = text[:m.start()] + a.strip() + text[m.end():]
-            if _still_fails(cand, args):
+            if _still_fails(cand, args, want):
                 text = cand
                 break
         else:
@@ -2578,7 +2686,7 @@ def shrink(text, args):
                     continue
                 steps += 1
                 cand = text[:m.start()] + repl + text[m.end():]
-                if _still_fails(cand, args):
+                if _still_fails(cand, args, want):
                     text = cand
                     changed = True
                     break

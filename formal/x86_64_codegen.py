@@ -276,6 +276,24 @@ def _collect_var_names(f: F.FunctionDef) -> list:
     def walk_compr(node, depth: int, acc: list) -> None:
         if node is None or isinstance(node, (str, int, float, bool)):
             return
+        if isinstance(node, (list, tuple)):
+            # A STATEMENT LIST is what this is called with (`f.body`), and it is
+            # also what an `elif` arm's body is: `IfStmt.elifs` is a list of
+            # `(cond, body)` TUPLES, and the dataclass-field walk below
+            # iterates a tuple's items — handing the `body` LIST straight to
+            # `walk_compr`, which then found no `__dataclass_fields__` and
+            # returned. So a comprehension inside an `elif` reserved no
+            # `_ci{d}`/`_cb{d}` at all and the emitter refused the program with
+            # "main: '_cb0' has no home" while arm64 built and ran it.
+            #
+            # arm64's `walk_compr_temps` has had this arm all along, with the
+            # same argument for it (a comprehension whose temps were never
+            # reserved fell through to X19, aliased one register, and read
+            # `ldr xN, [x0]`), which is what makes this a copy that drifted
+            # rather than a second design.
+            for x in node:
+                walk_compr(x, depth, acc)
+            return
         if isinstance(node, F.Comprehension):
             n = len(node.generators or [])
             if n:
