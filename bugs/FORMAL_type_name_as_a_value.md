@@ -5,6 +5,14 @@ path and the word is a tag, so `t == Int32` is an integer comparison, a type
 crosses a call boundary, and a `dtype: DType` field holds one. Both
 architectures, tested against CPython and against the interpreter.
 
+**Updated 2026-10-03 (`work/formal16-8`): §5's `DType`-ANNOTATED-FIELD item is
+CLOSED (the `DTYPE_TYPE_NAMES` row, measured before/after on both architectures
+on six shapes, with the numbers in §5), and measuring it found a real defect the
+item had only gestured at — a subscript on a frame slot is a pointer
+dereference, and the two backends disagree about it. One item is left and it is
+a limit rather than work: `DType` as a VALUE needs storage this image does not
+have.** Everything else below is unchanged.
+
 **Coverage: 0 of the 4 reachable files reach `pass`, and 1 of the 5 the 2026-09-30
 sweep named is no longer reachable at all.** Both numbers are measured below, not
 argued, and both are worth reading before anyone plans against this construct.
@@ -264,7 +272,7 @@ tree.
   object needs storage this image does not have (it is a pointer to something),
   so it is the same class of question as `FORMAL_string_value_model.md` and
   belongs to whoever owns the value model.
-* **A `DType`-ANNOTATED field is still not `TYPE_KIND`.** `declared_type_kind`
+* ~~**A `DType`-ANNOTATED field is still not `TYPE_KIND`.** `declared_type_kind`
   answers `String` and the integer names and a framed struct and a blob, and
   `DType` is none of those, so `b.t` for `var t: DType` is unclassified while
   `t = DType.int32` in a local is now a tag. **Deliberately left**, and the
@@ -275,7 +283,37 @@ tree.
   `dtype: DType`) for no gain — the two operations are refused either way, only
   with different sentences. **Next step**, if a reader wants it: a row in
   `declared_type_kind`, agreed over the holder's candidates like every other row
-  there.
+  there.~~ **CLOSED 2026-10-03** — `formal/types.py`'s `DTYPE_TYPE_NAMES`
+  (`{"DType"}`) is the fourth vocabulary, `declared_type_kind` reads it, and it
+  is threaded from both backends through the four readers of a field's declared
+  kind (`struct_field_kind` → `frame_slot_field_kind` and
+  `one_word_receiver_kind`, which is `ValueKinds.declared_kind`), so the
+  agree-or-refuse the item asked for applies unchanged: it is
+  `frame_slot_field_kind`'s, and a single candidate goes through the same rule
+  as several. `frame_slot_value_refusal` gains the fourth row so the slot path
+  does not fall through to "the source does not say what this operand holds".
+
+  **The prediction above held exactly, and that is the measurement worth
+  having.** On six shapes (`var d: DType = 5` and `var d: DType` + an `__init__`
+  that assigns it, each read by `printf`, by bare `print`, by `len()` and by a
+  subscript, plus the one-word-receiver spelling), before and after, on both
+  architectures: **the only differences are in the two `len()` sentences**, so
+  nothing is newly refused, and the `print()` widening the item did not predict
+  does not occur — `print()` consults the slot's recorded VALUE kind, and both
+  spellings already printed the tag. `len(self.d)`: "classified as 'int', and an
+  integer has no length" → "this slot's DECLARED type is 'DType' … not a string
+  and not a container, so there is no length of it to ask for". `len(self)` on a
+  one-word `S`: "classified as 'int'" → "is len() of a TYPE, and on this path a
+  type in a value position is one 64-bit TAG".
+
+  **The subscript half of the sentence is worse than a wrong message, and is
+  filed separately**: `self.t[i]` on a `DType`-annotated field is a SIGSEGV on
+  x86-64 with the field annotated `Int` as well, and a SIGSEGV on BOTH
+  architectures when the field is constructor-established — see
+  `FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_and_the_two_backends_disagree.md`.
+  That is not a consequence of this row (measured identical with and without it);
+  it is what the item's "takes a new branch on a shape the corpus uses" was
+  pointing at, and the branch it takes is the one that dereferences the slot.
 * ~~**The float8/float4 family and `uint128`** (§2's table). 202 corpus
   spellings, one entry each in `TYPE_VALUE_NAMES`, and the distinctness check
   grows with it by construction.~~ **CLOSED 2026-10-03** — see the note above
