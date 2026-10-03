@@ -1816,8 +1816,9 @@ def _wrap_into(buf, u, text, width, ind0, indn, wsub):
     `textwrap.wrap(text, width, initial_indent=ind0, subsequent_indent=indn)`
     with every default left at its default — which is what `HelpFormatter` asks
     for: it calls `textwrap.wrap` and `textwrap.fill` with no keyword of its own,
-    so `drop_whitespace`, `break_long_words`, `break_on_hyphens`, `expand_tabs`
-    and `tabsize` are all at their defaults.
+    so `drop_whitespace`, `break_long_words` and `break_on_hyphens` are all at
+    their defaults. (`expand_tabs` is at its default too, and does nothing here:
+    the formatter squashes whitespace before it gets here — `_squashed`.)
 
     The loop is `_wrap_chunks` with the chunk LIST flattened into integers: a
     line is open or it is not, and while it is open its length is enough to
@@ -1857,7 +1858,6 @@ def _wrap_into(buf, u, text, width, ind0, indn, wsub):
     first = 1
     content = 0          # `buf` offset where the open line's content began
     keep = 0             # …and where its content ends without trailing space
-    ilen = 0             # the indent this line was opened with
     while i < n:
         if forced > i:
             k = forced
@@ -1881,11 +1881,9 @@ def _wrap_into(buf, u, text, width, ind0, indn, wsub):
             continue
         if open_line == 0:
             if first == 1:
-                ilen = str_len(ind0)
-                u = _putrun(buf, u, ind0, 0, ilen)
+                u = str_put(buf, u, ind0, str_len(ind0))
             else:
-                ilen = str_len(indn)
-                u = _putrun(buf, u, indn, 0, ilen)
+                u = str_put(buf, u, indn, str_len(indn))
             content = u
             keep = u
             open_line = 1
@@ -1934,11 +1932,6 @@ def _wrap_into(buf, u, text, width, ind0, indn, wsub):
     if open_line == 1 and keep > content:
         u = _nl_at(buf, keep)
     return u
-
-
-def _putrun(buf, u, src, at, n):
-    """`n` bytes of `src` at `src + at`, at `buf[u:]`. The new `u`."""
-    return str_put(buf, u, src + at, n)
 
 
 def _basename(p):
