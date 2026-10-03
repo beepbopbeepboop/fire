@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """A frame address at an argument position of a COMPTIME-SPECIALIZED call.
 
-The receiver-position family (`bugs/FORMAL_frame_receiver_handoff.md` §6-§13)
-has three cases, and this file covers the one that is not about a method call
+The receiver-position family (`formal/build.py`'s `_frame_receivers` /
+`_check_frame_escapes` / `_check_holder_agreements`) has three cases, and this file covers the one that is not about a method call
 at all: `f[T](r)` — a generic being specialized with a frame address in an
 argument.
 
@@ -253,7 +253,6 @@ DIFF_CASES = [
      '    print("v=%d" % f(1, 3, 7), end="")\n'
      "    return 0\n\n"
      "main()\n"),
-
     # **GUARD** — the advice the call-result-receiver refusal gives, and it is in
     # this table because it is a positive case: `m.make().take(r)` is refused in
     # `REFUSALS` below, and the sentence it is refused with tells the reader to
@@ -296,6 +295,119 @@ DIFF_CASES = [
      "    p = Pair(4, 5)\n"
      "    q = p.peer()\n"
      '    print("v=%d" % q.combine(2, 3), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+    # ── THE SUBSCRIPT RECEIVER, which is `bugs/FORMAL_method_call_on_a_
+    # subscribed_receiver.md`'s Done-when and the capability the receiver-type
+    # predicate exists for.  `u1.mojo`, verbatim: the element type is the
+    # constructor's own declaration, and the answer is 3 on both architectures
+    # where the refusal it replaced was a LINK-AUDIT sentence naming a bare `get`.
+    ("subscript_receiver_method_call_reads_the_element",
+     "struct Box:\n"
+     "    var k: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.k\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var bs = [Box(), Box()]\n"
+     "    bs[0].k = 3\n"
+     '    printf("v=%d", bs[0].get())\n'
+     "    return 0\n",
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.k = 0\n"
+     "    def get(self):\n"
+     "        return self.k\n\n"
+     "def main():\n"
+     "    bs = [Box(), Box()]\n"
+     "    bs[0].k = 3\n"
+     '    print("v=%d" % bs[0].get(), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+
+    # …and a FIELD READ AND WRITE through the same subscript, which is the half
+    # that used to be silently WRONG rather than refused: the load fell to the
+    # emitter's "no object model, so the field reads as 0" arm and the store was
+    # dropped, so this program printed 0 and exited 0.  Both element reads and
+    # both element writes are in it, because a fix that made the read right and
+    # left the store dropped would produce the same 0 from the other direction.
+    ("subscript_element_field_read_and_write_both_land",
+     "struct Box:\n"
+     "    var k: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var bs = [Box(), Box()]\n"
+     "    bs[0].k = 3\n"
+     "    bs[1].k = 7\n"
+     '    printf("v=%d %d %d", bs[0].k, bs[1].k, bs[0])\n'
+     "    return 0\n",
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.k = 0\n\n"
+     "def main():\n"
+     "    bs = [Box(), Box()]\n"
+     "    bs[0].k = 3\n"
+     "    bs[1].k = 7\n"
+     '    print("v=%d %d %d" % (bs[0].k, bs[1].k, bs[0].k), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+
+    # …and the SECOND of the two sources that state an element type: a parameter
+    # declared `List[Box]`.  A local literal and a declared parameter are the
+    # only two spellings this path can read, and a predicate that only had the
+    # first would leave every function in the stdlib — which takes parameters,
+    # not literals — on the old refusal.
+    ("subscript_receiver_on_a_declared_element_parameter",
+     "struct Box:\n"
+     "    var k: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.k\n\n"
+     "def first(bs: List[Box]) -> Int:\n"
+     "    return bs[0].get()\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var bs = [Box(), Box()]\n"
+     "    bs[0].k = 5\n"
+     '    printf("v=%d", first(bs))\n'
+     "    return 0\n",
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.k = 0\n"
+     "    def get(self):\n"
+     "        return self.k\n\n"
+     "def first(bs):\n"
+     "    return bs[0].get()\n\n"
+     "def main():\n"
+     "    bs = [Box(), Box()]\n"
+     "    bs[0].k = 5\n"
+     '    print("v=%d" % first(bs), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+
+    # …and an index that is a NAME rather than a literal, on the first source.
+    # `bs[0].k` and `bs[i].k` are the same rewrite and must read different
+    # elements, so this is what stops the identity from being written as "take
+    # element 0".
+    ("subscript_receiver_with_a_name_index",
+     "struct Box:\n"
+     "    var k: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.k\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var bs = [Box(), Box()]\n"
+     "    bs[0].k = 3\n"
+     "    bs[1].k = 7\n"
+     "    var i = 1\n"
+     '    printf("v=%d %d", bs[i].get(), bs[i].k)\n'
+     "    return 0\n",
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.k = 0\n"
+     "    def get(self):\n"
+     "        return self.k\n\n"
+     "def main():\n"
+     "    bs = [Box(), Box()]\n"
+     "    bs[0].k = 3\n"
+     "    bs[1].k = 7\n"
+     "    i = 1\n"
+     '    print("v=%d %d" % (bs[i].get(), bs[i].k), end="")\n'
      "    return 0\n\n"
      "main()\n"),
 ]
@@ -351,18 +463,6 @@ REFUSALS = [
 
     # A RECEIVED FRAME ADDRESS RETURNED.  The return family, not the position
     # family, and the message says so: the creator is up the call chain and
-    # nothing here establishes it is still there when the caller reads the slot.
-    ("refuse_a_specialized_parameter_returned",
-     "struct R:\n"
-     "    var a: Int\n"
-     "    var b: Int\n\n"
-     "def stash[type: Int](x: Int, r: R) -> Int:\n"
-     "    return r\n\n"
-     "def main(n: Int) -> Int:\n"
-     "    var r = R()\n"
-     "    r.a = 7\n"
-     "    return stash[1](0, r).a\n",
-     "returned from a function that did not create it"),
 
     # A CALLEE THIS PASS CANNOT NAME, and the message must NAME IT rather than
     # call it a method call.  `Box.run[1](0, r)` is a specialization of a
@@ -370,8 +470,27 @@ REFUSALS = [
     # `Struct.m[T](x)`, so there is no parameter list to read.  The needle is
     # the callee's own spelling, which is the whole point — before the change
     # this program was reported as "a method call on a value receiver is
-    # dispatched by NAME", naming a receiver and a dispatch it does not have.
-    ("refuse_a_dotted_specialized_callee_names_it",
+    # A METHOD DECLARED WITH PARAMETERS AND NO RECEIVER — the sentence below is
+    # the whole of what this case is about, and it replaced TWO wrong ones.
+    #
+    # The case used to assert that `Box.run[1](0, r)` is refused as "a
+    # specialization of a dotted callee, which names no function this pass has a
+    # parameter list for". That stopped being true when
+    # `formal/build.py::_method_call_target` learned to look THROUGH the bracket
+    # `formal/build.py::_method_call_target`, which looks THROUGH the bracket:
+    # `Box.run[1]` is lifted to
+    # `Box_run[1]` like any other method call, so there IS a parameter list and
+    # the shape arm has nothing to fire on. What the program really is, and what
+    # it was actually refused for, is that `run` declares no receiver — so
+    # prepending the receiver to its argument list shifted every argument after
+    # the first by one, and the two diagnoses that stood in for that were an
+    # arity count ("3 for 2 parameter(s)") and a holder disagreement claiming the
+    # call "passes the literal 0" where it passes `r`.
+    #
+    # `model.method_declares_receiver` has the measurement: across every `.mojo`
+    # file in the tree, six methods declare parameters and all six spell the
+    # receiver `self`, so the refusal costs nothing here.
+    ("refuse_a_method_with_parameters_and_no_receiver",
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n\n"
@@ -385,15 +504,27 @@ REFUSALS = [
      "    r.b = 8\n"
      "    var bx = Box()\n"
      "    bx.k = 1\n"
-     "    return Box.run[1](0, r)\n",
-     "The callee of this call is Box.run[1], which names no function this pass "
-     "has a parameter list for"),
+     "    return bx.run[1](0, r)\n",
+     "is declared with parameters and no receiver"),
 
     # A specialization does NOT rescue the value-only callees: `origin_of`
     # wants the object, and a frame address is not one.  `origin_of` is spelled
     # `self.origin` here because `origin_of` is a builtin on this path and the
-    # check is about the callee, not the spelling.
-    ("refuse_a_value_only_callee_through_a_specialization",
+    # A RECEIVED frame address that leaves through the ENTRY. Same construct as
+    # the returned-frame suite's positive case, one destination worse: `ask`
+    # returns the address it was handed and `main` returns it in turn, and the
+    # convention needs a CALLER to reserve the block — `main`'s caller is the C
+    # runtime, which passes no such word.
+    #
+    # The case used to assert the value-only sentence, and that became
+    # unreachable the moment `origin_of` became `FRAME_IDENTITY_CALLS`
+    # `formal/model.py`'s `FRAME_IDENTITY_CALLS`, which erased it to its operand
+    # by
+    # `formal/build.py::_rewrite_identity_intrinsic_calls`, so there is no
+    # value-only callee here to refuse — `origin_of(r)` IS `r`, and what this
+    # program does is hand a received frame address back. The refusal below is
+    # that one, and every clause of it is true.
+    ("refuse_a_received_frame_returned_out_of_the_entry",
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n\n"
@@ -404,55 +535,83 @@ REFUSALS = [
      "    r.a = 7\n"
      "    r.b = 8\n"
      "    return ask[1](0, r)\n",
-     "which is lowered as an operation on a VALUE"),
+     "its caller is the C runtime, which passes no such word"),
 
-    # A METHOD called on a SUBSCRIPTED receiver — `bs[0].get()` — refused for
-    # the receiver's TYPE and not at the LINK LINE.
+    # A method called on a SUBSCRIPTED receiver whose element type is NOT
+    # DECLARED — `bs[0].get()` where `bs` is a parameter annotated only `List`.
+    # Refused for the receiver's TYPE and not at the LINK LINE.
     #
-    # This is the shape whose previous answer was a link-audit sentence:
+    # **This case used to be the same program as `bs = [Box(), Box()]`, and the
+    # CAPABILITY is what changed (2026-10-02, the now-deleted
+    # `bugs/FORMAL_method_call_on_a_subscripted_receiver.md`): a list literal of
+    # `Box()` names its element type in its own right, and a parameter declared
+    # `List[Box]` names it outright, so both now lift and run. What is left is
+    # the shape the source does not answer, and it is still the same refusal
+    # with the same words — a predicate that claimed a struct here would be
+    # inventing one, which is the failure mode a receiver's type is exactly
+    # about.
+    #
+    # The previous answer to a subscript receiver was a link-audit sentence:
     #
     #     the image would bind 1 symbol(s) that nothing provides: get.
     #     Nothing on this link line defines them …
     #
     # which is a diagnosis about where the symbol should have come from, for a
-    # defect in how the call was written — `_rewrite_method_calls` lifts
-    # `recv.m(...)` to `Struct_m(recv, …)` only when `recv` is a bare name, and
+    # defect in how the call was written — `_rewrite_method_calls` lifted
+    # `recv.m(...)` to `Struct_m(recv, …)` only when `recv` was a bare name, and
     # `bs[0]` is not one, so the dotted spelling fell through to a call against a
     # symbol spelled after the METHOD. The link audit caught it only because
     # nothing else claimed `get`; had the name collided with a C library symbol
     # the image would have bound that and computed a plausible wrong number.
-    #
-    # `bs` is a list literal of `Box()`, so the element type is statically
-    # obvious and this program is answerable — inferring it is the capability
-    # `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` records, and it is
-    # not what this case asserts. What it asserts is that the missing fact is
-    # NAMED instead of the link line.
     ("refuse_a_method_call_on_a_subscripted_receiver",
      "struct Box:\n"
      "    var k: Int\n"
      "    def get(self) -> Int:\n"
      "        return self.k\n\n"
+     "def drain(vals: List, i: Int) -> Int:\n"
+     "    return vals[i].get()\n\n"
      "def main(n: Int) -> Int:\n"
-     "    var bs = [Box(), Box()]\n"
-     "    bs[0].k = 3\n"
-     "    return bs[0].get()\n",
+     "    return 0\n",
      "What is missing is the receiver's TYPE"),
 
-    # …and the receiver is quoted back AS THE SOURCE SPELLS IT.  `bs[0]`, not
-    # `bs[IntLiteral]` — a refusal whose evidence is an AST node class name is a
-    # refusal a reader has to decode before they can act on it, and this is a
+    # …and the receiver is quoted back AS THE SOURCE SPELLS IT.  `vals[i]`, not
+    # `vals[IntLiteral]` — a refusal whose evidence is an AST node class name is
+    # a refusal a reader has to decode before they can act on it, and this is a
     # separate assertion because a spelling fix and a refusal fix are two
-    # changes that can each land alone.
+    # changes that can each land alone.  The index is a NAME here rather than a
+    # literal, which is the harder half of the spelling: both spellings come
+    # from `model.receiver_shape_text`.
     ("refuse_a_subscripted_receiver_is_spelled_as_written",
      "struct Box:\n"
      "    var k: Int\n"
      "    def get(self) -> Int:\n"
      "        return self.k\n\n"
+     "def drain(vals: List, i: Int) -> Int:\n"
+     "    return vals[i].get()\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return 0\n",
+     "`vals[i].get(…)` cannot be lowered"),
+
+    # **GUARD** — a method the element's struct does NOT declare, while another
+    # struct in the SAME MODULE does.  This is the guard the lift needs: the
+    # element type is what decides the callee, so a name `owners` knows must not
+    # be bound to the struct that declares it when the receiver holds another.
+    # `bs[0].peek()` must be refused rather than lifted to `Other_peek(bs[0])`,
+    # which would be a plausible-looking wrong answer — `Other` has the same
+    # shape and the same method body, so nothing downstream would notice.
+    ("refuse_a_method_the_element_struct_does_not_declare",
+     "struct Box:\n"
+     "    var k: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.k\n\n"
+     "struct Other:\n"
+     "    var k: Int\n"
+     "    def peek(self) -> Int:\n"
+     "        return self.k\n\n"
      "def main(n: Int) -> Int:\n"
      "    var bs = [Box(), Box()]\n"
-     "    bs[0].k = 3\n"
-     "    return bs[0].get()\n",
-     "`bs[0].get(…)` cannot be lowered"),
+     "    return bs[0].peek()\n",
+     "`bs[0].peek(…)` cannot be lowered"),
 
     # ── a CALL RESULT as the receiver, and the TWO SPELLINGS of that one call ──
     #

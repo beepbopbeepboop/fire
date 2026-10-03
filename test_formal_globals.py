@@ -63,6 +63,24 @@ BACKENDS = ("arm64", "x86_64")
 # an address as if it were text — so each case binds the global to an annotated
 # local first. That annotation is not incidental: it is the ordinary Mojo way to
 # say what a name holds, and every case below uses it.
+#
+# The expected answer may be a callable of (tmpdir, name) instead of a string;
+# `run_case` calls it, and `__file___is_the_source_the_build_was_handed` is the
+# one case that needs it, for the reason its own comment gives.
+def __file__case(tmpdir, name):
+    """`<__file__>`, `<dirname(__file__)>`, `<dirname(dirname(__file__))>`.
+
+    The three lines `tools/bootstrap_verify.py:31` computes and this file's
+    last case prints, with the path the RUNNER chose for the source.  Not
+    written down as a literal because it is not the same path twice: it is
+    `<tmpdir>/<case name>.mojo`, and `tmpdir` is a fresh `TemporaryDirectory`
+    per run.
+    """
+    path = os.path.join(tmpdir, name + ".mojo")
+    here = os.path.dirname(path)
+    return f"{path}\n{here}\n{os.path.dirname(here)}"
+
+
 CASES = [
     # ── the case this whole capability exists for ──
     # The measured wrong answer before module-global storage was 5. The write
@@ -425,6 +443,84 @@ CASES = [
      "    printf(\"%s\", M[\"k\"])\n"
      "    printf(\"%s\", M[\"j\"])\n"
      "    return 0\n", "vw"),
+
+    # A NESTED container global, which used to be refused with "a container
+    # element is itself a container … only the SECOND level of fixups is
+    # missing". The element of a nested literal IS a word on this path — a
+    # pointer to a blob — so what was missing was never a word to put there but
+    # the blob it points at, and `build_data_image` now lays one out per nested
+    # element and adds it to the same `fixups` list the flat case already used.
+    #
+    # EVERY index of both levels is read, and that is the row's real subject.
+    # Element `i` of a blob is the word at `8 * (i + 1)`, so a blob's own words
+    # have to be CONTIGUOUS: laying an inner blob out as its element word is
+    # reached interleaves it, and then `X[1][0]` reads the FIRST inner blob's
+    # count (2) where element 1's pointer belongs, indexes 0 into it, and answers
+    # 2 — which is what the first version of this fix did, on both architectures,
+    # from a green build. `X[0][*]` was right in that version and `X[1][*]` was
+    # wrong, so a row that read only the first element would have passed on it.
+    ("nested_container_global",
+     "X = [[1, 2], [3, 4]]\n"
+     "\n"
+     "def main(n):\n"
+     "    a: Int = X[0][0]\n"
+     "    b: Int = X[0][1]\n"
+     "    c: Int = X[1][0]\n"
+     "    d: Int = X[1][1]\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    print(c)\n"
+     "    print(d)\n"
+     "    print(len(X))\n"
+     "    return 0\n", "1\n2\n3\n4\n2\n"),
+
+    # The same layout with a THIRD level, and the third level is where a
+    # worklist stops being an optimisation: each pass has to finish a whole
+    # blob before the next one starts, or the deepest blob lands inside the
+    # middle one. `DEEP[0][1][0]` and `DEEP[1][0][0]` together are the two
+    # directions through the queue.
+    ("three_level_nested_container_global",
+     "DEEP = [[[1, 2], [3]], [[4]]]\n"
+     "\n"
+     "def main(n):\n"
+     "    a: Int = DEEP[0][1][0]\n"
+     "    b: Int = DEEP[1][0][0]\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    return 0\n", "3\n4\n"),
+
+    # STRINGS inside the nested blob, which is the other word kind and the one
+    # that cannot be laid out as bytes: a string word is a pointer to the
+    # INTERNED literal in `__TEXT`, which is not in this image, so it is eight
+    # zero bytes plus a `string_cells` entry and only the CODE can name the
+    # target. A nested blob therefore needs the fixup for its own words AND a
+    # string cell per string inside it, and the shape is `tools/wave1_move_shared.py`'s
+    # `MOVES` and `tools/wave2_extract_shared.py`'s `EXTRACT` verbatim — the two
+    # module globals this capability exists for. Compared against the
+    # interpreter, so the expected answer is not a second copy of the words.
+    ("nested_container_of_strings_global",
+     "MOVES = [\n"
+     "    (\"gimple_solvers\", \"mojo/middle/solvers.py\", \"mojo.middle.solvers\"),\n"
+     "    (\"gimple_ctypes\", \"mojo/middle/types.py\", \"mojo.middle.types\"),\n"
+     "]\n"
+     "\n"
+     "EXTRACT = {\n"
+     "    \"gimple_gen_infra.py\": (\"infra_infer\", [\"_infer_param_types\"]),\n"
+     "    \"gimple_mod.py\": (\"mod\", [\"one\"]),\n"
+     "}\n"
+     "\n"
+     "def main(n):\n"
+     "    a: String = MOVES[0][1]\n"
+     "    b: String = MOVES[1][0]\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    c: String = EXTRACT[\"gimple_mod.py\"][0]\n"
+     "    d: String = EXTRACT[\"gimple_gen_infra.py\"][1][0]\n"
+     "    print(c)\n"
+     "    print(d)\n"
+     "    print(len(MOVES))\n"
+     "    return 0\n",
+     "mojo/middle/solvers.py\ngimple_ctypes\nmod\n_infer_param_types\n2\n"),
 
     # THE CONTROL for the interning claim, and the reason the two rows above are
     # worth having: a string global and a string LITERAL are the same string, so
@@ -840,6 +936,80 @@ CASES = [
      "def main() -> int:\n"
      "    printf(\"%d\", f([1, 2]))\n"
      "    return 0\n", "5"),
+
+    # ── `__file__`, the one module-level name the BUILD can answer ──
+    #
+    # It was refused by name (`'__file__' has no home`) on the reasoning that
+    # module attributes "are strings by the language and identical in every
+    # program this path can compile" — which is true of the eleven other names on
+    # that list and false of this one, because `__file__` is a different string
+    # in every file. What the build was HANDED is the path of the file it is
+    # compiling, so the value is a build-time fact and it lives in the table a
+    # folded module constant already lives in.
+    #
+    # The expected value is not written down beside the case: it is computed
+    # from the source path the runner handed `fire.py`, which is the only honest
+    # way to pin it — a hand-written absolute path would go stale the moment the
+    # tree moved, and would be wrong for every reader but this one. The
+    # `os.path.dirname(os.path.abspath(__file__))` shape is
+    # `tools/bootstrap_verify.py:31` and `tools/audit_selfhost_struct_fields.py`
+    # verbatim, and `REPO = dirname(HERE)` is `bootstrap_verify.py`'s next line:
+    # the whole point is that a name bound to a CALL is a slot the body fills,
+    # and this row is what says the value in it is the build's and not zero's.
+    #
+    # The trailing `main(0)` is the same thing every container row above carries
+    # and for the same reason: the module body IS the entry, so `main` runs
+    # because the source says so.
+    ("__file___is_the_source_the_build_was_handed",
+     "from os.path import dirname, abspath\n"
+     "\n"
+     "HERE = dirname(abspath(__file__))\n"
+     "REPO = dirname(HERE)\n"
+     "\n"
+     "def main(n):\n"
+     "    s: String = __file__\n"
+     "    d: String = HERE\n"
+     "    r: String = REPO\n"
+     "    print(s)\n"
+     "    print(d)\n"
+     "    print(r)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", __file__case),
+
+    # The half of the row above that is about the ANNOTATION rather than about
+    # `__file__`, isolated so it cannot be read as "the case passes because
+    # `__file__` works".  `HERE`'s initializer is a call into another module's
+    # dylib, so `_body_store_shape` claims nothing about the slot's KIND (it
+    # asks only of a bare-name callee, deliberately), `global_slot_kind` is
+    # therefore None, and `kind_of(HERE)` is None — which `_value_kind` turns
+    # into this model's DEFAULT for a word.  Measured before the annotation was
+    # read, on BOTH architectures:
+    #
+    #     print(d)   ->   105553157226576
+    #
+    # An interned `char *` printed as a decimal, from a green build, with an
+    # exit status of 0.  `printf("%s", HERE)` in the same program printed `/a/b`
+    # throughout, so the value was never wrong — only the RENDERING was, and
+    # only because the one piece of evidence in the source (`d: String`) was not
+    # being read.
+    #
+    # The control is in the same program: `e = dirname(HERE)` has no annotation
+    # and is still classified from the call, so the row says the annotation
+    # IMPROVES an unknown rather than replacing a classification.
+    ("an_annotated_local_takes_its_type_from_the_annotation",
+     "from os.path import dirname, abspath\n"
+     "\n"
+     "HERE = dirname(abspath(\"/a/b/c.py\"))\n"
+     "\n"
+     "def main(n):\n"
+     "    d: String = HERE\n"
+     "    e: String = dirname(HERE)\n"
+     "    print(d)\n"
+     "    print(e)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "/a/b\n/a\n"),
 ]
 
 # Cases that must be REFUSED, and why each one is a refusal rather than a wrong
@@ -854,19 +1024,21 @@ CASES = [
 REFUSALS = [
     # A string ELEMENT inside a container global is NOT a refusal any more —
     # `read_list_of_strings` above runs it. What is still refused is a container
-    # element that is neither an int nor a string, and the pin is here because
-    # the refusal machinery is what stops a slot with no initializer from
-    # reading as the zero an unwritten slot gives: a list would report length 0
-    # and print an answer.
+    # element that is neither an int, a string, nor a NESTED container of those,
+    # and the pin is here because the refusal machinery is what stops a slot with
+    # no initializer from reading as the zero an unwritten slot gives: a list
+    # would report length 0 and print an answer.
     #
-    # A nested container is the interesting one, because its element IS a word
-    # (a pointer to a blob) and only the SECOND level of fixups is missing — so
-    # this is a real extension rather than a limit, and the message says which.
-    ("nested_container_global_refused",
-     "L = [[1, 2], [3]]\n"
+    # The element is a CALL here rather than a literal, which is the one word kind
+    # `_static_word` still cannot compute — its result is not known before the
+    # program runs, and no amount of laying out `__DATA` changes that. The
+    # nested-container half of the old message is gone with
+    # `nested_container_global` above; what is left is this.
+    ("call_computed_container_element_refused",
+     "L = [len(\"ab\"), 3]\n"
      "\n"
      "def main(n):\n"
-     "    v: Int = L[0][1]\n"
+     "    v: Int = L[0]\n"
      "    print(v)\n"
      "    return 0\n",
      "no initializer"),
@@ -1103,11 +1275,18 @@ def interpreter_stdout(tmpdir, name, files):
 
     The interpreter has no `__DATA`, no slot index and no image, so it cannot
     catch an addressing bug; it is here to catch a SEMANTIC one, and it shares
-    no code with either backend below the parser."""
+    no code with either backend below the parser.
+
+    The interpreter reads the SAME path the images are built from
+    (`<tmpdir>/<name>.mojo`, `write_sources`), not a `.interp.mojo` copy of it.
+    That was a `.interp.mojo` and it was invisible until a case's answer was the
+    source's own path: `__file__` is a fact about the file, so two spellings of
+    the same file are two different answers, and the harness was the thing that
+    made them differ. One path per case now, which is also what "the same
+    program" means.
+    """
     entry = files["prog.mojo"] if isinstance(files, dict) else files
-    src = os.path.join(tmpdir, name + ".interp.mojo")
-    with open(src, "w") as f:
-        f.write(entry)
+    src, _paths = write_sources(tmpdir, name, files)
     p = run([sys.executable, FIRE, "run", src], timeout=RUN_TIMEOUT)
     return p.returncode, p.stdout
 
@@ -1149,7 +1328,15 @@ def image_stdout(tmpdir, name, backend, files):
 
 
 def run_case(name, files, want_stdout, tmpdir, verbose):
-    want = want_stdout
+    # A case's expected answer may be a CALLABLE of (tmpdir, name) instead of
+    # a string, and one case needs that: `__file__` is the path of the source
+    # the build was handed, which is `<tmpdir>/<name>.mojo` — a path that is
+    # different in every run of this file, in every checkout, and on every
+    # machine. Writing it down beside the case would be a second answer to the
+    # same question and would go stale the moment the tree moved; computing it
+    # from the argument the runner itself passed to `fire.py` is the only way
+    # to pin the value rather than a value.
+    want = want_stdout(tmpdir, name) if callable(want_stdout) else want_stdout
     got = {}
     for backend in BACKENDS:
         result, err = image_stdout(tmpdir, name, backend, files)
@@ -1262,10 +1449,10 @@ def _reserved_words_are_there_and_unwritten(tmpdir, name, verbose):
             if n <= 0: return 0
             return deep(n - 1) + 1
 
-    and `deep(62)` is a SIGSEGV on arm64 today, so the guard that fixes it needs
-    a word in an image exactly like this one — an image with nothing else in its
-    `__DATA`
-    (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+    and `deep(62)` used to be a SIGSEGV on arm64, so the guard that fixed it
+    needed a word in an image exactly like this one — an image with nothing
+    else in its `__DATA` (`model.STACK_FLOOR_BUDGET_BYTES`,
+    `model.recursive_function_names`).
 
     What is asserted, per backend:
 

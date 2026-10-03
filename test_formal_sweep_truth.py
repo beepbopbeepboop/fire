@@ -30,6 +30,7 @@ says so and skips without it. The units are the census and the classifier.
 """
 import io
 import os
+import re
 import sys
 import unittest
 from contextlib import redirect_stderr
@@ -1187,22 +1188,41 @@ class TestX86EndToEndTree(unittest.TestCase):
                          ["push_r64", "mov_rm64_r64_reg", "alu_ri32:sub_rsp",
                           "leave", "ret"])
 
-    def test_a_call_that_returns_is_its_own_outcome_not_a_proof(self):
-        """`call` pushes a return address and `ret` pops one.
+    def test_a_callees_return_continues_into_the_caller(self):
+        """`call` pushes a return address and `ret` pops one, so the callee's
+        `ret` is NOT the end of the run.
 
         The caller below is `push rbp ; call far ; mov rax, 0 ; ret` and the callee
-        is `push rbp ; leave ; ret`. Walking it must DECLINE, naming the reason,
-        because the theorem it would emit claims the run stops at the callee's
-        `ret` and the machine carries on into `mov rax, 0`.
+        is `push rbp ; leave ; ret`. Walking it used to DECLINE, naming the
+        reason, because the theorem it emitted claimed the run stopped at the
+        callee's `ret` — and the machine carries on into `mov rax, 0`. Declining
+        was right and stopping was wrong; following the return is the fix, and
+        this is the case that says the chain now runs to the exit.
+
+        The `ret` at 0x1016 is the CALLEE's and its successor is 0x1009, the
+        instruction after the `call` at 0x1004 — which is `UInt64.ofNat (m + 5)`,
+        the literal the model's own `x86_step_call_rel32` pushes, so the two agree
+        about where the machine goes. The LAST node is the caller's own `ret`,
+        with no successor: that is the outermost one, and it pops the zero
+        `X86State.init` leaves on the stack, which is what makes address 0 the
+        exit sentinel.
         """
-        from formal.x86_64_endtoend_test import _NoTree
+        from formal.x86_64_endtoend_test import _paths
         MOV_EAX_0 = b"\x48\xc7\xc0\x00\x00\x00\x00"
         code, shapes = _image(_calling(PROLOGUE, PROLOGUE + EPILOGUE,
                                        MOV_EAX_0 + b"\xc3"))
-        with self.assertRaises(_NoTree) as cm:
-            self._tree(code, shapes)
-        self.assertEqual(cm.exception.kind, "call")
-        self.assertIn("caller", str(cm.exception))
+        root = self._tree(code, shapes)
+        self.assertIsNotNone(root, "the return must be followed, not declined")
+        (path,) = _paths(root)
+        self.assertEqual([n.form for n in path],
+                         ["push_r64", "mov_rm64_r64_reg", "call_rel32",
+                          "push_r64", "mov_rm64_r64_reg", "leave", "ret",
+                          "mov_rm64_imm32", "ret"])
+        rets = [n for n in path if n.form == "ret"]
+        self.assertEqual([n.succ for n in rets],
+                         [self.BASE + 9, None],
+                         "the callee's ret returns to the instruction after the "
+                         "call; only the outermost one ends the run")
 
     def test_calling_one_function_twice_is_two_calls_not_a_loop(self):
         """The second call re-enters an address the path has already been in.
@@ -1217,8 +1237,14 @@ class TestX86EndToEndTree(unittest.TestCase):
         offset.  The `seen` set that would catch this mistake is the one the
         SECOND call walks into, so the case has to actually contain two calls --
         one call into a callee that itself calls once would not reach it.
+
+        Following the return is what makes this case bite twice: the callee's
+        `ret` comes back to 0x1009, which is the SECOND call, so a `seen` carried
+        across the return boundary would read the callee's own body as a cycle.
+        The callee is entered at 0x1016 twice and the chain still ends at the
+        caller's `ret`.
         """
-        from formal.x86_64_endtoend_test import _NoTree
+        from formal.x86_64_endtoend_test import _paths
         callee = PROLOGUE + EPILOGUE
         MOV_EAX_0 = b"\x48\xc7\xc0\x00\x00\x00\x00"
         first = len(PROLOGUE)
@@ -1231,9 +1257,15 @@ class TestX86EndToEndTree(unittest.TestCase):
         self.assertEqual(len(code), target + len(callee),
                          "the callee must start where the two calls point")
         _, shapes = _image(code)
-        with self.assertRaises(_NoTree) as cm:
-            self._tree(code, shapes)
-        self.assertEqual(cm.exception.kind, "call")
+        root = self._tree(code, shapes)
+        self.assertIsNotNone(root, "two calls are two calls")
+        (path,) = _paths(root)
+        entered = [n.addr for n in path if n.addr == self.BASE + target]
+        self.assertEqual(len(entered), 2, "the callee is entered twice")
+        self.assertEqual(path[-1].form, "ret")
+        self.assertIsNone(path[-1].succ,
+                          "the chain ends at the CALLER's return, which is the "
+                          "outermost one")
 
     def test_a_backward_call_is_a_loop_and_not_the_call_outcome(self):
         """`jmp` back to the function's own entry is recursion, and `_has_loop`
@@ -1862,6 +1894,417 @@ class TestOleanCurrencyCheck(unittest.TestCase):
         with open(self.stamp, "w") as f:
             f.write("deadbeef")
         self.assertFalse(self._current())
+
+class TestX86EndToEndEmitter(unittest.TestCase):
+    """What the path-tree EMITTER does with a return, checked on the text.
+
+    `_tree` following the return is only half of it: the step after a `ret` has
+    to know `s_k.rip`, and the model says that is a value read out of the frame
+    rather than a literal. So the emitter has to state the value as its own named
+    fact and put it into the step, or the chain cannot continue. These are
+    Lean-free and they compile one small program — a 100-second proof is a very
+    expensive way to learn that the emitter forgot a line.
+    """
+
+    SOURCE = ("struct Point:\n"
+              "    var x: Int\n"
+              "    fn get_x(self) -> Int:\n"
+              "        return self.x\n"
+              "\n"
+              "def main(n) -> Int:\n"
+              "    var p = Point()\n"
+              "    return p.get_x()\n")
+
+    #: No call at all, so the whole return machinery must be absent. Loop-free
+    #: too, because `_tree` declines a body with a back edge and this is about
+    #: the return, not about that.
+    STRAIGHT = ("def main(n) -> Int:\n"
+                "    var t = n * 3 + 1\n"
+                "    return t\n")
+
+    @staticmethod
+    def _emitted(source=None):
+        import tempfile
+        import formal.x86_64_endtoend_test as E
+        with tempfile.TemporaryDirectory(prefix="formal-ret-emit-") as td:
+            path = os.path.join(td, "case.mojo")
+            with open(path, "w") as f:
+                f.write(TestX86EndToEndEmitter.SOURCE if source is None
+                        else source)
+            return E.emit_terminates(path)
+
+    def test_the_return_is_a_named_fact_and_the_step_uses_it(self):
+        text = self._emitted()
+        self.assertIn("hpop", text,
+                      "the value a `ret` pops is read out of memory, so the "
+                      "step after a return needs it as a fact of its own")
+        # The step is still the MODEL's: the literal goes back to
+        # `(mem_read_bytes …).toNat` and `x86_step_ret` concludes the record.
+        self.assertIn("(mem_read_bytes s", text)
+        self.assertIn("x86_step_ret", text)
+        self.assertIn("rw [← hpop", text)
+        # …and the closing fact is still about the EXIT SENTINEL, which is the
+        # outermost `ret` and not the callee's. Before the return was followed
+        # this was the false claim the whole bug is about.
+        self.assertRegex(text, r"have hrip : s\d+\.rip = 0 := by")
+
+    def test_a_chain_that_crossed_a_frame_is_admitted_at_the_closing_read(self):
+        """The cost side, stated as text so it cannot be forgotten.
+
+        A chain that returned into its caller has more than one frame's worth of
+        register file for the closing `simp` to reconstruct, and that `simp` does
+        not finish: measured on `wide_recv` it is 1190 s and then a heartbeat
+        timeout, which is B21's lesson from the other side — an unaffordable
+        attempt reported as a FAILURE is worse than an admitted gap. So a crossed
+        chain takes the cheap route at `hrip` and says so with a `sorry`.
+        """
+        text = self._emitted()
+        i = text.index("have hrip :")
+        closing = text[i:]
+        self.assertIn("simp only [hs", closing,
+                      "a crossed chain must not pay for the full closing simp")
+        self.assertNotIn("x86_flags_add", closing,
+                         "…which is what makes it the expensive one")
+
+    def test_a_chain_that_never_left_its_frame_is_untouched(self):
+        """The other half, and the one that must NOT change: 32 of the 45 examples
+        prove with no sorry, and they get there through the expensive closing
+        block. If the return work had changed that block for them, every one of
+        them would quietly become `proved, 1 sorry`.
+        """
+        text = self._emitted(self.STRAIGHT)
+        self.assertNotIn("hpop", text,
+                         "a straight-line function has no return to follow")
+        i = text.index("have hrip :")
+        self.assertIn("x86_flags_add", text[i:],
+                      "…and it keeps the expensive closing block, which is what "
+                      "those 32 sorries-free proofs go through")
+
+
+# ── 8. the other half of the launch estate: WHERE the generated file goes ─────
+#
+# Section 6 above is about who starts Lean; this is about where the file Lean
+# reads was written. Two scripts each wrote their generated source to a
+# hard-coded `os.path.join("/tmp", "<a fixed name>")` and handed it to `lean` BY
+# RELATIVE NAME with `cwd` set there
+# (fixed 2026-10-03 in 01d77c3a). Both are
+# registered suite jobs, the corpus has several worktrees, and `tools/suite.py`
+# runs `-j 18` — so two concurrent runs wrote the SAME `Coverage.lean` and the
+# second writer's bytes were what the first run's `lean` read. The coverage file
+# is 151 `native_decide` goals plus 482 hypothesis checks, so an interleaved
+# read is not a small corruption, and it surfaces as "a form is not steppable"
+# or "hypothesis N does not hold": a model or lemma bug, in the wrong file, in
+# somebody else's run. It is the same hazard `ensure_library` takes an exclusive
+# `flock` over, arrived at from the other end — a bound that says "only one
+# writer" and a path that says "any number of them".
+#
+# The guard is scoped to files that RUN Lean, which is the estate this bug is
+# in. `tools/tu_grind.py` has the same shape for its own `.ci` scratch and is
+# outside it; it is written down at `bugs/TOOLS_tu_grind_scratch_defaults_to_tmp.md`.
+
+_TMP_LITERAL = re.compile(r"^/tmp(?:/|$)")
+
+
+def _shared_scratch_dirs(source: str, path: str = "<snippet>"):
+    """[(lineno, literal)] for every hard-coded absolute scratch path in `source`.
+
+    Read out of the AST, for the reason `_launch_sites` gives: a file that
+    explains why it needs no scratch directory must not be mistaken for one that
+    does, and a comment is not in the AST. A docstring *is* a `Constant`, so the
+    search is restricted to constants a CALL or an ASSIGNMENT consumes — which is
+    also what makes it find `workdir = os.path.join("/tmp", name)`, where the
+    literal is nowhere near an `open` or a `makedirs`.
+    """
+    import ast
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        return [(-1, f"does not parse ({e})")]
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Call, ast.Assign, ast.AugAssign,
+                                 ast.AnnAssign)):
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
+                    and _TMP_LITERAL.match(sub.value):
+                out.add((sub.lineno, sub.value))
+    return sorted(out)
+
+
+class TestScratchDirEstate(unittest.TestCase):
+    def test_the_detector_sees_a_hard_coded_dir_and_ignores_an_explanation(self):
+        """The control, in both directions: a detector that finds nothing makes
+        the guard below a green light over an unexamined tree."""
+        self.assertEqual(
+            _shared_scratch_dirs('import os\n'
+                                 'workdir = os.path.join("/tmp", "x86_model")\n'
+                                 'os.makedirs(workdir, exist_ok=True)\n'),
+            [(2, "/tmp")], "the literal is in the join, not in the makedirs")
+        self.assertEqual(
+            _shared_scratch_dirs('import os, tempfile, shutil\n'
+                                 '# a comment naming /tmp proves nothing\n'
+                                 'workdir = tempfile.mkdtemp(prefix="x86_model")\n'
+                                 'shutil.rmtree(workdir, ignore_errors=True)\n'),
+            [], "a comment, and a private mkdtemp, are not a shared path")
+
+    def test_nothing_generates_a_lean_file_into_a_hard_coded_dir(self):
+        found, scanned = {}, []
+        for rel, path in _lean_files(HERE, skip=("formal/lean.py",
+                                               os.path.basename(__file__))):
+            with open(path, encoding="utf-8", errors="replace") as f:
+                source = f.read()
+            if "run_lean" not in source:
+                continue          # not a Lean-launching file; see above
+            scanned.append(rel)
+            hits = _shared_scratch_dirs(source, rel)
+            if hits:
+                found[rel] = hits
+        self.assertEqual(found, {},
+                         "a generated .lean goes in a private directory "
+                         "(formal/lean.py::scratch_dir): " + repr(found))
+        # This file is exempt — like formal/lean.py is above — because it QUOTES
+        # the violation in its own control, and a string holding source text is
+        # indistinguishable from source to `ast`. So the exemption has to be
+        # shown to be costing nothing: the walk must still reach both scripts the
+        # bug named, or the guard is green over an unexamined estate.
+        for rel in ("formal/x86_64_model_test.py",
+                    "formal/x86_64_model_coverage_test.py"):
+            self.assertIn(rel, scanned,
+                          "the guard stopped reaching " + rel)
+
+    def test_the_two_scripts_ask_for_a_private_directory(self):
+        """The positive half, against the two files the doc named.
+
+        The guard above is a negative ("nothing hard-codes /tmp"), which a file
+        that writes nowhere at all would satisfy. So the two scripts are also
+        required to name the helper, and to hand `lean` a path built by joining
+        onto the directory rather than a bare `os.path.basename` of it — the
+        relative name is what made the shared directory load-bearing.
+        """
+        for rel in ("formal/x86_64_model_test.py",
+                    "formal/x86_64_model_coverage_test.py"):
+            with open(os.path.join(HERE, rel), encoding="utf-8") as f:
+                source = f.read()
+            self.assertIn("scratch_dir", source, rel)
+            self.assertNotIn("os.path.basename(src)", source,
+                             rel + ": lean is handed a relative name, so the "
+                             "cwd has to be the scratch directory — which is "
+                             "the half of the old shape that collides")
+            self.assertNotIn("os.path.basename(lpath)", source, rel)
+
+    def test_scratch_dir_is_private_and_self_removing(self):
+        """The helper's three properties, each of which the bug needs."""
+        import shutil
+        import tempfile
+        with L.scratch_dir("x86_model_test") as a, \
+                L.scratch_dir("x86_model_test") as b:
+            self.assertNotEqual(a, b, "two runs got the same directory, which "
+                                      "is the collision")
+            self.assertTrue(os.path.isdir(a))
+            with open(os.path.join(a, "Coverage.lean"), "w") as f:
+                f.write("import X86\n")
+            self.assertTrue(os.path.isdir(b))
+        for path in (a, b):
+            self.assertFalse(os.path.exists(path),
+                             "a generated .lean outlived its run")
+
+        # TMPDIR is what puts it inside the checkout for a worker or a sandbox
+        # with no writable /tmp, so the helper has to honour it rather than
+        # asking for /tmp by name.
+        base = tempfile.mkdtemp(prefix="scratch_base_")
+        old = os.environ.get("TMPDIR")
+        os.environ["TMPDIR"] = base
+        try:
+            with L.scratch_dir("x86_model_coverage") as inner:
+                self.assertEqual(os.path.dirname(inner), base)
+        finally:
+            if old is None:
+                os.environ.pop("TMPDIR", None)
+            else:
+                os.environ["TMPDIR"] = old
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_scratch_dir_removes_the_directory_when_the_body_raises(self):
+        """The other control: a `finally`, not a happy-path `rmtree`.
+
+        A run that dies mid-elaboration is the one that most needs the directory
+        gone, and it is the one that would leave it behind.
+        """
+        import tempfile
+        seen = []
+        with self.assertRaises(RuntimeError):
+            with L.scratch_dir("x86_model_coverage") as path:
+                seen.append(path)
+                raise RuntimeError("lean did not finish")
+        self.assertEqual(len(seen), 1)
+        self.assertFalse(os.path.exists(seen[0]))
+
+
+# ── 9. a label name is unique per emission site, on BOTH assemblers ─────────
+#
+# `Assembler.label` records an address in a dict and `resolve` patches every
+# branch out of it, so a name defined TWICE is not a duplicate — it is a
+# retargeting of every earlier branch to the second block, which assembles, runs,
+# exits 0 and answers with a different number. Nothing downstream can see it.
+#
+# That is not a hypothetical. Every label in `x86_64_codegen.py` carries a
+# per-site counter (`assert{aid}`, `rok{rid}`, `bnds{bid}`, `sl{sid}`) except the
+# three bound-clamp labels of `_emit_slice_parts`, which were named after the
+# REGISTER alone (`f_s4a`/`_z`/`_c`) — so a second slice in one function rebound
+# the first's `jge` and `xs[1:5][1:3]` summed the OUTER slice
+# (fixed 2026-10-03 in 68671a62). The five behavioural
+# rows for it are `test_x86_64_containers.py`'s `slice-two-*` / `slice-of-slice`
+# cases; what is here is the mechanism, on both backends, because the defect is
+# in the assembler and arm64's is the same line of code.
+
+class TestLabelUniqueness(unittest.TestCase):
+    BACKENDS = ("formal.x86_64", "formal.arm64")
+
+    @staticmethod
+    def _asm(module: str):
+        """A fresh assembler per backend, with its own relative-branch spelling.
+
+        The two spell the same operation differently (`emit_label_rel` on arm64,
+        `emit_label_rel8` on x86-64), which is the naming convention
+        `formal/x86_64.py`'s own docstring says mirrors arm64's — so the test
+        takes the name from the module rather than hard-coding one."""
+        import importlib
+        mod = importlib.import_module(module)
+        asm = mod.Assembler()
+        asm.org(0x1000)
+        rel = getattr(asm, "emit_label_rel", None) or asm.emit_label_rel8
+        return asm, rel
+
+    def test_a_label_defined_twice_is_refused_on_both_backends(self):
+        """The control in each direction: a distinct name is accepted, and the
+        same name twice is a `CodegenError` naming the label.
+
+        Both halves matter. A guard that fired on every `label()` call would
+        refuse every program; one that stayed silent is the bug.
+        """
+        from formal.model import CodegenError
+        for module in self.BACKENDS:
+            with self.subTest(backend=module):
+                asm, _rel = self._asm(module)
+                asm.label("f_sl1_c4a")
+                asm.emit(b"\x90")
+                asm.label("f_sl2_c4a")          # a distinct name: fine
+                asm.emit(b"\x90")
+                with self.assertRaises(CodegenError) as cm:
+                    asm.label("f_sl1_c4a")      # …and now the same one again
+                msg = str(cm.exception)
+                self.assertIn("f_sl1_c4a", msg,
+                              "the refusal must name the label, or it is a "
+                              "number with no subject")
+                self.assertIn("defined twice", msg)
+
+    def test_an_earlier_branch_is_not_left_pointing_at_the_second_block(self):
+        """Why the second binding has to be an error and not a rebinding.
+
+        A branch recorded to `one`, then a second `one` further along: `resolve`
+        patches every fixup out of the same dict, so without the guard the branch
+        lands in the middle of the second block — which assembles, runs, exits 0
+        and computes a different number. The guard refuses before the image
+        exists, which is the only place this class of bug can be caught.
+        """
+        from formal.model import CodegenError
+        for module in self.BACKENDS:
+            with self.subTest(backend=module):
+                asm, rel = self._asm(module)
+                asm.label("one")
+                rel("one")                      # a branch back to `one`
+                asm.emit(b"\x90\x90\x90\x90")
+                asm.label("two")
+                with self.assertRaises(CodegenError):
+                    asm.label("one")             # the collision the guard names
+                # The recorded fixup is still the one for `one`, so nothing in
+                # the assembler quietly dropped the branch to keep going.
+                self.assertEqual([r[1] for r in asm.relocs], ["one"])
+
+    #: An OVERLOADED name — ordinary Mojo, and a class whose two `__init__`
+    #: overloads are renamed one. Both backends key their function table by
+    #: NAME, so a name with two definitions is one function in the image and a
+    #: call reaches the body registered last. That rule is deliberate
+    #: (`formal/build.py`'s `_check_holder_agreements` is asked about EVERY
+    #: definition for exactly this reason, and `test_formal_run.py`'s
+    #: `overload_*_CASES` assert the answer the LAST body computes) — but it
+    #: used to reach the assembler as `self.asm.label(f.name)` for both bodies,
+    #: which implemented "last wins" as a silent REBINDING. That is the defect
+    #: the guard above refuses, so the two guards together refused five real
+    #: programs in `test_formal_run.py` until the emitters gave each definition
+    #: a label of its own and bound the name to the last one explicitly.
+    OVERLOADED = ("def twice(x: Int) -> Int:\n"
+                  "    return x * 2\n"
+                  "\n"
+                  "def twice[K: Copyable](x: Int) -> Int:\n"
+                  "    return x * 3\n"
+                  "\n"
+                  "def main(n: Int) -> Int:\n"
+                  "    return twice(7)\n")
+
+    @staticmethod
+    def _compiled(arch: str):
+        """`(code, info, labels)` for `OVERLOADED` on `arch`, from the real
+        emitter.
+
+        Driven through `formal/build.py`'s own `_make_codegen`, so the backend
+        gets the same globals base and data-segment budget every real build
+        gives it — a Codegen built by hand would be a second answer to "what
+        does this backend emit", which is the thing this file exists to
+        prevent. The assembler's own label table comes back with it because
+        the per-definition labels are emitter-internal: `info["labels"]`
+        deliberately does not publish them, so they can only be read here.
+        """
+        import formal.build as B
+        import fire_compiler as F
+        stmts = F.Parser(F.py_tokenize(TestLabelUniqueness.OVERLOADED)
+                         ).with_filename("t").parse_module()
+        gen = B._make_codegen(arch, "macho", 10)
+        code, info = gen.compile(stmts)
+        return code, info, dict(gen.asm.labels)
+
+    def test_an_overloaded_name_is_one_label_per_definition_and_one_address(
+            self):
+        """The shape that replaced the rebinding, on both backends.
+
+        Three facts, and each is a way the rule can be got wrong:
+
+          * the program BUILDS — the guard above refusing it is the regression
+            this case exists to keep fixed;
+          * the label table holds one entry per DEFINITION, so no label is
+            defined twice and the guard above never has to fire on a name the
+            emitter itself owns;
+          * `info["labels"]` publishes ONE address per NAME, equal to the LAST
+            definition's — the rule the rebound label implemented by accident,
+            now stated — and none of the per-definition labels leak into it,
+            because `build.py`'s dylib export table and `arm64_proof_gen.py`'s
+            method table both read that map and both expect one address per
+            name.
+        """
+        for arch in ("arm64", "x86_64"):
+            with self.subTest(backend=arch):
+                code, info, emitted = self._compiled(arch)
+                self.assertTrue(code)
+                per_def = sorted(n for n in emitted
+                                  if n.startswith("twice") and "__def" in n)
+                self.assertEqual(per_def, ["twice__def1", "twice__def2"],
+                                 f"[{arch}] each definition gets its own entry "
+                                 "label, and no two share one")
+                self.assertEqual(info["labels"]["twice"],
+                                 emitted["twice__def2"],
+                                 f"[{arch}] a call to an overloaded name lands "
+                                 "on the LAST definition, which is what the "
+                                 "rebound label did")
+                self.assertEqual(
+                    sorted(n for n in info["labels"] if "__def" in n), [],
+                    f"[{arch}] a per-definition label leaked into the published "
+                    "map, which every consumer reads as one address per name")
+                # …and the main module is not overloaded, so its name is still
+                # bound and still points into the image: an alias that forgot
+                # the single-definition case would show up here as a KeyError.
+                self.assertEqual(info["labels"]["main"], info["func_offset"])
+
 
 if __name__ == "__main__":
     unittest.main()

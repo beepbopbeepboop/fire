@@ -8,6 +8,31 @@ expensive kind of red to read.
 
 ## Status, after the merge
 
+**One more arrived on 2026-10-03 and is NOT declared**, so the check is red
+again on `master` today: `python3 test_suite.py` is `282 passed, 1 failed` with
+
+    - the estate: every test file is run by something, or says why not:
+      not run by any registered spec and not in UNREGISTERED: test_formal_tempfile.py
+
+`test_formal_tempfile.py` landed with the `tempfile` host module
+(`5b993959 formal: tempfile — the 111-file host-import row, ranked and then
+modelled`) and added no `UNREGISTERED` entry. Measured directly rather than
+assumed, since that is what has distinguished an unaccounted-for file from a red
+suite in every paragraph above:
+
+    python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_tempfile.py
+    # 7/7 groups passed (arm64, x86_64) — constants, gettempdir, candidates,
+    # mkdtemp, name, exclusive, absent
+
+**So it is green and undeclared, and the fix is one dict entry** —
+`'test_formal_tempfile.py': _FORMAL_SUITE_REASON`. Not done here:
+`tools/suite.py` and `test_suite.py` are `construct:estate-registration`'s write
+set and this is a merge branch. The twenty-five arrivals this document has now
+recorded (eleven, five, one) is the argument for the thing its own text says
+twice: a hand-kept excuse list is the wrong instrument, because the inventory is
+the set of `test_*.py` on disk and every new suite is a new obligation for
+whoever adds it.
+
 **The twenty are now declared; the gap is closed by an excuse, not by a
 registration.** `test_suite.py`'s `UNREGISTERED` gained twenty entries, one per
 file, all sharing `_FORMAL_SUITE_REASON` — so `python3 test_suite.py` is
@@ -72,7 +97,7 @@ Mach-O images (`test_formal_os.py`, `test_struct_formal.py`,
 tally, and to the coverage number, and nothing in the tree says that is a
 decision.
 
-That is the failure mode `bugs/FORMAL_frame_receiver_handoff.md` §7 records from
+That is the failure mode `formal/build.py`'s check ORDER records from
 the other direction: `coro` sat in the gate naming `mojo_*` runtime files after
 they were renamed to `fire_*`, all twenty of its cases had been failing to
 compile, and the suite had been reporting 0/20 the whole time. Here nothing fails

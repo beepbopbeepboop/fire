@@ -500,6 +500,210 @@ def test_a_default_argument_crosses_the_boundary(tmpdir, _):
           f"the default did not arrive: {text!r}")
 
 
+KEYWORD_PROG = """\
+from deflib import need_two, need_one, no_args
+
+
+def main(k):
+    printf("kw-inorder=%d@", need_two(a=1, b=77))
+    printf("kw-reordered=%d@", need_two(b=77, a=1))
+    printf("kw-default=%d@", need_two(a=1))
+    printf("kw-mixed=%d@", need_two(1, b=77))
+    printf("kw-one=%d@", need_one(a=5))
+    printf("kw-noargs=%d@@", no_args())
+    return 0
+"""
+
+
+def test_keyword_arguments_cross_the_boundary(tmpdir, _):
+    """A KEYWORD binds a cross-module callee's parameter by NAME.
+
+    The rule is one function on both sides of a dylib boundary and inside one:
+    `model.bind_call_arguments` matches each keyword against the callee's own
+    `ParamShape`, so the caller may write the arguments in any order, may mix
+    them with positionals, and may omit a parameter that has a default. What
+    makes this a BOUNDARY case rather than a same-unit one is where the
+    declaration comes from: a callee in another image has no `FunctionDef` in
+    this unit's registry, so the shape is read off `_extern_decls` — the
+    declaration carried by the export manifest, keyed by the SYMBOL the call
+    binds. Before that table existed the call's keywords had no parameter list to
+    match, and `bugs/FORMAL_host_import_row_5_measured.md` recorded the
+    consequence for four host modules as a compiler limitation.
+
+    It was not one, and the measurement that says so is what this case pins.
+    `need_two`'s default is 511 and `need_one` returns its argument, so a
+    keyword that bound the wrong slot, dropped an argument, or filled a
+    parameter from a register nobody wrote cannot produce these numbers by
+    accident — and the CPython half is the SAME text, so the expected binding is
+    computed rather than written down.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "keywords")
+    os.makedirs(root)
+    write_tree(root, {"deflib.mojo": DEF_LIB, "prog.mojo": KEYWORD_PROG})
+    text, rc = agrees_with_cpython(tmpdir, "keywords across the boundary",
+                                   root, "prog.aout", expect_exit=0)
+    for want in ("kw-inorder=77@", "kw-reordered=77@", "kw-default=511@",
+                 "kw-mixed=77@", "kw-one=5@", "kw-noargs=4242@@"):
+        check(want in text, f"{want} missing from {text!r}")
+
+
+def test_a_keyword_is_refused_by_name_across_the_boundary(tmpdir, _):
+    """A keyword that names NO parameter is a `TypeError`, by name.
+
+    The other half, and it is the half that makes the row above a RULE rather
+    than an omission: accepting an unknown keyword would mean binding it to
+    whichever slot was left over, which is the wrong-number shape this file
+    exists to prevent. So the refusal NAMES the keyword rather than reporting an
+    arity, and it is asserted on both directions — the image must refuse, and
+    CPython must refuse, or the case would be pinning a rule the language does
+    not have.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "kwbad")
+    os.makedirs(root)
+    write_tree(root, {
+        "deflib.mojo": DEF_LIB,
+        "prog.mojo": "from deflib import need_two\n\n\ndef main(k):\n"
+                     "    printf(\"%d@@\", need_two(nope=5))\n"
+                     "    return 0\n",
+    })
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    refuses(result, "unexpected keyword argument 'nope'")
+    rc, _text = cpython(root, "prog.aout")
+    check(rc == 1, f"CPython did not refuse `need_two(nope=5)`: exit {rc}")
+
+
+def test_a_positional_and_a_keyword_on_one_parameter_are_refused(tmpdir, _):
+    """`need_two(1, a=2)` names `a` twice, and both sides must refuse it.
+
+    A keyword binds by NAME, so a name that a positional argument already filled
+    is a second value for one slot rather than a second slot — and this is the
+    only place in the boundary where the answer is a REFUSAL rather than a
+    placement, because there is no honest reading of "argument 0 and keyword `a`
+    both go to `a`" that is not one of them being dropped.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "kwdup")
+    os.makedirs(root)
+    write_tree(root, {
+        "deflib.mojo": DEF_LIB,
+        "prog.mojo": "from deflib import need_two\n\n\ndef main(k):\n"
+                     "    printf(\"%d@@\", need_two(1, a=2))\n"
+                     "    return 0\n",
+    })
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    refuses(result, "multiple values for argument 'a'")
+    rc, _text = cpython(root, "prog.aout")
+    check(rc == 1, f"CPython did not refuse `need_two(1, a=2)`: exit {rc}")
+
+
+def test_a_host_module_call_takes_keywords(tmpdir, _):
+    """`pathlib.match_path(b=…, bn=…, an=…, a=…)` — keywords OUT OF ORDER.
+
+    The claim this pins is the one
+    `bugs/FORMAL_host_import_row_5_measured.md` made and
+    `bugs/FORMAL_host_import_row_5_measured.md`'s own numbers rested on: that "a
+    keyword argument to a host module is REFUSED", which was measured on a
+    program that asked for `match(path=…, pattern=…)` — names `pathlib.match`
+    does not declare, because its parameters are `p` and `pat`. The refusal was
+    the language's own rule, correctly applied to a call that had the names
+    wrong; it was not a boundary that drops keywords.
+
+So the case asks the question the other way round: a real host module, from
+    `formal/hostmods/`, with its REAL declared parameter names, written in
+    reverse order. `an` and `bn` are the END indices the callee documents, which
+    is why the two end positions are 4 and not 5 for a four-byte pattern — a
+    measurement, and the reason the third call answers 0 and the first two
+    answer 1, so the agreement below is agreement about three different answers.
+    The oracle is the POSITIONAL spelling of the same three calls in the same
+    image rather than CPython, and that is the honest one twice over:
+    `pathlib.match_path` is this repository's own primitive (CPython's `pathlib`
+    exports no such function, so there is nothing to compare it against), and
+    what is under test is that the two SPELLINGS agree, which is a claim about
+    argument binding rather than about paths.
+    """
+
+    fresh_cas()
+    root = os.path.join(tmpdir, "hostkw")
+    os.makedirs(root)
+    write_tree(root, {"prog.mojo": (
+        "from pathlib import match_path\n\n\ndef main() -> int:\n"
+        '    printf("pos=%d %d %d@", match_path("x.py", 4, "*.py", 4), '
+        'match_path("x.py", 4, "*", 1), match_path("x.py", 4, "*.md", 4))\n'
+        '    printf("kw=%d %d %d@@", match_path(bn=4, b="*.py", an=4, '
+        'a="x.py"), match_path(bn=1, b="*", an=4, a="x.py"), '
+        'match_path(bn=4, b="*.md", an=4, a="x.py"))\n'
+        "    return 0\n")})
+    result, out = build(root, "prog.aout")
+    rc, text = run(out)
+    check(rc == 0, f"exit {rc}: {text!r}")
+    left, _, right = text.partition("@")
+    left = left.removeprefix("pos=")
+    right = right.removeprefix("kw=").removesuffix("@@")
+    check(left == right,
+          f"the keyword spelling disagreed with the positional one:\n"
+          f"  positional {left!r}\n  keyword    {right!r}")
+    check(left == "1 1 0",
+          f"the three calls all answered the same thing ({left!r}), so an "
+          f"agreement between the two spellings would be agreement about "
+          f"nothing")
+
+
+def test_a_keyword_binds_through_the_manifest_when_the_source_is_gone(tmpdir,
+                                                                     _):
+    """The declaration is not needed for a NAME: the manifest carries one.
+
+    This is the narrowest limit the keyword row has, and it is not a limit at
+    all — which is worth pinning because the obvious way to bound the capability
+    is "it needs the callee's source", and that is false. `export_call_contract`
+    publishes each export's parameter NAMES (`"positional": ["a", "b"]`), so a
+    library shipped without its sources still binds a keyword by name, still
+    rejects a name it does not declare, and still puts the argument in the slot
+    the name says rather than in the order the caller wrote them. Measured on a
+    dylib whose manifest `source` points at a path that is not there:
+    `two(b=2, a=1)` is 12 and `two(nope=2)` is refused by name.
+
+    So the whole of the "a keyword argument to a host module is REFUSED" claim
+    in `bugs/FORMAL_host_import_row_5_measured.md` reduces to the language's own
+    rule: the keyword must name a parameter the callee DECLARES, and every one
+    of the nine modules in that document is one whose author chooses the
+    declaration.
+    """
+    import json
+    fresh_cas()
+    root = os.path.join(tmpdir, "kwmanifest")
+    os.makedirs(root)
+    write_tree(root, {"countlib.mojo": COUNT_LIB,
+                      "prog.mojo": "from countlib import two\n\n\n"
+                                   "def main(k):\n"
+                                   '    printf("kw=%d@@", two(b=2, a=1))\n'
+                                   "    return 0\n"})
+    _r, dylib = build_dylib(root, "countlib.dylib", ["countlib.mojo"])
+    with open(dylib + ".manifest.json") as f:
+        payload = json.load(f)
+    published = [e.get("call", {}).get("positional")
+                 for e in payload.get("exports", [])
+                 if e.get("name") == "two"]
+    check(published == [["a", "b"]],
+          f"precondition: the manifest publishes `two`'s parameter names, "
+          f"which is the fact this case is about: {published!r}")
+    _library_with_no_readable_source(root, dylib)
+    result, out = build(root, "prog.aout", extra=["--link-dylib", dylib])
+    rc, text = run(out)
+    check(rc == 0 and text == "kw=12@@",
+          f"the keyword did not bind through the manifest: exit {rc}, "
+          f"{text!r} (the build said "
+          f"{(result.stderr or result.stdout).strip()[-300:]})")
+    write_tree(root, {"prog.mojo": "from countlib import two\n\n\n"
+                                   "def main(k):\n"
+                                   '    printf("%d@@", two(nope=2))\n'
+                                   "    return 0\n"})
+    result, _out = build(root, "prog.aout", expect_ok=False,
+                         extra=["--link-dylib", dylib])
+    refuses(result, "unexpected keyword argument 'nope'")
+
+
 def test_too_many_arguments_across_the_boundary_is_refused(tmpdir, _):
     """`need_one(5, 6)` is a `TypeError`, and it used to build and drop the word.
 
@@ -1306,6 +1510,7 @@ def test_the_executors_answer_the_same_questions(tmpdir, _):
     cases = [
         ("alias", {"deflib.mojo": DEF_LIB, "prog.mojo": ALIAS_PROG}),
         ("defaults", {"deflib.mojo": DEF_LIB, "prog.mojo": DEFAULT_PROG}),
+        ("keywords", {"deflib.mojo": DEF_LIB, "prog.mojo": KEYWORD_PROG}),
         ("variadic", {"varlib.mojo": VAR_LIB, "prog.mojo": VAR_PROG}),
         ("zeroinit", {"prog.mojo": ZERO_INIT_PROG}),
         ("local_vs_cross", {"deflib.mojo": DEF_LIB, "prog.mojo":
@@ -1524,6 +1729,16 @@ TESTS = [
      test_a_relative_import_behind_an_alias_resolves_and_runs),
     ("a default argument crosses the boundary",
      test_a_default_argument_crosses_the_boundary),
+    ("a keyword argument binds a cross-module callee by name",
+     test_keyword_arguments_cross_the_boundary),
+    ("a keyword naming no parameter is refused across the boundary",
+     test_a_keyword_is_refused_by_name_across_the_boundary),
+    ("a positional and a keyword on one parameter are refused",
+     test_a_positional_and_a_keyword_on_one_parameter_are_refused),
+    ("a host module's callee takes keywords out of order",
+     test_a_host_module_call_takes_keywords),
+    ("a keyword binds through the manifest when the source is gone",
+     test_a_keyword_binds_through_the_manifest_when_the_source_is_gone),
     ("too many arguments across the boundary is refused",
      test_too_many_arguments_across_the_boundary_is_refused),
     ("too few arguments across the boundary is refused",

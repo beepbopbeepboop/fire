@@ -1,12 +1,17 @@
 # FORMAL_listdir_no_run_time_sequence: a run-time-length blob is answerable; a run-time-length LIST is not
 
-**Status: the directory half is fixed, the sequence half is open.** `os.listdir`
-and `os.walk` exist in `formal/hostmods/os`, are exact, and are checked entry by
-entry and in order against `os.listdir`/`os.walk` in the test process
-(`test_formal_os_backing.py`'s `listdir_and_walk`, 49 answers over nine
-directory shapes and three depths). What does not exist is a Python-level LIST
-of a length only known at run time, and that is the part of this document's
-title that is still true.
+**Status: the directory half is fixed, the sequence half is MOSTLY fixed — items
+1 and 4 of "What is still missing" landed 2026-10-02 (`work/formal8-7`) and items
+2 and 3 did not.** `os.listdir` and `os.walk` exist in `formal/hostmods/os`, are
+exact, and are checked entry by entry and in order against `os.listdir`/`os.walk`
+in the test process (`test_formal_os_backing.py`'s `listdir_and_walk`, 49 answers
+over nine directory shapes and three depths). A returned blob is now a
+**Python-level list** as well: `len(names)`, `names[i]` and `for x in names` all
+lower, with the element kind the annotation states, and a caller's own
+`triple() -> List[Int]` gets the same three. What does not exist is a list LITERAL
+of a length only known at run time, and a `listdir` that has to be `free`d by hand
+while a Python list is not — items 2 and 3 below, and they are Phase 6's
+tagged-value convergence arriving from the `os` side.
 
 ## What landed, and what it was
 
@@ -79,28 +84,62 @@ So this document's three numbered next steps read, with what happened to each:
 
 ## What is still missing, and the exact next step
 
-**A Python-level list whose length is a run-time value.** `listdir` answers
-with a blob and a pair of accessors, which is honest and usable, and it is not
-`xs = os.listdir(p)` followed by `for x in xs`. Four things stand between the
-two, and none of them is in `formal/model.py`'s business:
+**ITEM 1 AND ITEM 4 ARE DONE (2026-10-02, `work/formal8-7`), and item 1 was a
+KIND the whole time.** Measured, both architectures, for a caller's own
+`triple() -> List[Int]` and for `os.listdir`:
 
-1. `len(blob)` and `for x in blob` and `xs[i]` on a value this path knows is a
-   `malloc`'d BLOB rather than a frame one. The blob readers all begin with
-   "the base is a frame-resident blob", and nothing in the model records that a
-   particular word is a heap allocation with a run-time length. The
-   representation is already the same shape — that is the whole of the fix above
-   — so what is missing is a KIND: `BLOB_KIND`, carried by the callee's
-   declared return type, which is the same annotation channel
-   `dylib_export_return_kind` already reads for `char *`.
-2. A `list` LITERAL's frame reserve cannot be a run-time value
-   (`_blob_est` is a compile-time upper bound), so `xs = []` followed by `n`
-   appends has nowhere to put them. With (1) that becomes a `malloc`.
-3. A function returning a container. `formal/model.py`'s
-   "A frame that OUTLIVES the function that built it" is the shape of this: a
-   frame address is not a value a caller can use after the callee returns. With
-   (1) and (2) the value is a heap address, which is.
-4. A `for` over it, and `len`. Both are "is this a blob" questions and both
-   already exist; they need the kind from (1).
+```
+var t = triple()            from tupr import triple
+printf("%d\n", len(t))      ->  3          was: refused, "len() of a value
+                                                classified as 'int'"
+for x in t: s += x          ->  17          was: refused the same way
+printf("%d\n", t[2])        ->  0           was: already worked
+```
+
+The channel was `model.imported_callee_kind` — the callee's own `-> T` read by
+`declared_type_kind`, asked where the two backends' `_callee_kind` previously
+asked only the manifest's C SIGNATURE. **That signature cannot answer it**, which
+is why nothing had: `-> List[Int]`, `-> Int` and `-> Bool` are all `int64_t`.
+Both backends call one shared function, so the two cannot answer differently, and
+only a CONTAINER is taken from the declaration (an `-> Int` is deliberately not
+claimed — this path cannot tell an integer from a frame address).
+
+The element kind came with it, because item 4's two consumers both ask what the
+blob HOLDS: `annotation_type_arg_base` reads `List[String]`'s argument and the
+kind is `list:str`, and `ValueKinds._iterable_own_shape` reads that element off
+the name a `for` walks — it returned nothing for a NAME before, so a loop target
+was the model's default-for-a-word whatever the iterable held.
+
+**For `os.listdir` the half that was missing was a DECLARATION.** It was
+`def listdir(path) -> int` — a bare word — so there was nothing to read a kind
+from even in unit. It is now `-> List[String]`, which is what the value has been
+since the blob landed (one word pointing at `[count][element]…`), and it costs
+nothing: the C signature is `int64_t` either way, so this is metadata and not an
+ABI change. `walk` likewise. The three accessors REMAIN, because a caller that
+wants to `listdir_free` the result has to say so.
+
+Pinned by `test_formal_os_backing.py`'s `listdir_is_a_python_level_list` (ten
+answers over two directory shapes, against `os.listdir` in this process, both
+architectures) and by the `len`/`for`/subscript rows in
+`test_formal_globals.py`. 54/54 in that file.
+
+**What is still missing is items 2 and 3, and both are the same project:**
+
+1. ~~`len(blob)` and `for x in blob` and `xs[i]` on a value this path knows is a
+   `malloc`'d BLOB.~~ **DONE**, above.
+2. A `list` LITERAL's frame reserve cannot be a run-time value (`_blob_est` is a
+   compile-time upper bound), so `xs = []` followed by `n` appends has nowhere to
+   put them. With (1) that becomes a `malloc`.
+3. A function returning a container. `formal/model.py`'s "A frame that OUTLIVES
+   the function that built it" is the shape of this: a frame address is not a
+   value a caller can use after the callee returns. With (1) and (2) the value is
+   a heap address, which is. **And this one is now measurably smaller than the
+   document says it is**: the returned blob already crosses a dylib boundary and
+   reads by subscript (`triple()` above), because a RETURNED CONTAINER LITERAL is
+   `malloc`'d rather than frame-resident. What is missing is the generalisation —
+   a container built by a LOOP and returned, which has no static size to
+   `malloc`.
+4. ~~A `for` over it, and `len`.~~ **DONE**, above.
 
 That is Phase 6's tagged-value convergence arriving from the `os` side, and it
 is the same work in both directions. **It is not a patch**, which is what this
@@ -154,3 +193,9 @@ the result as a list gets the blob path's answer, which is what
 docstrings in `formal/hostmods/os/__init__.mojo` say what the value is and how
 to read it, and a run-time-length blob with a count nobody can reach would have
 been the thing not to ship.
+
+**…and since 2026-10-02 a caller may also use the three Python spellings**, which
+is what the `-> List[String]` declaration bought: `len(names)`, `names[i]` and
+`for x in names`. The three accessors are still there and still the honest
+spelling for a caller who frees the result, because a Python list on this path
+has no `free`.

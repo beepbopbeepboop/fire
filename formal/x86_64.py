@@ -19,6 +19,8 @@ Naming convention mirrors formal/arm64.py: `encode_<mnemonic>_<operands>`,
 import struct
 from enum import Enum
 
+from formal.model import CodegenError
+
 
 class Reg(Enum):
     RAX = 0
@@ -311,6 +313,43 @@ def encode_mov_rm64_r64(base: Reg, disp: int, src: Reg) -> bytes:
     rex = _rex(w=1, r=1 if src.value >= 8 else 0,
                b=1 if base.value >= 8 else 0)
     return bytes([rex, 0x89, modrm]) + extra
+
+
+def encode_mov_rm32_r32(base: Reg, disp: int, src: Reg) -> bytes:
+    """mov [base + disp], src32 — 89 /r with NO REX.W, so four bytes.
+
+    The 4-byte member of the pointer value model's STORE set, and the store
+    counterpart of `encode_mov_r32_rm32`: the pointee widths are 1, 2, 4 and 8,
+    and this backend had encoders for the byte (`encode_mov_rm8_r8`) and the
+    qword (`encode_mov_rm64_r64`) only, so a `Pointer[Int32]`'s store had to be
+    an 8-byte store — which overwrites the four bytes after the pointee, a
+    silent corruption of a `malloc`'d buffer rather than anything that traps.
+
+    No REX.W, and that omission is the whole instruction: with it this is the
+    same opcode as the 8-byte store and writes eight.  A REX prefix is still
+    needed when either register is r8-r15, because that is what extends the
+    register field, and `_rex` emits exactly that.  Verified against clang:
+    `mov %r11d, (%rax)` = `44 89 18`.
+    """
+    modrm, extra = _mem_modrm(base, disp, src)
+    rex = _rex(r=1 if src.value >= 8 else 0,
+               b=1 if base.value >= 8 else 0)
+    return bytes([rex, 0x89, modrm]) + extra
+
+
+def encode_mov_rm16_r16(base: Reg, disp: int, src: Reg) -> bytes:
+    """mov [base + disp], src16 — 66 89 /r, two bytes.
+
+    The 2-byte member of the same set, and the operand-size prefix `66` is the
+    whole difference from `encode_mov_rm32_r32`: same opcode, same ModRM, two
+    bytes written.  It goes BEFORE the REX prefix, which is the one ordering
+    rule x86-64 has that is easy to get backwards.  Verified against clang:
+    `mov %r11w, (%rax)` = `66 44 89 18`.
+    """
+    modrm, extra = _mem_modrm(base, disp, src)
+    rex = _rex(r=1 if src.value >= 8 else 0,
+               b=1 if base.value >= 8 else 0)
+    return bytes([0x66, rex, 0x89, modrm]) + extra
 
 
 def encode_movabs_r64(reg: Reg, imm: int) -> bytes:
@@ -833,6 +872,37 @@ class Assembler:
         self._org = addr
 
     def label(self, name: str):
+        """Bind `name` to the current address — once.
+
+        A SECOND binding of the same name is an error rather than a rebinding.
+        Every branch to a label is patched in `resolve` out of this table, so a
+        later definition silently retargets every earlier reference to it, and
+        what that builds is a branch into the middle of a different instruction
+        sequence. Nothing downstream can see it: the image is well formed, the
+        run exits 0, and the answer is simply a different number.
+
+        That is not hypothetical. Two label names in `x86_64_codegen.py` were
+        built without the per-site counter every other one carries — the three
+        bound-clamp labels of `_emit_slice_parts`, named after the register
+        alone — so a second slice in one function rebound the first slice's
+        `jge` and `xs[1:3]` followed by `xs[2:6]` answered 14 for a sum of 23,
+        or died
+        (fixed 2026-10-03 in 68671a62). The
+        `_emit_range_list` labels collided the same way before that
+        (`bugs/FORMAL_x86_64_end_to_end_proof.md`, "Nested comprehensions"). So
+        a name is required to be unique per emission site, and this is where
+        that is enforced rather than remembered; `arm64.Assembler.label` carries
+        the same check for the same reason.
+        """
+        if name in self.labels:
+            raise CodegenError(
+                f"internal: label {name!r} is defined twice, at 0x"
+                f"{self.labels[name]:x} and at 0x"
+                f"{self._org + len(self.sections['text']):x}. Branch targets "
+                "are patched from this table, so every earlier branch to it now "
+                "lands in the middle of this second block. A label name must "
+                "carry a per-site counter (see every label in "
+                "formal/x86_64_codegen.py, e.g. assert{aid} / sl{sid}).")
         self.labels[name] = self._org + len(self.sections["text"])
 
     def emit(self, data: bytes):
@@ -840,7 +910,17 @@ class Assembler:
 
     def emit_label_rel8(self, label_name: str, here_offset: int = 0):
         """Record a rel8 branch fixup whose displacement byte is at the
-        current position (biased by `here_offset`)."""
+        current position (biased by `here_offset`).
+
+        The SAME convention as `emit_label_rel32` below, and it is stated here
+        because `resolve` does not enforce it: the recorded address is the
+        displacement BYTE, not the instruction, and a rel8 branch is two bytes
+        long, so a caller back-patching the `jcc rel8` it just emitted passes
+        `here_offset=-1`. Passing the rel32 form's `-4` writes four bytes too
+        early, which overwrites the opcode of the branch and the two bytes
+        before it — a silently misdecoded instruction stream rather than a
+        rejected encoding. (Measured while landing the stack-floor guard, which
+        is the first caller of this method.)"""
         self.relocs.append(
             ("j8", label_name,
              self._org + len(self.sections["text"]) + here_offset))

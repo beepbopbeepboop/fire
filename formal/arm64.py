@@ -6,6 +6,8 @@ All ARM64 instructions are 4 bytes (32 bits), little-endian encoded.
 
 import struct
 
+from formal.model import CodegenError
+
 # ARM64 register numbers
 # X0-X30: general purpose 64-bit registers
 # XZR/WZR: zero register (31)
@@ -113,6 +115,27 @@ def encode_strb_wd_wn(wd: int, wn: int, imm: int = 0) -> bytes:
     assert 0 <= imm < 0x1000
     insn = 0x39000000 | (imm << 10) | (wn << 5) | wd
     return struct.pack('<I', insn)
+
+
+def encode_str_wt_wn_imm(wt: int, wn: int, imm: int = 0) -> bytes:
+    """STR Wt, [Xn, #imm] — store 32 bits.
+
+    The store counterpart of `encode_ldr_wt_wn_imm`, and it exists because the
+    pointer value model's STORE needs one instruction per pointee width: the set
+    had the byte store (`encode_strb_wd_wn`), the halfword store
+    (`encode_strh_wt_wn_imm`) and the full one (`encode_str_xt_xn_imm`), and the
+    4-byte case had no encoder, so a `Pointer[Int32]`'s store would have had to
+    be either an 8-byte store (which overwrites four bytes the program never
+    wrote — silent corruption of a `malloc`'d buffer) or an 8-byte store
+    truncated afterwards, which is the same store plus a wasted instruction.
+
+    Writing Wt rather than Xt is what keeps the store 32 bits wide; the upper
+    half of Xt is not written, so the four bytes after the pointee are whatever
+    they were.  Verified against `as`: `str w0, [x0]` = 0xb9000000.
+    """
+    assert 0 <= wt <= 30 and 0 <= wn <= 31
+    assert 0 <= imm <= 16380 and imm % 4 == 0
+    return struct.pack('<I', 0xB9000000 | ((imm >> 2) << 10) | (wn << 5) | wt)
 
 
 def encode_br_xn(xn: int) -> bytes:
@@ -668,7 +691,28 @@ class Assembler:
         self._org = addr
 
     def label(self, name: str):
-        """Record a label at the current position."""
+        """Record a label at the current position — once.
+
+        A SECOND binding of the same name is an error rather than a rebinding.
+        Every branch is patched out of this table, so a later definition
+        silently retargets every earlier reference to it, and what that builds
+        is a branch into the middle of a different instruction sequence: the
+        image is well formed, the run exits 0, and the answer is a different
+        number. Both backends share this because both have shipped it —
+        `x86_64.Assembler.label` carries the same check and the longer account,
+        and the x86-64 slice-clamp collision it describes
+        (fixed 2026-10-03 in 68671a62) is the same defect
+        a label name without a per-site counter produces.
+        """
+        if name in self.labels:
+            raise CodegenError(
+                f"internal: label {name!r} is defined twice, at 0x"
+                f"{self.labels[name]:x} and at 0x"
+                f"{self._org + len(self.sections['text']):x}. Branch targets "
+                "are patched from this table, so every earlier branch to it now "
+                "lands in the middle of this second block. A label name must "
+                "carry a per-site counter (see every label in "
+                "formal/arm64_codegen.py).")
         self.labels[name] = self._org + len(self.sections["text"])
 
     def emit(self, data: bytes):

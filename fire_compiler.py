@@ -5862,9 +5862,9 @@ class Parser:
                     # to the trait), not a comptime VALUE parameter — it must
                     # NOT become a real field, or @fieldwise_init's synthesized
                     # constructor gets an extra phantom parameter (see
-                    # __init__'s _known_traits comment).
-                    bare_ann = type_ann.lstrip('*')
-                    if bare_ann not in self._known_traits:
+                    # __init__'s _known_traits comment). `_struct_param_is_bound`
+                    # is that test, and it has a second arm this did not.
+                    if not self._struct_param_is_bound(type_ann):
                         fields.append(VarDecl(name=name, type_ann=type_ann, value=None))
                 else:
                     # No colon — skip this token (could be a bare type name)
@@ -5872,6 +5872,57 @@ class Parser:
             else:
                 self._advance()  # skip unexpected token
         return fields
+
+    def _struct_param_is_bound(self, type_ann: str) -> bool:
+        """Is this struct-parameter annotation a comptime BOUND, not a field type?
+
+        Two shapes, and the second one is the defect this exists to close.
+
+          * a single bare name this unit knows is a TRAIT (`T: Movable`).
+            Unchanged, including its deliberate conservatism about a trait
+            declared in another module: `origin: Origin` and `level: Level`
+            stay fields, because this compiler cannot tell a stdlib enum from
+            a trait without reading that module.
+          * a CONJUNCTION at bracket depth zero (`T: Copyable & Comparable &
+            Deinitable`). Every conjunct is a bound whatever it is named, and
+            the reason needs no table at all: **`&` cannot occur in a data
+            type.** There is no spelling of a struct's storage whose declared
+            type contains `&` — it is the trait-constraint operator and
+            nothing else — so an annotation carrying one describes a constraint
+            on the type parameter and cannot be describing per-instance
+            storage. Depth zero because a `&` inside a subscript belongs to
+            whatever that subscript spells.
+
+        Why the second arm was needed, measured rather than argued: the first
+        arm compared the WHOLE annotation against a set of trait NAMES, so
+        `Copyable & Comparable` was not in the set and the parameter became a
+        real `VarDecl` field. Fourteen structs in the new-modular stdlib spell
+        a bound that way, and every one of them then measured one field more
+        than it has. `std/collections/binary_heap.mojo`'s `BinaryHeap` is the
+        one this was found on: `BinaryHeap[T: Copyable & Comparable &
+        Deinitable]` has exactly one field, `_data`, and it measured two —
+        `T` and `_data` — so `formal/model.py`'s `struct_is_one_field` said no,
+        the receiver became a FRAME ADDRESS of a two-word block instead of the
+        one word it is, and `len(self._data)` inside `__len__` became a read of
+        a frame slot whose value nothing establishes, refused by name
+        (`frame_slot_value_refusal`: "this slot's DECLARED type is
+        'List[Self.T]' … what is missing is the VALUE"). The phantom field is
+        upstream of that refusal: the value was missing because the slot was
+        read as a frame slot at all.
+
+        So the two arms are ordered cheapest-first and neither is a fallback
+        for the other: the first is a NAME test over a table that can be
+        incomplete, the second is a SYNTAX test that cannot be.
+        """
+        depth = 0
+        for ch in type_ann:
+            if ch in '([{':
+                depth += 1
+            elif ch in ')]}':
+                depth -= 1
+            elif ch == '&' and depth == 0:
+                return True
+        return type_ann.lstrip('*') in self._known_traits
 
     def _skip_bracketed(self):
         """Consume a balanced [...] block."""

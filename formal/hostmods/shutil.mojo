@@ -43,8 +43,10 @@ one returns 0 or -1. `""` is the right choice for the path-returning half
 because it is the one string no caller would pass to `open` by accident, and a
 caller that ignores the answer gets a failure rather than a path it did not
 write. A failure is a value here, not an exception, and this is the same rule
-`formal/hostmods/os/__init__.mojo` follows for `remove` and
-`bugs/FORMAL_glob_copy_collections_io_not_attempted.md` states for the rest.
+`formal/hostmods/os/__init__.mojo` follows for `remove`, and every host module
+here states it for itself: a value that cannot cross a dylib boundary has to be
+one 64-bit word, so a module that exists to hand back a list or a dict has no
+spelling on this path until the capability under it lands.
 
 WHAT IS NOT HERE, AND WHY — each measured or each a fact about the target
 -----------------------------------------------------------------------

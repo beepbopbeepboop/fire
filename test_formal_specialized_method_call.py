@@ -27,9 +27,8 @@ field read because `_rewrite_method_calls` recognised `recv.m(x)` — a callee
 that is a `MemberExpr` — and not `recv.m[T](x)`, whose callee is a
 `SubscriptExpr` over that same `MemberExpr`.  So the walk descended into the
 bracket, found `p.combine` in value position, and asked for a slot.  That is
-§4 of `bugs/FORMAL_frame_receiver_handoff.md` — "a refusal whose stated reason
-is entirely false" — and this is the fifth example in the family that section
-exists to police.
+the defect class `test_refusal_taxonomy.py` holds this path to — "a refusal
+whose stated reason is entirely false" — and this is one more example in it.
 
 Six of the eight files the sweep reported this way are this shape, not a
 bound-method value.  Measured by reading the refused expression in each:
@@ -57,7 +56,7 @@ not a new decision: `formal/model.py`'s `incoming_args` puts a generic's
 comptime parameters FIRST, and arm64's `_emit_call` passes the bracket
 expressions first (`_specialization_args`).  So both spellings deliver the same
 words to the same parameters, and the emitter needs no change at all — the same
-argument `bugs/FORMAL_frame_receiver_handoff.md` §14 makes for `len(h)`, and the
+argument `test_formal_frame_len.py` records for `len(h)`, and the
 same reason this is one function rather than two.
 
 Measured on the program above, before the change it refused; after, it builds on
@@ -348,7 +347,8 @@ DIFF_CASES = [
      "main()\n"),
 
     # **GUARD** — a specialization of a FREE function with no receiver
-    # anywhere, which `bugs/FORMAL_frame_receiver_handoff.md` §19 landed.  It
+    # anywhere, which `test_formal_receiver_position.py`'s comptime-ABI group
+    # landed.  It
     # is here so that "the comptime ABI is unchanged" is a measurement rather
     # than an assumption: the answer is 307, and a lift that shifted call-time
     # positions by the number of comptime parameters would make it 723.

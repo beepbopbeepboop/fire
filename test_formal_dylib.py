@@ -1563,6 +1563,57 @@ def test_the_manifest_offers_nothing_the_image_does_not_define(tmpdir, shared):
           f"the report does not say which side is wrong: {report}")
 
 
+def test_the_library_admits_no_hole(tmpdir, shared):
+    """No module under `lib/` admits a `sorry` or an `admit`.
+
+    A TEXT census and deliberately a weaker one than
+    `formal/lean.py::library_census`, which elaborates each module in a private
+    directory and reads what Lean says — the only sound way to count a hole,
+    because a module consumed as a pre-built `.olean` produces no warning and a
+    cached elaboration is precisely the one that does not look. That function
+    needs Lean runs this suite must not start, so what is pinned here is the
+    thing a text check CAN settle, and it is not nothing:
+
+      * a hole in `lib/` is invisible to every other check in this repository.
+        `test_default_prove_emits_checked_proof` greps the GENERATED proof,
+        which imports the library as an `.olean`, so a `by sorry` in
+        `lib/Refine.lean` is what every generated dylib contract rests on and
+        nothing here would report it. The three holes this row was written for
+        — `in_image_stub`, `semantics_stub`, `dylib_export_contract_stub` —
+        were exactly that, and `library_census`'s own docstring records that its
+        first version reported all four modules clean;
+      * a `sorry` in a DOCSTRING is not a hole, and there are several — the
+        records above are quoted in prose — so the check reads for the tactic
+        rather than for the word.
+
+    What it cannot see is a hole written any other way, and that is stated here
+    rather than left for a reader to assume. Running `library_census` is the
+    integrator's: it is the measurement this file stands in for, not a
+    replacement for it.
+    """
+    import re as _re
+    lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+    modules = sorted(f for f in os.listdir(lib) if f.endswith(".lean"))
+    check(modules, f"no .lean modules found in {lib}")
+    # `by sorry`, `:= sorry`, and `admit`, each with the shape that makes it a
+    # tactic rather than a word in prose. A comment line is excluded outright,
+    # which is what keeps this from red for the records quoted in the docstrings
+    # above.
+    hole = _re.compile(r"(^|\s)(by\s+sorry|:=\s*sorry|\badmit\b)")
+    found = []
+    for name in modules:
+        with open(os.path.join(lib, name)) as fh:
+            for n, line in enumerate(fh, 1):
+                if line.lstrip().startswith("--"):
+                    continue
+                if hole.search(line):
+                    found.append(f"{name}:{n}: {line.strip()[:90]}")
+    check(not found,
+          "the library admits a hole, and no other check in this tree can see "
+          "it (a generated proof imports these modules as .olean files, so Lean "
+          "warns about nothing):\n      " + "\n      ".join(found))
+
+
 TESTS = [
     ("dylib structure and export trie", test_dylib_structure_and_exports),
     ("the manifest offers nothing the image does not define",
@@ -1592,6 +1643,8 @@ TESTS = [
     ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
     ("a frame parameter's contract is published, not empty",
      test_frame_params_are_published_not_empty),
+    ("no module under lib/ admits a sorry or an admit",
+     test_the_library_admits_no_hole),
 ]
 
 

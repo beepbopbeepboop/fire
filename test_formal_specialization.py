@@ -28,6 +28,17 @@ read by both backends, so 2 is pinned on both architectures — an
 arch-free answer is the only way one construct cannot come back with two
 different verdicts.
 
+§5 and §5b are the OTHER name this path cannot resolve, and they are in this
+file because that is where the question lives: a function VALUE has no
+spelling here, in either position. A callee the calling function BINDS is a
+value, not a symbol (§5b), and "a name this unit does not compile" cannot
+tell the two apart — it emitted a branch against a symbol named after the
+parameter and the loader refused the image four stages later. A function of
+this unit read as an ARGUMENT (§5) is refused earlier and by different code,
+`formal/build.py`'s name-placement walk, which used to answer with a sentence
+about the register allocator. One fact, two checks; each case's docstring says
+which is which.
+
 Invoked directly:
     python3 test_formal_specialization.py [-v]
 """
@@ -102,6 +113,56 @@ def main() -> Int32:
 
 LOCAL_SPECIALIZATION_CPYTHON = 15        # 5 * 3
 SUBSCRIPTED_CALL_CPYTHON = 105           # 5 + 100, the answer it fabricated
+
+# `func(i)` where `func` arrived as a parameter: the whole body of
+# `stdlib/std/algorithm/backend/cpu/map.mojo`, which is what the 2026-10-02
+# sweep classified `not-answerable/unresolved-extern` on BOTH architectures
+# ("the image would bind 1 symbol(s) that nothing provides: func"). One line of
+# callee, one line of call, and the untyped parameter is the more honest
+# spelling of it: the annotation is not what makes this unanswerable, and a
+# test that pinned only the annotated form would leave the untyped one (which
+# is what a corpus is full of) unmeasured.
+CALL_THROUGH_A_PARAMETER = """\
+def apply(size: Int, func):
+    for i in range(size):
+        func(i)
+
+
+def main() -> Int32:
+    return 0
+"""
+
+# The control for the same check, and the one half that could have gone the
+# other way: a name the function declares `global` is NOT a local of it, so
+# `global printf; printf(…)` is still a call to a C symbol and still builds.
+# `callee_is_a_bound_value` subtracts `global_names_bound_in` for exactly this,
+# because the register allocator does, and a check that did not would refuse
+# every program that shadows a C name that way.
+GLOBAL_SHADOW_CALLS_THE_C_LIBRARY = """\
+def main() -> Int32:
+    global printf
+    printf("global-call-ok\\n")
+    return 0
+"""
+GLOBAL_SHADOW_CPYTHON = "global-call-ok"
+
+# The same fact as `CALL_THROUGH_A_PARAMETER`, one position out: a function of
+# THIS UNIT read as a word rather than called by name, which
+# `formal/build.py`'s name-placement walk refuses with
+# `model.function_value_refusal` before codegen. The callee inside `call_it` is
+# a parameter too, but the walk never gets that far — `main`'s `plain` is the
+# first name with nowhere to live — so this program and the one above are
+# refused by different code and are pinned separately.
+FUNCTION_AS_VALUE = """\
+def plain(v: Int32) -> Int32:
+    return v + 100
+
+def call_it(f, x: Int32) -> Int32:
+    return f(x)
+
+def main() -> Int32:
+    return call_it(plain, 5)
+"""
 
 
 def write_tree(root, files):
@@ -262,17 +323,31 @@ def test_a_cross_module_specialization_is_refused(tmpdir):
 
     The library also exports a CONCRETE `anchor`, so it builds as a dylib at
     all: a module exporting only the generic is refused earlier, by the export
-    rule, with an equally true message about there being no boundary symbol.
+rule, with an equally true message about there being no boundary symbol.
     That refusal is real and is not what this case is about.
+
+    **WHICH REFUSAL, and why it is not the brackets' one.** This case asserted
+    "brackets cannot be bound" and was RED on `master` at `c5ab524d` (measured:
+    `git archive HEAD` into a scratch tree, `python3
+    test_formal_specialization.py` → `PASS=6 FAIL=1`, this case, verbatim).
+    `build.py::_bracketed_export_gap` now asks the EXPORT rule first — on
+    purpose, and its own docstring says why: a private name, a generic
+    template, an overload and a C library name are four facts about what a
+    module publishes, and only one of them is about brackets. So for a
+    cross-module GENERIC the two refusals are structurally exclusive: the one
+    thing `doc/ABI.md`'s export rule never publishes is a generic, so a
+    cross-module generic can never reach the bracket check. The case now pins
+    the refusal that fires, and names `widen` — which is the part of the
+    original assertion that was right and worth keeping.
 
     **WHICH of the two refusals answers `widen[3](5)` changed under this case,
     and the answer is the export rule rather than the brackets — so this case
-    now pins the export rule.** `formal/build.py::_bracketed_export_gap` asks
-    the export rule FIRST for a bracketed callee whose base name is imported
-    and whose module's library on the link line does not publish it, and the
-    bracketed scan falls through to `specialization_call_refusal` when it does
-    publish it (`c245c138`, which measured `plain[3](5)` keeping the brackets'
-    own sentence and did not update this needle). A generic template is not
+    now pins the export rule.** `_bracketed_export_gap` asks the export rule
+    FIRST for a bracketed callee whose base name is imported and whose module's
+    library on the link line does not publish it, and the bracketed scan falls
+    through to `specialization_call_refusal` when it does publish it
+    (`c245c138`, which measured `plain[3](5)` keeping the brackets' own
+    sentence and did not update this needle). A generic template is not
     exported by that rule at all — it is one symbol per instantiation and the
     module exports no instantiation — so `widen` is NOT published and the
     export rule is the sentence that is true of it. This case therefore pins
@@ -298,6 +373,10 @@ def test_a_cross_module_specialization_is_refused(tmpdir):
     check("doc/ABI.md" in text or "export rule" in text,
           f"the refusal does not name the rule that keeps the name off the "
           f"boundary: {text.strip()[-300:]}")
+    check("one per instantiation" in text or "monomorph" in text
+          or "instantiation is the boundary symbol" in text,
+          f"the refusal does not say WHY a cross-module instantiation has no "
+          f"callee here: {text.strip()[-300:]}")
 
 
 def test_a_cross_module_specialization_of_a_published_name_says_brackets(tmpdir):
@@ -425,22 +504,33 @@ def test_an_external_call_template_is_not_refused_as_a_specialization(tmpdir):
               f"value did not reach the program")
 
 
-# ── 5. a function used as a VALUE, which is what the bracket case needs first ──
-
-# The shape `std/algorithm/backend/tile.mojo` is refused for: a callee that is a
+# ── 5. a callee this path cannot name: a function VALUE, in two positions ───
+#
+# One fact, two halves, and the fact is that this path has no function values:
+# a formal value is one 64-bit word with a home in a register, a spill slot, a
+# receiver's frame or a folded module constant, and the word a function value
+# needs is a code ADDRESS whose target this build cannot establish.
+#
+# ARGUMENT position — `call_it(plain, 5)`, where `plain` is a function of THIS
+# unit read as a word: `formal/build.py`'s name-placement walk refuses it with
+# `model.function_value_refusal`, before codegen. The shape
+# `std/algorithm/backend/tile.mojo` is refused for is a callee that is a
 # PARAMETER, so the brackets are a specialization of a function TYPE and the
-# callee itself is a word. Reduced to the part that is about this path rather
-# than about brackets: passing a function as an argument.
-FUNCTION_AS_VALUE = """\
-def plain(v: Int32) -> Int32:
-    return v + 100
-
-def call_it(f, x: Int32) -> Int32:
-    return f(x)
-
-def main() -> Int32:
-    return call_it(plain, 5)
-"""
+# callee itself is a word — reduced to the part that is about this path rather
+# than about brackets, that is passing a function as an argument.
+#
+# CALLEE position — `func(i)` where `func` arrived as a parameter: the same
+# fact one step in, caught at the call site by
+# `model.callee_is_a_bound_value` / `model.callee_value_refusal`, which both
+# backends ask from their own copy of `_emit_call` beside
+# `specialization_call_refusal`. This is the whole body of
+# `stdlib/std/algorithm/backend/cpu/map.mojo`.
+#
+# The two refusals are separate code on purpose — one is a placement walk over
+# names, the other is a decision about a callee — so each half is pinned where
+# it lives. Neither check may swallow the ordinary cases: a local that shadows
+# a function is the local, and a name declared `global` is not a local of the
+# function at all.
 
 
 def test_a_function_read_as_a_value_is_refused_by_name(tmpdir):
@@ -512,6 +602,70 @@ def test_a_local_shadowing_a_function_is_still_read_as_the_local(tmpdir):
               f"refused or read as something else")
 
 
+# ── 5b. the CALLEE half: a name the calling function BINDS is not a symbol ───
+
+def test_a_call_through_a_parameter_is_refused_on_both_architectures(tmpdir):
+    """`func(i)` where `func` is a parameter: refused by name, on both machines.
+
+    The other half of "a name this unit does not compile", and the one that
+    could not be told from a C symbol: `is_extern = name not in
+    self._functions` is true of a parameter as much as of `printf`, and the
+    extern path's job is to emit a call to a symbol, so it emitted a call to a
+    symbol spelled `func`. The image was written and then the loader refused
+    it — which the build reported as `the image would bind 1 symbol(s) that
+    nothing provides`, a true sentence about the link line that says nothing
+    about the construct, and a `not-answerable` class for a file that is a
+    codegen gap in itself.
+
+    Pinned on the construct rather than on the absence of that sentence, so a
+    future edit cannot pass by moving the same verdict somewhere else.
+    """
+    seen = {}
+    for arch in ARCHES:
+        root = os.path.join(tmpdir, f"value_{arch}")
+        os.makedirs(root)
+        write_tree(root, {"prog.mojo": CALL_THROUGH_A_PARAMETER})
+        seen[arch] = text_of(build(root, expect_ok=False, arch=arch)).strip()
+    for arch, text in seen.items():
+        for needle in ("is a name apply binds", "call through a VALUE",
+                       "no representation for a function value"):
+            check(needle in text,
+                  f"[{arch}] the refusal does not name the construct "
+                  f"({needle!r}): {text[-300:]}")
+        check("would bind" not in text,
+              f"[{arch}] the build still reports this as a MISSING SYMBOL "
+              f"rather than as the construct that is missing, which is the "
+              f"verdict this test exists to move: {text[-300:]}")
+    a, b = seen["arm64"], seen["x86_64"]
+    check(a == b,
+          "the two architectures refused one construct differently:\n"
+          f"  arm64:  {a[:220]}\n  x86-64: {b[:220]}")
+
+
+def test_a_global_shadowed_name_is_still_a_call_to_the_c_library(tmpdir):
+    """The control: the check must not swallow an ordinary extern call.
+
+    `global printf` makes `printf` a name the function writes but NOT a local
+    of it — the module's binding is what `printf(…)` still means, and the
+    register allocator already answers it that way
+    (`global_names_bound_in`). A callee check that read "does this body
+    mention the name" would refuse this, and the refusal would be false: the
+    image builds, links and prints, on both architectures.
+
+    Run rather than built, because "it compiled" is the weaker half.
+    """
+    for arch in ARCHES:
+        root = os.path.join(tmpdir, f"gshadow_{arch}")
+        os.makedirs(root)
+        write_tree(root, {"prog.mojo": GLOBAL_SHADOW_CALLS_THE_C_LIBRARY})
+        build(root, arch=arch)
+        code, out = run_image(root, arch)
+        check(code == 0, f"[{arch}] the image exited {code}: {out[:300]}")
+        check(out == GLOBAL_SHADOW_CPYTHON,
+              f"[{arch}] printed {out!r}, not {GLOBAL_SHADOW_CPYTHON!r} — a "
+              f"name declared `global` stopped being a call to the C library")
+
+
 TESTS = [
     ("a specialization's root is a callee, not a read",
      test_a_specialization_root_is_a_callee_not_a_read),
@@ -529,10 +683,14 @@ TESTS = [
      test_a_local_specialization_runs_and_matches_cpython),
     ("an external_call template is not refused as a specialization",
      test_an_external_call_template_is_not_refused_as_a_specialization),
-    ("a function read as a value is refused by name",
+("a function read as a value is refused by name",
      test_a_function_read_as_a_value_is_refused_by_name),
     ("a local shadowing a function is still the local",
      test_a_local_shadowing_a_function_is_still_read_as_the_local),
+    ("a call through a parameter is refused, as a construct, on both",
+     test_a_call_through_a_parameter_is_refused_on_both_architectures),
+    ("a `global`-shadowed name is still a call to the C library",
+     test_a_global_shadowed_name_is_still_a_call_to_the_c_library),
 ]
 
 

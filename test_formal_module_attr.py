@@ -467,10 +467,76 @@ def test_a_module_constant_is_readable_in_both_spellings(tmpdir, _shared,
     files = write_tree(root, {"mylib.mojo": LIB, "prog.mojo": prog})
     agrees_with_cpython(root, "prog", files, prog, verbose)
     m = manifest(module_dylib("mylib"))
-    check(m.get("constants") == {"CONST": 41, "S": "hello"},
-          f"the manifest does not record the module's folded constants, or "
-          f"records something else: {m.get('constants')!r} — a consumer cannot "
-          f"answer `mod.CONST` from a manifest that does not carry the value")
+    constants = m.get("constants") or {}
+    # The two the program uses are checked BY NAME rather than by dictionary
+    # equality, because the table now carries a third entry that is not this
+    # case's business and is right to be there: `__file__`, the module's own
+    # source path. It is a build-time fact about the file (`model.
+    # builtin_module_constants`), it is a folded module-level constant by every
+    # rule this file's other rows rely on, and an importer that reads
+    # `mylib.__file__` should get MYLIB's path rather than the program's — which
+    # is what CPython says. So the check is "the two named constants are here
+    # with these values, and anything else in the table is a name this module
+    # can answer", not "the table has exactly two entries".
+    for name, want in (("CONST", 41), ("S", "hello")):
+        check(constants.get(name) == want,
+              f"the manifest does not record the module's folded constant "
+              f"{name!r} (or records something else): {constants!r} — a "
+              f"consumer cannot answer `mod.{name}` from a manifest that does "
+              f"not carry the value")
+    check("__file__" in constants,
+          f"the manifest does not publish the module's own `__file__`, so an "
+          f"importer reading `mylib.__file__` would get the IMPORTER's path "
+          f"where CPython gives the module's: {constants!r}")
+
+
+def test_a_dotted_file_read_gives_the_MODULES_own_path(tmpdir, _shared,
+                                                       verbose):
+    """`mylib.__file__` is MYLIB's path, and `__file__` is the program's own.
+
+    The one module attribute that is a FOLDED CONSTANT rather than a variable,
+    and therefore the one attribute read across a dylib boundary that has a
+    real answer: the build was handed the module's source path, so the manifest
+    carries it the way it carries `CONST`, and the importer materializes the
+    same literal. What makes it worth its own case is WHICH path — a dotted read
+    that answered with the IMPORTER's path would be a plausible-looking wrong
+    answer in a shape nobody would look at twice, and the ordinary in-unit
+    substitution is exactly the machinery that could do it, because it has no
+    idea whose file it is standing in.
+
+    **Not compared against the CPython oracle**, and that is a property of the
+    construct rather than a gap in the case: the answer IS a path, and this
+    file's oracle runs the program from a `cpython/` copy of the tree with its
+    own file names (`prog.cpython.py`), so the two engines are necessarily
+    reading different files and the literal cannot match. What is comparable is
+    the property: each module reports ITS OWN source, and the two differ. That
+    is what this asserts, on both architectures — a dotted read that answered
+    with the importer's path would satisfy neither half.
+    """
+    prog = ("import mylib\n\n"
+            "def main():\n"
+            '  printf("%s|%s|", mylib.__file__, __file__)\n'
+            "  return mylib.addup(1, 2)\n")
+    root = os.path.join(tmpdir, "dotted_file")
+    os.makedirs(root)
+    files = write_tree(root, {"mylib.mojo": LIB, "prog.mojo": prog})
+    fresh_cas()
+    want = os.path.join(root, "mylib.mojo")
+    for arch in ARCHES:
+        out = build(root, "prog", arch)
+        if not runnable(arch):
+            continue
+        code, stdout, _stderr = run(out)
+        check(code == 3, f"{arch}: exited {code}, want 3 (`addup(1, 2)`)")
+        got_lib, _, got_own = stdout.partition("|")
+        got_own = got_own.rstrip("|")
+        check(got_lib == want,
+              f"{arch}: `mylib.__file__` is {got_lib!r}, want MYLIB's own "
+              f"source {want!r} — the importer's path would be a plausible "
+              f"wrong answer in a shape nobody reads twice")
+        check(got_own == os.path.join(root, "prog.mojo"),
+              f"{arch}: `__file__` is {got_own!r}, want the program's own "
+              f"source")
 
 
 def test_a_constant_reaches_the_importer_through_a_package(tmpdir, _shared,
@@ -1043,6 +1109,126 @@ def test_the_manifest_names_its_module_and_its_constants(tmpdir, _shared, verbos
           f"key its forwarding by it: {pkg.get('module')!r}")
 
 
+def test_a_mutable_global_of_another_module_is_refused_as_a_VARIABLE(
+        tmpdir, _shared, verbose):
+    """`mylib.G` where `mylib` also WRITES `G` — the wrong answer, now refused.
+
+    This row is the reason the refusal has its own sentence. `G = 5` in the
+    library is a folded literal, so before this was fixed the manifest published
+    it in `constants` and the importer materialized the 5 — while the library's own
+    `global G` write put a 9 in the slot and `mylib.get()` read it. Measured, both
+    architectures, from a green build:
+
+        # mylib.mojo:  G = 5  /  def get(): global G; return G
+        #              /      def setg(v): global G; G = v
+        # prog.mojo:    mylib.setg(9); print(mylib.get())  -> 9    (correct)
+        #               print(mylib.G)                      -> 5    (WRONG; CPython 9)
+
+    One name with two homes, and the read across the boundary picked the one
+    that never changes. The in-unit substitution already knew better —
+    `_module_constant_sites` excludes slotted names and says why — so this was
+    the SAME question answered two ways, which is the defect class this whole
+    mechanism is arranged to prevent.
+
+    The refusal has to name the SHAPE and not the value: "a list, an object or a
+    stream has no representation as a word" is false of an `Int`, and a reader
+    sent after a missing container for a name that holds an integer is reading
+    the wrong document. So this asserts the message says the module's own
+    functions WRITE the name, and that it offers the accessor — which works, and
+    which the row below runs.
+    """
+    lib = ("G = 5\n\n\n"
+           "def get():\n  global G\n  return G\n\n\n"
+           "def setg(v):\n  global G\n  G = v\n")
+    prog = ("import mylib\n\n"
+            "def main():\n"
+            "  mylib.setg(9)\n"
+            "  printf(\"%d|\", mylib.G)\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "mutable_global")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": lib, "prog.mojo": prog})
+    fresh_cas()
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("write through `global`" in text,
+              f"{arch}: the refusal must say the module's OWN functions write "
+              f"the name, because that is the reason and not its type: "
+              f"{text.strip()[-400:]}")
+        check("VARIABLE and not a constant" in text,
+              f"{arch}: and it must say the name is a variable rather than a "
+              f"constant even though it is declared at module level with a "
+              f"foldable value: {text.strip()[-400:]}")
+        check("get_G" in text,
+              f"{arch}: and it must offer the accessor, which is the spelling "
+              f"that works: {text.strip()[-400:]}")
+
+
+def test_the_accessor_is_the_spelling_that_reads_the_slot(
+        tmpdir, _shared, verbose):
+    """The row above's repair, RUN: `mylib.setg(9)` then `mylib.get()` is 9.
+
+    Not decoration. A refusal that names a repair nobody has measured is a
+    dead end wearing a repair, and the whole reason this row is refused rather
+    than answered is that the answer is one function away — so if the function
+    did not work, the refusal would be saying "write this" about something that
+    does not lower. Both architectures, and compared with CPython on the same
+    text, because 9 is what CPython prints and 5 is what the refused spelling
+    used to print.
+    """
+    lib = ("G = 5\n\n\n"
+           "def get():\n  global G\n  return G\n\n\n"
+           "def setg(v):\n  global G\n  G = v\n")
+    prog = ("import mylib\n\n"
+            "def main():\n"
+            "  mylib.setg(9)\n"
+            "  printf(\"%d\", mylib.get())\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "mutable_accessor")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": lib, "prog.mojo": prog})
+    fresh_cas()
+    agrees_with_cpython(root, "prog", {"mylib.mojo": lib, "prog.mojo": prog},
+                        prog, verbose)
+
+
+def test_the_manifest_records_a_variable_separately_from_a_constant(
+        tmpdir, _shared, verbose):
+    """`variables` is in the manifest, and is DISJOINT from `constants`.
+
+    Read from the file, for the reason `test_the_manifest_names_its_module`"
+    "gives: a consumer reads the file, and a test that asserted the writer's own
+    dict would pass when the writer and the file disagree. Disjointness is the
+    load-bearing assertion — a name in both tables is the bug this whole pair of
+    changes exists to stop, and it would let a consumer materialize the value
+    the module STARTED at while the manifest also says it is a variable.
+    """
+    lib = ("G = 5\n\n\n"
+           "def get():\n  global G\n  return G\n\n\n"
+           "def setg(v):\n  global G\n  G = v\n")
+    root = os.path.join(tmpdir, "manifest_variable")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": lib})
+    fresh_cas()
+    user = os.path.join(root, "user.mojo")
+    with open(user, "w") as f:
+        f.write("import mylib\n\n\ndef main():\n  return 0\n")
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "user.aout"), user], cwd=root)
+    check(result.returncode == 0,
+          f"building a user of `mylib` failed: "
+          f"{(result.stderr or result.stdout).strip()[-300:]}")
+    m = manifest(module_dylib("mylib"))
+    check("G" in list(m.get("variables") or []),
+          f"a module-level name the module's own function writes is a VARIABLE "
+          f"and the manifest has to say so, or every consumer guesses: "
+          f"{m.get('variables')!r}")
+    check("G" not in (m.get("constants") or {}),
+          f"and it must NOT also be published as a folded constant: that is the "
+          f"wrong answer, materialized in the importer\u0027s own image. "
+          f"constants={m.get('constants')!r}")
+
+
 TESTS = [
     ("`mod.fn(x)` builds, runs, and agrees with CPython",
      test_a_module_qualified_call_runs),
@@ -1052,6 +1238,8 @@ TESTS = [
      test_a_submodule_chain_runs),
     ("`mod.CONST` and `from mod import CONST` both lower",
      test_a_module_constant_is_readable_in_both_spellings),
+    ("`mylib.__file__` is the MODULE's own path, and `__file__` the program's",
+     test_a_dotted_file_read_gives_the_MODULES_own_path),
     ("`pkg.LIMIT` — a constant the package re-exports",
      test_a_constant_reaches_the_importer_through_a_package),
     ("a STORE to another module's constant is refused, not dropped",
@@ -1082,6 +1270,12 @@ TESTS = [
      test_a_module_attribute_read_from_the_module_body_is_refused_too),
     ("a local that shadows a module name is read as the local it is",
      test_a_local_shadowing_a_module_name_is_still_the_local),
+    ("`mylib.G`, a global the library WRITES, is refused as a VARIABLE",
+     test_a_mutable_global_of_another_module_is_refused_as_a_VARIABLE),
+    ("the accessor is the spelling that reads another module\u0027s slot",
+     test_the_accessor_is_the_spelling_that_reads_the_slot),
+    ("the manifest records a variable apart from a constant",
+     test_the_manifest_records_a_variable_separately_from_a_constant),
     ("the manifest names its module, its constants and its forwarding",
      test_the_manifest_names_its_module_and_its_constants),
 ]

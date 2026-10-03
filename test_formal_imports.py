@@ -49,6 +49,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -563,12 +564,26 @@ def test_several_unresolvable_imports_are_all_named(tmpdir, _shared):
     `test_formal_run.py`, a needle in `test_formal_sweep_truth.py` and the
     chain the sweep peels are all written against that sentence, and "several"
     must not cost the single case its wording.
+
+    **THE TWO UNRESOLVABLE NAMES ARE `glob` AND `zlib`, AND THEY USED TO BE
+    `glob` AND `tempfile`.** `tempfile` stopped being unresolvable on 2026-10-03
+    — `formal/hostmods/tempfile.mojo` landed, and a host module with a source
+    resolves before the tier lists are ever consulted — so a fixture naming it
+    stopped testing what it is for: with `tempfile` resolvable, the diagnostic
+    names `glob` alone, the completeness loop finds one of its two names, and
+    the test fails on a property that is still true. The failure is loud, which
+    is the good case; a fixture that had asserted only "the build fails" would
+    have gone on passing as a ONE-module test with a two-module name in it.
+    Both replacements are host modules with no source and real rows in the
+    sweep's host ranking (`tools/formal_sweep_causes.py --host`: `glob` 18
+    files, `zlib` 15), so the fixture is still made of names a reader could
+    meet in this tree.
     """
     root = os.path.join(tmpdir, "many")
     os.makedirs(root)
     orderings = {
-        "alpha": "import glob\nimport tempfile\nimport sys\n",
-        "omega": "import tempfile\nimport glob\n",
+        "alpha": "import glob\nimport zlib\nimport sys\n",
+        "omega": "import zlib\nimport glob\n",
     }
     for tag, imports in orderings.items():
         write_tree(root, {f"{tag}.mojo":
@@ -585,7 +600,7 @@ def test_several_unresolvable_imports_are_all_named(tmpdir, _shared):
         check("Traceback" not in text,
               f"{tag}: an unresolved import should be a clean error:\n"
               f"{text[-400:]}")
-        for mod in ("glob", "tempfile"):
+        for mod in ("glob", "zlib"):
             check(mod in text,
                   f"{tag}: the diagnostic names {mod!r} nowhere, so fixing it "
                   f"only reveals the next one:\n{text[-400:]}")
@@ -781,6 +796,107 @@ def test_a_function_local_import_is_a_dependency(tmpdir, _shared):
           "module-level name of another module, and that sentence sent the "
           "reader to the register allocator for a fact about the import "
           f"graph; it is still there: {text.strip()[-400:]}")
+
+
+# The bound this case asserts, and why it is a bound rather than a stopwatch.
+# Measured 2026-10-03 on this tree: `bindings.mojo` builds (as a REFUSAL, in
+# 3.2 s) on arm64 and on x86-64. Measured 2026-10-02, before the import chain
+# was walked in dependency order: the same build never terminated — five
+# workers' copies of it were found still running, the oldest 1 day 15 hours,
+# each at about 55% of a core, and `tools/control.py guard` had to be given a
+# 120-minute kill for `fire.py build` because of it. So the number here is three
+# orders of magnitude below the failure and 40x below the guard: it is not a
+# performance budget, it is the assertion that the file is CLASSIFIED rather
+# than still converging, and it is here because a build that never terminates is
+# the one outcome the sweep has no verdict for.
+BOUNDED_BUILD_S = 120
+
+
+class _Skip(Exception):
+    """A case that cannot run HERE, reported and counted rather than failed.
+
+    One case needs it and it is this one: the stdlib is a sibling CHECKOUT, so
+    a tree without it has nothing to measure, and failing in that case would
+    make the suite red for a fact about the machine rather than about the
+    compiler.  A skip that is silent is the failure mode CLAUDE.md warns about
+    for an `expect=` marker, so it prints its reason and is counted in the
+    tally — see `main`'s `SKIP  <name>` line.
+    """
+
+
+def _stdlib_dir():
+    """The swept stdlib's root, or None when there is no checkout beside us."""
+    try:
+        from module_loader import STDLIB_PATH
+    except Exception:
+        return None
+    std = os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else None
+    return std if std and os.path.isdir(std) else None
+
+
+def test_a_swept_stdlib_file_is_classified_in_a_bounded_time(tmpdir, _shared):
+    """The largest swept file is a build that TERMINATES, with a verdict.
+
+    `std/python/bindings.mojo` is 1,997 lines and the deepest import closure in
+    the sweep, and it is here because it used to be the one file whose build did
+    not come back at all: five workers' `fire.py build --formal --no-prove`
+    runs against it were found still going, the oldest a day and a half, each
+    burning about 55% of a core, and two `test_formal_math.py combperm` runs
+    were at 9-10 hours beside them. None of those were Lean — every one of them
+    was `--no-prove` — so it was a non-converging pass over the import closure
+    in this tier, and the only instrument that could have said so was the guard
+    that was added afterwards to kill it.
+
+    What is asserted here is the property that makes the sweep able to report
+    the file at all, and it is deliberately NOT "this file is refused": a
+    refusal is today's answer, a build would be a better one, and pinning
+    either would turn a future improvement into a test failure.  The three
+    outcomes that pass are a build that produced an image, a non-zero exit
+    whose message names the file and is not a traceback, and nothing else —
+    a timeout, a kill, or a traceback all fail, and each of those is the state
+    the sweep cannot classify.
+    """
+    stdlib = _stdlib_dir()
+    if stdlib is None:
+        raise _Skip("no stdlib checkout beside this tree, so there is no swept "
+                    "file to build")
+    src = os.path.join(stdlib, "python", "bindings.mojo")
+    check(os.path.isfile(src),
+          f"the stdlib checkout at {stdlib} has no python/bindings.mojo, so "
+          f"this case is not measuring the file it claims to measure")
+    for arch in ("arm64", "x86_64"):
+        out = os.path.join(tmpdir, f"bindings.{arch}.aout")
+        argv = ["build", "--formal", "--no-prove", f"--backend={arch}",
+                "-o", out, src]
+        started = time.monotonic()
+        try:
+            result = run_fire(argv, cwd=HERE)
+        except subprocess.TimeoutExpired:
+            raise TestFailure(
+                f"[{arch}] {src} did not finish within run_fire's own timeout "
+                f"— the non-converging build is back, or is close enough to it "
+                f"that the shared 600 s bound is what stops it") from None
+        took = time.monotonic() - started
+        text = result.stderr or result.stdout or ""
+        check(took <= BOUNDED_BUILD_S,
+              f"[{arch}] {src} took {took:.0f}s, over this case's "
+              f"{BOUNDED_BUILD_S}s bound. It used not to finish at all, and "
+              f"the two hanging commands in the report were one per "
+              f"architecture, so a per-architecture bound is the only one that "
+              f"could have told them apart: a build that takes minutes here is "
+              f"a pass that has started to converge again, and it is worth "
+              f"knowing before it is another day and a half")
+        check("Traceback (most recent call last)" not in text,
+              f"[{arch}] {src} raised rather than being classified: "
+              f"{text.strip()[-600:]}")
+        if result.returncode == 0:
+            check(os.path.isfile(out),
+                  f"[{arch}] {src} exited 0 and wrote no image at {out}")
+            continue
+        check("bindings.mojo" in text,
+              f"[{arch}] {src} was refused without naming itself, so a reader "
+              f"has no way to tell which of its imports the refusal is about: "
+              f"{text.strip()[-400:]}")
 
 
 def test_widening_the_imported_list_widens_nothing_else(tmpdir, _shared):
@@ -1008,6 +1124,104 @@ def test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo(tmpdir, _shared):
           f"does not exist: {text[-300:]}")
 
 
+def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
+    """The six names that were, and what each one is placed by.
+
+    `test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo` above pins the
+    property for `shlex`, one module. It was true for six more on 2026-10-03,
+    and they were found by a RANKING rather than by reading the tier list:
+    `tools/formal_sweep_causes.py --host` prints `UNTIERED` for a name in
+    neither tier with no model, which turned "some names are in neither tier"
+    from a sentence in a comment into six module names and ten swept files.
+
+    A name in neither tier is refused with "not a stdlib or sibling module, and
+    no such file exists", which is a false statement about a CPython
+    standard-library module — and it is also the sentence that says the reader
+    has a TYPO, which is the wrong thing to tell someone whose import is
+    correct. Ten files in the 2026-10-02 arm64 sweep were reading it.
+
+    The tier each one lands in is a judgement made BY THE RULE and stated in
+    `formal/imports.py`, so this test checks the placement and not just the
+    membership:
+
+      * `builtins` and `sysconfig` are UNREACHABLE, and each for a measured
+        reason rather than a read one — `builtins` because the three files that
+        want it all spell `set(dir(builtins))`, which asks the interpreter to
+        enumerate itself, and `sysconfig` because `fire.py` imports it and
+        never uses it, so what it wants is where an interpreter that is not here
+        would be installed.
+      * `html`, `datetime`, `resource` and `posixpath` are MODELLED, because
+        none of the four needs an object this target does not have: `html` is
+        five character replacements, `datetime` is a clock this tree already
+        reads plus calendar arithmetic, `resource` is `getrusage(2)` in
+        libSystem with a fixed struct, and `posixpath` IS
+        `formal/hostmods/os/path/__init__.mojo` under another spelling.
+
+    So: the premise (each is a real CPython stdlib module, read from
+    `sys.stdlib_module_names` and not trusted), the membership (each is in a
+    tier), the placement (each tier is the one its reason implies), and the
+    WORDING (each is refused as a host module and not as a typo).
+    """
+    import sys as _sys
+    import formal.imports as I
+    placed = {
+        # name: (tier, why that tier, in one line)
+        "builtins": ("unreachable",
+                     "`set(dir(builtins))`: the interpreter's own namespace"),
+        "sysconfig": ("unreachable",
+                      "where an embedded CPython would be installed"),
+        "html": ("modelled", "five character replacements over a string"),
+        "datetime": ("modelled", "a clock this tree reads, plus arithmetic"),
+        "resource": ("modelled", "`getrusage(2)` is libSystem"),
+        "posixpath": ("modelled",
+                      "`os/path/__init__.mojo` IS CPython's posixpath"),
+    }
+    for name, (tier, why) in sorted(placed.items()):
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is not a CPython standard-library module, "
+              f"so the diagnostic it used to get was not a false statement "
+              f"about one")
+        check(not I._host_tier_conflicts(),
+              "a name in two tiers is a partition bug: %s"
+              % I._host_tier_conflicts())
+        got = I.host_module_tier(name)
+        check(got == tier,
+              f"host_module_tier({name!r}) is {got!r}, not {tier!r} — {why}. "
+              f"The tier is what a coverage report counts a file against, so "
+              f"the wrong one moves a number rather than just a sentence")
+    root = os.path.join(tmpdir, "untiered")
+    os.makedirs(root, exist_ok=True)
+    for name in sorted(placed):
+        # A DIRECTORY PER NAME, and the reason is worth recording because the
+        # first version of this test put `builtins.mojo` NEXT TO the program
+        # that imports `builtins` and watched it build: the resolver's third
+        # pass finds a sibling source, so the program resolved its own import to
+        # itself and the test reported a false pass. The tier change is exactly
+        # what stops that — a name in a HOST tier outranks a sibling — which is
+        # `test_host_module_still_refused_despite_same_named_sibling`'s subject
+        # and is why this fixture does not rely on it.
+        one = os.path.join(root, name)
+        os.makedirs(one, exist_ok=True)
+        prog = os.path.join(one, "prog.mojo")
+        with open(prog, "w") as f:
+            f.write(f"import {name}\ndef main():\n  return 1\n")
+        fresh_cas()
+        result = run_fire(["build", "--formal", "--no-prove", "-o",
+                           os.path.join(one, "prog.aout"), prog], cwd=one)
+        check(result.returncode != 0,
+              f"import {name} built. A module with a Mojo source would "
+              f"resolve, which is a different (and better) finding — update "
+              f"this table and the census row together")
+        text = (result.stderr or "") + (result.stdout or "")
+        check("host module" in text,
+              f"import {name} is not refused as a host module, so this name "
+              f"is being resolved some other way: {text[-300:]}")
+        check("not a stdlib or sibling module" not in text,
+              f"import {name} is still refused as a name that does not exist, "
+              f"which is a false statement about a CPython standard-library "
+              f"module: {text[-300:]}")
+
+
 def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
     """The refusal's second half: what to write here instead, where the reader is.
 
@@ -1066,7 +1280,7 @@ def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
 
 
 def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
-    """222 names: CPython ships them, this table classifies none of them.
+    """238 names: CPython ships them, this table classifies none of them.
 
     The same defect as the row above, one tier wider, and it was 222 names wide
     rather than one because `shlex` was fixed by adding ONE tier entry while the
@@ -1097,7 +1311,7 @@ def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
           "precondition: this test is about the names in NO tier, and there are "
           f"only {len(unclassified)} of them now — if they have been "
           "classified, this row is about nothing and should go")
-    for name in ("binascii", "cmath", "getopt", "html", "tomllib"):
+    for name in ("binascii", "cmath", "getopt", "tomllib"):
         check(name in _sys.stdlib_module_names,
               f"precondition: {name} is a CPython standard-library module, "
               "which is the fact the diagnostic used to deny")
@@ -1108,6 +1322,17 @@ def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
               f"{name} is expected to be in no tier — this row is about the "
               "wording of an UNCLASSIFIED name, and if it has been classified "
               "the row above is the one that applies")
+    # `html` was in that list and left it on 2026-10-03: it is one of the six
+    # names `test_no_standard_library_module_is_left_in_neither_tier` above
+    # placed, and `modelled` is right for it (five character replacements over a
+    # string, needing no object this target lacks). `html` is asserted to be in
+    # a tier THERE, deliberately — the two rows are the two arms of the wording,
+    # so a name cannot quietly satisfy both.
+    check(I.host_module_tier("html") == "modelled",
+          "html is no longer in no tier, so this row is not about it: it is "
+          "the one word in 'a standard-library module with no tier' that a "
+          "classified name must NOT produce, and the row above is where its "
+          "placement is pinned")
     check(I.is_cpython_stdlib("os.path"),
           "a dotted name is matched on its TOP component, like "
           "`_is_host_module` and `host_module_tier`")
@@ -2799,7 +3024,9 @@ TESTS = [
      test_host_module_still_refused_despite_same_named_sibling),
     ("a standard-library module in no tier is not reported as a typo",
      test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo),
-("a host-module refusal says what this target offers instead",
+    ("no standard-library module is left in neither tier",
+     test_no_standard_library_module_is_left_in_neither_tier),
+    ("a host-module refusal says what this target offers instead",
      test_a_host_module_refusal_says_what_this_target_offers),
     ("an unclassified CPython stdlib name is not called a typo",
      test_an_unclassified_stdlib_name_is_not_called_a_typo),
@@ -2861,6 +3088,8 @@ TESTS = [
      test_every_module_in_this_repository_survives_the_export_probe),
     ("the exclusion table does not change the export set",
      test_the_exclusion_table_does_not_change_the_export_set),
+    ("the largest swept file is classified in a bounded time",
+     test_a_swept_stdlib_file_is_classified_in_a_bounded_time),
 ]
 
 
@@ -2892,7 +3121,7 @@ def main():
               f"{platform.machine()}")
         return 0
 
-    passed = failed = expected = 0
+    passed = failed = expected = skipped = 0
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, fn in TESTS:
             expect = EXPECTED_FAILURES.get(name)
@@ -2903,6 +3132,10 @@ def main():
                 continue
             try:
                 fn(tmpdir, None)
+            except _Skip as e:
+                skipped += 1
+                print(f"  SKIP  {name}\n        {e}")
+                continue
             except TestFailure as e:
                 if expect is not None:
                     expected += 1
@@ -2939,7 +3172,8 @@ def main():
               f"— drop the marker")
         failed += 1
 
-    print(f"\nformal imports: PASS={passed} EXPECTED={expected} FAIL={failed}")
+    print(f"\nformal imports: PASS={passed} EXPECTED={expected} "
+          f"SKIP={skipped} FAIL={failed}")
     return 1 if failed else 0
 
 

@@ -2449,9 +2449,19 @@ test('formal-small-hosts', [PY, 'test_formal_small_hosts.py'], mem='tiny',
 # is spelled like a subscript and both backends resolve it by flattening the
 # callee to its base NAME, which is where everything that goes wrong here goes
 # wrong — so the file also pins the shapes that must stay refused.
+#
+# The two EMITTERS are in the cache key (`extra`) because every assertion in
+# this file is about what `_emit_call` decides, and the recorded PASS is
+# replayed on unchanged inputs: a fix that changed only
+# `formal/arm64_codegen.py` or `formal/x86_64_codegen.py` left this key
+# untouched, so the suite would have reported the pre-fix PASS for a build the
+# fix had just changed. Measured, not assumed — the refusals this file pins are
+# raised from `_emit_call` in those two files, and `formal/build.py` +
+# `formal/model.py` were the only two of the four it named.
 test('formal-specialization', [PY, 'test_formal_specialization.py'],
      mem='tiny', deps=['preflight'],
-     extra=['test_formal_specialization.py', 'formal/build.py',
+     extra=['test_formal_specialization.py', 'formal/arm64_codegen.py',
+            'formal/x86_64_codegen.py', 'formal/build.py',
             'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='f[a, b](...): a specialization, and what must stay refused')
 # `#kgen.param.expr<…>`: the family whose meaning is not an MLIR object at all

@@ -1414,6 +1414,24 @@ Returns `{"kind": …, "ptype": …, "arity": …}` where `kind` is one of
     return {"kind": "nullary", "ptype": "UInt64", "name": name, "arity": 0}
 
 
+def _param_list_lean(fn) -> str:
+    """`fn`'s parameter NAMES as a Lean `List String` literal.
+
+    The whole list, and not `params[0][0]`: `MojoFunc.mk` carries the source's
+    parameter names and `evalFunc` the model's argument values, so a function
+    of two parameters has to put BOTH names in the AST or the second one is
+    unbound and evaluates to 0 -- which is the defect
+    `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` names.  A
+    function with no parameters gets `[]` rather than the old `""`, which is
+    the same empty binding list spelled as a list.
+
+    One reader for both backends: `formal/x86_64_proof_gen.py` imports it, so
+    the two cannot disagree about what the AST says a function takes.
+    """
+    names = [p[0] for p in (getattr(fn, "params", None) or []) if p]
+    return "[" + ", ".join('"%s"' % n for n in names) + "]"
+
+
 def _go_apply(go_defs: str, fname: str, arg: str = "n") -> str:
     """The term that applies `fname`'s model to `arg`, at whatever arity it has.
 
@@ -1444,8 +1462,8 @@ def _go_apply(go_defs: str, fname: str, arg: str = "n") -> str:
     `_model_shape` applies to the nullary case, and the same one
     `_gen_go`'s docstring records having already needed for the MODEL (which
     was fixed: its arity is the source's).  What is still one-parameter is
-    `mojo` and the AST bridge beside it, which is a `lib/ProofLib.lean` change
-    and not a generator fix; `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`
+    `mojo` and the RUN TESTS around it, which is a driver change and not a
+    generator fix; `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`
     records the measurement and the two halves.
     """
     sh = _model_shape(go_defs, fname)
@@ -1454,12 +1472,16 @@ def _go_apply(go_defs: str, fname: str, arg: str = "n") -> str:
             f"model: {sh['name']} has {sh['arity']} parameters, and the "
             f"surrounding proof is a one-input theorem: `mojo` is declared "
             f"`UInt64 -> UInt64`, `eval_eq_mojo` and every run test quantify "
-            f"over one `n`, and ProofLib's AST bridge binds one parameter "
-            f"(`evalFunc`'s environment answers 0 for every name that is not "
-            f"it). Emitting `mojo n := {sh['name']} n` instead is an "
-            f"argument-count error Lean cannot recover from, so the whole "
-            f"proof file fails to elaborate. Widening `mojo` and the bridge to "
-            f"the model's arity is a `lib/ProofLib.lean` change")
+            f"over one `n`, and a run test's entry state is one word "
+            f"(`Arm64State.init test_input base`). Emitting "
+            f"`mojo n := {sh['name']} n` instead is an argument-count error Lean "
+            f"cannot recover from, so the whole proof file fails to elaborate. "
+            f"The AST BRIDGE is not the obstacle any more: `MojoFunc.mk` "
+            f"carries every parameter NAME and `evalFunc` takes the model's "
+            f"argument list, so the model's arity is already stateable "
+            f"(`mojoEnv_binds_by_position`). What remains is `mojo`, the run "
+            f"tests, and the driver, which supplies a single `test_input` -- see "
+            f"`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`")
     if sh["kind"] == "nullary":
         return sh["name"]
     return f"{sh['name']} " + (f"{arg}.toNat" if sh["ptype"] == "Nat" else arg)
@@ -1886,6 +1908,19 @@ def _step_rhs(w: int, idx: int):
     if idx == 5:  # NEG
         rn = (w >> 16) & 0x1f
         return f"some (arm64_set_reg {rd} s (-(arm64_reg {rn} s)))"
+    # `Rn` here is SP for the ADD/SUB/CMP shifted-register forms (A64 reads SP
+    # in `Rn`, measured: `add x0, sp, x16` assembles) and `ProofLib`'s branches
+    # say `arm64_reg_or_sp`.  This generator still spells the CONCRETE answer —
+    # `s.sp` for 31, `arm64_reg n` otherwise — and that asymmetry is deliberate:
+    # the step-result lemma is closed by `exact`-ing the library lemma
+    # INSTANTIATED AT THIS WORD, so the two right-hand sides only have to be
+    # defeq, and on a literal index they are.  Emitting `arm64_reg_or_sp` here
+    # instead would make that `exact` trivial but put `arm64_reg_or_sp n s` into
+    # every downstream value-flow goal, and those are simplified with
+    # `simp only [..., arm64_reg, arm64_set_reg]` lists that do not carry the
+    # helper — measured: 8 examples typecheck with the spelling below and the
+    # helper is not in those lists.  `test_formal_call_proof_gen.py`'s
+    # `TestRegister31` pins both halves of that sentence.
     if idx == 2:  # ADD register
         return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s + arm64_reg {rm} s))"
     if idx == 4:  # MUL
@@ -6428,8 +6463,17 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
         if idx == 51:  # B.cond branches on the flags, not a register
             tactics.append(f"unfold arm64_step")
             tactics.append(f"simp [h, hinsn, {fact_names}, hb]")
-            tactics.append(f"by_cases hp : arm64_matches_condition {w & 0xf} s.nzcv = true")
-            tactics.append(f"all_goals simp [hp]")
+            # `all_goals` around the split, for the reason the comment above
+            # this chain gives: the `simp` can CLOSE the goal on its own —
+            # `arm64_step s code = some (if <cond> then … else …)` has a
+            # `some` on either arm, so for some condition codes the split is
+            # decidable and nothing is left to split — and a `by_cases` on a
+            # closed goal is the same "No goals to be solved" error the chain
+            # is already arranged to avoid one line earlier. Measured on the
+            # stack-floor guard's `B.HS`, whose condition `simp` does decide.
+            tactics.append(f"all_goals (by_cases hp : "
+                           f"arm64_matches_condition {w & 0xf} s.nzcv = true "
+                           f"<;> simp [hp])")
         elif idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
             rn = w & 0x1f
             tactics.append(f"unfold arm64_step")
@@ -6985,10 +7029,15 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
 /-- TRUST BOUNDARY eliminated: the fuel-bounded full interpreter applied to
 the formal AST equals the structural model, by strong induction. -/
 theorem eval_eq_mojo (n : UInt64) :
-    evalFuncF (n.toNat % @S@ + 2) ast handler n = mojo n := by
-  have hA : ast = MojoFunc.mk "@FN@" "@P@" prog := rfl
+    evalFuncF (n.toNat % @S@ + 2) ast handler [n] = mojo n := by
+  have hA : ast = MojoFunc.mk "@FN@" ["@P@"] prog := rfl
   rw [hA]
-  simp only [evalFuncF]
+  -- `MojoEnv` in the set because the environment is now BUILT from the
+  -- parameter-name list, and one `simp [MojoEnv]` reduces it to the term the
+  -- hand-written `henv0` below states -- which is why that lemma is unchanged
+  -- and why it can be: `MojoEnv ["p"] [n]` IS `fun name => if name == p then
+  -- n else 0`.
+  simp only [evalFuncF, MojoEnv]
   have henv0 : (fun name => if name == "@P@" then n else (0 : UInt64))
       = envOf n.toNat := by
     funext x
@@ -7326,7 +7375,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         param = fn.params[0][0] if fn.params else "n"
         rec_hrhs = _expr_rec_hrhs(fn.body[0].else_body[0].value, func_name, param)
         eval_eq_mojo_proof = (
-            f"simp +decide [mojo, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo]\n"
+            f"simp +decide [mojo, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo]\n"
             f"  by_cases hn : n = 0\n"
             f"  · subst n; simp [{func_name}_go]\n"
             f"  · have h1 : 1 ≤ n := by\n"
@@ -7358,9 +7407,10 @@ def generate_arm64_proof(prog, code, info) -> str:
         # gains `ast ((fun ...))` and stops being byte-identical to HEAD's.
         _cf_unparenthesised = _cf[1:-1] if _cf.startswith("(") else _cf
         eval_eq_mojo_proof = (
-            f"have hunf : evalFunc ast ({_cf_unparenthesised}) n =\n"
+            f"have hunf : evalFunc ast ({_cf_unparenthesised}) [n] =\n"
             f"      (if n ≤ (1 : UInt64) then n else mojo (n - 1) + mojo (n - 2)) := by\n"
-            f"    simp only [ast, evalFunc, evalBody, evalBodyEnv, evalExpr]\n"
+            f"    simp only [ast, evalFunc, MojoEnv, evalBody, "
+            f"evalBodyEnv, evalExpr]\n"
             f"    by_cases h : n ≤ (1 : UInt64) <;> simp [h]\n"
             f"  rw [hunf]\n"
             f"  by_cases hle : n ≤ (1 : UInt64)\n"
@@ -7391,7 +7441,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         # (10 of the 45 examples: absval, bigconst, condassign, condassign2,
         # deepif, elif3, ifonly, ifonly2, ifparam, twoifs).  The x86-64
         # generator has had `sKey` in this set for the same reason.
-        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
+        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
         if len(conds) == 0:
             eval_eq_mojo_proof = f"simp +decide [{simp_lems}]"
         else:
@@ -7430,15 +7480,15 @@ def generate_arm64_proof(prog, code, info) -> str:
         eval_eq_mojo_section = (
             f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo (n : UInt64) :\n"
-            f"  evalFunc ast {_cf_text} n = mojo n := by\n"
+            f"  evalFunc ast {_cf_text} [n] = mojo n := by\n"
             f"  {eval_eq_mojo_proof}"
         )
     if _range_loop_pattern(fn) is not None:
         ast_def = ""  # the AST model has no loop form; the bridge is omitted
     else:
-        _param = fn.params[0][0] if fn.params else "n"
         ast_stmts = ", ".join(_stmts_ast(fn.body))
-        ast_def = f'def ast : MojoFunc := MojoFunc.mk "{func_name}" "{_param}" ([{ast_stmts}])'
+        ast_def = ('def ast : MojoFunc := MojoFunc.mk "%s" %s ([%s])'
+                   % (func_name, _param_list_lean(fn), ast_stmts))
 
     code_defs = _gen_code_defs(func_name, code, base_addr, test_input)
     extern_calls = info.get("extern_calls") or []
@@ -7498,13 +7548,13 @@ def generate_arm64_proof(prog, code, info) -> str:
             eval_tests.append(
                 f"theorem eval_eq_mojo_{v} :\n"
                 f"  evalFunc ast {_cf_text} "
-                f"(UInt64.ofNat {v}) = mojo (UInt64.ofNat {v}) := by\n"
+                f"[(UInt64.ofNat {v})] = mojo (UInt64.ofNat {v}) := by\n"
                 f"{_tac_eval}"
             )
         eval_tests.append(
             f"theorem eval_eq_mojo_test :\n"
             f"  evalFunc ast {_cf_text} "
-            f"(UInt64.ofNat {test_input}) = mojo (UInt64.ofNat {test_input}) := by\n"
+            f"[(UInt64.ofNat {test_input})] = mojo (UInt64.ofNat {test_input}) := by\n"
             f"{_tac_eval}"
         )
         eval_test_block = "\n\n".join(eval_tests)

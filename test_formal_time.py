@@ -471,40 +471,264 @@ def main() -> int:
   return 0
 """
 
-# The two refusals, in modules of their own because one refused function refuses
-# its whole module — a module with both the read and the refusal in it would
-# make the reading case fail for the refusal's reason.
+# The load-side refusal, in a module of its own because one refused function
+# refuses its whole module — a module with both the read and the refusal in it
+# would make the reading case fail for the refusal's reason. (There was a second
+# refusal here, the store one, and it is gone: the store builds now, and the
+# stores that must still be refused are `STORE_REFUSALS` below.)
 WIDE_MODULE = """\
 def env_byte_wide(name) -> int:
   var p: Pointer[Int32] = external_call["getenv", Pointer[Int32]](name)
   return p.value()
 """
 
-POKE_MODULE = """\
-def poke(p: Pointer[UInt8]) -> int:
+# The store half, in a module of its own for the same reason the read is: a
+# module is where `localtime`'s store would be, and a pointer that arrives as a
+# callee ARGUMENT has no recorded pointee while one this module allocates has
+# one — so which of the two a case uses is part of what it measures.
+#
+# One function per pointee width, because the four widths are four INSTRUCTIONS
+# (`strb`/`strh`/`str w`/`str x`, and `movb`/`mov w16`/`mov w32`/`mov qword`)
+# and a store at the wrong one is invisible to every other assertion available
+# here: it writes the right ANSWER and corrupts the bytes AFTER the pointee,
+# which nothing reads unless something reads them.  So each case reads them —
+# the bytes at and after the pointee, immediately after its own store and before
+# the next one, which is the only ordering in which "the store wrote 4 bytes"
+# and "the store wrote 8 bytes" are different observations.
+STORE_MODULE = """\
+def poke8(p: Pointer[UInt8], v) -> int:
+  p.value() = v
+  return p.value()
+
+def poke16(p: Pointer[UInt16], v) -> int:
+  p.value() = v
+  return p.value()
+
+def poke32(p: Pointer[Int32], v) -> int:
+  p.value() = v
+  return p.value()
+
+def poke64(p: Pointer[Int64], v) -> int:
+  p.value() = v
+  return p.value()
+
+def clear(p: Pointer[UInt8], k) -> int:
+  p[k] = 0
+  return 0
+
+def byteat(p: Pointer[UInt8], k) -> int:
+  return p[k]
+"""
+
+# `(label, width in bytes, value)`.  The label is both the record's key and the
+# name of the case, and every width appears TWICE:
+#
+#   * the `a` value fits in 32 bits, so its round trip through `p.value()` can be
+#     PRINTED. `printf("%d")` reads 32 bits of the vararg — which is C's own
+#     rule and not a defect of this path, measured: an image printing
+#     `1234605616436508552` prints `1432778632`, the low half, on both
+#     architectures — so a value that does not fit cannot be compared as a
+#     number here.
+#   * the `b` value does NOT fit, and every one of its bytes is distinct and
+#     non-zero, so the records that read the bytes at and after the pointee are
+#     the only way to see whether the store wrote 1, 2, 4 or 8 bytes. A store
+#     one width too wide writes the value's higher bytes into a buffer that was
+#     cleared, and the `b` value is chosen so those bytes are not zero.
+#
+# Both are needed and neither subsumes the other: the `a` value proves the load
+# and the store AGREE at that width (the round trip closes), and the `b` value
+# proves the store's FOOTPRINT is that width (the byte after the pointee is
+# still 0). A store at 8 bytes passes every `a` case for widths 1, 2 and 4 when
+# the value happens to fit, and fails the matching `b` case.
+STORE_CASES = (
+    ("w1a", 1, 0x56),
+    ("w1b", 1, 0x1234ABCD56),
+    ("w2a", 2, 0x3344),
+    ("w2b", 2, 0x11223344),
+    ("w4a", 4, 0x55667788),
+    ("w4b", 4, 0x1122334455),
+    ("w8a", 8, 0x55667788),
+    ("w8b", 8, 0x1122334455667788),
+)
+STORE_BYTES = 16
+
+
+def _store_program():
+    body = ["import tmstore", "",
+            "def main() -> int:",
+            "  var b: Pointer[UInt8] = external_call[\"malloc\", "
+            "Pointer[UInt8]](%d)" % STORE_BYTES,
+            "  var i = 0",
+            "  while i < %d:" % STORE_BYTES,
+            "    tmstore.clear(b, i)",
+            "    i = i + 1"]
+    for label, width, value in STORE_CASES:
+        # The store is ALWAYS emitted; only the round-trip READ of it is
+        # conditional, and dropping the store along with the print is how this
+        # program once measured nothing at all for the `b` cases — every byte
+        # read then showed the PREVIOUS case's value and the assertion still
+        # had something to say.
+        call = f"tmstore.poke{width * 8}(b, {value})"
+        if value < 2 ** 32:
+            body.append(f'  printf("{label}=%d@@", {call})')
+        else:
+            body.append(f"  {call}")
+        # The pointee's own bytes, then one byte PAST it.  The last case is
+        # 8 bytes wide and the buffer is 16, so it still has a byte past it.
+        for k in range(width + 1):
+            body.append(f'  printf("{label}b{k}=%d@@", tmstore.byteat(b, {k}))')
+    body.append("  return 0")
+    return "\n".join(body) + "\n"
+
+
+def _store_want():
+    """What each record must read, computed from `STORE_CASES` by CPython.
+
+    The store truncates to the pointee's width and the bytes are little-endian
+    on both architectures (`str`/`mov` are little-endian by definition and the
+    image is a Mach-O), so `int.to_bytes(width, "little")` is the answer for the
+    footprint, and re-reading those bytes as one word is the answer for the round
+    trip — which is why it is `int.from_bytes(packed)` and not `value`: storing
+    0x11223344 through a `UInt16` is 0x3344, and a round trip that returned
+    anything else would mean the store had not truncated.
+    """
+    want = {}
+    for label, width, value in STORE_CASES:
+        packed = value.to_bytes(8, "little")[:width]
+        if value < 2 ** 32:
+            want[label] = str(int.from_bytes(packed, "little"))
+        for k in range(width + 1):
+            want[f"{label}b{k}"] = str(packed[k] if k < width else 0)
+    return want
+
+# The stores this path must still REFUSE, and the needle each one's message has
+# to contain.  Every one of these is a case where the store's WIDTH would be a
+# choice rather than a fact, so they are the standing statement that the
+# capability did not become a way to emit a store at any width: no pointee at
+# all, a pointee whose width this model does not establish (a float, a blob), a
+# struct (there is nothing at the address to store into), an unscaled offset on
+# a wider-than-one-byte pointee (the address and the store would disagree about
+# the element size), and a receiver whose bytes are the image's read-only text.
+#
+# The needles are the model's own sentences, so a needle that stops matching is
+# a message that moved — and both backends are asked for the same one, which is
+# the property that keeps a `strb` and a `movq` from becoming two answers.
+STORE_REFUSALS = (
+    ("nopointee", """\
+def f(p) -> int:
   p.value() = 1
   return 0
+""", "its pointee is not recorded here"),
+    ("float", """\
+def f(p: Pointer[Float64]) -> int:
+  p.value() = 1
+  return 0
+""", "the pointee is Float64"),
+    ("blob", """\
+def f(p: Pointer[List[Int]]) -> int:
+  p.value() = 1
+  return 0
+""", "the pointee is List"),
+    ("struct", """\
+struct P3:
+  var a: Int64
+  var b: Int64
+
+def f(p: Pointer[P3]) -> int:
+  p.value() = 1
+  return 0
+""", "a STRUCT"),
+    ("unscaled", """\
+def f(p: Pointer[Int64], k) -> int:
+  var q: Pointer[Int64] = p + k
+  q.value() = 1
+  return 0
+""", "WITHOUT scaling it by the pointee's"),
+    ("readonly", """\
+def f() -> int:
+  var p: Pointer[UInt8] = "hello"
+  p.value() = 72
+  return 0
+""", "READ-ONLY page"),
+)
+
+
+# ── the `struct tm` route, end to end ───────────────────────────────────────
+#
+# The capability's reason for existing, in the shape the five absent `time`
+# names will use it: a MODULE writes the eight bytes of a `time_t` through a
+# `Pointer[UInt8]`, hands the address to libc's `localtime`, and reads the
+# `struct tm` it fills in field-wise. Nothing here is special-cased for `time` —
+# it is `malloc`, `p.value() = v` and `p[k]` — and that is the assertion: the
+# bytes libc READS are the bytes the module WROTE, which is the one thing a
+# build-only test of a store cannot show.
+#
+# A function rather than a literal so the oracle is CPython's own `time`, not a
+# constant written here beside the program that computes it.
+TM_EPOCH = 1700000000
+
+
+def _tm_route_program():
+    # An f-string and NOT `%`-formatting: the program's own text is full of `%`
+    # (the `v % 256` decomposition and the `printf("...%d@@")` records), and a
+    # `%`-formatted program raises `unsupported format character` on its own
+    # source. Only the epoch is interpolated.
+    return f"""\
+def put64(p: Pointer[UInt8], v) -> int:
+  p[0] = v % 256
+  p[1] = (v / 256) % 256
+  p[2] = (v / 65536) % 256
+  p[3] = (v / 16777216) % 256
+  p[4] = (v / 4294967296) % 256
+  p[5] = (v / 1099511627776) % 256
+  p[6] = (v / 281474976710656) % 256
+  p[7] = (v / 72057594037927936) % 256
+  return 0
+
+def le32(p: Pointer[UInt8], k) -> int:
+  return p[k] + p[k + 1] * 256 + p[k + 2] * 65536 + p[k + 3] * 16777216
+
+def local_fields(t) -> int:
+  var buf: Pointer[UInt8] = external_call["malloc", Pointer[UInt8]](8)
+  put64(buf, t)
+  var tm: Pointer[UInt8] = external_call["localtime", Pointer[UInt8]](buf)
+  printf("year=%d@@", le32(tm, 20) + 1900)
+  printf("mon=%d@@", le32(tm, 16) + 1)
+  printf("mday=%d@@", le32(tm, 12))
+  return 0
+
+def main() -> int:
+  return local_fields({TM_EPOCH})
 """
+
+
+def _tm_route_want():
+    t = hosttime.localtime(TM_EPOCH)
+    return {"year": str(t.tm_year), "mon": str(t.tm_mon),
+            "mday": str(t.tm_mday)}
 
 
 def _build(tmpdir, mod_name, src, tag, program=None, arch=None):
     """Write one module and a program that calls into it; build and return.
 
-    `program` is the whole program when the caller has one (the reading case,
-    which prints three records); otherwise a program that CALLS the module's one
-    function and returns its value, which is enough to make a refusal the build
-    reports. `arch` adds the backend flag, so a case can also assert that the
-    measurement is the same one on both architectures — which for the reading
-    case is a BUILD, since an x86-64 Mach-O needs Rosetta to launch here.
+    `program` is the whole program when the caller has one (the reading and
+    storing cases, which print records); otherwise a program that CALLS the
+    module's one function and returns its value, which is enough to make a
+    refusal the build reports. `arch` adds the backend flag, so a case can also
+    assert that the measurement is the same one on both architectures.
+
+    The generated program is `import <mod>\n\ndef main() -> int: return <mod>.<f>()`
+    with NO arguments, and that is the whole of the generated form: a
+    `p.value() = 1` store now BUILDS, so there is no call whose arguments a
+    generated program would have to invent any more.
     """
     with open(os.path.join(TEMP, mod_name + ".mojo"), "w") as f:
         f.write(src)
     prog = os.path.join(TEMP, tag + ".mojo")
     if program is None:
         fn = re.search(r"def (\w+)\(", src).group(1)
-        args = "" if src is WIDE_MODULE else '"MOJO_STRUCT_ROUTE", 0'
         program = (f"import {mod_name}\n\ndef main() -> int:\n"
-                   f"  return {mod_name}.{fn}({args})\n")
+                   f"  return {mod_name}.{fn}()\n")
     with open(prog, "w") as f:
         f.write(program)
     out = os.path.join(TEMP, tag + (f".{arch}" if arch else ""))
@@ -515,34 +739,84 @@ def _build(tmpdir, mod_name, src, tag, program=None, arch=None):
                                 text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
 
 
+def _run(out, arch):
+    """`(rc, stdout, stderr)` for one image, with the x86-64 one under Rosetta.
+
+    `test_formal_os_backing.py`'s runner, copied rather than imported because
+    these two files have no shared test module and a shared one would be a
+    second thing to keep in step. The reason it is here and not a BUILD is the
+    whole point of this group: an x86-64 image that stores eight bytes where the
+    pointee is one is a program that BUILDS, and a build-only assertion could
+    not tell it from a correct one. Measured on this backend: an `os`-importing
+    formal image builds AND runs under `arch -x86_64`.
+    """
+    argv = [out]
+    if arch == "x86_64" and sys.platform == "darwin":
+        argv = ["arch", "-x86_64", out]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=RUN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 124, "", f"the image did not finish within {RUN_TIMEOUT}s"
+    return p.returncode, p.stdout, p.stderr
+
+
+def _build_program(tmpdir, tag, src, arch):
+    """Build ONE self-contained file, for a case that is not module + program.
+
+    The `struct tm` route is one file: it declares the functions it calls and
+    calls them from `main`, because the thing being measured is a single image
+    that writes eight bytes and hands them to libc. `_build` writes a module and
+    a program that imports it, which is the right shape for the read and store
+    halves (a pointer that arrives as a callee argument is a different question)
+    and the wrong one here.
+    """
+    prog = os.path.join(TEMP, tag + ".mojo")
+    with open(prog, "w") as f:
+        f.write(src)
+    out = os.path.join(TEMP, f"{tag}.{arch}")
+    argv = [sys.executable, FIRE, "build", "--formal", "--no-prove",
+            f"--backend={arch}", "-o", out, prog]
+    return subprocess.run(argv, capture_output=True, text=True,
+                          timeout=BUILD_TIMEOUT, cwd=HERE)
+
+
 def group_structroute(tmpdir, verbose):
-    """Which half of the `struct tm` route exists, measured on both backends.
+    """The `struct tm` route, both halves of it, measured on both backends.
 
     `bugs/FORMAL_time_struct_shaped_answers.md` says the five absent names are
     absent because "a `struct tm` cannot cross a module boundary, and cannot be
     constructed by one". That is true and it is NOT the whole reason, and the
-    difference decides what a fix looks like. Measured here, on both
-    architectures:
+    difference decides what a fix looks like. This group is the measurement, and
+    both halves of it now exist:
 
-      * **reading** a C library's struct through a `Pointer[UInt8]` pointee
-        WORKS — byte loads at `p + k`, which is what every field of a
-        `struct tm` is made of (nine `int`s, read as four little-endian bytes
-        each). The annotation has to be on the local holding the address AND on
-        the one holding `p + k`;
-      * a **wider** pointee on an address that came from a call is refused **by
-        name** (the load's width must be established, and a callee that
-        returned `p + k` hides its scale);
-      * **writing** through a pointee is refused outright — `p.value() = 1` is
-        "assignment target must be a plain name" — so a module can neither build
-        the `time_t` that `localtime`/`gmtime` take a POINTER to, nor the
-        `struct tm` that `mktime`/`strftime` take.
+      * **reading** a C library's struct through a `Pointer[UInt8]` pointee WORKS
+        — byte loads at `p + k`, which is what every field of a `struct tm` is
+        made of (nine `int`s, read as four little-endian bytes each). The
+        annotation has to be on the local holding the address AND on the one
+        holding `p + k`;
+      * **writing** through a pointee with a declared one WORKS, at the pointee's
+        own width — `p.value() = v` is a store of the pointee's width (a
+        truncating store, which is C's `*(UInt8 *)p = v`), so a module can build
+        the `time_t` that `localtime`/`gmtime` take a POINTER to and the
+        `struct tm` that `mktime`/`strftime` take;
+      * a **wider** pointee on an address that came from a call is still refused
+        **by name**, on the load side and now on the store side too (the load's
+        width must be established, and a callee that returned `p + k` hides its
+        scale).
 
-    So the blocker is the WRITE side and the argument it needs, not the struct
-    crossing. Which is worth a standing test rather than a paragraph in a bug
-    doc: it is the fact a reader has to check before deciding whether the fix is
-    the layout table that doc's step 1 describes (not what is missing) or a
-    store through a pointee (which is) — and the refusals here are the pin that
-    says so the day the store lands.
+    The store half is RUN on both backends and not merely built, because the
+    failure it exists to catch is invisible to a build: a store at the wrong
+    width writes the right answer and corrupts the bytes after it. So the
+    program's own numbers pin the width twice over — the value stored through
+    each of the four widths round-trips at that width (`300` into a `UInt8` is
+    44, `70000` into a `UInt16` is 4464), and the bytes AFTER a 4-byte store
+    still read 0 in a buffer that was cleared.
+
+    What this group is NOT is the five absent names. Those are
+    `bugs/FORMAL_time_struct_shaped_answers.md`'s work — the API shape against
+    CPython's one struct is a judgement that doc owns — and the capability they
+    were waiting for is what this group measures.
     """
     prog, r = _build(tmpdir, "tmrow", READ_MODULE, "structroute",
                      program=READ_PROGRAM)
@@ -556,7 +830,7 @@ def group_structroute(tmpdir, verbose):
                      program=READ_PROGRAM, arch="x86_64")
     check(r2.returncode == 0,
           f"the UInt8-pointee read did not build for x86_64 either: "
-          f"{(r2.stderr or r2.stdout).strip()[-400:]}")
+          f"{(r2.stderr or r.stdout).strip()[-400:]}")
     ran = subprocess.run([os.path.join(TEMP, "structroute")],
                          capture_output=True, text=True, timeout=RUN_TIMEOUT,
                          cwd=HERE,
@@ -571,33 +845,84 @@ def group_structroute(tmpdir, verbose):
           f"{want} — the bytes of the value this process put in the "
           f"environment")
 
-    # The refusal words are per-architecture, and the pair is itself part of the
-    # measurement: the two backends write this one refusal differently ("must be
-    # a plain name" vs "is not lowered ... only a plain name has a home"), so a
-    # needle that matched only one of them would have let the other drift.
-    for mod_name, src, needle, why in (
-            ("tmwide", WIDE_MODULE, "the load's width is the pointee's",
-             "a 4-byte load from an address a call returned"),
-            ("tmpoke", POKE_MODULE, "assignment target must be a plain name",
-             "a store through a pointee, which is what every absent `time` "
-             "name needs first")):
-        for arch, words in (("arm64", needle), ("x86_64", needle)):
-            if arch == "x86_64" and mod_name == "tmpoke":
-                words = "only a plain name has a home"
-            _p, rr = _build(tmpdir, mod_name, src, f"refused_{mod_name}",
+    # ── the store half, on BOTH backends and as a RUN ─────────────────────
+    for arch in ("arm64", "x86_64"):
+        _p, rs = _build(tmpdir, "tmstore", STORE_MODULE, f"store_{arch}",
+                        program=_store_program(), arch=arch)
+        check(rs.returncode == 0,
+              f"[{arch}] storing through a declared pointee did not build: "
+              f"{(rs.stderr or rs.stdout).strip()[-400:]}")
+        rc, out, err = _run(os.path.join(TEMP, f"store_{arch}.{arch}"), arch)
+        check(rc == 0, f"[{arch}] the store image exited {rc}: "
+                       f"{err.strip()[-300:]}")
+        got = dict(re.findall(r"(\w+)=([^@]*)" + REC, out))
+        want = _store_want()
+        check(got == want,
+              f"[{arch}] the stores returned {got}, expected {want}. Each case "
+              f"reads the bytes at and AFTER its own pointee, so a store at "
+              f"the wrong width is visible twice over: the value round trip "
+              f"truncates to the wrong width, and the byte past the pointee "
+              f"reads as part of the value instead of 0")
+
+    # The stores that must still be refused, on both backends, with the model's
+    # own sentence as the needle: a store whose WIDTH would be a choice rather
+    # than a fact is the outcome this path must never reach, and the sentence is
+    # shared so one backend cannot drift from the other without a test failing.
+    for mod_name, src, needle in STORE_REFUSALS:
+        for arch in ("arm64", "x86_64"):
+            _p, rr = _build(tmpdir, mod_name, src, f"refused_{mod_name}_{arch}",
                             arch=arch)
             check(rr.returncode != 0,
-                  f"[{arch}] {why} BUILT, so this measurement is out of date — "
-                  f"and the capability the absent `time` names are waiting for "
-                  f"has landed")
+                  f"[{arch}] {mod_name} BUILT, so the store capability has "
+                  f"widened past the point where the width is established")
             msg = rr.stderr or rr.stdout
-            check(words in msg,
-                  f"[{arch}] {why} was refused, but not with the words "
-                  f"{words!r}: {msg.strip()[-300:]}")
+            check(needle in msg,
+                  f"[{arch}] {mod_name} was refused, but not with the words "
+                  f"{needle!r}: {msg.strip()[-300:]}")
+
+    # The one LOAD-side refusal that is still a refusal: a 4-byte pointee on an
+    # address a call returned. It is here rather than in `STORE_REFUSALS`
+    # because it is the load's sentence, and the store half's refusal of the
+    # same construct is in that table with its own words — the pair is what says
+    # the two spellings refuse the same program.
+    for arch in ("arm64", "x86_64"):
+        _p, rr = _build(tmpdir, "tmwide", WIDE_MODULE,
+                        f"refused_wide_{arch}", arch=arch)
+        check(rr.returncode != 0,
+              f"[{arch}] a 4-byte load from an address a call returned BUILT, "
+              f"so the width rule has moved")
+        check("the load's width is the pointee's" in (rr.stderr or rr.stdout),
+              f"[{arch}] the wide load was refused without the model's own "
+              f"sentence: {(rr.stderr or rr.stdout).strip()[-300:]}")
+
+    # The store the five absent `time` names need, measured the way they will
+    # use it: a MODULE writes the `time_t` libc's `localtime` takes a POINTER to,
+    # and the answer comes back as a `struct tm *` whose fields are read
+    # byte-wise. This is the end-to-end statement that the capability is not
+    # only internally consistent — the bytes libc reads are the bytes the module
+    # wrote. CPython's `time.localtime` is the oracle for all three fields, and
+    # the field OFFSETS are Darwin's (`struct tm` starts `tm_sec` and `tm_year`
+    # is the sixth `int`), which is why this is 20 and not 0.
+    tm = _tm_route_program()
+    for arch in ("arm64", "x86_64"):
+        rt = _build_program(tmpdir, f"tmroute_{arch}", tm, arch)
+        check(rt.returncode == 0,
+              f"[{arch}] the localtime route did not build: "
+              f"{(rt.stderr or rt.stdout).strip()[-400:]}")
+        rc, out, err = _run(os.path.join(TEMP, f"tmroute_{arch}.{arch}"), arch)
+        check(rc == 0, f"[{arch}] the localtime image exited {rc}: "
+                       f"{err.strip()[-300:]}")
+        got = dict(re.findall(r"(\w+)=([^@]*)" + REC, out))
+        want = _tm_route_want()
+        check(got == want,
+              f"[{arch}] the localtime route returned {got}, expected {want} "
+              f"— the same three fields CPython's time.localtime reports for "
+              f"1700000000")
 
     if verbose:
-        print("    byte-wise reads work; a wider pointee and any store do not")
-    return True, "read yes / store no"
+        print("    reads and stores both work at the pointee's width, on both "
+              "backends")
+    return True, "read yes / store yes"
 
 
 GROUPS = {

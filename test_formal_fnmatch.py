@@ -80,10 +80,14 @@ _UNMASK = _UNMASK.replace(
             u = _put(out, u, h)""",
     """            u = _put(out, u, 0)""")
 # The store itself is `json.mojo`'s `put_byte` idiom, verbatim: a one-byte
-# buffer, `memset` into it, `memcpy` it out. A direct `q.value() = b` is refused
-# on this path (an assignment target must be a plain name), which is why three
-# host modules carry the same four lines rather than one of them carrying a
-# helper the others call.
+# buffer, `memset` into it, `memcpy` it out. It was here because a direct
+# `q.value() = b` was REFUSED on this path (an assignment target had to be a
+# plain name), which is why three host modules carried the same four lines
+# rather than one of them carrying a helper the others call. The store exists
+# now — `model.pointer_store_lowering`, the store mirror of the pointer value
+# model's load, on both backends — and these modules can be shortened to
+# `out.value() = b` whenever someone owns that; nothing here depends on the
+# round trip through `malloc`, so leaving it is a cleanup and not a fix.
 _UNMASK = ("def _put(out, at, b) -> int:\n"
            "    var one: Pointer[UInt8] = malloc(1)\n"
            "    memset(one, b & 255, 1)\n"

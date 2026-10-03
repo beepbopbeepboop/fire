@@ -4,11 +4,12 @@
 measurement is refreshed; items 2 and 3 are each one capability with an owner
 named, and neither is a light change.** Deliberately filed as ONE capability
 rather than two modules. Split out of
-`FORMAL_glob_copy_collections_io_not_attempted.md`, whose own text says this
-document "does not exist yet and should" — that a reader who finds one of these
-two should be told about the other, because they are the same missing thing.
-That parent is a measurement record whose remaining actions are withdrawn or
-filed elsewhere; this is the part of it that is work.
+`FORMAL_glob_copy_collections_io_not_attempted.md` — a measurement record of
+`glob`, `copy`, `collections` and `io`, DELETED 2026-10-03 by `work/formal10-3`
+with the fixes it recorded, its remaining actions withdrawn or filed elsewhere —
+whose own text said this document "does not exist yet and should". A reader who
+finds one of these two should be told about the other, because they are the same
+missing thing. This is the part of that parent that is work.
 
 ## 1. LANDED: the host-import refusal now says what this target offers
 
@@ -154,18 +155,20 @@ reachable by the same step.
    field-by-field copy, with references copied as references. That is a
    LOWERING in both backends plus a representation rule ("a clone of a framed
    struct is a fresh frame"), and it is the same feature
-   `bugs/FORMAL_frame_receiver_handoff.md` §4c already names as missing —
+   `formal/model.py`'s copy-construction refusal already names as missing —
    "`S(x)` — a copy construction — has no lowering, for any struct and any
    argument. A fresh block plus an `n`-slot copy is a feature in both backends."
    **Do these as one change**: they are one feature with two call sites, and
    filing them separately is how they get half-built.
-   **Not done here, and the reason is a CLAIM rather than a difficulty**: that
-   §4c is `FORMAL_frame_receiver_handoff.md`'s write set, and another lane holds
-   it. The advice sentence above is what a caller gets in the meantime, and it
-   names the honest limit ("a copy chosen at run time, over a graph whose shape
-   the build cannot see, has no answer here"). `mojo/middle/offload.py` and
-   `tools/extract_family.py` are additional `import copy` sites the original
-   five did not list.
+   **Not done here, and the reason is a CLAIM rather than a difficulty**: this was
+   `FORMAL_frame_receiver_handoff.md` §4c's write set, and that lane held it —
+   the doc was DELETED 2026-10-03 by `work/formal10-3` with its eight waves
+   landed, its copy-construction gap handed to this document and its string
+   sub-family to the docs that still hold it. The advice sentence above is what a
+   caller gets in the meantime, and it names the honest limit ("a copy chosen at
+   run time, over a graph whose shape the build cannot see, has no answer here").
+   `mojo/middle/offload.py` and `tools/extract_family.py` are additional
+   `import copy` sites the original five did not list.
 3. **The reflection table** — a runtime-readable type descriptor and
    construction from it — which is what `namedtuple` at run time and
    `deepcopy` over an arbitrary graph both need, and which is the actual root

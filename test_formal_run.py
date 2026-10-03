@@ -678,6 +678,38 @@ CASES = [
     # honest about the other half: it IS only ever read, so it is a constant,
     # and this tree measures one field where the pre-rule tree measured two
     # and refused.
+    # A class-level constant whose VALUE is another class's constant — the enum
+    # idiom (`origin: TypeOrigin = TypeOrigin.DEFAULT`), and this repository's
+    # `type_system.py`. The rewrite already answers a read of `Origin.B` from a
+    # function body (the `pyclass_constant_table_only` rows above), so the gap
+    # was narrower than it looked: the OUTER site consumes the whole node, so
+    # the inner reference was never reached, and the value was reported as "not
+    # a literal". Both halves of the resolution are here — the read at the top
+    # level and a constant whose own value is a THIRD class's constant, so a
+    # recogniser that resolved one hop would fail this row.
+    #
+    # The recogniser is `S.NAME` and nothing else, and the boundary is the
+    # BARE name: `C = B` in a class body is also how a module-level name is
+    # read, and this path has no scope at an initializer that could tell the
+    # two apart. That spelling is still refused, with the value quoted, which
+    # is the refusal a reader can act on.
+    ("pyclass_constant_whose_value_is_another_constant",
+     "class Inner:\n"
+     "    B = 2\n"
+     "\n"
+     "class Origin:\n"
+     "    C = Inner.B\n"
+     "\n"
+     "struct Holder:\n"
+     "    v: Int = Origin.C\n"
+     "\n"
+     "def get() -> Int:\n"
+     "    return Origin.C\n"
+     "\n"
+     "def main(n):\n"
+     "    h = Holder()\n"
+     "    printf(\"%d %d\\n\", get(), h.v)\n"
+     "    return 0\n", 0, "2 2"),
     ("pyclass_name_read_bare_and_written",
      "class Cell:\n"
      "    N = 7\n"
@@ -916,6 +948,21 @@ CASES = [
     # The `refuse:` sibling above with the needle this tree raises: it quotes the
     # VALUE, which is what sends a reader to the class body rather than to the
     # read, where the generic "is a class-level constant of Table" did not.
+    # The BOUNDARY of the reference resolution, and it is what keeps the
+    # resolution from being "resolve anything": `Missing` is not a class this
+    # image declares, so there is no declaration to read the value out of and
+    # the read is refused with the value quoted — the same sentence, and the
+    # same clause of it, as the container value two rows below.
+    ("class_constant_naming_a_class_this_image_does_not_declare_is_refused",
+     "struct Holder:\n"
+     "    v: Int = Missing.WHAT\n"
+     "\n"
+     "def main(n):\n"
+     "    var h = Holder()\n"
+     "    printf(\"%d\\n\", h.v)\n"
+     "    return 0\n",
+     "refuse:reads a class-level constant of Holder, whose value is "
+     "`Missing.WHAT`", None),
     ("class_constant_with_a_container_value_quotes_the_value",
      "struct Table:\n"
      "    NAMES = ['a', 'b']\n\n"
@@ -2626,16 +2673,30 @@ RECVKIND_CASES = [
   "    k = w.write_string(\"None\")\n"
   "    return 0\n",
   "refuse:is a method on a Writer", None),
- # `__mlir_bool__` is the one case here that IS implementable — a Bool is a word
- # holding 0 or 1 on this path, so it is the test `if` already does — and is
- # refused only because it cannot be GUARDED. The needle is the guard, not the
- # impossibility: a reader should come away knowing the fix is a BOOL kind.
- ("recvkind_mlir_bool_needs_a_bool_kind",
+ # `__mlir_bool__` IS implemented, for every receiver whose DECLARED type says
+ # `Bool` — `build._lower_dialect_select` rewrites it to `x != 0` in the shared
+ # pipeline, and `test_formal_mlir_precedence.py`'s
+ # `a_dialect_select_lowers_when_the_condition_declares_a_bool` builds and RUNS
+ # `std/utils/_select.mojo` on both architectures.
+ #
+ # So this row is the half that is still refused, and the difference is the
+ # DECLARATION: `c = n > 3` states nothing about what `c` holds, and an
+ # unannotated word is an integer here, so `(c != 0)` would answer 1 for a
+ # `char *`. The needle is the guard and the repair, not the impossibility — a
+ # reader should come away knowing to annotate the receiver, and that the
+ # missing thing is the declared type rather than a new kind.
+ #
+ # (A local bound to a COMPARISON is provably a Bool too, and this pass
+ # deliberately does not claim it: the annotation is what the SOURCE says about
+ # the name, while a comparison is a fact about the value's provenance, and the
+ # two are different questions. Widening it belongs with the rest of the value
+ # model, not here.)
+ ("recvkind_mlir_bool_needs_a_declared_bool",
   "def main(n):\n"
   "    c = n > 3\n"
   "    k = c.__mlir_bool__()\n"
   "    return 0\n",
-  "refuse:is a real builtin and is implementable as the same test", None),
+  "refuse:Annotate the receiver `Bool`", None),
 ]
 
 # ── `write`/`close` are a SYSCALL, and need a real receiver ─────────────────
@@ -3459,12 +3520,11 @@ BYREF_REFUSALS = [
     # `from … import …` in it binds the name either", and for a builtin both of
     # those are impossible — the name comes from the LANGUAGE — so the sentence
     # sent the reader to look for a missing `def` that cannot exist. `type_of`
-    # is on the list on the measurement in
-    # `bugs/FORMAL_frame_by_value_ceiling_zero.md` (`std/memory/unsafe_pointer`
-    # is refused with this very message and the doc's note is "`type_of` is a
-    # missing builtin, on any receiver"); the two cases below are the two
-    # families the table carries, and the needle is the clause that names what
-    # the callee is rather than what this file lacks.
+    # is on the list because `std/memory/unsafe_pointer.mojo` is refused with
+    # this very message and the honest reading of that sentence is "`type_of` is
+    # a missing builtin, on any receiver"; the two cases below are the two
+    # families `model.UNIMPLEMENTED_BUILTINS` carries, and the needle is the
+    # clause that names what the callee is rather than what this file lacks.
     #
     # The prefix "which is a name with no definition in hand" is asserted by
     # neither needle and is load-bearing anyway: two taxonomies key on that
@@ -5948,6 +6008,56 @@ BOTH_ARCH_CASES = [
      "    x.peek(y)\n"
      "    printf(\"a=%d\", x.a)\n"
      "    return 0\n", 0, "a=1"),
+    # ── the STACK FLOOR (`formal/model.py`: `recursive_function_names`,
+    # `STACK_FLOOR_BUDGET_BYTES`, `STACK_TRAP_STATUS`) ──
+    #
+    # A runaway recursion used to be a SIGSEGV on both backends: no output and
+    # no status a caller could read, above 61 frames on arm64 and above ~470 on
+    # x86-64. These three rows are the whole of the fix's observable behaviour,
+    # and each fails if the guard is absent, if it misfires, or if the cycle
+    # detection misses a shape:
+    #
+    #   * `stack_floor_deep_recursion_is_a_status` — the defect. `deep(5000)` is
+    #     far past either backend's ceiling and the answer is the exit status
+    #     `STACK_TRAP_STATUS`. `want_stdout=None` because `printf` is inside
+    #     `main` and the trap fires before it.
+    #   * `stack_floor_shallow_recursion_still_answers` — the other direction,
+    #     and the one a guard that fired unconditionally would fail: 30 deep is
+    #     nowhere near the budget and must still print 30.
+    #   * `stack_floor_mutual_recursion_is_a_status` — the cycle detection, not
+    #     the guard. `ping`/`pong` are only a cycle TOGETHER, so a rule that
+    #     looked for a function calling ITSELF would guard neither and this row
+    #     would be a SIGSEGV again.
+    ("stack_floor_deep_recursion_is_a_status",
+     "def deep(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return deep(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return deep(5000)\n", 2, None),
+    ("stack_floor_shallow_recursion_still_answers",
+     "def deep(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return deep(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\\n\", deep(30))\n"
+     "    return 0\n", 0, "30"),
+    ("stack_floor_mutual_recursion_is_a_status",
+     "def pong(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return ping(n - 1)\n"
+     "\n"
+     "def ping(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return pong(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return ping(5000)\n", 2, None),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -8700,26 +8810,139 @@ CONSTRUCTION_REFUSALS = [
      "    return x.a\n",
      "refuse:whose body this path does not inline: a local assignment (`t = …`)",
      None),
-    # (5) A READ OF THE RECEIVER, which is the case a bare-parameter check
-    # misses and the one that would be a wrong ANSWER rather than a refusal:
-    # `self.a = a` is fine because `a` is the caller's own expression, and
-    # `self.a = 1 + a` is not, because the arithmetic names a word the calling
-    # function does not have.  The needle is the READ, and the parameter row
-    # below is its twin from the other side.
-    ("constr_refuse_an_init_body_that_reads_the_receiver",
-     "struct A5:\n"
-     "    var a: Int\n"
-     "    var b: Int\n"
-     "\n"
-     "    def __init__(out self, a: Int, b: Int):\n"
-     "        self.a = a\n"
-     "        self.b = self.a + b\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var x = A5(1, 2)\n"
-     "    return x.b\n",
-     "refuse:whose body this path does not inline: a read of 'self' in the right-hand side",
-     None),
+     # (5) A READ OF THE RECEIVER.  It used to be one refusal with the needle
+     # "a read of 'self' in the right-hand side", because the block's address
+     # could not be threaded through as a receiver — and it is now TWO lowerings
+     # and a smaller refusal.  A method call is lifted to a real call with the
+     # block's address as its receiver and a one-level field read is a load at
+     # `block + 8·slot`, both of which the emitters answer from the block
+     # `struct_constructor_sites` already reserved for this call
+     # (`CTOR_RECEIVER_CASES` builds and runs the two shapes against CPython).
+     #
+     # What is left is a receiver read with no address to compute from, and the
+     # three cases below are the three ways that happens.  This first one is a
+     # read THROUGH a field: the slot holds a frame ADDRESS and the offset after
+     # it is a different struct's layout, which is the one thing this struct's
+     # own field table cannot answer.
+     ("constr_refuse_an_init_body_that_reads_through_a_nested_field",
+      "struct In5:\n"
+      "    var q: Int\n"
+      "    var r: Int\n"
+      "\n"
+      "struct A5:\n"
+      "    var a: Int\n"
+      "    var inner: In5\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int):\n"
+      "        self.a = a\n"
+      "        self.b = self.inner.q\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5(1)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: `self.inner.q`, "
+      "a read THROUGH a field of A5",
+      None),
+     # (5a) The same family from the other side: a field handed to a CALL.
+     # A slot holds one word and that word is an ADDRESS when the field holds a
+     # nested frame, so whether a callee may be handed one is a question about
+     # the CALLEE's parameter convention — and this is the one place in the
+     # compiler that cannot ask, because the frame-holder analysis reads
+     # function bodies and a call lifted out of an inlined constructor body is in
+     # none of them.
+     ("constr_refuse_an_init_body_that_hands_a_field_to_a_call",
+      "def twice5(v: Int) -> Int:\n"
+      "    return v * 2\n"
+      "\n"
+      "struct A5b:\n"
+      "    var a: Int\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int):\n"
+      "        self.a = a\n"
+      "        self.b = twice5(self.a)\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5b(1)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: `self.a` handed "
+      "to `twice5(…)` as an argument",
+      None),
+     # (5b) The receiver read with nothing behind it at all: the object itself,
+     # rather than one of its fields.  A bare `self` has no word to load and no
+     # call to lift, so there is nothing for the block to say.
+     ("constr_refuse_an_init_body_that_reads_the_receiver_barely",
+      "def sink5(v: Int) -> Int:\n"
+      "    return 1\n"
+      "\n"
+      "struct A5c:\n"
+      "    var a: Int\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int):\n"
+      "        self.a = a\n"
+      "        self.b = sink5(self)\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5c(1)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: a bare read of "
+      "`self`, which is the object under construction and neither one of its "
+      "fields nor a method call on it",
+      None),
+     # (5c) A receiver read on a struct that HAS no block to read.  A struct of
+     # one field is a plain word and its receiver IS that word, so the two
+     # lowerings above — both of which compute something out of an address —
+     # have no address; and the word this construction evaluates to is the LAST
+     # store of the body, so an earlier read has no value to read.  The method
+     # is a `@staticmethod` because an ordinary method of a one-field struct that
+     # returns a value is refused earlier and more specifically, by
+     # `receiver_writeback_name` — which is a real answer about a different
+     # question and not this one.
+     ("constr_refuse_an_init_body_that_reads_a_one_field_receiver",
+      "struct One5:\n"
+      "    var n: Int\n"
+      "\n"
+      "    def __init__(out self, v: Int):\n"
+      "        self.n = self.plus()\n"
+      "\n"
+      "    @staticmethod\n"
+      "    def plus() -> Int:\n"
+      "        return 7\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = One5(1)\n"
+      "    return x.n\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: a read of the "
+      "receiver of One5, which is a struct of 1 field(s) and so its receiver IS "
+      "its own word",
+      None),
+     # (5d) The name `self.a + b` used to be refused as a receiver read.  The
+     # receiver half of it lowers now and the refusal is about the OTHER name:
+     # `b` is a parameter read inside an expression, which this path does not
+     # substitute (see `_init_store_value`'s bare-parameter rule, and why the
+     # rule is "alone" and not "anywhere").
+     ("constr_refuse_an_init_body_that_reads_a_parameter_under_a_field_read",
+      "struct A5d:\n"
+      "    var a: Int\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int, b: Int):\n"
+      "        self.a = a\n"
+      "        self.b = self.a + b\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5d(1, 2)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of 'b' in the "
+      "right-hand side",
+      None),
+
     # (6) The same refusal for a PARAMETER, which is the one that is easy to
     # get wrong in the accepting direction: a program that inlined this would
     # read a word out of whatever register the CALLING function left in it, and
@@ -10905,7 +11128,8 @@ X86_ONLY_1SLOT_BUG_CASE = (
 # emitter cannot lower a SECOND slice in the same function — it reads a
 # pointer that is not one — so a table with two per program would be a table of
 # failures about that instead of about these. The reproducer and what is known
-# about the cause are `bugs/FORMAL_x86_64_a_second_slice_in_a_function.md`.
+# about the cause are the three bound-clamp labels of `_emit_slice_parts`, fixed
+# 2026-10-03 in 68671a62.
 #
 # What each case pins, and what it was before:
 #
@@ -11164,6 +11388,415 @@ CONCAT_CASES = [
      "    for v in ys:\n"
      "        s += v\n"
      "    print(\"sum=%d\" % s)\n"),
+]
+
+
+# ── an inlined `__init__`'s OWN RECEIVER ─────────────────────────────────────
+#
+# `model.init_receiver_rewrite` resolves a read of the object under construction
+# against the block `struct_constructor_sites` reserved for that construction,
+# in two ways: a METHOD CALL is lifted to the call it is with the block's address
+# as its receiver, and a one-LEVEL FIELD READ is a load at `block + 8·slot`.  It
+# used to be one refusal ("whose body this path does not inline: a read of 'self'
+# in the right-hand side"), and the two files it blocked were this repository's
+# own — `module_spec_gen.py`'s `self.spec_content = self._read_spec()`.  The
+# refusals that remain are in `CONSTRUCTION_REFUSALS` (5), (5a), (5b), (5c).
+#
+# A CPython-pair group rather than four-column constants, because the whole
+# content of the change is an ORDER: the stores run in the body's own order, each
+# receiver read sees what the stores BEFORE it wrote, and the block belongs to the
+# construction SITE.  A hand-written constant would not notice a receiver reading
+# a slot before the store that fills it, and CPython does.
+CTOR_RECEIVER_CASES = [
+    # (1) A METHOD CALL with no arguments, and a field read of what it returned.
+    # The last store is the whole value of the answer, so a receiver that read
+    # the wrong block would return the caller's block's garbage rather than 15.
+    ("ctor_recv_a_method_call_and_a_field_read",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    def __init__(out self, n: Int):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "        self.c = self.a + self.b\n"
+     "\n"
+     "    def ten(out self) -> Int:\n"
+     "        return 10\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var s = S(5)\n"
+     "    printf(\"%d\\n\", s.c)\n"
+     "    return 0\n",
+     "class S:\n"
+     "    def __init__(self, n):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "        self.c = self.a + self.b\n"
+     "\n"
+     "    def ten(self):\n"
+     "        return 10\n"
+     "\n"
+     "def main():\n"
+     "    s = S(5)\n"
+     "    print(s.c)\n"),
+    # (2) A method that reads TWO fields, one of them at its CLASS-LEVEL default
+    # and one the body has already stored — so the receiver the method reads
+    # through is the block under construction and the store order is load-bearing.
+    ("ctor_recv_a_method_reads_a_class_default",
+     "struct Box:\n"
+     "    var w: Int = 40\n"
+     "    var h: Int\n"
+     "    var area: Int\n"
+     "    var tag: Int\n"
+     "\n"
+     "    def __init__(out self, h: Int):\n"
+     "        self.h = h\n"
+     "        self.area = self.scaled()\n"
+     "        self.tag = self.pick(3)\n"
+     "\n"
+     "    def scaled(out self) -> Int:\n"
+     "        return self.w * self.h\n"
+     "\n"
+     "    def pick(out self, k: Int) -> Int:\n"
+     "        if k == 3:\n"
+     "            return 7\n"
+     "        return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box(2)\n"
+     "    printf(\"%d\\n\", b.area + b.tag)\n"
+     "    return 0\n",
+     "class Box:\n"
+     "    def __init__(self, h):\n"
+     "        self.w = 40\n"
+     "        self.h = h\n"
+     "        self.area = self.scaled()\n"
+     "        self.tag = self.pick(3)\n"
+     "\n"
+     "    def scaled(self):\n"
+     "        return self.w * self.h\n"
+     "\n"
+     "    def pick(self, k):\n"
+     "        if k == 3:\n"
+     "            return 7\n"
+     "        return 0\n"
+     "\n"
+     "def main():\n"
+     "    b = Box(2)\n"
+     "    print(b.area + b.tag)\n"),
+    # (3) TWO constructions of one struct in one function, which is the case the
+    # receiver has to name its own SITE for: the block is per call site, so a
+     # receiver that resolved to the first construction would read 5 where the
+     # source says 7.
+    ("ctor_recv_two_sites_get_two_blocks",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, n: Int):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "\n"
+     "    def ten(out self) -> Int:\n"
+     "        return 10\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var p = P(5)\n"
+     "    var q = P(7)\n"
+     "    printf(\"%d\\n\", p.b * 100 + q.b + p.a)\n"
+     "    return 0\n",
+     "class P:\n"
+     "    def __init__(self, n):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "\n"
+     "    def ten(self):\n"
+     "        return 10\n"
+     "\n"
+     "def main():\n"
+     "    p = P(5)\n"
+     "    q = P(7)\n"
+     "    print(p.b * 100 + q.b + p.a)\n"),
+    # (4) The shape `module_spec_gen.py` is written in: a constructor whose stores
+    # are the constructor's own ARGUMENT and two calls on the object being built,
+    # with the methods reading fields the earlier stores wrote.  Written out here
+    # with a file-shaped body instead of `open()`/`f.read()` so the case measures
+    # the receiver and nothing else.
+    ("ctor_recv_module_spec_generator_shape",
+     "struct ModuleSpecGenerator:\n"
+     "    var spec_file: String = \"\"\n"
+     "    var spec_len: Int\n"
+     "    var type_count: Int\n"
+     "\n"
+     "    def __init__(out self, spec_file: String):\n"
+     "        self.spec_file = spec_file\n"
+     "        self.spec_len = self.measure()\n"
+     "        self.type_count = self.count_types()\n"
+     "\n"
+     "    def measure(out self) -> Int:\n"
+     "        return len(self.spec_file)\n"
+     "\n"
+     "    def count_types(out self) -> Int:\n"
+     "        return self.spec_len + 2\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var g = ModuleSpecGenerator(\"abcd\")\n"
+     "    printf(\"%d\\n\", g.spec_len * 100 + g.type_count)\n"
+     "    return 0\n",
+     "class ModuleSpecGenerator:\n"
+     "    spec_file = \"\"\n"
+     "    def __init__(self, spec_file):\n"
+     "        self.spec_file = spec_file\n"
+     "        self.spec_len = self.measure()\n"
+     "        self.type_count = self.count_types()\n"
+     "\n"
+     "    def measure(self):\n"
+     "        return len(self.spec_file)\n"
+     "\n"
+     "    def count_types(self):\n"
+     "        return self.spec_len + 2\n"
+     "\n"
+     "def main():\n"
+     "    g = ModuleSpecGenerator(\"abcd\")\n"
+     "    print(g.spec_len * 100 + g.type_count)\n"),
+]
+
+
+
+# ── REPETITION: `xs * n`, which was not a construct on this path at all ─────
+#
+# It reached the integer ALU with both operands still holding blob ADDRESSES,
+# so `[7] * 4` was `7 * 4 * 8` — the address of nothing — and every read
+# through it walked a count at that address. Measured on both architectures
+# before the change, on this one program per architecture:
+#
+#     def main():
+#         C = [7] * 4
+#         n = 0
+#         for x in C:
+#             n = n + 1
+#         printf("n=%d", n)
+#
+# built, ran, and died with SIGSEGV (exit 139) on arm64 and on x86-64 alike,
+# where CPython counts 4. A build that succeeds and then crashes is the worst of
+# the three answers this backend can give, and the kind half made it worse: a
+# list of ints has kind `list:int`, and `_unify` compared that against the bare
+# `LIST_PREFIX` only, so `[1, 2] * 3` did not unify with the `int` on its other
+# side and the name was bound to the "a word is an integer" default — which is
+# also why `len()` of one was refused as "len() of a value classified as
+# 'int'" and why `print` of one said it could not tell a SubscriptExpr from a
+# string or a number.
+#
+# So these are CPython PAIRS for the reason the slice group above gives: a
+# constant written by the same hand as the lowering is worth nothing.
+# The two shapes a repetition CANNOT have, and both of them used to build.
+# A dynamic count and a container-times-container both reached the integer ALU
+# as address arithmetic, so the cases below are the direction the fix has to
+# keep: a named refusal on BOTH architectures, never a build.
+REPEAT_REFUSALS = [
+    # A COUNT THIS PATH CANNOT READ. The reservation is made before anything
+    # runs and there is no heap to grow into, so a repetition of unknown length
+    # has nowhere to put its elements — and the alternative (reserve a guess,
+    # check at run time) turns `[0.0] * (m * k)` into a program that builds and
+    # then dies, which is the outcome this backend exists to prevent. The needle
+    # is the CONSTRUCT, so a refusal about anything else fails the case.
+    ("repeat_refuses_a_count_it_cannot_read",
+     "def main(n: Int) -> Int:\n"
+     "    var xs = [1, 2]\n"
+     "    var ys = xs * n\n"
+     "    return len(ys)\n",
+     "refuse:is a REPETITION, and this path can only lower one whose count it "
+     "can read while emitting", None),
+    # TWO CONTAINERS. Python raises a TypeError for every such pair, so there is
+    # no program here to answer — and the multiply of two blob addresses is a
+    # number nowhere near either blob.
+    ("repeat_refuses_two_containers",
+     "def main() -> Int:\n"
+     "    var a = [1] * [2]\n"
+     "    return a[0]\n",
+     "refuse:multiplies two containers", None),
+]
+
+
+REPEAT_CASES = [
+    # The reproducer, verbatim. Counting is the one read that cannot be a
+    # wrong number: it walks the count word the emitter wrote.
+    ("repeat_counts_the_elements",
+     "def main() -> Int:\n"
+     "    var C = [7] * 4\n"
+     "    var n = 0\n"
+     "    for x in C:\n"
+     "        n = n + 1\n"
+     "    printf(\"n=%d\\n\", n)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    C = [7] * 4\n"
+     "    n = 0\n"
+     "    for x in C:\n"
+     "        n = n + 1\n"
+     "    print(\"n=%d\" % n)\n"),
+    # The ELEMENTS, which the count cannot vouch for: the count word is
+    # computed from nL*count, so it is right even when the copy wrote nothing —
+    # the shape both concat copy loops had, where `len` was right and `sum` was
+    # 0. A multi-element source is what makes the repetition's own copy loop
+    # observable at all.
+    ("repeat_copies_the_elements",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2] * 3\n"
+     "    var s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d e0=%d e5=%d\\n\", s, len(xs), xs[0], xs[5])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2] * 3\n"
+     "    s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d e0=%d e5=%d\" % (s, len(xs), xs[0], xs[5]))\n"),
+    # `len()` OF THE REPETITION, and a SUBSCRIPT of it: the kind half of the
+    # change is what makes these answerable at all — `list:int` against `int`
+    # did not unify, so the name was an integer and `len` refused with "an
+    # integer has no length".
+    ("repeat_len_and_subscript",
+     "def main() -> Int:\n"
+     "    var xs = [3, 4] * 2\n"
+     "    printf(\"len=%d e0=%d e1=%d e3=%d\\n\",\n"
+     "           len(xs), xs[0], xs[1], xs[3])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [3, 4] * 2\n"
+     "    print(\"len=%d e0=%d e1=%d e3=%d\" %\n"
+     "          (len(xs), xs[0], xs[1], xs[3]))\n"),
+    # THE COUNT ON THE LEFT, which is the same repetition spelled the other way
+    # round and a separate branch in the emitter (which operand is the blob).
+    ("count_on_the_left_repeats_too",
+     "def main() -> Int:\n"
+     "    var xs = 2 * [5]\n"
+     "    var s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d\\n\", s, len(xs))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = 2 * [5]\n"
+     "    s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d\" % (s, len(xs)))\n"),
+    # A NAME on the left, where the source length is a fact about the BLOB
+    # rather than about the syntax: `xs * 3` has to copy what `xs` holds at run
+    # time, which a static element count cannot answer.
+    ("repeat_of_a_name",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2]\n"
+     "    var ys = xs * 3\n"
+     "    var s = 0\n"
+     "    for v in ys:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d\\n\", s, len(ys))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2]\n"
+     "    ys = xs * 3\n"
+     "    s = 0\n"
+     "    for v in ys:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d\" % (s, len(ys)))\n"),
+    # A COUNT OF ZERO, and a NEGATIVE one: CPython's answer is the empty list
+    # for both (`[7] * 0` and `[7] * -1` are `[]`), so the loop bound must be
+    # clamped rather than left to run with a negative trip count — which is a
+    # walk off the front of the blob area, and silent.
+    ("repeat_of_zero_and_of_a_negative_count",
+     "def main() -> Int:\n"
+     "    var a = [9] * 0\n"
+     "    var b = [9] * -1\n"
+     "    var n = 0\n"
+     "    for v in a:\n"
+     "        n = n + 1\n"
+     "    for v in b:\n"
+     "        n = n + 1\n"
+     "    printf(\"n=%d len_a=%d len_b=%d\\n\", n, len(a), len(b))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    a = [9] * 0\n"
+     "    b = [9] * -1\n"
+     "    n = 0\n"
+     "    for v in a:\n"
+     "        n = n + 1\n"
+     "    for v in b:\n"
+     "        n = n + 1\n"
+     "    print(\"n=%d len_a=%d len_b=%d\" % (n, len(a), len(b)))\n"),
+    # A STORE INTO THE RESULT, and a CONCATENATION with it: the result is an
+    # ordinary frame blob, so both neighbouring operations have to work on it
+    # — and `[1, 2] * 2 + [7]` puts the new emitter
+    # and the old one next to each other.
+    ("repeat_then_store_and_concat",
+     "def main() -> Int:\n"
+     "    var a = [1, 2] * 2\n"
+     "    a[0] = 9\n"
+     "    var b = a + [7]\n"
+     "    var s = 0\n"
+     "    for v in b:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d e0=%d\\n\", s, len(b), a[0])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    a = [1, 2] * 2\n"
+     "    a[0] = 9\n"
+     "    b = a + [7]\n"
+     "    s = 0\n"
+     "    for v in b:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d e0=%d\" % (s, len(b), a[0]))\n"),
+    # A NESTED REPETITION, `([5] * 2) * 3`: the source of the outer copy is the
+    # inner RESULT, so the count the emitter reserves for the outer one is a
+    # product of two of them, and the copy reads a blob whose count word was
+    # itself just written.
+    ("repeat_of_a_repeat",
+     "def main() -> Int:\n"
+     "    var xs = ([5] * 2) * 3\n"
+     "    var s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d\\n\", s, len(xs))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = ([5] * 2) * 3\n"
+     "    s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d\" % (s, len(xs)))\n"),
+    # A COMPREHENSION on the left, and a FOR over the result with no name in
+    # between: the repetition as an EXPRESSION rather than as a bound temporary,
+    # which is the shape the reproducer's `for x in C` has and the one a
+    # reservation made only for a bound name would miss.
+    ("repeat_of_a_comprehension_iterated_directly",
+     "def main() -> Int:\n"
+     "    var s = 0\n"
+     "    for v in [i * 2 for i in range(3)] * 2:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d\\n\", s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    s = 0\n"
+     "    for v in [i * 2 for i in range(3)] * 2:\n"
+     "        s += v\n"
+     "    print(\"sum=%d\" % s)\n"),
+    # A STRING element, where the copied word is a `char *` rather than a
+    # number: the copy is a word copy either way, and a program that only ever
+    # summed its repetitions would not notice a receiver kind that made `*` a
+    # string operation.
+    ("repeat_of_a_list_of_strings",
+     "def main() -> Int:\n"
+     "    var xs = [\"ab\"] * 2\n"
+     "    printf(\"n=%d first=%s second=%s\\n\", len(xs), xs[0], xs[1])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [\"ab\"] * 2\n"
+     "    print(\"n=%d first=%s second=%s\" % (len(xs), xs[0], xs[1]))\n"),
 ]
 
 
@@ -11709,15 +12342,29 @@ WAVE7_G2_CASES = [
     # here is a bare `self` and the declared type has to be recovered from the
     # struct's one field.
     #
-    # NOT the shape `std/collections/binary_heap.mojo` is in, which is what
-    # this comment used to say: `BinaryHeap` has TWO fields here, because its
-    # comptime parameter `T` is in `struct_field_names` and `struct_is_framed`
-    # counts it, so `BinaryHeap` is a frame and its `len(self)` is the
-    # `__len__` call `formal/build.py`'s `_rewrite_len_on_frame_receivers` now
-    # makes (see `bugs/FORMAL_frame_receiver_handoff.md` §14).  A one-field
-    # struct is not a frame, `b` below is a plain word, and the `__len__` on it
-    # is not reached at all — which is why this case still refuses, for the
-    # field-value reason and not for a length reason.
+    # BOTH of these used to be REFUSALS naming "this slot's DECLARED type is
+    # 'List[Int]'", and they are the two halves of the change
+    # `model.ctor_establishes_slot` made: a container cannot come into a slot
+    # through a class-level default on this path (a container default is refused
+    # by name, `struct_frame_representable`: "the default is not a literal"), so
+    # the CONSTRUCTOR was the only remaining door and it was shut.  `S()` DOES
+    # run `__init__` — the body is inlined at the construction site — so a value
+    # the constructor assigns is a value the object has at every site, and 3 is
+    # what `len(b)` returns on both architectures.
+    #
+    # This IS the shape `std/collections/binary_heap.mojo` is in, which is what
+    # this comment used to say and then denied.  It denied it because
+    # `BinaryHeap` measured TWO fields: its comptime parameter `T` was in
+    # `struct_field_names`, `struct_is_framed` counted it, so `BinaryHeap` was a
+    # frame and its `len(self)` became the `__len__` call
+    # `formal/build.py`'s `_rewrite_len_on_frame_receivers` makes (see
+    # `test_formal_frame_len.py`) — a different construct, which
+    # is why the file was refused for a field-VALUE reason on a frame-slot read.
+    # `BinaryHeap[T: Copyable & Comparable & Deinitable]` spells its bound as a
+    # CONJUNCTION, which the parser did not recognise as a bound and filed as a
+    # `VarDecl` field; `fire_compiler._struct_param_is_bound` closes that, and
+    # `BinaryHeap` is one field again.  The first of these two cases is its
+    # `__len__` in miniature and the second is its `__len__` removed.
     ("len_one_word_struct_receiver_is_a_list_field",
      "struct B:\n"
      "    var _data: List[Int]\n"
@@ -11728,7 +12375,7 @@ WAVE7_G2_CASES = [
      "def main(k: Int) -> Int:\n"
      "    var b = B()\n"
      "    return len(b)\n",
-     "refuse:this slot's DECLARED type is 'List[Int]'", None),
+     3, None),
     # The same one-word struct, read through a LOCAL the constructor was bound
     # to rather than through the receiver.  `b` is a plain word on this path —
     # deliberately not a frame holder, because a one-field struct has no frame —
@@ -11741,6 +12388,99 @@ WAVE7_G2_CASES = [
      "def main(k: Int) -> Int:\n"
      "    var b = B()\n"
      "    return len(b)\n",
+     3, None),
+    # ── and the shapes that must STILL be refused, which are the whole of
+    # the gate's safety ──
+    #
+    # Each of these is a case where claiming the kind from the DECLARATION
+    # alone would be a wrong answer, and for the first one the wrong answer was
+    # MEASURED rather than argued: with the kind taken from `var _data:
+    # List[Int]` and nothing else, this built on BOTH architectures, ran, and
+    # died with SIGSEGV (exit 139) — `LDR X0, [X0]` with X0 zero, because the
+    # slot held 0 and `len` read eight bytes from address 0.  A build that stays
+    # green and faults is the failure this suite exists to catch, so the case is
+    # here rather than left to the refusal it is.
+    ("len_one_word_struct_with_no_constructor_is_refused",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     "refuse:this slot's DECLARED type is 'List[Int]'", None),
+    # The constructor's store is not a blob.  `self._data = k` is a WORD, and a
+    # word is not `[count][elements…]`, so `len` still has no count to read —
+    # the constructor door is not "the struct declares a constructor", it is
+    # "every constructor puts a materialized blob in THIS field".
+    ("len_one_word_struct_whose_constructor_stores_a_word_is_refused",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self, k: Int):\n"
+     "        self._data = k\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B(k)\n"
+     "    return len(b)\n",
+     "refuse:this slot's DECLARED type is 'List[Int]'", None),
+    # A container constructor with a `capacity=` RESERVATION, which is a
+    # DIFFERENT question from one that has to hold n elements and so is
+    # answered: a capacity says how much room to set aside, not what is in the
+    # container, and the container is empty either way.  0, not 3 — the count
+    # word of the blob is zero and the reservation is not modelled, which
+    # `model.blob_constructor_lowering` states as its limits.  This store is the
+    # one that kept `ctor_establishes_slot` shut for
+    # `std/collections/binary_heap.mojo`, whose second `__init__` is
+    # `self._data = List[Self.T](capacity=capacity)`.
+    ("len_one_word_struct_constructed_with_a_capacity",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int](capacity=3)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     0, None),
+    # …and the two operand shapes that are STILL a sized blob and so are still
+    # refused.  A positional argument says how many elements the container has,
+    # which is content rather than reservation, and `model` recognises exactly
+    # one reservation keyword because that is the one this stdlib spells.
+    ("len_one_word_struct_constructed_with_a_positional_size_is_refused",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int](3)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     "refuse:has no representation on this path", None),
+    ("len_one_word_struct_constructed_with_an_unknown_keyword_is_refused",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int](reserve=3)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     "refuse:has no representation on this path", None),
+    # A TWO-field struct, where the container door is SHUT.  Premise (B1) —
+    # `FRAME_FIELD_BLOB_PREMISE_B1`, "no executed method writes a container into
+    # a field" — is about the two lifetimes coming apart: the blob would live in
+    # the ASSIGNING function's frame while the slot's lifetime is the object's,
+    # and the object's frame can outlive the assignment.  A one-field struct has
+    # no frame, so its blob is governed by the ordinary value path and the door
+    # is open; a multi-field struct has one, so it stays shut.  Same program as
+    # the first answered case with one `Int` field added, and that one field is
+    # the whole difference.
+    ("len_container_field_of_a_two_field_struct_is_refused",
+     "struct P:\n"
+     "    var _data: List[Int]\n"
+     "    var n: Int\n"
+     "    def __init__(out self):\n"
+     "        self._data = [1, 2, 3]\n"
+     "        self.n = 1\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    return p.size()\n",
      "refuse:this slot's DECLARED type is 'List[Int]'", None),
     # ── (3) the case that is ANSWERED, and is the whole point of the gate ──
     # A LITERAL class-level default IS materialized by the constructor at every
@@ -13329,8 +14069,11 @@ SHIFT_CASES = [
 ]
 
 
-# `origin_of(x)` — the COMPILE-TIME IDENTITY, and the seven stdlib files it
-# un-blocks are measured in `bugs/FORMAL_frame_by_value_ceiling_zero.md`.
+# `origin_of(x)` — the COMPILE-TIME IDENTITY. It was one of three false
+# diagnoses counted in map rows 7 and 8 of the sweep work map, all three now
+# fixed (`origin_of` here, a subscript's argument list in
+# `model.subscript_index_is_a_comptime_parameter_list`, and `type_of` in
+# `model.UNIMPLEMENTED_BUILTINS`).
 #
 # `origin_of` is in the corpus almost entirely as a TYPE argument —
 # `Self.IteratorType[origin_of(self)]`, `Pointer[Deque[T], origin_of(self)]` —
@@ -13508,8 +14251,7 @@ ORIGIN_OF_REFUSALS = [
 # a frame address" — a sentence about a lifetime the program does not have,
 # which is the false diagnosis that cost the most because it sends the reader
 # to look for an escape that is not there. Four stdlib files drew it
-# (`std/builtin/tuple.mojo`, `std/collections/{deque,linked_list,set}.mojo`;
-# measured in `bugs/FORMAL_frame_by_value_ceiling_zero.md`).
+# (`std/builtin/tuple.mojo`, `std/collections/{deque,linked_list,set}.mojo`).
 #
 # Every row here is a REFUSAL, and that is not a gap in the fix: a type
 # application is a compile-time construct this backend still cannot lower, and
@@ -13757,6 +14499,36 @@ INT_PARSE_REFUSALS = [
 ]
 
 REFUSAL_CASES = [
+    # A FUNCTION NAME in a value position, which is the first thing any
+    # first-class-function work hits and the reason `functools` is not a host
+    # module (`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`).
+    # The refusal used to be the unresolved-NAME one, whose reason clause is
+    # "the register allocator collected no home for it, so the emitter and the
+    # allocation walk disagree about this function's locals" — false in every
+    # clause: both know `dbl` is not a local, which is why neither gave it one,
+    # and what is actually true is that a function is a code address and a value
+    # here is one 64-bit word. The needle is the clause that names the
+    # CONSTRUCT, so a change that went back to blaming the allocator fails.
+    #
+    # Two spellings, because they reach it differently and the second is the one
+    # a `functools.reduce(add2, [1,2,3], 0)` would be: the first stores the name
+    # in a local, the second hands it straight to a callee's parameter.
+    ("a_function_name_read_as_a_value_is_named_as_one",
+     "def dbl(x: Int) -> Int:\n"
+     "    return x * 2\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var g = dbl\n"
+     "    return g(5)\n",
+     "refuse:is a FUNCTION, and a function is not a value on this path", None),
+    ("a_function_name_passed_as_an_argument_is_named_as_one",
+     "def dbl(x: Int) -> Int:\n"
+     "    return x * 2\n\n"
+     "def call2(f: Int, a: Int) -> Int:\n"
+     "    return f + a\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return call2(dbl, 5)\n",
+     "refuse:is a FUNCTION, and a function is not a value on this path", None),
+
     # The ARITY LADDER rows below were REFUSALS here and are ANSWERED ones in
     # `BOTH_ARCH_CASES` now, so they no longer say what the paragraph this group
     # used to open with says about them.  What is left of that history is worth
@@ -14690,18 +15462,37 @@ TYPE_APPLICATION_REFUSALS = [
      "    printf(\"ok\")\n"
      "    return 0\n",
      0, "ok"),
-    # WITH ARGUMENTS it is a genuinely different question and gets its own
-    # diagnostic, which says why: a blob's size is fixed when the function is
-    # laid out, so one that must hold n elements needs a reservation sized by a
-    # value the compiler does not have. Before this change it was refused as
-    # "has no representation on this path", which is FALSE about the empty form
-    # and true about this one, and so true of neither — the diagnostic this row
-    # pins is the one that says both halves.
+    # WITH ARGUMENTS that are CONTENT it is a genuinely different question and
+    # gets its own diagnostic, which says why: a blob's size is fixed when the
+    # function is laid out, so one that must hold n elements needs a reservation
+    # sized by a value the compiler does not have. Before the diagnostic existed
+    # this was refused as "has no representation on this path", which is FALSE
+    # about the empty form and true about this one, and so true of neither — the
+    # diagnostic this row pins is the one that says both halves.
+    #
+    # It was `capacity=n`, and `capacity=n` no longer belongs here: a capacity is
+    # a RESERVATION rather than content, so
+    # `model.blob_constructor_lowering` answers it with the empty container and
+    # `len_container_field_constructed_with_a_positional_size_is_refused` is the
+    # row that keeps the class. The needle still says "the empty form is a
+    # different question" because that clause is what makes the refusal a
+    # statement about CONTENT.
     ("blob_constructor_with_operands_is_refused_by_its_own_reason",
      "def main(n: Int) -> Int:\n"
-     "    var xs = List[Int](capacity=n)\n"
+     "    var xs = List[Int](n)\n"
      "    return 0\n",
      "refuse:the empty form is a different question", None),
+    # …and the reservation form, which is the case this file's row above used to
+    # pin as a refusal and which now has to be pinned as an ANSWER instead, or
+    # nothing would notice it changing back. `len(xs)` is 0 because the
+    # container a capacity builds is empty; the room is not modelled and
+    # `blob_constructor_lowering`'s docstring is where that is written down.
+    ("blob_constructor_with_a_capacity_operand_is_the_empty_container",
+     "def main(n: Int) -> Int:\n"
+     "    var xs = List[Int](capacity=n)\n"
+     "    printf(\"n=%d\", len(xs))\n"
+     "    return 0\n",
+     0, "n=0"),
 ]
 
 
@@ -15185,6 +15976,110 @@ def check_emitter_builtin_agreement():
     return failures
 
 
+# WHICH PROLOGUES CARRY THE STACK-FLOOR GUARD, asked of
+# `model.recursive_function_names` and nothing else — the decision the three
+# `stack_floor_*` rows above can only observe indirectly, and the half of it they
+# cannot see at all.
+#
+# They can see that a cycle is guarded (the trap fires) and that a shallow
+# recursion is not disturbed. They CANNOT see that an acyclic function is left
+# alone, because leaving it alone and guarding it differ only in bytes, and
+# guarding it would cost the per-export contract proof — see
+# `recursive_function_names`'s docstring for why that is a cost and not a
+# detail. So the "not guarded" rows are asked directly, here, which is the level
+# at which the answer is the honest one.
+_STACK_FLOOR_PROBES = [
+    # (name, source, want — the set of guarded function names)
+    ("self_recursion", "def deep(n):\n    return deep(n - 1)\n"
+     "def main(n):\n    return deep(n)\n", {"deep"}),
+    # The shape a "does it call itself" rule gets wrong: neither function is
+    # recursive alone.
+    ("mutual_recursion", "def a(n):\n    return b(n - 1)\n"
+     "def b(n):\n    return a(n - 1)\n"
+     "def main(n):\n    return a(n)\n", {"a", "b"}),
+    # A three-function cycle, and the two functions that merely CALL it: they
+    # are on no cycle, so they are not guarded. The frames that accumulate
+    # while `b` runs are `b`'s to notice.
+    ("three_cycle_and_its_callers",
+     "def c(n):\n    return a(n - 1)\n"
+     "def b(n):\n    return c(n - 1)\n"
+     "def a(n):\n    return b(n - 1)\n"
+     "def caller(n):\n    return a(n)\n"
+     "def main(n):\n    return caller(n)\n", {"a", "b", "c"}),
+    # The shape that must NOT be guarded, twice: no self-call, and a call that
+    # goes out of the image (an unknown name) cannot close a cycle here.
+    ("acyclic_chain", "def leaf(n):\n    return n * 2\n"
+     "def mid(n):\n    return leaf(n)\n"
+     "def main(n):\n    return mid(n)\n", set()),
+    ("out_of_image_call", "def f(n):\n    return g(n - 1)\n"
+     "def main(n):\n    return f(n)\n", set()),
+    # A call inside a comprehension and inside an `elif`: the walk has to reach
+    # both, and `iter_nodes` is what reaches them — `iter_nodes`'s own docstring
+    # records a walker that descended every `if` body and stopped at the first
+    # `elif`, losing a third of the conditionals in a module.
+    ("cycle_through_a_comprehension",
+     "def f(n):\n    return [y for y in range(n)] and f(n - 1)\n"
+     "def main(n):\n    return f(n)\n", {"f"}),
+    ("cycle_through_an_elif",
+     "def f(n):\n"
+     "    if n > 0:\n        return 1\n"
+     "    elif n < 0:\n        return f(n + 1)\n"
+     "    return 0\n"
+     "def main(n):\n    return f(n)\n", {"f"}),
+    # A METHOD call is the symbol `Struct_method`, not `method`, so a rule that
+    # read the member name would find no edge here and guard neither — and a
+    # struct that ping-pongs through two of its own methods is an ordinary
+    # recursive descent, not a shape invented for this test.
+    ("cycle_through_two_methods",
+     "struct R:\n"
+     "    def ping(self) -> Int:\n        return self.pong()\n"
+     "    def pong(self) -> Int:\n        return self.ping()\n"
+     "def main(n):\n    var r = R()\n    return r.ping()\n",
+     {"R_ping", "R_pong"}),
+]
+
+
+def check_stack_floor_decision(verbose=False):
+    """`model.recursive_function_names` on seven parsed modules.
+
+    Returns `(passed, failures)`; a probe's last element is the guarded set it
+    must answer, read off the source rather than off an image."""
+    build = __import__("formal.build", fromlist=["build"])
+    from formal import model as M
+    passed, failures = 0, []
+    for probe in _STACK_FLOOR_PROBES:
+        name, source, want = probe
+        stmts = build.parse_module(source, "<stack-floor>")
+        # The function list the EMITTER sees: `formal/build.py` lifts every
+        # struct method into the function table as `Struct_method` before
+        # codegen runs, and the guard reads that table — so a probe that passed
+        # only the module's top-level `def`s would ask about a graph the emitter
+        # never builds.
+        structs = {st.name: st for st in stmts
+                   if type(st).__name__ == "StructDef"}
+        # `_struct_methods` (formal/build.py) lifts each method into a COPY
+        # named by `model.method_function_name`, and it is that name a lifted
+        # `self.ping()` call carries — so the probe applies the same rename
+        # through the same function, rather than inventing the spelling. Without
+        # it the graph has `ping` calling `ping` on one side and `R_ping` on the
+        # other and finds no edge.
+        import copy as _copy
+        fns = [st for st in stmts if type(st).__name__ == "FunctionDef"]
+        for st in structs.values():
+            for mth in M.struct_methods(st):
+                lifted = _copy.deepcopy(mth)
+                lifted.name = M.method_function_name(st.name, mth.name)
+                fns.append(lifted)
+        got = M.recursive_function_names(fns, structs)
+        if got != want:
+            failures.append(f"{name}: {sorted(got)} (want {sorted(want)})")
+            continue
+        passed += 1
+        if verbose:
+            print(f"  PASS  stack-floor-decision: {name}")
+    return passed, failures
+
+
 # The four rules `model.struct_init_field_types` is, asked of `formal.model` and
 # nothing else, and they are here as well as end to end: the evidence shape,
 # `self.<f> = T()` for a `T` of this unit whose receiver is a frame, is now
@@ -15533,6 +16428,7 @@ def main():
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
+                  + REPEAT_REFUSALS
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                   + WAVE6_TRUTHY_CASES
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES
@@ -15570,14 +16466,17 @@ def main():
                   | {c[0] for c in SLICE_CASES}
                   | {c[0] for c in SLICE_BOUND_CASES}
                   | {c[0] for c in CONCAT_CASES}
-                  | {c[0] for c in SET_UNION_CASES})
+                  | {c[0] for c in REPEAT_CASES}
+                  | {c[0] for c in SET_UNION_CASES}
+                  | {c[0] for c in CTOR_RECEIVER_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + COMPTIME_ALIAS_PAIR_CASES
                      + OVERLOAD_LAYOUT_CASES
                      + COMPTIME_ATTRIBUTE_CASES
                      + ONE_FIELD_MUTATOR_CASES
                      + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
-                     + SET_UNION_CASES
+                     + REPEAT_CASES + SET_UNION_CASES
+                     + CTOR_RECEIVER_CASES
                      if not args.cases or c[0] in args.cases])
     # `BOTH_ARCH_CASES` is the four-column shape, so it rides `selected` and the
     # ordinary `run_case` dispatch; what makes it different is the RUNNER, and
@@ -15613,6 +16512,13 @@ def main():
           f"FAIL={len(at_failures)}")
     passed += at_passed
     failed += len(at_failures)
+    sf_passed, sf_failures = check_stack_floor_decision(args.verbose)
+    for detail in sf_failures:
+        print(f"  FAIL  stack-floor-decision: {detail}")
+    print(f"formal run: stack-floor-decision PASS={sf_passed} "
+          f"FAIL={len(sf_failures)}")
+    passed += sf_passed
+    failed += len(sf_failures)
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, source, cpython_source in wanted_pairs:
             src = os.path.join(tmpdir, name + ".mojo")

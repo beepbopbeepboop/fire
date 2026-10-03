@@ -1477,7 +1477,8 @@ def compile_formal(source_path: str, output: str = None,
     parked_prepare_refusal = None
     try:
         functions, structs, symbols, slots = _prepare_functions(
-            stmts, synthetic=True, extra_structs=imported_structs)
+            stmts, synthetic=True, extra_structs=imported_structs,
+            source_path=source_path)
     except CodegenError as e:
         # A clean compile error. The function pipeline runs before codegen
         # proper, so a refusal raised there — a method whose receiver is wider
@@ -1860,7 +1861,8 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     # `__init_offsets` section (Mach-O) or `.init_array` (ELF) entry pointing at
     # it.
     functions, structs, symbols, slots = _prepare_functions(
-        stmts, synthetic=False)
+        stmts, synthetic=False, as_dylib=True,
+        source_path=source_path)
     # The other of the two call sites of `check_frame_field_blob_premises`, and
     # for the same reason: this is the dylib path, it has no import resolution
     # of its own to be preempted by, and the check has to apply to a dylib
@@ -4259,7 +4261,8 @@ def _park_construction_mismatches(functions, framed) -> None:
     "'a' is bound here as a parameter", and for a local bound from a conversion
     that is not what happened: `a` holds the address of an interned `char *`.
     A refusal whose stated reason is entirely false is the worst outcome on this
-    path (`bugs/FORMAL_frame_receiver_handoff.md` §4), and the analysis is the
+    path (the rule `test_refusal_taxonomy.py` exists to hold this path to), and
+    # the analysis is the
     only place that knows the difference, so it is the analysis that has to say
     it.
 
@@ -7858,6 +7861,59 @@ def _bound_receiver_structs(fn, structs_by_name, functions=(), owner=None) -> di
     return out
 
 
+def _rewrite_list_element_sole_field(node, elems: dict, chains: dict):
+    """`bs[0].f` → `bs[0]` when `f` is that element struct's ONLY field.
+
+    The same identity `_rewrite_self_fields` applies to a local, for the one
+    receiver spelling that has no local to hang it on, and it is what replaced
+    the two answers this used to give — both of them wrong, both of them green:
+
+      * the LOAD fell to arm64's "no object model, so the field reads as 0" arm
+        and x86-64's twin, so `printf("%d", bs[0].k)` printed 0 for a `k` the
+        constructor had put there;
+      * the STORE (`formal/arm64_codegen.py`'s `AssignStmt` arm for a
+        `MemberExpr` target with no local-slot key) evaluated both sides for
+        their effects and DROPPED it, so `bs[0].k = 3` was a statement with no
+        statement in it, and a program that built, ran, and computed the
+        constructor's zero.
+
+    Both are answered by one rewrite rather than by two emitters, because the
+    answer is that the element word IS the struct: `bs[0]` is already the word
+    `bs[0].k` names, so the subscript store writes the element and the load
+    reads it.  **Rewriting here and not in the backends is what makes the two
+    architectures agree by construction** — there is one emitter decision to
+    make and it is made before either of them sees the node.
+
+    `elems` is `model.list_element_structs`'s table and `chains` the same
+    per-function chains `_rewrite_self_fields` uses, so both rewrites read one
+    answer about each name.  The chain is matched rather than the single field
+    name, because a one-field struct can be a one-field struct OF another one
+    (`struct Box: var inner: OneWord`), and `bs[0].inner.v` is the same word as
+    `bs[0]` — `bs[0].inner.p` is not, and a name check would rewrite it.
+
+    A subscript whose index is a NAME keeps its own subscript, so
+    `bs[0].k` → `bs[i].k` reads `bs[i]`'s element and never `bs[0]`'s — the
+    rewrite replaces the MemberExpr, so the subscript it was written on is the
+    one that survives.
+    """
+    if isinstance(node, list):
+        for i, x in enumerate(node):
+            node[i] = _rewrite_list_element_sole_field(x, elems, chains)
+        return node
+    if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.SubscriptExpr):
+        recv = node.obj
+        base = recv.obj
+        if isinstance(base, F.IdentExpr) and base.name in (elems or {}):
+            sole = (chains or {}).get(base.name)
+            if sole and _is_sole_field_prefix(node.member, sole):
+                return recv
+    for name in getattr(node, "__dataclass_fields__", {}):
+        setattr(node, name,
+                _rewrite_list_element_sole_field(getattr(node, name), elems,
+                                                  chains))
+    return node
+
+
 def _rewrite_one_word_field_method_calls(node, one_word: dict,
                                          structs_by_name: dict,
                                          receiverless=(), bound=None) -> None:
@@ -8399,7 +8455,7 @@ def _class_read_disagreement(fn, structs_by_name: dict) -> dict:
     followed by a remedy (`bind the base from a constructor this module
     declares`) the source has already used. A refusal whose stated reason is
     entirely false is the worst outcome on this path
-    (`bugs/FORMAL_frame_receiver_handoff.md` §4), and this is the one place the
+    (`test_refusal_taxonomy.py`'s standing check), and this is the one place the
     disagreement is actually known.
 
     Only a path whose name is a class-level value of one of the candidates is
@@ -8630,7 +8686,7 @@ def _fold_a_class_level_default(struct_def, default, count: list) -> bool:
     return False
 
 
-def _constant_literal(struct_def, name: str):
+def _constant_literal(struct_def, name: str, structs_by_name: dict = None):
     """`(literal node or None, the initializer)` for a read of the constant `name`.
 
     The initializer comes back with the `None` because that is the half a
@@ -8643,11 +8699,23 @@ def _constant_literal(struct_def, name: str):
     None for the first half when the value is not a literal this path can
     materialize exactly — a dict, a list, a call, a name. The caller refuses
     there; see `_rewrite_class_constants` for why substituting a zero is not an
-    option."""
+    option.
+
+    `structs_by_name` is what makes a constant whose value is ANOTHER constant
+    answerable, and it is a parameter rather than a global because this
+    function has three callers and only the read path has the table:
+    `model.class_constant_word_in` resolves `TypeOrigin.DEFAULT` through
+    `TypeOrigin`'s own declaration, which is a fact about this image and not
+    about the constant alone. Without the table every caller below it is
+    exactly where it was, because a reference to a class this unit does not
+    declare has no answer here either way."""
     for const_name, default in M.struct_class_constants(struct_def):
         if const_name != name:
             continue
-        kind, payload = M.class_constant_word(const_name, default)
+        if structs_by_name is None:
+            kind, payload = M.class_constant_word(const_name, default)
+        else:
+            kind, payload = M.class_constant_word_in(structs_by_name, default)
         if kind == M.DEFAULT_INT:
             return F.IntLiteral(value=int(payload)), default
         if kind == M.DEFAULT_STRING:
@@ -8697,7 +8765,8 @@ def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
     _apply_constant_sites(
         fn.body,
         _constant_read_sites(fn, structs_by_name, owner, receiver_structs),
-        _class_read_disagreement(fn, structs_by_name))
+        _class_read_disagreement(fn, structs_by_name),
+        structs_by_name)
 
 
 # ── A module-level NAME, and where its value lives ─────────────────────────
@@ -8761,12 +8830,39 @@ def _module_constants(symbols: dict) -> dict:
     the folder could not fold — those are real globals, and a dylib has nowhere
     to put one (`bugs/FORMAL_module_state_no_storage.md`).
 
-    A name the folder turned into an `IntLiteral` is a number, including for a
-    `True`, because a formal value has no separate boolean: `fold_literal_expr`
-    already decided that and `_folded_node` already encoded it, and re-deciding
-    it here is how the two would come to disagree about what `X = True` is."""
+    **A name with a `__DATA` SLOT is not here either, and that exclusion is the
+    load-bearing half of what this function is.** The single-writer premise in
+    the paragraph above is FALSE for a slotted name: a function writes it
+    through `global`, so its value changes while the program runs, and
+    publishing the folded initializer across the boundary answers the value the
+    module started at rather than the value it holds. Measured, both
+    architectures:
+
+        # mylib2.mojo:  G = 5   /  def setg(v): global G; G = v
+        # main2.mojo:    mylib2.setg(9); print(mylib2.get())  -> 9   (the slot)
+        #               print(mylib2.G)                      -> 5   (the manifest)
+        # CPython:        9 and 9
+
+    A wrong answer from a green build, in the one class of defect this backend
+    exists to prevent, and it was INCONSISTENT rather than merely wrong: the
+    in-unit substitution asks the same question and already excludes slotted
+    names (`_module_constant_sites`, whose own comment records the measured
+    `G=5`-where-CPython-says-`G=7`), so `G` inside its own module was the slot
+    and `mylib.G` across the boundary was a constant. One name, two homes, and
+    the read picked the one that never changes.
+
+    A bytes literal is deliberately still not here: `MAGIC = b"…"` folds to a
+    `char *` the module never writes, and `_module_constants` publishes `str`
+    and `int` only.
+
+    The reader is `M.module_slots()` — the PUBLISHED table, not a re-derivation
+    — for the reason `_module_constant_sites` gives: two answers about one name
+    is the defect this whole table exists to make impossible."""
+    stored = M.module_slots()
     out = {}
     for name, sym in (symbols or {}).items():
+        if name in stored:
+            continue
         lit = getattr(sym, "literal", None)
         value = getattr(lit, "value", None) if lit is not None else None
         if isinstance(value, bool) or not isinstance(value, (int, str)):
@@ -9355,6 +9451,226 @@ def _rewrite_child(child, sites: dict, stores: set):
     return child
 
 
+# A dialect SELECT, and the BOOLEAN it is guarded by, as the two ordinary
+# expressions they already are on this path. `MLIR_SELECT_OP` is the ONE
+# operation this pass answers, and the table lives here rather than in
+# `formal/model.py` beside the classification because it is not a
+# classification: it is a lowering, and the classification's job is to say what
+# an operation DENOTES for the ones this pass does not answer.
+#
+# `pop.select` is answered because the computation is written both ways in the
+# same tree and this path already lowers one of them: `a if c else b` is an
+# `F.TernaryExpr`, which arm64 emits as one `CSEL` when all three operands are
+# pure (`_emit_csel_ternary`) and x86-64 as a branch. Rewriting to it — rather
+# than adding an emitter arm per architecture — is what makes the two agree by
+# construction instead of by two matching implementations.
+MLIR_SELECT_OP = "`pop.select`"
+MLIR_BOOL_METHOD = "__mlir_bool__"
+
+
+def _lower_dialect_select(functions: list) -> int:
+    """Rewrite `pop.select` and `__mlir_bool__()` into the expressions they mean.
+
+    Returns the number of sites rewritten.
+
+    A source-to-source rewrite in the SHARED pipeline, for the reason
+    `_fold_target_queries` gives and for the same subject: `pop.select` is a
+    construct both backends would have to be taught separately, and the failure
+    mode this module's whole design exists to prevent is the two architectures
+    answering one question differently. Replacing it with a `TernaryExpr` means
+    everything downstream — both instruction selectors, the comptime folder, the
+    name check — sees a construct it already knows and needs to know nothing
+    about MLIR at all.
+
+    **The guard is the declared type, and that is a correction to the
+    classification's premise.** `MLIR_UNGUARDED_OPS` records `pop.select` as
+    unanswerable because "this path has no BOOL kind distinct from an integer —
+    an unannotated word IS an integer — so a select answered kind-blind would
+    test a `char *` for non-zero". The first clause is true and the second is
+    what does not decide it: the program in question declares the word.
+    `std/utils/_select.mojo:17` is
+    `def _select_register_value[T: TrivialRegisterPassable](condition: Bool,
+    lhs: T, rhs: T) -> T`, so `x != 0` IS the value of a `Bool` here and the
+    fact that makes the lowering safe is IN THE SOURCE. `annotation_is_bool`
+    reads it, and a receiver it cannot place is left alone so the existing
+    `MLIR_BOOL_METHODS` refusal still fires and still names `__mlir_bool__` —
+    which is the right diagnostic, because the un-guardable case is a property
+    of the RECEIVER and not of the select.
+
+    **The select is rewritten only when its first argument is not itself an
+    un-rewritten `__mlir_bool__()`.** Otherwise the rewrite would move the
+    refusal from the operation to its operand, and `MLIR_UNGUARDED_OPS`'s
+    sentence — which names the bool and the missing fact — is the better of the
+    two messages for a program this build cannot answer.
+    """
+    done = 0
+    for fn in functions:
+        body = getattr(fn, "body", None)
+        if not isinstance(body, list):
+            continue
+        bools = _declared_bool_locals(fn)
+        count = [0]
+        _lower_dialect_select_in(body, bools, count)
+        done += count[0]
+    return done
+
+
+def _declared_bool_locals(fn) -> set:
+    """The names `fn` declares as a `Bool`: parameters, annotated locals, and
+    an annotated `self` field is NOT included.
+
+    Read from the AST once per function, beside the rewrite, because the rewrite
+    is the only thing that needs it and a second reader of "what does this
+    function declare" is a second answer to it. A name bound twice with
+    disagreeing annotations is left OUT rather than claimed: the rewrite would
+    test whichever value the register holds, and a program whose `flag` is a
+    `Bool` on one path and a `String` on another has no single lowering.
+    """
+    declared: dict = {}
+    for p in (getattr(fn, "params", None) or []):
+        if isinstance(p, (tuple, list)) and p and isinstance(p[0], str):
+            declared[p[0]] = p[1] if len(p) > 1 else None
+    for node in M.iter_nodes(getattr(fn, "body", None) or []):
+        ann = getattr(node, "type_ann", None)
+        target = getattr(node, "target", None)
+        if ann is None or not isinstance(target, F.IdentExpr):
+            continue
+        prev = declared.get(target.name, None)
+        if prev is not None and prev != ann:
+            declared[target.name] = None      # disagreement: claim nothing
+            declared.setdefault("__ambiguous__", set()).add(target.name)
+        elif target.name not in declared:
+            declared[target.name] = ann
+    ambiguous = declared.pop("__ambiguous__", set())
+    return {name for name, ann in declared.items()
+            if name not in ambiguous
+            and M.annotation_is_bool(ann, FT.BOOL_TYPE_NAMES)}
+
+
+def _lower_dialect_select_in(node, bools: set, count: list):
+    """The walk, in place. Returns a replacement node for `node`, or None.
+
+    The same two-shaped replacement problem `_fold_target_queries_in` documents:
+    a list element has to be replaced through its parent and a single-attribute
+    child through `setattr`, so one walk serves both and the count comes back
+    through a box.
+    """
+    if isinstance(node, (list, tuple)):
+        out = []
+        changed = isinstance(node, tuple)
+        for i, child in enumerate(node):
+            repl = _lower_dialect_select_in(child, bools, count)
+            if repl is not None:
+                changed = True
+            if isinstance(node, list):
+                if repl is not None:
+                    node[i] = repl
+            else:
+                out.append(child if repl is None else repl)
+        return out if changed else None
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return None
+    repl = _dialect_select_replacement(node, bools)
+    if repl is not None:
+        count[0] += 1
+        # Keep descending into what this node BECAME. The walk is pre-order, so
+        # the select is reached before the `__mlir_bool__()` inside its own
+        # condition — and returning the replacement without walking it left that
+        # call in the tree, which the emitter then refused with the very message
+        # this pass exists to make unnecessary. One line, and the shape is the
+        # same one `_fold_target_queries_in` handles by not descending into a
+        # query it FOLDED (there the subtree is gone; here it is the program).
+        for name in getattr(repl, "__dataclass_fields__", {}):
+            child = getattr(repl, name)
+            if child is None or isinstance(child, (str, int, float, bool)):
+                continue
+            got = _lower_dialect_select_in(child, bools, count)
+            if got is not None:
+                setattr(repl, name, got)
+        return repl
+    for name in getattr(node, "__dataclass_fields__", {}):
+        child = getattr(node, name)
+        if isinstance(child, (list, tuple)):
+            _lower_dialect_select_in(child, bools, count)
+        elif child is not None and not isinstance(child, (str, int, float,
+                                                          bool)):
+            got = _lower_dialect_select_in(child, bools, count)
+            if got is not None:
+                setattr(node, name, got)
+    return None
+
+
+def _dialect_select_replacement(node, bools: set):
+    """The node `node` becomes, or None when this pass does not answer it.
+
+    TWO shapes, and each is gated on something the source states:
+
+      * `x.__mlir_bool__()` — `x != 0`, gated on `x` being a name this function
+        declares a `Bool`. A `Bool` is a word holding 0 or 1 on this path, so
+        the test is its value; anything else is left for `MLIR_BOOL_METHODS`.
+      * `__mlir_op.`pop.select`(c, a, b)` — `a if c else b`, gated on three
+        POSITIONAL arguments, no keyword arguments, no bracket, and `c` not
+        being an un-rewritable `__mlir_bool__()` call.
+
+    The gates are the whole of the safety argument and they are all DECIDABLE
+    from the call: a bracketed `pop.select` would be naming a result type this
+    path cannot read, and an argument-count that differs is a different
+    operation spelled the same way.
+    """
+    if not isinstance(node, F.CallExpr):
+        return None
+    func = node.func
+    if not isinstance(func, F.MemberExpr):
+        return None
+    if func.member == MLIR_BOOL_METHOD:
+        if node.args or node.kwargs:
+            return None
+        obj = func.obj
+        if not isinstance(obj, F.IdentExpr) or obj.name not in bools:
+            return None
+        return F.BinaryOp(op="!=", left=obj,
+                          right=F.IntLiteral(value=0, line=func.line,
+                                             col=func.col),
+                          line=node.line, col=node.col)
+    if func.member != MLIR_SELECT_OP:
+        return None
+    if len(node.args) != 3 or node.kwargs:
+        return None
+    cond, yes, no = node.args
+    # The select is answerable exactly when its CONDITION is, and the question
+    # is asked of the child as it stands rather than of the tree after this
+    # node: the walk is PRE-ORDER (the function's note), so at this point the
+    # `__mlir_bool__()` inside the condition has NOT been rewritten yet. Asking
+    # "is it rewritten?" would therefore refuse every real site and answer none.
+    if not _condition_is_lowerable(cond, bools):
+        return None
+    return F.TernaryExpr(condition=cond, then_val=yes, else_val=no,
+                         line=node.line, col=node.col)
+
+
+def _condition_is_lowerable(cond, bools: set) -> bool:
+    """Can this select's CONDITION be answered on this path?
+
+    An `__mlir_bool__()` call is answerable iff its receiver is a name this
+    function declares a `Bool` — the same question `_dialect_select_replacement`
+    asks of it, asked here so the select and the condition cannot disagree
+    about it. It is asked through the same helper rather than by calling the
+    replacement and testing for None, because "the replacement is None" would
+    also be true for a shape the helper does not know, and a select whose
+    condition is one of those must stay refused for the CONDITION's reason.
+
+    Anything else is answerable: the corpus's other use of `pop.select` spells a
+    name this function's own declarations make a `Bool`, and a select is only
+    ever written where the source has a boolean, so there is no unstated word
+    here to be wrong about.
+    """
+    if isinstance(cond, F.CallExpr) and isinstance(cond.func, F.MemberExpr) \
+            and cond.func.member == MLIR_BOOL_METHOD \
+            and not cond.args and not cond.kwargs:
+        return _dialect_select_replacement(cond, bools) is not None
+    return True
+
+
 def _fold_target_queries(functions: list) -> int:
     """Replace every `#kgen.param.expr<…>` target query with its value.
 
@@ -9740,6 +10056,26 @@ def _module_published_names(module: str, link_line) -> set:
         dylib_export_lists(link_line))
     return set(M.dylib_export_module(by_module, module)) | set(
         M.dylib_export_module(forwarded, module))
+
+
+def _module_published_variables(module: str, link_line) -> set:
+    """The module-level names the library built for `module` treats as VARIABLES.
+
+    The same question `_module_published_names` asks, about the other half of what
+    a dylib publishes: a name its own functions write through `global`, whose
+    value therefore changes while the program runs and cannot be recorded as a
+    folded constant. Read through `model.dylib_module_variables` — the manifest
+    table, and not a re-reading of the sources — because the importer has only
+    the manifest, so a fact only the exporting build knows has to travel in it.
+
+    Empty for a module with no library on the line, and that is the honest
+    answer rather than a crash, for the reason `_module_published_names` gives:
+    `imported_module_names` is gated on `import_dylibs`, so an empty table means
+    the caller has not resolved imports and the rooted-chain gate is already
+    closed."""
+    if not link_line:
+        return set()
+    return M.dylib_module_variable_names(dylib_export_lists(link_line), module)
 
 
 def _link_line_publishes(link_line, name: str, aliases: dict = None) -> bool:
@@ -10541,7 +10877,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 leaf = sub.member
                 module_reads[id(root)] = M.module_attribute_refusal(
                     M.member_chain_text(sub), root_name, leaf, fn.name,
-                    _module_published_names(root_name, link_line))
+                    _module_published_names(root_name, link_line),
+                    _module_published_variables(root_name, link_line))
         # A TYPE name in a VALUE position is a compile-time constant whose value
         # is the type's TAG, so it has a home — the same one a folded
         # module-level constant has, which is the fourth of the four this walk
@@ -11037,6 +11374,26 @@ def _comptime_bound_names(fn) -> set:
     return out
 
 
+def _declared_module_names() -> set:
+    """The module-level names THIS FILE declared, as opposed to the build's.
+
+    A second reader would be a second answer, so it is the one filter over the
+    published table rather than a new walk of the statements: a
+    `GlobalSymbol.site` of `"builtin"` is a name the BUILD supplied
+    (`model.builtin_module_constants` — today `__file__` and nothing else), and
+    a module that declares no names of its own must still be able to say so.
+
+    It matters because the unplaced-name refusal prints one of two sentences
+    depending on this, and the choice was made visible the moment `__file__`
+    became answerable: every module has that one entry now, so "the table is
+    empty" had become unreachable and every unplaced read was reported as "this
+    module declares no module-level name by that spelling" — which is true, and
+    was sent to a reader looking for a declaration in a file that has none.
+    """
+    return {name for name, sym in M.module_symbols().items()
+            if getattr(sym, "site", None) != "builtin"}
+
+
 def _why_unplaced(node, fn, frame_slots: dict) -> str:
     """The evidence this check had, in words, for `node`'s name.
 
@@ -11047,7 +11404,7 @@ def _why_unplaced(node, fn, frame_slots: dict) -> str:
     if sym is not None:
         return (f"it is a module-level name of this module "
                 f"({sym.site}), and its value is not one the build can fold")
-    if M.module_symbols():
+    if _declared_module_names():
         return ("this module declares no module-level name by that spelling, "
                 "and the reading function declares no local or parameter by "
                 "it either")
@@ -11219,7 +11576,8 @@ def _enum_member_sites(structs_by_name: dict, bound: set) -> dict:
     return sites
 
 
-def _apply_constant_sites(node, sites: dict, disputed: dict = None):
+def _apply_constant_sites(node, sites: dict, disputed: dict = None,
+                         structs_by_name: dict = None):
     """The substitution itself, over a statement tree, in place.
 
     Split from `_rewrite_class_constants` so the sites can be computed once per
@@ -11255,7 +11613,8 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
     literal)."""
 
     if isinstance(node, (list, tuple)):
-        items = [_apply_constant_sites(x, sites, disputed) for x in node]
+        items = [_apply_constant_sites(x, sites, disputed, structs_by_name)
+                 for x in node]
         if isinstance(node, tuple):
             return tuple(items)
         node[:] = items
@@ -11277,7 +11636,8 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
                 # fact about the DECLARATION SITE and not about its value, so it
                 # is answerable even where the value is not (see below).
                 return F.StringLiteral(value=node.obj.member)
-            literal, default = _constant_literal(st, node.obj.member)
+            literal, default = _constant_literal(st, node.obj.member,
+                                                structs_by_name)
             if literal is not None:
                 return literal
             raise CodegenError(_enum_member_refusal(
@@ -11292,7 +11652,8 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
             if kind == "overridden":
                 raise CodegenError(_overridden_comptime_refusal(
                     st, node.member, f"{node.obj.name}.{node.member}"))
-            literal, default = _constant_literal(st, node.member)
+            literal, default = _constant_literal(st, node.member,
+                                                structs_by_name)
             if literal is None and default is not None:
                 # A target QUERY in the class-level initializer, asked of the
                 # evaluator before the value is called unrepresentable. The fold
@@ -11320,7 +11681,8 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
                 # got depended on where in the source they wrote the query.
                 folded = [0]
                 if _fold_a_class_level_default(st, default, folded):
-                    literal, default = _constant_literal(st, node.member)
+                    literal, default = _constant_literal(st, node.member,
+                                                        structs_by_name)
             if literal is None:
                 spelling = f"{node.obj.name}.{node.member}"
                 declared = (f"a `comptime` class attribute" if kind == "comptime"
@@ -11361,7 +11723,8 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
         if name in _TYPE_POSITION_FIELDS:
             continue
         setattr(node, name,
-                _apply_constant_sites(getattr(node, name), sites, disputed))
+                _apply_constant_sites(getattr(node, name), sites, disputed,
+                                       structs_by_name))
     return node
 
 
@@ -11515,7 +11878,9 @@ def refuse_member_reads_through_a_literal_base(functions: list) -> None:
 
 
 def _prepare_functions(stmts: list, synthetic: bool = True,
-                       extra_structs: list = None) -> tuple:
+                       extra_structs: list = None,
+                       as_dylib: bool = False,
+                       source_path: str = None) -> tuple:
     """Turn a parsed module into the function list the codegen compiles.
 
     ONE pipeline for both entry points, and it is one pipeline for the module
@@ -11572,7 +11937,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # node walk inside a backend, and neither has the module statements in
     # hand.  Replaces, never merges — a dylib and its dependent are two units
     # and their globals are not one table.
-    symbols = M.collect_module_symbols(stmts)
+    symbols = M.collect_module_symbols(stmts, source_path)
     M.publish_module_symbols(symbols)
     # A top-level statement whose MEANING changes when the body is wrapped in a
     # function — a file-level `return`, `global`, `break`, a `yield`/`await` —
@@ -11679,9 +12044,18 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # run beside `check_construction_shapes`, for the reason the comment on
     # that call site gives (a file that imports a host module has a more
     # fundamental fact about it than a codegen gap).
+    #
+    # `structs_by_name` goes with it for the one default that is not a literal
+    # and is still known: `origin: TypeOrigin = TypeOrigin.DEFAULT`, an enum
+    # member, which is how this repository's `type_system.py` spells it and is
+    # the sweep's `codegen` row for "a class-level default that is not a value
+    # this build can materialize". It is the SAME module's own declarations
+    # (`structs_by_name` above, not the wider `structs`) for the reason the
+    # paragraph above gives: an imported class is lowered when THAT module is
+    # compiled, and its defaults are resolved against its own table then.
     dc_classes = DC.dataclass_classes(stmts)
     if dc_classes:
-        DC.lower_field_defaults(dc_classes)
+        DC.lower_field_defaults(dc_classes, structs_by_name)
     # The `==` rewrite's table is WIDER — this module's dataclasses PLUS the
     # ones it imports — because a comparison between two values of an IMPORTED
     # dataclass is as much this module's problem as a comparison between two of
@@ -11778,25 +12152,35 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                                             structs_by_name)
         if fn.name in writebacks:
             _return_the_receiver(fn, writebacks[fn.name])
+        # The two tables the receiver-position rewrites read, built HERE and
+        # before both of them rather than beside their old callers, because a
+        # rewrite whose evidence is computed after it has run is a rewrite that
+        # sees nothing. `one_word` is what `_rewrite_self_fields` and
+        # `_lift_one_word_field_method` have always read; `elems` is the same
+        # question about a LIST rather than a single word, and it is what makes
+        # a SUBSCRIPT receiver liftable (`model.list_element_structs`). One
+        # walk of the bindings each, neither recomputed by a consumer.
+        st = method_owners.get(fn.name)
+        one_word = _one_word_field_map(fn, structs_by_name, st)
+        if st is not None and M.struct_is_one_field(st):
+            one_word["self"] = st
+        chains = {name: _one_word_sole_field_chain(one, structs_by_name)
+                  for name, one in one_word.items()}
+        elems = M.list_element_structs(fn, structs_by_name, structs_by_name,
+                                       st)
+        elem_chains = {name: _one_word_sole_field_chain(one, structs_by_name)
+                       for name, one in elems.items()}
         _rewrite_method_calls(fn.body, dispatch_owners, wide, receiverless,
                               fn.name,
-                              _this_unit_modules)
+                              _this_unit_modules,
+                              structs_by_name,
+                              elems)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
         # gives. Everything else about it is `_rewrite_class_constants`.
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name),
                                  _method_receiver_bases(fn))
-        # A method's `self` IS the field; a local initialised from a one-word
-        # constructor holds that struct's sole field directly.  The table holds
-        # the STRUCT and the chain is derived from it in one line, because the
-        # rewrite below needs the struct and the rewrite after that needs the
-        # chain — one recognition of "this name is a one-word word", read twice.
-        one_word = _one_word_field_map(fn, structs_by_name,
-                                       method_owners.get(fn.name))
-        st = method_owners.get(fn.name)
-        if st is not None and M.struct_is_one_field(st):
-            one_word["self"] = st
         # A method call THROUGH a one-word field, lifted while the field's
         # DECLARED type can still be read — the identity below is about the same
         # storage but it keeps the method name and loses the struct, and a
@@ -11820,6 +12204,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         mapping = {name: _one_word_sole_field_chain(one, structs_by_name)
                    for name, one in one_word.items()}
         _rewrite_self_fields(fn.body, mapping)
+        # …and the same identity through a SUBSCRIPT receiver. After the lift
+        # above, so a method call has already become `Box_get(bs[0], …)` and only
+        # field reads and writes are left; after `_rewrite_self_fields`, so both
+        # rewrites have read the one table.
+        if elems:
+            _rewrite_list_element_sole_field(fn.body, elems, elem_chains)
         # A class-level CONSTANT is not part of any value, so it is not
         # lowered as a field: it is materialized where it is read. Without
         # this a struct of nothing but constants — which the width rule now
@@ -11908,6 +12298,15 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `collect_module_symbols`, and this pass only sees the query where the
     # SOURCE wrote one.
     _fold_target_queries(functions)
+    # …and a dialect SELECT, which is the same kind of rewrite for the same
+    # reason and is beside it rather than after it because the two are
+    # INDEPENDENT: `_fold_target_queries` replaces a `#kgen.param.expr<…>` with a
+    # literal and this one replaces `pop.select`/`__mlir_bool__()` with the
+    # ordinary expressions they denote, and neither walks into the other's
+    # output. Both must run before `check_module_symbols`, whose MLIR pre-pass
+    # would otherwise refuse `pop.select` by name — and that pre-pass runs in
+    # `_run_late_checks`, below.
+    _lower_dialect_select(functions)
     # LAST, on the FINAL function list: which local names hold a frame
     # address is a property of the code that survives every rewrite above, and
     # a lifted lambda or a flattened closure is a function with its own locals
@@ -12056,17 +12455,24 @@ def _method_call_target(call, owners: dict):
     `None` for every other callee, which is the answer `owners` itself gives for
     a name two structs declare — dispatch here is by NAME, so an ambiguous one
     has no owner to lift to.  A receiver that is not a bare NAME is `None` too,
-    and that is a limit of the RECOGNITION rather than of the construct: the one
-    receiver whose declared type settles an ambiguous name is a one-word field,
-    and `_lift_one_word_field_method` is where that case is answered — it runs
-    immediately after this one, on the same `one_word` table, and it can lift an
-    ambiguous `m` where this cannot because it reads the field's DECLARED TYPE
-    instead of the spelling.
+    and that is no longer a limit of the recognition: the receiver whose TYPE is
+    established lifts through `_subscript_receiver_target`, and a `MemberExpr`
+    receiver is answered by `_lift_one_word_field_method`, which reads the
+    field's DECLARED type instead of the spelling and so can lift an ambiguous
+    `m` where this cannot.  All three are `model.receiver_struct`, asked
+    differently.
 
     The bracket is stripped by `model.method_callee_base`, the one recogniser for
     "what does this callee name", so this lift and `_receiver_shape_refusal` —
     which is asked immediately after it, of the same node — cannot disagree about
     whether `recv.m[T](x)` names a method.
+
+    `elems` is the per-function table of "names holding a LIST of a one-field
+    struct", and it is what answers the subscript case.  Passing it in rather
+    than computing it here is why `_rewrite_method_calls` needs no `fn`: the
+    table is a property of the function, built once by the caller that has the
+    function, and a pass that rebuilt it would be a second walk of the same
+    bindings.
     """
     func = M.method_callee_base(call)
     if not (isinstance(func, F.MemberExpr) and isinstance(func.obj, F.IdentExpr)):
@@ -12075,6 +12481,57 @@ def _method_call_target(call, owners: dict):
     if owner is None:
         return None
     return owner, func.member, func.obj
+
+
+def _subscript_receiver_target(call, elems: dict):
+    """`bs[0].m(x)` → `(owner name, m, bs[0])` when the element type says which.
+
+    The receiver-type predicate's one use at the LIFT, and the shape the deleted
+    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` was entirely about: a
+    receiver that is a subscript has no name to lift from, so dispatch by name
+    has nothing to work with, and its four sources say the element type is
+    what settles it.  Two of the four are answered here — a list literal of
+    `Box()` and a parameter declared `List[Box]` — and the two that are not are
+    a parameter annotated only `List` and an index whose element type nothing in
+    the source names, which stay refused for the receiver's TYPE rather than at
+    the link line.
+
+    `elems` is `model.list_element_structs`'s table, so the struct here is the
+    one `model.receiver_struct` would answer for the same expression — the
+    predicate is asked in ONE place and the table is its per-function cache, so
+    the build pass and the frame analysis cannot hold different opinions about
+    which receiver's type is known.  That is what
+    `frame_opaque_position_refusal`'s method sentence asks for ("What closes this
+    is the method's declaration reaching the analysis"), and it is reached here
+    rather than there: the lift happens first, so the frame analysis sees
+    `Box_get(bs[0], …)` — a bare-name call with the parameter list in hand —
+    and never has to answer the question at all.
+
+    `None` for a method the ELEMENT's struct does not declare, even when the
+    module-wide table knows the name from some other struct.  That is the guard
+    this predicate needs: `bs[0].peek()` where only `Other` declares `peek` must
+    be refused rather than lifted to `Other_peek(bs[0])`, which would be a
+    plausible-looking wrong answer for two structs of the same shape.  The call
+    then falls through to `_receiver_shape_refusal`, which names the receiver as
+    the source spells it.
+
+    The owner is returned as its NAME, because `owners` and `wide` are both keyed
+    by it: the caller uses it as `wide[owner]` and in `method_function_name(
+    owner, member)`, so a StructDef here would be a dict key where a string is
+    meant.
+    """
+    func = call.func
+    if not isinstance(func, F.MemberExpr):
+        return None
+    recv = func.obj
+    if not isinstance(recv, F.SubscriptExpr) or not elems:
+        return None
+    st = elems.get(recv.obj.name) if isinstance(recv.obj, F.IdentExpr) else None
+    if st is None:
+        return None
+    if not any(m.name == func.member for m in M.struct_methods(st)):
+        return None
+    return st.name, func.member, recv
 
 
 def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
@@ -12100,7 +12557,8 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
 
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,
                           receiverless: set = None, fn_name: str = None,
-                          imported=()) -> None:
+                          imported=(), structs_by_name: dict = None,
+                          elems: dict = None) -> None:
     """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
 
     Rewriting the CALL rather than special-casing a method call in the
@@ -12127,11 +12585,15 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     `Struct_m(recv, a)` reach the callee's parameters identically.  See
     `_specialized_method_call`.
 
-    A receiver that is NOT a bare name, with a method name that IS in `owners`,
-    is REFUSED — see `model.subscript_receiver_method_refusal`, which carries
-    the argument for why that has to happen here rather than being left to the
-    link audit. Before it, `bs[0].get()` compiled to a call against a symbol
-    spelled `get`."""
+    **A receiver that is a SUBSCRIPT lifts too**, which is what `elems` is for
+    (`_subscript_receiver_target`).  Before this, a receiver that is not a bare
+    name with a method name that IS in `owners` was REFUSED — see
+    `model.subscript_receiver_method_refusal`, which carries the argument for
+    why that has to happen rather than being left to the link audit.  It does
+    still happen, for every receiver whose type nothing establishes; what
+    changed is that a receiver whose type IS established no longer needs the
+    refusal, and `u1.mojo`'s `bs[0].get()` — before this, a link-audit failure
+    naming the bare symbol `get` — now builds and runs."""
     # `model.rewrite_tree`, and the walk it brings with it: `IfStmt.elifs` is a
     # list of TUPLES, so a recursion that tests `isinstance(node, list)` stops
     # dead at the first `elif` while `model.iter_nodes` — which every LATE check
@@ -12146,6 +12608,8 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
         if not isinstance(n, F.CallExpr):
             return n
         target = _method_call_target(n, owners)
+        if target is None:
+            target = _subscript_receiver_target(n, elems)
         if target is None:
             why = _receiver_shape_refusal(n, owners, fn_name, imported)
             if why is not None:
@@ -12165,6 +12629,20 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
                 f"{M.struct_width_cost(st)}")
         lifted = F.IdentExpr(name=M.method_function_name(owner, member))
         if member not in (receiverless or ()):
+            # The receiver is about to become `args[0]`, and every consumer of
+            # that list — `bind_call_arguments`'s arity check,
+            # `_frame_argument_slots`, `check_holder_agreements` — reads the
+            # callee's `fn.params` as the whole parameter list. That is the same
+            # list only when the DECLARATION spells a receiver, so a method
+            # whose first parameter is an ordinary argument is refused here
+            # rather than half-bound: `model.method_declares_receiver` has the
+            # measurement and the reason.
+            _st = (structs_by_name or {}).get(owner)
+            _decl = next((mth for mth in M.struct_methods(_st)
+                          if mth.name == member), None) if _st is not None else None
+            if _decl is not None and not M.method_declares_receiver(_decl):
+                raise CodegenError(
+                    M.method_without_a_receiver_parameter_refusal(owner, member))
             n.args = [receiver] + list(n.args)
         if isinstance(n.func, F.SubscriptExpr):
             # The brackets stay, and stay on the callee: they are the
@@ -12228,8 +12706,8 @@ def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):
     | `m.make().take(r)` | the LINK AUDIT: "the image would bind 1 symbol(s) that nothing provides: take" — a diagnosis about where the symbol should have come from, for a defect in how the call was written |
     | `m.make().take[r](r)` | the EMITTER: "unsupported call target on the formal arm64 path (got SubscriptExpr)" — a sentence about the compiler's node type, for a call whose only problem is its receiver |
 
-    The second is the same class of defect `bugs/FORMAL_frame_receiver_handoff.md`
-    §4 exists to police, and the first is the failure
+    The second is the same class of defect `formal/build.py::_receiverless_methods`
+    exists to police, and the first is the failure
     `subscript_receiver_method_refusal`'s own docstring calls "worse than a wrong
     number because it is usually silent": the symbol can also COLLIDE with a real
     one and the image then computes a plausible wrong answer with nothing
@@ -12365,7 +12843,8 @@ def update_dylib_manifest(manifest_path: str, mutate) -> None:
 
 def write_dylib_manifest(dylib_path: str, install_name: str,
                          exports: list, module: str = None,
-                         constants: dict = None, source: str = None) -> str:
+                         constants: dict = None, source: str = None,
+                         variables: list = None) -> str:
     """Record what a formal dylib exports, next to the dylib.
 
     An executable that links this library has to rewrite each call site's
@@ -12407,6 +12886,21 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     keeps `sys.argv` and `os.sep` different answers
     (`bugs/FORMAL_module_state_no_storage.md`).
 
+    `variables` is the module-level names this module's own functions WRITE
+    through `global`, and it is the answer to the question the paragraph above
+    cannot answer for them. The single-writer premise is FALSE for a slotted
+    name, so such a name is never in `constants` even when its module-level
+    statement folded to a literal — measured, both architectures:
+
+        # mylib.mojo:  G = 5   /  def setg(v): global G; G = v
+        # main.mojo:    mylib.setg(9); mylib.get()  -> 9    (the slot, correct)
+        #               mylib.G                     -> 5    (the manifest, WRONG)
+
+    so the two halves of one name disagreed and the read took the one that
+    never changes. Recorded here so a consumer can name the shape in a refusal
+    rather than guess it, and so the re-export check can tell "this module
+    provides the name" from "this module provides no such name".
+
     `source` is the module's own source path, recorded for the same reason and
     read back by `formal/imports.py`'s `external_declarations`: an export entry
     carries an ARITY and a signature, and neither is enough to bind a call whose
@@ -12435,6 +12929,7 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
         # client can bind a call without ever reading the module's source.
         "module": module,
         "constants": dict(constants or {}),
+        "variables": sorted(variables or ()),
         "exports": [{"module": e["module"], "name": e["name"],
                      "symbol": e["symbol"], "arity": e.get("arity"),
                      "call": e.get("call"),
@@ -12455,7 +12950,8 @@ def load_dylib_manifests(dylib_paths: list) -> list:
     """Read the manifests of the libraries an executable links against.
 
     Each entry is `{"install_name", "source", "map": {bare callee ->
-    exported symbol}, "exports", "module", "reexports", "constants"}`. A
+    exported symbol}, "exports", "module", "reexports", "constants",
+    "variables", "traits"}`. A
     library whose manifest is missing is an error rather than a silently
     ignored dependency: the executable would emit calls to symbols nothing
     defines and produce an image that dies in dyld at launch — which is exactly
@@ -12488,7 +12984,16 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         storage: the importer materializes the same value in its own image,
         which is what a module-level constant substitution already does inside
         one unit. That is the whole of what makes `mod.CONST` and `sys.argv`
-        different answers."""
+        different answers.
+      * `variables` — the module-level names this module's own functions WRITE
+        through `global`, so their value changes while the program runs and the
+        build cannot know it. A name here is deliberately ABSENT from
+        `constants` even when the module-level statement folded to a literal:
+        publishing both would let a consumer materialize the value the module
+        STARTED at, which is a wrong answer rather than an incomplete one.
+        Carried because the importer cannot derive it — it has only this file —
+        and because it is what lets a refusal name the shape instead of guessing
+        it (`model.module_attribute_refusal`)."""
     import json
     out = []
     for dylib in dylib_paths or []:
@@ -12528,6 +13033,7 @@ def load_dylib_manifests(dylib_paths: list) -> list:
             "module": payload.get("module") or "",
             "reexports": payload.get("reexports") or {},
             "constants": payload.get("constants") or {},
+            "variables": list(payload.get("variables") or []),
             # The trait-only namespace library's own names. Read back for the
             # same reason `module` is: so a reader can tell an empty trie that
             # is BY DESIGN (this library declares traits, which have no
@@ -12539,8 +13045,8 @@ def load_dylib_manifests(dylib_paths: list) -> list:
 
 
 def dylib_export_lists(dylibs: list) -> list:
-    """The `[{"module", "exports", "reexports", "constants"}]` view of a link
-    line.
+    """The `[{"module", "exports", "reexports", "constants", "variables"}]` view
+    of a link line.
 
     What both emitters are constructed with, and one iteration over the link
     line rather than the two it used to be: `_dylib_syms` (the flat bare-name
@@ -12551,12 +13057,16 @@ def dylib_export_lists(dylibs: list) -> list:
     manifests — `model.dylib_module_constants` reads this list — and a
     manifest's constants dropped here would silently answer every imported
     constant read with "no value", which is the refusal this whole mechanism
-    exists to replace.
+    exists to replace. `variables` rides along for the same reason and with the
+    same failure mode: dropped here, every cross-module read of a mutable global
+    would be told it is "a list, an object or a stream" rather than the module
+    writing its own variable (`model.dylib_module_variables`).
     """
     return [{"module": d.get("module") or "",
              "exports": list(d.get("exports") or []),
              "reexports": d.get("reexports") or {},
-             "constants": d.get("constants") or {}}
+             "constants": d.get("constants") or {},
+             "variables": list(d.get("variables") or [])}
             for d in (dylibs or [])]
 
 
@@ -13662,7 +14172,8 @@ def _namespace_library(output: str, install_name: str, arch: str,
                        reexports: dict, dylib_syms: dict, dep_install: list,
                        linked: list, module: str = None,
                        constants: dict = None, traits: list = None,
-                       source: str = None, fmt: str = "macho") -> dict:
+                       source: str = None, fmt: str = "macho",
+                       variables: list = None) -> dict:
     """A dylib for a module whose whole API is RE-EXPORTED — a package
     `__init__.mojo` — or whose whole API is TRAIT DECLARATIONS.
 
@@ -13743,8 +14254,19 @@ def _namespace_library(output: str, install_name: str, arch: str,
     # values' keys — asking it for the modules instead would make every
     # re-exported constant look missing again, which is the bug.
     dep_constants = M.dylib_module_constants(dylib_export_lists(linked))
-    provided = set(dylib_syms) | {name for table in dep_constants.values()
-                                  for name in table}
+    # A module's VARIABLES count as provided too, and the reason is that a
+    # variable is not in `constants`: a name a function writes through `global`
+    # is deliberately not published as a folded literal, so asking this question
+    # of constants alone would report a re-export of one as a MISSING DEFINITION
+    # — which is false in a way that sends the reader to write a function that
+    # already exists, in a module that is not the one at fault. Whether a caller
+    # can then BIND it is a separate question with its own answer
+    # (`model.module_attribute_refusal`); "the module has the name" is what this
+    # check asks.
+    dep_variables = M.dylib_module_variables(dylib_export_lists(linked))
+    provided = (set(dylib_syms)
+                | {name for table in dep_constants.values() for name in table}
+                | {name for names in dep_variables.values() for name in names})
     # A re-exported name is provided under the name the DEFINING module
     # published it as, which for an ALIAS is not the name this module binds —
     # `from x import f as g` publishes `g` and the symbol is `f`'s. Asking
@@ -13790,7 +14312,8 @@ def _namespace_library(output: str, install_name: str, arch: str,
     # immediately off Darwin.
     _publish_signed_image(output, binary)
     manifest_path = write_dylib_manifest(output, install_name, [], source=source,
-                                         module=module, constants=constants)
+                                         module=module, constants=constants,
+                                         variables=variables)
     _record_namespace(manifest_path, reexports, dylib_syms, traits=traits)
     if linked:
         _record_link_deps(manifest_path, linked)
@@ -13843,6 +14366,34 @@ def _namespace_constants(reexports: dict, own: dict, linked: list) -> dict:
         for value in _constants_named(tables, defines):
             out[name] = value
             break
+    return out
+
+
+def _namespace_variables(reexports: dict, linked: list) -> list:
+    """The VARIABLES a namespace library re-exports, by its own spelling.
+
+    The companion of `_namespace_constants`, and it exists so a diagnostic about
+    `pkg.G` names the same shape a diagnostic about `x.G` would. A package
+    `__init__` that forwards a mutable global has no VALUE for it — the library
+    has no code, so it cannot be a writer and cannot hold the slot — but it does
+    have the NAME, and a consumer that is refused has to be told "the module you
+    named declares this variable" rather than "a list, an object or a stream has
+    no representation as a word", which is false of an `Int` the defining module
+    writes.
+
+    Lookup by `defining_name` and publication under the alias, for the reason
+    `_namespace_constants` gives: a consumer that writes `pkg.N` is the only
+    spelling that can happen.
+    """
+    tables = M.dylib_module_variables(dylib_export_lists(linked))
+    out = []
+    for name, (_module, kind, defines) in (reexports or {}).items():
+        if kind != "unknown" or name in out:
+            continue
+        for names in tables.values():
+            if defines in names:
+                out.append(name)
+                break
     return out
 
 
@@ -14167,6 +14718,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             module=(module_prefixes or {}).get(source_paths[0])
             or _module_prefix(source_paths[0]),
             constants=_namespace_constants(reexports, constants, linked),
+            variables=_namespace_variables(reexports, linked),
             traits=traits)
 
     # A DYDLIB cannot export a function that returns a frame, and this is the
@@ -14344,14 +14896,33 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         mod_init_addrs=mod_init_addrs)
     # ONE publish, not write + chmod + sign -- see `_publish_signed_image`'s
     # docstring for the reader-sees-an-unsigned-Mach-O race this closes, and
-    # why it is the whole publish on Linux too.
+    # why it is the whole publish on Linux too. The two sides of this merge
+    # each replaced the same three lines and neither was a revert of the
+    # other: this branch made the publish ATOMIC (stage, sign, `os.replace`),
+    # master added the export-trie VERIFICATION below. Both are kept, in that
+    # order -- and the order is the point, because the verification reads the
+    # file that was just published.
     _publish_signed_image(output, binary)
+    # The manifest is a PROMISE to every consumer, and this is where the promise
+    # is checked against the file that was just written: read the export trie
+    # back with an independent parser and refuse if the two disagree. The
+    # direction that was missing is the one that hurts -- a library advertising a
+    # symbol nothing defines produces a manifest every consumer's bind audit
+    # believes, and a dyld failure at load rather than a refusal here
+    # (`formal/build.py::_advertised_but_absent`, whose two halves
+    # `test_formal_dylib.py`'s `the manifest offers nothing the image does not
+    # define` pins).
+    absent = _advertised_but_absent(output, exports)
+    if absent:
+        raise FormalBuildError(
+            _advertised_absent_report(source_paths[0], absent))
     manifest_path = write_dylib_manifest(
         output, install_name, exports,
         source=source_paths[0],
         module=(module_prefixes or {}).get(source_paths[0])
         or _module_prefix(source_paths[0]),
-        constants=constants)
+        constants=constants,
+        variables=sorted(library_slots))
     if linked:
         _record_link_deps(manifest_path, linked)
 

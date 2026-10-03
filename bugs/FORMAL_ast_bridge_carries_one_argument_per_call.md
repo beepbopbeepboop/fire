@@ -1,8 +1,12 @@
 # `MojoExpr.call` carries ONE argument, so a call with two arguments has no faithful AST and `eval_eq_mojo` is false
 
-**Area:** FORMAL (the proof layer's AST bridge). **Status: OPEN — not fixed;
-minimal reproduction below, and the smallest possible one is TWO arguments.**
-Found 2026-10-02 while wiring the SysV stack-argument convention's proof half.
+**Area:** FORMAL (the proof layer's AST bridge). **Status: OPEN — not fixed, and
+step 1 below is now MEASURED as blocked on a Lean limitation this doc did not
+anticipate (see "Status: step 1 is blocked", below, for the error, the two
+routes that could still do it, and the diff that was written and measured
+against them). The minimal reproduction below still stands, and the smallest
+possible one is TWO arguments.** Found 2026-10-02 while wiring the SysV
+stack-argument convention's proof half.
 
 **Sibling, not duplicate, of `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`.**
 That one is about a function's own PARAMETER LIST: `MojoFunc.mk`'s single
@@ -93,6 +97,112 @@ on x86-64 it is emitted and its AST bridge is false (quietly, as `⊢ False`).
 That difference is itself worth knowing: **the x86-64 side is the one to fix
 first**, because an emitted proof that cannot hold is worse than a refusal, and
 because the x86-64 path is the one this round is making provable at all.
+
+## Status: step 1 is blocked on `MojoExpr` becoming a NESTED inductive (measured
+## 2026-10-03)
+
+`MojoExpr.call (name : String) (args : List MojoExpr)` is step 1 and it is four
+lines. Making them is not four lines, and the reason is worth more than the
+attempt:
+
+**The list of the type's own constructors is what makes the type NESTED, and
+`evalExpr` is structural recursion over it.** Lean 4 compiles
+
+```lean
+def ev : E → Nat
+  | .int v => v
+  | .call n args => args.foldl (fun acc a => acc + ev a) 0
+```
+
+into a WELL-FOUNDED fixpoint, not a structural one, and says so:
+
+```
+failed to infer structural recursion:
+Cannot use parameter #1:
+  unexpected occurrence of recursive application
+    ev
+failed to prove termination, possible solutions:
+  - Use `termination_by` to specify a different well-founded relation
+n : String
+args : List E
+a✝ : E
+⊢ sizeOf a✝ < 1 + sizeOf n + sizeOf args
+```
+
+`a✝` is an element of `args`, and the obligation is true, but nothing in
+`List.foldl`'s definition hands Lean the membership fact, so it cannot discharge
+it. The consequence is not a warning: **`evalExpr` stops reducing**, so all 26 of
+its per-node lemmas — every `evalExpr_int`, `evalExpr_var`, `evalExpr_binop …` —
+lose `rfl` and fail, including the ones whose statement does not mention a call
+at all. Reproduced in isolation (a 16-line file, 0.3 s, no `lib/` involved), so
+this is Lean and not this tree.
+
+Three further consequences the attempt surfaced, all of which a fix has to carry:
+
+* **`evalExpr_congr` cannot use `induction e`.** Lean refuses it outright —
+  "The `induction` tactic does not support the type `MojoExpr` because it is a
+  nested inductive type" (`lib/ProofLib.lean:6490`) — and that theorem is what
+  `evalBodyEnv`'s environment-merging proof uses, so it is on the path of every
+  generated `eval_eq_mojo`. It needs the recursor with an explicit motive, and
+  the `call` case then needs its own list induction to push the element-wise
+  hypotheses through `foldl`.
+* **`liftMF`'s `.call name a => .call name (liftMF a)`** (`:6266`) has to become
+  the list form as well, or it does not elaborate.
+* **The admitted-call refusal stays CORRECT but changes its reason.**
+  `formal/arm64_proof_gen.py`'s `_call_go` and `formal/admitted.py` both justify
+  the one-argument rule by "`MojoExpr.call` carries a single `UInt64` argument",
+  which stops being true. It is still right, because the AST layer hands a
+  handler the arguments' PRODUCT and a contract is applied to the request — so
+  the wording has to move from "the AST can only carry one" to "the AST packs
+  them into one", in both files, or the reason points at a fact that is gone.
+
+**What still looks like the cheapest route**, in the order I would try it:
+
+1. A `mutual` block with the argument fold written as an explicit recursion on
+   `args` (`| a :: as => …`) instead of `List.foldl`, so the recursive call's
+   argument is visibly a subterm. Whether Lean's structural recursion then
+   accepts the nested occurrence is a 0.3-second experiment on the isolated file
+   above, and it is the FIRST thing to try because it is the only route that
+   leaves `evalExpr` reducible and every `rfl` intact.
+2. Failing that, `MojoExpr.rec` with an explicit motive for `evalExpr` itself.
+   That is a rewrite of the core evaluator plus 26 `rfl`s becoming `simp
+   [evalExpr]`, plus `evalExpr_congr` — bigger, and it changes how every
+   generated proof's `simp` set reaches `evalExpr`, so it wants the whole
+   `formal` suite behind it rather than one example.
+3. `termination_by e => sizeOf e` with `decreasing_by` carrying an explicit
+   `a ∈ args` induction. Sound, and the most code of the three.
+
+The whole of step 1 is 58 lines across `lib/ProofLib.lean`,
+`formal/arm64_proof_gen.py` and `formal/admitted.py`, it was written and
+measured, and it is NOT committed: it breaks the library build, and landing it
+would put a red `prooflib` in everyone's gate. The three hunks that matter, so
+nobody re-derives them:
+
+```lean
+-- lib/ProofLib.lean, the inductive
+  | call (name : String) (args : List MojoExpr)
+
+-- lib/ProofLib.lean, evalExpr's arm (the fold is what a `String → UInt64 →
+-- UInt64` handler can consume; the product is a real loss, and it is why step 2
+-- is still the fix)
+  | MojoExpr.call name args =>
+      callFunc name (args.foldl (fun acc a => acc * evalExpr callFunc a env) 1)
+
+-- formal/arm64_proof_gen.py, _expr_ast's Call arm (it was `e.args[0]` alone)
+    args = ", ".join(_expr_ast(a) for a in e.args)
+    return f'(MojoExpr.call "{_call_name(e)}" [{args}])'
+```
+
+plus `evalExpr_call` re-stated over the list, a new `evalExpr_call_one` that
+`1 * v = v` makes the old one-argument statement again (`simp`, not `rfl`), and
+the two comment corrections named above. One thing this attempt did establish
+that is worth keeping whatever route is taken: **for a ONE-argument call the new
+node evaluates to exactly what the old one did**, so every proof that typechecks
+today keeps its value and the change cannot move a verdict by itself.
+
+**What is unchanged by all of this: step 2 is still the fix, and step 1 was never
+a fix.** The reproduction at the top of this doc still fails the same way, and
+the closing paragraph below still holds.
 
 ## The exact next step
 
