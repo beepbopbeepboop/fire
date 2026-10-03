@@ -16,6 +16,12 @@ from dataclasses import dataclass
 import fire_compiler as F
 from mojo.middle.boundnames import _with_item_alias_name, _lbn_target_names
 
+# `fold_literal_expr` is the ONE folder for literal-only arithmetic (model.py's
+# own note: "It is now in all three folders"), and `infer_expr` needs its
+# answer to decide SIGNEDNESS. This import is safe in that direction: model.py
+# imports no other formal module, so there is no cycle, and it costs 3 ms.
+from formal import model as M
+
 
 @dataclass(frozen=True)
 class IntType:
@@ -177,17 +183,45 @@ def infer_expr(e, vtypes: dict, call_types: dict = None):
         # mean, and `common_type` treats None as neutral, so the signedness
         # survives promotion against a typeless literal.
         #
-        # Narrow on purpose: `0 - 3` is a BinaryOp and stays typeless, and a
+        # Narrow on purpose: `0 - 3` is a BinaryOp and stays flexible, and a
         # negation of a *variable* still recurses, so only a literal negative
-        # changes behaviour. Both the CSET value path and the B.cond branch
-        # path read this one function, so they cannot disagree.
+        # changes behaviour here. Both the CSET value path and the B.cond branch
+        # path read this one function, so they cannot disagree. A flexible type
+        # is no longer read as UNSIGNED by anything downstream (`cmp_signed`,
+        # below), which is what `0 - 3` relied on once this arm stopped being the
+        # only thing that knew a negative value cannot be unsigned.
         if (e.op == "-" and isinstance(e.operand, F.IntLiteral)
                 and e.operand.value != 0):
             return IntType(64, True)
         return infer_expr(e.operand, vtypes, call_types)
     if isinstance(e, F.BinaryOp):
-        return common_type(infer_expr(e.left, vtypes, call_types),
-                           infer_expr(e.right, vtypes, call_types))
+        lt = common_type(infer_expr(e.left, vtypes, call_types),
+                         infer_expr(e.right, vtypes, call_types))
+        # The same rule the negated-literal arm above states, for the OTHER way
+        # a negative value is written.  `0 - 4` is a BinaryOp of two literals,
+        # so both sides are typeless, `common_type` is None, and `cmp_signed`
+        # then answers False — the comparison is emitted with UNSIGNED
+        # condition codes and `17 <= (0 - 4)` is TRUE, because the value is
+        # 0xFFFF...FC.  Measured on BOTH backends, against CPython:
+        #
+        #     0 < (51 - 55)     arm64 1  x86-64 1  CPython 0
+        #     17 <= (0 - 4)      arm64 1  x86-64 1  CPython 0
+        #     (0 - 4) < 0        arm64 0  x86-64 0  CPython 1
+        #
+        # while the unary spelling of the very same value is right, which is
+        # what made this survive: `17 <= -4` answers 0 on both.  The old
+        # docstring here called the unary arm's narrowness deliberate and named
+        # this case as excluded; the exclusion is what was wrong, because a
+        # negative value cannot be unsigned however it is spelled.  Narrow
+        # still: only when BOTH sides are typeless (so only literal-only
+        # arithmetic), only for `+ - * //`, and only when the folded value is
+        # negative — so nothing that had a type changes type.
+        if lt is None:
+            folded = M.fold_literal_expr(e)
+            if isinstance(folded, int) and not isinstance(folded, bool) \
+                    and folded < 0:
+                return IntType(64, True)
+        return lt
     if isinstance(e, F.CompareChain):
         # The chain's result is a boolean; operands share the common type
         # only insofar as each link needs it — report default.
@@ -423,8 +457,37 @@ def needs_trunc(t) -> bool:
 
 
 def cmp_signed(t) -> bool:
-    """Whether comparisons of type t use signed condition codes."""
-    return t is not None and t.signed
+    """Whether a value of type `t` is read as a SIGNED one.
+
+    **A flexible type is not an unsigned one, and that is the whole of what
+    this used to get wrong.** `None` is what `infer_expr` returns for an
+    expression with no declared type — a bare literal, or an operator whose
+    operands are both typeless — and it means "this value takes the type of its
+    context", NOT "this value is unsigned". Returning False for it made every
+    consumer that must decide a signedness read the context's absence as a
+    decision, and the three that matter:
+
+    * `print` picked `%llu` for it, so `print(0 - 3)` printed
+      `18446744073709551613`. Measured on both architectures; `v = 0 - 3;
+      print(v)` printed `-3`, because an ASSIGNMENT resolves the flexible type
+      through `function_var_types`' `resolve`, so only an expression printed
+      directly was affected — a difference with no name in the source.
+    * a comparison emitted unsigned condition codes for it, so
+      `1 if (0 - 5) < 3 else 0` was 0: `-5` was `0xFFFF…FB`.
+    * `//` and `%` chose UDIV and the unsigned remainder for it.
+
+    So the flexible case resolves to the DEFAULT, which is signed
+    (`DEFAULT_INT_TYPE`), and a context that really is unsigned reaches this
+    function as a real `IntType` — `common_type` treats `None` as neutral, so a
+    bare literal beside a `UInt32` is `UInt32` and still reads as unsigned.
+    That is what makes the change safe rather than a blanket "signed": the
+    unsigned answers come from a DECLARED type, and only the absence of one
+    changed.
+
+    Consumers that genuinely want to know "is there a declared type at all"
+    ask `infer_expr` for it; this function answers the narrower question the
+    docstring above says it answers."""
+    return resolve(t).signed
 
 
 def used_narrow_types(fn: F.FunctionDef) -> set:

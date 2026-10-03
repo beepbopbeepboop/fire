@@ -365,12 +365,6 @@ def var_register_map(f: F.FunctionDef) -> dict[str, Reg]:
             for i, name in enumerate(names[:len(CALLEE_SAVED)])}
 
 
-def _with_item_alias_name(alias) -> str:
-    """The local name a `with ... as NAME` binds, or None."""
-    from mojo.middle.boundnames import _with_item_alias_name as _impl
-    return _impl(alias)
-
-
 def _callee_symbol(func) -> str | None:
     """Flatten a CallExpr callee to a symbol name string.
 
@@ -637,10 +631,10 @@ class X86_64Codegen:
         self._cond_branch_pcs = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
-        # `model.recursive_function_names`. The x86-64 twin of arm64's, from the
+        # `model.stack_floor_guarded_names`. The x86-64 twin of arm64's, from the
         # same shared function, so the two machines cannot disagree about which
         # prologues are guarded.
-        self._recursive_names: set = set()
+        self._guarded_names: set = set()
         # ── A multi-field receiver, BY REFERENCE ──────────────────────────
         # The x86-64 twin of arm64's, over the SAME shared layout
         # (`formal/model.py`'s `struct_constructor_sites` / `struct_frame_bytes`),
@@ -691,6 +685,14 @@ class X86_64Codegen:
         # Base depth for comprehension generator temps (`_ci{d}`/`_cb{d}`),
         # so a comprehension nested in a for-list cannot alias its temps.
         self._compr_depth = 0
+        # The COMPREHENSION scope stack: `model.ValueKinds`.
+        # `comprehension_generator_scopes` maps, outermost first, pushed by
+        # `_emit_compr_gen` after each generator's target store. A comprehension
+        # is its own scope in Python 3, so its loop variable is not a local of
+        # this function and `ValueKinds.locals` must not answer for it — the
+        # stack is what `_expr_str_kind` consults instead. Balanced by a
+        # `finally` per generator; also cleared per function below.
+        self._compr_scopes: list = []
         # Enclosing try-finally bodies, outermost first. Flushed before a
         # return/break/continue so the finally runs on those paths too.
         self._pending_finally = []
@@ -777,7 +779,7 @@ class X86_64Codegen:
         # whole image before any function is emitted (the guard is decided per
         # function, so it cannot be answered while a prologue is being written).
         # The x86-64 twin of arm64's, from the same shared function.
-        self._recursive_names = M.recursive_function_names(
+        self._guarded_names = M.stack_floor_guarded_names(
             self._functions.values(), self._structs)
 
         # A NAME is not an ADDRESS, and this is arm64's rule read from the same
@@ -1040,6 +1042,7 @@ class X86_64Codegen:
         self._vtypes = function_var_types(f, self._call_types)
         self._for_depth = 0
         self._compr_depth = 0
+        self._compr_scopes = []
         self._container_ctx = 0
         self._string_vars = set()
         self._dict_vars = set()
@@ -1076,8 +1079,9 @@ class X86_64Codegen:
         self.asm.emit(encode_sub_r64_imm32(Reg.RSP, self._frame_bytes))
         # The stack-floor guard, immediately after the subtraction it guards, and
         # only in a function a call chain can re-enter: see
-        # `model.recursive_function_names` for why the cycle is the set.
-        if self.func_name in self._recursive_names:
+        # `model.stack_floor_guarded_names` for why the set is a cycle PLUS every
+        # body that already branches.
+        if self.func_name in self._guarded_names:
             self._emit_stack_floor_guard()
         # The module-global initializer, LAZILY — the x86-64 twin of arm64's,
         # emitted at the same point in the prologue for the same reason. See
@@ -1719,10 +1723,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(stmt, F.WithStmt):
-            # async with lowers as a plain with (no event loop / context
-            # manager protocol on this path).
-            self._emit_with(stmt)
-            return
+            # An internal invariant, not a source construct.  `formal/build.py`
+            # lowers every `with` to the context-manager protocol before any
+            # codegen runs (`_rewrite_with_statements`), so a `WithStmt` here
+            # means that pass did not see it — and the emitter used to have a
+            # lowering of its own for it, which is how `with
+            # tempfile.TemporaryDirectory() as d:` built, ran, printed the right
+            # answers and left the directory on disk.  One implementation of the
+            # protocol, in the pass that owns statement rewriting.
+            raise CodegenError(
+                f"{getattr(self._cur_fn, 'name', '<module>')}: a `with` "
+                f"reached the emitter unrewritten, which is a bug in "
+                f"formal/build.py's `_rewrite_with_statements` and not a "
+                f"construct in this file: every `with` is lowered to "
+                f"`__enter__`/`__exit__` before codegen")
 
         if isinstance(stmt, F.IfStmt):
             self._emit_if(stmt)
@@ -2095,9 +2109,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         path (which, without EH, is simply the fall-through). A `finally` is
         pushed onto `_pending_finally` so the paths that leave early
         (return/break/continue/raise) run it too, and the normal fall-through
-        emits it here."""
+        emits it here.
+
+        The fall-through copy is emitted even when an exit edge inside the body
+        already flushed this frame, because that flush happens where the exit
+        is EMITTED while the fall-through is a different, still-reachable path
+        through the same block; dropping it is how a conditional `return` and a
+        `continue` inside a loop each cost a `finally` its cleanup on the normal
+        path (measured on both architectures, and the same fix and the same
+        measurement on arm64 — `formal/arm64_codegen.py`'s `_emit_try`)."""
         fin = stmt.finally_body or []
-        need_fallthrough = bool(fin)
         if fin:
             self._pending_finally.append(fin)
         try:
@@ -2106,36 +2127,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             for s in (stmt.else_body or []):
                 self._emit_stmt(s)
         finally:
-            if fin:
-                if (self._pending_finally
-                        and self._pending_finally[-1] is fin):
-                    self._pending_finally.pop()
-                else:
-                    # A return/raise inside the body already flushed it, so
-                    # the frame is gone and this code is unreachable.
-                    need_fallthrough = False
-        if need_fallthrough:
-            for s in fin:
-                self._emit_stmt(s)
-
-    def _emit_with(self, stmt: F.WithStmt) -> None:
-        """with-items, without a context-manager protocol.
-
-        Evaluate each context expression for its side effects (open(), lock
-        acquisition, ...); with no __enter__/__exit__ runtime an `as` alias
-        binds to the context expression's own value, not to an entered one.
-        The body always runs on the fall-through path, and return/break/
-        continue inside it do no cleanup (there is none to do). `async with`
-        lowers as a plain with. Same reading as the arm64 backend.
-        """
-        for it in stmt.items or []:
-            self._emit_expr(it.expr)
-            if it.alias is not None:
-                alias = _with_item_alias_name(it.alias)
-                if alias is not None:
-                    self._store_var(alias, Reg.RAX)
-        for s in stmt.body:
+            if fin and self._pending_finally \
+                    and self._pending_finally[-1] is fin:
+                self._pending_finally.pop()
+        for s in fin:
             self._emit_stmt(s)
+
 
     def _emit_extern_call(self, name: str) -> None:
         """Call an unbound symbol, in whichever of the two extern forms the
@@ -2442,12 +2439,38 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     def _emit_loop(self, cond, body, else_body, for_info) -> None:
         """while, or for over range(), with an optional else clause.
 
+        A `while` is the obvious layout:
+
             start:  <test>          --done--> false:
                     <body>
-            step:   [for: i += step]
-                    jmp start
+            step:   jmp start
             false:  [<else body>]
             end:
+
+        A `for … in range(…)` is NOT the same shape, and the whole difference is
+        one rule: **CPython binds the loop variable to each value the iteration
+        produces, so after the loop it holds the LAST one** — while this layout
+        tests the counter before it is advanced, so its exit path arrives one
+        past. Measured on a five-line program: `for i in range(0, 3): …` then
+        `print(i)` is 2 under CPython and was 3 here.
+
+            start:  <test>          --done--> false:
+                    fallthrough to body:
+            body:   <body>
+            step:   [for: i += step]
+                    <test>          --again--> body:
+                    [for: i -= step]
+                    jmp false
+            false:  [<else body>]
+            end:
+
+        The `i -= step` is on the exit path and not on the way into the body,
+        which is what makes `break` right as well: `break` leaves the counter at
+        the value the body last had — the last value CPython bound — and jumps
+        past it. Restoring on EVERY exit, including an empty range, would be one
+        instruction shorter and would be wrong: `i = 0` before an
+        `for i in range(0, 0)` is `0` under CPython and would print `-step`.
+        Hence the head test being separate from the test at the bottom.
 
         `break` jumps to end (skipping the else); `continue` jumps to step, so
         a for-loop still advances its counter."""
@@ -2455,6 +2478,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         wid = self._while_counter
         fn = self.func_name
         start_label = f"{fn}_loop{wid}_start"
+        body_label = f"{fn}_loop{wid}_body"
         step_label = f"{fn}_loop{wid}_step"
         false_label = f"{fn}_loop{wid}_false"
         end_label = f"{fn}_loop{wid}_end"
@@ -2487,31 +2511,30 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                             "fin_depth": len(self._pending_finally)})
         try:
             self.asm.label(start_label)
+            leave_cc = None
             if for_range:
-                self._load_var(target, Reg.RAX)
-                self._load_var(end_tmp, Reg.R11)
-                self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
-                self._record_cond_branch()
-                # The branch LEAVES the loop, so its condition is the negation
-                # of the loop's own: an ascending range runs while i < end and
-                # exits on i >= end, a descending one runs while i > end and
-                # exits on i <= end. (The `while` form below cannot get this
-                # wrong, because it branches on the negation of a value the
-                # condition expression already produced.) Signed, since the
-                # counter and the bound are int64 values.
-                cc = COND_LE if descending else COND_GE
-                self._emit_jcc(cc, false_label)
+                leave_cc = COND_LE if descending else COND_GE
+                self._emit_for_test(target, end_tmp, leave_cc, false_label)
             else:
                 self._emit_truthy_word(cond)
                 self._emit_branch_if_false(false_label)
 
+            self.asm.label(body_label)
             for s in body:
                 self._emit_stmt(s)
 
             self.asm.label(step_label)
             if for_range:
                 self._emit_for_inc(target, step_val, step_tmp, lit_step)
-            self._emit_jmp(start_label)
+                # The loop-back test is the same comparison as the head test
+                # with the opposite polarity, emitted by the same helper, so the
+                # two cannot drift into disagreeing about when the loop ends.
+                self._emit_for_test(target, end_tmp, cond_negated(leave_cc),
+                                    body_label)
+                self._emit_for_restore(target, step_val, step_tmp, lit_step)
+                self._emit_jmp(false_label)
+            else:
+                self._emit_jmp(start_label)
 
             self.asm.label(false_label)
             for s in (else_body or []):
@@ -2522,24 +2545,65 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._for_depth -= 1
             self._loops.pop()
 
+    def _emit_for_test(self, target: str, end_tmp: str, cc: int,
+                       label: str) -> None:
+        """CMP the counter against the bound and jump to `label` on `cc`.
+
+        `cc` is a CONDITION CODE, and the caller supplies both polarities of the
+        same comparison: the loop head jumps on the one that leaves the loop and
+        the loop back edge on its negation. Both go through here so the two
+        cannot be spelled differently.
+
+        The branch LEAVES the loop when its condition is the negation of the
+        loop's own: an ascending range runs while i < end and leaves on
+        i >= end, a descending one runs while i > end and leaves on i <= end.
+        (The `while` form cannot get this wrong, because it branches on the
+        negation of a value the condition expression already produced.) Signed,
+        since the counter and the bound are int64 values.
+        """
+        self._load_var(target, Reg.RAX)
+        self._load_var(end_tmp, Reg.R11)
+        self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
+        self._record_cond_branch()
+        self._emit_jcc(cc, label)
+
     def _emit_for_inc(self, target: str, step, step_tmp: str, lit_step) -> None:
         """Advance a for-range counter by `step`."""
+        self._emit_for_step(target, step, step_tmp, lit_step, subtract=False)
+
+    def _emit_for_restore(self, target: str, step, step_tmp: str,
+                          lit_step) -> None:
+        """Walk the counter BACK by `step`, on the loop-exit path.
+
+        Shares `_emit_for_inc`'s body with the direction flipped, because a step
+        the advance can lower and the restore cannot would leave the value the
+        loop exits with undefined for exactly the spellings a program is most
+        likely to use. `_emit_loop`'s docstring is why the restore is here."""
+        self._emit_for_step(target, step, step_tmp, lit_step, subtract=True)
+
+    def _emit_for_step(self, target: str, step, step_tmp: str, lit_step,
+                       subtract: bool) -> None:
         self._load_var(target, Reg.RAX)
         if lit_step is not None:
             if lit_step == 0:
                 raise CodegenError("range() step must not be zero")
-            if 0 < lit_step <= 0x7FFFFFFF:
-                self.asm.emit(encode_add_r64_imm32(Reg.RAX, lit_step))
-            elif -0x80000000 <= lit_step < 0:
-                self.asm.emit(encode_sub_r64_imm32(Reg.RAX, -lit_step))
+            # `imm` is the amount to move BY, and `enc` is how to move it: a
+            # negative literal means SUB, and an ADD of the negated immediate is
+            # the only other spelling (x86-64's imm32 is signed, so ADD takes the
+            # negation directly).
+            amount = -lit_step if subtract else lit_step
+            enc_add = encode_sub_r64_imm32 if amount < 0 else encode_add_r64_imm32
+            if abs(amount) <= 0x7FFFFFFF:
+                self.asm.emit(enc_add(Reg.RAX, abs(amount)))
             else:
-                self.asm.emit(encode_mov_r64_imm32(Reg.R11, lit_step))
+                self.asm.emit(encode_mov_r64_imm32(Reg.R11, amount))
                 self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
         else:
             # A negative literal arrives as UnaryOp('-', IntLiteral(n)), so
             # both spellings have to reduce to a static step.
             self._load_var(step_tmp, Reg.R11)
-            self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
+            self.asm.emit(encode_sub_r64_r64(Reg.RAX, Reg.R11) if subtract
+                          else encode_add_r64_r64(Reg.RAX, Reg.R11))
         self._store_var(target, Reg.RAX)
 
     # ── containers ───────────────────────────────────────────────────
@@ -2890,7 +2954,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         Named for what it answers rather than for the first caller: `print`,
         the method-receiver guard and `_note_binding` all need the same
         question, and three copies of this precedence rule is three chances for
-        one of them to decide that a `char *` is a number."""
+        one of them to decide that a `char *` is a number.
+
+        `_compr_scopes` is consulted LAST and only for a bare name, and it is
+        the answer rather than a fallback while it is in force: a comprehension
+        has its own scope in Python 3, so `var x = 5` beside `[x for x in
+        ["a", "b"]]` does not make the two bindings disagree, and a site inside
+        the comprehension must see the loop variable and not the outer `x`.
+        Measured on both architectures, `[x for x in ["p", "", "q"] if x]`
+        returned 3 elements where CPython returns 2: the comprehension's `x`
+        was in no kind map at all, so `if x:` fell to `TRUTHY_NONZERO` and
+        tested the ADDRESS of the empty string for zeroness."""
         if isinstance(expr, F.MemberExpr):
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
@@ -2901,7 +2975,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             bound = M.comptime_val_kind(self._comptime_vals, expr.name)
             if bound is not None:
                 return bound
-        return self._vkinds.kind_of(expr)
+        return self._vkinds.kind_of(expr, scopes=self._compr_scopes)
 
     def _expr_is_fd(self, expr) -> bool:
         """True when `expr` is known to be a FILE DESCRIPTOR.
@@ -5544,9 +5618,26 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_expr(operand)
             self._push_slot(Reg.RAX)
         n = len(operands)
-        # Operand i was pushed i-th, so it now sits one _SLOT above RSP per
-        # operand pushed after it.
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, _SLOT * (n - 1)))
+        # The accumulator starts at 1 — the identity of the AND below — and NOT
+        # at the first operand's value, which is what this used to do
+        # (`mov R10, [RSP + _SLOT*(n-1)]`, a copy of the operand rather than a
+        # constant). The consequence is a chain whose answer is
+        # `operands[0] & link0 & link1 & …`, so every chain whose FIRST operand
+        # is even answers 0 and every chain whose first operand is odd answers
+        # the truth. Measured on this backend with `n = -20, m = 5, w = 243`:
+        # `print(1 if n <= m <= w else 0)` printed 0, `print(1 if m <= w <= w
+        # else 0)` printed 1, and arm64 printed 1 for both — a silent
+        # miscompile, not a refusal, and one that a test with an all-positive
+        # first operand passes (the corpus is mostly odd small integers).
+        # Found by `tools/formal_fuzz.py`'s CPython-vs-image differential,
+        # which named it: the first program it generated whose first operand
+        # was even. Pinned by `chain_first_operand_bits` in
+        # `test_formal_x86_64_parity.py`.
+        #
+        # Operand i was pushed i-th, so it sits one _SLOT above RSP per operand
+        # pushed after it — which is what the loop below reads, and all it
+        # reads: nothing here may consult a slot for any other reason.
+        self._emit_mov_imm(Reg.R10, 1)
         for i, op in enumerate(ops):
             if op not in _CMP_CONDS:
                 raise CodegenError(
@@ -6634,7 +6725,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
     def _emit_compr_gen(self, expr: F.Comprehension, gi: int, res_offset: int,
                         is_dict: bool, cap: int, d0: int) -> None:
-        """Recursive generator walk: gen[gi] … gen[-1], then append."""
+        """Recursive generator walk: gen[gi] … gen[-1], then append.
+
+        THE SCOPE STACK IS PUSHED AFTER THE TARGET STORE, and that placement is
+        Python's rule rather than a convenience: generator `gi`'s own ITERABLE is
+        evaluated in the scope of generators `0 … gi-1`, and the parent frame has
+        already pushed exactly that and has not popped it (the pop is in this
+        frame's `finally`, below the recursion). So the iterable above reads the
+        enclosing scope, and everything from the target store down — the
+        conditions, the element, the key, and every nested comprehension inside
+        them — reads this generator's own scope as well.
+        """
         gens = expr.generators
         if gi >= len(gens):
             if is_dict:
@@ -6701,13 +6802,23 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             else:
                 self._emit_for_unpack(tnames, Reg.RAX, f"{fn}_cgu{wid}")
 
-            for cond in gen.conditions or []:
-                self._emit_truthy_word(cond)
-                self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
-                self._record_cond_branch()
-                self._emit_jcc(COND_E, step_label)
+            # From here down this generator's target is in scope: the
+            # conditions, the element/key, and the recursion into the next
+            # generator (whose own ITERABLE is evaluated one level up, which is
+            # why the push is here and not at the top of the frame). See the
+            # method's docstring.
+            self._compr_scopes.append(
+                self._vkinds.comprehension_generator_scopes(expr)[gi])
+            try:
+                for cond in gen.conditions or []:
+                    self._emit_truthy_word(cond)
+                    self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+                    self._record_cond_branch()
+                    self._emit_jcc(COND_E, step_label)
 
-            self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
+                self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
+            finally:
+                self._compr_scopes.pop()
 
             self.asm.label(step_label)
             self._load_var(ci_name, Reg.RAX)
@@ -7461,6 +7572,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         if isinstance(e.func, F.MemberExpr) and \
                 self._is_value_receiver(e.func.obj):
             self._emit_value_method(e, e.func.member)
+            return
+        # `mod.S(...)` — a CONSTRUCTION of a struct the module publishes. The
+        # decision and its reasons are `model.dotted_struct_construction`, read
+        # from the same three tables arm64 reads, and placed immediately after
+        # the value-receiver arm for the reason that arm gives: a base that is a
+        # MODULE is the only thing left, and only for it is a dotted call a
+        # construction rather than an extern.
+        if not is_extern_call and M.dotted_struct_construction(
+                e.func, self._structs, self._import_aliases):
+            self._emit_struct_constructor(e, e.func.member,
+                                          self._structs[e.func.member])
             return
         # A TYPE is not a function. Intercepted before the extern path, which
         # would emit a `call _S` against a symbol named after the type —

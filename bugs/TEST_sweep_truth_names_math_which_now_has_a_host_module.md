@@ -87,8 +87,7 @@ red again without anybody noticing why.
 ## Why it is not fixed here
 
 `test_formal_sweep_truth.py` is the sweep's own truth test and `formal8-12`
-holds the sweep claims (`FORMAL_sweep_default_timeout_hides_a_crash_on_the_
-repos_own_files`, `FORMAL_sweep_memcap_death_is_filed_as_codegen`,
+holds the sweep claims (`FORMAL_sweep_memcap_death_is_filed_as_codegen`,
 `FORMAL_sweep_sigterm_drains_the_whole_scope`, …). A one-line edit in a file
 another worker is plausibly working in is a conflict for a fix that is one
 character-class of edit and fully specified above, and the rules for this

@@ -889,6 +889,136 @@ def run_refusal_case(case, tmpdir, verbose):
     return True, ""
 
 
+# ── the SPELLING cases: there is ONE spelling function, and what it says ────
+#
+# A refusal that quotes a call site quotes it with `_expr_spelling`, and every
+# row in `REFUSALS` that pins a needle is really pinning the spelling too —
+# `refuse_disagreement_spells_both_call_sites` above says so in its own comment.
+# That makes the function itself worth a row, because it is the one place where
+# "the message is right" and "the function is right" can come apart.
+#
+# THEY DID. `formal/build.py` carried
+#
+#     _expr_spelling = M.expr_spelling
+#
+# and then, three lines below, a `def _expr_spelling` that shadowed the alias —
+# the older of the two, from before the model needed a spelling of its own. The
+# comment above the alias claimed the model owned the one implementation, so the
+# comment described a state the file was not in, and the model was the newer HALF
+# of a pair rather than the whole of it. The two copies disagreed on the shape
+# that matters most in this file's own corpus: the older one's `CallExpr` arm
+# required a BARE `IdentExpr` callee, so `g[1](r, 1)` — which
+# `refuse_disagreement_spells_both_call_sites` gets right through
+# `subscript_chain_text`, because a specialization's callee is a SUBSCRIPT — and
+# a dotted subscripted method call both came out as the bare text `CallExpr`.
+#
+# So these are UNIT rows, with no build: the defect is a second implementation
+# existing, and a build can only observe it through whichever message a given
+# program happens to reach. The table below is read through the SAME alias the
+# build pass calls, so a second `def` shadowing it is caught by the identity
+# assertion and not by any of the spellings.
+SPELLINGS = [
+    # (name, source, [(what to pull out of the parse, expected spelling)])
+    #
+    # The whole point: a callee that is not a bare name. Measured before the fix
+    # (same input, both spellings, no build):
+    #
+    #     model.expr_spelling  : c.f[0]()
+    #     build._expr_spelling : CallExpr
+    ("a_call_whose_callee_is_a_subscript",
+     "def g(c):\n"
+     "    return c.f[0]()\n",
+     [("CallExpr", "c.f[0]()"),
+      ("SubscriptExpr", "c.f[0]"),
+      ("MemberExpr", "c.f")]),
+
+    ("a_call_whose_callee_is_a_specialized_member",
+     "def g(m):\n"
+     "    return m.reduction[0](3)\n",
+     [("CallExpr", "m.reduction[0](3)")]),
+
+    # The two arms the DELETED copy alone carried. `BinaryOp` is not cosmetic:
+    # `test_formal_globals.py`'s `local_shadow_of_global_read_before_store_
+    # refused` asserts the needle `at \`G + 1\``, so a deletion that dropped the
+    # arm would turn that row's message into `at \`BinaryOp\`` — still a refusal,
+    # still true, and still unreadable, which is why the arm is ported rather
+    # than lost. `SetExpr` has no end-to-end row; it is here because a set
+    # literal in a message about a stored value is a set literal the reader can
+    # find in their own file.
+    ("a_binary_operator_and_a_set_display",
+     "def g():\n"
+     "    G = 1 + 2\n"
+     "    S = {1, 2}\n"
+     "    return G\n",
+     [("BinaryOp", "1 + 2"),
+      ("SetExpr", "{1, 2}")]),
+
+    # The shapes the MODEL's copy carried and the deleted one did not, so that
+    # deleting it is not a regression in the other direction: a string literal is
+    # QUOTED (`repr`) rather than printed as a bare name the file does not
+    # contain, and a dict display is `{…}` rather than `DictExpr`.
+    ("a_string_literal_is_quoted_and_a_dict_display_is_an_ellipsis",
+     "def g():\n"
+     "    A = 'hi'\n"
+     "    D = {}\n"
+     "    return A\n",
+     [("StringLiteral", "'hi'"),
+      ("DictExpr", "{…}")]),
+
+    # `not x` rather than `notx`: the model's unary arm spells the word with a
+    # space, and the deleted copy produced `f"{op}{operand}"` — `notx`, an
+    # identifier the file does not contain.
+    ("a_unary_not_has_its_space",
+     "def g(x):\n"
+     "    return not x\n",
+     [("UnaryOp", "not x")]),
+]
+
+
+def run_spelling_case(case, tmpdir, verbose):
+    """ONE spelling function, and the spellings below.
+
+    The identity is asserted first and separately, because it is the defect: a
+    second `def _expr_spelling` in `formal/build.py` restores every spelling the
+    table above already pins (the copy that shadowed the alias spelled all of
+    them, and `BinaryOp`/`SetExpr` are the two it alone carried) and would be
+    caught by nothing else here.
+    """
+    import inspect
+
+    import fire_compiler as F
+    import formal.build as FB
+    import formal.model as M
+
+    if FB._expr_spelling is not M.expr_spelling:
+        return False, ("formal/build.py::_expr_spelling is not "
+                       "formal/model.py::expr_spelling — there are two "
+                       "implementations and the build pass calls its own")
+    _lines, first = inspect.getsourcelines(M.expr_spelling)
+    if not _lines[0].lstrip().startswith("def "):
+        return False, ("model.expr_spelling's own source does not begin with a "
+                       "`def`, so the alias above it stands for something else")
+
+    name, source, want = case
+    stmts = F.Parser(F.py_tokenize_named(source, name + ".mojo")).parse_module()
+    kinds = {k for k, _ in want}
+    got = {}
+    for node in M.iter_nodes(stmts):
+        kind = type(node).__name__
+        if kind in kinds and kind not in got:
+            got[kind] = M.expr_spelling(node)
+    for kind, expect in want:
+        if kind not in got:
+            return False, f"the case produced no {kind} to spell"
+        if got[kind] != expect:
+            return False, (f"expr_spelling({kind}) == {got[kind]!r}, expected "
+                           f"{expect!r} — the source's own spelling is what a "
+                           f"refusal quotes, and this is a placeholder")
+    if verbose:
+        print("      " + ", ".join(f"{k}={got[k]!r}" for k, _ in want))
+    return True, ""
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -902,10 +1032,12 @@ def main():
     diff_names = {c[0] for c in DIFF_CASES}
     refuse_names = {c[0] for c in REFUSALS}
     abi_names = {c[0] for c in COMPTIME_ABI_CASES}
+    spelling_names = {c[0] for c in SPELLINGS}
     runners = [
         (DIFF_CASES, diff_names, run_diff_case),
         (REFUSALS, refuse_names, run_refusal_case),
         (COMPTIME_ABI_CASES, abi_names, run_diff_case),
+        (SPELLINGS, spelling_names, run_spelling_case),
     ]
     everything = [c for group, _n, _r in runners for c in group]
     known = {c[0] for c in everything}

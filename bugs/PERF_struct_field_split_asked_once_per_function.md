@@ -1,6 +1,21 @@
 # PERF: `struct_field_names` is still asked once per FUNCTION, so the largest compiler sources still miss the sweep's timeout
 
-**Status: OPEN, and it is what is left of the 2026-10-02 sweep's `tool` class.**
+**Status: still OPEN, and smaller than it was.** Step 1 below (memoize the
+derivation with an invalidation argument) was **not** taken and is not needed:
+`_prepare_functions` now derives the module's FRAMED table once and THREADS it,
+so the derivation is no longer asked per function at all — the soundness
+condition step 1 worried about was measured and it holds (146 779 asks over 7 788
+(question, struct) pairs across 14 files, zero of which changed their answer
+inside one `_prepare_functions` call). `myinterpreter.py` went 53.0 s → 3.8 s on
+arm64 and 38.1 s → 3.8 s on x86-64, artifacts byte-identical.
+`bugs/FORMAL_build_cost_2026-10-03.md` is the doc to read.
+**What is left, both in that doc's §6: step 2 (the statement-position walk —
+its precondition is now measured, 0 counterexamples over 516 files and 58 node
+types, but it wants a corpus differential test before it lands because the
+failure mode is a field set missing a store), and `struct_is_one_field`, still
+asked once per function.**
+
+**The 2026-10-02 measurement this doc records, and its `tool`-class framing:**
 The 361 files with no verdict were ALL timeouts at `-t 30` (not one a memory
 kill, not one a driver error — measured by parsing the sweep log: 361
 `TOOL: … (timeout (> 30s))` and zero of any other `tool` cause). Most of that is

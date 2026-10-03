@@ -300,3 +300,44 @@ of which is an importer of `builtin_slice` or `rebind`.
 `builtin_slice.mojo` past its own next refusal, or how many of the 13 files gain
 a PASS when it does. Both need the integrator's sweep, and both are the kind of
 number this document has twice recorded wrongly by estimating it.
+
+## Re-measured 2026-10-03 (`work/formal13-6`): the first arrow is UNCHANGED, so
+## option 2 still cannot be started, and the reason it cannot is worth naming
+
+`bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md` says to measure
+the first refusal before starting anything here, and the answer is that it has
+not moved. arm64 and x86-64, byte-identical:
+
+```
+build: builtin_slice.mojo imports 'std.format._utils', which cannot be built
+either: builtin_slice.mojo: self is assigned other in StridedSlice___init__(),
+and self is this method's receiver, so it is the address the CALLER passed rather
+than a name either side can re-declare. …
+```
+
+That is the new arrow's own subject — a struct whose ONLY field is a nested frame,
+whose `__init__` writes `self` — so **this document's chain still starts one layer
+below `Optional`, and that layer is `formal13-5`'s claim, not this one's.** Option
+2 is therefore still not startable here, and the three revisions of the chain
+below it are history in the way §"Re-measured 2026-10-03" says they are.
+
+**One measurement of this document's OWN subject that is cheap and is not in it.**
+The chain says `Optional`'s single field is a `Variant` and the discriminator
+lives "a SECOND frame away". That is still true, and it is worth being precise
+about why the unwrap is two hops rather than one, because it is the difference
+between a tag reader and a layout reader:
+
+    Optional._value : Variant            one word naming the Variant's frame
+      Variant._storage                    one word naming the storage's frame
+        _CustomNicheStorage               3 fields — the tag is HERE, at a
+                                          declared offset
+        _NichedOptionalStorage            3 fields
+        _DefaultVariantStorage            1 field
+
+so an unwrap is "read the word at `Optional._value + 8*slot(_storage)`, then read
+the word at THAT + 8*slot(<the chosen storage's tag>)" — and WHICH storage is
+`_VariantStorageFor[…]`, a `comptime` class attribute holding a computed value,
+which is the 2026-10-01 arrow in the chain above. So option 2's second half is
+not "read a `Variant`'s discriminant" but "read a discriminant at an offset that
+depends on a comptime choice this path cannot make", which is why the two
+readings have to land together and why neither is a `lib/Refine.lean` question.

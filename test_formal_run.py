@@ -178,15 +178,96 @@ CASES = [
     # — a diagnostic naming neither the construct nor an error the reader can
     # reproduce.
     #
-    # The expected answer is the two emitters' own documented lowering, not
-    # CPython's: with no `__enter__`/`__exit__` on this path the alias is bound
-    # to the context expression's VALUE and the body runs on the fall-through
-    # (`arm64_codegen._emit_with` and its x86-64 twin say so). 7 is what that is
-    # for `with 7 as y`, and `x = y` inside the body is what proves the alias
-    # was stored before the body rather than after it.
-    ("with_alias_is_bound_before_the_body",
+    # **This row used to expect the emitters' own lowering** — the alias bound to
+    # the context expression's VALUE, which is what `_emit_with` documented on
+    # both machines — and it is a `refuse:` case now, because `with` is lowered
+    # to the context-manager PROTOCOL (`formal/build.py`'s
+    # `_rewrite_with_statements`): `__enter__` produces the name the body sees
+    # and `__exit__` runs on the way out. `with 7 as y` has neither, and CPython
+    # raises `TypeError: 'int' object does not support the context manager
+    # protocol` — so the answer this path owes the reader is that refusal, not a
+    # program that binds `y` to 7 and silently skips the exit call. The
+    # property the row was written for is now
+    # `with_enter_binds_the_alias_before_the_body` below, where the alias is a
+    # real `__enter__` result.
+    ("with_on_a_word_is_the_context_manager_protocol_or_a_refusal",
      "def main():\n    x = 0\n    with 7 as y:\n        x = y\n"
-     "    printf(\"x=%d\", x)\n    return x\n", 7, "x=7"),
+     "    printf(\"x=%d\", x)\n    return x\n",
+     "refuse:is CPython's CONTEXT-MANAGER PROTOCOL", None),
+    # …and the property itself, on a value that IS a context manager. The alias
+    # is `__enter__`'s return value and not the object, which is the whole
+    # difference between the protocol and "bind the expression's own value":
+    # this program prints 20, and it would print 11 if the alias were the
+    # manager.
+    ("with_enter_binds_the_alias_before_the_body",
+     "struct Ctx:\n    var tag: Int\n    var name: String\n"
+     "    fn __enter__(self) -> Int:\n        printf(\"enter@@\")\n"
+     "        return self.tag\n"
+     "    fn __exit__(self) -> Int:\n        printf(\"exit@@\")\n"
+     "        return 0\n\n"
+     "def main():\n    x = 0\n    with Ctx(20, \"c\") as y:\n"
+     "        x = y\n        printf(\"x=%d@@\", x)\n"
+     "    printf(\"after=%d@@\", x)\n    return x\n",
+     20, "enter@@x=20@@exit@@after=20@@"),
+    # The exit on the FALL-THROUGH, and — the reason this is a separate row —
+    # on a `return` out of the block. A cleanup written "after the body" is
+    # right on the first and wrong on the second, and this path lowers the
+    # whole `with` to a `try`/`finally` so the second is right too. Before the
+    # fix this row also failed for a THIRD reason, in the emitters rather than
+    # here: a `finally` was dropped from the fall-through path once an exit edge
+    # inside the body had flushed it, which is a `finally` that silently does
+    # nothing (measured: a conditional `return` in the body printed nothing from
+    # the clause on the path that did not return).
+    ("with_exit_runs_on_an_early_return",
+     "struct Ctx:\n    var tag: Int\n    var name: String\n"
+     "    fn __enter__(self) -> Int:\n        return self.tag\n"
+     "    fn __exit__(self) -> Int:\n        printf(\"exit@@\")\n"
+     "        return 0\n\n"
+     "def f(n):\n    with Ctx(1, \"c\") as y:\n        printf(\"body@@\")\n"
+     "        if n > 0:\n            return 9\n    return 0\n\n"
+     "def main():\n    printf(\"r=%d@@\", f(1))\n    printf(\"r=%d@@\", f(0))\n"
+     "    return 0\n",
+     0, "body@@exit@@r=9@@body@@exit@@r=0@@"),
+    # Two items: CPython enters left to right and exits RIGHT TO LEFT, and
+    # nesting the rewrites inside one another is what produces that order.
+    ("with_two_items_exit_in_reverse_order",
+     "struct Ctx:\n    var tag: Int\n    var name: String\n"
+     "    fn __enter__(self) -> Int:\n        printf(\"enter %s@@\", self.name)\n"
+     "        return self.tag\n"
+     "    fn __exit__(self) -> Int:\n        printf(\"exit %s@@\", self.name)\n"
+     "        return 0\n\n"
+     "def main():\n"
+     "    with Ctx(1, \"A\") as a, Ctx(2, \"B\") as b:\n"
+     "        printf(\"a=%d b=%d@@\", a, b)\n    return 0\n",
+     0, "enter A@@enter B@@a=1 b=2@@exit B@@exit A@@"),
+    # `with EXPR:` with no `as` — CPython still calls `__enter__` and still runs
+    # `__exit__`; the value is simply discarded. A lowering that treated a
+    # missing alias as "no context manager" would skip the exit, which is the
+    # silent half this whole protocol exists to remove.
+    ("with_no_alias_still_enters_and_exits",
+     "struct Ctx:\n    var tag: Int\n    var name: String\n"
+     "    fn __enter__(self) -> Int:\n        printf(\"enter@@\")\n"
+     "        return self.tag\n"
+     "    fn __exit__(self) -> Int:\n        printf(\"exit@@\")\n"
+     "        return 0\n\n"
+     "def main():\n    with Ctx(1, \"c\"):\n        printf(\"body@@\")\n"
+     "    return 0\n",
+     0, "enter@@body@@exit@@"),
+    # A context manager inside a LOOP, with a `continue` — the exit has to run
+    # on that edge too, and it is the shape that found the dropped-`finally`
+    # defect above (a `continue` inside the block flushed the pending clause at
+    # EMIT time, so every LATER iteration's normal path had no cleanup at all).
+    ("with_exit_runs_on_a_continue_inside_a_loop",
+     "struct Ctx:\n    var tag: Int\n    var name: String\n"
+     "    fn __enter__(self) -> Int:\n        return self.tag\n"
+     "    fn __exit__(self) -> Int:\n        printf(\"exit %d@@\", self.tag)\n"
+     "        return 0\n\n"
+     "def f(n):\n    var i = 0\n    var seen = 0\n    while i < n:\n"
+     "        with Ctx(i, \"c\") as v:\n"
+     "            if v == 0:\n                i = i + 1\n                continue\n"
+     "            seen = seen + 1\n        i = i + 1\n    return seen\n\n"
+     "def main():\n    printf(\"seen=%d@@\", f(3))\n    return 0\n",
+     0, "exit 0@@exit 1@@exit 2@@seen=2@@"),
     ("seven", "def seven():\n    return 7\n", 7, None),
     ("absval", "def absval(n):\n    if n > 0:\n        return n\n"
                "    else:\n        return 0 - n\n", 10, None),
@@ -2693,6 +2774,74 @@ CASES = [
      " 1 << 32, 1 << 40, (1 << 32) >> 32, 1024 >> 5, 1 >> 32)\n"
      "    return 0\n",
      0, "128 256 4294967296 1099511627776 1 32 0"),
+    # ── the store a one-field receiver CANNOT deliver ───────────────────────
+    #
+    # The two ANSWERED rows of this group are `BOTH_ARCH_CASES`
+    # (`both_arch_two_field_store_through_a_plain_receiver_still_reaches_it`
+    # and the `__init__` guard beside it); these two are here because a
+    # `refuse:` expectation is what `run_case` dispatches on both backends.
+    #
+    # Found by `tools/formal_fuzz.py`, and the shape above is why the two rows
+    # before it did not catch it: they are about a REBINDING of the receiver,
+    # which CPython also does not deliver, so leaving it alone is right. This is
+    # a store to the FIELD, which CPython DOES deliver — into the object the
+    # caller holds — and which this path computed and dropped:
+    #
+    #     class C:
+    #         def __init__(self): self.a = 2
+    #         def bump(self):     self.a = 7
+    #         def get(self):      return self.a
+    #     c = C(); c.bump(); print(c.get())      # CPython 7, this path 2
+    #
+    # Builds, ran, exited 0, and printed the constructor's value on BOTH
+    # architectures. `model.one_field_dropped_receiver_stores` is the rule and
+    # `receiver_writeback_name` is the mechanism it is about: the write-back
+    # needs the receiver declared `out`/`inout`/`mut`, and a plain `self` is
+    # never handed back. Refused rather than delivered, because the one return
+    # word is the receiver and delivering the store would cost the method's own
+    # value — the same ABI reason `mutating_receiver_return_refusal` gives.
+    #
+    # The needle is the LOAD-BEARING half of the message: it says the receiver
+    # is not handed back. A message that only said "one-field receiver" would be
+    # indistinguishable from a one-field READER, which builds.
+    ("refuse_a_one_field_store_through_a_plain_receiver",
+     "class C:\n"
+     "    def __init__(self):\n"
+     "        self.a = 2\n"
+     "\n"
+     "    def bump(self):\n"
+     "        self.a = 7\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C()\n"
+     "    c.bump()\n"
+     "    printf(\"a=%d\", c.get())\n"
+     "    return 0\n",
+     "refuse:is not a receiver this path hands back", None),
+    # The `+=` spelling is a separate AST node (`AugAssignStmt`), so the rule
+    # reads it explicitly and a fix that only walked `AssignStmt` would pass the
+    # row above and miss this one — which is the shape every in-place operator
+    # in the stdlib is written with.
+    ("refuse_a_one_field_augmented_store_through_a_plain_receiver",
+     "class C:\n"
+     "    def __init__(self):\n"
+     "        self.a = 2\n"
+     "\n"
+     "    def bump(self):\n"
+     "        self.a += 5\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C()\n"
+     "    c.bump()\n"
+     "    printf(\"a=%d\", c.get())\n"
+     "    return 0\n",
+     "refuse:is not a receiver this path hands back", None),
 ]
 
 # ── what a method on a VALUE means, per RECEIVER KIND ──────────────────────
@@ -5146,6 +5295,145 @@ DECLARED_TYPE_REFUSALS = [
      "    var p = P()\n"
      "    return p.go()\n",
      "refuse:is a method call on a value", None),
+
+    # ── THE ONE CLAUSE OF THE AMBIGUOUS-NAME LIFT THAT IS NOT OPTIONAL ───────
+    #
+    # `BOTH_ARCH_CASES`'s `both_arch_ambiguous_method_name_settled_by_the_receiver`
+    # lifts `o.get()` because `o`'s agreed binding names a struct of this unit
+    # that DECLARES `get`. That condition is right, and it has exactly one
+    # exception: a struct that DERIVES from the binding's struct and declares
+    # the same member too. `b` is bound to `Base`, and `Base_emit` is compiled
+    # against `Base`'s two-field layout, so a value of `Derived` read through it
+    # is the BASE's view of a child — which builds, runs, and prints digits no
+    # source wrote. Python dispatches on the value; this path can only see the
+    # DECLARATION, which names the base.
+    #
+    # So this row is a REFUSAL and not a demonstration, and the reason is worth
+    # stating rather than leaving to be found: this path cannot construct the
+    # `Derived` value that would make the lift visibly wrong, so there is no
+    # program whose ANSWER the lift gets wrong for a case to compare against
+    # CPython. What the row pins is the refusal, which is the only end state
+    # reachable from here that is not a lie — and `BOTH_ARCH_CASES` is the wrong
+    # list for it for the same reason, since that runner requires a build.
+    #
+    # MEASURED, so this is not a row asserting a guard that is not there: with
+    # `formal/build.py`'s `_derived_overrides` clause deleted from the bare-
+    # receiver arm of `_lift_one_word_field_method`, this program BUILDS on
+    # arm64 and prints 5 — `Base_emit` called on a `Base`, which happens to be
+    # right for the only receiver this path can build here and would be wrong
+    # for every receiver it cannot. `Base` is TWO fields, so `one_word` does not
+    # carry it and the lift this row is about is the one that reads the
+    # constructor binding instead.
+    #
+    # The same guard on the FIELD-receiver arm is pinned by
+    # `test_formal_specialized_method_call.py`'s
+    # `refuse_a_field_receiver_whose_declared_type_has_a_derived_override`: two
+    # arms of one rule, so two rows.
+    ("ambiguous_name_a_derived_struct_also_declares_is_still_refused",
+     "struct Base:\n"
+     "    var start: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    def emit(self) -> Int:\n"
+     "        return self.start\n"
+     "\n"
+     "struct Derived(Base):\n"
+     "    var extra: Int\n"
+     "\n"
+     "    def emit(self) -> Int:\n"
+     "        return 1000\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Base()\n"
+     "    b.start = 5\n"
+     "    b.pad = 1\n"
+     "    printf(\"%d\\n\", b.emit())\n"
+     "    return 0\n",
+     "refuse:b.emit() is a method call on a value", None),
+
+    # ── THE TWO ACCESSORS `.value` DOES NOT ANSWER THROUGH A PARAMETER ───────
+    #
+    # `BOTH_ARCH_CASES`' `both_arch_enum_typed_parameter_value_is_the_word_it_
+    # holds` is the half of this that works. These two are the half that does not,
+    # and they are two refusals because the two facts are two — a single sentence
+    # would have to be false about one of them, and a refusal that is false about
+    # the construct is worse than none because it sends a reader to change a
+    # correct program.
+    #
+    # `.name` is a member's SPELLING: the constant's own name in the class body,
+    # which the word travelling in the parameter does not carry. The
+    # class-constant spelling `Reg.RBP.name` answers, so this is not "the enum
+    # machinery is absent" — it is that a parameter has lost which member it is.
+    # (CPython's asymmetry is the same one: `Reg.<computed>.value` fails and
+    # `Reg.<computed>.name` still answers.)
+    ("refuse_an_enum_members_name_through_a_parameter",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    RBP = 5\n"
+     "\n"
+     "def name_of(base: Reg) -> String:\n"
+     "    return base.name\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%s\\n\", name_of(Reg.RBP))\n"
+     "    return 0\n",
+     "refuse:base.name` is a member's SPELLING", None),
+
+    # `.value` where the enum has a member this path cannot materialize. The gate
+    # is EVERY member and not this read's member, and the reason is that a
+    # parameter's value is a word that arrived from a call site: nothing in it
+    # says which member it is, so one computed member makes the identity
+    # `base.value is base` false for all of them and answering it for the others
+    # would be a wrong number rather than a refusal.
+    #
+    # The call site passes `0` and CPython would raise `TypeError` there — an enum
+    # member is not an int. That is deliberate and is what makes this a LIMIT row
+    # rather than a differential: the reachable programs on this side of the gate
+    # are the ones with no reference answer, so what is pinned is that the build
+    # says so INSTEAD of answering. Naming `Reg.NEXT` in the needle is the other
+    # half — a message that said only "some member is computed" would send a
+    # reader looking through the class body for which one.
+    ("refuse_an_enum_value_when_any_member_is_computed",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    NEXT = RAX + 1\n"
+     "\n"
+     "def pick(base: Reg) -> Int:\n"
+     "    return base.value\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\\n\", pick(0))\n"
+     "    return 0\n",
+     "refuse:`Reg.NEXT` is written as a COMPUTATION", None),
+
+    # THE DIRECTION THAT MATTERS MOST, because it is the one that would refuse
+    # real programs: the census is gated on `model.struct_is_enum`, so a
+    # parameter whose declared type is an ORDINARY struct still reads `.value`
+    # as a field — through the generic `field_access_refusal`, whose wording
+    # ("this path has no way to say what 'base' holds") is still TRUE here,
+    # because a two-field struct's receiver is a frame address and nothing in
+    # `base`'s declaration as used by THIS read settles which. `P` declares a
+    # METHOD named `value`, so the program is also one whose answer is a number:
+    # a census that stopped at the annotation and dropped the enum gate would
+    # rewrite `base.value` to `base` and print a frame address.
+    ("refuse_a_non_enum_parameters_value_is_still_a_field_read",
+     "struct P:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def value(self) -> Int:\n"
+     "        return self.v\n"
+     "\n"
+     "def pick(base: P) -> Int:\n"
+     "    return base.value\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\\n\", pick(P()))\n"
+     "    return 0\n",
+     "refuse:'base.value' is a field access through 'base'", None),
 ]
 
 # ── the SECOND evidence source for a field's type: what __init__ ASSIGNS ─────
@@ -5620,6 +5908,61 @@ BOTH_ARCH_CASES = [
      "    o.inner.a = 20\n"
      "    o.inner.b = 22\n"
      "    return o.get()\n", 42, None),
+
+    # ── AN ENUM-TYPED PARAMETER, AND `.value` OFF IT ─────────────────────────
+    #
+    # `Reg.RBP.value` — a CLASS-level member read — lowers, and has since
+    # `_enum_member_sites` / `_apply_constant_sites` (that fix is what stopped
+    # `Reg.R15.value` answering `0` where CPython answers `15`). The PARAMETER
+    # spelling did not, and the difference was one word in the site key: the
+    # census was keyed on the literal path `Reg.RBP.value`, and a parameter's path
+    # is `base.value`. Measured on both architectures before the rewrite:
+    #
+    #   build: 'base.value' is a field access through 'base', and this path has
+    #   no way to say what 'base' holds …
+    #
+    # and the refusal was FALSE. Its own rule is that "a field is lowered three
+    # ways and which one applies is decided by the BINDING of the base, not by a
+    # type" — and `base` is bound by its DECLARATION, which says `Reg`. `base`
+    # is not a frame and not a field: it holds an enum member, which on this path
+    # is a plain 64-bit word, and **the word an enum member IS, on this path, IS
+    # its value** — which is exactly why the class-constant rewrite substitutes
+    # the literal for `Reg.RBP.value`. So `base.value` is `base`.
+    #
+    # In `BOTH_ARCH_CASES` rather than as a `refuse:` row because the rewrite is
+    # in the shared build pass and the ANSWER is what has to agree: `formal/
+    # x86_64.py` reads these values in its register-number arithmetic, so a
+    # backend that got the word wrong would compute wrong machine code, print it,
+    # and exit 0.
+    #
+    # 46 = `scaled(Reg.RSP, 3)`'s 36, `is_bp(Reg.RBP)`'s 10, `is_bp(Reg.RAX)`'s
+    # 0 — under 256 because the exit status is a byte, and a weighted sum wide
+    # enough to overflow it would compare against `expected & 0xFF` and invent a
+    # mismatch (the lesson `bugs/FORMAL_arm64_instruction_coverage.md` §"Every
+    # expected value must fit in a byte" records, having been learned there).
+    # `is_bp` is a COMPARISON and `scaled` is arithmetic on purpose: the rewrite
+    # has to put the bare name where an operand goes, and a row that only
+    # returned `base.value` would pass on a substitution that happened to be
+    # right for the wrong reason.
+    ("both_arch_enum_typed_parameter_value_is_the_word_it_holds",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    RBP = 5\n"
+     "    RSP = 12\n"
+     "\n"
+     "def is_bp(base: Reg) -> Int:\n"
+     "    if base.value == 5:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "\n"
+     "def scaled(base: Reg, k: Int) -> Int:\n"
+     "    return base.value * k\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return scaled(Reg.RSP, 3) + is_bp(Reg.RBP) * 10 + is_bp(Reg.RAX) * 100\n",
+     46, None),
     # ── A ONE-FIELD STRUCT WHOSE SOLE FIELD IS A FRAME ────────────────────────
     #
     # `Box` declares ONE field, `inner`, whose declared type is the framed
@@ -6160,7 +6503,72 @@ BOTH_ARCH_CASES = [
      "    x.peek(y)\n"
      "    printf(\"a=%d\", x.a)\n"
      "    return 0\n", 0, "a=1"),
-    # ── the STACK FLOOR (`formal/model.py`: `recursive_function_names`,
+    # ── the store a one-field receiver CANNOT deliver ───────────────────────
+    #
+    # Found by `tools/formal_fuzz.py`, and the shape above is why the two rows
+    # before it did not catch it: they are about a REBINDING of the receiver,
+    # which CPython also does not deliver, so leaving it alone is right. This is
+    # a store to the FIELD, which CPython DOES deliver — into the object the
+    # caller holds — and which this path computed and dropped:
+    #
+    #     class C:
+    #         def __init__(self): self.a = 2
+    #         def bump(self):     self.a = 7
+    #         def get(self):      return self.a
+    #     c = C(); c.bump(); print(c.get())      # CPython 7, this path 2
+    #
+    # Builds, ran, exited 0, and printed the constructor's value on BOTH
+    # architectures. `model.one_field_dropped_receiver_stores` is the rule and
+    # `receiver_writeback_name` is the mechanism it is about: the write-back
+    # needs the receiver declared `out`/`inout`/`mut`, and a plain `self` is
+    # never handed back. Refused rather than delivered, because the one return
+    # word is the receiver and delivering the store would cost the method's own
+    # value — the same ABI reason `mutating_receiver_return_refusal` gives.
+    #
+    # The needle is the LOAD-BEARING half of the message: it says the receiver
+    # is not handed back. A message that only said "one-field receiver" would be
+    # indistinguishable from a one-field READER, which builds.
+    # …and the WIDTH is the whole rule, so the two-field spelling of the same
+    # program is the guard: its receiver is a frame address the caller still
+    # owns, so the store lands and CPython's answer is already this path's.
+    ("both_arch_two_field_store_through_a_plain_receiver_still_reaches_it",
+     "class D:\n"
+     "    def __init__(self):\n"
+     "        self.a = 2\n"
+     "        self.b = 5\n"
+     "\n"
+     "    def bump(self):\n"
+     "        self.a = 7\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "def main(n):\n"
+     "    d = D()\n"
+     "    d.bump()\n"
+     "    printf(\"a=%d\", d.get())\n"
+     "    return 0\n", 0, "a=12"),
+    # And the CONSTRUCTOR is not refused, because it is not a call: its stores
+    # are inlined into the construction site, which is where CPython runs them.
+    # `one_field_reader_is_not_a_mutator` and `both_arch_zero_arg_init_stores_a
+    # _one_field_scalar` cover the read and the zero-argument spelling; this row
+    # is the one where a plain receiver's `__init__` takes a PARAMETER and stores
+    # it, so the refusal cannot be "plain receivers are refused" by accident.
+    ("both_arch_one_field_init_stores_its_parameter_through_a_plain_receiver",
+     "struct T:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def __init__(self, v: Int):\n"
+     "        self.a = v\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = T(9)\n"
+     "    printf(\"a=%d\", t.get())\n"
+     "    return 0\n", 0, "a=9"),
+    # ── the STACK FLOOR (`formal/model.py`: `stack_floor_guarded_names`,
     # `STACK_FLOOR_BUDGET_BYTES`, `STACK_TRAP_STATUS`) ──
     #
     # A runaway recursion used to be a SIGSEGV on both backends: no output and
@@ -6251,6 +6659,185 @@ BOTH_ARCH_CASES = [
      "    if read8u(s) != 5208208757389214273:\n"
      "        return 14\n"
      "    return 1\n", 1, None),
+    # ── THE ACYCLIC CHAIN, ON BOTH ARCHITECTURES ───────────────────────────
+    #
+    # A recursion is what the guard was written for and the three rows above are
+    # that. This row is the other half: SIX HUNDRED DISTINCT functions, each
+    # calling the next, with no call back into anything already on the stack.
+    # Unbounded depth needs a cycle, so a chain like this walked straight past
+    # the floor — and the corpus is already inside it, which is what
+    # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its life
+    # measuring: `tools/formal_call_depth_census.py` puts the deepest single
+    # image in this repository at 76 frames against the 60 an arm64 budget
+    # affords (`formal/arm64_codegen.py`, and 69 for `x86_64_codegen.py`).
+    #
+    # 600 rather than 61 because x86-64's frame is 16 KiB to arm64's 128 KiB, so
+    # its budget affords 480 frames and a 61-deep chain is correctly INSIDE it.
+    # A single depth cannot therefore show the defect on both machines, and a
+    # case that only fires on one is a case whose subject is the FRAME SIZE
+    # rather than the guard. 600 crosses both: 600 x 128 KiB = 75 MiB against
+    # arm64's 7.5 MiB, and 600 x 16 KiB = 9.4 MiB against x86-64's 7.5 MiB.
+    #
+    # GENERATED, and that is the point rather than a convenience: no hand-written
+    # function in this file is 600 calls deep, so only a generator reaches the
+    # shape at all — the same reason `spills_2001_statements` exists.
+    #
+    # `if n > 1000000: return n` in every body is what makes this a case about
+    # the SECOND rule rather than the first: a body with no conditional branch
+    # is not guarded off the cycle, and 600 of those is the measured residual
+    # `stack_floor_guarded_names`'s docstring states (12 frames over the whole
+    # corpus, a median of 3).
+    #
+    # Measured before the widening, on both architectures: exit 139 (SIGSEGV,
+    # no output, no status). After: `STACK_TRAP_STATUS`, exit 2.
+    ("both_arch_an_acyclic_chain_past_the_floor_is_a_status",
+     "".join(
+         "def d%d(n: Int) -> Int:\n"
+         "    if n > 1000000:\n"
+         "        return n\n"
+         "    %s\n" % (i, "return n + 1" if i == 599 else "return d%d(n)" % (i + 1))
+         for i in range(600))
+     + "def main(n: Int) -> Int:\n"
+       "    if n > 1000000:\n"
+       "        return n\n"
+       "    return d0(n)\n", 2, None),
+    # GUARD for the row above, and it is the row that says the widening is not
+    # "guard everything": a chain of STRAIGHT-LINE bodies is left exactly as it
+    # was, because a body the emitter lays out without a branch is a body whose
+    # per-export contract the guard's own branch would cost. 61 is where arm64
+    # would cross its budget, so a program that stopped here is a program the
+    # rule is not reaching — and 11 is `main`'s own answer for the argument the
+    # entry stub passes, which is what makes it an assertion about the DEPTH
+    # rather than about the guard being present.
+    ("guard_a_straight_line_chain_is_left_alone",
+     "".join(
+         "def d%d(n: Int) -> Int:\n"
+         "    %s\n" % (i, "return n + 1" if i == 60 else "return d%d(n)" % (i + 1))
+         for i in range(61))
+     + "def main(n: Int) -> Int:\n"
+       "    return d0(n)\n", 11, None),
+    # ── A DELEGATING CONSTRUCTOR OVER A STRUCT OF THIS MODULE ──────────────
+    #
+    # The last reason `bugs/FORMAL_receiver_stored_in_a_field.md`'s delegating
+    # row was refused. It is a THREE-step deadlock between two decisions that
+    # were each individually right:
+    #
+    #   1. `model.struct_nested_frame_fields` PLACED a nested frame in every
+    #      field whose declared type names a framed struct of this module and
+    #      whose only writer is `__init__` — the constructor reserving a block in
+    #      the object's own block and storing that block's ADDRESS in the slot.
+    #   2. which made `formal/build.py`'s `_frame_field_store_is_sound` refuse
+    #      `self.src = r`, correctly: the slot IS placed, so a pointer stored
+    #      over it leaves a word where every reader computes a frame base from
+    #      it.
+    #   3. and `_typed_nested_frame` answered `_REASSIGNED` at the read, because
+    #      the placement list — the authority it consults — did not have the
+    #      field in it.
+    #
+    # The store and the read are both right about a field the constructor BUILDS
+    # there. This one does not build one: it stores the CALLER's frame. So the
+    # slot is a POINTER slot, `struct_nested_frame_fields` now says so
+    # (`model.init_stores_a_parameter_struct`, the predicate `one_word_field_struct`
+    # was already asking for the same evidence), `_typed_nested_frame` says so
+    # too — and it must say it with the STRUCT rather than with `_REASSIGNED`,
+    # because `_REASSIGNED`'s own sentence ("a frame belonging to whichever
+    # function ran the assignment") is false here: the only assignment is
+    # `__init__`'s and the frame in the slot is the caller's.
+    #
+    # 7 + 1 = 8, and the reader is a METHOD (`h.total()`) as well as a field read
+    # (`h.src.a`) because the two go through different arms and a fix that
+    # reached only the value-position read would leave the method receiver
+    # refusing.
+    ("both_arch_a_delegating_constructor_over_a_struct_of_this_module",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Holder:\n"
+     "    var src: R\n"
+     "    var n: Int\n"
+     "\n"
+     "    def __init__(self, r: R):\n"
+     "        self.src = r\n"
+     "        self.n = 1\n"
+     "\n"
+     "    def total(self) -> Int:\n"
+     "        return self.src.a + self.n\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    var h = Holder(r)\n"
+     "    printf(\"%d %d\", h.src.a, h.total())\n"
+     "    return h.src.a + h.n\n", 8, "7 8"),
+    # GUARD for the placement itself, in the direction that keeps it working: a
+    # slot whose `__init__` writes only `self.tag` — never `in1` — is still a
+    # PLACED nested frame, and two objects still get two frames. Without this row
+    # a fix that dropped the placement rather than narrowing it would look green.
+    #
+    # It is the shape `assigned_type_nested_frame_two_objects_no_alias` uses,
+    # deliberately: that case's `Outer` has a two-field frame (`tag`, `pad`) so
+    # `in1` lands at slot 2, which is what makes it a depth-2 nested frame rather
+    # than the depth-1 one-word case, and it is the only shape on this path that
+    # both PLACES a nested frame and writes through one afterwards.
+    ("a_constructed_nested_frame_is_still_placed",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.tag = 0\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o1 = Outer()\n"
+     "    var o2 = Outer()\n"
+     "    o1.in1.a = 1\n"
+     "    o1.in1.b = 2\n"
+     "    o2.in1.a = 7\n"
+     "    o2.in1.b = 8\n"
+     "    printf(\"%d %d\", o1.in1.a * 10 + o1.in1.b, o2.in1.a * 10 + o2.in1.b)\n"
+     "    return o1.in1.a + o2.in1.a\n", 8, "12 78"),
+    # ── A LOOP VARIABLE'S KIND, ON BOTH ARCHITECTURES ──────────────────────
+    #
+    # Every other row of this change is in PRINTF_TEXT_CASES and runs on the
+    # host only, which is the wrong economy here: the subject is one table in
+    # `formal/model.py` that both backends ask (`ValueKinds._iterable_own_shape`
+    # for the kind, `truthy_lowering` for the conversion), so what needs proving
+    # is that they come out the SAME, and that is what this row is for.
+    #
+    # The pre-change answers were a WRONG NUMBER on both machines and both were
+    # wrong in the same direction, which is the failure mode nothing else here
+    # catches: `a` (a `for` over three strings, one of them empty) was 3 and
+    # `b` (a comprehension over four of them, one empty) was 4, both where
+    # CPython says 2 and 3. `c` and `d` are the two guards — the outer `x` stays
+    # an integer beside a comprehension that rebinds `x`, and `len` of a
+    # comprehension target is a `strlen` rather than a refusal (which is what
+    # made `d` answerable at all).
+    #
+    # Every number printed is distinct, and the trailing `5` is a constant in the
+    # format so a formatter that dropped an argument would still print five of
+    # them.
+    ("both_arch_loop_and_comprehension_variable_hold_an_element",
+     "def main(n: Int) -> Int:\n"
+     "    var a = 0\n"
+     "    for t in [\"p\", \"\", \"q\"]:\n"
+     "        if t:\n"
+     "            a = a + 1\n"
+     "    var b = len([y for y in [\"p\", \"\", \"q\", \"r\"] if y])\n"
+     "    var x = 5\n"
+     "    var c = 0\n"
+     "    if x:\n"
+     "        c = c + 1\n"
+     "    var lens = [len(k) for k in [\"a\", \"bb\", \"ccc\", \"dddd\"]]\n"
+     "    var d = lens[3]\n"
+     "    printf(\"%d %d %d %d %d\", a, b, c, d, 5)\n"
+     "    return 0\n", 0, "2 3 1 4 5"),
 
     # ONE NAME, TWO `__init__`s, only ONE of which has a receiver. Both halves of
     # the defect this pins are about that collision, and each one alone leaves a
@@ -9526,23 +10113,25 @@ CONSTRUCTION_REFUSALS = [
      "    return x.g\n",
      "refuse:whose body this path does not inline: `In1(…)`, a construction of a struct whose receiver is a frame",
      None),
-# (8) The SAME construction into a field DECLARED with that struct's type,
-    # and the message is a different one — the frame's.  `f` is declared `In3`,
-    # a struct of this module whose receiver is a frame, so the parameter is a
-    # FRAME HOLDER (the declared type is the evidence; there is no call site
-    # that hands it one, because `In4.__init__` is called by nobody here) and
-    # `self.f = f` parks a frame address in a field.  That is
-    # `frame_return_refusal`'s sibling for a store, and it is the more useful of
-    # the two messages because it names the LIFETIME question: the slot belongs
-    # to the frame that created THAT object and nothing here can say the two
-    # lifetimes agree.  It used to be answered by the placement instead
-    # (`construction_nested_slot_refusal`, "a store over a placed nested frame"),
-    # which was right about the slot and silent about the address being stored
-    # in it; the ORDER moved because the frame analysis runs before the
-    # construction checks and now recognises the parameter.  Still a refusal, and
-    # a separate case because two refusals for one family is exactly what "the
-    # needle is the fact that is wrong" is for.
-    ("constr_refuse_an_init_store_over_a_placed_nested_frame",
+# (8) The SAME construction into a field DECLARED with that struct's type, and
+    # **this one used to be a refusal and is now the row that says why it is
+    # not** (`model.init_stores_a_parameter_struct`, 2026-10-03,
+    # `bugs/FORMAL_receiver_stored_in_a_field.md`).
+    #
+    # It was refused as "a store over a placed nested frame", and the PLACEMENT
+    # is what made the store unsound — `struct_nested_frame_fields` reserves a
+    # block in the object's own block and writes that block's address into `f`,
+    # so a pointer stored over it leaves a word where every reader computes a
+    # frame base from it.  But this constructor does not BUILD a nested frame in
+    # `f`: it stores the CALLER's, because `f` arrived as its own annotated
+    # parameter.  `f` is therefore a POINTER slot, `g` is the only placed one,
+    # and `x.f.a` reads the caller's frame at the slot's own offset.
+    #
+    # Which is why this case changed from `refuse:` to an ANSWER rather than
+    # being deleted: it is the smallest source that reaches the whole deadlock,
+    # and a reader who finds the placement predicate and wants to know what it
+    # moved should find the answer here.  1 + 2 + 3 = 6.
+    ("constr_a_delegating_store_into_a_typed_nested_slot_builds",
      "struct In3:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -9557,8 +10146,7 @@ CONSTRUCTION_REFUSALS = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var x = In4(In3(1, 2), 3)\n"
-"    return x.g",
-     "refuse:is stored in the field 'self.f'", None),
+     "    return x.f.a + x.f.b + x.g\n", 6, None),
     # The other side of the same line, and the one the change made a REFUSAL:
     # a zero-argument `S()` on a struct whose `__init__` REQUIRES a parameter.
     # `Bag4()` is a `TypeError` in the language — the constructor needs `n` and
@@ -10847,6 +11435,135 @@ WAVE6_TRUTHY_CASES = [
      "    b = [x for x in a if x]\n"
      "    printf(\"%d\", len(b))\n"
      "    return 0\n", 0, "3"),
+    # ── THE LOOP VARIABLE'S KIND: an ELEMENT, not the container ────────────
+    #
+    # The row above is over a NAME, so it says nothing about what a loop
+    # variable holds — and that is the gap these two close. `ValueKinds`
+    # classified the target of `for x in ["p", "", "q"]` as `list:str`, the
+    # LIST's kind, so every reader of a container took it at its word:
+    #
+    #   * `if x:` → `truthy_lowering`'s TRUTHY_FROM_BLOB_FIELD, which is ONE
+    #     LOAD FROM OFFSET 0. For a `char *` that load reads the eight bytes of
+    #     `__TEXT,__text` that FOLLOW the terminating NUL — so whether the
+    #     empty string came out truthy depended on which other string the
+    #     linker happened to intern next to it. Measured on both backends
+    #     before the fix, `for x in ["p", "", "q"]: if x: c = c + 1` returned
+    #     3 where CPython returns 2.
+    #   * `len(x)` → the same load, so it returned a number made of the string's
+    #     own bytes: 2013266032 = 0x78000070 for "p", which is `p\0` and the
+    #     first three bytes of the next interned string.
+    #
+    # 3 and 2 are the only two small answers available, and the pre-change
+    # number is on the other side of the one-byte boundary from the correct
+    # one, so a fixed build cannot reach it by accident.
+    ("truthy_for_loop_variable_over_strings",
+     "def main(n):\n"
+     "    var c = 0\n"
+     "    for x in [\"p\", \"\", \"q\"]:\n"
+     "        if x:\n"
+     "            c = c + 1\n"
+     "    printf(\"%d\", c)\n"
+     "    return 0\n", 0, "2"),
+    # The `else` half, because the two-element list is where the pre-change
+    # build was ACCIDENTALLY right: the empty string's interned bytes happened
+    # to be adjacent to their own NUL, so offset 0 read zero and the else arm
+    # ran. 101 is `then` once and `else` once; 2 or 200 would mean the guard
+    # never moved.
+    ("truthy_for_loop_variable_else_arm",
+     "def main(n):\n"
+     "    var c = 0\n"
+     "    for x in [\"p\", \"\"]:\n"
+     "        if x:\n"
+     "            c = c + 1\n"
+     "        else:\n"
+     "            c = c + 100\n"
+     "    printf(\"%d\", c)\n"
+     "    return 0\n", 0, "101"),
+    # The INTEGER row, and it is the one that CRASHED rather than answered
+    # wrongly: with the target classified `list:int`, `if x:` took the count
+    # field — `LDR [x, #0]` with X0 holding the integer 1 — so
+    # `for x in [1, 0, 2]: if x:` died of SIGSEGV on both backends. An integer
+    # is 0 or it is not, so the identity test is the answer and it is what the
+    # element kind restores.
+    ("truthy_for_loop_variable_over_ints",
+     "def main(n):\n"
+     "    var c = 0\n"
+     "    for x in [1, 0, 2]:\n"
+     "        if x:\n"
+     "            c = c + 1\n"
+     "    printf(\"%d\", c)\n"
+     "    return 0\n", 0, "2"),
+    # GUARD, and the reason it passes on the pre-change tree too: the target of
+    # `for row in [[1, 2], [3, 4]]` IS a blob, and `len(row)` answers from its
+    # count field. The nested-container arm of the element kind is what keeps it
+    # that way — without it the target kind would fall to the word default and
+    # `len` of a program that has always worked would start refusing.
+    # 2 + 2 = 4.
+    ("truthy_nested_loop_variable_keeps_its_blob",
+     "def main(n):\n"
+     "    var s = 0\n"
+     "    for row in [[1, 2], [3, 4]]:\n"
+     "        s = s + len(row)\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n", 0, "4"),
+    # ── THE COMPREHENSION'S OWN SCOPE ──────────────────────────────────────
+    #
+    # A comprehension has its own scope in Python 3, so its loop variable is
+    # not a local of the enclosing function and `ValueKinds.locals` must not
+    # answer for it. It did not answer at all: `_scan` binds a `for` statement's
+    # target and has no `Comprehension` arm, so the target was in no kind map
+    # and `if x:` fell to TRUTHY_NONZERO — a null test on the ADDRESS of the
+    # empty string. Measured on both backends before the fix, exactly as the
+    # `for` row above:
+    # `[x for x in ["p", "", "q"] if x]` had THREE elements where CPython
+    # builds two.
+    #
+    # It is an OVERLAY rather than a `_bind` into `locals`, and this row is why
+    # that matters: binding `x` into the function's map beside `var x = 5` would
+    # file two bindings that do not meet as a conflict, cost the OUTER `x` the
+    # integer kind it has here, and leave the comprehension with a word. The
+    # outer `x` must stay an integer (c = 1) and the comprehension must still
+    # filter (r = 2), and both are asserted here.
+    ("comprehension_target_is_its_own_scope",
+     "def main(n):\n"
+     "    var x = 5\n"
+     "    var r = [x for x in [\"p\", \"\", \"q\"] if x]\n"
+     "    var c = 0\n"
+     "    if x:\n"
+     "        c = c + 1\n"
+     "    printf(\"%d %d\", len(r), c)\n"
+     "    return 0\n", 0, "2 1"),
+    # The SAME scope read by the ELEMENT rather than by the guard, and it is a
+    # capability as well as a correctness row: `len(k)` over a comprehension
+    # target used to be REFUSED for want of a kind ("the source does not say
+    # what this operand holds"), and it is a `strlen` now. 2 + 0 + 3 = 5.
+    ("comprehension_target_kind_is_visible_to_the_element",
+     "def main(n):\n"
+     "    var r = [len(k) for k in [\"aa\", \"\", \"bbb\"]]\n"
+     "    printf(\"%d %d %d\", len(r), r[0], r[2])\n"
+     "    return 0\n", 0, "3 2 3"),
+    # A DICT comprehension's KEY is the element and its VALUE is `.key` (the
+    # parser's swap), so both sites are inside the scope — and `len(k)` in the
+    # value position is the one that would be missed if only the element were
+    # routed. 3 pairs, d["aa"] = 2, d["bbb"] = 3.
+    ("comprehension_scope_reaches_both_dict_spellings",
+     "def main(n):\n"
+     "    var d = {k: len(k) for k in [\"aa\", \"\", \"bbb\"]}\n"
+     "    printf(\"%d %d %d\", len(d), d[\"aa\"], d[\"bbb\"])\n"
+     "    return 0\n", 0, "3 2 3"),
+    # GUARD: a comprehension over an iterable this path cannot describe is
+    # exactly as unanswerable as it was before the overlay — the overlay claims
+    # a kind only from `_iterable_own_shape`, so `for x in a` over a parameter
+    # falls through to the function's own map and then to TRUTHY_NONZERO. That
+    # is the right answer for integers and the reason the row is 3 and not a
+    # refusal.
+    ("comprehension_over_a_parameter_is_unchanged",
+     "def pick(n, a):\n"
+     "    var b = [x for x in a if x]\n"
+     "    return len(b)\n"
+     "\n"
+     "def main(n):\n"
+     "    return pick(0, [1, 0, 2])\n", 2, None),
     # A short-circuit chain. The one that is NOT just the left operand: `and`/
     # `or` return an OPER operand, and the operand that survives can be the
     # empty string or the empty list, whose zeroness as a returned VALUE is the
@@ -10926,6 +11643,169 @@ WAVE6_TRUTHY_CASES = [
      "def main(n):\n"
      "    printf(\"%d %d\", 5 and 9, 0 or 9)\n"
      "    return 0\n", 0, "9 9"),
+
+    # ── WHAT A `for … in range(…)` LEAVES IN ITS COUNTER ────────────────────
+    #
+    # Found by `tools/formal_fuzz.py` (its seed 1 reduces to the first row
+    # below), and it was a SILENT wrong answer on both architectures: the loop
+    # tests the counter before it advances it, so the exit path arrives one past
+    # the last value the body saw, and `for i in range(0, 3)` left `i == 3`
+    # where CPython leaves 2. Nothing else in this file read a range counter
+    # after its loop, which is why ~700 hand-written cases never saw it.
+    #
+    # Every row's expected value is CPython's, and the arithmetic is in the row
+    # rather than taken on trust. The counter after a loop is CPython's LAST
+    # BOUND value, which for a step of 2 is not one less than the exit value.
+    #
+    # The one case still wrong, and it is a bug doc rather than a row here:
+    # pinning "prints 0" where CPython prints 7 would make the defect the
+    # expectation. `for i in range(0, 0)` over a counter that already held a
+    # value stores `start` before it tests, and CPython's `for` binds the target
+    # only when the iteration produces one —
+    # `bugs/FORMAL_for_range_over_an_empty_range_overwrites_a_preassigned_counter.md`.
+    ("both_arch_for_range_leaves_the_counter_at_the_last_value_it_bound",
+     "def main(n):\n"
+     "    for i in range(0, 3):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=2"),
+    ("both_arch_for_range_step_leaves_the_counter_one_step_back",
+     "def main(n):\n"
+     "    for i in range(0, 5, 2):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=4"),
+    ("both_arch_for_range_descending_leaves_the_counter_at_the_last_value",
+     "def main(n):\n"
+     "    for i in range(3, 0, -1):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=1"),
+    # `break` leaves the counter where the body last had it, which is the last
+    # value CPython bound — so the restore on the exit path must NOT run for a
+    # break, or this row would print 1.
+    ("both_arch_for_range_break_leaves_the_counter_where_break_ran",
+     "def main(n):\n"
+     "    for i in range(0, 9):\n"
+     "        if i == 2:\n"
+     "            break\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=2"),
+    # `continue` re-enters through the counter advance, so the value after the
+    # loop is the last one the TEST rejected — here 4, since `range(0, 5)` last
+    # yielded 3 and the skipped `continue` on 4 still advanced and tested.
+    ("both_arch_for_range_continue_advances_before_it_tests_again",
+     "def main(n):\n"
+     "    for i in range(0, 5):\n"
+     "        if i == 4:\n"
+     "            continue\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=4"),
+    # …and the `else` arm runs on exhaustion, with the counter already restored,
+    # so the two are asserted together rather than one at a time.
+    ("both_arch_for_range_else_runs_with_the_counter_already_restored",
+     "def main(n):\n"
+     "    for i in range(0, 3):\n"
+     "        x = 1\n"
+     "    else:\n"
+     "        printf(\"else i=%d\", i)\n"
+     "    return 0\n", 0, "else i=2"),
+    # The loop in a FUNCTION, which is where the counter is a spill slot rather
+    # than a register: the restore has to go through the same load/operate/store
+    # path the advance does, and a fix that only handled the register home would
+    # pass every row above and fail this one.
+    ("both_arch_for_range_restores_a_spilled_counter_too",
+     "def last(k):\n"
+     "    s = 0\n"
+     "    for i in range(0, k):\n"
+     "        s = s + i\n"
+     "    return i\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"i=%d\", last(4))\n"
+     "    return 0\n", 0, "i=3"),
+    # NESTED: the inner loop's restore must not disturb the outer counter, which
+    # is the value the outer loop keeps testing. Both were one past before.
+    ("both_arch_nested_for_range_restores_only_its_own_counter",
+     "def main(n):\n"
+     "    for i in range(0, 2):\n"
+     "        for j in range(0, 3):\n"
+     "            x = j\n"
+     "    printf(\"i=%d j=%d\", i, j)\n"
+     "    return 0\n", 0, "i=1 j=2"),
+    # A `while` is untouched by the fix and says so: its counter is the user's
+    # own increment, so there is nothing to restore and this row must not move.
+    ("both_arch_while_counter_is_unchanged_by_the_for_range_fix",
+     "def main(n):\n"
+     "    i = 0\n"
+     "    while i < 3:\n"
+     "        i = i + 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=3"),
+
+    # ── a FLEXIBLE type is not an UNSIGNED one ─────────────────────────────
+    #
+    # Found by `tools/formal_fuzz.py` (its seed 206 reduces to the last row
+    # below), and it was silent on both architectures. `infer_expr` returns
+    # `None` for an expression with no declared type — a bare literal, or an
+    # operator whose operands are both typeless — and `None` means "this value
+    # takes the type of its context", not "this value is unsigned". Reading it
+    # as unsigned made `print` choose `%llu`, so `print(0 - 3)` printed
+    # 18446744073709551613. The confusing part, and the reason a hand-written
+    # case did not catch it: `v = 0 - 3; print(v)` printed `-3` all along,
+    # because an ASSIGNMENT resolves the flexible type to the default. The
+    # difference had no name in the source — only whether the expression was
+    # printed directly or bound first.
+    #
+    # `types.cmp_signed` is the one decision both backends and both proof
+    # generators read, so this is a single change with a single blast radius;
+    # these rows are the four places it reached.
+    ("both_arch_print_of_a_flexible_negation_is_signed",
+     "def main(n):\n"
+     "    print(0 - 3)\n"
+     "    return 0\n", 0, "-3"),
+    ("both_arch_print_of_a_flexible_folded_negation_is_signed",
+     "def main(n):\n"
+     "    print(-(1 + 2))\n"
+     "    return 0\n", 0, "-3"),
+    # The comparison half, and the row that matters most: a constant expression
+    # with no declared type was compared with UNSIGNED condition codes, so
+    # `(0 - 5) < 3` was FALSE — `-5` was 0xFFFF…FB. Both directions are here
+    # because a fix that made every constant comparison signed would pass the
+    # first and fail nothing here.
+    ("both_arch_a_constant_comparison_is_signed_in_both_directions",
+     "def main(n):\n"
+     "    printf(\"%d %d\", 1 if (0 - 5) < 3 else 0,"
+     " 1 if (0 - 5) > 3 else 0)\n"
+     "    return 0\n", 0, "1 0"),
+    # The row the fuzzer reduced to: a negation of a REMAINDER. `%` returns a
+    # typeless value (both operands typeless), so `-(…)` was flexible and
+    # printed unsigned: 18446744073709551614 where CPython prints -2.
+    ("both_arch_print_of_a_negated_flexible_remainder_is_signed",
+     "def main(n):\n"
+     "    print(-(2 % 5))\n"
+     "    return 0\n", 0, "-2"),
+    # THE GUARD, and it is the row that decides whether the fix is safe rather
+    # than a blanket "everything is signed": a DECLARED unsigned type still
+    # reads as unsigned, because `common_type` treats a flexible operand as
+    # neutral and the declared `UInt32` is what decides. Without this row a
+    # change that resolved every `None` to signed without asking `common_type`
+    # first would pass all four above.
+    ("both_arch_a_declared_unsigned_operand_is_still_unsigned",
+     "def main(n):\n"
+     "    x: UInt32 = 7\n"
+     "    y: UInt32 = 2\n"
+     "    x = x - 4\n"
+     "    printf(\"%d %d\", 1 if x > y else 0, x)\n"
+     "    return 0\n", 0, "1 3"),
+    # …and the assignment half, which was never wrong and must stay right: it
+    # is what made the defect look like a `print` bug.
+    ("both_arch_a_bound_flexible_negation_was_always_signed",
+     "def main(n):\n"
+     "    v = 0 - 3\n"
+     "    printf(\"%d\", v)\n"
+     "    return 0\n", 0, "-3"),
 ]
 
 
@@ -12465,6 +13345,72 @@ SET_UNION_CASES = [
      "    for v in a | b:\n"
      "        s += v\n"
      "    print(\"%d\" % s)\n"),
+
+    # ── THE SAME UNION, READ AS A VALUE — the row above structurally cannot
+    # fail on this, and that is why it is a separate row rather than a comment.
+    #
+    # The row above walks the result.  A walk reads elements until it hits
+    # something else, so it gets the right three even when the count word is
+    # wrong — the failure `_emit_set_union` had was a count of `nL + nR`
+    # written over a result holding `nL` elements, which made the dedup loop
+    # append `3` at index 4 and settle on 5 over the words [1, 2, 3] and two
+    # unwritten ones.  Iterating that reads five slots, sums 6, and agrees with
+    # CPython on the sum while disagreeing on everything else.
+    #
+    # `len` reads the count word itself, and so does a walk's own trip count, so
+    # both are asked here and CPython is asked both.  Measured on arm64 before
+    # the fix: `3 5 6` where CPython says `3 3 6`; and the subscript spelling
+    # `c[0], c[1], c[2]` answered `1, 2, 0` where CPython has no subscript for
+    # a set at all, which is why this row asks `len` and the trip count rather
+    # than reproducing that.  (It is not lost: `c[3]` on a three-element union
+    # now exits 1 through the blob bounds check, which is the other half of the
+    # same answer.)
+    ("set_union_count_read_as_a_value_through_locals",
+     "def main() -> Int:\n"
+     "    var a = {1, 2}\n"
+     "    var b = {2, 3}\n"
+     "    var c = a | b\n"
+     "    var s = 0\n"
+     "    var k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    printf(\"%d %d %d\\n\", len(c), k, s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    a = {1, 2}\n"
+     "    b = {2, 3}\n"
+     "    c = a | b\n"
+     "    s = 0\n"
+     "    k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    print(\"%d %d %d\" % (len(c), k, s))\n"),
+
+    # THE SAME THROUGH LITERALS, which is a different path and not a
+    # variation on the row above: `_blob_est` answers a set literal with its
+    # element count and an `IdentExpr` with 64, so the two spellings reserve a
+    # different number of words for the result.  A fix that only got the
+    # reservation right would pass one of these two rows and fail the other.
+    ("set_union_count_read_as_a_value_through_literals",
+     "def main() -> Int:\n"
+     "    var c = {1, 2} | {2, 3}\n"
+     "    var s = 0\n"
+     "    var k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    printf(\"%d %d %d\\n\", len(c), k, s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    c = {1, 2} | {2, 3}\n"
+     "    s = 0\n"
+     "    k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    print(\"%d %d %d\" % (len(c), k, s))\n"),
 ]
 
 
@@ -16545,6 +17491,12 @@ TYPE_VALUE_CASES = [
      5, None),
 ]
 
+# The model itself, imported rather than a table of its answers: a tag is a hash
+# of a canonical name, and a literal written here would be a second
+# implementation of that hash in a test.
+_TYPE_VALUE_MODEL = __import__("formal.model", fromlist=["model"])
+
+
 TYPE_VALUE_DTYPE_CASES = [
     # `DType.<member>` is the SAME WORD as the bare name — the case that says
     # so, and the reason the tag is computed from the type's name and not from
@@ -16577,6 +17529,44 @@ TYPE_VALUE_DTYPE_CASES = [
     # Through a STRUCT FIELD, which is the shape the corpus uses: both files
     # declare `dtype: DType` and store into it. The field is one word, so this
     # is only interesting because the VALUE is a type.
+    # The NARROW float formats and `UInt128`, which were 202 corpus spellings
+    # refused as "a name no table in formal/model.py lists". The expected values
+    # are `model.type_tag` read from the model rather than written down here,
+    # and that is the right oracle for THIS row specifically: a tag IS a hash of
+    # the canonical name, so a constant typed by hand would be a second
+    # implementation of the same hash in a test. What the row asserts is the
+    # thing the list exists for — every one of the ten corpus spellings is a
+    # word, the member and the bare type name are the SAME word, and two
+    # different formats are DIFFERENT words (which is the injectivity property
+    # the closed set buys, checked here where a reader can see it).
+    ("type_value_narrow_float_formats_and_uint128_are_tags",
+     "def main(n: Int) -> Int:\n"
+     "    var a = 0\n"
+     "    if DType.float8_e4m3fn == Float8_e4m3fn:\n        a = a + 1\n"
+     "    if DType.float8_e5m2 == Float8_e5m2:\n        a = a + 2\n"
+     "    if DType.uint128 == UInt128:\n        a = a + 4\n"
+     "    if DType.float4_e2m1fn != Float4_e2m1fn:\n        a = a + 8\n"
+     "    printf(\"h=%d@@\", a)\n"
+     "    printf(\"i=%d@@\", DType.float6_e3m2fn != DType.float8_e3m4)\n"
+     "    printf(\"j=%d@@\", DType.float8_e4m3fnuz != DType.float8_e5m2fnuz)\n"
+     "    printf(\"k=%d@@\", DType.float8_e8m0fnu != UInt128)\n"
+     "    return 0\n",
+     0, "h=7@@i=1@@j=1@@k=1@@"),
+    # …and the WORDS themselves, because "it built" is not "it is the right
+    # word": a member that resolved to some OTHER type's tag would satisfy
+    # every comparison above and answer a program wrongly. `print()` and not
+    # `printf("%d")`, which is the reason the expected values are the full
+    # 64-bit tags: `%d` is a 32-bit conversion in C and every one of the 67
+    # admitted tags is above 2**31 — `bool`'s included, which is why
+    # `TYPE_VALUE_NUMBER_CASES` below uses `print` for the same reason.
+    ("type_value_dtype_narrow_format_tags_are_the_model_words",
+     "def main(n: Int) -> Int:\n"
+     "    a = DType.float8_e4m3fn\n    print(a)\n"
+     "    b = DType.uint128\n    print(b)\n"
+     "    c = DType.float8_e3m4\n    print(c)\n"
+     "    return 0\n",
+     0, "\n".join(str(_TYPE_VALUE_MODEL.type_tag(n)) for n in
+                   ("Float8_e4m3fn", "UInt128", "Float8_e3m4"))),
     ("type_value_through_a_struct_field",
      "struct Bag:\n"
      "    var tag: Int64\n"
@@ -16604,15 +17594,19 @@ TYPE_VALUE_REFUSALS = [
      "    var t = DType\n"
      "    return 0\n",
      "refuse:is the type OF a type", None),
-    # A `DType` member naming a real Mojo type whose NAME is in no table here
-    # (the float8/float4 formats and `uint128`, 202 spellings in the corpus).
-    # Refused with the member named, because the emitter's own fallback said
-    # "is a field access through 'DType'" — a struct field where there is a
-    # missing table entry, which sends the reader to the wrong file.
+    # A `DType` member naming a real Mojo type whose NAME is in no table here.
+    # **This used to be the corpus's own spellings** — the float8/float6/float4
+    # formats and `uint128`, 202 of them — and it is now a member outside the
+    # closed list in `TYPE_VALUE_NAMES`, which is the boundary that keeps
+    # `type_value_tags_are_distinct` a proof over a finite set rather than a
+    # hope over a shape rule. A format Mojo has and this list does not is
+    # refused, and still with the member named, because the emitter's own
+    # fallback says "is a field access through 'DType'" — a struct field where
+    # there is a missing table entry, which sends the reader to the wrong file.
     ("an_unknown_dtype_member_is_refused_by_name",
      "def main(n: Int) -> Int:\n"
-     "    return Int(DType.float8_e4m3fn)\n",
-     "refuse:DType.float8_e4m3fn names a type", None),
+     "    return Int(DType.float8_e7m0fnu)\n",
+     "refuse:DType.float8_e7m0fnu names a type", None),
     # `len()` of a type.  This was a GUARD against making a type a VALUE turning
     # `len()` of one into a count, and the guard held; what it also pinned was the
     # imprecision: "the source does not say what this operand holds … Annotate it
@@ -16698,9 +17692,9 @@ TYPE_VALUE_REFUSALS = [
 # pre-existing limit of the statement walk and not this case's problem to fix;
 # 26 comparisons per function is well inside it and the case builds in under
 # four seconds.
-_TYPE_VALUE_MODEL = __import__("formal.model", fromlist=["model"])
 _TYPE_VALUE_TAG_NAMES = sorted(_TYPE_VALUE_MODEL.type_value_name_space()
                                - {"DType"})   # no tag: dtype_object_refusal
+
 
 # The same claim asked of the model directly, so a collision is loud at import
 # and not only in the image: two questions, two places. This one is a fact about
@@ -16924,17 +17918,18 @@ def check_emitter_builtin_agreement():
 
 
 # WHICH PROLOGUES CARRY THE STACK-FLOOR GUARD, asked of
-# `model.recursive_function_names` and nothing else — the decision the three
+# `model.stack_floor_guarded_names` and nothing else — the decision the three
 # `stack_floor_*` rows above can only observe indirectly, and the half of it they
 # cannot see at all.
 #
 # They can see that a cycle is guarded (the trap fires) and that a shallow
-# recursion is not disturbed. They CANNOT see that an acyclic function is left
-# alone, because leaving it alone and guarding it differ only in bytes, and
-# guarding it would cost the per-export contract proof — see
-# `recursive_function_names`'s docstring for why that is a cost and not a
-# detail. So the "not guarded" rows are asked directly, here, which is the level
-# at which the answer is the honest one.
+# recursion is not disturbed. They CANNOT see that a straight-line function is
+# left alone, because leaving it alone and guarding it differ only in bytes, and
+# guarding a straight-line body would cost the per-export contract proof — see
+# `stack_floor_guarded_names`'s docstring for why that is a cost and not a
+# detail, and why adding the guard to a body that ALREADY has a branch is not.
+# So the "not guarded" rows are asked directly, here, which is the level at which
+# the answer is the honest one.
 _STACK_FLOOR_PROBES = [
     # (name, source, want — the set of guarded function names)
     ("self_recursion", "def deep(n):\n    return deep(n - 1)\n"
@@ -16983,11 +17978,83 @@ _STACK_FLOOR_PROBES = [
      "    def pong(self) -> Int:\n        return self.ping()\n"
      "def main(n):\n    var r = R()\n    return r.ping()\n",
      {"R_ping", "R_pong"}),
+    # ── THE SECOND RULE: a body that ALREADY branches, with no cycle ──────
+    #
+    # The cycle rule alone left a DAG of distinct functions free to walk past
+    # the floor, and the measured cost of that is in
+    # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`: the deepest
+    # single image in this corpus is 76 frames against the 60 an arm64 budget
+    # affords. So a body that already contains a conditional branch is guarded
+    # whether or not anything calls back into it.
+    ("a_branching_body_is_guarded_off_the_cycle",
+     "def leaf(n):\n    return n * 2\n"
+     "def mid(n):\n"
+     "    if n > 0:\n"
+     "        return leaf(n)\n"
+     "    return 0\n"
+     "def main(n):\n    return mid(n)\n", {"mid"}),
+    # A LOOP is a branch — `_emit_loop` always emits a compare and a branch, on
+    # both backends — and a loop is the shape that actually recurses through a
+    # call chain in this corpus's own lowering code.
+    ("a_looping_body_is_guarded_off_the_cycle",
+     "def total(n):\n"
+     "    var c = 0\n"
+     "    for i in range(n):\n"
+     "        c = c + i\n"
+     "    return c\n"
+     "def main(n):\n    return total(n)\n", {"total"}),
+    # A COMPREHENSION GUARD is a branch too, and it is the third site the truthy
+    # conversion routes through, so it is the one a reader of `if s:` would
+    # forget.
+    ("a_comprehension_guard_is_a_branch",
+     "def keep(n):\n    return [y for y in [1, 2, 3] if y]\n"
+     "def main(n):\n    return len(keep(n))\n", {"keep"}),
+    ("an_assert_is_a_branch",
+     "def need(n):\n    assert n > 0\n    return n\n"
+     "def main(n):\n    return need(n)\n", {"need"}),
+    # ── THE THREE ROWS THAT PIN THE PREDICATE'S DIRECTION ────────────────
+    #
+    # The argument that widening costs nothing is that a body that already has
+    # a branch had no per-export contract to lose. That argument inverts into a
+    # requirement: the predicate must answer True ONLY for a body the emitter
+    # lays out with a branch in it, or a straight-line export loses the contract
+    # it has. These three are the shapes where a careless predicate over-counts,
+    # and each is a REFUSAL of the widening rather than of the guard.
+    #
+    # A TERNARY: both backends have a branchless CSEL form behind a purity
+    # predicate, so `1 if n else 2` can be straight-line in the image.
+    ("a_ternary_is_not_a_branch",
+     "def pick(n):\n    return 1 if n else 2\n"
+     "def main(n):\n    return pick(n)\n", set()),
+    # A SHORT-CIRCUIT chain, for the same reason and the same measurement: the
+    # branchless form is gated on the left operand needing no conversion.
+    ("a_short_circuit_is_not_a_branch",
+     "def pick(n):\n    return n and 1\n"
+     "def main(n):\n    return pick(n)\n", set()),
+    # A NESTED `def`'s branch is in the NESTED function's prologue, so a
+    # predicate that walked the whole tree — `iter_nodes` does, a nested def
+    # being just another dataclass node — would guard the enclosing function and
+    # cost it a contract it still has.
+    #
+    # Asked on `main` itself, and that is not a contrivance: `formal/build.py`'s
+    # `_flatten_closures` LIFTS every nested def to top level (renamed
+    # `ci.<name>`) before the function table exists, so the lifted child's
+    # branch is a separate function's and `main`'s body is left with a call.
+    # The pruning is what keeps that true when the table is built from an
+    # unlifted tree, and `iter_nodes` would not keep it.
+    ("a_nested_defs_branch_is_not_the_enclosing_functions",
+     "def main(n):\n"
+     "    def inner(m):\n"
+     "        if m > 0:\n"
+     "            return 1\n"
+     "        return 0\n"
+     "    return inner(n)\n", set()),
 ]
 
 
 def check_stack_floor_decision(verbose=False):
-    """`model.recursive_function_names` on seven parsed modules.
+    """`model.stack_floor_guarded_names` on the parsed probes, and
+    `model.call_graph_depth` on the graphs that decide the widening's cost.
 
     Returns `(passed, failures)`; a probe's last element is the guarded set it
     must answer, read off the source rather than off an image."""
@@ -17017,14 +18084,64 @@ def check_stack_floor_decision(verbose=False):
                 lifted = _copy.deepcopy(mth)
                 lifted.name = M.method_function_name(st.name, mth.name)
                 fns.append(lifted)
-        got = M.recursive_function_names(fns, structs)
+        got = M.stack_floor_guarded_names(fns, structs)
         if got != want:
             failures.append(f"{name}: {sorted(got)} (want {sorted(want)})")
             continue
         passed += 1
         if verbose:
             print(f"  PASS  stack-floor-decision: {name}")
+    passed, failures = passed, list(failures)
+    for name, edges, want in _STACK_FLOOR_DEPTH_PROBES:
+        got = M.call_graph_depth(edges)
+        if got != want:
+            failures.append(f"depth/{name}: {got} (want {want})")
+            continue
+        passed += 1
+        if verbose:
+            print(f"  PASS  stack-floor-decision: depth/{name}")
     return passed, failures
+
+
+# HOW DEEP A CHAIN GETS, asked of `model.call_graph_depth` — the half of the
+# residual the guard cannot reach, and the number that decided
+# `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`'s widening.
+#
+# These are GRAPHS, not modules, because the question is about the function and
+# not about the parse: a module the corpus already holds would make a test that
+# goes red the moment an unrelated function is added, which is a test of the
+# corpus rather than of the rule. The corpus figure is
+# `tools/formal_call_depth_census.py`'s (deepest image 76 frames against the 60
+# an arm64 budget affords; deepest branch-free chain 12), and it is a
+# MEASUREMENT rather than an assertion — pinning it here would pin today's
+# corpus.
+_STACK_FLOOR_DEPTH_PROBES = [
+    # A straight chain of n: the answer is n, and the point of the row is that
+    # 76 of them is a real number the cycle rule cannot see.
+    ("chain_of_one", {"f0": set()}, 1),
+    ("chain_of_two", {"f0": {"f1"}, "f1": set()}, 2),
+    ("chain_of_twenty", {f"f{i}": {f"f{i + 1}"} for i in range(19)}
+     | {"f19": set()}, 20),
+    # A chain LONGER than the budget, which is the whole reason the rule was
+    # widened: 60 frames is what `STACK_FLOOR_BUDGET_BYTES` affords on arm64 and
+    # this is three times it, with no cycle anywhere.
+    ("chain_past_the_arm64_budget",
+     {f"f{i}": {f"f{i + 1}"} for i in range(179)} | {"f179": set()}, 180),
+    # A cycle and the tail behind it: the cycle's two members count ONCE each
+    # (a simple path cannot visit one twice) and the two after it once each, so
+    # the bound is 4 and not unbounded. This is the "the guard already covers
+    # that half" row.
+    ("cycle_then_a_tail", {"a": {"b"}, "b": {"a", "c"}, "c": {"d"},
+                           "d": set()}, 4),
+    # A diamond: two routes to one function, one frame live at a time. 3, and
+    # not 4 — a walk that counted EDGES rather than the stack would.
+    ("diamond", {"a": {"b", "c"}, "b": {"d"}, "c": {"d"}, "d": set()}, 3),
+    # No edges at all: two exports side by side is a depth of 1, and the empty
+    # graph is 0. Both are rows because a function that reports 1 for an empty
+    # module has an off-by-one that reads as correct on everything else.
+    ("two_functions_no_edge", {"a": set(), "b": set()}, 1),
+    ("empty_graph", {}, 0),
+]
 
 
 # The four rules `model.struct_init_field_types` is, asked of `formal.model` and
@@ -17375,7 +18492,7 @@ def main():
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
-+ REPEAT_REFUSALS
+                  + REPEAT_REFUSALS
                   + SOLE_FIELD_CTOR_STORE_CASES
                   + SPREAD_CONSTRUCTION_CASES + SPREAD_REFUSALS
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS

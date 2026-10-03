@@ -721,6 +721,294 @@ SITE_FILTER_CASES = [
      "go", ["A.K"]),
 ]
 
+# ── a MODULE-level table asked from a per-FUNCTION pass, asked once ──────────
+#
+# `_prepare_functions`' per-function loop derives two tables that are properties
+# of the MODULE and used to derive them itself, once per function:
+#
+#   * which structs are FRAMED (`formal/model.py`'s `struct_is_framed`, whose
+#     field count walks every method body of the struct), read by
+#     `_bound_receiver_structs` — 43 508 derivations on `myinterpreter.py`;
+#   * which structs are ENUMS (`struct_is_enum`, whose inheritance fixed point
+#     walks every struct in the module), read by `_enum_member_sites` — 876 575.
+#
+# Both are now derived once beside each other and threaded, which is only the
+# same answer if the derivation does not move under the loop that mutates method
+# bodies in place. These cases pin the COUNT (the thing that regressed) and the
+# ANSWER (the thing that must not), and the count is asserted by instrumenting
+# the predicate and driving the whole pipeline rather than by timing: a build
+# that got slower again would be noticed by nobody, and one that got faster by
+# answering a different question would pass every refusal test in the tree.
+#
+# The last row is the correctness guard for `struct_derived_names`. This change
+# removed that function's own final filter — `{n for n in derived if n in
+# set(names)}` — on the argument that it could not remove anything, because
+# `derived` only ever receives a name from the collection it was built from. The
+# filter was dead; what is NOT dead is the FIXED POINT beside it, and the row
+# below pins the closure through something observable rather than through the
+# helper's return value: `struct Reg(MyBase)` with `struct MyBase(Enum)` is an
+# enum, and if the closure stopped being transitive `struct_is_enum` would say
+# False, `Reg.RAX.value` would lose its accessor site, and the read would be
+# answered as an ordinary member access of a word — which prints 0 where the
+# source says the member's value. That is the silent wrong answer
+# `_enum_member_sites` exists to prevent, so a lost site is a wrong program and
+# not a missing diagnostic.
+#
+# (name, mojo_source, expected_enum_struct_names)
+PER_MODULE_TABLE_CASES = [
+    ("the_framed_table_is_derived_once_per_struct_not_once_per_function",
+     "struct Wide:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "    def total(self) -> Int:\n"
+     "        return self.a + self.b + self.c\n"
+     "    def bump(self):\n"
+     "        self.a = self.a + 1\n"
+     "\n"
+     "struct Narrow:\n"
+     "    var n: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.n\n"
+     "    def set(self, v: Int):\n"
+     "        self.n = v\n"
+     "\n"
+     "def one(x: Int) -> Int:\n"
+     "    var w = Wide()\n"
+     "    var v = Narrow()\n"
+     "    v.set(x)\n"
+     "    return w.total() + v.get()\n"
+     "\n"
+     "def two(x: Int) -> Int:\n"
+     "    var w = Wide()\n"
+     "    var v = Narrow()\n"
+     "    v.set(x)\n"
+     "    return w.total() + v.get()\n"
+     "\n"
+     "def three(x: Int) -> Int:\n"
+     "    var w = Wide()\n"
+     "    var v = Narrow()\n"
+     "    v.set(x)\n"
+     "    return w.total() + v.get()\n"
+     "\n"
+     "def four(x: Int) -> Int:\n"
+     "    var w = Wide()\n"
+     "    var v = Narrow()\n"
+     "    v.set(x)\n"
+     "    return w.total() + v.get()\n"
+     "\n"
+     "def five(x: Int) -> Int:\n"
+     "    var w = Wide()\n"
+     "    var v = Narrow()\n"
+     "    v.set(x)\n"
+     "    return w.total() + v.get()\n"
+     "\n"
+     "def six(x: Int) -> Int:\n"
+     "    var w = Wide()\n"
+     "    var v = Narrow()\n"
+     "    v.set(x)\n"
+     "    return w.total() + v.get()\n"
+     "\n"
+     "def seven(x: Int) -> Int:\n"
+     "    var w = Wide()\n"
+     "    var v = Narrow()\n"
+     "    v.set(x)\n"
+     "    return w.total() + v.get()\n"
+     "\n"
+     "def eight(x: Int) -> Int:\n"
+     "    var w = Wide()\n"
+     "    var v = Narrow()\n"
+     "    v.set(x)\n"
+     "    return w.total() + v.get()\n",
+     []),
+
+    ("the_enum_table_is_derived_once_per_struct_and_agrees_with_the_derivation",
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    R15 = 15\n"
+     "\n"
+     "class Plain:\n"
+     "    var v: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.v\n"
+     "\n"
+     "def one(x: Int) -> Int:\n"
+     "    return Reg.RAX.value + Reg.R15.name.__len__() + x\n"
+     "\n"
+     "def two(x: Int) -> Int:\n"
+     "    var p = Plain()\n"
+     "    p.v = x\n"
+     "    return p.get() + Reg.R15.value\n"
+     "\n"
+     "def three(x: Int) -> Int:\n"
+     "    var p = Plain()\n"
+     "    p.v = x\n"
+     "    return p.get() + Reg.R15.value\n"
+     "\n"
+     "def four(x: Int) -> Int:\n"
+     "    var p = Plain()\n"
+     "    p.v = x\n"
+     "    return p.get() + Reg.R15.value\n",
+     ["Reg"]),
+
+    ("an_enum_through_two_levels_of_inheritance_is_still_an_enum",
+     # `struct Reg(MyBase)` with `struct MyBase(Enum)`: `Reg` names `MyBase` in
+     # its bases, NOT `Enum`, so nothing but the TRANSITIVE closure says `Reg` is
+     # an enum. A derivation that read direct bases, or that made one pass in
+     # declaration order, would drop `Reg` from the table — and `Reg.RAX.value`
+     # would then have no accessor site, so the read would fall through to the
+     # member-access lowering and print 0 where the source says the member's
+     # value. Both are declared in the order that makes the fixed point
+     # necessary (the intermediate base first), so a one-pass derivation misses
+     # the grandchild.
+     "struct MyBase(Enum):\n"
+     "    A = 0\n"
+     "\n"
+     "struct Reg(MyBase):\n"
+     "    RAX = 0\n"
+     "    R15 = 15\n"
+     "\n"
+     "struct Plain:\n"
+     "    var v: Int\n"
+     "    def get(self) -> Int:\n"
+     "        return self.v\n"
+     "\n"
+     "def use(x: Int) -> Int:\n"
+     "    var p = Plain()\n"
+     "    p.v = x\n"
+     "    return Reg.R15.value + p.get()\n",
+     ["MyBase", "Reg"]),
+]
+
+# Padding functions, appended by the runner to change the FUNCTION count while
+# leaving the struct set alone — so the same struct table can be asked about
+# with a module that has few functions and one that has many.
+_PAD_FN = ("\ndef pad{i}(x: Int) -> Int:\n"
+           "    return x + {i}\n")
+
+
+def _struct_asks(source: str, pad: int) -> dict:
+    """`{struct name: {question: [answers]}}` for one `_prepare_functions`.
+
+    Instruments the two module-level predicates the per-function loop used to
+    derive itself and returns, per struct, every answer each one gave — so a
+    caller can compare COUNTS (did the ask count move with the function count?)
+    and ANSWERS (did threading the table change what it says?) from one run.
+    """
+    import fire_compiler as F
+    import formal.build as FB
+    import formal.model as M
+
+    text = source + "".join(_PAD_FN.format(i=i) for i in range(pad))
+    stmts = FB.parse_module(text, "padded.mojo")
+    seen = {}
+
+    def record(label, real):
+        def counted(struct_def, *a, **k):
+            answer = real(struct_def, *a, **k)
+            row = seen.setdefault(getattr(struct_def, "name", None), {})
+            row.setdefault(label, []).append(answer)
+            return answer
+        return counted
+
+    saved = {name: getattr(M, name) for name in ("struct_is_framed",
+                                                 "struct_is_one_field",
+                                                 "struct_is_enum")}
+    try:
+        M.struct_is_framed = record("framed", saved["struct_is_framed"])
+        M.struct_is_one_field = record("one_field",
+                                       saved["struct_is_one_field"])
+        M.struct_is_enum = record("enum", saved["struct_is_enum"])
+        try:
+            FB._prepare_functions(stmts, synthetic=True,
+                                  source_path="padded.mojo")
+        except (FB.FormalBuildError, M.CodegenError):
+            # A refusal is a fine outcome: the questions were still asked, and
+            # the count is the thing under test.
+            pass
+    finally:
+        for name, fn in saved.items():
+            setattr(M, name, fn)
+    return seen
+
+
+def run_per_module_table_case(case, tmpdir, verbose):
+    """Adding functions must not add module-level derivations, or change them.
+
+    Two runs of the SAME source, one with 8 padding functions and one without,
+    and the assertion is on BOTH what was asked and what it said. The count is
+    the regression this exists for — `#functions × #structs` whole-struct walks
+    is what `bugs/FORMAL_build_cost_2026-10-03.md` measures — and the answers are
+    what makes the count safe to assert: threading a table is only the same
+    answer if the derivation does not move while the loop rewrites method bodies,
+    so a table that changed under the loop would show up here as a differing
+    answer list rather than as a silent layout difference.
+    """
+    import fire_compiler as F
+    import formal.build as FB
+    import formal.model as M
+
+    name, source, want_enums = case
+    few = _struct_asks(source, 0)
+    many = _struct_asks(source, 8)
+    if set(few) != set(many):
+        return False, (f"{set(few) ^ set(many)}: the two runs saw different "
+                       f"structs, so there is nothing to compare")
+    for st in sorted(few, key=str):
+        for question in sorted(few[st]):
+            a, b = few[st][question], many[st][question]
+            if a != b:
+                return False, (
+                    f"struct {st}: {question} answered {a[:2]}… with 0 padding "
+                    f"functions and {b[:2]}… with 8, so the derivation moves "
+                    f"under the per-function loop")
+            if len(a) != len(b):
+                return False, (
+                    f"struct {st}: {question} was asked {len(a)} times with the "
+                    f"8 padding functions and {len(b)} times without them — a "
+                    f"module-level table is being derived per FUNCTION again")
+    # The threaded table and the derivation it replaced must agree, site for
+    # site, for every function in the unit. `_enum_member_sites`' `None` is the
+    # derivation; the table is what `_prepare_functions` passes.
+    stmts = FB.parse_module(source, name + ".mojo")
+    structs = {s.name: s for s in stmts if isinstance(s, F.StructDef)}
+    table = {n: st for n, st in structs.items()
+             if M.struct_is_enum(structs, n)}
+    if sorted(table) != sorted(want_enums):
+        return False, (f"the enum table is {sorted(table)}, expected "
+                       f"{sorted(want_enums)}; `model.struct_derived_names` is a "
+                       f"FIXED POINT over the base closure and not a pass over "
+                       f"the direct bases, so this is where a non-transitive "
+                       f"derivation shows")
+    fns = [s for s in stmts if getattr(s, "name", None)
+           and not isinstance(s, F.StructDef)]
+    if not fns:
+        return False, "the case declares no function to compare the table over"
+    # Every enum member's accessor must be a site, with `bound` EMPTY so no
+    # local can shadow the class name — `.value` and `.name` are the two
+    # attributes CPython puts on a member and the only two this path answers.
+    for ename, est in sorted(table.items()):
+        sites = FB._enum_member_sites(structs, set(), table)
+        for cname, _default in M.struct_class_constants(est):
+            for accessor in ("value", "name"):
+                if f"{ename}.{cname}.{accessor}" not in sites:
+                    return False, (
+                        f"{ename}.{cname}.{accessor} is not a site, so the read "
+                        f"would be answered as an ordinary member access of a "
+                        f"word — which prints 0 where the source says the "
+                        f"member's value")
+    for fn in fns:
+        bound = FB._names_bound_in(fn)
+        derived = FB._enum_member_sites(structs, bound)
+        threaded = FB._enum_member_sites(structs, bound, table)
+        if sorted(derived) != sorted(threaded):
+            return False, (f"{fn.name}: threaded enum sites {sorted(threaded)} "
+                           f"are not the derived ones {sorted(derived)}")
+    if verbose:
+        print(f"      {len(few)} structs, per-struct asks "
+              f"{ {s: {q: len(a) for q, a in v.items()} for s, v in few.items()} }")
+    return True, ""
+
 
 def run_census_case(case, tmpdir, verbose):
     """The field set, the per-method sets against the old formula, ONE census.
@@ -1006,6 +1294,8 @@ def main(argv=None):
                ("field set", FIELDSET_CASES, run_fieldset_case),
                ("census", CENSUS_CASES, run_census_case),
                ("site filter", SITE_FILTER_CASES, run_site_filter_case),
+               ("module table", PER_MODULE_TABLE_CASES,
+                run_per_module_table_case),
                ("refusal", REFUSALS, run_refusal_case),
                ("x86-64 ABI", X86_ABI_PARITY, run_x86_abi_case),
                ("known gap", KNOWN_GAPS, run_known_gap_case))

@@ -1,12 +1,29 @@
 # PERF: `formal/build.py` recomputes a PER-STRUCT census on every ask, and that is where a big file's time goes
 
+**Status: the two askers this doc's step 2 is about are FIXED, and the fix is
+the other of the two options this doc weighed — threading, not a published
+memo. `bugs/FORMAL_build_cost_2026-10-03.md` is the doc to read for the current
+numbers.** What landed, on 2026-10-03: `_prepare_functions` derives the module's
+FRAMED and ENUM tables once and threads them, so `_bound_receiver_structs` and
+`_enum_member_sites` stopped deriving them per function (`myinterpreter.py` 53.0 s
+→ 3.8 s arm64, 38.1 s → 3.8 s x86-64, byte-identical artifacts). Step 2's
+soundness condition is settled by measurement rather than argument: **146 779 asks
+over 7 788 (question, struct) pairs across 14 files, and not one changed its
+answer between two asks inside one `_prepare_functions` call**, so a table read
+at the top of the loop is the table every ask returned. Step 1 (threading
+`_init_field_assignments`) was measured at **0.02 s over 704 calls** and is not
+worth doing. **What is left: `struct_is_one_field` is still asked 1 031 times,
+once per function**, plus `struct_receiver_stores`' full-node walk — both written
+up with their next steps in that doc's §6.
+
 **Class:** performance (the value model's tables, not one pass).
 **Area:** `formal/model.py`'s per-struct helpers, read from `_prepare_functions`
 and from both emitters.
 
-Found while answering `bugs/FORMAL_sweep_default_timeout_hides_a_crash_on_the_repos_own_files.md`
-§3, which asked for "a profile" of the two repo-root files no `-t` answers
-(`gimple_codegen.py`, 5 645 lines; `myinterpreter.py`, 5 572). That section's
+Found while answering the sweep's §3 question — "a profile" of the two repo-root
+files no `-t` answers (`gimple_codegen.py`, 5 645 lines; `myinterpreter.py`,
+5 572) — which `tools/formal_sweep.py`'s `Timeouts` now carries the other half
+of, as `-t repo=SECONDS`. That question's
 hypothesis — "the AST-walk-per-pass shape in `formal/build.py` is the first
 thing to look at" — is **measured false below**, and the real shape is adjacent
 to it: it is the per-STRUCT tables, recomputed once per ASK rather than once per

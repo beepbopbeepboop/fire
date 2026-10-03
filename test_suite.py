@@ -3046,6 +3046,25 @@ UNREGISTERED = {
     # `test('formal-list-splat', [PY, 'test_formal_list_splat.py'], ...)` in
     # the `proofs` bucket beside `formal-x86`.
     'test_formal_list_splat.py': _FORMAL_SUITE_REASON,
+    # The same shape, and its own reason rather than the group's: this file runs
+    # a DIFFERENTIAL FUZZER over twenty pinned seeds per architecture and checks
+    # the generator's own corpus, so what it protects is the measurement rather
+    # than a construct. Its heavier settings (a few thousand seeds) are a sweep,
+    # not a check, and they belong to whoever runs a formal sweep rather than to
+    # a gate — CLAUDE.md's rule is that a job a gate cannot afford is declared,
+    # not quietly omitted. `tools/formal_fuzz.py` is the tool and this file is
+    # its regression suite; the bug docs it found are named in the tool's
+    # `KNOWN_DIVERGENCES`.
+    'test_formal_fuzz.py':
+        'Builds and runs twenty generated images per architecture and compares '
+        'each against CPython on the same text — a differential fuzzer\'s own '
+        'regression suite, so it protects the measurement rather than a '
+        'construct. Measured 2026-10-03: ~29 s wall, 0.1 GB peak, both '
+        'architectures. Declared rather than registered because its heavier '
+        'settings (a few thousand seeds) are a sweep, and CLAUDE.md\'s rule '
+        'for a job no gate can afford is to declare it. '
+        'bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md records '
+        'the same gap for the eleven suites above.',
     'test_formal_math.py': _FORMAL_SUITE_REASON,
     'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
     'test_formal_platform.py': _FORMAL_SUITE_REASON,

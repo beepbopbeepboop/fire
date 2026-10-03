@@ -240,6 +240,23 @@ refused would have been the inconsistency rather than the safety.
 
 ### Still open
 
+**Update 2026-10-03: the third item is CLOSED.** The float8/float6/float4 formats
+and `UInt128` — 202 corpus spellings, every one of them refused as "a name no
+table in `formal/model.py` lists" — are named in `TYPE_VALUE_NAMES`, so
+`DType.float8_e4m3fn` is the same word `Float8_e4m3fn` is. They are a CLOSED list
+and not a shape rule, and that is the whole of the condition the doc's §2 argued
+for: `type_value_name_space()` stays finite (67 names), so
+`type_value_tags_are_distinct` stays a proof over every pair, and a member
+outside the list is still refused with its own name — `an_unknown_dtype_member_
+is_refused_by_name` now uses `DType.float8_e7m0fnu`, which the corpus does not
+write, because the corpus's own spellings are answered. Two rows in
+`test_formal_run.py`: every format's member and bare name are the same word and
+two different formats are different words, and the tags themselves compared
+against `model.type_tag` rather than against literals.
+
+The other two items are unchanged and are still limits rather than work in this
+tree.
+
 * **`DType` as a value is a refusal, and that is a real limit.** A program that
   wants the runtime type object — `DType(Int32)`, `dtype.name`, `dtype.is_signed()`
   — still has no answer, and `formal/model.py`'s `POINTEES_REFUSED` already
@@ -259,9 +276,12 @@ refused would have been the inconsistency rather than the safety.
   with different sentences. **Next step**, if a reader wants it: a row in
   `declared_type_kind`, agreed over the holder's candidates like every other row
   there.
-* **The float8/float4 family and `uint128`** (§2's table). 202 corpus spellings,
-  one entry each in `TYPE_VALUE_NAMES`, and the distinctness check grows with it
-  by construction.
+* ~~**The float8/float4 family and `uint128`** (§2's table). 202 corpus
+  spellings, one entry each in `TYPE_VALUE_NAMES`, and the distinctness check
+  grows with it by construction.~~ **CLOSED 2026-10-03** — see the note above
+  this list; the name space is 67 names and the check is asked over all of it at
+  import of `test_formal_run.py` and again inside the emitted image
+  (`every_type_tag_is_distinct`).
 
 ## 6. Verification
 

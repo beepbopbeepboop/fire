@@ -2024,6 +2024,20 @@ _STEP_CONDS = [
     # makes the comparison against a zero-cond base unmatchable, so the
     # instruction is never recognised and the model silently skips it.
     (0xff000000, 0x54000000),
+    # 52 TBZ, 53 TBNZ. APPENDED for the reason 51 was: every index above is
+    # hard-coded in `_step_rhs` and in the block scanner, so a new instruction
+    # goes at the end and the indices do not move. `_step_facts` decides every
+    # other entry's condition PER WORD rather than by position, so adding two
+    # entries here adds two `have h52` / `have h53` lines to every generated
+    # lemma and renumbers nothing.
+    #
+    # Top byte alone, for the reason 51 says: 0x36 and 0x37 are the b5 test-bit
+    # encodings and nothing else in A64 shares them. Bits 0-31 only — the encoder
+    # REFUSES a bit >= 32 (the b40 form relocates imm14) rather than encode it
+    # from memory of the spec, so there is no second form to recognise here and
+    # getting that wrong would mean a branch to the wrong address, silently.
+    (0xff000000, 0x36000000),
+    (0xff000000, 0x37000000),
     # CSEL is NOT here, and the row that was is removed rather than left:
     # `arm64_step` has no CSEL branch either, and `check_step_conds` (called by
     # `generate_arm64_proof`, so by EVERY proved arm64 build) requires the two to
@@ -2119,6 +2133,27 @@ def _step_rhs(w: int, idx: int):
             tgt = f"(UInt64.ofNat s.pc - UInt64.ofNat {-delta}).toNat"
         cmpop = "=" if idx == 16 else "≠"
         return (f"(if arm64_reg {rn_c} s {cmpop} 0 then "
+                f"({{ s with pc := {tgt} }} : Arm64State) "
+                f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
+    if idx in (52, 53):  # TBZ / TBNZ -- CBZ/CBNZ on ONE BIT
+        rn_c = w & 0x1f
+        bit = (w >> 19) & 0x1f
+        # imm14 and not imm19: the b5 form puts the bit number in bits 19..23,
+        # so the displacement is 14 bits wide and is sign-extended from bit 13
+        # of ITS OWN field.  Reading imm19 here would double the reach and send
+        # every branch past the next block -- a wrong branch target that builds
+        # and runs, which is the failure the encoder's `bits 0-31` guard exists
+        # to make impossible.
+        imm14 = (w >> 5) & 0x3fff
+        signed = imm14 - (1 << 14) if imm14 & 0x2000 else imm14
+        delta = signed * 4
+        if delta >= 0:
+            tgt = f"(UInt64.ofNat s.pc + UInt64.ofNat {delta}).toNat"
+        else:
+            tgt = f"(UInt64.ofNat s.pc - UInt64.ofNat {-delta}).toNat"
+        cmpop = "=" if idx == 52 else "≠"
+        return (f"(if ((arm64_reg {rn_c} s >>> UInt64.ofNat {bit}) &&& 1) "
+                f"{cmpop} 0 then "
                 f"({{ s with pc := {tgt} }} : Arm64State) "
                 f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
     if idx == 51:  # B.cond -- flags-only, so nothing but pc changes
@@ -2350,6 +2385,16 @@ def _step_rhs_generic(idx: int):
         cmpop = "=" if idx == 16 else "≠"
         return (f"(if arm64_reg {_RN} s {cmpop} 0 then "
                 f"({{ s with pc := (UInt64.ofNat s.pc + {_OFF19} * 4).toNat }} : Arm64State) "
+                f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
+    if idx in (52, 53):  # TBZ / TBNZ: the same two-way shape, on ONE BIT
+        _BIT = "(((w >>> 19) &&& 0x1f).toNat)"
+        _IMM14 = "(((w >>> 5) &&& 0x3fff) : UInt32)"
+        _OFF14 = (f"(if ({_IMM14} &&& 0x2000) ≠ 0 then (UInt64.ofNat ({_IMM14}).toNat) "
+                  f"- (UInt64.ofNat (2^14)) else UInt64.ofNat ({_IMM14}).toNat)")
+        cmpop = "=" if idx == 52 else "≠"
+        return (f"(if ((arm64_reg {_RN} s >>> UInt64.ofNat {_BIT}) &&& 1) "
+                f"{cmpop} 0 then "
+                f"({{ s with pc := (UInt64.ofNat s.pc + {_OFF14} * 4).toNat }} : Arm64State) "
                 f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
     if idx == 18:  # LDR Xt, [Xn, #imm] -- unsigned-offset LOAD, base = Rn
         return (f"some (arm64_set_reg {_RD} s (mem_read_u64 s.mem "
@@ -2781,6 +2826,19 @@ def loop_test(words: dict, pc: int):
         rt = w & 0x1f
         return (None, f"decide (arm64_reg {rt} s {'= 0' if idx == 16 else '≠ 0'})",
                 None)
+    if idx in (52, 53):
+        # TBZ / TBNZ: the same two-way question about ONE BIT rather than about
+        # the whole register, and therefore the same "leave the loop" reading as
+        # CBZ / CBNZ above. `while x & 8:` is ordinary Python and its test is a
+        # bit test, so this is a shape a loop can have — and the ValueError below
+        # is the right answer for it only until it is written here.
+        rt = w & 0x1f
+        bit = (w >> 19) & 0x1f
+        cmpop = "= 0" if idx == 52 else "≠ 0"
+        return (None,
+                f"decide (((arm64_reg {rt} s >>> UInt64.ofNat {bit}) &&& 1) "
+                f"{cmpop})",
+                None)
     raise ValueError(
         f"loop test at {pc} (word {w!r}, step branch {idx}) is neither a "
         f"B.cond nor a CBZ/CBNZ; add it to loop_test() rather than guessing")
@@ -3094,7 +3152,7 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
             if idx == 0:
                 kind = "ret"
                 break
-            if idx in (14, 15, 16, 17, 51):
+            if idx in (14, 15, 16, 17, 51, 52, 53):
                 if idx == 14:
                     kind = "b"
                     targets = [_branch_target(words, pc)]
@@ -3105,6 +3163,19 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
                     kind = "cbz"
                     targets = [pc + 4, _branch_target(words, pc)]
                 elif idx == 51:  # B.cond: same two-way shape as a CBZ
+                    kind = "cbz"
+                    targets = [pc + 4, _branch_target(words, pc)]
+                elif idx in (52, 53):
+                    # TBZ / TBNZ: same two-way shape as a CBZ — pc + 4 on the
+                    # fallthrough, the branch target on the taken edge — and it
+                    # writes no register, so it is the SAME kind rather than a
+                    # new one. A new kind would drop these blocks out of every
+                    # `b["kind"] == "cbz"` filter in this file at once, and the
+                    # loudest of those is `cond_branches`: an `if` whose branch
+                    # is not in a `cbz`-kinded block falls to the "no
+                    # recording" fallback and gets SOME OTHER block's source
+                    # condition, which is the mis-attribution the `either`
+                    # section above exists to prevent.
                     kind = "cbz"
                     targets = [pc + 4, _branch_target(words, pc)]
                 else:  # 17 CBNZ

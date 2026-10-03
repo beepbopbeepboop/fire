@@ -1910,6 +1910,31 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     return module, functions, source, structs, slots
 
 
+def _own_structs(structs) -> list:
+    """The structs THIS unit declares, out of a list that also carries imports'.
+
+    `check_frame_field_blob_premises` asks a question about a struct's METHODS
+    and about the FUNCTIONS of the unit that declares it — whether a call stored
+    into a field returns a word — and the second half is only answerable for a
+    unit this build compiled. An imported declaration is a separate parse of the
+    other module's source (`formal/imports.py`'s `imported_struct_defs`), so its
+    struct carries no callee table and the check would answer "this call might be
+    a container constructor" about a program that says what it returns: measured,
+    every program importing `tempfile` was refused for `TemporaryDirectory` on
+    the strength of a table the module's own build had already applied. That is a
+    refusal the importer cannot fix and the declaring module does not make,
+    because every imported module is compiled in full into a dylib by
+    `_resolve_imports` and this same check runs there over that module's own
+    structs.
+
+    The marker is the attachment rather than a name set: `attach_plain_word_
+    callees` marks exactly the structs `_prepare_functions` was handed as this
+    unit's own, and a struct without it is an imported declaration.
+    """
+    return [st for st in (structs or ())
+            if hasattr(st, "_plain_word_callees")]
+
+
 def _run_late_checks(stmts: list, functions: list, structs: list,
                      symbols: dict, slots: dict,
                      imported_module_names, link_line=None) -> None:
@@ -1972,7 +1997,7 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     M.publish_module_symbols(symbols)
     M.publish_global_slots(slots)
     by_name = {st.name: st for st in structs}
-    check_frame_field_blob_premises(structs)
+    check_frame_field_blob_premises(_own_structs(structs))
     check_frame_subscript_escapes(functions)
     # Late frame checks, each added by a later branch and each paid
     # for twice while this block was open-coded at both call sites — which is the
@@ -2052,9 +2077,20 @@ def _struct_methods(stmts: list) -> list:
     for st in stmts:
         if not isinstance(st, F.StructDef):
             continue
-        for m in M.struct_methods(st):
-            if not M.struct_fits_one_word(st) \
-                    and not M.struct_is_framed(st):
+        # The REPRESENTATION question is per STRUCT, asked once above the
+        # method loop rather than once per method inside it. It is not cheap:
+        # `struct_fits_one_word` and `struct_is_framed` both count the fields,
+        # and the count walks every method body of this very struct
+        # (`formal/model.py`'s `_split_declaration`) — so asking it per method
+        # made a struct with M methods cost M whole-struct walks to answer one
+        # question about it. Nothing in this loop mutates the struct, so there
+        # is nothing for a later iteration to see that an earlier one did not.
+        methods = M.struct_methods(st)
+        if not methods:
+            continue
+        lowerable = M.struct_fits_one_word(st) or M.struct_is_framed(st)
+        for m in methods:
+            if not lowerable:
                 # Not compiled, and not exported — but NOT an error here. The
                 # body would read `self.<field>` as a field of an integer, so
                 # it cannot be lowered; refusing at DECLARATION though broke
@@ -2659,45 +2695,15 @@ def _check_declared_parameter(functions, callee, position, pname, want,
 # here as well; `model.py` needs them for its own refusals and a model function
 # must not reach up into the build pass for a string, so the model owns the one
 # implementation and this file calls it.
+#
+# This file's OWN copy was the older of the two and its `def` shadowed this alias
+# three lines below it, so the comment above described a state the file was not
+# in and every build refusal that quoted a value whose callee was not a bare
+# name printed `CallExpr` where the source wrote `c.f[0]()`.  It is deleted; the
+# two arms it alone carried — `BinaryOp` and the set half of the display — live
+# in `model.expr_spelling` now, so the model is the whole of the spelling rather
+# than the newer half of it.  See `formal/model.py::expr_spelling`.
 _expr_spelling = M.expr_spelling
-
-
-def _expr_spelling(node) -> str:
-    """The source's own spelling of an expression, as far as a name needs one.
-
-    A refusal that quotes `CallExpr` where the source wrote `mid(1)` sends the
-    reader to the AST to find the call, which is the opposite of what a
-    diagnostic quoting a call site is for.  A shape with no short spelling is
-    named by its type, which is at least a true statement and is obviously a
-    placeholder to anyone who reads it.
-
-    The OPERATOR arms came later than the rest and the reason is a message that
-    read `G is read in bump() at BinaryOp` — a true statement, a placeholder,
-    and useless, because the reader's question is which read.  Every refusal that
-    quotes a value goes through this one function, so the fix belongs here rather
-    than in each caller."""
-    if isinstance(node, F.IdentExpr):
-        return node.name
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
-        return f"{node.func.name}({', '.join(_expr_spelling(a) for a in (node.args or []))})"
-    if isinstance(node, F.MemberExpr):
-        return _member_chain(node)
-    if isinstance(node, F.BinaryOp):
-        return (f"{_expr_spelling(node.left)} {node.op} "
-                f"{_expr_spelling(node.right)}")
-    if isinstance(node, F.UnaryOp):
-        return f"{node.op}{_expr_spelling(node.operand)}"
-    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-        return (f"{'(' if isinstance(node, F.TupleExpr) else ''}"
-                f"{', '.join(_expr_spelling(e) for e in node.elements)}"
-                f"{')' if isinstance(node, F.TupleExpr) else ''}")
-    if isinstance(node, F.SubscriptExpr):
-        return f"{_expr_spelling(node.obj)}[{_expr_spelling(node.index)}]"
-    for attr in ("value", "name"):
-        v = getattr(node, attr, None)
-        if isinstance(v, (str, int, float, bool)):
-            return str(v)
-    return type(node).__name__
 
 
 def _call_spelling(call, arg, position, pname) -> str:
@@ -3066,7 +3072,8 @@ def _holder_state(holders: dict, hstruct: dict, returns_frame: dict) -> tuple:
 
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
-                     star_imports: tuple = ()) -> None:
+                     star_imports: tuple = (),
+                     enum_structs=None) -> None:
     """Annotate every function with its frame-pointer receivers and field slots.
 
     Writes `fn._frame_holders` (the names holding a frame address) and
@@ -3682,13 +3689,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                                             structs_by_name)
 
     refuse_none_comparisons(functions, structs_by_name, _holder_bases,
-                            method_owners)
+                            method_owners, enum_structs)
     for fn in functions:
         if not hstruct.get(_fn_key(fn)):
             continue
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name),
-                                 _holder_bases(fn))
+                                 _holder_bases(fn), enum_structs)
 
     # AFTER the fixpoint and BEFORE the per-function loop below, and both of
     # those positions are load-bearing rather than tidy:
@@ -4652,6 +4659,53 @@ def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name) -> None:
         return
 
 
+def _collect_one_field_dropped_stores(fn, owner, structs_by_name) -> None:
+    """PARK a ONE-FIELD struct's method that stores its own field with no
+    write-back to deliver it.
+
+    **Also before `_rewrite_self_fields`, for the same reason
+    `_collect_one_field_receiver_rebinds` is**: that rewrite collapses
+    `recv.<sole field>` onto `recv`, so after it a store and a rebinding of the
+    receiver are the same text, and this question is about the SPELLING.
+
+    The question itself is `model.one_field_dropped_receiver_stores` — asked
+    there rather than re-derived here, so the rule and the refusal that quotes it
+    cannot come to disagree about which methods are at risk.
+
+    **A one-field struct whose sole field holds a FRAME is somebody else's
+    refusal**, and this one stands aside for it. `self.inner = o` is `self = o`
+    there, `_collect_receiver_rebinds` refuses exactly that, and its message says
+    what the store destroys (the frame address the caller still holds) where this
+    one can only say that the word is not handed back — `one_word_sole_field_frame`
+    is the predicate it already exempts on, and
+    `refuse_a_one_word_holder_of_a_frame_stored_through_its_receiver` pins that
+    wording. Two refusals for one construct is one too many, and the second one
+    would be the worse-worded of the pair.
+
+    **`owner is None` returns here**, and that is a QUESTION not a shape: this is
+    called per function with `method_owners.get(fn.name)`, which is None for every
+    free function, and asking `one_word_sole_field_frame(None, …)` is asking a
+    question about nothing — it answers False, and the answer is thrown away by
+    the line above. Worse than useless, because `struct_is_one_field` is a
+    whole-struct derivation and the free functions are the majority: the asks
+    scale with the function count, which is the regression
+    `test_formal_bracketed_method_field_set.py`'s `module table` group asserts is
+    gone (`bugs/PERF_struct_field_split_asked_once_per_function.md`). The guard
+    is what puts it back.
+    """
+    if owner is None:
+        return
+    if M.one_word_sole_field_frame(owner, structs_by_name or {}) is not None:
+        return
+    sites = M.one_field_dropped_receiver_stores(fn, owner)
+    if not sites:
+        return
+    field, convention = sites[0]
+    fn._one_field_dropped_store = (
+        field, convention,
+        getattr(owner, "name", None), M.method_member_name(owner, fn))
+
+
 def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
     """PARK every method that rebinds its own receiver to something that is not
     a construction of its own struct.
@@ -4800,13 +4854,22 @@ def check_receiver_rebinds(functions) -> None:
     construct identically — a receiver's meaning is a property of the by-
     reference design, not of an instruction either backend chose.
 
-    TWO findings, and the one-field one is raised first because it is the one
-    only a pre-rewrite pass can see: `_collect_one_field_receiver_rebinds` runs
+    THREE findings, and the two one-field ones are raised first because they are
+    the ones only a pre-rewrite pass can see: a field store and a rebinding are
+    the same text once `_rewrite_self_fields` has run. The dropped store is
+    raised before the rebinding because it is the finding CPython disagrees
+    with; the rebinding is the one whose answer is already right. `_collect_one_field_receiver_rebinds` runs
     before `_rewrite_self_fields` collapses `recv.<field>` onto `recv`, so by
     the time anything else asks, a field store and a rebinding are the same
     text. A method that has both would otherwise be reported as the multi-field
     defect it is not.
     """
+    for fn in functions:
+        dropped = getattr(fn, "_one_field_dropped_store", None)
+        if dropped:
+            field, convention, owner_name, member = dropped
+            raise CodegenError(M.dropped_receiver_store_refusal(
+                owner_name or "this struct", member, field, convention))
     for fn in functions:
         parked = getattr(fn, "_one_field_receiver_rebind", None)
         if parked:
@@ -5912,10 +5975,37 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
     # the authority, and consulting it rather than re-deriving the condition is
     # what keeps the emitter and this decision from disagreeing about which
     # fields are placed.
+    #
+    # **A DELEGATING field is the one thing that is a nested frame WITHOUT being
+    # placed, and it has to be asked here rather than inferred from the
+    # placement's absence.** `model.init_stores_a_parameter_struct` is the
+    # predicate: `self.src = r` where `r: R` is `__init__`'s own annotated
+    # parameter, and nothing else writes `src`. The slot holds a frame address —
+    # the CALLER's — so a read is `[slot + 8k]` exactly as it is for a placed
+    # one and `walked`/`nested_fields` want the struct back. What it is NOT is a
+    # frame placed in the object's own block, which is why
+    # `struct_nested_frame_fields` leaves it out and why the constructor reserves
+    # nothing for it. Two questions, two answers, and the pair that used to
+    # deadlock on this shape is `bugs/FORMAL_receiver_stored_in_a_field.md`:
+    # the placement made the delegating STORE unsound
+    # (`_frame_field_store_is_sound`), and the store's soundness is what says the
+    # slot is a pointer.
+    #
+    # Returning `_REASSIGNED` here instead would be the wrong ANSWER rather than
+    # a cautious one: `_REASSIGNED` says the slot holds "a frame belonging to
+    # whichever function ran the assignment", and for a delegating field the
+    # only assignment is `__init__`'s, whose argument the caller supplies. So
+    # the frame in the slot is the caller's, the caller is the frame the object
+    # itself is reached through, and the two die together — which is the whole
+    # argument `_frame_field_store_is_sound` already makes.
     for st in cands:
-        if not any(name == field for name, _slot, _child
-                   in M.struct_nested_frame_fields(st, structs_by_name)):
-            return _REASSIGNED
+        if any(name == field for name, _slot, _child
+               in M.struct_nested_frame_fields(st, structs_by_name)):
+            continue
+        if M.init_stores_a_parameter_struct(st, field,
+                                            structs_by_name) is not None:
+            continue
+        return _REASSIGNED
     return nested
 
 
@@ -8601,7 +8691,7 @@ def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
     return bool(fields) and fields == list(sole[:len(fields)])
 
 
-def _bound_receiver_structs(fn, structs_by_name, functions=(), owner=None) -> dict:
+def _bound_receiver_structs(fn, framed, functions=(), owner=None) -> dict:
     """`{name: struct}` for a local whose construction bindings all AGREE.
 
     **The same evidence `_one_word_field_map` reads, without the one-word
@@ -8616,13 +8706,26 @@ def _bound_receiver_structs(fn, structs_by_name, functions=(), owner=None) -> di
     wrong answer chosen by ordering.
 
     `_constructor_bindings` is the implementation rather than a second walk of
-    the same bindings, and it is called with a `framed` map derived from
-    `structs_by_name` so the list it returns is over exactly the constructions
-    it was written for. The `type_constructor_kind` guard and the
-    `call_lowers_as_framed_construction` guard are therefore both this table's,
-    not re-derived — a call the emitters route to a type CONVERSION produces a
-    plain word that is not an `S`, and naming it one would lift `x.m()` to a
-    method of a struct `x` does not hold.
+    the same bindings, and it is called with the module's `framed` table so the
+    list it returns is over exactly the constructions it was written for. The
+    `type_constructor_kind` guard and the `call_lowers_as_framed_construction`
+    guard are therefore both this table's, not re-derived — a call the emitters
+    route to a type CONVERSION produces a plain word that is not an `S`, and
+    naming it one would lift `x.m()` to a method of a struct `x` does not hold.
+
+    **`framed` is a PARAMETER, `{struct name: struct}` for the module's framed
+    structs, and it was derived here instead — once per FUNCTION, over every
+    struct the module declares.** That is the whole of what it cost:
+    `M.struct_is_framed` counts the struct's fields, and the count is derived by
+    walking every method body of the struct (`formal/model.py`'s
+    `_split_declaration`), so each ask was a whole-struct walk; on
+    `myinterpreter.py` this line made 43 508 of them for 275 structs and 1 031
+    functions, which was 33.6 s of `struct_receiver_stores` inside a 97 s build
+    (`bugs/FORMAL_build_cost_2026-10-03.md` has the measurement). `_prepare_functions`
+    derives it once and threads it, like `wide` and `dispatch_owners`. Passing
+    the table rather than a predicate keeps this function free of the question
+    entirely: it cannot answer a different one by accident, because it no longer
+    answers it at all.
 
     `owner` adds the method's own receiver, under whatever SPELLING that struct
     uses (`M.struct_receivers`, because the receiver set is not the literal
@@ -8642,13 +8745,23 @@ def _bound_receiver_structs(fn, structs_by_name, functions=(), owner=None) -> di
     together would make the older table's verdict depend on this one's
     conservatism.
     """
-    framed = {name: st for name, st in (structs_by_name or {}).items()
-              if M.struct_is_framed(st)}
     out = {name: cands[0]
            for name, cands in _constructor_bindings(
                fn, framed, functions).items()
            if len(cands) == 1}
-    if owner is not None and M.struct_is_framed(owner):
+    # The owner's OWN entry in the same table, not a fresh `struct_is_framed`
+    # ask: `owner` comes from `method_owners`, which is built from the `structs`
+    # list `framed` is keyed over, so a hit on the very same object IS the
+    # predicate's answer. Asking it was 274 more whole-struct walks on
+    # `myinterpreter.py` — one per function that is a method — in the one
+    # function here whose stated reason for existing is that it no longer
+    # derives a module-level table. A table that does not cover this owner falls
+    # back to the predicate, because this function cannot know what a partial
+    # table was meant to say.
+    covered = framed.get(owner.name) if owner is not None else None
+    owner_framed = (covered is owner if covered is not None
+                    else owner is not None and M.struct_is_framed(owner))
+    if owner_framed:
         for recv in M.struct_receivers(owner):
             out.setdefault(recv, owner)
     return out
@@ -8963,7 +9076,8 @@ def _constant_site(st, kind: str, member: str = None) -> tuple:
 
 
 def _constant_read_sites(fn, structs_by_name: dict, owner=None,
-                         receiver_structs: dict = None) -> dict:
+                         receiver_structs: dict = None,
+                         enum_structs=None) -> dict:
     """{access path: (struct, kind, member)} for every read of a class-level
     constant.
 
@@ -9051,7 +9165,7 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
                 st, "comptime" if name in M.struct_comptime_aliases(st)
                 else "constant")
     for path, (st, kind, member) in _enum_member_sites(
-            structs_by_name, bound).items():
+            structs_by_name, bound, enum_structs).items():
         sites[path] = _constant_site(st, kind, member)
     def publish(holder, st, comptime_only):
         """Every read of `st`'s class-level values through `holder`.
@@ -9090,11 +9204,42 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
     # values: the base is the value the call site or the declaration says it is,
     # and nothing about `x.A` is a field read when `A` is the class's own value.
     locals_ = dict(_constant_constructor_bindings(fn, structs_by_name)[0])
-    for local, st in M.parameter_declared_structs(
-            fn, structs_by_name, owner).items():
+    declared = M.parameter_declared_structs(fn, structs_by_name, owner)
+    for local, st in declared.items():
         locals_.setdefault(local, st)
     for local, st in locals_.items():
         publish(local, st, comptime_only=False)
+    # …and the ENUM accessor's PARAMETER spelling, which is a different fact
+    # again: `base.value` is not a read of a class-level value at all, it is a
+    # read of the WORD `base` already holds, because on this path an enum member
+    # is not an object — the member and its value are one word, which is exactly
+    # why `_enum_member_sites` substitutes the literal for `S.NAME.value`.
+    #
+    # Keyed the same way (`"<parameter>.value"`), so it lands in this table and
+    # is rewritten by this function's own arm: a second walk of the body for one
+    # spelling would be the quadratic thing `_constant_read_sites`' own docstring
+    # is about, and two tables of access paths would be a second `_constant_site`
+    # shape for every consumer to destructure.
+    #
+    # Gated on the body spelling `value` at all, which is the same superset filter
+    # the loops above use and the same direction that cannot lose a site: the
+    # only thing that can look one of these up is a `MemberExpr` over an
+    # `IdentExpr` in THIS body.
+    #
+    # `path not in sites` because `publish` may already have registered the same
+    # spelling: an enum with a MEMBER named `value` or `name` gives the
+    # class-constant loop above a `base.value` of its own, and that one is the
+    # more specific evidence — a declared member is a value this table can
+    # materialize, whatever the accessor shape says about the same two letters.
+    if "value" in members or "name" in members:
+        for pname, st in declared.items():
+            if not M.struct_is_enum(structs_by_name, st.name):
+                continue
+            for accessor in ENUM_PARAMETER_ACCESSORS:
+                path = f"{pname}.{accessor}"
+                if accessor in members and path not in sites:
+                    sites[path] = _constant_site(
+                        st, _enum_parameter_kind(st, accessor))
     # The RECEIVER, and `Self` beside it. Only a `comptime` binding is readable
     # through these; see the docstring for why the assignment case is not.
     if owner is not None:
@@ -9432,6 +9577,101 @@ def _enum_member_refusal(struct_def, name: str, accessor: str, default):
             f"is the constant's spelling, not its value.")
 
 
+# The two accessors of an ENUM member, spelled off a PARAMETER rather than off
+# the class: `base.value` and `base.name` for a `base: Reg` parameter. Written
+# out rather than ranged over, because the two answer from DIFFERENT evidence and
+# that asymmetry is the whole design: `.value` is the word the parameter already
+# holds, and `.name` is the member's spelling, which is a fact about the
+# declaration site and is not recoverable from any word this path can read.
+ENUM_PARAMETER_ACCESSORS = ("value", "name")
+
+# `{id(struct_def): (struct_def, {accessor: kind})}` — the per-struct half of the
+# gate, which is a property of the DECLARATION and not of the function asking.
+# `_constant_read_sites` is called once per function and the question is once per
+# struct, so without this every function in a module re-derives it: 177 methods in
+# `formal/arm64_codegen.py` times every member of every enum in the image.
+#
+# The `struct_def` is kept IN THE VALUE, and that is not tidiness: keying a cache
+# on `id()` is only sound while the id cannot be recycled, and a sweep process
+# builds many images in one interpreter, so a struct def from file 1 can be freed
+# and file 2's can land on its id. Holding the object is what makes the key
+# unique for the lifetime of the entry, and the entry is one small dict per enum
+# class per image.
+_ENUM_PARAMETER_KINDS: dict = {}
+
+
+def _enum_parameter_kind(struct_def, accessor: str) -> str:
+    """The site kind for `<parameter>.<accessor>` where the parameter is an enum.
+
+    `"enum-value"` for `.value` when the whole enum can be represented as words,
+    `"enum-computed"` when it cannot, and `"enum-name"` for `.name` in both
+    cases — which is the asymmetry stated above, and it is CPython's too:
+    `Reg.RBP.value` fails for a computed member and `Reg.RBP.name` still answers.
+
+    The gate on `.value` is EVERY member, not the one at this read site, and the
+    reason is that a parameter's value is a word that arrived from a call site
+    this image may not have: the same word is `Reg.RAX`'s and `Reg.RBP`'s, and
+    nothing in it says which. A computed member's value is not the word that
+    travels (it is the result of a computation the class body runs), so one
+    computed member makes the identity false for every member — and answering
+    `base.value` for the others anyway is a wrong number rather than a refusal,
+    which is the worse of the two failures here.
+    """
+    entry = _ENUM_PARAMETER_KINDS.get(id(struct_def))
+    if entry is None or entry[0] is not struct_def:
+        kinds = {"name": "enum-name", "value": "enum-value"}
+        for member, _default in M.struct_class_constants(struct_def):
+            literal, _ = _constant_literal(struct_def, member)
+            if literal is None or not isinstance(literal, F.IntLiteral):
+                kinds["value"] = "enum-computed"
+                break
+        entry = (struct_def, kinds)
+        _ENUM_PARAMETER_KINDS[id(struct_def)] = entry
+    return entry[1][accessor]
+
+
+def _enum_parameter_refusal(struct_def, pname: str, kind: str):
+    """The two refusals for `<parameter>.value` / `<parameter>.name` on an enum.
+
+    They are two messages and not one because the two facts are two: a computed
+    member has a value this path cannot materialize, while a member's `name` is
+    not a value at all — it is the constant's SPELLING, and the word travelling
+    in the parameter does not carry it. A single sentence would have to be false
+    about one of them, and a refusal that is false about the construct is worse
+    than no refusal because it sends a reader to change a correct program.
+
+    Both name the parameter rather than the enum, because the reader is looking
+    at a line that says `base.value`, and the enum's declaration is what they
+    would have to go and read to know which of its members this word is.
+    """
+    if kind == "enum-computed":
+        computed = [member for member, _default
+                    in M.struct_class_constants(struct_def)
+                    if (_constant_literal(struct_def, member)[0] is None
+                        or not isinstance(_constant_literal(
+                            struct_def, member)[0], F.IntLiteral))]
+        spelled = ", ".join(f"`{struct_def.name}.{c}`" for c in computed)
+        return (f"`{pname}.value` is the value of an `enum` member, and a formal "
+                f"value is one 64-bit word — which on this path is the member "
+                f"ITSELF, so the read is the word `{pname}` already holds. But "
+                f"{spelled} {'is' if len(computed) == 1 else 'are'} written as a "
+                f"COMPUTATION in the class body rather than as a literal, and "
+                f"this path has no comptime evaluator to run one, so it cannot "
+                f"say which member a word is and therefore cannot answer this "
+                f"read for any member of `{struct_def.name}`. Write the value as "
+                f"a literal at the declaration, or pass the value in rather than "
+                f"the member")
+    return (f"`{pname}.name` is a member's SPELLING — the constant's own name in "
+            f"the class body of `{struct_def.name}` — and the word this path "
+            f"receives for `{pname}` is the member's VALUE, which does not carry "
+            f"it: on this target an `enum` member is not an object, it is one "
+            f"64-bit word, and `Reg.RBP` and `Reg.RAX` are the same word "
+            f"wherever they are written. So this read is answerable for a member "
+            f"named at the use site (`Reg.RBP.name`, which lowers) and not "
+            f"through a parameter. Pass the name as a string, or pass the value "
+            f"and compare it, which is the same program with a representation")
+
+
 def _fold_a_class_level_default(struct_def, default, count: list) -> bool:
     """Fold a target query in one class-level initializer, IN PLACE. True if it did.
 
@@ -9518,7 +9758,8 @@ def _constant_literal(struct_def, name: str, structs_by_name: dict = None):
 
 
 def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
-                             receiver_structs: dict = None):
+                             receiver_structs: dict = None,
+                             enum_structs=None):
     """`S.NAME` / `self.NAME` -> the literal `NAME` holds, in place, over `fn`.
 
     A class-level constant — a class-level assignment OR a `comptime` binding —
@@ -9557,7 +9798,8 @@ def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
         return
     _apply_constant_sites(
         fn.body,
-        _constant_read_sites(fn, structs_by_name, owner, receiver_structs),
+        _constant_read_sites(fn, structs_by_name, owner, receiver_structs,
+                             enum_structs),
         _class_read_disagreement(fn, structs_by_name),
         structs_by_name)
 
@@ -12398,7 +12640,8 @@ def _first_unanswerable_mlir(value):
 
 
 
-def _enum_member_sites(structs_by_name: dict, bound: set) -> dict:
+def _enum_member_sites(structs_by_name: dict, bound: set,
+                       enum_structs=None) -> dict:
     """`{access path: (struct, kind, 'value'|'name')}` for every ENUM accessor read.
 
     The `.value` / `.name` half of the census, and it exists because of a measured
@@ -12434,12 +12677,31 @@ def _enum_member_sites(structs_by_name: dict, bound: set) -> dict:
     `kind` is the constant's own kind, carried through so the refusal arm can say
     whether the value it cannot materialize is a `comptime` binding or an
     assignment — the same distinction the bare `S.NAME` read makes.
+
+    **`enum_structs` is the module's `{name: struct}` table of ENUM classes and
+    it is a parameter, because the question behind it is a property of the
+    MODULE and every asker here asks it per FUNCTION.** `model.struct_is_enum`
+    is not a predicate over a class: it asks whether the class derives from one
+    of `model.ENUM_BASES`, which is `model.struct_derived_names`' fixed point
+    over every struct in the module — so one call is a whole-module graph walk,
+    and this loop asks one per struct per function. Measured on `myinterpreter.py`
+    (275 structs, 1 031 functions): 876 575 whole-module fixed points, 24.5 s of
+    a 31 s build, all of it re-deriving a set of enums that is EMPTY for that
+    file. `bound` is the only per-function input left, which is why it is the
+    only thing this function still asks. `_prepare_functions` derives the table
+    once, beside the framed one, and threads it here for the same reason and by
+    the same mechanism (`bugs/FORMAL_build_cost_2026-10-03.md`).
+
+    Deriving it here instead is kept as the `None` default so that a caller with
+    no module context — a test, a tool reading one function's census — still gets
+    the right answer, and it costs one walk rather than none.
     """
     sites = {}
-    for st in structs_by_name.values():
+    if enum_structs is None:
+        enum_structs = {name: st for name, st in structs_by_name.items()
+                        if M.struct_is_enum(structs_by_name, name)}
+    for st in enum_structs.values():
         if st.name in bound:
-            continue
-        if not M.struct_is_enum(structs_by_name, st.name):
             continue
         for name, _default in M.struct_class_constants(st):
             kind = ("comptime" if name in M.struct_comptime_aliases(st)
@@ -12522,6 +12784,28 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None,
         got = sites.get(f"{node.obj.name}.{node.member}")
         if got is not None:
             st, kind, _member = got
+            if kind in ("enum-value", "enum-computed", "enum-name"):
+                # `<parameter>.value` / `<parameter>.name` where the parameter is
+                # declared with an ENUM of this unit. The rewrite is the IDENTITY
+                # on `.value` — the bare name — and that is the whole answer
+                # rather than a stand-in for one: `_enum_member_sites` already
+                # substitutes the literal for `Reg.RBP.value` because the word an
+                # enum member is ON THIS PATH IS its value, and the parameter holds
+                # that word. Before this, `base.value` reached the emitter as a
+                # field read through a base nothing classified and was refused with
+                # `field_access_refusal` — whose own rule ("a field is lowered
+                # three ways and which one applies is decided by the BINDING of the
+                # base, not by a type") is satisfied by the DECLARATION here, and
+                # whose sentence about nothing being able to say what `base` holds
+                # was false.
+                #
+                # Measured, on both architectures, before the rewrite:
+                # `def pick(base: Reg) -> Int: return 1 if base.value == 5 else 0`
+                # called with `Reg.RBP` refused; CPython answers 1.
+                if kind == "enum-value":
+                    return node.obj
+                raise CodegenError(_enum_parameter_refusal(
+                    st, node.obj.name, kind))
             if kind == "overridden":
                 raise CodegenError(_overridden_comptime_refusal(
                     st, node.member, f"{node.obj.name}.{node.member}"))
@@ -12630,7 +12914,8 @@ def _constant_read_spelling(node) -> str:
 
 def refuse_none_comparisons(functions: list, structs_by_name: dict,
                              receiver_bases=None,
-                             method_owners: dict = None) -> None:
+                             method_owners: dict = None,
+                             enum_structs=None) -> None:
     """Refuse `==` / `!=` whose operand is a read of a `None`-valued constant.
 
     Asked BEFORE either substitution, and that ordering is the whole reason this
@@ -12677,7 +12962,7 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict,
         # function that wrote that `p` and not in any other.
         sites = _constant_read_sites(
             fn, structs_by_name, (method_owners or {}).get(fn.name),
-            receiver_bases(fn) if receiver_bases else None)
+            receiver_bases(fn) if receiver_bases else None, enum_structs)
         none_paths = {path: kind for path, (st, kind, _member) in sites.items()
                       if (st.name, path.partition(".")[2]) in none_consts}
         if not none_names and not none_paths:
@@ -12874,7 +13159,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     M.refuse_module_level_mlir_templates(stmts)
     # The module's own statement list is the ONE place a module-level name's
     # home is stated, so it is read here and PUBLISHED, for the same reason
-    # `attach_field_evidence` and `publish_placed_frame_structs` publish what
+    # `attach_field_evidence` and `attach_placed_frame_callees` carry what
     # they carry: the consumers are a per-function rewrite in this file and a
     # node walk inside a backend, and neither has the module statements in
     # hand.  Replaces, never merges — a dylib and its dependent are two units
@@ -13046,13 +13331,57 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                    else dc_classes)
     method_owners = M.method_owner_names(structs)
     functions = functions + _struct_methods(stmts)
+    # THE REPRESENTATION TABLE, derived ONCE for the module.
+    #
+    # `struct_is_framed` is not a cheap predicate: it counts the struct's
+    # fields, and `struct_field_names` derives that set by walking EVERY method
+    # body of the struct (`_split_declaration` → `struct_receiver_stores` +
+    # `struct_method_receiver_reads`). So each ask is a whole-struct walk, and
+    # the question is a property of the MODULE — one answer per declared struct
+    # — while every asker in this file below asks it from inside the per-FUNCTION
+    # loop. That is `#functions × #structs` whole-struct walks of bodies nobody
+    # has touched since the previous one, and it is where a big file's time
+    # goes: `myinterpreter.py` (5 572 lines, 275 structs, 1 031 functions) made
+    # 43 508 asks of `M.struct_is_framed` from `_bound_receiver_structs` alone,
+    # out of 46 512 asks of the field set in the whole build, and
+    # `formal/model.py`'s `struct_receiver_stores` was 33.6 s of a 97 s build
+    # inside them. See `bugs/FORMAL_build_cost_2026-10-03.md`.
+    #
+    # So the answer is computed here, once, and THREADED — the same way
+    # `dispatch_owners`, `method_owners` and `wide` are, and for the same
+    # reason: a module-level table read by a per-function pass. No cache and no
+    # invalidation, because nothing is being remembered across a mutation: the
+    # loop below used to re-derive the same partition and could read the two
+    # HALVES of it at two different points, which is the inconsistency this
+    # removes rather than one it introduces. Measured: over 14 files (this
+    # repository's own largest sources and the stdlib's biggest) 146 779 asks of
+    # the four predicates covered 7 788 (question, struct) pairs, and NOT ONE of
+    # them changed its answer between two asks inside one `_prepare_functions`
+    # call — so the table this replaces is the table every one of those asks
+    # returned.
+    framed = {name: st for name, st in structs_by_name.items()
+              if M.struct_is_framed(st)}
     # A struct of more than one field is not refused here when its receiver is
     # by reference (formal.model.struct_is_framed): the receiver word is a
     # frame address, which is one word, so the method needs no special casing
     # and the call needs no change. What is still refused is a struct that
-    # fits neither representation.
-    wide = {st.name: st for st in structs
-            if not M.struct_fits_one_word(st) and not M.struct_is_framed(st)}
+    # fits neither representation. The other half of the partition `framed`
+    # holds, read from it rather than re-asked, so the two cannot disagree —
+    # `wide` is a filter over the same `structs_by_name`, in the same order, and
+    # `structs` and `structs_by_name` are one-to-one by construction
+    # (`seen_struct` above keeps the first declaration of each name).
+    wide = {name: st for name, st in structs_by_name.items()
+            if name not in framed and not M.struct_fits_one_word(st)}
+    # …and the module's ENUM classes, derived once for the same reason and by
+    # the same mechanism. `model.struct_is_enum` is not a predicate over a class
+    # but a fixed point over every struct in the module (`struct_derived_names`),
+    # so a per-function asker pays a whole-module graph walk per struct per
+    # function: 876 575 of them on `myinterpreter.py`, 24.5 s of a 31 s build,
+    # every one re-deriving a set of enums that file has none of. The census that
+    # reads it (`_enum_member_sites`) is per function — `bound` is — so this is
+    # the table it takes instead.
+    enum_structs = {name: st for name, st in structs_by_name.items()
+                    if M.struct_is_enum(structs_by_name, name)}
     # Re-attach the census to the structs THIS FILE declares, so that a
     # consumer of the same file's declarations cannot narrow one of them behind
     # this build's back: the two would then measure the same class differently
@@ -13072,13 +13401,31 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # every struct reached as a typed-nested field of one of them.  Published
     # rather than threaded because the one consumer — the blob-in-a-field
     # premise check — is a node walk with no unit in hand, the same reason
-    # `attach_field_evidence` puts the evidence on the struct.
-    M.publish_placed_frame_structs(
-        {st.name for st in structs_by_name.values()
-         if M.struct_is_framed(st)}
+    # `attach_field_evidence` puts the evidence on the struct. The framed HALF
+    # is `framed`'s key set read off the table above, which is what it was: a
+    # third derivation of the same predicate over the same structs.
+    M.attach_placed_frame_callees(
+        [st for st in structs if id(st) in own],
+        set(framed)
         | {child.name for st in structs_by_name.values()
            for _f, _s, child in M.struct_nested_frame_fields(
                st, structs_by_name)})
+    # …and the same premise's other half: a call to a function of THIS module
+    # whose declaration says it returns a plain word cannot hand back a blob,
+    # so a method may store one in a frame field. Attached to this unit's own
+    # structs rather than published in a module global, and the reason is
+    # measured: a build compiles imported units NESTED, so a published set was
+    # whichever import compiled last — `formal/hostmods/tempfile.mojo` was
+    # checked against SHUTIL's callee list and its `TemporaryDirectory` was
+    # refused, while the same file built through an importer that published in
+    # the other order. A context manager's `__enter__` is what needed this at
+    # all — `self.name = mkdtemp(p)` — and `formal/model.py`'s
+    # `attach_plain_word_callees` carries the measurement.
+    M.attach_plain_word_callees(
+        [st for st in structs if id(st) in own],
+        M.plain_word_callee_names(functions, structs_by_name,
+                                  int_names=FT.TYPE_NAMES,
+                                  string_names=FT.STRING_TYPE_NAMES))
     # A method declared with NO parameters takes no receiver. `def first():`
     # inside a class is a plain function that happens to be spelled like a
     # method, and prepending `Regs` to its call passes a NAME where a value is
@@ -13105,7 +13452,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # zero was a `None`. See `refuse_none_comparisons` for why the fold stands
     # and only the comparison is refused.
     refuse_none_comparisons(functions, structs_by_name,
-                            _method_receiver_bases, method_owners)
+                            _method_receiver_bases, method_owners,
+                            enum_structs)
     # …and the OTHER lossy fold on this path, asked at the same point for the
     # same reason: a member and its value are one word, so two members with equal
     # values are one word and `Reg.A == Reg.B` answers True where CPython says
@@ -13128,7 +13476,33 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # rooted at a MODULE", which is a fact about the source spelling.
     from formal.imports import imported_modules as _imported_modules
     _this_unit_modules = tuple(_imported_modules(stmts) or ())
+    # The image's compiled function names, for `_constructor_bindings`' one
+    # name-that-is-both-a-function-and-a-struct guard. Hoisted out of the loop
+    # because `functions` is not rebound or extended anywhere inside it — the
+    # `_flatten_closures` / `_lift_lambdas` calls that DO change the list are
+    # after it — so the comprehension was loop-invariant and rebuilt a
+    # `#functions`-long list once per function: 1 031 × 1 031 name reads on
+    # `myinterpreter.py`, i.e. a million attribute loads to compute one list.
+    _image_function_names = [f.name for f in functions]
     for fn in functions:
+        # A `with` is CPython's context-manager PROTOCOL, and this path used to
+        # lower its first line and drop the two calls that ARE it — the emitters
+        # said so in their own docstrings, which is how `with
+        # tempfile.TemporaryDirectory() as d:` built, ran, printed the right
+        # answers and left the directory on disk, and how `with closing(7) as
+        # v:` printed `v=7` where CPython raises AttributeError.  Both are a
+        # wrong-but-exit-0 artifact with nothing on the link line to catch it.
+        #
+        # FIRST in the loop, for two reasons that are about what the rewrite
+        # emits.  It REPLACES a statement with four, and everything below reads
+        # this body as the source's shape: `_collect_one_field_receiver_rebinds`
+        # would otherwise see the `with`'s own statements (fine) while
+        # `_rewrite_method_calls` would see the context construction and decide
+        # a holder from a statement the source did not write.  And the lowered
+        # form is a `try`/`finally`, which the handler-arm refusal above has
+        # already cleared for this module: a `with` that lowered to a `try` with
+        # a handler would be refused for the wrong reason.
+        _rewrite_with_statements(fn, structs_by_name)
         # A one-field struct's mutator that rebinds its receiver to a name of its
         # own type. Asked HERE, at the top of the loop, because
         # `_rewrite_self_fields` below collapses `recv.<sole field>` onto `recv`
@@ -13136,6 +13510,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # shape is unanswerable anywhere later in the pipeline.
         _collect_one_field_receiver_rebinds(fn, method_owners.get(fn.name),
                                             structs_by_name)
+        # …and its sibling: a one-field method that stores its own field through
+        # a receiver no write-back will hand back, so the store is computed and
+        # dropped. Asked at the same point for the same reason — after
+        # `_rewrite_self_fields` the store and a rebinding are the same text.
+        _collect_one_field_dropped_stores(fn, method_owners.get(fn.name),
+                                          structs_by_name)
         if fn.name in writebacks:
             _return_the_receiver(fn, writebacks[fn.name])
         # The two tables the receiver-position rewrites read, built HERE and
@@ -13149,6 +13529,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # (`model.list_element_structs`). One walk of the bindings each, neither
         # recomputed by a consumer.
         st = method_owners.get(fn.name)
+        # A method's `self` IS the field; a local initialised from a one-word
+        # constructor holds that struct's sole field directly.  The table holds
+        # the STRUCT and the rewrite derives the chain from it, because the
+        # rewrite needs the struct too — to name it in the refusal a call
+        # through one of those fields gets — and the chain is one line away
+        # either way.  One recognition of "this name is a one-word word", read
+        # once.
         one_word = _one_word_field_map(fn, structs_by_name, st)
         if st is not None and M.struct_is_one_field(st):
             one_word["self"] = st
@@ -13166,15 +13553,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # gives. Everything else about it is `_rewrite_class_constants`.
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name),
-                                 _method_receiver_bases(fn))
-# A method's `self` IS the field; a local initialised from a one-word
-        # constructor holds that struct's sole field directly.  The table holds
-        # the STRUCT and the rewrite derives the chain from it, because the
-        # rewrite needs the struct too — to name it in the refusal a call
-        # through one of those fields gets — and the chain is one line away
-        # either way.  One recognition of "this name is a one-word word", read
-        # once.  (Built with `one_word` at the top of this loop rather than
-        # here, beside `elems`, for the reason the comment there gives.)
+                                 _method_receiver_bases(fn), enum_structs)
         # A method call THROUGH a one-word field, lifted while the field's
         # DECLARED type can still be read — the identity below is about the same
         # storage but it keeps the method name and loses the struct, and a
@@ -13193,9 +13572,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # the owner of `o.get()` as plainly as the source spells it.
         _rewrite_one_word_field_method_calls(
             fn.body, one_word, structs_by_name, receiverless,
-            _bound_receiver_structs(fn, structs_by_name,
-                                    [f.name for f in functions], st))
-# `mapping` is derived inside `_rewrite_self_fields` now, because the
+            _bound_receiver_structs(fn, framed, _image_function_names, st))
+        # `mapping` is derived inside `_rewrite_self_fields` now, because the
         # rewrite is handed the table it derives the chain from — it needs the
         # struct as well as the chain, for the refusal a call through one of
         # those fields gets. So neither the chain nor the table is built twice.
@@ -13216,7 +13594,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # pass sees what is left, which is the class name and a local built
         # from a constructor.
         _rewrite_class_constants(fn, structs_by_name,
-                                 method_owners.get(fn.name))
+                                 method_owners.get(fn.name),
+                                 None, enum_structs)
         # …and the CALLER half of the one-field mutator write-back, after
         # `_rewrite_self_fields` so the receiver it stores through is the same
         # word the callee was handed (`c._value` is `c` by now, and it is `c`
@@ -13355,7 +13734,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # half of the same bug, and why `_check_method_receiver_types` was dead.
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
-                     star_imported_modules(stmts))
+                     star_imported_modules(stmts), enum_structs)
     # The slot table is RETURNED as well as published, for the reason
     # `symbols` is: building an import compiles the imported module through this
     # same function, and that nested call publishes ITS globals over ours, so
@@ -13549,6 +13928,209 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
     declaring = [st for st in (structs_by_name or {}).values()
                  if any(m.name == base.member for m in M.struct_methods(st))]
     return declaring if len(declaring) > 1 else []
+
+
+# ── `with`: lowered to the protocol, or refused by name ───────────────────────
+#
+# The statement containers a `with` can sit inside, and the reason the list is
+# written out rather than discovered.  `M.rewrite_tree` is the mutating sibling
+# of `M.iter_nodes` and reaches every dataclass field, but it REPLACES a node
+# with what the visitor returns rather than splicing a list of statements into
+# its parent, and the lowering below is four statements where the source had
+# one.  So this walk owns the two things that needs: which fields hold
+# statements, and how a replacement list is spliced.
+#
+# `elifs` is its own entry because `IfStmt.elifs` is a list of TUPLES
+# `(condition, body)` — the only place in the tree where a container is not a
+# `list`, and invisible from a node's field list.  A walk that recursed on
+# `isinstance(value, list)` descends every `if` body and stops dead at the first
+# `elif`, which is measured (`formal/model.py`, the `_GenexpDesugarer` note):
+# a method call inside an `elif` arm once reached a late check unrewritten.
+# A nested `FunctionDef` is NOT descended: each function on the list this pass
+# runs over is visited on its own, and descending here would rewrite a body
+# twice — harmless while the rewrite is a no-op on a body with no `with`, and a
+# duplicated context manager the moment there is one.
+_STMT_LIST_FIELDS = {
+    "IfStmt": ("then_body", "else_body"),
+    "WhileStmt": ("body",),
+    "ForStmt": ("body",),
+    "TryStmt": ("body", "else_body", "finally_body"),
+    "MatchStmt": ("cases",),
+    "MatchCase": ("body",),
+    "ComptimeIfStmt": ("then_body", "else_body"),
+    "ComptimeForStmt": ("body",),
+    "WithStmt": ("body",),
+}
+_STMT_TUPLE_LIST_FIELDS = {
+    "IfStmt": ("elifs",),
+    "ComptimeIfStmt": ("elifs",),
+}
+# The one field name that is a list of statements on EVERY statement, so a new
+# node shape cannot be silently missed by the table above: `MatchCase.body` and
+# `WithStmt.body` are already in it, and a future `Match`-like node that adds a
+# body under another name is a row in `_STMT_LIST_FIELDS` instead of a bug found
+# by a program.
+_SKIP_DESCEND_FIELDS = {("FunctionDef", "body"), ("LambdaExpr", "body")}
+
+
+def _rewrite_stmt_lists(stmts: list, visit) -> list:
+    """`stmts` with `visit` applied to every statement, spliced where it splits.
+
+    `visit(stmt)` returns either the statement (kept) or a LIST of statements
+    that take its place.  The recursion happens BEFORE the visit, so a `with`
+    nested inside an `if` arm is rewritten whether the reader arrived at it
+    through this function's loop or through the arm.
+    """
+    out = []
+    for stmt in (stmts or []):
+        kind = type(stmt).__name__
+        for field in _STMT_LIST_FIELDS.get(kind, ()):
+            if (kind, field) in _SKIP_DESCEND_FIELDS:
+                continue
+            value = getattr(stmt, field, None)
+            if isinstance(value, list):
+                value[:] = _rewrite_stmt_lists(value, visit)
+        for field in _STMT_TUPLE_LIST_FIELDS.get(kind, ()):
+            for pair in (getattr(stmt, field, None) or []):
+                if isinstance(pair, (list, tuple)) and len(pair) == 2 \
+                        and isinstance(pair[1], list):
+                    pair[1][:] = _rewrite_stmt_lists(pair[1], visit)
+        pieces = visit(stmt)
+        out.extend(pieces if isinstance(pieces, list) else [pieces])
+    return out
+
+
+def _with_temp_names(fn) -> set:
+    """Every name the function's own body mentions, for a collision-free temp.
+
+    A `with` that evaluates its context expression once needs a name to hold it,
+    and the name has to be one the source cannot also mean: a `__with_ctx` that
+    shadowed a local would silently change what that local holds for the rest of
+    the function, which is a wrong answer rather than a refusal.  Every name in
+    the tree is collected — parameters, locals, fields spelled through a
+    receiver — because a name this function never assigns can still be READ.
+    """
+    names = set()
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        name = getattr(node, "name", None)
+        if isinstance(name, str):
+            names.add(name)
+        elif isinstance(node, F.MemberExpr):
+            member = getattr(node, "member", None)
+            if isinstance(member, str):
+                names.add(member)
+    return names
+
+
+def _rewrite_with_statements(fn, structs_by_name: dict) -> None:
+    """Every `with` in `fn` becomes the protocol, or is refused by name.
+
+    What it emits, for one item, is CPython's own order:
+
+        <tmp> = EXPR                          # once, into a local
+        try:
+            TARGET = S___enter__(<tmp>)       # what the alias names
+            <body>
+        finally:
+            S___exit__(<tmp>)                 # on EVERY way out
+
+    `finally` rather than a statement after the body, and that is the whole
+    reason the cleanup is correct rather than nearly correct: measured on both
+    architectures, a `return` from inside a `try` body still runs the
+    `finally`, so `with TmpDir() as d: … return x` removes the directory —
+    which is the entire contract `formal/hostmods/tempfile.mojo` refuses to
+    fake.  A statement after the body would leave the directory behind on every
+    early return, and a temporary directory left behind is the bug this exists
+    to remove rather than a detail.
+
+    The callee is emitted as the LIFTED name `S___enter__` / `S___exit__`
+    rather than as `tmp.__enter__()`, for a reason that is about ordering rather
+    than taste: `_rewrite_method_calls` runs later in this same loop and is what
+    lifts `recv.m(a)` into `S_m(recv, a)`, so writing the lifted call here means
+    this pass does not depend on that one having run, on the receiver's frame
+    analysis existing yet, or on the dispatch table being asked to name a struct
+    from a receiver it has no table for yet.  The method is already a compiled
+    function taking `self` first, so the call is an ordinary call with the
+    frame address as its first argument — the by-reference receiver's own shape.
+
+    Multiple items nest: CPython enters left to right and exits right to left,
+    and nesting the rewrites inside one another produces exactly that.
+
+    `async with` is the same rewrite.  This path has no event loop, so there is
+    no suspension point for the protocol to resume across; the `is_async` flag
+    has no other meaning here, and the emitters already said so where they used
+    to drop the exit call.
+    """
+    used = _with_temp_names(fn)
+    counter = [0]
+
+    def fresh_name():
+        while True:
+            counter[0] += 1
+            name = f"_with_ctx{counter[0]}"
+            if name not in used:
+                used.add(name)
+                return name
+
+    def visit(stmt):
+        if not isinstance(stmt, F.WithStmt):
+            return stmt
+        items = list(stmt.items or [])
+        if not items:
+            # A `with` with no items has no context expression and no cleanup;
+            # there is nothing to lower and nothing to refuse, so it runs its
+            # body — which is also what it means.
+            return list(stmt.body or [])
+        # Inside-out, so the FIRST item's `__exit__` runs LAST.
+        result = list(stmt.body or [])
+        for item in reversed(items):
+            result = _one_with_item(fn, item, result, structs_by_name,
+                                    fresh_name)
+        return result
+
+    fn.body = _rewrite_stmt_lists(getattr(fn, "body", None), visit)
+
+
+def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name):
+    """One `with` item, wrapped around `body`. Raises CodegenError if it cannot."""
+    struct = M.with_expr_struct(item.expr, structs_by_name)
+    if struct is None or not M.struct_is_context_manager(struct):
+        raise CodegenError(
+            M.refuse_unlowerable_with(fn, item, item.expr, struct,
+                                      structs_by_name))
+    tmp = fresh_name()
+    enter = F.CallExpr(
+        func=F.IdentExpr(M.method_function_name(struct.name,
+                                               M.CONTEXT_ENTER)),
+        args=[F.IdentExpr(tmp)], kwargs=[])
+    exit_ = F.CallExpr(
+        func=F.IdentExpr(M.method_function_name(struct.name, M.CONTEXT_EXIT)),
+        args=[F.IdentExpr(tmp)], kwargs=[])
+    # `WithItem.alias` is typed `object` and is a bare STRING on this front end
+    # (and an `IdentExpr` where the self-hosted one boxes it), which is why
+    # `mojo/middle/boundnames.py` has a helper that asks the node case
+    # explicitly: `alias.name` on the string raises, and in the compiled path
+    # that raise silently truncated the enclosing function. Both spellings are
+    # accepted here for the same reason, and neither is normalised anywhere else.
+    alias = item.alias
+    alias_name = (alias if isinstance(alias, str)
+                  else getattr(alias, "name", None))
+    if isinstance(alias_name, str):
+        opened = F.VarDecl(alias_name, None, enter)
+    elif alias is None:
+        opened = F.ExprStmt(enter)
+    else:
+        # `with EXPR as (a, b)` and `with EXPR as obj.attr` are two shapes this
+        # path does not lower, and the alias is where the protocol's result
+        # goes, so it is refused rather than dropped: dropping it is a `with`
+        # whose contract is the exit call alone, with nothing bound.
+        raise CodegenError(M.refuse_unlowerable_with(
+            fn, item, item.expr, struct, structs_by_name))
+    return [
+        F.VarDecl(tmp, None, item.expr),
+        F.TryStmt(body=[opened, *body], handlers=[], else_body=None,
+                  finally_body=[F.ExprStmt(exit_)]),
+    ]
 
 
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,
@@ -14664,6 +15246,54 @@ def _export_entries(source_paths: list, prefixes: dict = None) -> dict:
     return exported
 
 
+def _declares_nothing_but_a_package_body(source_paths: list) -> bool:
+    """A package `__init__` that DECLARES nothing — a namespace package.
+
+    Two conditions and both are load-bearing, and the second is the one that
+    took a test red when it was left out.
+
+    **Every source is a package `__init__`.** Spelled on the BASENAME, because
+    that is what makes it a statement about the module rather than about where
+    the file sits: `formal/imports.py` resolves a package by the same
+    `__init__.mojo` / `__init__.py` name (`_admitted_tier_conflicts` walks
+    `formal/hostmods` on it), and a module named `__init__.py` that is not a
+    package does not exist in this resolver.
+
+    **It declares no function, no type and no trait — private or public.** This
+    is the condition the gate's own refusal names ("declares no function and no
+    type at all"), read out of `_declared_api_shape`, which is the same reader
+    `no_public_api_reason` uses so the two cannot disagree about it. Without it
+    the branch swallowed three refusals that are RIGHT: a package whose only
+    public function is a GENERIC template (`test_a_module_with_no_boundary_
+    symbol_is_refused`'s `mylib/__init__.mojo`), one whose only declaration is
+    private, and one whose names are all C library symbols. Each of those has a
+    name a reader might have wanted to bind and no legal way to bind it, which
+    is a finding; a docstring has neither.
+
+    A module-level CONSTANT is not a declaration here and does not stop the
+    branch: a folded value needs no symbol, and `_namespace_library`'s
+    `constants` parameter is where the consumer reads it — which is the same
+    route `formal/hostmods/sys.mojo`'s `byteorder` already takes.
+    """
+    if not source_paths:
+        return False
+    for p in source_paths:
+        if os.path.basename(p) not in ("__init__.py", "__init__.mojo"):
+            return False
+        try:
+            with open(p) as f:
+                text = f.read()
+        except OSError:
+            return False
+        shape = _declared_api_shape(text)
+        # `any(shape.values())` rather than a list of buckets, so a bucket
+        # `_declared_api_shape` grows later is part of this question from the
+        # day it exists instead of from the day somebody remembers this line.
+        if any(shape.values()):
+            return False
+    return True
+
+
 def _declared_traits(source_paths: list) -> list:
     """The public TRAIT names `source_paths` declare at top level.
 
@@ -15775,11 +16405,58 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # about the file is worse than no message: it sends the reader looking for
     # a struct that isn't there.
     traits = _declared_traits(source_paths)
-    if not _export_entries(source_paths, module_prefixes) \
-            and not reexports and not traits:
+    entries = _export_entries(source_paths, module_prefixes)
+    # ── a package `__init__` whose body DECLARES NOTHING ────────────────────
+    #
+    # `_namespace_library` exists for a package whose whole API is
+    # re-exported, and it emits a real library with an EMPTY export trie
+    # because the names already resolve through the submodules on its link
+    # line. A package `__init__` that declares NOTHING is the same library for
+    # a stronger reason: there is no name to forward and none to declare, so
+    # there is nothing an importer could have bound here in the first place,
+    # and its API is its submodules' — which are libraries of their own.
+    #
+    # Measured, 2026-10-03 (`bugs/sweeps/sweep-arm-8.txt`): `formal/__init__.py`
+    # is five lines of docstring, and the gate below refused it as "declares no
+    # function and no type at all", which took out `test_formal_globals.py`,
+    # `test_formal_toplevel.py` and `test_x86_64_encoders.py` — every one of
+    # which imports a SUBMODULE (`from formal.build import globals_base`,
+    # `from formal.x86_64 import Reg`) and names nothing the package itself
+    # publishes. The file behind the measurement: adding one public `def` to
+    # that `__init__` moved all three off this refusal in the same build.
+    #
+    # What still refuses, and must: an importer that writes `pkg.name` finds an
+    # empty trie and gets `model`'s per-name refusal naming the package and
+    # listing what it does publish (`dylib_export_lookup`'s dotted arm, which
+    # reads the manifest's `module` — recorded by `_namespace_library` for
+    # exactly a table-less library). So the failure this gate prevents is still
+    # a build error with a message; what goes away is the refusal of an
+    # importer that never asked the package for anything.
+    if not entries and not reexports and not traits \
+            and _declares_nothing_but_a_package_body(source_paths):
+        if prove:
+            raise FormalBuildError(
+                f"{os.path.basename(source_paths[0])} is a package whose body "
+                f"declares nothing — no function, no type, no re-export — so it "
+                f"compiles to a library with no code and there is nothing to "
+                f"prove. Its API is its submodules, each of which is a library "
+                f"in its own right.")
+        return _namespace_library(
+            output, install_name, arch, {}, dylib_syms, dep_install,
+            linked, fmt=fmt,
+            source=source_paths[0],
+            module=(module_prefixes or {}).get(source_paths[0])
+            or _module_prefix(source_paths[0]),
+            constants=dict(constants),
+            variables=[],
+            traits=[])
+    if not entries and not reexports and not traits:
         raise FormalBuildError(no_public_api_reason(source_paths))
-    if not _export_entries(source_paths, module_prefixes) \
-            and (reexports or traits):
+    # `entries`, not a second `_export_entries` call: the gate above and this
+    # branch ask the same question, and two evaluations of it are two chances
+    # for the export table to disagree with itself about what the module
+    # publishes.
+    if not entries and (reexports or traits):
         # A proof is a property of CODE, and this library has none. Saying so
         # beats quietly returning a result with no `proof_path` in it: a
         # caller that asked for a checked proof and got a library would

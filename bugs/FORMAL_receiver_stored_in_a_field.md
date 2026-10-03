@@ -1,80 +1,140 @@
 # FORMAL_receiver_stored_in_a_field: a frame address in a struct field, and a parameter whose declared type no call site agrees with
 
-**Status: row A's RULE is landed (a delegating constructor is no longer
-refused, and the locally-built half still is); the 24 files are still blocked,
-by a DIFFERENT and more interesting rule, measured in §6. Row B is unmeasured
-here and now has a census that produces its list without a sweep (§7).**
+**Status: row A is CLOSED. The delegating row builds, computes the right
+number, and runs on both architectures; the 24 files were never a count of
+what this blocked (see §0.1 for why they did not move). Row B is unmeasured
+and is a different rule — its list needs a sweep, because the refusal compares
+call sites inside one image and a parse-and-walk instrument cannot answer it.**
 
 Both constructs were in the "other refusal" bucket until `fbaed39b` gave the
 bucket markers for them, and both were unowned. They are one document because
 they were measured together and they are the two rows a planner would otherwise
 have to split by hand out of a 183-file bucket.
 
-**Re-measured 2026-10-02 on `work/formal8-10`, without a sweep, and ROW A's
-24 FILES ARE THE DELEGATING CONSTRUCTOR — 13 of the 14 sites are an
-`__init__` storing its own parameter, and none of them is a local.** §5 below
-has the census, the instrument, its one weakness, and the rule the measurement
-decides. Row B is untouched: its list needs a sweep, because the refusal
-compares call sites inside one image and a parse-and-walk instrument cannot
-answer it — §7 says what can be answered without one.
-
 | row | files blocked | in-file | both arches | source |
 |---|---|---|---|---|
 | a receiver stored in a FIELD of a struct that outlives it | **24** | 24 | identical | `formal/build.py:4735` |
 | a parameter's declared type contradicts every call site | **13** | 13 | identical | `formal/model.py:7110` |
 
-Neither row is claimed. `python3 tools/control.py claims` shows no owner for
-either as of 2026-10-01; they are enqueued in the work map §7.
+## 0.1 What landed, 2026-10-03 (`work/formal13-6`): the PLACEMENT, and the
+## three-step deadlock it was holding shut
 
-## 0. What landed, 2026-10-03 (`work/formal10-4`): row A's rule, and why the
-## 24 files are still refused
+Row A's rule (`_frame_field_store_is_sound`) was already in place and already
+correct: `self.src = <a parameter>` is sound because the frame ARRIVED. What
+§0 recorded as "the 24 files are still blocked, by a DIFFERENT and more
+interesting rule" was a three-step deadlock between two decisions that were
+each individually right:
 
-`formal/build.py`'s `_frame_field_store_is_sound` replaces the flat refusal with
-the rule §5's census selects, and the rule is about the VALUE, not the slot:
+1. `model.struct_nested_frame_fields` **PLACED** a nested frame in every field
+   whose declared type names a framed struct of this module and whose only
+   writer is `__init__` — the constructor reserving a block in the object's own
+   block and storing that block's ADDRESS in the slot;
+2. which made step 3's store **unsound**, so `_frame_field_store_is_sound`
+   refused it — correctly, and with the more useful of the two messages;
+3. and `_typed_nested_frame` answered `_REASSIGNED` at the read, because the
+   placement list — the authority it consults, deliberately, so the emitter and
+   the reader cannot disagree about which fields are placed — did not have the
+   field in it.
 
-> A field store of a frame address is sound when the frame ARRIVED — it is a
-> parameter of this method, so the CALLER reserved it and it cannot outlive
-> anything this function owns — **and** the slot is an ordinary word.
+**The constructor does not always BUILD a nested frame in the slot it was given
+one for.** `self.src = r` where `r: R` is `__init__`'s own annotated parameter
+stores the CALLER's frame, so the slot is a POINTER slot and reserving a block
+for it is what made the store unsound in the first place. That is one predicate
+over the constructor's own body, which is what §0 said the next step was.
 
-Measured on both architectures, a delegating constructor across a module
-boundary now builds and computes the right number —
-`test_formal_run.py`'s `byref_delegating_constructor_stores_a_parameter_frame`,
-where `peek` reads `7` and `8` out of the frame the constructor stored, so a copy
-or a re-created block would answer 1 — and
-`byref_refuse_a_field_store_of_a_frame_built_here` pins the negative half
-(`var t = R()` in the method: that frame is built HERE, in this method's own
-scratch, and the slot may outlive the call).
+```python
+model.init_stores_a_parameter_struct(struct_def, name, decls)
+```
+— "every assigned value of `name` in `__init__` is a bare NAME of a parameter
+annotated with a struct of this module". It is the evidence
+`model.one_word_field_struct` was ALREADY asking for the same reason (a
+delegating constructor is the commonest field shape in this repository's own
+source), so that function calls it rather than the two walking `__init__` twice
+and one of them learning a spelling the other does not. Unanimous-or-nothing,
+and asked only AFTER `struct_nested_frame_fields`'s other three conditions, so
+it can only ever REMOVE a placement and never invent one.
 
-**And the 24 files are still blocked, which is the finding worth more than the
-rule.** A delegating constructor over a struct **of this module** is refused by
-`model.struct_nested_frame_fields`' PLACEMENT, not by the store:
+Two readers, and they need two different answers:
 
-| the store is now allowed | what refuses the same program next |
-|---|---|
-| `self.src = <a parameter>`, field typed with an IMPORTED struct | nothing — it builds and runs (§0's case) |
-| `self.src = <a parameter>`, field typed with a struct of THIS module | `construction_nested_slot_refusal` at the construction site, and `_nested_frame_levels`'s `_REASSIGNED` arm at a read |
-| `self.f = <a parameter>`, field declared as a framed struct of this module | `constr_refuse_an_init_store_over_a_placed_nested_frame`'s own case, unchanged |
+| | question | answer for a delegating field |
+|---|---|---|
+| `struct_nested_frame_fields` | does the constructor reserve a block here? | **no** — it stores an address, it does not fill a block |
+| `_typed_nested_frame` | does a read of `holder.f.<field>` load `[slot + 8k]`? | **yes**, and it must answer with the STRUCT rather than `_REASSIGNED` |
 
-The reason is that this module PLACES a frame in such a slot: the constructor
-reserves a block for it in the object's own block and stores that block's
-address, so a pointer stored over it leaves a word where every reader computes a
-frame base from it. That is a real hazard, and it is why the rule requires an
-ordinary word — `struct_nested_frame_fields` IS the placement decision, and a
-rule that ignored it would trade a loud refusal for a wrong answer.
+`_REASSIGNED` would be the wrong ANSWER, not a cautious one: its own sentence is
+"a frame belonging to whichever function ran the assignment", and for a
+delegating field the only assignment is `__init__`'s and the frame in the slot
+is the caller's. The caller is the frame the object is itself reached through,
+and the two die together — which is the argument `_frame_field_store_is_sound`
+already makes and which the placement was cancelling out.
 
-**So the blocker for the corpus is the PLACEMENT decision, and the next step is
-narrower than §3 assumed:** `struct_nested_frame_fields` does not look at what
-the constructor STORES. A field whose `__init__` stores a name rather than
-building a nested frame there is not a placed frame — it is a pointer slot — and
-teaching the placement that is one predicate over the constructor's own body.
-That predicate was already the subject of `FORMAL_struct_construction_shapes.md`
-(`git rm`'d 2026-10-03, when the construction family closed — its `constr_*`
-cases in `test_formal_run.py` stand in its place), which is why this doc stops
-here rather than reaching into it.
+Measured on **both architectures**, before and after:
+
+```python
+struct R:
+    var a: Int
+    var b: Int
+struct Holder:
+    var src: R
+    var n: Int
+    def __init__(self, r: R):
+        self.src = r
+        self.n = 1
+    def total(self) -> Int:
+        return self.src.a + self.n
+def main(n: Int) -> Int:
+    var r = R(); r.a = 7; r.b = 8
+    var h = Holder(r)
+    printf("%d %d", h.src.a, h.total())
+    return h.src.a + h.n
+```
+
+```
+before   build: a R receiver is stored in the field 'self.src', so it outlives
+         the frame it names …   (both architectures, byte-identical)
+after    printf: 7 8   exit 8   (both architectures)
+```
+
+Four cases in `test_formal_run.py`. The reader is a METHOD (`h.total()`) as well
+as a field read (`h.src.a`), because the two go through different arms and a fix
+that reached only the value-position read would leave the method receiver
+refusing. One of the four is a case that **stopped being a refusal**:
+`constr_refuse_an_init_store_over_a_placed_nested_frame` — the smallest source
+that reaches the whole deadlock — is now
+`constr_a_delegating_store_into_a_typed_nested_slot_builds` and asserts `6`,
+because a reader who finds the placement predicate should be able to find in the
+suite what it moved.
+
+**And the "24 files" never moved, which is the finding worth more than the fix.**
+Four of the 14 census sites are not this shape at all, and §5's census is
+syntactic while the refusal's evidence is a derived holder set, so its count was
+always an upper bound. The 24 was never a promise of 24 unblocked files: the same
+caution `formal_sweep_causes.py` states as "FILES BLOCKED IS AN UPPER BOUND". What
+the fix changes is that the SHAPE is now lowerable, which is what any of the 11
+files that reaches it needs; **the number of them is a `tools/formal_sweep.py`
+delta and that is the integrator's measurement, not this document's claim.**
+
+**What did not change.** `self.f = t` where `var t = R()` was BUILT HERE is still
+refused — `init_stores_a_parameter_struct` asks whether the store is a NAME of an
+`__init__` parameter and a construction is not one — and a slot whose `__init__`
+writes only some other field is still PLACED, which
+`a_constructed_nested_frame_is_still_placed` pins (two objects, two frames,
+because a placement that were shared would answer the first guard and fail the
+second).
+
+Verified: `test_formal_run.py` PASS=810 FAIL=0, and green on the placement's own
+readers — `formal-frame-len`, `formal-returned-frame` (unchanged from its
+measured 23/13 baseline, all 13 x86-64), `formal-cross-module`,
+`formal-value-model`, `formal-x86-parity`, `formal-method-param-field`,
+`formal-dylib`, `formal-bracketed-method-field-set`, `formal-receiver-position`,
+`formal-read-before-store` (140), `formal-receiver-spelling`, `formal-toplevel`
+(108), `formal-globals`, `formal-admitted`, `formal-frame-return-overloads`,
+`formal-typed-flag`.
 
 ---
 
 ## 1. Row A: a frame address stored in a field — 24 files
+
 
 ### Smallest reproducer (12 lines, both arches)
 
@@ -247,6 +307,9 @@ neither row's 24 or 13 is a promise:
   same line and was tracked in `FORMAL_struct_construction_shapes.md` (`git rm`'d
   2026-10-03 when the construction family closed). Expect a
   similar landing, and expect the ceiling to be well under 24.
+  **Still open after §0.1, and still the integrator's measurement:** the fix
+  removes the SHAPE's blocker, and how many of the 24 reach it is a sweep delta
+  this document does not claim.
 * **Row B, 13 files.** Cheaper and prior to any change: for each of the 13,
   check whether CPython raises on the same source. A file whose program is
   already wrong is not blocked by a backend gap, and a row of those is a stdlib

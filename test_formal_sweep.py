@@ -15,6 +15,7 @@ file, tools/formal_sweep.py, fire.py, fire_compiler.py and every formal/*.py
 as the hashed inputs — the sweep's verdict is a function of all of those, so a
 cached result from a different set would be a different answer.
 """
+import argparse
 import io
 import os
 import re
@@ -998,7 +999,10 @@ class TestReport(unittest.TestCase):
         # mem_gb is accepted and ignored: it is a bound on a build, and there is
         # no build here. Accepting it is the point — run_one grew this parameter
         # when the per-file ceiling landed, and a stub with the old signature
-        # would fail on arity and read as a defect in the sweep.
+        # would fail on arity and read as a defect in the sweep. `timeout` and
+        # `population` are accepted and ignored for the same reason and grew
+        # together: `-t` became a per-POPULATION bound, so the caller resolves
+        # both per file and hands them over.
         # A row's optional FIFTH element is the path handed to `classify`.  It
         # has to exist at all, because `built-with-admitted-contracts` is decided
         # from the file's IMPORT CLOSURE and not from anything the build said —
@@ -1010,7 +1014,8 @@ class TestReport(unittest.TestCase):
             if len(row) > 4 and row[4]:
                 by_classify_path[os.path.join(mod.REPO, row[0])] = row[4]
 
-        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB):
+        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB,
+                         population=None):
             ok, detail, cause = by_path[path]
             return mod.Verdict(ok, detail, cause, True,
                                *mod.classify(ok, detail, cause, "import os\n",
@@ -1244,8 +1249,7 @@ class TestReport(unittest.TestCase):
         self.assertIn("got no verdict at all", out)
 
     def test_the_tool_bucket_is_split_by_cause_with_its_share_of_the_scope(self):
-        # `bugs/FORMAL_sweep_default_timeout_hides_a_crash_on_the_repos_own_files.md`:
-        # one lumped "N files got no verdict (timeout/unreadable/memory-killed/
+        # One lumped "N files got no verdict (timeout/unreadable/memory-killed/
         # tool error) … a too-small -t is the usual cause" is what let a file
         # whose build CRASHES at 42 s read as a file that is merely slow, and the
         # crash never reached the ledger at all. So each cause is named, each
@@ -1270,12 +1274,15 @@ class TestReport(unittest.TestCase):
                       S.CAUSE_UNREADABLE):
             self.assertRegex(out, rf"{cause}\s+1 file\(s\) \(16\.7% of the "
                                  r"classified scope\)")
-        # The timeout row says what the file's answer is: unknown at this -t.
-        self.assertIn("unknown at this -t", out)
+        # The timeout row says what the file's answer is: unknown at the bound
+        # it hit, which is that POPULATION's bound and not the run's.
+        self.assertIn("unknown at that bound", out)
         # And it hands over the command that answers it, rather than leaving the
         # reader to reconstruct one. The paths are named while they are few, and
-        # the -t it suggests is not the one that just failed.
-        self.assertIn("re-answer them with a larger -t: python3 "
+        # the -t it suggests is not the one that just failed. A run that set one
+        # bound for both populations gets the BARE spelling — suggesting
+        # `-t repo=90` at a reader who wrote `-t 90` is noise.
+        self.assertIn("re-answer the 1 repo file(s) with a larger -t: python3 "
                       "tools/formal_sweep.py --arch arm64 -t 90 t.py", flat)
         self.assertNotIn("-t 30 t.py", flat)
         # The memory row must not read as "raise -t": it names the ceiling.
@@ -1288,7 +1295,7 @@ class TestReport(unittest.TestCase):
         out, _code, _pub = self._main([
             ("p.py", True, "", None),
             ("m.py", False, "killed at the 4.0 GB ceiling", S.CAUSE_MEMORY)])
-        self.assertNotIn("re-answer them", out)
+        self.assertNotIn("re-answer", out)
 
     def test_many_timed_out_files_name_the_rows_rather_than_a_long_line(self):
         # Nine paths would be a 700-character summary line, and the paths are
@@ -1319,6 +1326,218 @@ class TestReport(unittest.TestCase):
     def test_history_says_so_when_there_is_none(self):
         out, _code, _pub = self._main([("p.py", True, "", None)], prev=None)
         self.assertIn("verdict history: none", out)
+
+
+class TestTimeoutPerPopulation(unittest.TestCase):
+    """`-t` is a bound PER POPULATION, not one number for a whole run.
+
+    §2 of the measurement that put the two populations apart is what this class
+    pins. A repository-root `.py` imports the
+    repository's other root `.py` files, so its build is the SUM of its import
+    closure's, and one 185-line file crashes inside 600 s where a 135-line one
+    passes inside 30 — while the four files that cannot be told apart by line
+    count share ONE closure of identical size, so no bound proportional to the
+    closure can separate them either. The population is the axis that can.
+
+    No builds here: the unit under test is which bound a given FILE is handed
+    and what the summary then says about it, both of which are decided before
+    anything is compiled.
+    """
+
+    STD = os.path.join(os.sep, "elsewhere", "Mojo", "stdlib")
+
+    def _timeouts(self, spec=None):
+        return S.Timeouts(spec, stdlib_root=self.STD)
+
+    def test_a_bare_bound_is_the_bound_for_both_populations(self):
+        t = self._timeouts(S.merge_timeout_args([S._timeout_arg("90")]))
+        self.assertEqual(t.populations_with_seconds(),
+                         {"repo": 90, "stdlib": 90})
+        self.assertTrue(t.uniform())
+        # And the header says the one number, because that is what the run is
+        # doing — a reader diffing two runs wants to see whether it CHANGED.
+        self.assertEqual(t.describe(), "90s")
+
+    def test_one_population_leaves_the_other_at_the_default(self):
+        t = self._timeouts(S.merge_timeout_args([S._timeout_arg("repo=600")]))
+        self.assertEqual(t.seconds["repo"], 600)
+        self.assertEqual(t.seconds["stdlib"], S.DEFAULT_TIMEOUT)
+        self.assertFalse(t.uniform())
+        self.assertEqual(t.describe(), f"repo=600s stdlib={S.DEFAULT_TIMEOUT}s")
+
+    def test_a_repeated_t_population_is_the_last_one_spoken(self):
+        merged = S.merge_timeout_args([S._timeout_arg("90"),
+                                       S._timeout_arg("repo=600"),
+                                       S._timeout_arg("stdlib=120")])
+        self.assertEqual(S.Timeouts(merged, self.STD).populations_with_seconds(),
+                         {"repo": 600, "stdlib": 120})
+
+    def test_a_typo_is_refused_naming_the_populations(self):
+        for text in ("rep=600", "repo=soon", "six", "repo="):
+            with self.assertRaises(argparse.ArgumentTypeError) as cm:
+                S._timeout_arg(text)
+            flat = " ".join(str(cm.exception).split())
+            self.assertIn("repo, stdlib", flat, text)
+
+    def test_the_population_is_the_stdlib_root_and_nothing_else(self):
+        t = self._timeouts()
+        self.assertEqual(t.population(os.path.join(self.STD, "std", "a.mojo")),
+                         "stdlib")
+        self.assertEqual(t.population(os.path.join(S.REPO, "imports.py")),
+                         "repo")
+        # A string PREFIX is not a path prefix: `<stdlib>-backup/…` is a
+        # different tree, and calling it stdlib would apply the stdlib bound to
+        # a repo file.
+        self.assertEqual(
+            t.population(os.path.join(self.STD + "-backup", "a.py")), "repo")
+
+    def test_with_no_stdlib_root_every_file_is_a_repo_file(self):
+        # What `--no-stdlib` and every explicit-path sweep of this repository
+        # get: no root was discovered, so there is one population and the repo
+        # bound is the only one that can apply.
+        t = S.Timeouts(S.merge_timeout_args([S._timeout_arg("45")]))
+        self.assertEqual(t.population("/anywhere/at/all.mojo"), "repo")
+        self.assertEqual(t.for_file("/anywhere/at/all.mojo"), 45)
+
+    def test_each_file_is_built_with_the_bound_of_its_own_population(self):
+        # The property the whole flag exists for, at the place it is decided:
+        # the WORKER that is about to build a file resolves that file's bound,
+        # so no caller has to know which population the file is in.
+        import formal_sweep as mod
+        seen = []
+        std_file = os.path.join(self.STD, "std", "slow.mojo")
+        repo_file = os.path.join(S.REPO, "imports.py")
+
+        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB,
+                         population=None):
+            seen.append((mod.rel(path), timeout, population))
+            return mod.Verdict(False, "build: refused", None, True,
+                               mod.CLASS_CODEGEN, "other refusal")
+
+        saved, results, buf = mod.run_one, {}, io.StringIO()
+        mod.run_one = fake_run_one
+        try:
+            with redirect_stdout(buf):
+                mod._stream_results([std_file, repo_file], 1,
+                                    self._timeouts(
+                                        S.merge_timeout_args(
+                                            [S._timeout_arg("repo=600"),
+                                             S._timeout_arg("stdlib=45")])),
+                                    ("--formal",), 4.0, results)
+        finally:
+            mod.run_one = saved
+        self.assertIn((os.path.relpath(std_file, mod.REPO), 45, "stdlib"),
+                      seen)
+        self.assertIn((os.path.relpath(repo_file, mod.REPO), 600, "repo"),
+                      seen)
+
+    def test_a_per_population_run_is_told_to_raise_only_the_population_that_failed(self):
+        # One bound for both populations cannot answer this: raising it would
+        # spend the repo-sized bound on the stdlib files too, and leaving it
+        # where it is means the repo files keep timing out.
+        std_file = os.path.join(self.STD, "std", "slow.mojo")
+        repo_file = os.path.join(S.REPO, "gimple_codegen.py")
+        results = {
+            std_file: S.Verdict(False, S._timeout_detail(45, "stdlib"),
+                                S.CAUSE_TIMEOUT, False, S.CLASS_TOOL,
+                                "timeout (> 45s)"),
+            repo_file: S.Verdict(False, S._timeout_detail(600, "repo"),
+                                 S.CAUSE_TIMEOUT, False, S.CLASS_TOOL,
+                                 "timeout (> 600s)"),
+        }
+        lines = []
+        S._report_tool_causes(
+            [std_file, repo_file], results,
+            self._timeouts(S.merge_timeout_args(
+                [S._timeout_arg("repo=600"), S._timeout_arg("stdlib=45")])),
+            4.0, "arm64", lines.append)
+        out = " ".join(" ".join(lines).split())
+        self.assertIn("re-answer the 1 stdlib file(s) with a larger -t: "
+                      "python3 tools/formal_sweep.py --arch arm64 -t stdlib=105",
+                      out)
+        self.assertIn("re-answer the 1 repo file(s) with a larger -t: "
+                      "python3 tools/formal_sweep.py --arch arm64 -t repo=1200",
+                      out)
+        # Twice the bound, or a minute more — never the bound that just failed.
+        self.assertNotIn("-t stdlib=45 ", out)
+        self.assertNotIn("-t repo=600 ", out)
+
+    def test_a_uniform_run_is_suggested_the_bare_spelling(self):
+        # `-t repo=90` at a reader who wrote `-t 90` is noise, and the per-file
+        # rows are named in the population order rather than arrival order so
+        # two runs of one sweep print the same lines in the same places.
+        std_file = os.path.join(self.STD, "std", "slow.mojo")
+        repo_file = os.path.join(S.REPO, "slow.py")
+        results = {p: S.Verdict(False, S._timeout_detail(90, pop),
+                                S.CAUSE_TIMEOUT, False, S.CLASS_TOOL, "")
+                   for p, pop in ((std_file, "stdlib"), (repo_file, "repo"))}
+        lines = []
+        S._report_tool_causes(
+            # Deliberately the other order to what is printed, so a report that
+            # followed arrival order would fail here.
+            [repo_file, std_file], results,
+            self._timeouts(S.merge_timeout_args([S._timeout_arg("90")])),
+            4.0, "arm64", lines.append)
+        flat = " ".join(" ".join(lines).split())
+        self.assertIn("re-answer the 1 repo file(s) with a larger -t: "
+                      "python3 tools/formal_sweep.py --arch arm64 -t 180",
+                      flat)
+        self.assertIn("re-answer the 1 stdlib file(s) with a larger -t: "
+                      "python3 tools/formal_sweep.py --arch arm64 -t 180",
+                      flat)
+        retries = [i for i, line in enumerate(lines) if "re-answer" in line]
+        self.assertEqual(len(retries), 2)
+        self.assertLess(*[lines[i].index("file(s)") for i in retries])
+
+    def test_the_timeout_row_says_which_populations_bound_it_hit(self):
+        # `timeout (> 30s)` alone leaves a reader unable to tell whether 30 was
+        # the default or a bound they chose, and those want different next
+        # steps. A caller with no population in hand keeps the older wording.
+        self.assertEqual(S._timeout_detail(30, "repo"),
+                         "timeout (> 30s, repo population)")
+        self.assertEqual(S._timeout_detail(30), "timeout (> 30s)")
+
+    def test_the_header_line_states_the_bounds_the_run_is_using(self):
+        # A run whose header does not say what it timed out at is a run whose
+        # `timeout` rows cannot be read as measurements.
+        import formal_sweep as mod
+        files = [os.path.join(mod.REPO, "t.py")]
+        seen = {}
+
+        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB,
+                         population=None):
+            return mod.Verdict(False, "timeout (> 45s)", S.CAUSE_TIMEOUT,
+                               False, *mod.classify(False, "timeout (> 45s)",
+                                                    S.CAUSE_TIMEOUT,
+                                                    "import os\n"))
+
+        saved = {n: getattr(mod, n) for n in
+                 ("run_one", "load_ledger", "publish_ledger", "find_source_files",
+                  "_claim_arch")}
+        mod.run_one = fake_run_one
+        mod.load_ledger = lambda arch, f: None
+        mod.publish_ledger = lambda *a, **k: None
+        mod.find_source_files = lambda roots: files
+        mod._claim_arch = lambda arch, files: True
+        old_argv = sys.argv
+        err = io.StringIO()
+        try:
+            sys.argv = ["formal_sweep.py", "--no-stdlib", "-t", "stdlib=45"]
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                try:
+                    mod.main()
+                except SystemExit:
+                    pass
+        finally:
+            sys.argv = old_argv
+            for n, v in saved.items():
+                setattr(mod, n, v)
+            cas.reset_stats()
+        seen["stderr"] = err.getvalue()
+        # One population spelled out and the other at its default, because that
+        # is what the run is doing; not a number the reader has to guess at.
+        self.assertIn(f"stdlib=45s timeout", seen["stderr"])
+        self.assertIn(f"repo={S.DEFAULT_TIMEOUT}s", seen["stderr"])
 
 
 class TestCacheContract(unittest.TestCase):
@@ -1834,7 +2053,8 @@ class TestResultsSurviveAnInterruptedRun(unittest.TestCase):
         events = []
         results = {}
 
-        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB):
+        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB,
+                         population=None):
             events.append(("built", mod.rel(path)))
             # A non-PASS so there is a line to print at all.
             return mod.Verdict(False, "build: refused", None, True,
@@ -1846,7 +2066,8 @@ class TestResultsSurviveAnInterruptedRun(unittest.TestCase):
             files = [os.path.join(mod.REPO, "a.py"), os.path.join(mod.REPO, "b.py")]
             buf = io.StringIO()
             with redirect_stdout(buf):
-                mod._stream_results(files, 1, 30, ("--formal",), 4.0, results)
+                mod._stream_results(files, 1, mod.Timeouts(),
+                                      ("--formal",), 4.0, results)
         finally:
             mod.run_one = saved
         out = buf.getvalue()
@@ -1862,13 +2083,14 @@ class TestResultsSurviveAnInterruptedRun(unittest.TestCase):
         import formal_sweep as mod
         results = {}
         saved = mod.run_one
-        mod.run_one = lambda p, t, f, mem_gb=mod.MEMCAP_GB: mod.Verdict(
-            True, "", None, True, mod.CLASS_PASS, "")
+        mod.run_one = lambda p, t, f, mem_gb=mod.MEMCAP_GB, population=None: (
+            mod.Verdict(True, "", None, True, mod.CLASS_PASS, ""))
         try:
             files = [os.path.join(mod.REPO, "ok.py")]
             buf = io.StringIO()
             with redirect_stdout(buf):
-                mod._stream_results(files, 1, 30, ("--formal",), 4.0, results)
+                mod._stream_results(files, 1, mod.Timeouts(),
+                                      ("--formal",), 4.0, results)
         finally:
             mod.run_one = saved
         self.assertEqual(buf.getvalue(), "")
@@ -1989,7 +2211,8 @@ class TestAStoppedRunStopsBuilding(unittest.TestCase):
                     drained.set()
                 return super().shutdown(wait=wait, cancel_futures=cancel_futures)
 
-        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB):
+        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB,
+                         population=None):
             name = mod.rel(path)
             started.append(name)
             if name == hold:
@@ -2016,7 +2239,8 @@ class TestAStoppedRunStopsBuilding(unittest.TestCase):
                                    "ThreadPoolExecutor", RecordingExecutor):
                 with redirect_stdout(buf):
                     interrupted = mod._stream_results(
-                        files, jobs, 30, ("--formal",), 4.0, results)
+                        files, jobs, mod.Timeouts(), ("--formal",), 4.0,
+                        results)
         finally:
             mod.run_one = saved
         self.assertTrue(interrupted, "the run must report itself interrupted")
@@ -2058,7 +2282,7 @@ class TestAStoppedRunStopsBuilding(unittest.TestCase):
         import formal_sweep as mod
         started = []
         saved = mod.run_one
-        mod.run_one = lambda p, t, f, mem_gb=mod.MEMCAP_GB: (
+        mod.run_one = lambda p, t, f, mem_gb=mod.MEMCAP_GB, population=None: (
             started.append(mod.rel(p)) or
             mod.Verdict(False, "build: refused", None, True,
                         mod.CLASS_CODEGEN, "other refusal"))
@@ -2067,7 +2291,7 @@ class TestAStoppedRunStopsBuilding(unittest.TestCase):
         try:
             with redirect_stdout(buf):
                 interrupted = mod._stream_results(
-                    files, 2, 30, ("--formal",), 4.0, results)
+                    files, 2, mod.Timeouts(), ("--formal",), 4.0, results)
         finally:
             mod.run_one = saved
         self.assertFalse(interrupted)

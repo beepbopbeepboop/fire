@@ -597,19 +597,70 @@ def test_the_tagged_box_accessors_are_declared_and_callable():
             f'    var x = {name}({"0.5" if "bits" in name else "0, 0"})\n'
             '    return 0\n', 'taggedfloat')
         check(msg != '', f'a call to {name} is still refused')
-    # The trap the doc names, left alone on purpose: `mojo_open`/`mojo_close`
-    # are declared in fire_runtime.c as the C library's, while the SYMBOL the
-    # dylib exports is the Mojo stdlib's renamed pair behind the same name.
-    # Declaring the C one would put a signature in front of a definition it does
-    # not match, which is the misresolved-export class
-    # `build_stdlib_dylib.runtime_export_entries` reports by name.
+    # THE TRAP, and this block is where the DECISION the doc said it needed was
+    # made and measured (2026-10-03, `work/formal13-6`).  The doc's own reason
+    # for leaving it alone was wrong in a way that matters, so the correction and
+    # the measurement both belong here rather than in a comment.
+    #
+    # The doc said: "`mojo_open`/`mojo_close` are declared in `fire_runtime.c` as
+    # the C library's, while the SYMBOL the dylib exports is the Mojo stdlib's
+    # renamed pair behind the same name."  **The stdlib is not in the link.**  A
+    # formal image links `build_stdlib_dylib.runtime_dylib`, which links
+    # `runtime_units(arch, None)` — core, coroutine, async scheduler — and
+    # `fire_python.c` is deliberately never linked (`FORMAL.md` phase 0: its
+    # header was never `#include`d so the failure stays loud).  `fire_runtime.c`
+    # has `#define USE_PYTHON 0` at line 26, so the definition behind the symbol
+    # is the `#else` arm at line 452 — `MojoFileHandle mojo_open(char *, char
+    # *)` — and `MojoFileHandle` is `typedef void*`.  Both arms of that `#if`
+    # have the SAME C signature anyway, which is why one declaration serves
+    # either build.
+    #
+    # So the signature is knowable.  What decides the other half is
+    # `build_stdlib_dylib.runtime_export_entries`: the export surface is the
+    # HEADERS' entry points INTERSECTED with the symbols the objects DEFINE, so a
+    # name no header declares is not exported AT ALL — which is why the current
+    # refusal ("no header in runtime/ declares it, so there is no signature here
+    # to check") is a statement about the LINK LINE and not only about a
+    # signature, and why declaring it is not a formality: the declaration is what
+    # puts it on the line.
     for name in ('mojo_open', 'mojo_close'):
-        check(M.runtime_abi_entry(name) is None
-              or 'MojoFileHandle' not in
-              (M.runtime_abi_entry(name) or {}).get('signature', ''),
-              f'{name} is not declared with the C signature the symbol does '
-              f'not implement',
+        check(M.runtime_abi_entry(name) is None,
+              f'{name} is not in the header table, so it is not on any '
+              f'formal link line — which is what the refusal says',
               str(M.runtime_abi_entry(name)))
+    # AND WHAT A HEADER EDIT WOULD BUY, measured through the model's own word
+    # rule rather than asserted: `mojo_close` is word-shaped and `mojo_open` is
+    # not, because a `void *` RETURN is the ceiling-3 shape (`void *` in
+    # ARGUMENT position is admitted, and `mojo_close` takes one).  So ceiling 2's
+    # remaining six becomes FIVE and `mojo_open` moves to ceiling 3 — which is why
+    # the edit is one line in `runtime/fire_runtime.h` and not the decision the
+    # doc was afraid of, and why it is not taken here: `fire_runtime.h` is on the
+    # COMPILED path's include list, so a change to it owes a `make check` and a
+    # `stdlib-dylib` run, which is the integrator's.
+    close_entry = M._runtime_abi_entry(
+        {'name': 'mojo_close', 'signature': 'void mojo_close (void *fh)',
+         'ret': 'void', 'params': 'void *fh'})
+    check(close_entry['word'],
+          'declared as `void mojo_close(void *)`, mojo_close IS word-shaped — '
+          'a `void *` in argument position is admitted, and this is the one name '
+          'a header edit makes callable', close_entry['signature'])
+    open_entry = M._runtime_abi_entry(
+        {'name': 'mojo_open',
+         'signature': 'void *mojo_open (char *filename, char *mode)',
+         'ret': 'void *', 'params': 'char *filename, char *mode'})
+    check(not open_entry['word'] and open_entry['boxes'],
+          'declared as `void *mojo_open(char *, char *)`, mojo_open is NOT '
+          'word-shaped — a `void *` RETURN is the ceiling-3 shape, so it moves '
+          'from ceiling 2 to ceiling 3 rather than becoming callable',
+          str(open_entry['boxes']))
+    # And the cheap half of the claim, checked against the real table rather
+    # than against a spelling: a `void *` return is refused and a `void *`
+    # parameter is not, on a name that IS on the link line today.
+    read_all = M.runtime_abi_entry('mojo_file_read_all')
+    check(read_all is not None and read_all['word'],
+          'mojo_file_read_all (char *) is word-shaped and callable, so the '
+          'admission of a char* parameter is a fact about the rule and not '
+          'about this one name', str(read_all))
     src = ('def main():\n'
            '    printf("tag=%d word=%d int=%d", mojo_tagged_tag_dyn(0, 0),\n'
            '           mojo_tagged_word_dyn(0, 0), mojo_tagged_int(0, 0))\n'

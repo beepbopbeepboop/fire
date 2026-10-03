@@ -26,7 +26,7 @@ import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
 from formal import model as M
 from mojo.middle.boundnames import (
-    _with_item_alias_name, bound_names_in_order, _lbn_target_names,
+    bound_names_in_order, _lbn_target_names,
     _lbn_split_commas,
 )
 
@@ -599,10 +599,10 @@ dylib_exports: list = None, globals_base: int = None,
         self._cond_branch_pcs = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
-        # `model.recursive_function_names`. `compile()` is the only construction
+        # `model.stack_floor_guarded_names`. `compile()` is the only construction
         # path (`formal/build.py` is the only caller), so it always overwrites
         # this before a prologue is emitted.
-        self._recursive_names: set = set()
+        self._guarded_names: set = set()
         self._blob_cap = _SCRATCH
         # ── A multi-field receiver, BY REFERENCE ──────────────────────────
         # `_frame_sites` is this function's `{id(call): (struct, offset)}` from
@@ -770,6 +770,15 @@ dylib_exports: list = None, globals_base: int = None,
         # concat operand: BinaryOp `+`/`|` then mean list/set ops, not the
         # integer ALU forms.
         self._container_ctx = 0
+        # The COMPREHENSION scope stack: `model.ValueKinds`.
+        # `comprehension_generator_scopes` maps, outermost first, pushed by
+        # `_emit_compr_gen` after each generator's target store. A comprehension
+        # is its own scope in Python 3, so its loop variable is not a local of
+        # this function and `ValueKinds.locals` must not answer for it — the
+        # stack is what `_expr_str_kind` consults instead. Balanced by a
+        # `finally` per generator, so it is empty between comprehensions and on
+        # the way out of a failed one.
+        self._compr_scopes: list = []
 
     def compile(self, stmts: list, base_addr: int = 0x100000014,
                 emit_startup: bool = True, structs: list = None) -> tuple:
@@ -803,7 +812,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `values(self._functions.values())`, not `functions`: the guard reads
         # the same set of FunctionDefs either way, and this is the table the
         # emitters dispatch on.
-        self._recursive_names = M.recursive_function_names(
+        self._guarded_names = M.stack_floor_guarded_names(
             self._functions.values(), self._structs)
 
         # A NAME is not an ADDRESS, and this is where that stops being true by
@@ -1246,9 +1255,10 @@ dylib_exports: list = None, globals_base: int = None,
         _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
         # The stack-floor guard, immediately after the subtraction it guards,
         # and only in a function a call chain can re-enter: see
-        # `model.recursive_function_names` for why the cycle is the set, and
-        # `model.stack_floor_address` for the sequence itself.
-        if self.func_name in self._recursive_names:
+        # `model.stack_floor_guarded_names` for why the set is a cycle PLUS every
+        # body that already branches, and `model.stack_floor_address` for the
+        # sequence itself.
+        if self.func_name in self._guarded_names:
             self._emit_stack_floor_guard()
 
         for stmt in f.body:
@@ -2106,8 +2116,20 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(stmt, F.WithStmt):
-            self._emit_with(stmt)
-            return
+            # An internal invariant, not a source construct.  `formal/build.py`
+            # lowers every `with` to the context-manager protocol before any
+            # codegen runs (`_rewrite_with_statements`), so a `WithStmt` here
+            # means that pass did not see it — and the emitter used to have a
+            # lowering of its own for it, which is how `with
+            # tempfile.TemporaryDirectory() as d:` built, ran, printed the right
+            # answers and left the directory on disk.  One implementation of the
+            # protocol, in the pass that owns statement rewriting.
+            raise CodegenError(
+                f"{getattr(self._cur_fn, 'name', '<module>')}: a `with` "
+                f"reached the emitter unrewritten, "
+                f"which is a bug in formal/build.py's `_rewrite_with_statements` "
+                f"and not a construct in this file: every `with` is lowered to "
+                f"`__enter__`/`__exit__` before codegen")
 
         if isinstance(stmt, F.DelStmt):
             self._emit_del(stmt)
@@ -2217,11 +2239,25 @@ dylib_exports: list = None, globals_base: int = None,
         the process after flushing finallys). `else` runs on the success
         path (always, without EH). On fall-through the finally emits
         here; on return/break/continue/raise `_flush_pending_finally`
-        already ran it and truncated the stack, so the frame may be gone
-        — pop only if it is still ours (guards IndexError after a
-        return-driven flush)."""
+        already ran it and truncated the stack — so the pop below is
+        stack bookkeeping and nothing else.
+
+        **The fall-through copy is emitted even when an exit edge inside
+        the body already flushed this frame**, and that is a fix rather than
+        an optimisation: the flush happens where the `return`/`break`/
+        `continue`/`raise` is EMITTED, while the fall-through path is a
+        different path through the same block, and it is still reachable. The
+        old shape decided "was the frame flushed? then the end is unreachable"
+        and dropped the copy, which is right for an UNCONDITIONAL `return` and
+        wrong for every other case — measured on both architectures, with
+        `try: if n > 0: return 1; … finally: print()` printing nothing at all
+        when `n` was 0, and with a `continue` inside a `try` in a loop
+        skipping the cleanup on every later iteration. Both are the failure
+        this path exists to refuse elsewhere: a program that runs, exits 0 and
+        has silently not done what its source says. The copy is dead code in
+        the unconditional case, which costs bytes and nothing else.
+        """
         fin = stmt.finally_body or []
-        need_fallthrough = bool(fin)
         if fin:
             self._pending_finally.append(fin)
         try:
@@ -2230,35 +2266,12 @@ dylib_exports: list = None, globals_base: int = None,
             for s in (stmt.else_body or []):
                 self._emit_stmt(s)
         finally:
-            if fin:
-                if (self._pending_finally
-                        and self._pending_finally[-1] is fin):
-                    self._pending_finally.pop()
-                else:
-                    need_fallthrough = False
-        if need_fallthrough:
-            for s in fin:
-                self._emit_stmt(s)
-
-    def _emit_with(self, stmt: F.WithStmt) -> None:
-        """with-items without a context-manager protocol.
-
-        Evaluate each context expression for its side effects (open(),
-        lock acquisition, executor construction, …). With no __enter__/
-        __exit__ runtime, an `as` alias is bound to the expression result
-        itself (the context-manager object), not to an entered value.
-        The body always runs on the fall-through path; return/break/
-        continue inside do no cleanup (there is none). `async with`
-        raises — same gate as async for."""
-        # async with lowers as a plain with (no event loop / context-manager
-        # protocol on this path — same as the non-async with above).
-        for it in stmt.items or []:
-            self._emit_expr(it.expr)
-            if it.alias is not None:
-                alias = _with_item_alias_name(it.alias)
-                self._store_var(alias, 0)
-        for s in stmt.body:
+            if fin and self._pending_finally \
+                    and self._pending_finally[-1] is fin:
+                self._pending_finally.pop()
+        for s in fin:
             self._emit_stmt(s)
+
 
     def _emit_tuple_assign(self, stmt: F.AssignStmt) -> None:
         """`a, b = rhs` — two shapes, matching GIMPLE's unpack split.
@@ -2447,28 +2460,73 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_loop(self, cond, body, else_body, for_info) -> None:
         """while or for-range loop with optional else clause.
 
-        Layout:
+        A `while` is the obvious layout:
+
             start:  <condition>  --falsy--> false:
                     <body>
-            step:   [<for: i += step>]  B start
+            step:   B start
             false:  [<else_body>]
             end:
-        `break` → end (skips else); `continue` → step (for-loops still
-        advance the counter)."""
+
+        A `for … in range(…)` is NOT the same shape, and the whole difference is
+        one rule: **CPython binds the loop variable to each value the iteration
+        produces, so after the loop it holds the LAST one** — while this layout
+        tests the counter before it is advanced, so its exit path arrives one
+        past. Measured, both architectures, on a five-line program:
+        `for i in range(0, 3): …` then `print(i)` is 2 under CPython and was 3.
+
+            start:  <test>  --holds--> body:   <body>
+                    B false                   (an empty range leaves the
+            step:   i += step                 counter at its initial value,
+                    <test> --holds--> body     which is what CPython does —
+                    i -= step                 it never binds the name at all,
+                    B false                   and what it does when the name
+            false:  [<else_body>]             already held one)
+            end:
+
+        The counter is tested BEFORE the increment, so the loop-exit path
+        arrives with the counter one past the last value the body saw, and the
+        `i -= step` puts it back. Restoring on the exit path rather than testing
+        differently is what makes `break` right too: `break` leaves the counter
+        at the value the body last had, which is the last value CPython bound,
+        and it jumps past the restore.
+
+        The alternative — subtracting on every exit including the empty range —
+        is one instruction shorter and is WRONG, and the case that shows it is
+        `i = 0` before an `for i in range(0, 0)`: CPython prints 0 and a
+        blanket `i -= step` prints `-step`. Hence the first test being emitted
+        separately from the loop-back test.
+
+        `continue` → step (for-loops still advance the counter)."""
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
         start_label = f"{fn}_loop{wid}_start"
+        body_label = f"{fn}_loop{wid}_body"
         step_label = f"{fn}_loop{wid}_step"
         false_label = f"{fn}_loop{wid}_false"
         end_label = f"{fn}_loop{wid}_end"
 
         is_for = for_info is not None
+        for_conds = None
         if is_for:
             target, rargs = for_info
             start_val, end_val, step_val = self._range_info(rargs)
             self._emit_expr(start_val)
             self._store_var(target, 0)
+            # The comparison has to follow the step's direction, or a descending
+            # range exits immediately (and an ascending one would run away). A
+            # step whose sign is only known at runtime is refused rather than
+            # silently mis-compiled: the counter advances correctly but the loop
+            # bound would be the wrong way round, which is a wrong answer, not a
+            # slow one.
+            _down = self._for_step_sign(step_val)
+            if _down is None:
+                raise CodegenError(
+                    f"for-range step must be a literal or a negated "
+                    f"literal, so the loop bound can be chosen at compile "
+                    f"time (got {step_val!r})")
+            for_conds = ("hi", "gt") if _down else ("cc", "lt")
 
         self._loops.append({"start": start_label, "step": step_label,
                             "break": end_label,
@@ -2480,21 +2538,10 @@ dylib_exports: list = None, globals_base: int = None,
                 # on the CSET it left behind: `for i in range(a, b)` computed
                 # a boolean, dropped it, and looped forever. Compare and branch
                 # on the flags directly.
-                # The comparison has to follow the step's direction, or a
-                # descending range exits immediately (and an ascending one
-                # would run away). A step whose sign is only known at runtime
-                # is refused rather than silently mis-compiled: the counter
-                # advances correctly but the loop bound would be the wrong way
-                # round, which is a wrong answer, not a slow one.
-                _down = self._for_step_sign(step_val)
-                if _down is None:
-                    raise CodegenError(
-                        f"for-range step must be a literal or a negated "
-                        f"literal, so the loop bound can be chosen at compile "
-                        f"time (got {step_val!r})")
-                _u, _sg = ("hi", "gt") if _down else ("cc", "lt")
-                self._emit_branch_unless_cmp(F.IdentExpr(target), end_val,
-                                              _u, _sg, false_label)
+                self._emit_branch_if_cmp(F.IdentExpr(target), end_val,
+                                         for_conds[0], for_conds[1],
+                                         body_label)
+                self._emit_b_to(false_label)
             elif not self._emit_branch_unless(cond, false_label):
                 self._emit_truthy_word(cond)
                 self.asm.emit(encode_cmp_xn_imm(0, 0))
@@ -2502,14 +2549,21 @@ dylib_exports: list = None, globals_base: int = None,
                 self.asm.emit(encode_cbz_xn(0, 0))
                 self.asm.emit_label_rel(false_label, here_offset=-4)
 
+            self.asm.label(body_label)
             for s in body:
                 self._emit_stmt(s)
 
             self.asm.label(step_label)
             if is_for:
                 self._emit_for_inc(target, step_val)
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(start_label, here_offset=-4)
+                self._emit_branch_if_cmp(F.IdentExpr(target), end_val,
+                                         for_conds[0], for_conds[1],
+                                         body_label)
+                self._emit_for_restore(target, step_val)
+                self._emit_b_to(false_label)
+            else:
+                self.asm.emit(encode_b(0))
+                self.asm.emit_label_rel(start_label, here_offset=-4)
 
             self.asm.label(false_label)
             for s in (else_body or []):
@@ -2805,53 +2859,84 @@ dylib_exports: list = None, globals_base: int = None,
         `range(a, b, -1)` lowers — the parser keeps `-1` as
         `UnaryOp('-', IntLiteral(1))`, not a negative literal). Negative
         steps use SUB (ARM64 ADD imm12 is unsigned)."""
+        self._emit_for_step(target, step, subtract=False)
+
+    def _emit_for_restore(self, target: str, step) -> None:
+        """Walk the for-range counter BACK by `step`, on the loop-exit path.
+
+        The same arithmetic as `_emit_for_inc` with the direction flipped, and
+        it shares that method's body rather than repeating it: the two must
+        accept the same step spellings, because a step the advance can lower and
+        the restore cannot would leave the loop's exit value undefined for
+        exactly the spellings a program is most likely to use. See
+        the loop's exit value is defined for exactly the spellings a program is
+        most likely to use."""
+        self._emit_for_step(target, step, subtract=True)
+
+    def _emit_for_step(self, target: str, step, subtract: bool) -> None:
         # RMW on the counter: register home edits in place; spill home
         # loads to X11, operates, stores back (X12 holds a spilled step
         # operand when one is needed).
         if target in self._var_regs:
-            self._for_inc_in(target, step)
+            self._for_inc_in(target, step, subtract)
             return
         self._load_var(target, 11)
-        self._for_inc_scratch(step, 11)
+        self._for_inc_scratch(step, 11, subtract)
         self._store_var(target, 11)
 
-    def _for_inc_in(self, target: str, step) -> None:
+    def _for_inc_in(self, target: str, step, subtract: bool = False) -> None:
         ireg = self._var_regs[target]
-        self._for_inc_body(ireg, step)
+        self._for_inc_body(ireg, step, subtract)
 
-    def _for_inc_body(self, ireg: int, step) -> None:
+    def _for_inc_body(self, ireg: int, step, subtract: bool = False) -> None:
+        # `subtract` flips which instruction each spelling reaches for, and the
+        # pairing is by SIGN: advancing by a negative literal is SUB, so
+        # restoring by one is ADD, and an ADD of the negated immediate is the
+        # only spelling of that arm64 offers (its ADD imm12 is unsigned).
+        def op_for(value: int):
+            """(immediate encoder, immediate) for `+= value`."""
+            add, sub = encode_add_xd_xn_imm, encode_sub_xd_xn_imm
+            if subtract:
+                return (sub, value) if value >= 0 else (add, -value)
+            return (add, value) if value >= 0 else (sub, -value)
+
         if (isinstance(step, F.UnaryOp) and step.op == "-"
                 and isinstance(step.operand, F.IntLiteral)):
-            self.asm.emit(encode_sub_xd_xn_imm(ireg, ireg, step.operand.value))
+            enc, imm = op_for(-step.operand.value)
+            self.asm.emit(enc(ireg, ireg, imm))
             return
         if isinstance(step, F.IntLiteral):
-            if step.value < 0:
-                self.asm.emit(encode_sub_xd_xn_imm(ireg, ireg, -step.value))
-            else:
-                self.asm.emit(encode_add_xd_xn_imm(ireg, ireg, step.value))
+            enc, imm = op_for(step.value)
+            self.asm.emit(enc(ireg, ireg, imm))
             return
         if isinstance(step, F.UnaryOp) and step.op == "-" \
                 and isinstance(step.operand, F.IdentExpr):
             sreg = self._var_reg_or_scratch(step.operand.name, 12)
-            self.asm.emit(encode_sub_xd_xn_xm(ireg, ireg, sreg))
+            self.asm.emit(encode_sub_xd_xn_xm(ireg, ireg, sreg) if subtract
+                          else encode_add_xd_xn_xm(ireg, ireg, sreg))
             return
         if isinstance(step, F.IdentExpr):
             sreg = self._var_reg_or_scratch(step.name, 12)
-            self.asm.emit(encode_add_xd_xn_xm(ireg, ireg, sreg))
+            self.asm.emit(encode_sub_xd_xn_xm(ireg, ireg, sreg) if subtract
+                          else encode_add_xd_xn_xm(ireg, ireg, sreg))
             return
         if isinstance(step, F.BinaryOp) and step.op == "+" \
                 and isinstance(step.left, F.IdentExpr):
             k = step.right
             if isinstance(k, F.IntLiteral) and k.value >= 0:
                 sreg = self._var_reg_or_scratch(step.left.name, 12)
+                if subtract:
+                    self.asm.emit(encode_sub_xd_xn_xm(ireg, ireg, sreg))
+                    self.asm.emit(encode_sub_xd_xn_imm(ireg, ireg, k.value))
+                    return
                 self.asm.emit(encode_add_xd_xn_xm(ireg, ireg, sreg))
                 self.asm.emit(encode_add_xd_xn_imm(ireg, ireg, k.value))
                 return
         raise CodegenError("for-loop step must be a literal or a variable")
 
-    def _for_inc_scratch(self, step, dst: int) -> None:
+    def _for_inc_scratch(self, step, dst: int, subtract: bool = False) -> None:
         """Same as _for_inc_body but counter lives in `dst` (already loaded)."""
-        self._for_inc_body(dst, step)
+        self._for_inc_body(dst, step, subtract)
 
     # ── Expressions (result in X0) ─────────────────────────────────
 
@@ -4521,7 +4606,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         Named for what it answers rather than for the first caller: `print`,
         the method-receiver guard and `_note_binding` all need the same
         question, and three copies of this precedence rule is three chances for
-        one of them to decide that a `char *` is a number."""
+        one of them to decide that a `char *` is a number.
+
+        `_compr_scopes` is consulted LAST and only for a bare name, and it is
+        the answer rather than a fallback while it is in force: a comprehension
+        has its own scope in Python 3, so `var x = 5` beside `[x for x in
+        ["a", "b"]]` does not make the two bindings disagree, and a site inside
+        the comprehension must see the loop variable and not the outer `x`.
+        Measured on both architectures, `[x for x in ["p", "", "q"] if x]`
+        returned 3 elements where CPython returns 2: the comprehension's `x`
+        was in no kind map at all, so `if x:` fell to `TRUTHY_NONZERO` and
+        tested the ADDRESS of the empty string for zeroness."""
         if isinstance(expr, F.MemberExpr):
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
@@ -4532,7 +4627,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             bound = M.comptime_val_kind(self._comptime_vals, expr.name)
             if bound is not None:
                 return bound
-        return self._vkinds.kind_of(expr)
+        return self._vkinds.kind_of(expr, scopes=self._compr_scopes)
 
     def _expr_is_fd(self, expr) -> bool:
         """True when `expr` is known to be a FILE DESCRIPTOR.
@@ -6042,6 +6137,113 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_ldr_xt_xn_imm(
                 _reg_num(reg), _reg_num(reg), 0))
 
+    def _static_bit_mask(self, e):
+        """The bit number `e` selects, or None when `e` is not a single bit.
+
+        A mask is written two ways and both are ordinary: `x & 8` and
+        `x & (1 << 3)` are the same question. `_static_int` answers only the
+        first on purpose — its callers want a LITERAL (a `range` bound, a slice
+        index), and folding arithmetic into it would change what they accept —
+        so the shift is folded HERE, where the question is "is this a power of
+        two" and a second reader is not a second implementation of the same one.
+
+        None for zero, for a negative mask, and for anything that is not exactly
+        one bit: `x & 255` asks about eight bits and `x & -1` is a Python
+        identity this path does not need to recognise.
+        """
+        value = self._static_int(e)
+        if value is None and isinstance(e, F.BinaryOp) and e.op == "<<":
+            base = self._static_int(e.left)
+            shift = self._static_int(e.right)
+            if base is not None and shift is not None and 0 <= shift <= 63:
+                value = base << shift
+        if value is None or value <= 0 or (value & (value - 1)):
+            return None
+        return value.bit_length() - 1
+
+    def _bit_test_mask(self, cond):
+        """`(operand, bit, negated)` for a TEST OF ONE BIT, else None.
+
+        `x & 8`, `x & (1 << 3)` and `8 & x` are the same question and the
+        ARCHITECTURE has one instruction for it: TBZ/TBNZ reads a single bit of
+        a register and branches, so the mask never has to be built, the `cmp`
+        never runs, and the three instructions this used to spend become one.
+        That is 49,645 TBNZ and 25,037 TBZ in the 200-binary instruction mix
+        `tools/arm64_insn_audit.py` disassembles — the two largest genuinely
+        uncovered entries, and they were unreached because the encoder had no
+        caller. Between them they are 1.85% of every instruction a real
+        compiler emits.
+
+        `negated` is the `not` spelling, and it is a different INSTRUCTION and
+        not a different way of spelling the same one: `if not (x & 8):` holds
+        when the bit is CLEAR, so the branch that leaves it is taken when the bit
+        is SET, which is TBNZ. Emitting TBZ there would be a program that builds,
+        runs and answers the other way round.
+
+        Three shapes, and refusing the fourth is the point:
+
+          * the mask is a single bit, by either spelling above. `x & 0xff` is
+            not a bit test — it asks whether any of eight bits is set — and
+            answering it with a TBZ would be a wrong answer, so it falls through
+            to the general path and stays right;
+          * the mask may be written either way round, because `&` is commutative
+            in Python and a reader writes both;
+          * the base must be a LOAD this backend can put in a register on its
+            own. Anything that needs a conversion, a call or a frame address is
+            declined, because the bit test is only cheaper when the operand is
+            already a word and a frame address has no bits to read.
+
+        The bit is capped at 31 and the reason is in the ENCODER: the b40 form
+        (bits 32-63) relocates imm14, and encoding that from memory of the spec
+        is how you get a branch to the wrong address. `encode_tbz_xn_bit` raises
+        rather than guess, and this declines before reaching it so a bit >= 32
+        is a correct AND/CMP rather than an exception out of the middle of a
+        branch.
+        """
+        negated = False
+        if isinstance(cond, F.UnaryOp) and cond.op == "not":
+            negated = True
+            cond = cond.operand
+        if not (isinstance(cond, F.BinaryOp) and cond.op == "&"):
+            return None
+        left, right = cond.left, cond.right
+        for operand, mask in ((left, right), (right, left)):
+            bit = self._static_bit_mask(mask)
+            if bit is None:
+                continue
+            if bit > 31 or not self._is_pure_expr(operand):
+                return None                 # see the docstring for both
+            return operand, bit, negated
+        return None
+
+    def _emit_branch_unless_bit_test(self, cond, false_label: str) -> bool:
+        """`if x & (1 << n):` as ONE instruction. True if it emitted.
+
+        `_emit_branch_unless`'s first arm, and it comes before the comparison
+        arm because a bit test is not a comparison: there are no flags to read
+        and no boolean to round-trip through a register, which is the same
+        argument the B.cond wiring makes and the same reason this one records a
+        `cond_branch` — the proof generator filters `if` tests by the PC the
+        codegen named, and a branch it was not told about would be attributed
+        some other block's source condition.
+
+        Which of the two, from the polarity rather than from the shape: this
+        function branches on the FALSE case, so `if x & 8:` is TBZ (false is the
+        bit clear) and `if not (x & 8):` is TBNZ. Both are recorded, and both
+        are two-way with `pc + 4` on the fallthrough, which is why the proof
+        generator's block scanner treats them as the `cbz` kind.
+        """
+        found = self._bit_test_mask(cond)
+        if found is None:
+            return False
+        operand, bit, negated = found
+        self._emit_expr(operand)            # X0 = the word
+        self._record_cond_branch()
+        self.asm.emit(encode_tbnz_xn_bit(bit, 0, 0) if negated
+                      else encode_tbz_xn_bit(bit, 0, 0))
+        self.asm.emit_label_rel(false_label, here_offset=-4)
+        return True
+
     def _emit_branch_unless(self, cond, false_label: str) -> bool:
         """Branch to `false_label` unless `cond` holds. True if it emitted.
 
@@ -6055,6 +6257,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         block structure the rest of the backend (and the proof generator's
         `_cond_branches` filter) already expects is unchanged.
         """
+        if self._emit_branch_unless_bit_test(cond, false_label):
+            return True
         if not (isinstance(cond, F.BinaryOp) and cond.op in self._cmp_conds()):
             return False
         # A comparison in a CONDITION does not go through `_emit_binop` — the
@@ -6096,21 +6300,35 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_branch_unless_cmp(cond.left, cond.right, u, s, false_label)
         return True
 
-    def _emit_branch_unless_cmp(self, l, r, unsigned_cond: str,
-                                signed_cond: str, false_label: str) -> None:
-        """CMP + B.cond on two already-separated operands, no CSET.
+    def _emit_branch_if_cmp(self, l, r, unsigned_cond: str,
+                            signed_cond: str, label: str) -> None:
+        """CMP + B.cond to `label` when the comparison HOLDS, no CSET.
 
-        The operand-level half of `_emit_branch_unless`, for the one caller
-        that has a comparison's operands without the enclosing BinaryOp: the
-        `for i in range(...)` test, which is built from the loop target and
-        the range's end bound rather than parsed from source.
+        The positive form, because a construct needs both polarities from one
+        comparison and two independent copies of this is how they come to
+        disagree: `_emit_loop`'s for-range test branches one way at the loop head
+        and the other way at the bottom, and they must be the same comparison.
         """
         self._emit_cmp_flags(l, r, unsigned_cond, signed_cond)
         chosen = signed_cond if self._signed else unsigned_cond
         self._record_cond_branch()
-        self.asm.emit(encode_b_cond(invert_cond(chosen), 0))
-        self.asm.emit_label_rel(false_label, here_offset=-4)
+        self.asm.emit(encode_b_cond(chosen, 0))
+        self.asm.emit_label_rel(label, here_offset=-4)
         return True
+
+    def _emit_branch_unless_cmp(self, l, r, unsigned_cond: str,
+                                signed_cond: str, false_label: str) -> None:
+        """CMP + B.cond on two already-separated operands, no CSET.
+
+        The operand-level half of `_emit_branch_unless`, for the callers that
+        have a comparison's operands without the enclosing BinaryOp: the
+        `for i in range(...)` test, which is built from the loop target and the
+        range's end bound rather than parsed from source. `_emit_branch_if_cmp`
+        with both condition codes inverted, so there is one comparison and one
+        branch emission rather than two of each.
+        """
+        return self._emit_branch_if_cmp(l, r, invert_cond(unsigned_cond),
+                                       invert_cond(signed_cond), false_label)
 
     def _cmp_conds(self) -> dict:
         """Operator -> (unsigned condition, signed condition).
@@ -7104,6 +7322,17 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._is_value_receiver(e.func.obj):
             self._emit_value_method(e, e.func.member)
             return
+        # `mod.S(...)` — a CONSTRUCTION of a struct the module publishes. The
+        # decision and its reasons are `model.dotted_struct_construction`; what
+        # it needs from this emitter is the receiver-shape answer above, which
+        # is why it sits immediately after it rather than beside the extern
+        # path: a `recv.m(...)` on a value is a method call, and only a base
+        # that is a MODULE can be a construction.
+        if not is_extern_call and M.dotted_struct_construction(
+                e.func, self._structs, self._import_aliases):
+            self._emit_struct_constructor(e, e.func.member,
+                                          self._structs[e.func.member])
+            return
         # A type constructor is a conversion, not a call. Intercepted before the
         # extern path, because the extern path would emit a BL against a
         # symbol named e.g. `Int` that nothing defines (the decision is
@@ -7558,7 +7787,17 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _emit_compr_gen(self, expr: F.Comprehension, gi: int,
                         res_offset: int, is_dict: bool, cap: int,
                         d0: int) -> None:
-        """Recursive generator walk: gen[gi] … gen[-1], then append element."""
+        """Recursive generator walk: gen[gi] … gen[-1], then append element.
+
+        THE SCOPE STACK IS PUSHED AFTER THE TARGET STORE, and that placement is
+        Python's rule rather than a convenience: generator `gi`'s own ITERABLE is
+        evaluated in the scope of generators `0 … gi-1`, and the parent frame has
+        already pushed exactly that and has not popped it (the pop is in this
+        frame's `finally`, below the recursion). So the iterable above reads the
+        enclosing scope, and everything from the target store down — the
+        conditions, the element, the key, and every nested comprehension inside
+        them — reads this generator's own scope as well.
+        """
         gens = expr.generators
         if gi >= len(gens):
             if is_dict:
@@ -7645,15 +7884,25 @@ ctor_field_value=self._ctor_field_value_for(name),
             else:
                 self._store_var(tnames[0], 0)
 
-            for cond in gen.conditions or []:
-                if not self._emit_branch_unless(cond, step_label):
-                    self._emit_truthy_word(cond)
-                    self.asm.emit(encode_cmp_xn_imm(0, 0))
-                    self._record_cond_branch()
-                    self.asm.emit(encode_cbz_xn(0, 0))
-                    self.asm.emit_label_rel(step_label, here_offset=-4)
+            # From here down this generator's target is in scope: the
+            # conditions, the element/key, and the recursion into the next
+            # generator (whose own ITERABLE is evaluated one level up, which is
+            # why the push is here and not at the top of the frame). See the
+            # method's docstring.
+            self._compr_scopes.append(
+                self._vkinds.comprehension_generator_scopes(expr)[gi])
+            try:
+                for cond in gen.conditions or []:
+                    if not self._emit_branch_unless(cond, step_label):
+                        self._emit_truthy_word(cond)
+                        self.asm.emit(encode_cmp_xn_imm(0, 0))
+                        self._record_cond_branch()
+                        self.asm.emit(encode_cbz_xn(0, 0))
+                        self.asm.emit_label_rel(step_label, here_offset=-4)
 
-            self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
+                self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
+            finally:
+                self._compr_scopes.pop()
 
             self.asm.label(step_label)
             if ci_reg is not None:
@@ -9080,7 +9329,25 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
         self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
-        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))     # n (upper bound)
+        # THE COUNT IS nL, NOT nL + nR, and the two are indistinguishable in
+        # every shape that only ITERATES the result — which is why the wrong one
+        # was here so long.  The result starts out holding the nL left-hand
+        # elements and NOTHING else, so the count that describes it is nL; the
+        # dedup loop below grows it by one per element it actually appends.
+        #
+        # With nL + nR written here, `len` and a subscript both read a number no
+        # store produced: `{1,2} | {2,3}` had count 4 over the three words
+        # [1, 2, 3] and two unwritten ones, then appended `3` at index 4 and
+        # made the count 5.  Measured, `printf("len=%d", len({1,2}|{2,3}))`:
+        # arm64 5, CPython 3; `c[0], c[1], c[2]` was 1, 2, 0.  Iterating the
+        # same blob read all five slots and summed 6, which is the right answer
+        # from the right three elements and two zeros — so a case that walks the
+        # union cannot see this, and the existing one could not either.
+        #
+        # `est` above stays the sum, because it is a RESERVATION: nL + nR is how
+        # many words the result can need, and the reservation is what keeps the
+        # append loop's `result[count]` store inside the blob.
+        self.asm.emit(encode_mov_zr_xn(4, 2))            # n = nL (elements present)
         self._emit_list_base(offset)
         self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
         # copy all of left into result[0..nL)

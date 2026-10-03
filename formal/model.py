@@ -13490,6 +13490,35 @@ def _pair_value_kind(node):
     return _kind_of_simple(node)
 
 
+def _kind_of_nested_elements(elems) -> str | None:
+    """`_kind_of_elements` with the nested-container arm, so a WALKER'S TARGET
+    is classified one level deeper than a flat literal is.
+
+    The same question and the same evidence as `_pair_value_kind`, from the
+    second reader that needs it: a container literal's element word holds a
+    container when the element written there is one, and a loop variable's word
+    is exactly such an element word — written by the literal and by nothing
+    else, which is the evidence `_pair_value_kind`'s docstring requires before
+    it claims the nesting. It is kept beside that function rather than folded
+    into `_kind_of_elements` for the reason that docstring gives: the flat
+    reader is read by the module-global classification, where the dict's VALUES
+    are taken out of a slot's initializer with no check that a subscripted key
+    is one of them.
+
+    Measured, both architectures, before this existed — and it is the
+    comprehension row of `bugs/FORMAL_string_value_model.md`, found with the
+    `for` row beside it: a `for` target over `["p", "", "q"]` classified as
+    `list:str` and the empty string was TRUTHY, because the count-field load
+    reads the eight bytes of `__TEXT` that follow the terminating NUL. The kind
+    was the list's, not the element's; see `_iterable_own_shape`.
+    """
+    kinds = {_pair_value_kind(el) for el in (elems or [])}
+    kinds.discard(None)
+    if not kinds:
+        return None
+    return kinds.pop() if len(kinds) == 1 else None
+
+
 def dict_literal_key_value_kind(node, index):
     """What `node[<index>]` yields for a LITERAL key, or None when it cannot say.
 
@@ -14185,44 +14214,75 @@ class ValueKinds:
                 self._bind(s.name, self._return_kind(s))
 
     def _iterable_kind(self, iterable):
-        """What a `for`/`in` binds from `iterable`.
+        """What a `for`/`in` binds from `iterable` — ONE ELEMENT of it.
 
-        A container literal knows its own element kind; `range` yields
-        integers; anything else is a blob whose elements this path treats as
-        words (types.function_var_types says the same about loop variables)."""
+        A container literal knows its own element kind; `range` yields integers;
+        anything else is a blob whose elements this path treats as words
+        (types.function_var_types says the same about loop variables). Never the
+        container's own kind; `_iterable_own_shape` carries the measurement of
+        what that cost."""
         return self._iterable_own_shape(iterable) or INT_KIND
 
     def _iterable_own_shape(self, iterable):
         """`_iterable_kind` without its final fallback, or None.
 
-        The same three shapes `_iterable_kind` decides on its own evidence and
-        then `or INT_KIND`, kept apart because the fallback is not a claim.  A
-        loop variable over a name — `for row in rows: row[0]`, where `rows` is a
-        parameter — is the ordinary way to walk a list of lists, and
-        `_iterable_kind` answers INT_KIND for it because there is nothing else
-        to answer.  That answer is a word, not an integer, so anything reading
-        it as evidence that the source says "integer" refuses a correct
-        program; see `own_shape_kind`, which is what reads this.
+        The kind of the name a `for` (or a comprehension generator) over
+        `iterable` BINDS — which is one ELEMENT of it, and never the container.
 
-        **A NAME whose kind carries an ELEMENT is the fourth shape**, and it is
-        the one a returned blob needs: `for x in names: len(x)` over
+        **It used to answer the container's kind, and that was a wrong ANSWER on
+        both architectures, not a missing refusal.** `["p", "", "q"]` is
+        `list:str`, so the loop variable was classified `list:str` and every
+        reader of a container took it at its word:
+
+          * `if x:` → `truthy_lowering`'s `TRUTHY_FROM_BLOB_FIELD`, which is one
+            load from offset 0. For a `char *` that load reads the eight bytes
+            of `__TEXT,__text` that FOLLOW the terminating NUL, so whether the
+            empty string came out truthy depended on which other string the
+            linker happened to intern next to it. Measured on both machines,
+            `for x in ["p", "", "q"]: if x: c = c + 1` returned 3 where CPython
+            returns 2, and a two-element `["p", ""]` with an `else` returned 101
+            — which is right only because the two strings happened to land
+            adjacent to their own NULs;
+          * `len(x)` → the same load, so it returned the low half of the
+            address's own neighbourhood: 2013266032 (0x78000070, which is `p\0`
+            and the first three bytes of the next interned string) for `"p"`.
+
+        One element is what the target holds, so the element kind is what is
+        returned, and `subscript_element_kind` is what already turns a container
+        kind into an element kind for `x[i]`. The nested arm is
+        `_kind_of_nested_elements` rather than `_kind_of_elements` because
+        `for row in [[1, 2], [3, 4]]` is ordinary and its target IS a blob:
+        without the arm the target kind would fall to the word default and
+        `len(row)` — which works today and which the corpus uses — would start
+        refusing.
+
+        **A NAME whose kind carries an ELEMENT is the other shape, and it is the
+        one a returned blob needs**: `for x in names: len(x)` over
         `names = listdir(p)` — `-> List[String]`, so the name's kind is
         `list:str` — refused with "an integer has no length" about a `char *`,
         because nothing read the element off the one place that states it. The
         answer is the element kind, and it is evidence for the same reason the
-        three above are: the annotation said what the loop yields.
+        literal arms are: the annotation said what the loop yields.
 
-        It stays None for a name whose kind is the BARE list prefix, which is
-        every container this path cannot give an element type to (a parameter
+        The fallback is a word, and a word is not a claim that the source says
+        "integer": `for row in rows: row[0]` over a parameter is the ordinary
+        way to walk a list of lists and `_iterable_kind` answers INT_KIND for it
+        because there is nothing else to answer. So the fallback is kept out of
+        `own_shape` (this function returns None for it), which is what
+        `own_shape_kind` reads; see that method for the three correct programs
+        that depend on it.
+
+        That direction is the conservative one and it is the measured one: it
+        stays None for a name whose kind is the BARE list prefix, which is every
+        container this path cannot give an element type to (a parameter
         annotated `List`, a nested container, a blob whose initializer claimed
-        nothing). That is the conservative direction and it is the measured one:
-        `for row in rows: row[0]` over an unannotated parameter must keep
-        working, and it does, because nothing claims an element.
+        nothing), so `for row in rows: row[0]` over an unannotated parameter
+        keeps working.
         """
         if isinstance(iterable, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return list_kind(_kind_of_elements(iterable.elements))
+            return _kind_of_nested_elements(iterable.elements)
         if isinstance(iterable, F.Comprehension):
-            return list_kind(_kind_of_simple(iterable.element))
+            return _pair_value_kind(iterable.element)
         if isinstance(iterable, F.CallExpr) and _flat_callee(iterable) == "range":
             return INT_KIND
         if isinstance(iterable, F.IdentExpr):
@@ -14238,6 +14298,63 @@ class ValueKinds:
         if ann in self._string_names:
             return STR_KIND
         return None
+
+    def comprehension_generator_scopes(self, comp) -> list:
+        """The names a comprehension's generator targets bind, per level.
+
+        `scopes[i]` is what a site INSIDE generator `i` of `comp` sees: every
+        name the generators `0 … i` bound, with the kind each one's own
+        iterable says. `scopes[i-1]` — not `scopes[i]` — is therefore what
+        generator `i`'s OWN ITERABLE sees, which is Python's rule and the reason
+        the emitters push the level's scope just after the target store rather
+        than on entry (see `formal/arm64_codegen.py::_emit_compr_gen`).
+
+        **An overlay and not a `_bind` into `locals`, and the difference is
+        SCOPE.** A comprehension is its own scope in Python 3, so `var x = 5`
+        beside `[x for x in ["a", "b"]]` is two bindings of one name that do not
+        meet, and a `_bind` would file them as a conflict — `locals[x] = None`,
+        a word — which costs the OUTER `x` an answer it had and buys the
+        comprehension's nothing. Worse in the other direction: a `_bind` makes
+        the comprehension's target visible to every site in the function, so
+        `printf("%s", x)` after a comprehension that binds `x` and nothing else
+        emits instead of refusing a read CPython answers with `NameError`.
+
+        So this is consulted only from inside the comprehension, and only for a
+        bare NAME (a generator target is a name or a tuple of names, and a
+        tuple target's per-element kind is one level deeper than the iterable's
+        — see `_bind_target`, which has the same limit on the `for` statement).
+        Nothing else changes: `own_shape_kind` deliberately does NOT read this,
+        because it answers "did a STATEMENT OF THIS FUNCTION bind this name to
+        a shape of its own" and a comprehension's target is bound by no
+        statement of the function.
+
+        The kind is `_iterable_own_shape`, never `_iterable_kind`, so an
+        iterable this cannot describe claims nothing and the name falls through
+        to the function's own map — which is what happened to every comprehension
+        target before this existed, and is why a comprehension over a PARAMETER
+        behaves exactly as it always has.
+        """
+        scopes: list = []
+        bound: dict = {}
+        conflicted: set = set()
+        for gen in (getattr(comp, "generators", None) or []):
+            own = self._iterable_own_shape(getattr(gen, "iterable", None))
+            if own is not None:
+                for nm in _comprehension_target_names(
+                        getattr(gen, "target", None)):
+                    if nm in conflicted:
+                        continue
+                    if bound.get(nm, own) != own:
+                        # Two generators of one comprehension, one name, two
+                        # kinds: the same unanimity rule `locals` follows, and
+                        # for the same reason (the map is flow-insensitive, so
+                        # two statements that disagree say nothing).
+                        conflicted.add(nm)
+                        bound.pop(nm, None)
+                        continue
+                    bound[nm] = own
+            scopes.append(dict(bound))
+        return scopes
 
     # ── querying ───────────────────────────────────────────────────────
 
@@ -14382,8 +14499,21 @@ class ValueKinds:
         # say the source does not say what its operand holds.
         return (TYPE_KIND if type_tag_for_name(name) is not None else None)
 
-    def kind_of(self, e):
-        """What `e` evaluates to, or None when the source does not say."""
+    def kind_of(self, e, scopes=()):
+        """What `e` evaluates to, or None when the source does not say.
+
+        `scopes` is the comprehension scope STACK (`ValueKinds`.
+        `comprehension_generator_scopes`, outermost first) and is empty
+        everywhere except on a site inside a comprehension. A bare name the
+        innermost such scope binds is answered by that scope and by nothing
+        else — see `scope_lookup` for why it does not fall through, and
+        `comprehension_generator_scopes` for why the scopes exist rather than
+        being a `_bind` into `locals`.
+        """
+        if scopes and isinstance(e, F.IdentExpr):
+            found, scoped = scope_lookup(scopes, e.name)
+            if found:
+                return scoped
         k = _kind_of_simple(e)
         if k is not None or isinstance(e, (F.StringLiteral, F.IntLiteral,
                                            F.BoolLiteral, F.FloatLiteral)):
@@ -15752,6 +15882,51 @@ def _target_names(target):
     return _lbn_target_names(target) if isinstance(target, str) else []
 
 
+def _comprehension_target_names(target) -> list:
+    """The names ONE generator target binds, in source order.
+
+    A comprehension's target is a `str` (`fire_compiler.ComprehensionFor`
+    carries it as one), an `IdentExpr`, or a tuple/list of them for a nested
+    generator — the three shapes `_bind_target` already splits, and the same
+    three `_lbn_target_names` reads for a `for` statement. It is spelled out
+    here rather than called so that a target this cannot describe contributes
+    NO name: a scope that claimed a name it cannot classify would be a claim
+    about a slot whose element it never looked at.
+
+    A tuple target's names all get the ITERABLE's element kind, which is one
+    level too coarse for `[[1, 2], [3, 4]]` unpacked into `a, b` (each of them
+    holds an integer). That limit is the `for` statement's too and for the same
+    reason — deriving it needs the element's own element kind, which
+    `_kind_of_nested_elements` collapses — so it is left as one imprecision
+    rather than two.
+    """
+    if isinstance(target, str):
+        return [target]
+    if isinstance(target, F.IdentExpr):
+        return [target.name]
+    if isinstance(target, (F.TupleExpr, F.ListExpr)):
+        return [e.name for e in (getattr(target, "elements", None) or [])
+                if isinstance(e, F.IdentExpr)]
+    return []
+
+
+def scope_lookup(scopes, name: str):
+    """`(found, kind)` for `name` in a stack of comprehension scopes.
+
+    INNEST first, and the order is the whole of the answer: a nested
+    comprehension's target shadows the enclosing one's for every site inside it,
+    which is the same rule `comprehension_generator_scopes`' cumulative maps
+    encode and the reason the emitters keep a STACK rather than one merged map.
+    A scope that has the name and cannot say what it holds returns `(True, None)`
+    rather than falling through, because falling through would answer about the
+    enclosing scope's binding of a name the inner one has already rebound.
+    """
+    for scope in reversed(scopes):
+        if name in scope:
+            return True, scope[name]
+    return False, None
+
+
 # ── Constructs that are no-ops in the value flow ──────────────────────────
 #
 # These name source constructs whose only meaning is to the compiler, so a
@@ -16198,7 +16373,26 @@ TYPE_VALUE_NAMES = frozenset(
      # program written in the shared subset (`f(bool)`) has to have an answer
      # here as well as in the interpreter — which binds `bool` to Python's own
      # `bool`, so both agree that `f(bool)` is handed the same object.
-     "bool"))
+     "bool",
+    # The NARROW float formats and the 128-bit unsigned integer, which are in
+    # no table here for the same reason `BFloat16` is: those tables answer a
+    # question about BITS (how wide a pointee load is, which formats this path
+    # can represent) and a tag asks only whether a type can be NAMED. They are
+    # a CLOSED list and not a shape rule, which is the whole of the condition:
+    # `type_value_name_space()` stays finite, so `type_value_tags_are_distinct`
+    # stays a proof over every pair rather than a hope, and a member outside
+    # this list is still refused with its own name. Measured over this
+    # repository and the stdlib checkout, these are every float-format and
+    # 128-bit member either of them writes — `DType.float8_e4m3fn` 26,
+    # `float8_e5m2fnuz` 21, `float8_e4m3fnuz` 20, `float8_e5m2` 19,
+    # `float8_e8m0fnu` 14, `float6_e3m2fn` 11, `float6_e2m3fn` 11,
+    # `float4_e2m1fn` 10, `uint128` 8, `float8_e3m4` 7 — so the list is the
+    # corpus rather than a guess at the language's shape. A tag for a format
+    # this path cannot hold is not a lie: it is a word two programs comparing
+    # dtypes agree on, which is all a dtype VALUE is on this path.
+    "Float8_e4m3fn", "Float8_e5m2", "Float8_e4m3fnuz", "Float8_e5m2fnuz",
+    "Float8_e8m0fnu", "Float8_e3m4", "Float6_e3m2fn", "Float6_e2m3fn",
+    "Float4_e2m1fn", "UInt128"))
 
 
 # A `DType` member whose name is not its type's name. `DType.int` is the 64-bit
@@ -16250,13 +16444,15 @@ def _dtype_member_type(member: str) -> str | None:
     answer is admitted only if it is a name this path knows, which is what
     keeps the name space a tag is asked about FINITE and therefore checkable.
 
-    KNOWN AND DELIBERATELY NOT ADMITTED: the float8/float4 family
-    (`DType.float8_e4m3fn` and its six siblings, 191 spellings in the corpus)
-    and `DType.uint128` (11). Their type names — `Float8_e4m3fn`,
-    `UInt128` — are in no table here, and admitting them by SHAPE would make
-    the name space a tag is asked about unbounded, which is exactly what
-    `type_value_tags_are_distinct` needs it not to be. They are refused with the
-    member named, and the fix is the type names in `TYPE_VALUE_NAMES`.
+    THE FAMILY IS CLOSED, and that is the condition rather than a detail: the
+    spellings the corpus writes are admitted by NAME in `TYPE_VALUE_NAMES` (the
+    float8/float6/float4 formats and `UInt128`, with their measured counts
+    there), and a member outside that list is still refused with its own name.
+    A rule that admitted any `float<width>_<format>` would make the name space a
+    tag is asked about unbounded, which is exactly what
+    `type_value_tags_are_distinct` needs it not to be — so the boundary is drawn
+    once, explicitly, and every member outside it keeps a refusal that says what
+    the admitted ones are.
     """
     over = _DTYPE_MEMBERS.get(member)
     if over is not None:
@@ -16416,10 +16612,16 @@ def dtype_member_refusal(spelled: str, member: str) -> str:
     A different diagnostic from `dtype_object_refusal` because it is a
     different fact: the bare `DType` is a type object and there is none, while
     this is a member that names a real Mojo type whose NAME is in no table on
-    this path — the float8/float4 formats and `uint128`, 202 spellings in the
-    corpus. Saying "a field access through 'DType'" instead (which is what the
-    emitter's own fallback says, and did say, for all of them) sends the reader
-    to look for a struct field where there is a missing table entry.
+    this path — a float format or a width outside the closed list in
+    `TYPE_VALUE_NAMES`. Saying "a field access through 'DType'" instead (which
+    is what the emitter's own fallback says, and did say, for all of them)
+    sends the reader to look for a struct field where there is a missing table
+    entry.
+
+    The corpus's own spellings are no longer in that state: the float8/float6/
+    float4 formats and `UInt128` are named in `TYPE_VALUE_NAMES`, so this
+    refusal is now only reachable for a member no file in this repository or its
+    stdlib checkout writes, and it says which names do work.
     """
     return (f"DType.{member} names a type, and this path has no value for it: "
             f"a type is a word here — its tag — and the tag is computed from "
@@ -16427,7 +16629,8 @@ def dtype_member_refusal(spelled: str, member: str) -> str:
             f"formal/model.py lists, so there is nothing to compute it from. "
             f"The members that do work are the ones whose type name this path "
             f"knows: DType.int8 … DType.int64, DType.uint8 … DType.uint64, "
-            f"DType.float16/float32/float64/bfloat16 and DType.bool, each of "
+            f"DType.float16/float32/float64/bfloat16, the DType.float8_*/"
+            f"float6_*/float4_* formats, DType.uint128 and DType.bool, each of "
             f"which is the same word the bare type name is. Naming the type "
             f"instead of the member (Int8 rather than DType.int8) is the same "
             f"value and always works")
@@ -17648,9 +17851,18 @@ def struct_derived_names(struct_defs, name: str) -> set:
     same reason — the fixed point is the set, and one pass over the direct bases
     is a prefix of it.
 
-    Returns struct NAMES, so a caller with a list of StructDefs can index it."""
+    Returns struct NAMES, so a caller with a list of StructDefs can index it.
+
+    **The final filter this used to end with is gone because it could not
+    remove anything.** It read `{n for n in derived if n in set(names)}`, and
+    `set(names)` was rebuilt — a fresh set of every struct's name — once per
+    element of `derived`, so the tail cost `#derived × #structs` set insertions
+    to return a set that was already exactly `derived`: `derived` only ever
+    receives `own = getattr(st, "name", None)` from a struct in `struct_defs`
+    that passed `own is None`, and `names` is the same collection's names, so
+    every member of `derived` is in `names` by construction. `names` is
+    therefore dead too, and with it one list build per call."""
     derived, grew = set(), True
-    names = [getattr(st, "name", None) for st in struct_defs or []]
     while grew:
         grew = False
         for st in struct_defs or []:
@@ -17661,7 +17873,7 @@ def struct_derived_names(struct_defs, name: str) -> set:
                    for b in (getattr(st, "bases", None) or [])):
                 derived.add(own)
                 grew = True
-    return {n for n in derived if n in set(names)}
+    return derived
 
 
 def struct_is_derived_from(struct_defs, name: str) -> bool:
@@ -18090,10 +18302,20 @@ def struct_is_one_field(struct_def) -> bool:
 
 
 # The argument conventions that say "this method may change the object its
-# receiver names". `out` and `inout` are the two the corpus writes; `mut` is the
-# third spelling, and the list is a tuple because adding one is a decision about
-# the language's surface syntax rather than a detail of the walk below.
-MUTATING_RECEIVER_CONVENTIONS = ("out", "inout", "mut")
+# receiver names", as `param_convs` actually spells them.
+#
+# **NOT the surface syntax, and the difference is load-bearing.** The parser
+# folds `inout self` to `mut`, so the string `"inout"` never reaches
+# `param_convs` and an entry for it can never match; it was here until
+# 2026-10-03 and is a lie about the parser's vocabulary rather than a safety
+# net. `var self` and `owned self` fold to `"owned"`, which is deliberately NOT
+# in the list: 195 of the 196 methods in the corpus that declare a non-mutating
+# convention are readers, where `owned` is right, and the one that is a writer is
+# a question about the language's argument model rather than about this path —
+# `bugs/FORMAL_a_var_self_receiver_on_a_one_field_struct_drops_its_store.md`,
+# which also carries the measurement. Kept as a tuple because adding an entry is
+# a decision about the language's conventions, not a detail of the walk below.
+MUTATING_RECEIVER_CONVENTIONS = ("out", "mut")
 
 
 def receiver_writeback_name(fn) -> object:
@@ -18140,6 +18362,74 @@ def receiver_writeback_name(fn) -> object:
 # call site joins on the KEY and reads only the receiver, while a refusal has to
 # name the construct — and re-deriving the owner from the key at refusal time
 # would be a second lookup that can disagree with the first.
+def one_field_dropped_receiver_stores(fn, owner):
+    """Where `fn` stores a ONE-FIELD struct's own field and the store is DROPPED.
+
+    A one-field struct's receiver IS its field — `struct_is_one_field` is what
+    says so, and `_rewrite_self_fields` is what acts on it — so `self.f = v` in
+    the callee writes the callee's own copy of one word and the caller's object
+    keeps whatever it had. `receiver_writeback_name` is the mechanism that makes
+    such a store reach the caller, and it needs the receiver declared `out` /
+    `inout` / `mut`; with any other convention the method is never handed back
+    and the store is computed and thrown away.
+
+    Measured on both architectures, 2026-10-03 (found by `tools/formal_fuzz.py`):
+
+        class C:
+            def __init__(self): self.a = 2
+            def bump(self):     self.a = 7
+            def get(self):      return self.a
+
+        c = C(); c.bump(); print(c.get())      # CPython 7, this path 2
+
+    which builds, runs and exits 0. The TWO-FIELD spelling of the same program
+    is right (`self.a` is a slot in a frame the caller owns), which is why the
+    rule is asked about width and not about stores.
+
+    `__init__` is deliberately not in the answer: a constructor is not a call. Its
+    stores are INLINED into the construction site (`init_receiver_rewrite`), so
+    they run in the frame the object is being built in — which is where CPython
+    runs them, and the reason the same source is correct there.
+
+    Returns `[(field, convention)]` — the field stored and the receiver's
+    convention as the source spelled it, `None` for a plain `self` — or `[]` when
+    the method is not at risk.
+    """
+    if owner is None or not struct_is_one_field(owner):
+        return []
+    recv = method_receiver_name(fn)
+    receivers = struct_receivers(owner)
+    if recv is None or recv not in receivers:
+        return []
+    conv = (getattr(fn, "param_convs", None) or {}).get(recv)
+    if (conv or "") in MUTATING_RECEIVER_CONVENTIONS:
+        return []                      # the write-back delivers the store
+    if method_member_name(owner, fn) == "__init__":
+        return []                      # inlined at the construction site
+    field = struct_sole_field_name(owner)
+    if field is None:
+        return []
+    out = []
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        target = getattr(node, "target", None) if isinstance(
+            node, (F.AssignStmt, F.AugAssignStmt)) else None
+        if not isinstance(target, F.MemberExpr) or target.member != field:
+            continue
+        base = getattr(target, "obj", None)
+        if isinstance(base, F.IdentExpr) and base.name == recv:
+            out.append((field, conv))
+    return out
+
+
+# A `var self` / `owned self` receiver is a SPELLING question this rule does not
+# decide: the parser folds both to the `owned` convention, and `owned` is not in
+# `MUTATING_RECEIVER_CONVENTIONS`. One corpus site is written that way
+# (`std/python/python_object.mojo`'s `PythonObject.steal_data`), and whether it
+# should join the list is a question about the language's argument conventions
+# rather than about this path, so the refusal below NAMES it instead of guessing.
+RECEIVER_CONVENTION_NAMES = {None: "`self`", "owned": "`var self`",
+                             "read": "`borrowed self`", "ref": "`ref self`"}
+
 ReceiverWriteback = collections.namedtuple("ReceiverWriteback",
                                            "receiver owner member")
 ReceiverWriteback.__doc__ = (
@@ -18181,6 +18471,40 @@ def one_field_mutating_methods(functions, method_owners: dict) -> dict:
         member = method_member_name(st, fn)
         out[fn.name] = ReceiverWriteback(recv, st.name, member)
     return out
+
+
+def dropped_receiver_store_refusal(owner: str, member: str, field: str,
+                                   convention) -> str:
+    """The diagnostic for a store a one-field struct's receiver cannot deliver.
+
+    The backend's rule is that a construct with no representation on this path
+    says so rather than computing the wrong answer, and this is that rule for the
+    one-field receiver: the receiver IS the field, so the callee stores into its
+    own copy of one word and the caller's object is unchanged — a program that
+    builds, runs, exits 0 and prints the value the constructor put there. Both
+    ways out are the language's own, and the message gives both because a reader
+    who has only met the two-field spelling of this program does not know either:
+
+    * declare the receiver `out` / `inout` / `mut`, which is what makes
+      `receiver_writeback_name` hand it back so the call site stores the new word
+      over the object; or
+    * split the method into one that changes the receiver and returns nothing,
+      and one that reads it and returns the value — which is what a constructor
+      already is, and why `__init__` is not refused.
+    """
+    spelled = RECEIVER_CONVENTION_NAMES.get(convention, "this receiver")
+    return (
+        f"{owner}.{member}() stores `{field}`, the one field its receiver IS, "
+        f"and {spelled} is not a receiver this path hands back, so the store "
+        f"cannot reach "
+        f"the caller: on this path a one-field struct's receiver is its single "
+        f"word rather than an address, so the method would compute the new value "
+        f"and drop it, and the object the caller holds would keep the old one. "
+        f"Declare the receiver `out self` (or `inout self` / `mut self`) so it is "
+        f"handed back, or split the method into one that changes the receiver "
+        f"and returns nothing and one that reads it. (The rule is "
+        f"`formal/model.py`'s `one_field_dropped_receiver_stores`; "
+        f"`receiver_writeback_name` is the mechanism it is about.)")
 
 
 def mutating_receiver_return_refusal(owner: str, member: str) -> str:
@@ -19964,23 +20288,74 @@ def one_word_field_struct(struct_def, name, decls: dict):
     st = (decls or {}).get(base) if base and evidence else None
     if st is not None:
         return st, evidence
+    st = init_stores_a_parameter_struct(struct_def, name, decls)
+    return (st, "assigned") if st is not None else (None, None)
+
+
+def init_stores_a_parameter_struct(struct_def, name, decls: dict):
+    """The `StructDef` of this module a `__init__` field store is a NAME of, or
+    None.
+
+    **THE PLACEMENT PREDICATE, and it is the one question `struct_nested_frame_fields`
+    was not asking.** That function placed a nested frame in every field whose
+    DECLARED type names a framed struct of this module and whose only writer is
+    `__init__` — which is the constructor reserving a block in the object's own
+    block and storing that block's ADDRESS in the slot. But the constructor does
+    not always build one there:
+
+        struct Holder:
+            var src: R                     # declared R, a framed struct of THIS module
+            def __init__(self, r: R):
+                self.src = r               # … and stores a NAME
+
+    Here the slot holds the CALLER's frame, not one this constructor made, so
+    reserving a block for it and writing a block address into it is wrong twice
+    over: the block is never filled, and the store that would fill it —
+    `formal/build.py`'s `_frame_field_store_is_sound` — is right to refuse
+    ("the slot belongs to the function that created THAT frame") because the slot
+    IS placed. That is the deadlock `bugs/FORMAL_receiver_stored_in_a_field.md`
+    measured: a DELEGATING constructor over a struct of this module is refused
+    for a reason that only exists because of the placement, and the placement
+    exists because of the declared type.
+
+    **`self.src = r` is a POINTER slot, and `struct_nested_frame_fields` now says
+    so.** It is a pointer slot for a lifetime reason, not a typing one: `r`
+    arrived as an argument, so the CALLER reserved its bytes in the caller's own
+    scratch and the two die together — which is exactly the argument
+    `_frame_field_store_is_sound` already makes and which the placement was
+    cancelling out.
+
+    Unanimous-or-nothing, as everywhere else on this axis, and the negative
+    direction is the one that keeps the old behaviour: any assigned value that
+    is not a bare NAME of an `__init__` parameter annotated with a struct of this
+    module — a construction `R()`, a call, a ternary, a name the parameter table
+    does not resolve — leaves the field PLACED, because that is the shape the
+    placement was built for and this predicate is not a rewrite of it. It is
+    asked only of a field `struct_nested_frame_fields` has already agreed is a
+    nested frame of this module, so it can only ever REMOVE a placement, never
+    invent one.
+
+    `one_word_field_struct` is the other reader of the same evidence and calls
+    this, rather than the two walking `__init__`'s body separately and one of
+    them learning about a spelling the other does not.
+    """
     values = _init_field_assignments(struct_def).get(name) or []
     if not values:
-        return None, None
+        return None
     params = None
     named = set()
     for v in values:
         if not (isinstance(v, F.IdentExpr) and v.name != "None"):
-            return None, None
+            return None
         if params is None:
             params = _init_declared_parameters(struct_def, decls)
         st = params.get(v.name)
         if st is None:
-            return None, None
+            return None
         named.add(st.name)
     if len(named) != 1:
-        return None, None
-    return structs_declared(named.pop(), decls), "assigned"
+        return None
+    return structs_declared(named.pop(), decls)
 
 
 def _init_declared_parameters(struct_def, decls: dict) -> dict:
@@ -20613,12 +20988,13 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
 
     The PLACEMENT decision, and the reason a declared type is not the
     silently-wrong direction: this is the list the constructor walks to reserve
-    a block per field and store each nested frame's address into its own slot.
+    a     block per field and store each nested frame's address into its own slot.
     A declared type that this function did not place is not used, so the
     negative cases (`frame_field_type_candidates`'s `None`) cannot leak into
     the emitter.
 
-    Three conditions, and all three are load-bearing:
+    Four conditions, and all four are load-bearing:
+
 
       * the field is in `struct_frame_slots`, so the frame layout has a slot to
         put an address in — the same discipline `struct_frame_slot` applies;
@@ -20634,6 +21010,21 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
         dropping the condition moved 164 files' verdicts, every one of them
         because ordinary code (`self._bytes = remaining`) was being refused for
         a frame the program had just replaced.
+      * **the constructor BUILDS one there**, rather than storing a name
+        (`init_stores_a_parameter_struct`).  The fourth is the newest and the
+        smallest in source and the largest in what it unblocks: a DELEGATING
+        constructor — `self.src = r` where `r: R` is `__init__`'s own annotated
+        parameter — does not build a nested frame in that slot, it stores the
+        CALLER's frame address, so the slot is a pointer slot and reserving a
+        block for it is what makes the delegating store unsound
+        (`formal/build.py`'s `_frame_field_store_is_sound`, whose lifetime
+        argument the placement was cancelling out).  It is the last reason
+        `bugs/FORMAL_receiver_stored_in_a_field.md`'s delegating row was still
+        refused, and the predicate is asked only AFTER the first three so it can
+        only ever REMOVE a placement.
+
+    A declared type this function did not place is not used, so the negative
+    cases (`frame_field_type_candidates`'s `None`) cannot leak into the emitter.
 
     `depth` is the recursion bound; a chain longer than it is dropped from the
     answer rather than silently truncated, which is what makes the bound a
@@ -20653,6 +21044,8 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
             continue
         slot = struct_frame_slot(struct_def, name)
         if slot is None:
+            continue
+        if init_stores_a_parameter_struct(struct_def, name, decls) is not None:
             continue
         out.append((name, slot, nested))
     return out
@@ -20912,7 +21305,7 @@ def construction_dead_blob_refusal(name: str, field: str, arg,
 
 
 def construction_arg_dead_blob_refusal(name: str, field: str, arg,
-                                       rets=None):
+                                       rets=None, struct_def=None):
     """The refusal for `arg` if it is a callee's container, else None.
 
     ONE function rather than a predicate plus three `if refused:` sites at the
@@ -20924,8 +21317,15 @@ def construction_arg_dead_blob_refusal(name: str, field: str, arg,
     `rets` is `CalleeReturnTable` — the declared annotations plus the inferred
     reading — and a plain dict is accepted so that anything holding only the
     declared table keeps working with the declared-only answer.
+
+    `struct_def` is the struct being CONSTRUCTED, and it is what
+    `_callee_is_placed_frame` reads: the placed-frame callees are a fact about
+    the unit that declares the struct, attached to the struct by
+    `attach_placed_frame_callees`, and a caller that does not have it in hand
+    gets the conservative answer (the callee is not placed) — which is a refusal
+    rather than a wrong number.
     """
-    evidence = _callee_container_evidence(arg, rets)
+    evidence = _callee_container_evidence(arg, rets, struct_def)
     if evidence is None:
         return None
     return construction_dead_blob_refusal(name, field, arg, evidence)
@@ -20957,6 +21357,37 @@ def construction_frame_in_value_refusal(name: str, field: str, arg,
             f"frame-lifetime check here is bypassed by. Copy the value out of "
             f"the frame first (`{name}(frame.field)`), which is the same "
             f"program with a lifetime this analysis can see")
+
+
+def one_word_store_refusal(name: str, field: str, arg, candidates: dict,
+                           rets=None):
+    """The two refusals a ONE-WORD struct's own value has, or None.
+
+    **One rule for both the POSITIONAL construction and a DECLARED
+    `__init__`'s store, and the second caller is the reason this is a
+    function.** A one-field struct's value IS its field, so an argument stored
+    into that field is the whole value — and whether the argument got there by
+    `S(x)` or by `self.inner = x` inside a constructor is not a fact about the
+    lifetime argument at all: the constructor's store is inlined at the
+    CONSTRUCTION SITE, so the word that lands in the caller's hand is the
+    argument either way. Answering it on one path and not the other is how
+    `struct Box: var inner: Opt` with `def __init__(self, o: Opt)` came to be
+    planned as a plain inlined store while the same struct with no constructor
+    was refused — the same word, the same hazard, two answers.
+
+    ORDER, and it is the order the positional path has always used: the DEAD
+    BLOB check first, because a container callee's address is a more specific
+    fact about the argument than "it is a frame of some struct", and its
+    message is the one a reader can act on.
+    """
+    refusal = construction_arg_dead_blob_refusal(name, field, arg, rets)
+    if refusal is not None:
+        return refusal
+    src = _frame_source_structs(arg, candidates)
+    if src:
+        return construction_frame_in_value_refusal(
+            name, field, arg, [s.name for s in src])
+    return None
 
 
 InitShape = collections.namedtuple("InitShape",
@@ -21950,7 +22381,7 @@ def _init_store_value(struct_def, value, params, got: int, args, rets,
     if free is not None:
         return (None, free)
     refusal = construction_arg_dead_blob_refusal(
-        struct_def.name, "of this `__init__`", value, rets)
+        struct_def.name, "of this `__init__`", value, rets, struct_def)
     if refusal is not None:
         return (None, refusal)
     return (lifted, None)
@@ -22611,6 +23042,21 @@ def struct_construction_plan(struct_def, call, decls: dict,
         stores, refusal = init_body_stores(struct_def, call, shape, decls, rets)
         if refusal is not None:
             return (None, refusal)
+        # A ONE-FIELD struct whose constructor stores into its only field: the
+        # inlined store is the whole value, so the one-word rule applies here for
+        # the reason `one_word_store_refusal`'s docstring gives. Read off
+        # `slots`, the same list the positional path reads, so "which field is
+        # the value" has one answer.
+        if len(slots) == 1 and not struct_is_framed(struct_def):
+            only = slots[0]
+            for store_field, _slot, value in stores:
+                if store_field != only:
+                    continue
+                refusal = one_word_store_refusal(name, only, value,
+                                                 candidates, rets)
+                if refusal is not None:
+                    return (None, refusal)
+                break
         placed = {field: child.name
                   for field, _slot, child in struct_nested_frame_fields(
                       struct_def, decls)}
@@ -22681,13 +23127,9 @@ def struct_construction_plan(struct_def, call, decls: dict,
         arg = bound[only]
         if arg is None:
             return ((CONSTRUCTION_DEFAULT,), None)
-        refusal = construction_arg_dead_blob_refusal(name, only, arg, rets)
+        refusal = one_word_store_refusal(name, only, arg, candidates, rets)
         if refusal is not None:
             return (None, refusal)
-        src = _frame_source_structs(arg, candidates)
-        if src:
-            return (None, construction_frame_in_value_refusal(
-                name, only, arg, [s.name for s in src]))
         return ((CONSTRUCTION_POSITIONAL, [(only, None)]), None)
     placed = {field: child.name
               for field, _slot, child in struct_nested_frame_fields(
@@ -22697,7 +23139,8 @@ def struct_construction_plan(struct_def, call, decls: dict,
         if field in placed:
             return (None, construction_nested_slot_refusal(
                 name, field, arg, placed[field]))
-        refusal = construction_arg_dead_blob_refusal(name, field, arg, rets)
+        refusal = construction_arg_dead_blob_refusal(name, field, arg, rets,
+                                                     struct_def)
         if refusal is not None:
             return (None, refusal)
         if arg is not None:
@@ -22878,7 +23321,7 @@ def _construction_field_bindings(struct_def, args, kwargs, slots, summary: str):
     return ({f: bound.get(f) for f in slots}, None)
 
 
-def _callee_container_evidence(arg, rets=None):
+def _callee_container_evidence(arg, rets=None, struct_def=None):
     """`"declared"`, `"inferred"` or None — WHICH evidence says `arg` is a blob.
 
     The decision half of `construction_arg_dead_blob_refusal`, split out because
@@ -22944,7 +23387,7 @@ def _callee_container_evidence(arg, rets=None):
     callee = call_callee_name(arg.func)
     if callee is None:
         return None
-    if _callee_is_placed_frame(callee):
+    if _callee_is_placed_frame(struct_def, callee):
         return None
     if return_type_is_blob((rets or {}).get(callee)):
         return "declared"
@@ -23196,7 +23639,7 @@ FRAME_FIELD_BLOB_PREMISE_B1 = \
 FRAME_FIELD_BLOB_PREMISE_B2 = "a struct that declares no __init__ has no body to run"
 
 
-def _is_container_value(value, containers: set) -> str:
+def _is_container_value(value, containers: set, struct_def=None) -> str:
     """A phrase for why `value` is a container, or "" if it is not one.
 
     A write into a frame slot is a blob write when the value put there is a
@@ -23207,9 +23650,16 @@ def _is_container_value(value, containers: set) -> str:
       * a list, tuple or dict DISPLAY — unconditionally a container;
       * a call to something this path does not place — conservatively a
         container, because `List[Self.T]()` is a bump-allocated region and a
-        call this path cannot see through might be one.  A call to a framed
-        struct of this unit is the exception: its result is a placed frame
-        address, one word, with a lifetime the frame layout governs;
+        call this path cannot see through might be one.  There are TWO
+        exceptions and both are about a result whose lifetime is not the
+        callee's activation.  A call to a framed struct of this unit is a placed
+        frame address, one word, with a lifetime the frame layout governs; and a
+        call to a function of THIS unit whose DECLARED return type is a plain
+        word (`_callee_returns_plain_word`, answered from the set
+        `attach_plain_word_callees` puts on the struct) hands back a `malloc`'d
+        buffer or a number rather than a region of the callee's scratch — which
+        is what `self.name = mkdtemp(p)` inside a context manager's `__enter__`
+        is, and it was refused here until that arm existed;
       * a NAME this method is known to have bound to a container
         (`containers`) — one hop of propagation, which is what catches
         `tmp = [1, 2, 3]; self.items = tmp`;
@@ -23226,7 +23676,19 @@ def _is_container_value(value, containers: set) -> str:
         return "a container literal"
     if isinstance(value, F.CallExpr):
         callee = value.func.name if isinstance(value.func, F.IdentExpr) else None
-        if callee and _callee_is_placed_frame(callee):
+        if callee and _callee_is_placed_frame(struct_def, callee):
+            return ""
+        if callee and _callee_returns_plain_word(struct_def, callee):
+            # The callee is a function of THIS module and its declaration says
+            # it returns a word. That settles the question premise (B1) asks,
+            # because the hazard is specific: a container is a bump-allocated
+            # region of the CALLEE's scratch, so it dies with the callee's
+            # activation, while a `str` is a `malloc`'d buffer the caller owns
+            # and a number is a number. Measured on the case that needed it:
+            # `self.name = mkdtemp(p)` inside `TemporaryDirectory.__enter__` was
+            # refused here, which is the refusal that stood between
+            # `formal/hostmods/tempfile.mojo` and a `TemporaryDirectory` whose
+            # contract is the removal on the way out of a `with`.
             return ""
         return (f"a call to {callee!r}, whose result this path does not place "
                 f"— `List[T]()` and every other container constructor on this "
@@ -23266,22 +23728,25 @@ def _container_binding_names(node, receivers, out: set) -> None:
         _container_binding_names(getattr(node, fname, None), receivers, out)
 
 
-def _container_write(node, receivers, found: list, containers: set) -> None:
+def _container_write(node, receivers, found: list, containers: set,
+                     struct_def=None) -> None:
     """Collect `(field, why)` for every container written through a receiver.
 
     The receiver set is `struct_receivers(st)`, so `this.x = [1]` in a class
     whose methods spell the receiver `this` is seen as readily as `self.x`.
+    `struct_def` is threaded down rather than published, because it is what the
+    unit-scoped callee answer needs (`attach_plain_word_callees`).
     """
     if isinstance(node, list):
         for x in node:
-            _container_write(x, receivers, found, containers)
+            _container_write(x, receivers, found, containers, struct_def)
         return
     if isinstance(node, F.FunctionDef):
         return
     if isinstance(node, F.AssignStmt) and isinstance(node.target, F.MemberExpr) \
             and isinstance(node.target.obj, F.IdentExpr) \
             and node.target.obj.name in receivers:
-        why = _is_container_value(node.value, containers)
+        why = _is_container_value(node.value, containers, struct_def)
         if why:
             found.append((node.target.member, why))
         return
@@ -23289,13 +23754,64 @@ def _container_write(node, receivers, found: list, containers: set) -> None:
         if fname in ("line", "col"):
             continue
         _container_write(getattr(node, fname, None), receivers, found,
-                         containers)
+                         containers, struct_def)
 
 
-_PLACED_FRAME_CALLEES = None
+def attach_plain_word_callees(struct_defs, names) -> None:
+    """Give every one of `struct_defs` this unit's plain-word callees, in place.
+
+    On the struct rather than published in a module global, for the reason
+    `attach_field_evidence` gives and MEASURED here: a module global is the LAST
+    writer's answer, and a build compiles other units NESTED. Published, the set
+    was whichever import compiled last — measured on
+    `formal/hostmods/tempfile.mojo`, where `__enter__`'s `self.name = mkdtemp(p)`
+    was checked against SHUTIL's callee list (tempfile imports shutil) and the
+    premise refusal came back, while the same file built fine when reached
+    through an importer that happened to publish in the other order. A fact
+    about one unit attached to that unit's own structs cannot be overwritten by
+    a nested build.
+    """
+    for st in struct_defs or []:
+        setattr(st, "_plain_word_callees", frozenset(names or ()))
 
 
-def _callee_is_placed_frame(callee: str) -> bool:
+def _callee_returns_plain_word(struct_def, callee: str) -> bool:
+    """Whether `callee` is one of THIS struct's unit's declared word-returning callees.
+
+    Only functions of the unit are in the set, and that is the conservative
+    direction rather than an omission: a callee in another unit is a call this
+    path cannot see through whatever its source says, and the whole premise is
+    about a value whose lifetime is the callee's activation — across a dylib
+    boundary this build has the callee's declaration but not its allocation.
+    """
+    return callee in (getattr(struct_def, "_plain_word_callees", None) or ())
+
+
+def plain_word_callee_names(functions, structs_by_name=None,
+                            int_names=(), string_names=()) -> set:
+    """The functions of a module whose declared return type is a plain word.
+
+    `declared_type_kind` is asked rather than a private list of type names,
+    because that function is the one place that maps an annotation to a
+    representation and the two backends already read it — a second list here
+    would be a second answer to "is `-> str` a word", and they would drift the
+    first time a name was added to one of them.
+
+    A FRAME return is a word too and is deliberately absent: a frame address is
+    one word, but a frame belongs to the function that created it, so storing
+    one in a slot has its own lifetime question and is not this table's answer.
+    """
+    out = set()
+    decls = structs_by_name or {}
+    for fn in functions or ():
+        ann = getattr(fn, "return_type", None)
+        kind = declared_type_kind(ann, int_names, string_names, decls)
+        if kind in (STR_KIND, INT_KIND, "float", "bool"):
+            out.add(fn.name)
+    return out
+
+
+def _callee_is_placed_frame(struct_def, callee: str) -> bool:
     """Whether a call to `callee` yields a frame this path PLACED.
 
     True for a struct of the module being compiled whose receiver is a frame —
@@ -23303,26 +23819,28 @@ def _callee_is_placed_frame(callee: str) -> bool:
     inside its owner's block.  Both are one word with a lifetime the frame layout
     already governs, which is why a slot may hold them and may not hold a blob.
 
-    The table is a MODULE-level cache keyed on nothing but the compiled struct
-    names, because there is no unit to thread through and a container-write scan
-    runs per struct; it is cleared by the build pass at the point where it
-    publishes the set for a module (`publish_placed_frame_structs`), so a
-    second module in one process cannot read the first module's answer.
+    Attached to the struct rather than published in a module global, for the
+    reason `attach_plain_word_callees` gives and MEASURED on its sibling: a build
+    compiles imported units NESTED, so a published set was whichever import
+    compiled last.  The drift here is in the SAFE direction — a frame address
+    read as "not placed" is an extra refusal, never a wrong answer — which is
+    exactly why it went unnoticed and is why it is worth removing rather than
+    leaving beside the table that had it backwards.
     """
-    return bool(_PLACED_FRAME_CALLEES) and callee in _PLACED_FRAME_CALLEES
+    return callee in (getattr(struct_def, "_placed_frame_callees", None) or ())
 
 
-def publish_placed_frame_structs(names) -> None:
-    """Tell the container-write scan which callees this module places.
+def attach_placed_frame_callees(struct_defs, names) -> None:
+    """Give every one of `struct_defs` this unit's placed-frame callees, in place.
 
-    The one piece of unit knowledge `frame_field_premise` needs, and it is
-    published rather than threaded because the scan is a node walk with no unit
-    in hand — the same reason `attach_field_evidence` puts the evidence on the
-    struct instead of passing it down.  Called from `_prepare_functions`, which
-    is the single point where the compiled struct set is known.
+    The one piece of unit knowledge `frame_field_premise` needs, carried on the
+    struct for the reason `attach_field_evidence` gives: the consumer is a node
+    walk with no unit in hand, and a unit-scoped fact that lives in a global is
+    the last writer's answer.  Called from `_prepare_functions`, which is the
+    single point where the compiled struct set is known.
     """
-    global _PLACED_FRAME_CALLEES
-    _PLACED_FRAME_CALLEES = set(names or ())
+    for st in struct_defs or []:
+        setattr(st, "_placed_frame_callees", frozenset(names or ()))
 
 
 def struct_field_container_writes(struct_def) -> list:
@@ -23342,7 +23860,8 @@ def struct_field_container_writes(struct_def) -> list:
         containers: set = set()
         _container_binding_names(getattr(m, "body", None), receivers,
                                 containers)
-        _container_write(getattr(m, "body", None), receivers, found, containers)
+        _container_write(getattr(m, "body", None), receivers, found, containers,
+                         struct_def)
     return found
 
 
@@ -23782,10 +24301,22 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
         return {}
     out, offset = {}, 0
     for node in iter_nodes(getattr(fn, "body", None)):
-        if not isinstance(node, F.CallExpr) or not isinstance(node.func,
-                                                             F.IdentExpr):
+        if not isinstance(node, F.CallExpr):
             continue
-        st = framed.get(node.func.name)
+        # A construction is a BARE `S(...)` or a DOTTED `mod.S(...)`, and both
+        # reserve the same block: the object is laid out by whoever builds it,
+        # and `mod.S(...)` builds it here. Reading only the bare spelling made
+        # this table and the emitter disagree — the emitter emitted the
+        # construction and this table had reserved nothing for it, which is the
+        # "the frame layout and the body disagree" refusal, on a program with
+        # nothing wrong with it.
+        if isinstance(node.func, F.IdentExpr):
+            st = framed.get(node.func.name)
+        elif isinstance(node.func, F.MemberExpr) \
+                and isinstance(node.func.member, str):
+            st = framed.get(node.func.member)
+        else:
+            continue
         if st is None:
             continue
         nested, block = struct_frame_block_layout(st, structs_by_name)
@@ -25314,7 +25845,7 @@ class GlobalSymbol:
 
 
 # Published by `publish_module_symbols`, for the same reason and with the same
-# shape as `publish_placed_frame_structs`: the consumer that needs it is a
+# shape as `attach_placed_frame_callees`: the consumer that needs it is a
 # node walk inside a backend with no unit in hand, and a module-level dict
 # threaded through every signature would be a second, driftable copy of the
 # same fact.
@@ -27056,46 +27587,29 @@ def stack_floor_address(base: int, table: dict = None) -> int:
         module_slots() if table is None else table, base).stack_floor_offset
 
 
-def recursive_function_names(functions, structs: dict = None) -> set:
-    """The functions of one image a call chain can RE-ENTER, by name.
+def call_graph_edges(functions, structs: dict = None) -> dict:
+    """`{caller: {callee, …}}` for one image's functions, as the emitter sees them.
 
-    This is the set the stack-floor guard is emitted for, and the rule is
-    "on a call-graph cycle" rather than "in the image" for a reason that is
-    about what the guard is FOR. Unbounded call depth is a cycle: a chain of
-    distinct functions has a finite depth, and it is the return to a function
-    already on the stack that makes the depth a function of the PROGRAM rather
-    than of its shape. So a cycle's members are where a runaway recursion is
-    stopped, and a program that recurses cannot get past one.
+    The one place an edge is added, so the stack-floor guard's rule
+    (`stack_floor_guarded_names`) and the depth census that measures whether that
+    rule leaves a hole (`tools/formal_call_depth_census.py`) cannot come apart on
+    what a call is — the same reason `call_callee_name` is one function rather
+    than one copy per backend.
 
-    **And the narrower set costs nothing anywhere else, which is what makes it
-    the rule rather than a compromise.** The per-export contract proof
-    (`arm64_proof_gen._dylib_contract_proof`) declines to emit a contract for an
-    export whose body contains ANY conditional branch — `Refine.Block.step` is one
-    function of one state — and every RECURSIVE function contains a branch (a
-    branch-free body that calls itself does not return, so it is not a program
-    this backend can be asked about). So guarding the cycles adds no branch to
-    any export that still had a proved contract, and removes none: the export
-    contracts that exist today are exactly the straight-line, non-recursive
-    ones, and they are byte-identical with this in place. Widening the rule to
-    "every function" would therefore trade proved contracts for nothing.
-
-    What it does leave open, and what is stated rather than hidden: a chain of
-    DISTINCT functions deep enough to exhaust the stack is still unguarded. Its
-    depth is finite and knowable, and the budget this guards against
-    (`STACK_FLOOR_BUDGET_BYTES`) would fire on it only if the guard were in a
-    function the chain passes through, which by construction it is not.
-
-    The edges are a SUPERSET of the calls the emitter makes, deliberately, since
-    a missed edge here means a missed cycle and an unguarded recursion:
+    **The edges are a SUPERSET of the calls the emitter makes, deliberately,
+    since a missed edge means a missed cycle and an unguarded recursion.**
     `call_callee_name` answers the two spellings that name a function of this
     image by a bare name, and a `recv.m(x)` callee contributes `Struct_m` for
     EVERY struct in the image that declares an `m` — which is the symbol the
     method-call rewriting emits, and over-approximating the owner is the safe
-    direction because it can only add an edge. A call out of the image
-    (a dylib symbol, an extern) is not an edge: nothing in this image calls back
-    into it, so it cannot close a cycle here.
+    direction because it can only add an edge. A call out of the image (a dylib
+    symbol, an extern) is not an edge: nothing in this image calls back into it,
+    so it cannot close a cycle here.
+
+    Callees that are not functions of this image are absent from the values
+    rather than present-and-empty, which is what lets the census distinguish "no
+    edge" from "an edge out of the image".
     """
-    names = {f.name for f in functions}
     method_owners: dict = {}
     for st in (structs or {}).values():
         for m in struct_methods(st):
@@ -27124,6 +27638,221 @@ def recursive_function_names(functions, structs: dict = None) -> set:
                 continue
             for owner in method_owners.get(func.member, ()):
                 edges[f.name].add(f"{owner}_{func.member}")
+    return edges
+
+
+def call_graph_depth(edges: dict) -> int:
+    """An UPPER BOUND on the number of distinct functions a call chain can have
+    live at once, in `edges`.
+
+    The question `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
+    asks and the guard does not answer: unbounded depth needs a CYCLE, so the
+    guard is emitted on the cycles only, but "finite" is not "small" and a DAG
+    sixty levels deep spends the same stack as a recursion sixty deep. Every
+    formal frame is at least 128 KiB, so the depth that matters is
+    `STACK_FLOOR_BUDGET_BYTES // 128 KiB` — 59 on arm64, measured, not estimated.
+
+    **An upper bound, and the same direction as the sweep's `FILES BLOCKED`.**
+    The exact figure is the longest SIMPLE path, which is NP-hard in general, so
+    this takes the bound a linear-time decomposition gives: collapse each
+    strongly-connected component to a node weighted by its SIZE, and take the
+    longest weighted path in the condensation. A simple path enters a component
+    once (the condensation is acyclic, so it cannot leave and come back) and
+    visits at most `size` distinct members inside it, so that sum bounds it —
+    and it is reached only when a component is a clique-like blob, which the
+    measured images are not.
+
+    Two iterative DFS passes (Kosaraju) rather than one recursive Tarjan: a
+    45-file closure has call chains deeper than Python's own recursion limit,
+    and a measurement that raises `RecursionError` on the graph it exists to
+    measure is not a measurement.
+    """
+    nodes = set(edges) | {n for callees in edges.values() for n in callees}
+    if not nodes:
+        return 0
+    # Kosaraju pass 1: finish order, on the forward graph.
+    order: list = []
+    seen: set = set()
+    for root in sorted(nodes):
+        if root in seen:
+            continue
+        seen.add(root)
+        stack = [(root, iter(sorted(edges.get(root, ()))))]
+        while stack:
+            node, it = stack[-1]
+            advanced = False
+            for nxt in it:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append((nxt, iter(sorted(edges.get(nxt, ())))))
+                    advanced = True
+                    break
+            if not advanced:
+                order.append(node)
+                stack.pop()
+    # Pass 2: components, on the reverse graph, in decreasing finish order.
+    rev: dict = {}
+    for caller, callees in edges.items():
+        for callee in callees:
+            rev.setdefault(callee, set()).add(caller)
+    comp_of: dict = {}
+    comps: list = []
+    for root in reversed(order):
+        if root in comp_of:
+            continue
+        cid = len(comps)
+        members = []
+        stack = [root]
+        comp_of[root] = cid
+        while stack:
+            node = stack.pop()
+            members.append(node)
+            for prev in sorted(rev.get(node, ())):
+                if prev not in comp_of:
+                    comp_of[prev] = cid
+                    stack.append(prev)
+        comps.append(members)
+    # The condensation, and the longest weighted path over it.  A component
+    # containing a cycle is where the guard already fires, so it is counted at
+    # its SIZE and no further: the bound is about the acyclic tail.  Kosaraju's
+    # second pass emits the components in TOPOLOGICAL order of the
+    # condensation, so walking the list backwards is a valid relaxation order
+    # and the DP needs no recursion of its own — which matters, because a deep
+    # chain is exactly the shape this is measured on.
+    succ: dict = {}
+    for caller, callees in edges.items():
+        src = comp_of[caller]
+        for callee in callees:
+            dst = comp_of.get(callee)
+            if dst is not None and dst != src:
+                succ.setdefault(src, set()).add(dst)
+    best = [1] * len(comps)
+    depth = 1
+    for cid in range(len(comps) - 1, -1, -1):
+        own = len(comps[cid])
+        m = own
+        for nxt in succ.get(cid, ()):
+            m = max(m, own + best[nxt])
+        best[cid] = m
+        depth = max(depth, m)
+    return depth
+
+
+def body_has_conditional_branch(fn) -> bool:
+    """Does this body's SOURCE contain a construct that ALWAYS lowers to a
+    conditional branch?
+
+    **The predicate exists for one argument and the argument is a DIRECTION.**
+    `stack_floor_guarded_names` widens the stack-floor guard from the call-graph
+    cycles to every function whose body already branches, and the price is the
+    per-export contract proof: `arm64_proof_gen._dylib_contract_proof` returns
+    `""` — no contract — for an export whose body contains ANY conditional
+    branch, so the guard's own `cbnz`/`b.hs` costs a contract only in a body that
+    had one to lose. For that to be an argument rather than a hope, this
+    predicate must never answer True for a body the EMITTER lays out
+    straight-line — over-counting would take a contract away from an export that
+    has one. So:
+
+      * counted: `if`, `while`, `for`, `assert`, `try`, `match`, and a
+        comprehension with a condition. Each of these lowers to a compare and a
+        branch on BOTH backends with no purity gate in front of it —
+        `_emit_if` and `_emit_loop` always emit one, and `_emit_compr_gen`'s
+        condition arm always emits a `cbz`;
+      * NOT counted: a ternary (`a if c else b`) and a short-circuit chain
+        (`a and b`). Both backends have a BRANCHLESS lowering chosen by a
+        purity predicate, so a body whose only branch is one of them can still be
+        straight-line in the image;
+      * NOT descended: a nested `def`. Its branches are in ITS prologue, not this
+        one's — the same rule `ValueKinds._scan` follows for the same reason.
+
+    Under-counting is the safe direction and is where the residual lives:
+    `tools/formal_call_depth_census.py`'s `no-brch` column is what this
+    predicate's complement leaves unguarded, measured over the corpus.
+    """
+    body = getattr(fn, "body", None)
+    if body is None:
+        return False
+    return _has_branch_node(body)
+
+
+def _has_branch_node(node) -> bool:
+    """`_has_branch_node` over a statement list, without a nested `def`'s body.
+
+    An explicit walk rather than `iter_nodes` for the one reason the docstring
+    above gives: `iter_nodes` descends a nested `FunctionDef` because a nested
+    def is just another dataclass node in the tree, and its branches are not in
+    this function's emitted code.
+    """
+    if isinstance(node, (list, tuple)):
+        return any(_has_branch_node(x) for x in node)
+    if isinstance(node, F.FunctionDef):
+        return False
+    if isinstance(node, (F.IfStmt, F.WhileStmt, F.ForStmt, F.AssertStmt,
+                         F.TryStmt, F.MatchStmt)):
+        return True
+    if isinstance(node, F.Comprehension):
+        for gen in (getattr(node, "generators", None) or []):
+            if getattr(gen, "conditions", None):
+                return True
+    if not hasattr(node, "__dataclass_fields__"):
+        return False
+    return any(_has_branch_node(getattr(node, name))
+               for name in _node_field_names(node))
+
+
+def stack_floor_guarded_names(functions, structs: dict = None) -> set:
+    """The functions of one image whose prologue carries the stack-floor guard.
+
+    Two rules, and the SECOND is what the measurement forced:
+
+      * **on a call-graph CYCLE.** Unbounded call depth is a cycle: a chain of
+        distinct functions has a finite depth, and it is the return to a function
+        already on the stack that makes the depth a function of the PROGRAM
+        rather than of its shape. So a cycle's members are where a runaway
+        recursion is stopped, and a program that recurses cannot get past one.
+
+      * **or the body already contains a conditional branch**
+        (`body_has_conditional_branch`). This was NOT in the rule that landed
+        with the guard, and it is the measured answer to the question
+        `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its
+        life asking. Every formal prologue subtracts a fixed 128 KiB frame on
+        arm64 (16 KiB on x86-64), so the depth at which the stack runs out is a
+        constant — 60 frames against `STACK_FLOOR_BUDGET_BYTES` on arm64 — and
+        the cycle rule left a DAG of DISTINCT functions free to walk straight
+        past it. Measured over this repository and the stdlib with
+        `tools/formal_call_depth_census.py`: the deepest single image is **76
+        frames** (`formal/arm64_codegen.py`, and 69 for `x86_64_codegen.py`),
+        which is 1.3x what the arm64 budget affords. So this is not a stated
+        limit with no work behind it; it is one the corpus is already inside.
+
+    **And the second rule costs nothing the first one was careful not to.** The
+    per-export contract proof (`arm64_proof_gen._dylib_contract_proof`) declines
+    to emit a contract for an export whose body contains ANY conditional branch —
+    `Refine.Block.step` is one function of one state, and a conditional branch
+    does not have one. So a body that already branches has no contract to lose,
+    and a body that does not is left exactly as it was. "Every function" would
+    trade proved contracts for nothing; "every function that already has a
+    branch" does not, and `body_has_conditional_branch` is written to that
+    direction.
+
+    **What the widening does not reach**, measured rather than argued: a chain
+    of bodies that have no branch at all. The census's `unguard` column is that
+    chain's depth, and its maximum over the same corpus is **7 frames** — a
+    median of 3, against the 60 the arm64 budget affords (59 measured, one frame
+    spent by the caller). So the residual is a bounded 7 rather than an
+    unbounded "finite", and it is bounded by a module's size rather than by the
+    guard. 600 straight-line functions in a chain still walk off the end of the
+    stack; that is what `test_formal_run.py`'s
+    `guard_a_straight_line_chain_is_left_alone` row says out loud, and closing
+    it is `lib/Refine.lean` — a `Block` per arm with a join — not an emitter.
+
+    The edges are `call_graph_edges`, and its docstring carries why they are a
+    superset and why a call out of the image is not an edge. `call_graph_depth`
+    is what measured the two numbers above, on the same edges, so the
+    measurement and the rule cannot come apart.
+    """
+    edges = call_graph_edges(functions, structs)
+    by_name = {f.name: f for f in functions}
 
     def reaches_self(start: str) -> bool:
         seen, stack = set(), [start]
@@ -27137,12 +27866,14 @@ def recursive_function_names(functions, structs: dict = None) -> set:
                     stack.append(nxt)
         return False
 
-    return {name for name in names if reaches_self(name)}
+    return {name for name in by_name
+            if reaches_self(name) or body_has_conditional_branch(by_name[name])}
+
 
 
 # THE GUARD'S SHAPE, decided once so that neither backend can spell it twice.
 #
-# **Which prologues get it** is `recursive_function_names` above, and that is
+# **Which prologues get it** is `stack_floor_guarded_names` above, and that is
 # the only decision here that is not the sequence: the sequence is the same in
 # every prologue it appears in, and a prologue it does not appear in is
 # unchanged code.
@@ -28654,6 +29385,23 @@ def expr_spelling(node) -> str:
         inner = ", ".join(expr_spelling(e) for e in (node.elements or []))
         return (f"[{inner}]" if isinstance(node, F.ListExpr)
                 else f"({inner})")
+    if isinstance(node, F.SetExpr):
+        # `{1, 2}` and not `SetExpr`.  An arm the build pass's older copy carried
+        # and this one did not, so it is spelled here rather than kept as a second
+        # implementation of the function — a set literal in a refusal about a
+        # stored or assigned value is a set literal the reader can find in their
+        # own file.
+        return f"{{{', '.join(expr_spelling(e) for e in (node.elements or []))}}}"
+    if isinstance(node, F.BinaryOp):
+        # `a + b` and not `BinaryOp`, for the reason the build pass's copy spelled
+        # out before it was deleted: a message that read `G is read in bump() at
+        # BinaryOp` is a true statement, a placeholder, and useless, because the
+        # reader's question is WHICH read.  Every refusal that quotes a value goes
+        # through this one function, so the fix belongs here rather than in each
+        # caller — and here is also the only place it can live now that there is
+        # one function.
+        return (f"{expr_spelling(node.left)} {node.op} "
+                f"{expr_spelling(node.right)}")
     if isinstance(node, F.StringLiteral) and isinstance(node.value, str):
         # QUOTED, and that is the whole of this arm: the `("value", "name")`
         # loop below prints `str("a")`, which is `a` — a bare name the file does
@@ -29211,3 +29959,212 @@ def variadic_read_refusal(fn_name: str, name: str, is_kwarg: bool,
             f"change to the calling convention both backends AND the Lean "
             f"proof share. Take the arguments as named parameters, or read "
             f"them from a list the caller passes")
+
+
+# ── `with`: the context-manager protocol, and the only shape of it this path can
+#    honour ────────────────────────────────────────────────────────────────────
+#
+# `with EXPR as TARGET:` is not "evaluate, bind, run the body".  In CPython it is
+# `mgr = EXPR; TARGET = type(mgr).__enter__(mgr); <body>; type(mgr).__exit__(…)`,
+# and the two calls are the whole point: a `contextlib.redirect_stdout` that does
+# not redirect, a `TemporaryDirectory` that does not remove, and a
+# `contextlib.closing` that never closes all look like working programs, print
+# their results, and exit 0.  This path used to lower the first line and drop the
+# other two — the emitters' own docstrings said so ("with-items without a
+# context-manager protocol … an `as` alias is bound to the expression result
+# itself") — which made every one of those a wrong-but-exit-0 answer with
+# nothing on the link line to catch it.
+#
+# The fix is not a wider value: a context manager here has to be a value this
+# path can dispatch two methods on, and the only such value is a FRAME ADDRESS
+# (the by-reference receiver, `struct_is_framed`).  So the protocol is lowered
+# for a framed struct that declares both `__enter__` and `__exit__`, and every
+# other `with` is refused by name — which is what CPython itself does with one
+# that has neither (AttributeError), stated here as a refusal because this
+# backend has no unwinder to raise it through.
+
+CONTEXT_ENTER = "__enter__"
+CONTEXT_EXIT = "__exit__"
+
+
+def struct_is_context_manager(struct_def) -> bool:
+    """True when `struct_def` is a context manager this path can enter and exit.
+
+    Three conditions, each of which is a separate capability rather than a
+    detail:
+
+      * it declares BOTH dunders.  `__enter__` alone binds the alias and leaves
+        the way out with nothing to call, which is the silent half this whole
+        family exists to stop; `__exit__` alone has no way to produce the value
+        the alias names.
+      * its receiver is a FRAME (`struct_is_framed`).  A one-field struct's
+        receiver IS its field — there is no address to call a method on, and no
+        place to keep a second thing — so a one-field class cannot be a context
+        manager here however the two dunders are written.  This is the price of
+        the one-word value model and it is stated rather than hidden: CPython's
+        own `TemporaryDirectory` and `nullcontext` both keep more than one
+        attribute, so the honest mirror of either is representable.
+      * neither dunder takes an argument other than the receiver, and `__enter__`
+        RETURNS a value.  `__exit__`'s three exception arguments are a question
+        about the unwinder this path does not have (see
+        `refuse_dropped_handler_arm`): there is nothing to pass them, and a
+        `__exit__` that wanted them could not act on them anyway.
+    """
+    if struct_def is None or not struct_is_framed(struct_def):
+        return False
+    methods = {getattr(m, "name", None): m for m in struct_methods(struct_def)}
+    for name in (CONTEXT_ENTER, CONTEXT_EXIT):
+        m = methods.get(name)
+        if m is None or _dunder_receiver_params(m) != 1:
+            return False
+    return True
+
+
+def _dunder_receiver_params(method) -> int:
+    """How many parameters a method declares, receiver included; -1 if unknown.
+
+    `*args`/`**kwargs` cannot be counted from the tree and are -1, which fails
+    every comparison here — a variadic context-manager method is refused rather
+    than assumed, for the same reason a variadic call is
+    (`refuse_variadic_parameter_read`).
+    """
+    params = list(getattr(method, "params", None) or ())
+    if getattr(method, "vararg", None) or getattr(method, "kwarg", None):
+        return -1
+    return len(params)
+
+
+def with_expr_struct(expr, structs_by_name: dict, functions: dict = None):
+    """The struct a `with` item's EXPRESSION constructs, or None if undecidable.
+
+    Deliberately narrow: the expression must be a CONSTRUCTION, spelled
+    `S(...)` or `mod.S(...)`, and `S` must be a struct this image knows.  Every
+    other spelling answers None, which the caller turns into the refusal below.
+
+    The narrowness is the point.  A context manager is entered through its
+    type, so the question "what type is this value" has to have an answer that
+    is a fact rather than a guess, and on this path the only fact available is
+    the constructor the source itself wrote.  A name, a field read, a call to
+    some other function: each would need a return-type table this image does not
+    have for values that cross a dylib boundary, and each guess is a program
+    that enters the wrong `__enter__`.
+
+    `mod.S(...)` resolves through the same table as `S(...)` on purpose: a
+    context manager published by a host module (`tempfile.TemporaryDirectory`) is
+    a struct of THIS image too, because `formal/build.py` compiles the imported
+    module's own declarations into `structs_by_name` before this runs.
+    """
+    if isinstance(expr, tuple):        # a parenthesised expression
+        expr = expr[0] if expr else None
+    callee = getattr(expr, "func", None)
+    if callee is None:
+        return None
+    # `mod.S(...)` is a `MemberExpr`, whose `member` is a plain string — the
+    # same two spellings `_with_item_alias_name` has to ask about, and read
+    # here rather than through a helper so this function answers for the AST it
+    # is handed.
+    name = getattr(callee, "name", None) or getattr(callee, "member", None)
+    if not isinstance(name, str) or not name:
+        return None
+    return structs_by_name.get(name)
+
+
+def refuse_unlowerable_with(fn, where, expr, struct, structs_by_name) -> str:
+    """Why this `with` cannot be the context-manager protocol, in reader's terms.
+
+    The three shapes this message has to tell apart, because they are three
+    different edits and a reader who cannot tell them apart looks for the wrong
+    one:
+
+      * the expression CONSTRUCTS a struct that is not enterable — not framed
+        (the one-word value model), or framed without both dunders.  The fix is
+        in the struct, and the message says which half is missing.
+      * the expression constructs a struct that IS enterable but this image does
+        not compile — which cannot happen here and is not given an arm, because
+        an arm that is never reached is a sentence a future reader has to check.
+      * the expression is not a construction at all, so nothing says what type it
+        is.  The fix is in the spelling: bind the context manager in a `var`
+        this build can see the type of, or construct it here.
+
+    The sentence that matters most is the last one: what this path used to do
+    instead.  A `with` lowered as "evaluate, bind, run the body" is a program
+    that builds, runs, prints its results and exits 0 while skipping the call
+    that is the entire contract — the failure CLAUDE.md calls the one no check
+    on this path can see.
+    """
+    # The `with` ITEM is what carries the line, and it is what the reader's
+    # editor jumps to; the statement's own line is the same line here and would
+    # be one hop away when they ever differ.
+    line = getattr(where, "line", 0) or 0
+    head = f"line {line}: " if line else ""
+    # `expr_spelling`, not a private spelling helper: a diagnostic about a `with`
+    # that printed `CallExpr` would send the reader to the AST, which is the
+    # opposite of what quoting the call site is for.
+    spelled = expr_spelling(expr)
+    detail = ("this build cannot answer what type it is, because it is not a "
+              "construction of a struct this image compiles"
+              if struct is None else
+              ("it is a struct of ONE field, so its receiver IS that field and "
+               "there is no address to call a method on"
+               if not struct_is_framed(struct) else
+               f"it declares no {CONTEXT_ENTER}"
+               + ("" if _declares(struct, CONTEXT_EXIT)
+                  else f" and no {CONTEXT_EXIT}")
+               + ", so there is nothing to enter and nothing to call on the way "
+                 "out"))
+    return (
+        f"{head}{fn.name}: `with {spelled} as …` is CPython's CONTEXT-MANAGER "
+        f"PROTOCOL — `type(mgr).__enter__` binds the name, and "
+        f"`type(mgr).__exit__` runs on the way out — and this path cannot "
+        f"honour it here: {detail}. A formal value is one 64-bit word, so the "
+        f"only value this path can enter and exit is a FRAMED struct that "
+        f"declares both dunders (`struct_is_context_manager`), whose receiver is "
+        f"the frame's address. Binding the name to the expression's own value "
+        f"and running the body — which is what this path used to do — builds a "
+        f"program that exits 0 having skipped the call that IS the contract: "
+        f"CPython raises AttributeError on a word, a redirect that does not "
+        f"redirect prints the program's own output and looks right, and a "
+        f"temporary directory is left on disk. Give the value a struct with "
+        f"`{CONTEXT_ENTER}` and `{CONTEXT_EXIT}`, or construct it in the `with` "
+        f"itself; a `with` whose context is a plain value cannot be made "
+        f"faithful here."
+    )
+
+
+def _declares(struct_def, method_name) -> bool:
+    return any(getattr(m, "name", None) == method_name
+               for m in struct_methods(struct_def))
+
+
+def dotted_struct_construction(func, structs: dict, import_aliases: dict) -> bool:
+    """True when `mod.S(...)` constructs a struct this image knows — not an extern call.
+
+    A dotted call has three readings and the emitters used to know two of them:
+    `recv.m(...)` is a method call on a value, and `mod.f(...)` is a call across
+    a module boundary.  The third is a CONSTRUCTION of a struct that the module
+    publishes, and it has to be read as one because the dylib exports a struct's
+    METHODS and not its constructor (`_formal_exports`: a frame-returning
+    function is not exportable and a struct's fields are laid out by whoever
+    builds the object), so `mod.S(...)` is lowered inline by the caller exactly
+    as a bare `S(...)` is.
+
+    Left on the extern path it became `BL mod.S` — a flat symbol no library
+    defines — and the failure arrived as a link-time "the image would bind 1
+    symbol(s) that nothing provides", which names a missing provider rather than
+    the reading that was wrong.
+
+    Two conditions, and the first is what keeps this from swallowing a method
+    call: the BASE has to be a name this unit imported as a module
+    (`import_aliases` is `{local name: (module, defining name)}`, the same table
+    the dotted-callee arm of both emitters already consults), so `recv.m(...)`
+    on a local, on a field, on a string literal or on a frame slot is not
+    touched here — those are decided by position and by receiver shape, and they
+    are decided earlier.
+    """
+    if not isinstance(func, F.MemberExpr):
+        return False
+    member = getattr(func, "member", None)
+    if not isinstance(member, str) or member not in (structs or {}):
+        return False
+    base = getattr(func, "obj", None)
+    return isinstance(base, F.IdentExpr) and base.name in (import_aliases or {})
