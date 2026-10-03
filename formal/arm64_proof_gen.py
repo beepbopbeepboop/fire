@@ -27,6 +27,11 @@ import struct
 import fire_compiler as F
 from formal import model
 from formal.arm64_codegen import var_register_map, _SCRATCH
+# `model` for `entry_arg_values` -- the ONE reader of what the startup stub
+# passes the entry function, so the proof's entry state and the binary's
+# registers are two renderings of one list.  `formal/types.py` imports the same
+# module, so this costs nothing that was not already being loaded.
+from formal import model as M
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           used_narrow_types, lean_trunc_defs, lean_trunc_name,
@@ -1401,18 +1406,26 @@ Returns `{"kind": …, "ptype": …, "arity": …}` where `kind` is one of
     # `def f_go (n ` -- and a zero-binder reading of that is a nullary model.
     head = _re.search(r"^def %s\b(.*?)(?::=|\n)" % _re.escape(name), src, _re.M)
     if head is None:
-        return {"kind": "applied", "ptype": "UInt64", "name": name, "arity": 1}
+        return {"kind": "applied", "ptype": "UInt64", "ptypes": ["UInt64"],
+                "name": name, "arity": 1}
     text = head.group(1)
     _ty = r"[\w]+(?:\s*(?:→|->)\s*[\w]+)*"
     binders = _re.findall(r"\(\s*([\w']+)\s*:\s*(%s)\s*\)" % _ty, text)
     if binders:
-        return {"kind": "applied", "ptype": binders[0][1], "name": name,
+        # `ptypes` beside `ptype`: a model's binders need not share a type —
+        # `def f_go (n : Nat) (m : UInt64)` is expressible — and `_go_apply`
+        # converts EACH argument to the type the binder it lands in wants, so
+        # reading only the first one would silently hand a `UInt64` to a `Nat`
+        # binder.  `ptype` stays, for the reader that only wants the first.
+        return {"kind": "applied", "ptype": binders[0][1],
+                "ptypes": [b[1] for b in binders], "name": name,
                 "arity": len(binders)}
     arrow = _re.search(r":\s*([\w]+)\s*(?:→|->)", text)
     if arrow:
-        return {"kind": "curried", "ptype": arrow.group(1), "name": name,
-                "arity": 1}
-    return {"kind": "nullary", "ptype": "UInt64", "name": name, "arity": 0}
+        return {"kind": "curried", "ptype": arrow.group(1),
+                "ptypes": [arrow.group(1)], "name": name, "arity": 1}
+    return {"kind": "nullary", "ptype": "UInt64", "ptypes": [], "name": name,
+            "arity": 0}
 
 
 def _param_list_lean(fn) -> str:
@@ -1421,10 +1434,12 @@ def _param_list_lean(fn) -> str:
     The whole list, and not `params[0][0]`: `MojoFunc.mk` carries the source's
     parameter names and `evalFunc` the model's argument values, so a function
     of two parameters has to put BOTH names in the AST or the second one is
-    unbound and evaluates to 0 -- which is the defect
-    `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` names.  A
+    unbound and evaluates to 0 -- which was the defect, and `MojoEnv` answers
+    0 for a name no argument binds, so the two halves have to agree.  A
     function with no parameters gets `[]` rather than the old `""`, which is
-    the same empty binding list spelled as a list.
+    the same empty binding list spelled as a list.  Pinned by
+    `test_formal_eval_eq_mojo_bridge.py`'s
+    `test_the_ast_value_names_every_parameter`.
 
     One reader for both backends: `formal/x86_64_proof_gen.py` imports it, so
     the two cannot disagree about what the AST says a function takes.
@@ -1433,59 +1448,172 @@ def _param_list_lean(fn) -> str:
     return "[" + ", ".join('"%s"' % n for n in names) + "]"
 
 
-def _go_apply(go_defs: str, fname: str, arg: str = "n") -> str:
-    """The term that applies `fname`'s model to `arg`, at whatever arity it has.
+# --------------------------------------------------------------------------
+# The entry function's ARGUMENTS: one reader, both backends
+# --------------------------------------------------------------------------
 
-    "at whatever arity it has" is 0 or 1, and that limit is the whole content of
-    this function.  The term it produces is the body of
+def _entry_arity(fn) -> int:
+    """How many parameters the ENTRY function declares -- `model.entry_arity`.
 
-        def mojo (n : UInt64) : UInt64 := <this>
+    A reader and not the definition, because `formal/build.py` asks the same
+    question of the same function before the image exists (to widen the startup
+    stub's argument values), and two spellings of "how many parameters" is two
+    chances for the model and the theorem to be stated about different functions.
+    """
+    return M.entry_arity(fn)
 
-    and `mojo` is a ONE-INPUT function by construction: `eval_eq_mojo`, every
-    `native_decide` run test and the universal theorem all quantify over a
-    single `n`, and `lib/ProofLib.lean`'s AST bridge is one-parameter too
-    (`MojoFunc.mk name param body`, and `evalFunc`'s environment is
-    `fun name => if name == param then arg else 0` — every parameter past the
-    first evaluates to 0).  So there is no term to write for a two-parameter
-    model: it would need two inputs where the apparatus has one.
 
-    Which is why this refuses rather than applying `binders[0]`, which is what
-    it used to do.  Measured, both generators, for
-    `def f(a0, a1): return a0 + a1`:
+def _entry_arg_names(arity: int) -> list:
+    """The theorem-level names of the entry function's arguments.
 
-        def f_go (a0 : UInt64) (a1 : UInt64) : UInt64 := ...
+    The FIRST is always `n`, at every arity.  Not a convention for its own
+    sake: `n` is already the first entry argument inside the universal theorem
+    (it is the fuel index `runProg … n` and the `n` in every `hn` bound), so
+    renaming it at arity two would mean re-inking every one of those.  The
+    later ones are `n1`, `n2`, ... — positional rather than the SOURCE's
+    names, because these are the variables of a THEOREM about the entry point
+    and a source parameter name is free to be `n`, `h0` or `hf`, any of which
+    would shadow a hypothesis the proof is already using.
+
+    A zero- or one-argument entry gets `["n"]`, which is what it has always
+    been and why this change is byte-identical over the corpus.
+    """
+    return ["n"] + [f"n{i}" for i in range(1, max(1, arity))]
+
+
+def _entry_binders(arity: int) -> str:
+    """`mojo`'s parameter list, at the entry's arity."""
+    return " ".join(f"({n} : UInt64)" for n in _entry_arg_names(arity))
+
+
+def _entry_arg_list(args: list) -> str:
+    """`evalFunc`'s argument LIST: `[n]`, or `[n0, n1]` for a wider entry."""
+    return "[" + ", ".join(args) + "]"
+
+
+def _apply_args(head: str, args: list, paren_single: bool = False) -> str:
+    """`head` applied to `args`, parenthesised when there is more than one.
+
+    Two arguments HAVE to be parenthesised: `mojo (UInt64.ofNat 10) 20` parses,
+    and parses as the application `mojo (UInt64.ofNat 10)` to `20` -- a
+    different function of a different arity, which is the exact class of
+    mistake `_model_shape`'s docstring is about, one level up.  For ONE
+    argument the parenthesisation is a per-site style choice, so it is a
+    parameter rather than a guess: `paren_single=False` gives `mojo 10`,
+    which is what the run tests and `eval_eq_mojo` have always read, and
+    `True` gives `mojo (arg)`, which is what the universal theorem's terminal
+    proposition has always read.
+    """
+    def _one(a):
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_']*", a):
+            return a
+        return f"({a})"
+    if len(args) <= 1:
+        if not args:
+            return head
+        return f"{head} ({args[0]})" if paren_single else f"{head} {args[0]}"
+    return head + " " + " ".join(_one(a) for a in args)
+
+
+def _entry_arg_with(arity: int, names: list) -> str:
+    """The `with`-clause entries that put the SECOND and later arguments in
+    their registers, as a PREFIX for a clause the caller already writes.
+
+    Both `init` constructors zero every register past the first
+    (`Arm64State.init` sets `x1 := 0`, `X86State.init` sets `rsi := 0`), so
+    `x0 := <input>` is the whole of a one-argument entry state and this is
+    empty for it -- which is why every entry state in this file is unchanged
+    byte-for-byte.
+    """
+    return "".join(f"x{i} := {names[i]}, " for i in range(1, arity))
+
+
+def _entry_init(inputs: list, base, arity: int, tail: str = None) -> str:
+    """The entry STATE, with the later arguments in their registers.
+
+    `inputs` are Lean TERMS -- `n`, or a decimal literal for a concrete run
+    test -- and `tail` is an extra `with` clause the caller already has
+    (`pc := …`, `x30 := …`) and which this puts AFTER the arguments.  A
+    one-argument entry with no `tail` is the bare
+    `Arm64State.init n base` the callers already wrote, because both `init`
+    constructors zero every register past the first (`Arm64State.init` sets
+    `x1 := 0`, `X86State.init` sets `rsi := 0`).
+    """
+    head = f"Arm64State.init {inputs[0]} {base}"
+    extra = _entry_arg_with(arity, inputs)
+    if tail:
+        return f"{{ {head} with {extra}{tail} }}"
+    if extra:
+        return f"{{ {head} with {extra[:-2]} }}"
+    return head
+
+
+def _entry_run(inputs: list, base, arity: int) -> str:
+    """`_entry_init`, in the shape a run test writes it.
+
+    Parenthesised at arity one, because every such site goes on to add a
+    `with x30 := …` clause and `{ (Arm64State.init v base) with … }` is what
+    they all already read.  A wider entry brings its own braces, and putting a
+    second pair around them would be a record update with no `with`.
+    """
+    st = _entry_init(inputs, base, arity)
+    return f"({st})" if arity <= 1 else st
+
+
+def _go_apply(go_defs: str, fname: str, args=None) -> str:
+    """The term that applies `fname`'s model to `args`, at whatever arity it has.
+
+    `args` is the entry theorem's argument LIST, so it has as many elements as
+    the model's binders and the term is the body of
+
+        def mojo (n0 : UInt64) (n1 : UInt64) : UInt64 := <this>
+
+    A model whose arity disagrees with `args` is a GENERATOR bug rather than a
+    program shape, so it refuses — loudly, naming both counts — instead of
+    applying `binders[0]` as this used to.  That misreading is what produced
+
         def mojo (n : UInt64) : UInt64 :=
-          f_go n                       -- argument-count error, elaborates to
-                                       -- nothing, and the whole file fails
+          f_go n                       -- argument-count error Lean cannot
+                                       -- recover from: the whole file stops
 
-    The refusal says which arity and why, so the reader is at the line that is
-    wrong rather than three definitions away from it — the same discipline
-    `_model_shape` applies to the nullary case, and the same one
-    `_gen_go`'s docstring records having already needed for the MODEL (which
-    was fixed: its arity is the source's).  What is still one-parameter is
-    `mojo` and the RUN TESTS around it, which is a driver change and not a
-    generator fix; `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`
-    records the measurement and the two halves.
+    for `def f(a0, a1): return a0 + a1`, three definitions away from the line
+    that is wrong.  (A two-parameter ENTRY POINT used to be refused outright
+    instead, by the same argument-count worry; `mojo`, the run tests, the entry
+    state and the driver's `test_input` are all at the ENTRY's arity now --
+    `model.entry_arity` is the one reader of it, and
+    `test_formal_call_proof_gen.py::TestEntryArity` drives both generators and
+    both built binaries -- so the refusal here is left for the case it is
+    actually good at.)
+
+    Each argument is converted to the type the binder it lands in wants, from
+    `_model_shape`'s `ptypes`, because a model's binders need not agree: a
+    `Nat`-domain model (`f_model`, `count_go`) is applied to `n.toNat` while a
+    `UInt64`-binder model is applied to `n`.
     """
     sh = _model_shape(go_defs, fname)
-    if sh["arity"] > 1:
+    if args is None:
+        args = ["n"]
+    # A NULLARY model is applied to nothing and the theorem it is the model of
+    # still has its argument: `def mojo (n : UInt64) := ret42_go` for
+    # `def ret42(): return 42` is what this has always emitted, and `n` is
+    # simply not read.  So the arity check is about a model that takes
+    # arguments, not about a theorem that does.
+    if sh["kind"] != "nullary" and sh["arity"] != len(args):
         raise NotImplementedError(
-            f"model: {sh['name']} has {sh['arity']} parameters, and the "
-            f"surrounding proof is a one-input theorem: `mojo` is declared "
-            f"`UInt64 -> UInt64`, `eval_eq_mojo` and every run test quantify "
-            f"over one `n`, and a run test's entry state is one word "
-            f"(`Arm64State.init test_input base`). Emitting "
-            f"`mojo n := {sh['name']} n` instead is an argument-count error Lean "
-            f"cannot recover from, so the whole proof file fails to elaborate. "
-            f"The AST BRIDGE is not the obstacle any more: `MojoFunc.mk` "
-            f"carries every parameter NAME and `evalFunc` takes the model's "
-            f"argument list, so the model's arity is already stateable "
-            f"(`mojoEnv_binds_by_position`). What remains is `mojo`, the run "
-            f"tests, and the driver, which supplies a single `test_input` -- see "
-            f"`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`")
+            f"model: {sh['name']} takes {sh['arity']} argument(s) but the "
+            f"theorem it is the model of has {len(args)} "
+            f"({', '.join(args)}). Applying it to a different number of "
+            f"arguments is an argument-count error Lean cannot recover from, "
+            f"so the whole proof file would stop elaborating three "
+            f"definitions away from the line that is wrong.")
     if sh["kind"] == "nullary":
         return sh["name"]
-    return f"{sh['name']} " + (f"{arg}.toNat" if sh["ptype"] == "Nat" else arg)
+    _pt = list(sh.get("ptypes") or [])
+    while len(_pt) < len(args):
+        _pt.append(sh["ptype"])
+    return _apply_args(sh["name"],
+                       [f"{a}.toNat" if t == "Nat" else a
+                        for a, t in zip(args, _pt)])
 
 
 def _require_one_param(fname, params):
@@ -2726,6 +2854,25 @@ def audit_step_table(lean_path: str) -> list:
         body = fh.read()
     body = body[body.index("def arm64_step"):]
     body = body[:body.index("\n\n")]
+    # COMMENTS ARE NOT BRANCHES, and reading them as branches is not a
+    # hypothetical: `arm64_step`'s own note about where the TBZ case is placed
+    # writes the condition out in full -- "because `(insn &&& 0xff000000) =
+    # 0x36000000` is specific" -- so the regex counted `0x36000000` twice, the
+    # sets were equal, and the comparison `sorted(model) != sorted(table)`
+    # failed with `only in ProofLib []` and `only in _STEP_CONDS []`, naming
+    # nothing.  `test_formal.py` calls this before it builds anything, so the
+    # whole arm64 formal corpus -- the job registered as `formal`, with no
+    # `expect=` and no `disabled=` -- could not run at all.
+    #
+    # A LINE comment is dropped rather than a block comment being tracked,
+    # because `arm64_step`'s body has no block comment inside it: the two
+    # `/-` markers in the extracted text are the docstring of the definition
+    # that FOLLOWS it, which the `\n\n` cut already excludes.  A block comment
+    # added inside the body later would be caught rather than silently
+    # misread, because a line that opens or closes one is not a branch line and
+    # is left alone.
+    body = "\n".join(l for l in body.split("\n")
+                     if "--" not in l and "/-" not in l and "-/" not in l)
     full = 0xFFFFFFFF
     model = [(int(m, 0), int(b, 0)) for m, b in
              _re.findall(r"insn &&& (0x[0-9a-fA-F]+|\d+)\) = (0x[0-9a-fA-F]+|\d+)", body)]
@@ -4411,7 +4558,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                            exit_at: int = None, thm: str = None,
                            prop: str = None, no_change: bool = False,
                            halt_only: bool = False, fuel: int = None,
-                           fuel_lean: str = None):
+                           fuel_lean: str = None, entry_arity: int = 1):
     """CompCert-style universal e2e driven by the control-flow graph.
 
     The generator is thin: it emits, per basic block, wrapper defs + a
@@ -4716,8 +4863,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     _entry_bpc = b["start"]
                     _entry_bi = _bi
                     break
-        entry_init = (f"{{ Arm64State.init n {base} with pc := {func_entry}, "
-                      f"x30 := UInt64.ofNat {exit_pc} }}")
+        # `x1 := n1, …` FIRST, so the entry state also carries the entry
+        # function's later arguments; `_entry_arg_with` is empty at arity one,
+        # which is every program in the corpus.
+        entry_init = (f"{{ Arm64State.init n {base} with "
+                      f"{_entry_arg_with(entry_arity, _entry_arg_names(entry_arity))}"
+                      f"pc := {func_entry}, x30 := UInt64.ofNat {exit_pc} }}")
         # The CBZ tests the condition register as it stands *at the branch*, so
         # the state to reason about is the end of the straight-line run the
         # branch closes (`qT` chains stop one transition short of the
@@ -4980,8 +5131,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 # change that does not affect it stays byte-identical.
                 if _fno:
                     _tmsg = "the frame contract"
-                elif _prop == _DEFAULT_TERM_PROP:
-                    _tmsg = f"(s_{bi}).x0 = mojo n"
+                elif _prop.startswith(_DEFAULT_TERM_PROP[:len("s.x0 = mojo")]):
+                    # Read the model's application back out of the proposition
+                    # rather than assuming one, so the comment cannot claim a
+                    # statement the theorem does not make.
+                    _tmsg = f"(s_{bi}).x0 = {_prop[len('s.x0 = '):]}"
                 else:
                     _tmsg = f"the halt state (s_{bi}) satisfies `{_prop}`"
                 A(f"{IND}-- terminal value flow: {_tmsg}")
@@ -5905,7 +6059,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             _goxtra = list(go_lemmas or []) + list(ctx.get("go_facts", []))
             A(f"{IND}-- runs terminal: build the step-counted Post")
             A(f"{IND}change ∃ (k : Nat) (st' : Arm64State), k ≤ fuel ∧ arm64_runs {C} k st = some st'")
-            A(f"{IND}  ∧ st'.x0 = mojo ({arg_expr}) ∧ st'.pc = st.x30.toNat ∧ FrameOk st st' ∧")
+            A(f"{IND}  ∧ st'.x0 = "
+              f"{_apply_args('mojo', [arg_expr] + _entry_arg_names(entry_arity)[1:], paren_single=True)}"
+              f" ∧ st'.pc = st.x30.toNat ∧ FrameOk st st' ∧")
             A(f"{IND}  (∀ u, u < k → ∀ s, arm64_runs {C} u st = some s → s.pc ≠ {exit_pc})")
             A(f"{IND}refine ⟨{acc}, {cur}, ?_, ?_, ?_, ?_, ?_, ?_⟩")
             if fuel_proof == "__tree__":
@@ -6384,8 +6540,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             emit_runs(0, "st", "st", "0", "hacc0", "hpc", [], [], "arg", "__tree__", 1,
                       set(), _cstep)
             A("")
-            tree_init = (f"{{ Arm64State.init n {base} with pc := {func_entry}, "
-                         f"x30 := UInt64.ofNat {exit_pc} }}")
+            tree_init = (f"{{ Arm64State.init n {base} with "
+                         f"{_entry_arg_with(entry_arity, _entry_arg_names(entry_arity))}"
+                         f"pc := {func_entry}, x30 := UInt64.ofNat {exit_pc} }}")
             A(f"theorem {name}_compiles_correctly_universal (n : UInt64)")
             A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600) :")
             A(f"    (match runProg {name}_prog n with")
@@ -6462,8 +6619,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # The top-level entry state, shared by the walk closure (which needs it to
     # seed the frame-bound descent) and the universal theorem's statement.
     _fr0 = frame or {}
-    init = (f"{{ Arm64State.init n {base} with pc := {func_entry}, "
-            f"x30 := UInt64.ofNat {exit_pc}"
+    init = (f"{{ Arm64State.init n {base} with "
+            f"{_entry_arg_with(entry_arity, _entry_arg_names(entry_arity))}"
+            f"pc := {func_entry}, x30 := UInt64.ofNat {exit_pc}"
             + ((", " + _fr0["init_extra"]) if _fr0.get("init_extra") else "")
             + " }")
     _fr = frame or {}
@@ -6492,8 +6650,30 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 f"{_fr['prop']!r}: the halt would not discharge it, so the "
                 f"value flow is still needed")
     _thm = _fr.get("thm") or f"{name}_compiles_correctly_universal"
-    _prop = _fr.get("prop") or _DEFAULT_TERM_PROP
-    A(f"theorem {_thm} ({_fr.get('params') or 'n : UInt64'})")
+    # The terminal proposition, at the entry's ARITY.  `s.x0 = mojo n` for the
+    # one argument every program in the corpus has — byte-for-byte the old
+    # text — and `s.x0 = mojo n n1` for a wider one, which is the same
+    # statement about a function of two arguments.
+    _enames = _entry_arg_names(entry_arity)
+    _prop = _fr.get("prop") or (
+        _DEFAULT_TERM_PROP if entry_arity <= 1
+        else f"s.x0 = {_apply_args('mojo', _enames)}")
+    # `_fr['params']` is the binder LIST a frame contract supplies for its own
+    # receiver (`n v : UInt64`), so it keeps the parentheses the callers always
+    # wrote; the entry-point default is `_entry_binders`, which brings its own.
+    _params = _fr.get("params")
+    A(f"theorem {_thm} ({_params})" if _params
+      else f"theorem {_thm} {_entry_binders(entry_arity)}")
+    # `runProg` seeds ONLY `x0` from `Arm64State.init` (`lib/Refine.lean:112`),
+    # so the theorem's opening `change` from `runProg {name}_prog n` to the
+    # entry state is a definitional equality that holds only while the entry
+    # takes ONE argument.  Past one it cannot: `runProg`'s state has `x1 := 0`
+    # and this one's has `x1 := n1`.  So a wider entry is stated directly over
+    # `arm64_exec_go_exit`, which is the form a by-reference receiver already
+    # uses for the same reason (see the comment on `no_change` below) -- the
+    # statement is the same execution, and nothing is dropped by not routing it
+    # through the framework's `Prog`.
+    _via_prog = not (_fr.get("no_change") or entry_arity > 1)
     if fuel is None:
         A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600)")
     for _h in (_fr.get("hyps") or []):
@@ -6506,7 +6686,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # that takes a value argument is stated over `arm64_exec_go_exit` directly.
     # For a method that takes none the statement could go through `runProg`;
     # both forms are emitted so the framework's `Prog` is exercised either way.
-    if _fr.get("no_change"):
+    if not _via_prog:
         A(f"    (match arm64_exec_go_exit {init} {C} {exit_pc} ({FUEL0}) with")
         A(f"     | some s => {_prop}")
         A("     | none => False) := by")
@@ -6521,7 +6701,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         A(f"  have hbnd : FrameBound {stride} {init} n := by")
         A(f"    change {stride} * (n.toNat + 1) ≤ 18446744073709551600")
         A("    omega")
-    if not _fr.get("no_change"):
+    if _via_prog:
         A(f"  change (match arm64_exec_go_exit {init} {C} {exit_pc} ({FUEL0}) with")
         A(f"     | some s => {_prop}")
         A("     | none => False)")
@@ -6920,7 +7100,8 @@ def _gen_code_defs(name: str, code: bytes, base: int, test_input: int) -> str:
 
 def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
                    func_entry: int, admitted_model: bool = False,
-                   admitted_names: list = None) -> str:
+                   admitted_names: list = None, arity: int = 1,
+                   entry_values: list = None) -> str:
     """Concrete machine-verified test of a fully-modelled compiled binary.
 
     Appends a RET sentinel after the code and executes the whole program
@@ -6931,7 +7112,16 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
     Additional inputs are executed from the function entry directly.
     """
     exit_addr = base + len(code)
-    init = (f"{{ (Arm64State.init {test_input} {base}) "
+    # The entry function's ARGUMENT words as the startup stub materialized
+    # them (`model.entry_arg_values`, already widened to `arity`), so a
+    # two-parameter entry's run starts from the same x0/x1 the binary was
+    # given rather than from an x1 the model invented.
+    vals = [str(v) for v in (entry_values or [test_input])]
+    # The same values as a comma-separated list, for the PROSE: a docstring
+    # that says "input 10" about a two-parameter entry whose second argument is
+    # 20 would be describing a different program.
+    tinput = test_input if arity <= 1 else ", ".join(vals)
+    init = (f"{{ {_entry_run(vals, base, arity)} "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
     _tac = _decide_or_admit(admitted_model)
     # The admission note goes on the FIRST block only, and every docstring here
@@ -6946,26 +7136,30 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
     _rest_note = "" if admitted_model else " -/"
     blocks = [
         f"/-- Concrete verification: running the compiled binary on input "
-        f"{test_input} leaves mojo {test_input} in x0.{_first_note}"
+        f"{tinput} leaves mojo {tinput} in x0.{_first_note}"
         if admitted_model else
         f"/-- Concrete verification: running the compiled binary on input "
-        f"{test_input} leaves mojo {test_input} in x0. -/\n"
+        f"{tinput} leaves mojo {tinput} in x0. -/\n"
         f"theorem {name}_runs_test :\n"
         f"  run_result_exit {init} {name}_code {exit_addr} 200000 "
-        f"= mojo {test_input} := by\n"
+        f"= {_apply_args('mojo', vals)} := by\n"
         f"{_tac}"
     ]
     for v in [0, 1, 2, 5]:
         if v == test_input:
             continue
-        ventry = (f"{{ (Arm64State.init {v} {func_entry}) "
+        # The other arguments are 0 for these instances -- the same padding
+        # `model.entry_arg_values` applies, and what the binary's registers
+        # hold for an argument it was handed no value for.
+        vv = [str(v)] + ["0"] * (arity - 1)
+        ventry = (f"{{ {_entry_run(vv, func_entry, arity)} "
                   f"with x30 := UInt64.ofNat {exit_addr} }}")
         blocks.append(
             f"/-- Concrete verification for input {v}, run from the function "
             f"entry.{_rest_note}\n"
             f"theorem {name}_runs_{v} :\n"
             f"  run_result_exit {ventry} {name}_code {exit_addr} 200000 "
-            f"= mojo {v} := by\n"
+            f"= {_apply_args('mojo', vv)} := by\n"
             f"{_tac}"
         )
     return "\n\n".join(blocks)
@@ -6974,7 +7168,8 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                      extern_calls: list, externs: list, fn,
                      admitted_model: bool = False,
-                     admitted_names: list = None) -> tuple:
+                     admitted_names: list = None, arity: int = 1,
+                     entry_values: list = None) -> tuple:
     """Structured verification for programs that call extern symbols.
 
     The execution is split at each extern call site:
@@ -6999,7 +7194,12 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
     the model had followed the call.
     """
     exit_addr = base + len(code)
-    init = (f"{{ (Arm64State.init {test_input} {base}) "
+    # The entry function's ARGUMENT words as the startup stub materialized
+    # them (`model.entry_arg_values`, already widened to `arity`), so a
+    # two-parameter entry's run starts from the same x0/x1 the binary was
+    # given rather than from an x1 the model invented.
+    vals = [str(v) for v in (entry_values or [test_input])]
+    init = (f"{{ {_entry_run(vals, base, arity)} "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
     ret_type_of = {e.name: e.return_type for e in externs}
     blocks = []
@@ -7106,7 +7306,8 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                 f"theorem {name}_post_extern_given_callee_returns :\n"
                 f"  run_result_exit {{ {name}_pre_{len(extern_calls) - 1} "
                 f"with pc := {last_bl + 4} }} "
-                f"{name}_code {exit_addr} 200000 = mojo {test_input} := by\n"
+                f"{name}_code {exit_addr} 200000 = "
+                f"{_apply_args('mojo', vals)} := by\n"
                 f"{_decide_or_admit(admitted_model)}"
             )
             if admitted_model:
@@ -7440,7 +7641,7 @@ def _admitted_model_note(contracts: list) -> str:
 
 
 def _call_func_lean(func_name: str, admitted: dict = None,
-                    wrap: bool = True) -> str:
+                    wrap: bool = True, arity: int = 1) -> str:
     """The `callFunc` the AST-evaluation model is given: `fun name arg => …`.
 
     ONE function for what five call sites used to spell out.  They agreed
@@ -7462,8 +7663,26 @@ def _call_func_lean(func_name: str, admitted: dict = None,
     `admitted` maps the spelling a call site uses to the contract's Lean name;
     it is the same `prog.admitted_calls` the `_go` model uses, so both layers of
     the proof resolve one call to one contract.
+
+    **`arity` is the entry point's parameter count, and it decides whether the
+    proved function's OWN name gets a branch at all.**  At arity one the branch
+    is `mojo arg` and everything else falls to `0`, which is what this has
+    always emitted for every program in the corpus.  Past one there is no
+    faithful branch to write: `mojo` is now a function of several arguments and
+    `callFunc` is handed exactly ONE value, so any rendering would have to
+    invent the rest.  So the name is dropped from the stub's known set and it
+    answers `0` like any name it does not know -- which is TRUE, and is what
+    `_ast_bridge_gaps` then refuses on: a program whose AST calls its own
+    multi-parameter entry by name is a program this bridge cannot state, and it
+    is refused rather than emitted as a theorem that is false for the reason the
+    `else 0` branch documents.  (`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`
+    is the filing: widening `MojoExpr.call` to carry a LIST is what would let
+    the branch be written, and it is a `lib/ProofLib.lean` change.)
     """
     if not admitted:
+        if arity > 1:
+            return ("(fun name arg => 0)" if not wrap
+                    else "(fun name arg =>\n    0)")
         # The spelling each of the six call sites used to write out, byte for
         # byte, chosen by `wrap`.  A change that is supposed to be
         # behaviour-preserving has to be byte-identical on a program that reaches
@@ -7479,6 +7698,8 @@ def _call_func_lean(func_name: str, admitted: dict = None,
     arms = "\n  ".join(
         f'if name = "{spelling}" then {lean} arg else'
         for spelling, lean in sorted(admitted.items()) if lean)
+    if arity > 1:
+        return f'(fun name arg =>\n  {arms}\n  0)'
     return (f'(fun name arg =>\n  {arms}\n'
             f'  if name = "{func_name}" then mojo arg else 0)')
 
@@ -7575,7 +7796,6 @@ def generate_arm64_proof(prog, code, info) -> str:
     # The `callFunc` the AST layer is given, which has to know the admitted
     # spellings as well as the proved function — see `_call_func_lean`.
     _admitted_calls_map = dict(getattr(prog, "admitted_calls", None) or {})
-    _cf_text = _call_func_lean(func_name, _admitted_calls_map)
 
     _fmethods = _frame_methods(prog, code, info)
     if _fmethods:
@@ -7587,6 +7807,27 @@ def generate_arm64_proof(prog, code, info) -> str:
         fn = prog.functions[0]
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
+    # The entry function's ARGUMENTS, as one fact read once.  `arity` is what
+    # `mojo`, `eval_eq_mojo`, every run test and the universal theorem are
+    # stated at; `enames` are their binder names; `evalues` are the concrete
+    # words the startup stub materialized into the argument registers, widened
+    # to the arity (`model.entry_arg_values`) so a two-parameter entry's run
+    # test compares against what the binary actually received.
+    arity = _entry_arity(fn)
+    enames = _entry_arg_names(arity)
+    # `entry_args` when the codegen published it, and `test_input` when a
+    # caller built an `info` dict by hand (a test, a tool reading one
+    # function's proof): both are the startup stub's argument values, and
+    # `formal/build.py` is the one that widens the list to the arity in every
+    # real build, so the padding here is the belt to that suspenders.
+    evalues = M.entry_arg_values(
+        info.get("entry_args", test_input), arity)
+    tinput = test_input if arity <= 1 else ", ".join(str(v) for v in evalues)
+    # The `callFunc` the AST layer is given, which has to know the admitted
+    # spellings as well as the proved function, and is stated AT THE ENTRY'S
+    # ARITY because `mojo` is — see `_call_func_lean`, which is where the
+    # reason a wider entry gets no branch of its own is written down.
+    _cf_text = _call_func_lean(func_name, _admitted_calls_map, arity=arity)
 
     # Which of those this program ACTUALLY calls, walked with `_callees_of` —
     # the same walk that builds the `_go` dependency graph, so it cannot call a
@@ -7633,7 +7874,16 @@ def generate_arm64_proof(prog, code, info) -> str:
     # have, and `mojo n = ret42_go n` bound that fabrication to every caller.
     # `_go_apply` READS the arity back out of the emitted model rather than
     # predicting it from which pattern matched, so the two cannot drift.
-    mojo_term = _go_apply(go_defs, func_name)
+    mojo_term = _go_apply(go_defs, func_name, enames)
+    # The `mojo` docstring keeps its old one-liner verbatim at arity one, which
+    # is every program in the corpus: a comment is not semantics, but re-inking
+    # it would invalidate every cached verdict in ~/.gmojo for a wording
+    # change, and the whole point of this change being inert elsewhere is that
+    # it is byte-identical there.
+    mojo_note = ("/-- The semantic model as a UInt64 -> UInt64 function. -/\n"
+                 if arity <= 1 else
+                 f"/-- The semantic model as a function of {func_name}'s "
+                 f"{arity} arguments, one per parameter. -/\n")
 
     # Universal eval_eq_mojo: non-recursive, always-returning, loop-free
     # programs unfold by simp after case-splitting; single-recursion shapes are
@@ -7694,7 +7944,15 @@ def generate_arm64_proof(prog, code, info) -> str:
         )
     elif (not _is_recursive(fn) and not _has_while(fn.body)):
         param = fn.params[0][0] if fn.params else "n"
-        env = {param: param} if fn.params else {}
+        # One env entry per SOURCE parameter, each bound to the theorem's
+        # binder at the same POSITION -- `n0` for the first, `n1` for the
+        # second.  `{param: param}` bound the first and left every later one
+        # unbound, and an unbound name is `0` in `MojoEnv`, so the model of
+        # `def f(a, b): return a + b` came out as `f_go n + 0`: a function of
+        # the right arity and the wrong value.
+        _sp = [p[0] for p in (fn.params or [])]
+        env = ({n: _sp[i] if _sp[i] == _sp[0] else n
+                for i, n in enumerate(enames[:len(_sp)])} if _sp else {})
         conds = _collect_conds(fn, param, env)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
@@ -7747,8 +8005,9 @@ def generate_arm64_proof(prog, code, info) -> str:
                 "eval_eq_mojo: function shape (recursive/while with AST eval) unsupported")
         eval_eq_mojo_section = (
             f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
-            f"theorem eval_eq_mojo (n : UInt64) :\n"
-            f"  evalFunc ast {_cf_text} [n] = mojo n := by\n"
+            f"theorem eval_eq_mojo {_entry_binders(arity)} :\n"
+            f"  evalFunc ast {_cf_text} {_entry_arg_list(enames)} = "
+            f"{_apply_args('mojo', enames)} := by\n"
             f"  {eval_eq_mojo_proof}"
         )
     code_defs = _gen_code_defs(func_name, code, base_addr, test_input)
@@ -7758,11 +8017,13 @@ def generate_arm64_proof(prog, code, info) -> str:
     if extern_calls:
         run_test, step_tests = _gen_extern_test(
             func_name, code, base_addr, test_input, extern_calls, externs, fn,
+            arity=arity, entry_values=evalues,
             admitted_model=_admitted_model,
             admitted_names=_admitted_used_names)
     elif not externs:
         run_test = _gen_runs_test(func_name, code, base_addr, test_input,
                                   info["labels"].get(func_name, base_addr),
+                                  arity=arity, entry_values=evalues,
                                   admitted_model=_admitted_model,
                                   admitted_names=_admitted_used_names)
     else:
@@ -7806,16 +8067,24 @@ def generate_arm64_proof(prog, code, info) -> str:
         for v in [0, 1, 2, 5, test_input]:
             if v == test_input:
                 continue
+            # A wider entry holds its OTHER arguments at 0 for this instance
+            # -- the same value `model.entry_arg_values` pads with, and the
+            # same value the startup stub leaves in a register it emits no
+            # materializer for -- so the statement is about an input the
+            # machine could really have been handed.
+            _vv = [f"(UInt64.ofNat {v})"] + [f"(UInt64.ofNat 0)"] * (arity - 1)
             eval_tests.append(
                 f"theorem eval_eq_mojo_{v} :\n"
                 f"  evalFunc ast {_cf_text} "
-                f"[(UInt64.ofNat {v})] = mojo (UInt64.ofNat {v}) := by\n"
+                f"{_entry_arg_list(_vv)} = {_apply_args('mojo', _vv)} := by\n"
                 f"{_tac_eval}"
             )
+        _tv = ([f"(UInt64.ofNat {test_input})"] +
+               [f"(UInt64.ofNat {v})" for v in evalues[1:]])
         eval_tests.append(
             f"theorem eval_eq_mojo_test :\n"
             f"  evalFunc ast {_cf_text} "
-            f"[(UInt64.ofNat {test_input})] = mojo (UInt64.ofNat {test_input}) := by\n"
+            f"{_entry_arg_list(_tv)} = {_apply_args('mojo', _tv)} := by\n"
             f"{_tac_eval}"
         )
         eval_test_block = "\n\n".join(eval_tests)
@@ -7852,8 +8121,14 @@ def generate_arm64_proof(prog, code, info) -> str:
     # CFG walk cannot follow the call at all, where the bridge could be fixed
     # without the machine model.  Both refuse; this one is second because its
     # message is about a smaller piece of work.
-    _resolvable = {func_name} | {spelling for spelling, lean
-                                 in _admitted_calls_map.items() if lean}
+    # The names `callFunc` answers for, and it does NOT answer for the proved
+    # function's own name when the entry takes more than one argument: a unary
+    # handler cannot supply the rest, so `_call_func_lean` left the branch out
+    # and a call to it is the UNRESOLVABLE-callee gap below, which is a
+    # refusal rather than a false theorem.
+    _resolvable = (({func_name} if arity <= 1 else set())
+                   | {spelling for spelling, lean
+                      in _admitted_calls_map.items() if lean})
     # …and only where the AST is going to be EMITTED. A `for`-range program
     # gets `ast_def = ""` and its bridge omitted (the untyped AST model has no
     # loop form), so nothing it contains can make a claim that is false — and
@@ -7895,21 +8170,26 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"/- NO CONCRETE RUN TEST for {func_name}: the function calls out of\n"
             f"   the image at {_opaque['pc']:#x}, so the model cannot execute the\n"
             f"   call and `arm64_exec_go` stops there.  A run test would compare\n"
-            f"   the machine against `0 = mojo {test_input}` and pass for the\n"
+            f"   the machine against `0 = mojo {tinput}` and pass for the\n"
             f"   wrong reason -- both sides zero because nothing ran.  The\n"
             f"   universal theorem above proves the part that IS decidable: the\n"
             f"   run reaches the call, for every input. -/")
     else:
+        # The concrete run's entry ARGUMENTS as Lean literals: the words the
+        # startup stub materialized into x0..x(arity-1), which
+        # `model.entry_arg_values` padded to the arity with the `0` those
+        # registers already held.
+        elist = [str(v) for v in evalues]
         concrete_test = (
             f"/-- End-to-end correctness (concrete): the compiled binary hardcodes its input\n"
-            f"    ({test_input}), so it is a closed computation. The run starts with x30 at\n"
+            f"    ({tinput}), so it is a closed computation. The run starts with x30 at\n"
             f"    the RET sentinel, and the machine halts once the program has returned to\n"
             f"    it. Proved by native_decide, which scales to any program size. -/\n"
             f"theorem {func_name}_compiles_correctly :\n"
-            f"  (match arm64_exec_go {{ (Arm64State.init {test_input} {base_addr})\n"
+            f"  (match arm64_exec_go {{ {_entry_run(elist, base_addr, arity)}\n"
             f"      with x30 := UInt64.ofNat {sentinel_addr} }} {func_name}_code {concrete_fuel} with\n"
             f"   | some s => s.x0\n"
-            f"   | none => 0) = mojo {test_input} := by\n"
+            f"   | none => 0) = {_apply_args('mojo', elist)} := by\n"
             f"  native_decide")
 
     # CompCert-style CFG emitter: emits the refinement-framework data (Blocks +
@@ -7944,6 +8224,7 @@ def generate_arm64_proof(prog, code, info) -> str:
                                             fn=fn, tw_extra=tw_extra, tc=tc,
                                             cond_branches=set(
                                                 info.get("cond_branches") or ()),
+                                            entry_arity=arity,
                                             **_ukw)
     if universal_text is not None:
         universal_section = _opaque_note + universal_text
@@ -7971,8 +8252,7 @@ set_option linter.unusedVariables false
 /-- Mojo semantics: direct Lean model of the source code. -/
 {go_defs}
 
-/-- The semantic model as a UInt64 -> UInt64 function. -/
-def mojo (n : UInt64) : UInt64 :=
+{mojo_note}def mojo {_entry_binders(arity)} : UInt64 :=
   {mojo_term}
 
 /- AST for {func_name} (mirrors source code). -/

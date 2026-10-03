@@ -935,10 +935,9 @@ def MojoEnv : List String → List UInt64 → String → UInt64
 
 /-- The i-th name binds the i-th value, and a name that is in neither list is 0.
 
-Both halves of what `MojoFunc.mk`'s single `param` could not say, and they are
-the statement `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` is
-about: a two-parameter function binds BOTH of its names, each to its own
-argument, and a name no argument answers for is still 0 — which is what an
+Both halves of what `MojoFunc.mk`'s single `param` could not say: a
+two-parameter function binds BOTH of its names, each to its own argument, and a
+name no argument answers for is still 0 — which is what an
 unbound name evaluated to before, so every one-parameter program's answer is
 unchanged.  Decided rather than argued: both are `simp` on the definition. -/
 theorem mojoEnv_binds_by_position (p q : String) (u v : UInt64) (n : String)
@@ -953,8 +952,7 @@ theorem mojoEnv_unbound_name_is_zero (p q : String) (u : UInt64) (n : String)
 
 `args` is the model's ARITY: a two-parameter function binds two names, and the
 list is what says which value is which.  This is the whole of what
-`MojoFunc.mk`'s single `param` could not say, and it is what
-`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` is about. -/
+`MojoFunc.mk`'s single `param` could not say. -/
 def evalFunc (f : MojoFunc) (callFunc : String → UInt64 → UInt64)
     (args : List UInt64) : UInt64 :=
   match f with

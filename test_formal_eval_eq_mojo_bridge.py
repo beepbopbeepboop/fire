@@ -11,10 +11,9 @@ on ONE theorem:
 `evalFunc`'s third argument is the model's ARGUMENT LIST: `MojoFunc.mk` carries
 the source's parameter NAMES and `evalFunc` the model's argument values, and
 the i-th name binds the i-th value (`MojoEnv`, whose two lemmas say so).  It
-was one `UInt64` while the bridge bound one name, which is the whole of
-`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`; the list is what
-makes a two-parameter model's AST faithful, and `_go_apply` still refuses to
-APPLY one because `mojo` itself is one-input.
+was one `UInt64` while the bridge bound one name; the list is what makes a
+two-parameter model's AST faithful, and `_go_apply` applies one at its own
+arity (`formal/model.py::entry_arity` is the reader both generators use).
 
 The bridge is proved by splitting on the function's own conditions (`by_cases h0 : <cond>`)
 and then letting `simp` close the goal.  That only works if the `by_cases`
@@ -244,10 +243,9 @@ class TestTheBridgeBindsEveryParameter(unittest.TestCase):
     the mechanism: the generated `ast` names every parameter of the source.
 
     It also pins what is still refused, because the two are the same fact seen
-    from both sides: `_go_apply` still refuses to APPLY a two-parameter model,
-    because `mojo` is one-input (`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`
-    step 5). A test that only checked the list would let someone lift that guard
-    believing the file were done.
+    from both sides: `_go_apply` refuses a model whose arity disagrees with the
+    theorem it is the model of. A test that only checked the list would let
+    someone widen one half and leave the other reading `binders[0]`.
     """
 
     def test_the_ast_value_names_every_parameter(self):
@@ -300,20 +298,35 @@ class TestTheBridgeBindsEveryParameter(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_a_two_parameter_model_is_still_refused_at_the_model_not_the_ast(self):
+    def test_a_two_parameter_model_is_applied_at_its_arity(self):
+        """`_go_apply` at the model's arity, and a MISMATCH refused by name.
+
+        It used to read `binders[0]` and apply ONE argument, which for
+        `def f(a, b): return a + b` produced `def mojo (n : UInt64) := f_go n` —
+        an argument-count error Lean does not recover from. The apparatus that
+        made the correct application impossible (`mojo` declared
+        `UInt64 -> UInt64`, one `n` in every theorem, `test_input` a single
+        integer) is at the entry's arity now, so the correct application is the
+        ordinary one.
+
+        What is left to refuse is the case this is actually good at: a model
+        whose arity disagrees with the theorem it is the model of, which is a
+        GENERATOR bug rather than a program shape.
+        """
         import formal.arm64_proof_gen as AP
+        defs = ("def twoparam_go (a : UInt64) (b : UInt64) : UInt64 :=\n"
+                "  a + b\n")
+        self.assertEqual(AP._go_apply(defs, "twoparam", ["n", "n1"]),
+                         "twoparam_go n n1")
         with self.assertRaises(NotImplementedError) as cm:
-            AP._go_apply("def twoparam_go (a : UInt64) (b : UInt64) : UInt64 :=\n"
-                         "  a + b\n", "twoparam")
+            AP._go_apply(defs, "twoparam")        # one argument, two binders
         msg = str(cm.exception)
-        self.assertIn("2 parameters", msg)
-        self.assertIn("one-input", msg)
-        # …and it must NOT blame the AST bridge, which is no longer the
-        # obstacle: a refusal that names a cause that has been fixed sends the
-        # reader to widen something that is already wide.
-        self.assertNotIn("AST bridge binds one parameter", msg,
-                         "the refusal still blames the one-parameter AST "
-                         "bridge, which now carries every parameter NAME")
+        for needle in ("twoparam_go", "2 argument(s)", "1", "n"):
+            self.assertIn(needle, msg,
+                          f"the refusal must name BOTH counts, because a model "
+                          f"and the theorem it is the model of disagreeing "
+                          f"about the arity is what it exists to report; got "
+                          f"{msg!r}")
 
     def test_prooflib_binds_by_position_and_leaves_an_unbound_name_at_zero(self):
         """The two library lemmas, named — the bridge's contract in one line each.

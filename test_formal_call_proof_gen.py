@@ -280,56 +280,87 @@ class TestGeneratorSource(unittest.TestCase):
                              f"`native_decide` downstream then fails with "
                              f"'mojo' uses 'sorry'")
 
-    def test_a_model_of_two_parameters_is_refused_not_applied_to_one(self):
-        """`_go_apply` used to read the FIRST binder and apply one argument.
+    def test_a_model_is_applied_at_its_own_arity_and_a_mismatch_is_refused(self):
+        """`_go_apply` reads the model's arity and applies THAT many arguments.
 
+        It used to read the FIRST binder and apply one argument, so
         `def f(a0, a1): return a0 + a1` produced `def f_go (a0) (a1)` and then
         `def mojo (n : UInt64) := f_go n` — an argument-count error, which Lean
         does not recover from as a `sorry` and does not elaborate, so the whole
-        proof file fails three definitions away from the line that is wrong.
+        proof file failed three definitions away from the line that is wrong.
 
-        The one-parameter limit is not a generator's taste: `mojo` is declared
-        `UInt64 -> UInt64`, `eval_eq_mojo` and every run test quantify over one
-        `n`, and `lib/ProofLib.lean`'s `MojoFunc`/`evalFunc` bind one parameter
-        with 0 for every other name.  So the honest answer is to refuse and name
-        the arity.  Measured on both generators.
+        The limit is gone because everything that read `mojo` as
+        `UInt64 -> UInt64` now reads it at the ENTRY's arity:
+        `model.entry_arity` and `_entry_binders` / `_entry_arg_list` /
+        `_apply_args`, which are the whole of it.
+        So the case worth pinning is the one that is left: a model whose arity
+        disagrees with the theorem it is the model of is a GENERATOR bug, and it
+        has to be refused by name rather than applied to whatever binder is
+        first.  Both halves, on both generators.
         """
         import formal.arm64_proof_gen as G
         defs2 = "def f_go (a0 : UInt64) (a1 : UInt64) : UInt64 :=\n  a0\n"
+        self.assertEqual(G._go_apply(defs2, "f", ["n", "n1"]), "f_go n n1")
         with self.assertRaises(NotImplementedError) as caught:
-            G._go_apply(defs2, "f")
+            G._go_apply(defs2, "f")            # one argument, a two-argument model
         said = str(caught.exception)
-        for needle in ("f_go", "2 parameters", "mojo"):
+        for needle in ("f_go", "2 argument(s)", "1", "n"):
             self.assertIn(needle, said,
-                          f"the refusal must name the model's arity and the "
-                          f"one-input apparatus it does not fit; got {said!r}")
+                          f"the refusal must name BOTH counts, because a model "
+                          f"and the theorem it is the model of disagreeing about "
+                          f"the arity is what it exists to report; got {said!r}")
+        # A NULLARY model takes no argument at all and is still applied to
+        # NOTHING while the theorem keeps its binder: `def mojo (n : UInt64) :=
+        # ret42_go` for `def ret42(): return 42` is what this has always
+        # emitted, and `n` is simply not read.  So the arity check must not
+        # fire on it — which it did not until it was given a nullary case.
+        self.assertEqual(G._go_apply("def f_go : UInt64 :=\n  0\n", "f"),
+                         "f_go")
+        self.assertEqual(G._go_apply("def f_go : UInt64 :=\n  0\n", "f",
+                                    ["n", "n1"]), "f_go")
         # ONE implementation, not two.  The x86-64 generator imports the arm64
         # one (`from formal import arm64_proof_gen as AP`) precisely so the two
         # machines cannot disagree about how a model is applied; a second
         # arity check of its own would be the duplication that check exists to
         # prevent, and this is the assertion that says so.
         import formal.x86_64_proof_gen as X
-        src = open(PROOF_GEN).read()
-        self.assertIn("_go_apply(go_defs, func_name)", src,
-                      "the x86-64 generator no longer applies the model through "
-                      "the shared reader, so it has its own arity handling")
+        # `PROOF_GEN` is the ARM64 generator -- which is what the old version of
+        # this assertion read, while its message talked about the x86-64 one, so
+        # it was checking arm64's own call site and saying nothing about the
+        # machine it claimed to cover.  Both files are named explicitly now.
+        x86_src = open(os.path.join(HERE, "formal", "x86_64_proof_gen.py")).read()
+        for src, where, want in (
+                (open(PROOF_GEN).read(), "arm64",
+                 "_go_apply(go_defs, func_name, enames)"),
+                (x86_src, "x86-64",
+                 "_go_apply(go_defs, func_name, AP._entry_arg_names(arity))")):
+            self.assertIn(want, src,
+                          f"the {where} generator no longer applies the model "
+                          f"through the shared reader at the entry's arity, so "
+                          f"it has its own arity handling")
         self.assertEqual(X.generate_x86_64_proof.__module__,
                          "formal.x86_64_proof_gen")
-        # …and the three shapes that DO fit are untouched, which is the other
-        # half: a guard that also refused arity 1 would turn this into a proof
-        # generator that proves nothing.
+        # …and the shapes that fit at arity one are untouched, which is the
+        # other half: a reader that also mis-typed them would turn this into a
+        # proof generator that proves nothing.
         for defs, want in (("def f_go (n : UInt64) : UInt64 :=\n  n\n", "f_go n"),
-                           ("def f_go : UInt64 :=\n  0\n", "f_go")):
+                           ("def f_model : Nat → UInt64\n  | 0 => 0\n",
+                            "f_model n.toNat")):
             self.assertEqual(G._go_apply(defs, "f"), want)
 
-    def test_the_generated_mojo_is_one_input_for_every_arity(self):
+    def test_the_generated_mojo_is_declared_at_the_entry_arities_arity(self):
         """The end-to-end statement, on both generators, for a 2-parameter entry.
 
         `_go_apply` is the shared reader both call, so pinning it is nearly
-        enough — but "nearly" is how a second call site appears.  This drives the
-        real entry points with the one text that reaches them, and asks for the
-        REFUSAL rather than the text, so a reordering that lets `MojoFunc.mk`
-        reach the output first is caught here.
+        enough — but "nearly" is how a second call site appears.  This drives
+        the real entry points with the one text that reaches them and reads the
+        STATEMENTS out of what they emit, because the failure this pins is not
+        the application but the three things around it: `mojo`'s own binders,
+        `eval_eq_mojo`'s argument list and the entry state's `x1`.
+
+        Both architectures, because the two emitters could previously disagree
+        about how many parameters the entry takes — which is why the arity
+        reader is `model.entry_arity` and both generators call it.
         """
         from types import SimpleNamespace
         from formal.build import parse_module
@@ -337,16 +368,29 @@ class TestGeneratorSource(unittest.TestCase):
         src = "def f(a0, a1):\n    return a0 + a1\n"
         fns = [f for f in parse_module(src) if isinstance(f, F.FunctionDef)]
         prog = SimpleNamespace(functions=fns, externs=[])
-        info = {"func_name": "f", "base_addr": 0x1000, "labels": {},
-                "test_input": 10}
         import formal.arm64_proof_gen as G
         import formal.x86_64_proof_gen as X
         for gen, entry in ((X, "generate_x86_64_proof"),
                            (G, "generate_arm64_proof")):
-            with self.assertRaises(NotImplementedError,
-                                   msg=f"{entry} emitted a one-input `mojo` for "
-                                       f"a two-parameter model"):
-                getattr(gen, entry)(prog, b"", dict(info))
+            info = {"func_name": "f", "base_addr": 0x1000, "labels": {},
+                    "test_input": 10}
+            try:
+                out = getattr(gen, entry)(prog, b"", dict(info))
+            except NotImplementedError as e:
+                # x86-64 has no CFG walk for an empty image, so it refuses the
+                # SHAPE; what it must not do is refuse for the ARITY, which is
+                # the reason this test existed when it asserted a refusal.
+                self.assertNotIn("parameter", str(e).split("\n")[0].lower()
+                                 .replace("arity", ""),
+                                 f"{entry} still refuses a two-parameter entry "
+                                 f"point for its arity: {e}")
+                continue
+            self.assertIn("def mojo (n : UInt64) (n1 : UInt64) : UInt64", out,
+                          f"{entry} declared `mojo` at the wrong arity")
+            self.assertIn("evalFunc ast", out)
+            self.assertIn("[n, n1] = mojo n n1", out,
+                          f"{entry} handed the AST bridge a one-argument list, "
+                          f"so its second parameter evaluates to 0")
 
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
@@ -674,6 +718,113 @@ class TestLean(unittest.TestCase):
                 self.assertTrue(ok, f"{name}: {detail}")
                 self.assertEqual(n, 0,
                                  f"{name}: the proof admits {n} `sorry`")
+
+
+class TestEntryArity(unittest.TestCase):
+    """A TWO-PARAMETER ENTRY POINT, end to end, on both architectures.
+
+    This class is what closed it: `mojo`, `eval_eq_mojo`, every run test, the
+    universal theorem's entry state and the startup stub are all stated at the
+    ENTRY's parameter count, which is the source's
+    (`formal/model.py::entry_arity`).  Before, a `def main(n: Int, m: Int)`
+    built and ran and had no proof — `_go_apply` refused it with a message
+    naming a one-input apparatus (`mojo` declared `UInt64 -> UInt64`, one `n`,
+    `Arm64State.init test_input base`) that is gone.
+
+    Two halves, and the second is the one that matters:
+
+    * the TEXT, which needs no Lean and so is checked on every run of this
+      file, and
+    * that **Lean accepts the file**, which is the assertion that could not be
+      written until the text was right, and which is skipped loudly without
+      `lib/ProofLib.olean` like every other Lean assertion here.
+
+    The runtime is in here too, because the two halves can be green and the
+    binary still wrong: the startup stub has to materialize a word into `x1` for
+    the model's `x1 := 0` to be about the program that was built.  It was not —
+    `main(n, m)` answered 90 on arm64, `argv`'s low byte.
+    """
+
+    SOURCE = "def main(n: Int, m: Int) -> Int:\n    return n + m\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.per = {}
+        for arch in ("arm64", "x86_64"):
+            tmp = tempfile.mkdtemp(prefix=f"a2-arity-{arch}-")
+            p, err = _generate(tmp, cls.SOURCE, "twoparams", arch=arch)
+            cls.per[arch] = (tmp, p, err)
+
+    @classmethod
+    def tearDownClass(cls):
+        for tmp, _p, _e in cls.per.values():
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_both_backends_generate_a_proof_at_the_entry_arities_arity(self):
+        for arch, (_tmp, p, err) in sorted(self.per.items()):
+            with self.subTest(arch=arch):
+                self.assertIsNone(err, err)
+                text = open(p).read()
+                self.assertIn("def mojo (n : UInt64) (n1 : UInt64) : UInt64",
+                              text,
+                              f"{arch}: `mojo` is not declared at the entry's "
+                              f"arity, so every `mojo n` below it is a function "
+                              f"where a value was expected")
+                self.assertNotIn("def mojo (n : UInt64) : UInt64 :=\n  "
+                                 "main_go n\n", text,
+                                 f"{arch}: the one-argument application is "
+                                 f"still there, so the two-parameter one is "
+                                 f"not what was emitted")
+                # The AST bridge: both parameter names in the `MojoFunc.mk`,
+                # both values in `evalFunc`'s list.  The names were fixed by
+                # an earlier commit; the LIST is what a second parameter needs,
+                # and a name it cannot bind evaluates to 0.
+                self.assertIn('MojoFunc.mk "main" ["n", "m"]', text,
+                              f"{arch}: the AST binds only the first parameter, "
+                              f"so the second evaluates to 0")
+                self.assertRegex(text, r"evalFunc ast \S+ \(n, n1|\[n, n1\]",
+                                 f"{arch}: `eval_eq_mojo` was stated at arity one")
+
+    def test_the_startup_stub_materializes_every_argument(self):
+        """The stub's words and the proof's `x1 := 0` are one list.
+
+        Not a text check: it RUNS the binary it just built, because the failure
+        this pins is not in the proof at all.  The stub emitted one `MOV` (x0)
+        for a list the proof had already widened to two, so `x1` held whatever
+        the process started with -- `argv` -- and `def main(n, m): return n + m`
+        answered 90 while `mojo 10 0` said 10.
+        """
+        import formal.build as fb
+        for arch in ("arm64", "x86_64"):
+            with self.subTest(arch=arch):
+                tmp, _p, err = self.per[arch]
+                self.assertIsNone(err, err)
+                out = os.path.join(tmp, "twoparams.aout")
+                st = os.system(f'"{out}"')
+                self.assertEqual(os.WEXITSTATUS(st), 10,
+                                 f"{arch}: `main(10, 0)` answered "
+                                 f"{os.WEXITSTATUS(st)}; the second argument "
+                                 f"register is not the 0 the model says it is")
+
+    def test_lean_accepts_the_two_parameter_proof_on_both_backends(self):
+        for arch, (_tmp, p, _err) in sorted(self.per.items()):
+            with self.subTest(arch=arch):
+                got = _check_proof(p)
+                if got is None:
+                    self.skipTest("no Lean / no lib/ProofLib.olean: skipping "
+                                  "the typecheck (every assertion that is about "
+                                  "Lean accepting a file needs it)")
+                ok, detail, n = got
+                self.assertTrue(ok, f"{arch}: {detail}")
+                # arm64's is a proof with no hole.  x86-64's two `sorry`s are
+                # its TWO designed trust boundaries (`compile_correct` and
+                # `compiles_correctly`), which every x86-64 proof in the tree
+                # carries -- `TestAstBridgeCallLimit` pins that count for a
+                # one-argument program, and this asserts it did not grow.
+                self.assertEqual(n, 0 if arch == "arm64" else 2,
+                                 f"{arch}: the two-parameter proof admits {n} "
+                                 f"`sorry`; a wider entry must not have added "
+                                 f"a trust boundary")
 
 
 class TestAstBridgeCallLimit(unittest.TestCase):

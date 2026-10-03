@@ -32,8 +32,9 @@ the theorem ACCEPTED, so a `sorry` here is a claim of trust, not a proof — the
 audit tooling in the toy project counts exactly these.
 """
 
-from formal.types import (DEFAULT_INT_TYPE, function_var_types, parse_type_name,
-                          resolve, uses_typed_model)
+from formal.types import (DEFAULT_INT_TYPE, function_var_types,
+                          parse_type_name, resolve, uses_typed_model)
+from formal.x86_64 import ARG_REGS  # noqa: F401 — read by `_x86_entry`
 
 # The file's own preamble, matching formal/arm64_proof_gen.py's: the deep
 # recursion is the model equations and `native_decide` runs, and the linter
@@ -241,7 +242,8 @@ def _ast_value(fn, func_name: str, admitted: dict = None) -> str:
 
 
 def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
-                          go_lemmas: list = None, admitted: dict = None) -> str:
+                          go_lemmas: list = None, admitted: dict = None,
+                          arity: int = 1) -> str:
     """`eval_eq_mojo`: the AST interpreter agrees with the source model.
 
     Proved for the shapes the shared generator can close by `simp` (a
@@ -259,7 +261,15 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     if AP._is_recursive(fn) or AP._has_while(fn.body):
         return None       # caller emits the `sorry` form
     param = fn.params[0][0] if fn.params else "n"
-    env = {param: param} if fn.params else {}
+    # One env entry per SOURCE parameter, each bound to the theorem's binder at
+    # the same POSITION.  `{param: param}` bound the first and left every later
+    # one unbound, and an unbound name is `0` in `MojoEnv` -- the same
+    # first-parameter-only defect this closes, and `AP._entry_arg_names` is the
+    # reader both backends use -- so the two cannot bind a different number of
+    # parameters than the entry has.
+    _sp = [p[0] for p in (fn.params or [])]
+    _en = AP._entry_arg_names(arity)
+    env = ({_en[i]: _sp[i] for i in range(len(_sp))} if _sp else {})
     # vtypes/call_types, so the `by_cases` conditions and the model's own `if`
     # are the same term, and `sKey` (ProofLib's sign-flip, which is how both
     # render a signed comparison) in the simp set so `simp` sees that the
@@ -285,14 +295,15 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     # that the AST model and the source model agree — including about what an
     # ADMITTED call means.
     from formal import arm64_proof_gen as AP
-    _cf = AP._call_func_lean(func_name, admitted)
+    _cf = AP._call_func_lean(func_name, admitted, arity=arity)
     return (f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
-            f"theorem eval_eq_mojo (n : UInt64) :\n"
-            f"  evalFunc ast {_cf} [n] = mojo n := by\n"
+            f"theorem eval_eq_mojo {AP._entry_binders(arity)} :\n"
+            f"  evalFunc ast {_cf} {AP._entry_arg_list(_en)} = "
+            f"{AP._apply_args('mojo', _en)} := by\n"
             f"  {proof}\n")
 
 
-def _compile_correct_section(func_name: str) -> str:
+def _compile_correct_section(func_name: str, arity: int = 1) -> str:
     """The AST ⟷ compiled-bytes trust boundary.
 
     `exec_seq` runs the machine model for a bounded number of steps from the
@@ -320,7 +331,33 @@ def _compile_correct_section(func_name: str) -> str:
     this round can close: proving the emitted bytes implement the AST is the
     deepest of the three boundaries and is a project, not a patch. What changes
     here is the SHAPE — a remaining hole is now a hypothesis a caller can
-    discharge, which is the only form this programme accepts."""
+    discharge, which is the only form this programme accepts.
+
+    **`mojo arg` and the entry's arity.**  This section states the handler the
+    AST is evaluated under as `fun name arg => mojo arg` -- a bare application
+    with no name test, which is what it has always said and is a THIRD
+    spelling next to `_call_func_lean`.  It is left alone rather than
+    consolidated here because this file's proofs are byte-identical
+    artifacts in `~/.gmojo` and rewriting a `sorry`'s statement is not worth
+    invalidating them.  What DOES have to follow `mojo` is the arity: at two
+    parameters `mojo arg` is a function rather than a value and the statement
+    does not elaborate.  The remaining arguments are `_` -- universally
+    quantified holes -- because this theorem binds no entry arguments of its
+    own, which is honest about what it claims (nothing about any particular
+    argument) and is absorbed by the `sorry` that is already the whole of
+    this theorem's proof."""
+    from formal import arm64_proof_gen as AP
+    # At arity > 1 the handler needs the LATER arguments from somewhere, and
+    # this theorem has no binder for them, so it gains one: an extra binder per
+    # argument past the first, and the handler applied to them.  That is the
+    # same quantifier the arm64 generator's theorems carry (`eval_eq_mojo`),
+    # and at arity one `_extra` is empty and the emitted text is unchanged.
+    _extra = " ".join(f"({n} : UInt64)"
+                      for n in AP._entry_arg_names(arity)[1:])
+    _extra = (_extra + " ") if (arity > 1 and _extra) else ""
+    _handler = ("(fun name arg => mojo arg)" if arity <= 1 else
+                "(fun name arg => " + AP._apply_args(
+                    "mojo", ["arg"] + AP._entry_arg_names(arity)[1:]) + ")")
     return (
         f"/-- Run the machine model for `steps` instructions from the entry. -/\n"
         f"def {func_name}_exec_seq (s : X86State) (code : Nat → UInt8)\n"
@@ -338,13 +375,13 @@ def _compile_correct_section(func_name: str) -> str:
         f"    because nothing is known about where it stopped. The `none` branch\n"
         f"    is `False` and not `True` for that reason -- see the note on\n"
         f"    `_compile_correct_section`. -/\n"
-        f"theorem {func_name}_compile_correct (e : MojoExpr)\n"
+        f"theorem {func_name}_compile_correct {_extra}(e : MojoExpr)\n"
         f"    (env : String → UInt64) (s : X86State)\n"
         f"    (hrun : ∀ steps : Nat,\n"
         f"      ({func_name}_exec_seq s {func_name}_code {func_name}_offset steps).isSome) :\n"
         f"  ∀ steps : Nat,\n"
         f"    match {func_name}_exec_seq s {func_name}_code {func_name}_offset steps with\n"
-        f"    | some s' => s'.rax = evalExpr (fun name arg => mojo arg) e env\n"
+        f"    | some s' => s'.rax = evalExpr {_handler} e env\n"
         f"    | none => False := by\n"
         f"  sorry\n")
 
@@ -499,9 +536,50 @@ def _step_certificate_section(func_name: str, code_len: int, insns: list = None,
     return "\n".join(out)
 
 
+# `X86State`'s field names in `formal/x86_64.py`'s `ARG_REGS` order -- SysV's
+# RDI, RSI, RDX, RCX, R8, R9.  One list, next to `_x86_entry` which is its only
+# reader, and it is asserted against `ARG_REGS` there so the model and the
+# emitter cannot number an argument register differently.
+_X_FIELD = ("rdi", "rsi", "rdx", "rcx", "r8", "r9")
+
+
+def _x86_entry(values: list, offset) -> str:
+    """`X86State.init` with the entry function's later ARGUMENTS in RSI, RCX...
+
+    One shared reader for the sites that start a run at the entry, because a run
+    test and the end-to-end theorem are one statement about one machine and two
+    spellings of the start state would be two chances to disagree about what the
+    binary was handed.  At arity one it is the bare `X86State.init v offset`,
+    which is what those sites have always written (parenthesised, because both
+    of them pass it as one term of a larger application): `X86State.init` sets
+    `rdi := input` and `rsi := 0`, so one argument needs no `with` clause at
+    all.
+
+    `values` are Lean TERMS (`n` or a decimal literal), in argument order, and
+    the registers are `formal/x86_64.py`'s `ARG_REGS` -- SysV's RDI, RSI, RDX,
+    RCX, R8, R9, the same order the emitter binds a call's arguments in, so the
+    model and the image cannot number them differently.  Past six this REFUSES
+    rather than inventing an argument: the seventh travels in the CALLER's
+    frame, which an `X86State.init` entry state does not have.
+    """
+    head = f"X86State.init {values[0]} {offset}"
+    if len(values) <= 1:
+        return f"({head})"
+    if len(values) > len(ARG_REGS):
+        raise NotImplementedError(
+            f"run test: the entry function takes {len(values)} arguments and "
+            f"this architecture passes {len(ARG_REGS)} in registers; argument "
+            f"{len(ARG_REGS)} and up travel in the caller's frame, which an "
+            f"`X86State.init` entry state does not have, so there is nothing "
+            f"honest to write here")
+    fields = "".join(f"{_X_FIELD[i]} := {values[i]}, " for i in range(1, len(values)))
+    return f"({{ {head} with {fields[:-2]} }})"
+
+
 def _run_tests_section(func_name: str, test_input: int, externs: list = None,
                        placeholder: bool = False,
-                       string_result: bool = False) -> str:
+                       string_result: bool = False, arity: int = 1,
+                       entry_values: list = None) -> str:
     """Concrete run tests: the machine model on the real bytes, by evaluation.
 
     These are not `sorry` and not assertions — `native_decide` executes the
@@ -569,17 +647,31 @@ def _run_tests_section(func_name: str, test_input: int, externs: list = None,
             f"   up to the call, which is what the per-instruction certificates\n"
             f"   below cover. -/\n")
 
+    # `entry_values` is the entry function's ARGUMENT words as the startup stub
+    # materialized them (`model.entry_arg_values`, already widened to `arity`),
+    # so a two-parameter entry's run starts from the same RDI/RSI the binary was
+    # given.  `X86State.init` zeroes every register past RDI, so one argument is
+    # the bare call it has always been.
+    from formal import arm64_proof_gen as AP
+    vals = [str(v) for v in (entry_values or [test_input])]
+    # The HELPER is a function of the arguments, so it starts from the binder
+    # names; only the per-instance theorems below start from concrete words.
+    names = AP._entry_arg_names(arity)
+    _binds = ("(n : UInt64)" if arity <= 1 else
+              " ".join(f"({v} : UInt64)" for v in names))
+
     helper = (
         f"/-- Result register after running the image from the entry (0 if the\n"
         f"    model could not run it to completion). -/\n"
-        f"def {func_name}_result (n : UInt64) : UInt64 :=\n"
-        f"  match x86_exec_exit (X86State.init n {func_name}_offset) "
+        f"def {func_name}_result {_binds} : UInt64 :=\n"
+        f"  match x86_exec_exit {_x86_entry(names, func_name + '_offset')} "
         f"{func_name}_code 0 with\n"
         f"  | some s => s.rax\n"
         f"  | none => 0\n")
     out = [helper]
     for n in dict.fromkeys([test_input, 0, 1, 2, 5]):
-        run = (f"x86_exec_exit (X86State.init {n} {func_name}_offset) "
+        vv = [str(n)] + ["0"] * (arity - 1)
+        run = (f"x86_exec_exit {_x86_entry(vv, func_name + '_offset')} "
                f"{func_name}_code 0")
         out.append(
             f"/-- The model runs the image to completion for input {n}. -/\n"
@@ -589,7 +681,8 @@ def _run_tests_section(func_name: str, test_input: int, externs: list = None,
             f"\n"
             f"/-- Concrete verification for input {n}, run from the entry. -/\n"
             f"theorem {func_name}_runs_{n} :\n"
-            f"    {func_name}_result {n} = mojo {n} := by\n"
+            f"    {func_name}_result " + " ".join(vv)
+            + " = " + AP._apply_args('mojo', vv) + " := by\n"
             f"  native_decide\n")
     return "\n".join(out) + "\n"
 
@@ -611,6 +704,25 @@ def generate_x86_64_proof(prog, code, info) -> str:
     func_offset = info.get("func_offset", base_addr)
     test_input = info.get("test_input", 10)
     code = code or b""
+    # The entry function's ARGUMENTS, at its arity -- the same facts the arm64
+    # generator reads, through the same readers (`AP._entry_arity`,
+    # `AP._entry_arg_names`, `formal.model.entry_arg_values`), so the two
+    # architectures cannot state a program of different arity.  `AP` is the
+    # arm64 generator, which is where the shared readers live; importing it here
+    # rather than in each of the six functions below it is the same one-import
+    # rule this file already follows, and it was imported INSIDE the
+    # `if _admitted:` branch, where every other use found it unbound.
+    from formal import arm64_proof_gen as AP
+    from formal import model as _M
+    arity = AP._entry_arity(fn)
+    enames = AP._entry_arg_names(arity)
+    # `entry_args` when the codegen published it, and `test_input` when a
+    # caller built an `info` dict by hand (a test, a tool reading one
+    # function's proof): both are the startup stub's argument values, so
+    # either answers the question and `formal/build.py` is the one that widens
+    # the list to the arity in every real build.
+    entry_values = _M.entry_arg_values(
+        info.get("entry_args", info.get("test_input", 10)), arity)
 
     call_types = {g.name: resolve(parse_type_name(g.return_type)
                                   or DEFAULT_INT_TYPE)
@@ -630,7 +742,6 @@ def generate_x86_64_proof(prog, code, info) -> str:
     # be one backend emitting something the census cannot count.
     _admitted = list(getattr(prog, "admitted", None) or [])
     if _admitted:
-        from formal import arm64_proof_gen as AP
         parts.append(AP._admitted_lean(_admitted))
 
     # ── source semantics ────────────────────────────────────────────
@@ -694,10 +805,17 @@ def generate_x86_64_proof(prog, code, info) -> str:
     # `sorry` so every `native_decide` downstream then failed with "'mojo'
     # uses 'sorry'".
     from formal import arm64_proof_gen as AP
-    mojo_term = AP._go_apply(go_defs, func_name)
-    parts.append("/-- The semantic model as a UInt64 -> UInt64 function. -/\n"
-                 f"def mojo (n : UInt64) : UInt64 :=\n"
-                 f"  {mojo_term}\n")
+    mojo_term = AP._go_apply(go_defs, func_name, AP._entry_arg_names(arity))
+    # The old one-liner verbatim at arity one, which is every program in the
+    # corpus: a comment is not semantics, but re-inking it would invalidate
+    # every cached verdict in ~/.gmojo for a wording change.
+    mojo_note = ("/-- The semantic model as a UInt64 -> UInt64 function. -/\n"
+                 if arity <= 1 else
+                 f"/-- The semantic model as a function of {func_name}'s "
+                 f"{arity} arguments, one per parameter. -/\n")
+    parts.append(mojo_note
+                 + f"def mojo {AP._entry_binders(arity)} : UInt64 :=\n"
+                 + f"  {mojo_term}\n")
 
     # ── AST bridge ───────────────────────────────────────────────────
     #
@@ -714,7 +832,8 @@ def generate_x86_64_proof(prog, code, info) -> str:
     else:
         try:
             section = _eval_eq_mojo_section(func_name, fn, typed,
-                                            go_lemma_names, admitted=_admitted)
+                                            go_lemma_names, admitted=_admitted,
+                                            arity=arity)
         except Exception:                           # noqa: BLE001
             section = None
     if section is None:
@@ -762,12 +881,13 @@ def generate_x86_64_proof(prog, code, info) -> str:
         f"/-- The byte at an absolute address (0 outside the image). -/\n"
         f"{_code_function(func_name, base_addr)}")
 
-    parts.append(_compile_correct_section(func_name))
+    parts.append(_compile_correct_section(func_name, arity))
     parts.append(_run_tests_section(
         func_name, test_input,
         [e.get("sym") for e in (info.get("extern_calls") or [])],
         placeholder=model_placeholder,
-        string_result=_returns_string_literal(fn)))
+        string_result=_returns_string_literal(fn),
+        arity=arity, entry_values=entry_values))
     _certs, _total = _decode_function_body(code, info, func_offset)
     parts.append(_step_certificate_section(func_name, len(code), _certs, _total))
 
@@ -775,10 +895,11 @@ def generate_x86_64_proof(prog, code, info) -> str:
     parts.append(
         f"/-- END-TO-END: executing the compiled x86-64 image computes the\n"
         f"    same value as the source semantics, for every input. -/\n"
-        f"theorem {func_name}_compiles_correctly (n : UInt64) :\n"
-        f"  match x86_exec_exit (X86State.init n {func_name}_offset) "
+        f"theorem {func_name}_compiles_correctly {AP._entry_binders(arity)} :\n"
+        f"  match x86_exec_exit "
+        f"{_x86_entry(enames, func_name + '_offset')} "
         f"{func_name}_code 0 with\n"
-        f"  | some s => s.rax = mojo n\n"
+        f"  | some s => s.rax = {AP._apply_args('mojo', enames)}\n"
         f"  | none => False := by\n"
         f"  sorry\n")
 

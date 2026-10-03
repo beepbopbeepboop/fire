@@ -1,7 +1,15 @@
 # FORMAL_arm64_x30_is_reloaded_from_the_frame: the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it
 
 **Area:** FORMAL (the arm64 proof generator's per-instruction value flow).
-**Status: OPEN, measured, with the exact next step.** Found 2026-10-03 by
+**Status: OPEN. Re-measured 2026-10-03 on this tree, and the DIAGNOSIS IS
+CORRECTED: the obligation is not merely unproved, it is FALSE as the theorem is
+stated, so "peel the chain" is not the whole fix and step 1 below is necessary
+but not sufficient.** The reduced goal is quoted verbatim from a real run, the
+`st.sp` that makes it false is computed, and §"What this costs the fix" says
+what has to be added first. Everything else in this file — the two error sites,
+the measurement table, the five affected examples, the peel machinery that
+exists — was re-confirmed on this tree and still stands.
+Found 2026-10-03 by
 `tools/formal_proof_breadth.py`'s proof-breadth census
 (`bugs/FORMAL_proof_coverage_census_2026-10-03.md`), which is the first thing
 ever to run this repository's OWN functions through `build --formal` with
@@ -129,6 +137,9 @@ passes). That is the size of this one fact: **12 % of the arm64 corpus.**
 
 ## The exact next step
 
+0. **Add the `sp` premise** — §"What this costs the fix" above, which is the
+   correction to this list and comes before it. Everything below is unreachable
+   until the statement is true.
 1. **`hx30fr_N` needs the callee's frame invariant, not `rfl`.** Concretely:
    find where `hx30fr` is emitted (`formal/arm64_proof_gen.py`, the `_halts`
    branch of `emit_block`, next to `hj_{bi}`/`hjump_{bi}`) and discharge it
@@ -155,15 +166,126 @@ passes). That is the size of this one fact: **12 % of the arm64 corpus.**
    282 s on 2026-10-03), so budget `-j 1`; two concurrent runs at Lean's own
    6 GB ceiling is what breached an 8 GB reservation during this census.
 
+## The correction: the emitted theorem is FALSE for an arbitrary `st.sp`
+
+`hx30fr_5`'s reduced goal, verbatim from
+`python3 fire.py build --formal -o .tmp/dump/count.aout formal/examples/count.mojo`
+on this tree (`count_proof.lean:5330`, the `rfl` after the `simp +decide`):
+
+```
+⊢ mem_read_u64
+     (mem_write_u64
+       (mem_write_u64
+         (mem_write_u64
+           (mem_write_u64 (mem_write_u64 st.mem (st.sp - UInt64.ofNat 16).toNat st.x29) (st.sp - UInt64.ofNat 8).toNat
+             st.x30)
+           (st.sp - UInt64.ofNat 32).toNat st.x19)
+         (st.sp - UInt64.ofNat 24).toNat st.x20)
+       (UInt64.ofNat 4294968008 -
+           (UInt64.ofNat 4294968008 % 4096 -
+             ((if False then UInt64.ofNat 1024 - UInt64.ofNat (2 ^ 21) else UInt64.ofNat 1024) * 4096 +
+               UInt64.ofNat 8))).toNat
+       (st.sp - UInt64.ofNat 1984))
+     (st.sp - UInt64.ofNat 8).toNat
+   = st.x30
+```
+
+Read the nesting from the inside out — five stores, in the order they were
+performed, and then one read:
+
+| # | address | value |
+|---|---|---|
+| 1 | `st.sp - 16` | `st.x29` |
+| 2 | `st.sp - 8` | `st.x30` |
+| 3 | `st.sp - 32` | `st.x19` |
+| 4 | `st.sp - 24` | `st.x20` |
+| 5 | `PAGE` | `st.sp - 1984` |
+| read | `st.sp - 8` | |
+
+`PAGE` is `formal/model.py::stack_floor_address` — the stack-floor WORD, at an
+ABSOLUTE address, which is why the read is five writes deep: stores 3, 4 and 5
+sit between it and store 2. Stores 1-4 are the frame prologue, `sp`-relative,
+and those are what `ctx["stores"]` and the peel machinery in
+`_gen_universal_e2e_cfg` know about. **Store 5 is not `sp`-relative, so it is
+in the model's chain and not in the generator's store list** — which is the
+generator-side half of this.
+
+And the theorem cannot be closed as stated, because `st.sp` is a free variable
+and the fifth store can land on the read:
+
+```
+PAGE        = 4294968008 - (4294968008 % 4096 - (1024*4096) + 8) = 4299161592
+st.sp       = PAGE + 8 = 4299161600          -- then (st.sp - 8).toNat = PAGE
+hbnd        : FrameBound 131152 st 0   is   131152 * (0 + 1) <= 4299161600   TRUE
+```
+
+`FrameBound` (`lib/Refine.lean:293`) is `stride * (arg.toNat + 1) <= st.sp.toNat`
+and nothing more, so `hbnd` holds for that `st`. The read then returns store
+5's value, `st.sp - 1984`, and the goal asks Lean to prove
+`st.sp - 1984 = st.x30`. **`count_compiles_correctly_universal` is therefore
+false for a `st` it quantifies over**, and so is the `FrameOk` conjunct whose
+goal is the same chain — the two error sites are two statements of one false
+thing, which is why fixing the tactic without fixing the statement would have
+made the build green and the theorem wrong.
+
+This corrects §"What is NOT the cause" below, which said "this is incompleteness,
+not unsoundness". That was right about the emitted theorem being *true in the
+intended situation* and wrong about the statement, which quantifies over every
+`Arm64State`.
+
+## What this costs the fix
+
+A premise. Nothing else in the file's step 1 can be reached before it, and the
+premise has to be one the concrete entry state satisfies, or the concrete run
+tests stop being about the binary.
+
+The honest shape is a `sp` bound, and the generator has everything it needs:
+the store address is `model.stack_floor_address(globals_base(fmt))` and
+`formal/build.py::globals_base(fmt)` is the one computation of it for both
+backends. So the universal theorem's binder list — which today is the frame
+binder plus `hn : stride * (n.toNat + 1) + stride <= 2^64...`
+(`formal/arm64_proof_gen.py`, `if fuel is None:` in `_gen_universal_e2e_cfg`) —
+gains one more, of the form
+
+```
+(hspg : <stack_floor_address> + 8 + 8 + <the frame's deepest slot> <= st.sp.toNat)
+```
+
+which for `count` is `4299161592 + 24 <= st.sp.toNat`. That is what
+`mem_read_after_write_u64_ne` then needs for store 5, and `omega` closes it
+against `hbnd`'s `2^64 - …` shape; stores 1, 3 and 4 are the
+`mem_read_after_write_u64_slot'` peels (`k + 8 <= j` with `k = 8`, so `j >= 16`
+— every one of them), and store 2 is `mem_read_after_write_u64`.
+
+Three things to decide, and the doc's own step list does not mention any of them:
+
+1. **Is the premise `hbnd` or a sibling?** `FrameBound` is library-shared
+   (`frameBound_succ` is how the recursion induction step works), so putting it
+   there is a `lib/Refine.lean` change with a blast radius; a sibling binder on
+   the theorem is a generator change with none. The sibling is the smaller and
+   more honest one: the frame-vs-data-page separation is a property of THIS
+   theorem's entry state, not of every frame claim in the library.
+2. **The `tree_init` / `runProg` pair at the other two `Arm64State.init n …`
+   sites** (`tree_init`, `init`) need the same premise, and `runProg`'s state
+   (`lib/Refine.lean:112`) is the one `n` alone cannot describe — see
+   `formal/arm64_proof_gen.py`'s `_via_prog`, which already routes a wider ENTRY
+   around `runProg` for exactly this class of reason.
+3. **What discharges it.** Nothing references
+   `count_compiles_correctly_universal` today, so a premise is free — which is
+   also why it is the dangerous shape: a premise nobody discharges is a weaker
+   theorem that reads as a stronger one. `test_formal.py`'s dec1 examples and
+   the run tests are what would have to say so.
+
 ## What is NOT the cause, so nobody re-derives it
 
 * **Not the library.** `arm64_reg 30` is `s.x30` and the model's SP change
   (`528981bb`, register 31) does not touch register 30. The obligation's LHS is
   a plain record projection once the block function is unfolded; what is not
   plain is the VALUE the projection holds.
-* **Not the proof's honesty.** The emitted theorem is TRUE — `(st).x30` is what
-  the slot holds. This is incompleteness, not unsoundness, which is why the
-  fix is a peel chain and not a change of the model.
+* **Not the model.** `arm64_step`'s store arm and the emitter's `STR` to the
+  stack-floor word agree — the chain above is what the machine does. See
+  §"The correction" above for what IS wrong, which is the theorem's `st`, not
+  the model's step.
 * **Not `count`'s other three error sites.** Those were the emitter naming a
   hypothesis it never emitted and unfolding with a one-block-deep simp set;
   they are fixed in `formal/arm64_proof_gen.py` on this branch and described in
