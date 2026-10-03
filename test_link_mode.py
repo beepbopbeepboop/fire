@@ -339,6 +339,85 @@ def test_sibling_function_import_call_is_inlined() -> bool:
     return ok
 
 
+def test_bare_import_sibling_function_call_through_module() -> bool:
+    """`import SIBLING` + `SIBLING.free_fn(...)` — the FUNCTION reached
+    through a bare module marker, the shape
+    `bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md` is
+    about, and the sibling of the two struct cases above.
+
+    The call used to reach the extern preamble's `weak` "unavailable in
+    compiled mode" stub, printing `deep_fn: unavailable in compiled
+    mode` INTO THE PROGRAM'S OWN STDOUT and then returning 0 — exit 0, a
+    wrong answer, and the only diagnostic on the wrong stream.
+
+    It is TWO defects, and fixing either alone leaves it broken, which is
+    why the doc recorded a "partial fix that is NOT enough" verbatim:
+
+      * **the module was never inlined.** `_inline_bare_import_struct`
+        asked only `_source_defines_struct`, so a bare marker reached
+        through a FUNCTION added nothing to `_link_inline_modules` and the
+        definition was in neither this translation unit nor any dylib on
+        the link line. It now calls the shared `_classify_unresolved_export`
+        — the same classifier the `from M import X` spelling uses, which
+        already answers for a plain top-level function.
+      * **the member was never registered.** `import deep` records
+        `imported_symbols['deep']` — for the MODULE, not its members — so
+        the re-dispatched bare call found no `imported_symbols['deep_fn']`,
+        `_func_mangleable` was False, `_func_csym` produced the bare
+        `_safe_name('deep_fn')` with no qualifier and no overload suffix,
+        and `_lower_named_call`'s `_is_unknown` branch emitted the stub.
+        The call site now registers the member, with the signature from
+        the DEFINING module's own parsed FunctionDef
+        (`_resolved_export_entry`), because `module_loader`'s text scan
+        answers `int64_t deep_fn (void)` for an unannotated
+        `def deep_fn(x)` and that, as the only prototype in the file,
+        rejects its own call site.
+
+    With only the second half, the call site emits the correctly QUALIFIED,
+    overload-suffixed `deep_deep_fn_9f63a2` and the link fails on it
+    (`ld: symbol(s) not found`); with only the first, it still calls the
+    unqualified stub. Both halves are here, and `from_deep_import_deep_fn`
+    below is the control for the `from` spelling.
+    """
+    pkg = {
+        '_deepmod.py': (
+            'def deep_fn(x):\n'
+            '    return x + 7\n'
+            '\n'
+            'def other(x):\n'
+            '    return x * 100\n'
+        ),
+        'bimp.py': (
+            'import _deepmod\n'
+            '\n'
+            'def main():\n'
+            '    print(_deepmod.deep_fn(1))\n'
+            '\n'
+            'main()\n'
+        ),
+        'bimpf.py': (
+            'from _deepmod import deep_fn\n'
+            '\n'
+            'def main():\n'
+            '    print(deep_fn(1))\n'
+            '\n'
+            'main()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'bimp.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'bimp.py')
+        rc2, stdout2 = _build_and_run(pkg, 'bimpf.py', td)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '8'
+          and rc2 == 0 and stdout2.strip() == '8')
+    if not ok:
+        print(f"  ✗ bare_import_sibling_function_call_through_module: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r}) "
+              f"| from-import control rc={rc2} stdout={stdout2!r}")
+    return ok
+
+
 def test_sibling_class_attribute_function_scoped() -> bool:
     """A CLASS attribute read (`Parameter.VAR_POSITIONAL`) where the import
     is function-scoped. Used to print `0`: with the class never inlined, the
@@ -824,6 +903,7 @@ CASES = [
     test_sibling_class_constructor_field_function_scoped,
     test_bare_import_sibling_struct_ctor_through_module,
     test_bare_import_sibling_struct_field_through_module,
+    test_bare_import_sibling_function_call_through_module,
     test_module_scoped_cross_module_struct_ctor_both_import_spellings,
     test_module_scoped_cross_module_ctor_arg_through_a_param,
     test_dotted_sibling_import_qualifier_agrees,

@@ -569,26 +569,27 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             self._unresolved_import_aliases.add(_sk)
         return
     if isinstance(sym_info, str):
-        _reg_isym[_sk] = {
-            'module': _eff_mod, 'original_name': orig_name,
-            'return_type': sym_info, 'parameters': [],
-            'signature': f"{sym_info} {_sk} (void)"
-        }
-        self.func_return_types[_sk] = sym_info
+        # One writer for the three tables, shared with the bare-`import`
+        # module-qualified call site (see
+        # `funcs_shared.register_imported_symbol`), which has the same three
+        # writes to do and used to have no writer to call. The
+        # `original_name` rule lives there too: only a genuine
+        # `import X as Y` alias records it, because storing it for an
+        # unaliased import makes `_func_csym` read it back (MojoDict get ->
+        # int64_t, then a POINTER `!=` against `bare_name` that is always
+        # true on the self-hosted path) take its alias branch ->
+        # `_safe_name(<erased ptr>)` -> a decimal-address guard name
+        # (`#ifndef _Users_..._<addr>`), different every run. This str branch
+        # used to record it unconditionally, which is that bug.
+        self._register_imported_symbol(
+            _sk,
+            {'module': _eff_mod, 'original_name': orig_name,
+             'return_type': sym_info, 'parameters': [],
+             'signature': f"{sym_info} {_sk} (void)"},
+            orig_name)
     elif isinstance(sym_info, dict):
         sym_info = _as_dict(dict(sym_info))
         sym_info['module'] = _eff_mod
-        # Only record `original_name` for a genuine `import X as Y` alias.
-        # For an unaliased import it equals `_sk`, and storing it makes
-        # `_func_csym` read it back (MojoDict get -> int64_t, then a POINTER
-        # `!=` against `bare_name` that is always true on the self-hosted
-        # path) take its alias branch -> `_safe_name(<erased ptr>)` -> a
-        # decimal-address guard name (`#ifndef _Users_..._<addr>`), different
-        # every run. `orig_name`/`_sk` here are real str params (module-level
-        # fn, not a lifted closure), so this compare is a true string compare.
-        if orig_name != _sk:
-            sym_info['original_name'] = orig_name
-        _reg_isym[_sk] = sym_info
         _ret_changed = False
         if orig_name.startswith('_'):
             pass
@@ -598,8 +599,6 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             if _resolved_ret:
                 sym_info['c_return_type'] = _resolved_ret
                 _ret_changed = True
-        if 'c_return_type' in sym_info:
-            self.func_return_types[_sk] = sym_info['c_return_type']
         if sym_info.get('variadic'):
             if _ret_changed:
                 sym_info['signature'] = (
@@ -628,11 +627,12 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
                 _c_ret = _as_str(sym_info.get('c_return_type', 'int64_t'))
                 _param_str = ', '.join(_new_c_params) if _new_c_params else 'void'
                 sym_info['signature'] = f"{_c_ret} {orig_name} ({_param_str})"
-        if _sib_qualifier and 'c_parameters' in sym_info:
-            self.func_param_types[_sk] = [
-                ' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
-                for cp in (sym_info.get('c_parameters') or [])
-            ]
+        # `_sib_qualifier` decides the param types and nothing else: when
+        # THIS compile will emit the definition, the definition's own
+        # signature is authoritative and a second entry here is what a stale
+        # cross-module hint would read instead.
+        self._register_imported_symbol(_sk, sym_info, orig_name,
+                                       write_param_types=bool(_sib_qualifier))
     if _sib_qualifier and sym_info:
         # The condition is "will THIS compile emit that module's own
         # definition into this translation unit?", NOT `do_imports`. Two

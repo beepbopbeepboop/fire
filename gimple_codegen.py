@@ -4355,6 +4355,11 @@ class GimpleGen:
                                  depth: int = 0, want_abs: bool = False):
         return gfn._find_symbol_home_module(self, module, name, kind,
                                            depth=depth, want_abs=want_abs)
+    def _register_imported_symbol(self, name: str, info, original_name=None,
+                                  write_param_types: bool = True):
+        import mojo.middle.funcs_shared as _fn2
+        return _fn2.register_imported_symbol(self, name, info, original_name,
+                                            write_param_types)
     def _resolved_export_entry(self, module: str, name: str, info):
         return gfn._resolved_export_entry(self, module, name, info)
     def _resolve_test_relative_module(self, module: str) -> str | None:

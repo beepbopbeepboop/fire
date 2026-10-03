@@ -615,6 +615,54 @@ def _resolved_export_entry(gen, module: str, name: str, info):
                          + (', '.join(_cparams) or 'void') + ')')
     return _out
 
+def register_imported_symbol(gen, name: str, info: dict,
+                             original_name: str = None,
+                             write_param_types: bool = True) -> None:
+    """The three table writes an IMPORTED free function needs, in one place.
+
+    `imported_symbols[name]` is what every downstream consumer reads --
+    `_func_mangleable` (a name with a `signature` there IS mangleable),
+    `_func_csym` (which reads `original_name` for an alias), and the re-export
+    extern block -- and `func_return_types` / `func_param_types` are what the
+    call site's own emission reads. An entry that is missing from one and
+    present in the other is exactly the half-registered state this function
+    exists to prevent, and there are TWO import spellings that can produce
+    one: `_register_link_imports`' `from X import Y` and the bare-`import`
+    module-qualified call site in `emit_methods._lower_method_call` (see
+    bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md).
+
+    `write_param_types=False` keeps `func_param_types` untouched while still
+    recording the entry. That is `_register_sym`'s rule for a module whose
+    definition THIS compile will emit anyway: the definition's own signature
+    is authoritative, and a second, differently-keyed entry here is what a
+    stale cross-module hint reads instead.
+
+    `original_name` is recorded ONLY for a genuine alias. For an unaliased
+    import it equals `name`, and storing it makes `_func_csym` read it back
+    (MojoDict get -> int64_t, then a POINTER `!=` against the bare name that
+    is always true self-hosted) take its alias branch and emit
+    `_safe_name(<erased ptr>)` -- a decimal-address guard name, different
+    every run.
+    """
+    _sk = _as_str(name)
+    _info = _as_dict(dict(info or {}))
+    _orig = _as_str(original_name) if original_name is not None else None
+    if not _orig or _orig == _sk:
+        _info.pop('original_name', None)
+    else:
+        _info['original_name'] = _orig
+    _as_dict(gen.imported_symbols)[_sk] = _info
+    _c_ret = _info.get('c_return_type')
+    if _c_ret:
+        gen.func_return_types[_sk] = _c_ret
+    _c_params = _info.get('c_parameters')
+    if write_param_types and _c_params is not None:
+        gen.func_param_types[_sk] = [
+            (' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp)
+            for cp in (_c_params or [])
+        ]
+
+
 def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
     """Does `module`'s OWN top-level source define `name`? `kind` is
     'struct' (a StructDef) or 'fn' (a top-level FunctionDef).
