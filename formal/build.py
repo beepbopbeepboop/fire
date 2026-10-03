@@ -5829,10 +5829,37 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
     # the authority, and consulting it rather than re-deriving the condition is
     # what keeps the emitter and this decision from disagreeing about which
     # fields are placed.
+    #
+    # **A DELEGATING field is the one thing that is a nested frame WITHOUT being
+    # placed, and it has to be asked here rather than inferred from the
+    # placement's absence.** `model.init_stores_a_parameter_struct` is the
+    # predicate: `self.src = r` where `r: R` is `__init__`'s own annotated
+    # parameter, and nothing else writes `src`. The slot holds a frame address —
+    # the CALLER's — so a read is `[slot + 8k]` exactly as it is for a placed
+    # one and `walked`/`nested_fields` want the struct back. What it is NOT is a
+    # frame placed in the object's own block, which is why
+    # `struct_nested_frame_fields` leaves it out and why the constructor reserves
+    # nothing for it. Two questions, two answers, and the pair that used to
+    # deadlock on this shape is `bugs/FORMAL_receiver_stored_in_a_field.md`:
+    # the placement made the delegating STORE unsound
+    # (`_frame_field_store_is_sound`), and the store's soundness is what says the
+    # slot is a pointer.
+    #
+    # Returning `_REASSIGNED` here instead would be the wrong ANSWER rather than
+    # a cautious one: `_REASSIGNED` says the slot holds "a frame belonging to
+    # whichever function ran the assignment", and for a delegating field the
+    # only assignment is `__init__`'s, whose argument the caller supplies. So
+    # the frame in the slot is the caller's, the caller is the frame the object
+    # itself is reached through, and the two die together — which is the whole
+    # argument `_frame_field_store_is_sound` already makes.
     for st in cands:
-        if not any(name == field for name, _slot, _child
-                   in M.struct_nested_frame_fields(st, structs_by_name)):
-            return _REASSIGNED
+        if any(name == field for name, _slot, _child
+               in M.struct_nested_frame_fields(st, structs_by_name)):
+            continue
+        if M.init_stores_a_parameter_struct(st, field,
+                                            structs_by_name) is not None:
+            continue
+        return _REASSIGNED
     return nested
 
 

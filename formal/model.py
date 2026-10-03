@@ -13490,6 +13490,35 @@ def _pair_value_kind(node):
     return _kind_of_simple(node)
 
 
+def _kind_of_nested_elements(elems) -> str | None:
+    """`_kind_of_elements` with the nested-container arm, so a WALKER'S TARGET
+    is classified one level deeper than a flat literal is.
+
+    The same question and the same evidence as `_pair_value_kind`, from the
+    second reader that needs it: a container literal's element word holds a
+    container when the element written there is one, and a loop variable's word
+    is exactly such an element word — written by the literal and by nothing
+    else, which is the evidence `_pair_value_kind`'s docstring requires before
+    it claims the nesting. It is kept beside that function rather than folded
+    into `_kind_of_elements` for the reason that docstring gives: the flat
+    reader is read by the module-global classification, where the dict's VALUES
+    are taken out of a slot's initializer with no check that a subscripted key
+    is one of them.
+
+    Measured, both architectures, before this existed — and it is the
+    comprehension row of `bugs/FORMAL_string_value_model.md`, found with the
+    `for` row beside it: a `for` target over `["p", "", "q"]` classified as
+    `list:str` and the empty string was TRUTHY, because the count-field load
+    reads the eight bytes of `__TEXT` that follow the terminating NUL. The kind
+    was the list's, not the element's; see `_iterable_own_shape`.
+    """
+    kinds = {_pair_value_kind(el) for el in (elems or [])}
+    kinds.discard(None)
+    if not kinds:
+        return None
+    return kinds.pop() if len(kinds) == 1 else None
+
+
 def dict_literal_key_value_kind(node, index):
     """What `node[<index>]` yields for a LITERAL key, or None when it cannot say.
 
@@ -14185,44 +14214,75 @@ class ValueKinds:
                 self._bind(s.name, self._return_kind(s))
 
     def _iterable_kind(self, iterable):
-        """What a `for`/`in` binds from `iterable`.
+        """What a `for`/`in` binds from `iterable` — ONE ELEMENT of it.
 
-        A container literal knows its own element kind; `range` yields
-        integers; anything else is a blob whose elements this path treats as
-        words (types.function_var_types says the same about loop variables)."""
+        A container literal knows its own element kind; `range` yields integers;
+        anything else is a blob whose elements this path treats as words
+        (types.function_var_types says the same about loop variables). Never the
+        container's own kind; `_iterable_own_shape` carries the measurement of
+        what that cost."""
         return self._iterable_own_shape(iterable) or INT_KIND
 
     def _iterable_own_shape(self, iterable):
         """`_iterable_kind` without its final fallback, or None.
 
-        The same three shapes `_iterable_kind` decides on its own evidence and
-        then `or INT_KIND`, kept apart because the fallback is not a claim.  A
-        loop variable over a name — `for row in rows: row[0]`, where `rows` is a
-        parameter — is the ordinary way to walk a list of lists, and
-        `_iterable_kind` answers INT_KIND for it because there is nothing else
-        to answer.  That answer is a word, not an integer, so anything reading
-        it as evidence that the source says "integer" refuses a correct
-        program; see `own_shape_kind`, which is what reads this.
+        The kind of the name a `for` (or a comprehension generator) over
+        `iterable` BINDS — which is one ELEMENT of it, and never the container.
 
-        **A NAME whose kind carries an ELEMENT is the fourth shape**, and it is
-        the one a returned blob needs: `for x in names: len(x)` over
+        **It used to answer the container's kind, and that was a wrong ANSWER on
+        both architectures, not a missing refusal.** `["p", "", "q"]` is
+        `list:str`, so the loop variable was classified `list:str` and every
+        reader of a container took it at its word:
+
+          * `if x:` → `truthy_lowering`'s `TRUTHY_FROM_BLOB_FIELD`, which is one
+            load from offset 0. For a `char *` that load reads the eight bytes
+            of `__TEXT,__text` that FOLLOW the terminating NUL, so whether the
+            empty string came out truthy depended on which other string the
+            linker happened to intern next to it. Measured on both machines,
+            `for x in ["p", "", "q"]: if x: c = c + 1` returned 3 where CPython
+            returns 2, and a two-element `["p", ""]` with an `else` returned 101
+            — which is right only because the two strings happened to land
+            adjacent to their own NULs;
+          * `len(x)` → the same load, so it returned the low half of the
+            address's own neighbourhood: 2013266032 (0x78000070, which is `p\0`
+            and the first three bytes of the next interned string) for `"p"`.
+
+        One element is what the target holds, so the element kind is what is
+        returned, and `subscript_element_kind` is what already turns a container
+        kind into an element kind for `x[i]`. The nested arm is
+        `_kind_of_nested_elements` rather than `_kind_of_elements` because
+        `for row in [[1, 2], [3, 4]]` is ordinary and its target IS a blob:
+        without the arm the target kind would fall to the word default and
+        `len(row)` — which works today and which the corpus uses — would start
+        refusing.
+
+        **A NAME whose kind carries an ELEMENT is the other shape, and it is the
+        one a returned blob needs**: `for x in names: len(x)` over
         `names = listdir(p)` — `-> List[String]`, so the name's kind is
         `list:str` — refused with "an integer has no length" about a `char *`,
         because nothing read the element off the one place that states it. The
         answer is the element kind, and it is evidence for the same reason the
-        three above are: the annotation said what the loop yields.
+        literal arms are: the annotation said what the loop yields.
 
-        It stays None for a name whose kind is the BARE list prefix, which is
-        every container this path cannot give an element type to (a parameter
+        The fallback is a word, and a word is not a claim that the source says
+        "integer": `for row in rows: row[0]` over a parameter is the ordinary
+        way to walk a list of lists and `_iterable_kind` answers INT_KIND for it
+        because there is nothing else to answer. So the fallback is kept out of
+        `own_shape` (this function returns None for it), which is what
+        `own_shape_kind` reads; see that method for the three correct programs
+        that depend on it.
+
+        That direction is the conservative one and it is the measured one: it
+        stays None for a name whose kind is the BARE list prefix, which is every
+        container this path cannot give an element type to (a parameter
         annotated `List`, a nested container, a blob whose initializer claimed
-        nothing). That is the conservative direction and it is the measured one:
-        `for row in rows: row[0]` over an unannotated parameter must keep
-        working, and it does, because nothing claims an element.
+        nothing), so `for row in rows: row[0]` over an unannotated parameter
+        keeps working.
         """
         if isinstance(iterable, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return list_kind(_kind_of_elements(iterable.elements))
+            return _kind_of_nested_elements(iterable.elements)
         if isinstance(iterable, F.Comprehension):
-            return list_kind(_kind_of_simple(iterable.element))
+            return _pair_value_kind(iterable.element)
         if isinstance(iterable, F.CallExpr) and _flat_callee(iterable) == "range":
             return INT_KIND
         if isinstance(iterable, F.IdentExpr):
@@ -14238,6 +14298,63 @@ class ValueKinds:
         if ann in self._string_names:
             return STR_KIND
         return None
+
+    def comprehension_generator_scopes(self, comp) -> list:
+        """The names a comprehension's generator targets bind, per level.
+
+        `scopes[i]` is what a site INSIDE generator `i` of `comp` sees: every
+        name the generators `0 … i` bound, with the kind each one's own
+        iterable says. `scopes[i-1]` — not `scopes[i]` — is therefore what
+        generator `i`'s OWN ITERABLE sees, which is Python's rule and the reason
+        the emitters push the level's scope just after the target store rather
+        than on entry (see `formal/arm64_codegen.py::_emit_compr_gen`).
+
+        **An overlay and not a `_bind` into `locals`, and the difference is
+        SCOPE.** A comprehension is its own scope in Python 3, so `var x = 5`
+        beside `[x for x in ["a", "b"]]` is two bindings of one name that do not
+        meet, and a `_bind` would file them as a conflict — `locals[x] = None`,
+        a word — which costs the OUTER `x` an answer it had and buys the
+        comprehension's nothing. Worse in the other direction: a `_bind` makes
+        the comprehension's target visible to every site in the function, so
+        `printf("%s", x)` after a comprehension that binds `x` and nothing else
+        emits instead of refusing a read CPython answers with `NameError`.
+
+        So this is consulted only from inside the comprehension, and only for a
+        bare NAME (a generator target is a name or a tuple of names, and a
+        tuple target's per-element kind is one level deeper than the iterable's
+        — see `_bind_target`, which has the same limit on the `for` statement).
+        Nothing else changes: `own_shape_kind` deliberately does NOT read this,
+        because it answers "did a STATEMENT OF THIS FUNCTION bind this name to
+        a shape of its own" and a comprehension's target is bound by no
+        statement of the function.
+
+        The kind is `_iterable_own_shape`, never `_iterable_kind`, so an
+        iterable this cannot describe claims nothing and the name falls through
+        to the function's own map — which is what happened to every comprehension
+        target before this existed, and is why a comprehension over a PARAMETER
+        behaves exactly as it always has.
+        """
+        scopes: list = []
+        bound: dict = {}
+        conflicted: set = set()
+        for gen in (getattr(comp, "generators", None) or []):
+            own = self._iterable_own_shape(getattr(gen, "iterable", None))
+            if own is not None:
+                for nm in _comprehension_target_names(
+                        getattr(gen, "target", None)):
+                    if nm in conflicted:
+                        continue
+                    if bound.get(nm, own) != own:
+                        # Two generators of one comprehension, one name, two
+                        # kinds: the same unanimity rule `locals` follows, and
+                        # for the same reason (the map is flow-insensitive, so
+                        # two statements that disagree say nothing).
+                        conflicted.add(nm)
+                        bound.pop(nm, None)
+                        continue
+                    bound[nm] = own
+            scopes.append(dict(bound))
+        return scopes
 
     # ── querying ───────────────────────────────────────────────────────
 
@@ -14382,8 +14499,21 @@ class ValueKinds:
         # say the source does not say what its operand holds.
         return (TYPE_KIND if type_tag_for_name(name) is not None else None)
 
-    def kind_of(self, e):
-        """What `e` evaluates to, or None when the source does not say."""
+    def kind_of(self, e, scopes=()):
+        """What `e` evaluates to, or None when the source does not say.
+
+        `scopes` is the comprehension scope STACK (`ValueKinds`.
+        `comprehension_generator_scopes`, outermost first) and is empty
+        everywhere except on a site inside a comprehension. A bare name the
+        innermost such scope binds is answered by that scope and by nothing
+        else — see `scope_lookup` for why it does not fall through, and
+        `comprehension_generator_scopes` for why the scopes exist rather than
+        being a `_bind` into `locals`.
+        """
+        if scopes and isinstance(e, F.IdentExpr):
+            found, scoped = scope_lookup(scopes, e.name)
+            if found:
+                return scoped
         k = _kind_of_simple(e)
         if k is not None or isinstance(e, (F.StringLiteral, F.IntLiteral,
                                            F.BoolLiteral, F.FloatLiteral)):
@@ -15750,6 +15880,51 @@ def dylib_aliased_export_refusal(callee: str, aliases: dict,
 def _target_names(target):
     from mojo.middle.boundnames import _lbn_target_names
     return _lbn_target_names(target) if isinstance(target, str) else []
+
+
+def _comprehension_target_names(target) -> list:
+    """The names ONE generator target binds, in source order.
+
+    A comprehension's target is a `str` (`fire_compiler.ComprehensionFor`
+    carries it as one), an `IdentExpr`, or a tuple/list of them for a nested
+    generator — the three shapes `_bind_target` already splits, and the same
+    three `_lbn_target_names` reads for a `for` statement. It is spelled out
+    here rather than called so that a target this cannot describe contributes
+    NO name: a scope that claimed a name it cannot classify would be a claim
+    about a slot whose element it never looked at.
+
+    A tuple target's names all get the ITERABLE's element kind, which is one
+    level too coarse for `[[1, 2], [3, 4]]` unpacked into `a, b` (each of them
+    holds an integer). That limit is the `for` statement's too and for the same
+    reason — deriving it needs the element's own element kind, which
+    `_kind_of_nested_elements` collapses — so it is left as one imprecision
+    rather than two.
+    """
+    if isinstance(target, str):
+        return [target]
+    if isinstance(target, F.IdentExpr):
+        return [target.name]
+    if isinstance(target, (F.TupleExpr, F.ListExpr)):
+        return [e.name for e in (getattr(target, "elements", None) or [])
+                if isinstance(e, F.IdentExpr)]
+    return []
+
+
+def scope_lookup(scopes, name: str):
+    """`(found, kind)` for `name` in a stack of comprehension scopes.
+
+    INNEST first, and the order is the whole of the answer: a nested
+    comprehension's target shadows the enclosing one's for every site inside it,
+    which is the same rule `comprehension_generator_scopes`' cumulative maps
+    encode and the reason the emitters keep a STACK rather than one merged map.
+    A scope that has the name and cannot say what it holds returns `(True, None)`
+    rather than falling through, because falling through would answer about the
+    enclosing scope's binding of a name the inner one has already rebound.
+    """
+    for scope in reversed(scopes):
+        if name in scope:
+            return True, scope[name]
+    return False, None
 
 
 # ── Constructs that are no-ops in the value flow ──────────────────────────
@@ -19964,23 +20139,74 @@ def one_word_field_struct(struct_def, name, decls: dict):
     st = (decls or {}).get(base) if base and evidence else None
     if st is not None:
         return st, evidence
+    st = init_stores_a_parameter_struct(struct_def, name, decls)
+    return (st, "assigned") if st is not None else (None, None)
+
+
+def init_stores_a_parameter_struct(struct_def, name, decls: dict):
+    """The `StructDef` of this module a `__init__` field store is a NAME of, or
+    None.
+
+    **THE PLACEMENT PREDICATE, and it is the one question `struct_nested_frame_fields`
+    was not asking.** That function placed a nested frame in every field whose
+    DECLARED type names a framed struct of this module and whose only writer is
+    `__init__` — which is the constructor reserving a block in the object's own
+    block and storing that block's ADDRESS in the slot. But the constructor does
+    not always build one there:
+
+        struct Holder:
+            var src: R                     # declared R, a framed struct of THIS module
+            def __init__(self, r: R):
+                self.src = r               # … and stores a NAME
+
+    Here the slot holds the CALLER's frame, not one this constructor made, so
+    reserving a block for it and writing a block address into it is wrong twice
+    over: the block is never filled, and the store that would fill it —
+    `formal/build.py`'s `_frame_field_store_is_sound` — is right to refuse
+    ("the slot belongs to the function that created THAT frame") because the slot
+    IS placed. That is the deadlock `bugs/FORMAL_receiver_stored_in_a_field.md`
+    measured: a DELEGATING constructor over a struct of this module is refused
+    for a reason that only exists because of the placement, and the placement
+    exists because of the declared type.
+
+    **`self.src = r` is a POINTER slot, and `struct_nested_frame_fields` now says
+    so.** It is a pointer slot for a lifetime reason, not a typing one: `r`
+    arrived as an argument, so the CALLER reserved its bytes in the caller's own
+    scratch and the two die together — which is exactly the argument
+    `_frame_field_store_is_sound` already makes and which the placement was
+    cancelling out.
+
+    Unanimous-or-nothing, as everywhere else on this axis, and the negative
+    direction is the one that keeps the old behaviour: any assigned value that
+    is not a bare NAME of an `__init__` parameter annotated with a struct of this
+    module — a construction `R()`, a call, a ternary, a name the parameter table
+    does not resolve — leaves the field PLACED, because that is the shape the
+    placement was built for and this predicate is not a rewrite of it. It is
+    asked only of a field `struct_nested_frame_fields` has already agreed is a
+    nested frame of this module, so it can only ever REMOVE a placement, never
+    invent one.
+
+    `one_word_field_struct` is the other reader of the same evidence and calls
+    this, rather than the two walking `__init__`'s body separately and one of
+    them learning about a spelling the other does not.
+    """
     values = _init_field_assignments(struct_def).get(name) or []
     if not values:
-        return None, None
+        return None
     params = None
     named = set()
     for v in values:
         if not (isinstance(v, F.IdentExpr) and v.name != "None"):
-            return None, None
+            return None
         if params is None:
             params = _init_declared_parameters(struct_def, decls)
         st = params.get(v.name)
         if st is None:
-            return None, None
+            return None
         named.add(st.name)
     if len(named) != 1:
-        return None, None
-    return structs_declared(named.pop(), decls), "assigned"
+        return None
+    return structs_declared(named.pop(), decls)
 
 
 def _init_declared_parameters(struct_def, decls: dict) -> dict:
@@ -20613,12 +20839,13 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
 
     The PLACEMENT decision, and the reason a declared type is not the
     silently-wrong direction: this is the list the constructor walks to reserve
-    a block per field and store each nested frame's address into its own slot.
+    a     block per field and store each nested frame's address into its own slot.
     A declared type that this function did not place is not used, so the
     negative cases (`frame_field_type_candidates`'s `None`) cannot leak into
     the emitter.
 
-    Three conditions, and all three are load-bearing:
+    Four conditions, and all four are load-bearing:
+
 
       * the field is in `struct_frame_slots`, so the frame layout has a slot to
         put an address in — the same discipline `struct_frame_slot` applies;
@@ -20634,6 +20861,21 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
         dropping the condition moved 164 files' verdicts, every one of them
         because ordinary code (`self._bytes = remaining`) was being refused for
         a frame the program had just replaced.
+      * **the constructor BUILDS one there**, rather than storing a name
+        (`init_stores_a_parameter_struct`).  The fourth is the newest and the
+        smallest in source and the largest in what it unblocks: a DELEGATING
+        constructor — `self.src = r` where `r: R` is `__init__`'s own annotated
+        parameter — does not build a nested frame in that slot, it stores the
+        CALLER's frame address, so the slot is a pointer slot and reserving a
+        block for it is what makes the delegating store unsound
+        (`formal/build.py`'s `_frame_field_store_is_sound`, whose lifetime
+        argument the placement was cancelling out).  It is the last reason
+        `bugs/FORMAL_receiver_stored_in_a_field.md`'s delegating row was still
+        refused, and the predicate is asked only AFTER the first three so it can
+        only ever REMOVE a placement.
+
+    A declared type this function did not place is not used, so the negative
+    cases (`frame_field_type_candidates`'s `None`) cannot leak into the emitter.
 
     `depth` is the recursion bound; a chain longer than it is dropped from the
     answer rather than silently truncated, which is what makes the bound a
@@ -20653,6 +20895,8 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
             continue
         slot = struct_frame_slot(struct_def, name)
         if slot is None:
+            continue
+        if init_stores_a_parameter_struct(struct_def, name, decls) is not None:
             continue
         out.append((name, slot, nested))
     return out
@@ -27056,46 +27300,29 @@ def stack_floor_address(base: int, table: dict = None) -> int:
         module_slots() if table is None else table, base).stack_floor_offset
 
 
-def recursive_function_names(functions, structs: dict = None) -> set:
-    """The functions of one image a call chain can RE-ENTER, by name.
+def call_graph_edges(functions, structs: dict = None) -> dict:
+    """`{caller: {callee, …}}` for one image's functions, as the emitter sees them.
 
-    This is the set the stack-floor guard is emitted for, and the rule is
-    "on a call-graph cycle" rather than "in the image" for a reason that is
-    about what the guard is FOR. Unbounded call depth is a cycle: a chain of
-    distinct functions has a finite depth, and it is the return to a function
-    already on the stack that makes the depth a function of the PROGRAM rather
-    than of its shape. So a cycle's members are where a runaway recursion is
-    stopped, and a program that recurses cannot get past one.
+    The one place an edge is added, so the stack-floor guard's rule
+    (`stack_floor_guarded_names`) and the depth census that measures whether that
+    rule leaves a hole (`tools/formal_call_depth_census.py`) cannot come apart on
+    what a call is — the same reason `call_callee_name` is one function rather
+    than one copy per backend.
 
-    **And the narrower set costs nothing anywhere else, which is what makes it
-    the rule rather than a compromise.** The per-export contract proof
-    (`arm64_proof_gen._dylib_contract_proof`) declines to emit a contract for an
-    export whose body contains ANY conditional branch — `Refine.Block.step` is one
-    function of one state — and every RECURSIVE function contains a branch (a
-    branch-free body that calls itself does not return, so it is not a program
-    this backend can be asked about). So guarding the cycles adds no branch to
-    any export that still had a proved contract, and removes none: the export
-    contracts that exist today are exactly the straight-line, non-recursive
-    ones, and they are byte-identical with this in place. Widening the rule to
-    "every function" would therefore trade proved contracts for nothing.
-
-    What it does leave open, and what is stated rather than hidden: a chain of
-    DISTINCT functions deep enough to exhaust the stack is still unguarded. Its
-    depth is finite and knowable, and the budget this guards against
-    (`STACK_FLOOR_BUDGET_BYTES`) would fire on it only if the guard were in a
-    function the chain passes through, which by construction it is not.
-
-    The edges are a SUPERSET of the calls the emitter makes, deliberately, since
-    a missed edge here means a missed cycle and an unguarded recursion:
+    **The edges are a SUPERSET of the calls the emitter makes, deliberately,
+    since a missed edge means a missed cycle and an unguarded recursion.**
     `call_callee_name` answers the two spellings that name a function of this
     image by a bare name, and a `recv.m(x)` callee contributes `Struct_m` for
     EVERY struct in the image that declares an `m` — which is the symbol the
     method-call rewriting emits, and over-approximating the owner is the safe
-    direction because it can only add an edge. A call out of the image
-    (a dylib symbol, an extern) is not an edge: nothing in this image calls back
-    into it, so it cannot close a cycle here.
+    direction because it can only add an edge. A call out of the image (a dylib
+    symbol, an extern) is not an edge: nothing in this image calls back into it,
+    so it cannot close a cycle here.
+
+    Callees that are not functions of this image are absent from the values
+    rather than present-and-empty, which is what lets the census distinguish "no
+    edge" from "an edge out of the image".
     """
-    names = {f.name for f in functions}
     method_owners: dict = {}
     for st in (structs or {}).values():
         for m in struct_methods(st):
@@ -27124,6 +27351,221 @@ def recursive_function_names(functions, structs: dict = None) -> set:
                 continue
             for owner in method_owners.get(func.member, ()):
                 edges[f.name].add(f"{owner}_{func.member}")
+    return edges
+
+
+def call_graph_depth(edges: dict) -> int:
+    """An UPPER BOUND on the number of distinct functions a call chain can have
+    live at once, in `edges`.
+
+    The question `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
+    asks and the guard does not answer: unbounded depth needs a CYCLE, so the
+    guard is emitted on the cycles only, but "finite" is not "small" and a DAG
+    sixty levels deep spends the same stack as a recursion sixty deep. Every
+    formal frame is at least 128 KiB, so the depth that matters is
+    `STACK_FLOOR_BUDGET_BYTES // 128 KiB` — 59 on arm64, measured, not estimated.
+
+    **An upper bound, and the same direction as the sweep's `FILES BLOCKED`.**
+    The exact figure is the longest SIMPLE path, which is NP-hard in general, so
+    this takes the bound a linear-time decomposition gives: collapse each
+    strongly-connected component to a node weighted by its SIZE, and take the
+    longest weighted path in the condensation. A simple path enters a component
+    once (the condensation is acyclic, so it cannot leave and come back) and
+    visits at most `size` distinct members inside it, so that sum bounds it —
+    and it is reached only when a component is a clique-like blob, which the
+    measured images are not.
+
+    Two iterative DFS passes (Kosaraju) rather than one recursive Tarjan: a
+    45-file closure has call chains deeper than Python's own recursion limit,
+    and a measurement that raises `RecursionError` on the graph it exists to
+    measure is not a measurement.
+    """
+    nodes = set(edges) | {n for callees in edges.values() for n in callees}
+    if not nodes:
+        return 0
+    # Kosaraju pass 1: finish order, on the forward graph.
+    order: list = []
+    seen: set = set()
+    for root in sorted(nodes):
+        if root in seen:
+            continue
+        seen.add(root)
+        stack = [(root, iter(sorted(edges.get(root, ()))))]
+        while stack:
+            node, it = stack[-1]
+            advanced = False
+            for nxt in it:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append((nxt, iter(sorted(edges.get(nxt, ())))))
+                    advanced = True
+                    break
+            if not advanced:
+                order.append(node)
+                stack.pop()
+    # Pass 2: components, on the reverse graph, in decreasing finish order.
+    rev: dict = {}
+    for caller, callees in edges.items():
+        for callee in callees:
+            rev.setdefault(callee, set()).add(caller)
+    comp_of: dict = {}
+    comps: list = []
+    for root in reversed(order):
+        if root in comp_of:
+            continue
+        cid = len(comps)
+        members = []
+        stack = [root]
+        comp_of[root] = cid
+        while stack:
+            node = stack.pop()
+            members.append(node)
+            for prev in sorted(rev.get(node, ())):
+                if prev not in comp_of:
+                    comp_of[prev] = cid
+                    stack.append(prev)
+        comps.append(members)
+    # The condensation, and the longest weighted path over it.  A component
+    # containing a cycle is where the guard already fires, so it is counted at
+    # its SIZE and no further: the bound is about the acyclic tail.  Kosaraju's
+    # second pass emits the components in TOPOLOGICAL order of the
+    # condensation, so walking the list backwards is a valid relaxation order
+    # and the DP needs no recursion of its own — which matters, because a deep
+    # chain is exactly the shape this is measured on.
+    succ: dict = {}
+    for caller, callees in edges.items():
+        src = comp_of[caller]
+        for callee in callees:
+            dst = comp_of.get(callee)
+            if dst is not None and dst != src:
+                succ.setdefault(src, set()).add(dst)
+    best = [1] * len(comps)
+    depth = 1
+    for cid in range(len(comps) - 1, -1, -1):
+        own = len(comps[cid])
+        m = own
+        for nxt in succ.get(cid, ()):
+            m = max(m, own + best[nxt])
+        best[cid] = m
+        depth = max(depth, m)
+    return depth
+
+
+def body_has_conditional_branch(fn) -> bool:
+    """Does this body's SOURCE contain a construct that ALWAYS lowers to a
+    conditional branch?
+
+    **The predicate exists for one argument and the argument is a DIRECTION.**
+    `stack_floor_guarded_names` widens the stack-floor guard from the call-graph
+    cycles to every function whose body already branches, and the price is the
+    per-export contract proof: `arm64_proof_gen._dylib_contract_proof` returns
+    `""` — no contract — for an export whose body contains ANY conditional
+    branch, so the guard's own `cbnz`/`b.hs` costs a contract only in a body that
+    had one to lose. For that to be an argument rather than a hope, this
+    predicate must never answer True for a body the EMITTER lays out
+    straight-line — over-counting would take a contract away from an export that
+    has one. So:
+
+      * counted: `if`, `while`, `for`, `assert`, `try`, `match`, and a
+        comprehension with a condition. Each of these lowers to a compare and a
+        branch on BOTH backends with no purity gate in front of it —
+        `_emit_if` and `_emit_loop` always emit one, and `_emit_compr_gen`'s
+        condition arm always emits a `cbz`;
+      * NOT counted: a ternary (`a if c else b`) and a short-circuit chain
+        (`a and b`). Both backends have a BRANCHLESS lowering chosen by a
+        purity predicate, so a body whose only branch is one of them can still be
+        straight-line in the image;
+      * NOT descended: a nested `def`. Its branches are in ITS prologue, not this
+        one's — the same rule `ValueKinds._scan` follows for the same reason.
+
+    Under-counting is the safe direction and is where the residual lives:
+    `tools/formal_call_depth_census.py`'s `no-brch` column is what this
+    predicate's complement leaves unguarded, measured over the corpus.
+    """
+    body = getattr(fn, "body", None)
+    if body is None:
+        return False
+    return _has_branch_node(body)
+
+
+def _has_branch_node(node) -> bool:
+    """`_has_branch_node` over a statement list, without a nested `def`'s body.
+
+    An explicit walk rather than `iter_nodes` for the one reason the docstring
+    above gives: `iter_nodes` descends a nested `FunctionDef` because a nested
+    def is just another dataclass node in the tree, and its branches are not in
+    this function's emitted code.
+    """
+    if isinstance(node, (list, tuple)):
+        return any(_has_branch_node(x) for x in node)
+    if isinstance(node, F.FunctionDef):
+        return False
+    if isinstance(node, (F.IfStmt, F.WhileStmt, F.ForStmt, F.AssertStmt,
+                         F.TryStmt, F.MatchStmt)):
+        return True
+    if isinstance(node, F.Comprehension):
+        for gen in (getattr(node, "generators", None) or []):
+            if getattr(gen, "conditions", None):
+                return True
+    if not hasattr(node, "__dataclass_fields__"):
+        return False
+    return any(_has_branch_node(getattr(node, name))
+               for name in _node_field_names(node))
+
+
+def stack_floor_guarded_names(functions, structs: dict = None) -> set:
+    """The functions of one image whose prologue carries the stack-floor guard.
+
+    Two rules, and the SECOND is what the measurement forced:
+
+      * **on a call-graph CYCLE.** Unbounded call depth is a cycle: a chain of
+        distinct functions has a finite depth, and it is the return to a function
+        already on the stack that makes the depth a function of the PROGRAM
+        rather than of its shape. So a cycle's members are where a runaway
+        recursion is stopped, and a program that recurses cannot get past one.
+
+      * **or the body already contains a conditional branch**
+        (`body_has_conditional_branch`). This was NOT in the rule that landed
+        with the guard, and it is the measured answer to the question
+        `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its
+        life asking. Every formal prologue subtracts a fixed 128 KiB frame on
+        arm64 (16 KiB on x86-64), so the depth at which the stack runs out is a
+        constant — 60 frames against `STACK_FLOOR_BUDGET_BYTES` on arm64 — and
+        the cycle rule left a DAG of DISTINCT functions free to walk straight
+        past it. Measured over this repository and the stdlib with
+        `tools/formal_call_depth_census.py`: the deepest single image is **76
+        frames** (`formal/arm64_codegen.py`, and 69 for `x86_64_codegen.py`),
+        which is 1.3x what the arm64 budget affords. So this is not a stated
+        limit with no work behind it; it is one the corpus is already inside.
+
+    **And the second rule costs nothing the first one was careful not to.** The
+    per-export contract proof (`arm64_proof_gen._dylib_contract_proof`) declines
+    to emit a contract for an export whose body contains ANY conditional branch —
+    `Refine.Block.step` is one function of one state, and a conditional branch
+    does not have one. So a body that already branches has no contract to lose,
+    and a body that does not is left exactly as it was. "Every function" would
+    trade proved contracts for nothing; "every function that already has a
+    branch" does not, and `body_has_conditional_branch` is written to that
+    direction.
+
+    **What the widening does not reach**, measured rather than argued: a chain
+    of bodies that have no branch at all. The census's `unguard` column is that
+    chain's depth, and its maximum over the same corpus is **7 frames** — a
+    median of 3, against the 60 the arm64 budget affords (59 measured, one frame
+    spent by the caller). So the residual is a bounded 7 rather than an
+    unbounded "finite", and it is bounded by a module's size rather than by the
+    guard. 600 straight-line functions in a chain still walk off the end of the
+    stack; that is what `test_formal_run.py`'s
+    `guard_a_straight_line_chain_is_left_alone` row says out loud, and closing
+    it is `lib/Refine.lean` — a `Block` per arm with a join — not an emitter.
+
+    The edges are `call_graph_edges`, and its docstring carries why they are a
+    superset and why a call out of the image is not an edge. `call_graph_depth`
+    is what measured the two numbers above, on the same edges, so the
+    measurement and the rule cannot come apart.
+    """
+    edges = call_graph_edges(functions, structs)
+    by_name = {f.name: f for f in functions}
 
     def reaches_self(start: str) -> bool:
         seen, stack = set(), [start]
@@ -27137,12 +27579,14 @@ def recursive_function_names(functions, structs: dict = None) -> set:
                     stack.append(nxt)
         return False
 
-    return {name for name in names if reaches_self(name)}
+    return {name for name in by_name
+            if reaches_self(name) or body_has_conditional_branch(by_name[name])}
+
 
 
 # THE GUARD'S SHAPE, decided once so that neither backend can spell it twice.
 #
-# **Which prologues get it** is `recursive_function_names` above, and that is
+# **Which prologues get it** is `stack_floor_guarded_names` above, and that is
 # the only decision here that is not the sequence: the sequence is the same in
 # every prologue it appears in, and a prologue it does not appear in is
 # unchanged code.

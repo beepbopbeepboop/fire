@@ -1485,7 +1485,7 @@ def _reserved_words_are_there_and_unwritten(tmpdir, name, verbose):
     and `deep(62)` used to be a SIGSEGV on arm64, so the guard that fixed it
     needed a word in an image exactly like this one — an image with nothing
     else in its `__DATA` (`model.STACK_FLOOR_BUDGET_BYTES`,
-    `model.recursive_function_names`).
+    `model.stack_floor_guarded_names`).
 
     What is asserted, per backend:
 

@@ -599,10 +599,10 @@ dylib_exports: list = None, globals_base: int = None,
         self._cond_branch_pcs = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
-        # `model.recursive_function_names`. `compile()` is the only construction
+        # `model.stack_floor_guarded_names`. `compile()` is the only construction
         # path (`formal/build.py` is the only caller), so it always overwrites
         # this before a prologue is emitted.
-        self._recursive_names: set = set()
+        self._guarded_names: set = set()
         self._blob_cap = _SCRATCH
         # ── A multi-field receiver, BY REFERENCE ──────────────────────────
         # `_frame_sites` is this function's `{id(call): (struct, offset)}` from
@@ -770,6 +770,15 @@ dylib_exports: list = None, globals_base: int = None,
         # concat operand: BinaryOp `+`/`|` then mean list/set ops, not the
         # integer ALU forms.
         self._container_ctx = 0
+        # The COMPREHENSION scope stack: `model.ValueKinds`.
+        # `comprehension_generator_scopes` maps, outermost first, pushed by
+        # `_emit_compr_gen` after each generator's target store. A comprehension
+        # is its own scope in Python 3, so its loop variable is not a local of
+        # this function and `ValueKinds.locals` must not answer for it — the
+        # stack is what `_expr_str_kind` consults instead. Balanced by a
+        # `finally` per generator, so it is empty between comprehensions and on
+        # the way out of a failed one.
+        self._compr_scopes: list = []
 
     def compile(self, stmts: list, base_addr: int = 0x100000014,
                 emit_startup: bool = True, structs: list = None) -> tuple:
@@ -803,7 +812,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `values(self._functions.values())`, not `functions`: the guard reads
         # the same set of FunctionDefs either way, and this is the table the
         # emitters dispatch on.
-        self._recursive_names = M.recursive_function_names(
+        self._guarded_names = M.stack_floor_guarded_names(
             self._functions.values(), self._structs)
 
         # A NAME is not an ADDRESS, and this is where that stops being true by
@@ -1246,9 +1255,10 @@ dylib_exports: list = None, globals_base: int = None,
         _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
         # The stack-floor guard, immediately after the subtraction it guards,
         # and only in a function a call chain can re-enter: see
-        # `model.recursive_function_names` for why the cycle is the set, and
-        # `model.stack_floor_address` for the sequence itself.
-        if self.func_name in self._recursive_names:
+        # `model.stack_floor_guarded_names` for why the set is a cycle PLUS every
+        # body that already branches, and `model.stack_floor_address` for the
+        # sequence itself.
+        if self.func_name in self._guarded_names:
             self._emit_stack_floor_guard()
 
         for stmt in f.body:
@@ -4521,7 +4531,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         Named for what it answers rather than for the first caller: `print`,
         the method-receiver guard and `_note_binding` all need the same
         question, and three copies of this precedence rule is three chances for
-        one of them to decide that a `char *` is a number."""
+        one of them to decide that a `char *` is a number.
+
+        `_compr_scopes` is consulted LAST and only for a bare name, and it is
+        the answer rather than a fallback while it is in force: a comprehension
+        has its own scope in Python 3, so `var x = 5` beside `[x for x in
+        ["a", "b"]]` does not make the two bindings disagree, and a site inside
+        the comprehension must see the loop variable and not the outer `x`.
+        Measured on both architectures, `[x for x in ["p", "", "q"] if x]`
+        returned 3 elements where CPython returns 2: the comprehension's `x`
+        was in no kind map at all, so `if x:` fell to `TRUTHY_NONZERO` and
+        tested the ADDRESS of the empty string for zeroness."""
         if isinstance(expr, F.MemberExpr):
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
@@ -4532,7 +4552,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             bound = M.comptime_val_kind(self._comptime_vals, expr.name)
             if bound is not None:
                 return bound
-        return self._vkinds.kind_of(expr)
+        return self._vkinds.kind_of(expr, scopes=self._compr_scopes)
 
     def _expr_is_fd(self, expr) -> bool:
         """True when `expr` is known to be a FILE DESCRIPTOR.
@@ -7667,7 +7687,17 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _emit_compr_gen(self, expr: F.Comprehension, gi: int,
                         res_offset: int, is_dict: bool, cap: int,
                         d0: int) -> None:
-        """Recursive generator walk: gen[gi] … gen[-1], then append element."""
+        """Recursive generator walk: gen[gi] … gen[-1], then append element.
+
+        THE SCOPE STACK IS PUSHED AFTER THE TARGET STORE, and that placement is
+        Python's rule rather than a convenience: generator `gi`'s own ITERABLE is
+        evaluated in the scope of generators `0 … gi-1`, and the parent frame has
+        already pushed exactly that and has not popped it (the pop is in this
+        frame's `finally`, below the recursion). So the iterable above reads the
+        enclosing scope, and everything from the target store down — the
+        conditions, the element, the key, and every nested comprehension inside
+        them — reads this generator's own scope as well.
+        """
         gens = expr.generators
         if gi >= len(gens):
             if is_dict:
@@ -7754,15 +7784,25 @@ ctor_field_value=self._ctor_field_value_for(name),
             else:
                 self._store_var(tnames[0], 0)
 
-            for cond in gen.conditions or []:
-                if not self._emit_branch_unless(cond, step_label):
-                    self._emit_truthy_word(cond)
-                    self.asm.emit(encode_cmp_xn_imm(0, 0))
-                    self._record_cond_branch()
-                    self.asm.emit(encode_cbz_xn(0, 0))
-                    self.asm.emit_label_rel(step_label, here_offset=-4)
+            # From here down this generator's target is in scope: the
+            # conditions, the element/key, and the recursion into the next
+            # generator (whose own ITERABLE is evaluated one level up, which is
+            # why the push is here and not at the top of the frame). See the
+            # method's docstring.
+            self._compr_scopes.append(
+                self._vkinds.comprehension_generator_scopes(expr)[gi])
+            try:
+                for cond in gen.conditions or []:
+                    if not self._emit_branch_unless(cond, step_label):
+                        self._emit_truthy_word(cond)
+                        self.asm.emit(encode_cmp_xn_imm(0, 0))
+                        self._record_cond_branch()
+                        self.asm.emit(encode_cbz_xn(0, 0))
+                        self.asm.emit_label_rel(step_label, here_offset=-4)
 
-            self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
+                self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
+            finally:
+                self._compr_scopes.pop()
 
             self.asm.label(step_label)
             if ci_reg is not None:
