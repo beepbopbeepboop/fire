@@ -285,6 +285,40 @@ is not in §11.2's five.
    because "add the missing operator" is exactly the fix a future reader will
    propose.
 
+6. **`with EXPR as TARGET:` is the context-manager PROTOCOL, and a value that is
+   not enterable is REFUSED rather than bound.** `formal/build.py`'s
+   `_rewrite_with_statements` lowers every `with` to `__enter__` (which produces
+   the name the body sees) plus `__exit__` in a `finally`, and
+   `formal/model.py`'s `struct_is_context_manager` says which values can be: a
+   FRAMED struct declaring both dunders, whose receiver is the frame's address —
+   which is the by-reference receiver, so no part of the value model moves. Every
+   other `with` is refused by name, which is what CPython does with a value that
+   has no `__enter__`.
+
+   **The lowering this replaced bound the name to the expression's value and ran
+   the body, and that is a wrong-but-exit-0 answer with nothing on the link line
+   to catch it**: `with tempfile.TemporaryDirectory() as d:` printed every right
+   answer and left the tree behind, and `with closing(7) as v:` printed `v=7`
+   where CPython raises `AttributeError`. Both emitters' `_emit_with` docstrings
+   said so at the time, which is how it stayed true for so long.
+
+   **Do not add a `with` lowering to a backend.** One implementation, in the pass
+   that owns statement rewriting; a `WithStmt` reaching an emitter is an internal
+   invariant and is refused as one.
+
+7. **A `finally`'s fall-through copy is emitted even when an exit edge inside the
+   body already flushed it.** The old rule read "the frame was flushed, so the
+   end of the block is unreachable" and dropped the copy, which is true only of an
+   unconditional `return`. A conditional `return`, and a `continue`/`break` in a
+   loop, are different paths through the same block and are still reachable —
+   measured on both machines: `try: if n > 0: return 1 … finally: print()`
+   printed nothing at all when `n` was 0. `formal/arm64_codegen.py`'s
+   `_emit_try` and its x86-64 twin.
+
+   **Do not restore the suppression to save bytes.** The copy is dead code in the
+   unconditional case, and dead code costs bytes; the suppression costs a cleanup
+   that does not run, which is the failure this project refuses everywhere else.
+
 ---
 
 ## 5. The ABI arc: (c) is a phase of (a), not an alternative to it

@@ -7,30 +7,33 @@ that resolver adds as its last search root and that no other resolver in the tre
 lists — see `_HOSTMODS_ROOT` for why these did NOT go at the repository root,
 where the first three of them captured `import os` in the compiler's own sources.
 
-ONE FUNCTION, AND IT IS NOT FORGETFULNESS
------------------------------------------
+ONE STRUCT, AND IT IS NOT A SHORTCUT
+------------------------------------
 CPython's `contextlib` is context managers, and a context manager is an OBJECT
-with an `__enter__` and an `__exit__`. What this path has instead was measured,
-arm64 and x86-64, on the shapes themselves:
+with an `__enter__` and an `__exit__`. That is now what this path lowers: a
+`with` runs `__enter__` to produce the name the body sees and `__exit__` on the
+way out, and it REFUSES a `with` whose value cannot be entered and exited rather
+than binding the name to the value and running the body (`formal/build.py`'s
+`_rewrite_with_statements`, and `model.struct_is_context_manager` for the rule).
+So `nullcontext` below is a struct with those two methods, and the whole of what
+this module has to add is the one CPython class whose meaning they carry
+completely.
 
-    def nullcontext(v): return v
-    with nullcontext(11) as x: ...        # x binds to 11 on BOTH backends
+The measurement that decides the rest is unchanged and is still what the
+absences below turn on: a formal value is ONE 64-bit word, so a context manager
+here has to be a value two methods can be dispatched on, and the only such value
+is the frame address of a struct of more than one field
+(`model.struct_is_context_manager`). CPython's own `nullcontext` keeps two
+attributes — `enter_result` and `exit_result` — so the honest mirror of it is
+representable, and this one is.
 
-`with EXPR as TARGET` evaluates `EXPR`, evaluates the body, and binds `TARGET` to
-the expression — there is no dispatch through a dunder to get wrong, so a context
-manager whose `__enter__` returns its argument is *already* what the keyword
-statement means, with nothing left for this module to add. That is the whole of
-`nullcontext`: it hands back the value the caller passed and does nothing on the
-way in or out.
-
-So this module is one function because that is the one name in CPython's
-`contextlib` whose meaning is fully carried by that shape. The measurement that
-separates it from its neighbours is what each of them needs BEYOND the binding,
-and it is in "WHAT IS NOT HERE" below.
-
-`test_formal_contextlib.py` checks `nullcontext` against CPython's own for both
-arities — `nullcontext(v)` and `nullcontext()` — on both backends, and pins each
-absence below as a refusal naming itself.
+`test_formal_core_hostmods.py`'s `ctx` group checks `nullcontext` against
+CPython's own for all three arities on both backends — and it goes through the
+protocol now, so a `nullcontext` that did not answer `enter_result` from
+`__enter__` would print the wrong number rather than bind wrongly.
+`test_formal_tempfile.py`'s `TemporaryDirectory` group is the standing
+measurement for the half that has EFFECTS, because `nullcontext`'s exit does
+nothing at all.
 
 WHAT IS NOT HERE, AND WHY
 -------------------------
@@ -51,20 +54,20 @@ WHAT IS NOT HERE, AND WHY
     `@contextmanager` would build and turn the generator function into an ordinary
     one that returns a generator nobody consumes.
   * `closing` — LOOKED LIKE `nullcontext` AND IS NOT, which is why it is worth
-    naming. `with closing(x) as y:` binds `y` to `x` on this path, exactly as
-    `nullcontext` does, so it builds and answers the binding correctly — and then
-    silently never calls `x.close()`. Measured: `with closing(7) as v:` builds,
-    runs the body and prints `v=7`; CPython raises
-    `AttributeError: 'int' object has no attribute 'close'`. For a real closable
-    the divergence is worse and quieter: the resource is never released and the
-    program prints its results as if it had been. A name that answers the easy half
-    of its contract and drops the half that matters is the one thing a mirror of
-    CPython must not export, so it is absent rather than approximately right.
+    naming. `with closing(x) as y:` needs `y` to be `x.close()`'s result while
+    the manager holds `x` itself, so it needs TWO words — and this path has one.
+    Measured: `with closing(7) as v:` used to build, run the body and print
+    `v=7`, and CPython raises `AttributeError: 'int' object has no attribute
+    'close'`; now it is refused by the `with` rule above, which is the same
+    answer with the reason attached.
   * `ExitStack`, `AsyncExitStack` — a registry of exits applied in REVERSE order
-    on the way out. There is no `__exit__` to apply them in, so the whole ordering
-    guarantee — the reason the class exists — has nothing to live in.
-  * `chdir` (3.11+) — for the same reason as `closing`: the restore on the way out
-    is the entire point and there is no way out to do it on.
+    on the way out. A struct of more than one field could hold that list, but
+    `__exit__` would have to APPLY it, and applying a list of calls is a
+    generator shape this path does not lower — so the ordering guarantee, which
+    is the reason the class exists, has nothing to live in.
+  * `chdir` (3.11+) — for the same reason as `closing`: the restore on the way
+    out is the entire point, and `__exit__` would have to call `os.chdir` on the
+    value the body may also have changed.
   * `AbstractContextManager`, `ContextDecorator`, `aclosing` — TYPES and
     decorators; `formal/hostmods/typing.mojo` says the same about `Optional`, and
     the decorator measurement is above.
@@ -78,23 +81,34 @@ say. The fold is lossy in exactly one direction — after it, `x == 0` and
 `x is None` are the same expression — and that one case is refused by name rather
 than answered (`formal/build.py`'s `refuse_none_comparisons`). So a program can
 distinguish them, and a program that merely passes the value along is unaffected.
-The 0 is the DEFAULT argument's value rather than a substitute computed at the
-call, because a module-level name has no storage here and a default is the same
-spelling `os` and `struct` use for the same reason.
+The 0 is the FIELD's default rather than a substitute computed at the call,
+because the constructor is called with no arguments at all from a `with`, and a
+module-level name has no storage here besides a class body's own initializers.
 """
 
 
-def nullcontext(v = 0) -> int:
-    """`contextlib.nullcontext(enter_result=None)`: a manager yielding `v`.
+struct nullcontext:
+    """`contextlib.nullcontext(enter_result=None, exit_result=None)`.
 
-    `with nullcontext(v) as x:` binds `x` to `v` and does nothing else, which is
-    what CPython's does — its `__enter__` returns `enter_result` and its
-    `__exit__` returns False (so the body may suppress nothing and nothing is
-    suppressed). Checked against CPython's own for both arities by
-    `test_formal_contextlib.py`.
-
-    The default is 0 rather than a spelling of `None` because `None` is the word
-    0 on this path (`model.NONE_WORD`); the docstring above states the one
-    construct that can tell the difference and where it is refused.
+    Two fields because CPython's keeps two, and two because a context manager on
+    this path has to be a struct of MORE THAN one field: a one-field struct's
+    receiver IS that field, so there is no address to dispatch a method on and no
+    second thing to remember. `enter_result` is what `__enter__` hands the body
+    and `exit_result` is what `__exit__` answers, which is CPython's own
+    arrangement and is why both arities of the constructor are answerable: an
+    omitted argument takes the field's own class-level default.
     """
-    return v
+    var enter_result: Int = 0
+    var exit_result: Int = 0
+
+    fn __enter__(self) -> Int:
+        """`__enter__` returns `enter_result`, which is what the `as` name binds."""
+        return self.enter_result
+
+    fn __exit__(self) -> Int:
+        """`__exit__` returns `exit_result` — False in CPython, so nothing is suppressed.
+
+        Nothing can be suppressed here in any case: this path has no unwinder,
+        so no edge runs from a raise site into anything (`suppress` above).
+        """
+        return self.exit_result

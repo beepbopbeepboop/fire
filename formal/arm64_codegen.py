@@ -26,7 +26,7 @@ import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
 from formal import model as M
 from mojo.middle.boundnames import (
-    _with_item_alias_name, bound_names_in_order, _lbn_target_names,
+    bound_names_in_order, _lbn_target_names,
     _lbn_split_commas,
 )
 
@@ -2116,8 +2116,20 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(stmt, F.WithStmt):
-            self._emit_with(stmt)
-            return
+            # An internal invariant, not a source construct.  `formal/build.py`
+            # lowers every `with` to the context-manager protocol before any
+            # codegen runs (`_rewrite_with_statements`), so a `WithStmt` here
+            # means that pass did not see it — and the emitter used to have a
+            # lowering of its own for it, which is how `with
+            # tempfile.TemporaryDirectory() as d:` built, ran, printed the right
+            # answers and left the directory on disk.  One implementation of the
+            # protocol, in the pass that owns statement rewriting.
+            raise CodegenError(
+                f"{getattr(self._cur_fn, 'name', '<module>')}: a `with` "
+                f"reached the emitter unrewritten, "
+                f"which is a bug in formal/build.py's `_rewrite_with_statements` "
+                f"and not a construct in this file: every `with` is lowered to "
+                f"`__enter__`/`__exit__` before codegen")
 
         if isinstance(stmt, F.DelStmt):
             self._emit_del(stmt)
@@ -2227,11 +2239,25 @@ dylib_exports: list = None, globals_base: int = None,
         the process after flushing finallys). `else` runs on the success
         path (always, without EH). On fall-through the finally emits
         here; on return/break/continue/raise `_flush_pending_finally`
-        already ran it and truncated the stack, so the frame may be gone
-        — pop only if it is still ours (guards IndexError after a
-        return-driven flush)."""
+        already ran it and truncated the stack — so the pop below is
+        stack bookkeeping and nothing else.
+
+        **The fall-through copy is emitted even when an exit edge inside
+        the body already flushed this frame**, and that is a fix rather than
+        an optimisation: the flush happens where the `return`/`break`/
+        `continue`/`raise` is EMITTED, while the fall-through path is a
+        different path through the same block, and it is still reachable. The
+        old shape decided "was the frame flushed? then the end is unreachable"
+        and dropped the copy, which is right for an UNCONDITIONAL `return` and
+        wrong for every other case — measured on both architectures, with
+        `try: if n > 0: return 1; … finally: print()` printing nothing at all
+        when `n` was 0, and with a `continue` inside a `try` in a loop
+        skipping the cleanup on every later iteration. Both are the failure
+        this path exists to refuse elsewhere: a program that runs, exits 0 and
+        has silently not done what its source says. The copy is dead code in
+        the unconditional case, which costs bytes and nothing else.
+        """
         fin = stmt.finally_body or []
-        need_fallthrough = bool(fin)
         if fin:
             self._pending_finally.append(fin)
         try:
@@ -2240,35 +2266,12 @@ dylib_exports: list = None, globals_base: int = None,
             for s in (stmt.else_body or []):
                 self._emit_stmt(s)
         finally:
-            if fin:
-                if (self._pending_finally
-                        and self._pending_finally[-1] is fin):
-                    self._pending_finally.pop()
-                else:
-                    need_fallthrough = False
-        if need_fallthrough:
-            for s in fin:
-                self._emit_stmt(s)
-
-    def _emit_with(self, stmt: F.WithStmt) -> None:
-        """with-items without a context-manager protocol.
-
-        Evaluate each context expression for its side effects (open(),
-        lock acquisition, executor construction, …). With no __enter__/
-        __exit__ runtime, an `as` alias is bound to the expression result
-        itself (the context-manager object), not to an entered value.
-        The body always runs on the fall-through path; return/break/
-        continue inside do no cleanup (there is none). `async with`
-        raises — same gate as async for."""
-        # async with lowers as a plain with (no event loop / context-manager
-        # protocol on this path — same as the non-async with above).
-        for it in stmt.items or []:
-            self._emit_expr(it.expr)
-            if it.alias is not None:
-                alias = _with_item_alias_name(it.alias)
-                self._store_var(alias, 0)
-        for s in stmt.body:
+            if fin and self._pending_finally \
+                    and self._pending_finally[-1] is fin:
+                self._pending_finally.pop()
+        for s in fin:
             self._emit_stmt(s)
+
 
     def _emit_tuple_assign(self, stmt: F.AssignStmt) -> None:
         """`a, b = rhs` — two shapes, matching GIMPLE's unpack split.
@@ -7232,6 +7235,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         if isinstance(e.func, F.MemberExpr) and \
                 self._is_value_receiver(e.func.obj):
             self._emit_value_method(e, e.func.member)
+            return
+        # `mod.S(...)` — a CONSTRUCTION of a struct the module publishes. The
+        # decision and its reasons are `model.dotted_struct_construction`; what
+        # it needs from this emitter is the receiver-shape answer above, which
+        # is why it sits immediately after it rather than beside the extern
+        # path: a `recv.m(...)` on a value is a method call, and only a base
+        # that is a MODULE can be a construction.
+        if not is_extern_call and M.dotted_struct_construction(
+                e.func, self._structs, self._import_aliases):
+            self._emit_struct_constructor(e, e.func.member,
+                                          self._structs[e.func.member])
             return
         # A type constructor is a conversion, not a call. Intercepted before the
         # extern path, because the extern path would emit a BL against a
