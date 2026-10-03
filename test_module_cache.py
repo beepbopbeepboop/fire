@@ -1261,6 +1261,127 @@ def test_review_fixes_monomorphize_overload(wd):
           _mojo_type(None) == 'int64_t' and _TYPE_MAP.get(None, 'int64_t') == 'int64_t')
 
 
+def test_self_qualified_type_param_substitution(wd):
+    """`Self.<param>` inside a generic struct substitutes to the CONCRETE type,
+    `Self.` and all — not to `Self.<concrete>`.
+
+    The bare-word substitution pass can only rewrite the `T` in `Self.T`, which
+    leaves `Self.int64_t`: a member name that means nothing, which `_mojo_type`
+    then answers as `int64_t`. That silence is what boxed stdlib's
+    `_PeekableIterator[InnerIterator]`'s `var _inner: Self.InnerIterator` (and
+    every other generic iterator's `_inner`), leaving `next(self._inner)` with
+    no receiver type to dispatch the iterator protocol through — the declared
+    red in bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md.
+    See monomorphize_source's own docstring."""
+    import monomorphize as mm
+
+    _name, concrete = mm.monomorphize_source(
+        "struct Wrap[T]:\n"
+        "    var _inner: Self.T\n"
+        "    var _raw: T\n"
+        "    var _opt: Optional[Self.T]\n"
+        "    var _ptr: Pointer[Self.T]\n"
+        "    var _other: Self.NotAParam\n",
+        {'T': 'int64_t'})
+    check("self#1: mangled name unchanged by the fix",
+          _name == 'Wrap_int64_t')
+    check("self#2: `Self.T` substitutes to the concrete type, not `Self.int64_t`",
+          'var _inner: int64_t' in concrete and 'Self.int64_t' not in concrete)
+    check("self#3: a bare `T` still substitutes (unchanged behaviour)",
+          'var _raw: int64_t' in concrete)
+    check("self#4: `Self.T` inside a container type argument substitutes too",
+          'var _opt: Optional[int64_t]' in concrete
+          and 'var _ptr: Pointer[int64_t]' in concrete)
+    check("self#5: `Self.<non-param member>` is NOT substituted",
+          'var _other: Self.NotAParam' in concrete)
+
+    # A struct-typed argument must survive as the mangled name of that struct,
+    # so the layout the caller registers and the layout the instantiated
+    # object carries are computed from the SAME text.
+    _name2, concrete2 = mm.monomorphize_source(
+        "struct Wrap2[T]:\n"
+        "    var _inner: Self.T\n",
+        {'T': 'Inner_int64_t'})
+    check("self#6: a struct-typed argument substitutes verbatim",
+          'var _inner: Inner_int64_t' in concrete2
+          and 'Self.Inner_int64_t' not in concrete2)
+
+    # A nested function that re-declares the same name as its own bracket
+    # parameter still shadows it — the qualified pass must respect the same
+    # spans the bare one does, not rewrite a nested declaration.
+    _name3, concrete3 = mm.monomorphize_source(
+        "fn outer[T](x: Self.T) -> T:\n"
+        "    def inner[T](y: T) -> T:\n"
+        "        return y\n"
+        "    return inner[T](x)\n",
+        {'T': 'int64_t'})
+    check("self#7: `Self.T` still respects a nested shadowing bracket param",
+          'def inner[T](y: T) -> T:' in concrete3)
+    check("self#8: the outer `Self.T` still substitutes",
+          'fn outer_int64_t(x: int64_t) -> int64_t:' in concrete3)
+
+
+def test_type_param_markers_and_simd_unification(wd):
+    """`type_param_names` must not report a positional-only/keyword-only
+    separator as a type parameter, and `infer_type_args` must bind a type
+    parameter that appears NESTED in a parameter's annotation.
+
+    Both were one-line defects with a large blast radius, and both are silent:
+    the elaborator declines, the call site falls through to a bare
+    `extern int64_t f (...)`, and `gcc -fsyntax-only` cannot see that nothing
+    defines it. Measured over the stdlib sweep, the `//` marker alone accounted
+    for 383 of 1254 elaborator declines — every template in the numeric library
+    is written with it (`def ceildiv[T: CeilDivable, //](...)`). See
+    bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md."""
+    import elaborate as el
+
+    check("marker#1: `//` is a separator, not a type param",
+          el.type_param_names(
+              'def ceildiv[T: CeilDivable, //](n: T, d: T) -> T:\n'
+              '    return n\n') == ['T'])
+    check("marker#2: a bare `**` is a separator; `**kw` is a parameter",
+          el.type_param_names('def f[T, **](x: T) -> T:\n    return x\n')
+          == ['T']
+          and el.type_param_names('def g[T, **kw](x: T) -> T:\n    return x\n')
+          == ['T', '**kw'])
+    check("marker#3: the legacy `/` and `*` still work",
+          el.type_param_names('def f[T, /](x: T) -> T:\n    return x\n')
+          == ['T']
+          and el.type_param_names('def g[T, *](x: T) -> T:\n    return x\n')
+          == ['T'])
+    check("marker#4: real params are untouched",
+          el.type_param_names('struct Box[T, U]:\n    pass\n') == ['T', 'U'])
+    check("marker#5: a bounds parse skips the marker too",
+          el.parse_bounds('def ceildiv[T: CeilDivable, //](n: T) -> T:\n'
+                          '    return n\n') == {'T': 'CeilDivable'})
+    check("marker#6: an origin param is still reported (it is not a marker)",
+          el.type_param_names(
+              'def black_box[T: AnyType, origin: Origin, //]'
+              '(ref[origin] value: T) -> ref[origin] T:\n'
+              '    return value\n') == ['T', 'origin'])
+
+    _simd = ('def copysign[\n    dtype: DType, width: Int, //\n'
+             '](magnitude: SIMD[dtype,width], sign: SIMD[dtype,width])'
+             ' -> SIMD[dtype,width]:\n    return magnitude\n')
+    check("unify#1: a type param nested in `SIMD[dtype, width]` binds",
+          el.infer_type_args(_simd, ['double', 'double'])
+          == ['Float64', '1'])
+    check("unify#2: `x: T` still binds as before",
+          el.infer_type_args('def f[T](x: T) -> T:\n    return x\n',
+                             ['char *']) == ['String'])
+    check("unify#3: an un-understood shape still declines (no partial bind)",
+          el.infer_type_args(
+              'def f[T, U](a: Pointer[T], b: U) -> U:\n    return b\n',
+              ['int64_t *', 'double']) is None)
+    check("unify#4: a non-SIMD wrapper still declines",
+          el.infer_type_args(
+              'def f[T](a: Some[T]) -> T:\n    return a\n',
+              ['int64_t']) is None)
+    check("unify#5: too few arguments still declines",
+          el.infer_type_args('def f[T, U](a: T, b: U) -> T:\n    return a\n',
+                             ['int64_t']) is None)
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -1281,6 +1402,8 @@ def main():
         test_reflected_struct_import(wd)
         test_module_qualified_struct_symbols(wd)
         test_review_fixes_monomorphize_overload(wd)
+        test_self_qualified_type_param_substitution(wd)
+        test_type_param_markers_and_simd_unification(wd)
         test_def_overload_not_dangling_export(wd)
         test_cross_module_free_func_mangling_agrees(wd)
         test_sb1_cross_module_same_c_param_overload_mangling(wd)

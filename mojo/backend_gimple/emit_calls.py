@@ -842,8 +842,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     mlir_call = gen._maybe_lower_mlir_op(node)
     if mlir_call is not None:
         return mlir_call
-    if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr) \
-            and node.func.obj.name in gen._imported_generic_structs:
+    if (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and node.func.obj.name in gen._imported_generic_structs) or \
+           (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name in gen._imported_generic_structs):
+        # The BARE-name form (`ThinAllocation(unsafe_owned_ptr=x)`) is the
+        # common spelling in the stdlib — Mojo writes the constructor's types
+        # in the parameters, so the bracket arguments are usually omitted
+        # entirely. Without this arm every one of those fell through to the
+        # ordinary call path and emitted a bare call to a symbol nothing
+        # defines; `elaborate_generic_struct_inferred` recovers the type args
+        # from the `__init__` annotations. See
+        # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md.
         res = gen._elaborate_generic_struct_call(node)
         if res is not None:
             return res

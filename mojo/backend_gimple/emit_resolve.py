@@ -2530,6 +2530,87 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
 
 
 
+def _materialize_generic_struct_mentions(gen, ann: str) -> str:
+    """`ann` with every generic-struct INSTANTIATION it mentions (`Base[A]`)
+    replaced by the concrete mangled struct name, materializing each one as a
+    side effect (so its typedef, layout and methods exist in this compile).
+
+    Innermost-first, and each replacement re-scanned, so a nested
+    instantiation is resolved before the one containing it (`Outer[
+    Inner[int64_t]]` → `Inner_int64_t` → `Outer_Inner_int64_t_`). A mention
+    is left exactly as written — no exception, no refusal — when the base is
+    not an elaborable generic struct, when a type argument is not concrete,
+    or when elaboration fails; `_resolve_type` then gets its ordinary
+    `_mojo_type` answer for that mention, which is the correct outcome for
+    every base it declines (List/Dict/Optional/Pointer and friends, which
+    `_mojo_type` does know) and the pre-existing boxed one for anything else.
+    """
+    _out = ann
+    # Bounded by the annotation's own bracket depth: every round that changes
+    # `_out` removes at least one bracket pair, so this cannot spin.
+    for _ in range(8):
+        _hit = None
+        for _m in re.finditer(r'\b([A-Za-z_]\w*)\s*\[', _out):
+            _base = _m.group(1)
+            if _base not in gen._imported_generic_structs:
+                continue
+            _close = gimple_exprtypes._matching_bracket(_out, _m.end() - 1)
+            if _close is None:
+                continue
+            # Innermost wins: a shorter bracket span cannot contain another.
+            if _hit is None or (_close - _m.start()) < (_hit[1] - _hit[0].start()):
+                _hit = (_m, _close)
+        if _hit is None:
+            return _out
+        _m, _close = _hit
+        _base = _m.group(1)
+        _inner = _out[_m.end():_close].strip()
+        _args = [a.strip() for a in gimple_ctypes._split_top_level_commas(_inner)] \
+            if _inner else []
+        if not _args or not all(gimple_exprtypes._is_concrete_type_arg(a)
+                                for a in _args):
+            return _out
+        _mangled = _ensure_generic_struct(gen, _base, _args)
+        if not _mangled:
+            return _out
+        _out = _out[:_m.start()] + _mangled + _out[_close + 1:]
+    return _out
+
+
+def _generic_struct_field_types(gen, info: dict) -> dict:
+    """field -> ctype for a monomorphized generic struct, resolved through THIS
+    compile's own struct registry.
+
+    `info['fields']` is the stateless reduction: `_mojo_type` of each field's
+    Mojo annotation, with no access to `gen.struct_field_types`. That is
+    correct for every scalar and built-in container annotation, and silently
+    WRONG for one shape: a field whose type is another generic struct's
+    instantiation. `_mojo_type` does not know that `Inner_int64_t` is a
+    struct, so it answers `int64_t` and the field is boxed — which is how
+    stdlib's `_PeekableIterator[InnerIterator]`'s `var _inner:
+    Self.InnerIterator` ended up an integer, and how `next(self._inner)` /
+    `next(it)` then had no receiver type to dispatch the iterator protocol
+    through (`bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_
+    unlowered.md`).
+
+    So: materialize the instantiation to its mangled name, then resolve with
+    `gen._resolve_type`, which is the one resolver that consults
+    `struct_field_types`. Every field whose annotation names no elaborable
+    instantiation keeps `_mojo_type`'s answer byte for byte, so this is
+    additive — the only fields that can change are the ones that were wrong.
+    """
+    _out = {f: ct for f, ct in info['fields']}
+    for _fname, _kind, _idx, _ann in (info.get('anns') or []):
+        if _kind != 'field' or _fname not in _out:
+            continue
+        if not isinstance(_ann, str) or '[' not in _ann:
+            continue
+        _resolved = _materialize_generic_struct_mentions(gen, _ann.strip())
+        if _resolved != _ann.strip():
+            _out[_fname] = gen._resolve_type(_resolved)
+    return _out
+
+
 def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     """Elaborate+register `base_name[type_args]` (idempotent) via
     elaborate.Elaborator.elaborate_generic_struct: materialize the concrete
@@ -2564,33 +2645,91 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     except Exception:
         gimple_ctypes._debug_note('generic struct elaboration failed')
         info = None
+    return _register_generic_struct(gen, base_name, info)
+
+
+def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
+    """Elaborate Struct[TypeArgs](args) — or bare `Struct(args)`, whose type
+    args the constructor's own annotations supply. Materialize the concrete
+    monomorphized struct (register its layout + typedef, declare its methods,
+    record its object on the link line), then lower the call as a
+    constructor."""
+    if isinstance(node.func, gimple_ctypes.SubscriptExpr):
+        g = node.func.obj.name
+        idx = node.func.index
+        elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+        type_args = [gen._type_expr_to_ann(e) for e in elems]
+        name = gen._ensure_generic_struct(g, type_args)
+    elif isinstance(node.func, gimple_ctypes.IdentExpr):
+        g = node.func.name
+        if g not in gen._imported_generic_structs:
+            return None
+        source = gen._imported_generic_structs.get(g)
+        try:
+            module_src = open(source).read()
+            import elaborate
+            info = elaborate.Elaborator().elaborate_generic_struct_inferred(
+                module_src, g, [ct for ct, _ in
+                                ([gen.lower_expr(a) for a in node.args]
+                                 + [gen.lower_expr(k) for _, k in
+                                    (getattr(node, 'kwargs', None) or [])])])
+        except Exception:
+            gimple_ctypes._debug_note('inferred generic struct elaboration failed')
+            info = None
+        name = _register_generic_struct(gen, g, info) if info else None
+    else:
+        return None
+    if not name:
+        return None
+    return gen._lower_struct_constructor(name, node.args, node.kwargs)
+
+
+def _register_generic_struct(gen, base_name, info):
+    """The registration half of `_ensure_generic_struct`, split out so the
+    INFERRED constructor path (`Struct(...)` with no bracket arguments) can
+    reuse it verbatim rather than re-implementing the layout/method/link-line
+    bookkeeping. `_ensure_generic_struct` is now the `Base[Args](...)` spelling
+    of exactly this, plus the template lookup and the concrete-type-argument
+    guard."""
     if not info or not info['fields']:
         return None
-
     name = info['name']
     if name not in gen.struct_field_types:
-        # elaborate_generic_struct's method extraction doesn't mangle
-        # overloaded methods by signature — two `__init__`s (or e.g.
-        # LinkedList's `pop()` / `pop(index)`, a common pattern) both come
-        # back named "{name}_{method}", which would need two DIFFERENT
-        # extern declarations for the same C symbol ("conflicting
-        # types"). Rather than register a subset (silently making the
-        # OTHER overload uncallable — confirmed to actively break
-        # LinkedList, which has real callers of both `pop` forms), bail
-        # out of elaborating this struct entirely: the caller
-        # (_lower_call's `if res is not None: return res` pattern) then
-        # falls through to whatever path already handled this struct
-        # correctly before _imported_generic_structs started actually
-        # being populated (this whole mechanism was previously dead code
-        # — see _register_imported_generic_structs).
+        # elaborate_generic_struct's method extraction reports methods by their
+        # BARE name (`_struct_layout_anns` builds `{mangled}_{method}`), while
+        # the instantiation TU itself mangles an OVERLOADED method by
+        # signature. `FormatStruct[T, o]`'s two `fields` are the measured case:
+        #
+        #   the real TU:  FormatStruct_Int64_MutOrigin_..._fields_93095a (self, MojoList *)
+        #                 FormatStruct_Int64_MutOrigin_..._fields_75c303 (self, int64_t)
+        #                 FormatStruct_Int64_MutOrigin_..._fields (...)      <- dispatcher
+        #   this code:    extern void FormatStruct_Int64_MutOrigin_fields (FormatStruct_Int64_MutOrigin *, int64_t);
+        #
+        # — a symbol nothing defines, declared with ONE of the two arities, so
+        # the other arity's call site is a hard gcc error ("too many arguments
+        # to function", test/format/test_utils.mojo).
+        #
+        # The guard used to be "same name, DIFFERENT signature after erasure",
+        # which these two defeat: `_mojo_type('*Ts')` and
+        # `_mojo_type('Some[def[T:Writer](mutT)]')` are both `int64_t`, so the
+        # erased signatures compared EQUAL while the real symbols do not. Any
+        # duplicate method name is therefore disqualifying, unconditionally:
+        # one source-level name cannot map to one C symbol here.
+        #
+        # Bailing out returns None, and the caller (`_lower_call`'s
+        # `if res is not None: return res`) falls through to whatever path
+        # handled this struct before `_imported_generic_structs` was populated
+        # at all — a bare call to an undefined symbol, i.e. the pre-existing
+        # state. That is strictly better than a wrong extern declaration, which
+        # turns a link error into either a compile error or a silent
+        # mis-dispatch.
         seen_sigs: dict = {}
         for mname, ret, ps in info['methods']:
-            sig = (ret, tuple(ps))
-            if mname in seen_sigs and seen_sigs[mname] != sig:
+            if mname in seen_sigs:
                 return None
-            seen_sigs[mname] = sig
+            seen_sigs[mname] = (ret, tuple(ps))
         # Register the layout; the struct-typedef section emits the typedef.
-        gen.struct_field_types[name] = {f: ct for f, ct in info['fields']}
+        gen.struct_field_types[name] = _generic_struct_field_types(gen, info)
         for mname, ret, ps in info['methods']:
             msym = f"{name}_{mname}"
             gen.func_return_types[msym] = ret
@@ -2601,25 +2740,11 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
                 gen._elaborated_externs.append(decl)
     if info['object'] not in gen._link_objects:
         gen._link_objects.append(info['object'])
-    _cpp_obj = info.get('cpp_object')
-    if _cpp_obj is not None and _cpp_obj not in gen._link_objects:
-        gen._link_objects.append(_cpp_obj)
+    cpp_obj = info.get('cpp_object')
+    if cpp_obj is not None and cpp_obj not in gen._link_objects:
+        gen._link_objects.append(cpp_obj)
         gen._link_needs_cxx = True
     return name
-
-
-def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
-    """Elaborate Struct[TypeArgs](args): materialize the concrete monomorphized
-    struct (register its layout + typedef, declare its methods, record its
-    object on the link line), then lower the call as a constructor."""
-    g = node.func.obj.name
-    idx = node.func.index
-    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
-    type_args = [gen._type_expr_to_ann(e) for e in elems]
-    name = gen._ensure_generic_struct(g, type_args)
-    if not name:
-        return None
-    return gen._lower_struct_constructor(name, node.args, node.kwargs)
 
 
 def _emit_generic_instantiation(gen, info, arg_pairs):

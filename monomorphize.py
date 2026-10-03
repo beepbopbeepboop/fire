@@ -159,7 +159,26 @@ def monomorphize_source(template_src: str, type_args: dict) -> tuple:
     `[params]` block, rename the definition, and replace each type-param
     identifier with its concrete type as a whole word — except inside a
     NESTED function that re-declares (shadows) that same type-param name as
-    its own independent bracket parameter (see `_shadowed_spans`)."""
+    its own independent bracket parameter (see `_shadowed_spans`).
+
+    `Self.<param>` is substituted as a UNIT, in a pass of its own that runs
+    BEFORE the bare-word one, so the `Self.` qualifier is dropped along with
+    the name it qualifies. `Self.T` inside `struct Box[T]` is the enclosing
+    type's own name for the parameter `T`, so for the instantiation
+    `Box[int64_t]` it denotes exactly `int64_t`; the bare-word pass alone
+    could only rewrite its `T` and leave the `Self.` glued to the argument,
+    producing `Self.int64_t` — a member name that means nothing, which
+    `_mojo_type` then silently answered as `int64_t`. That silence is what
+    made the whole `next(<user-defined iterator struct>)` family a declared
+    red: stdlib's `_PeekableIterator[InnerIterator]` declares
+    `var _inner: Self.InnerIterator` and `std/itertools`' iterators declare
+    `var _inner: Self.InnerIteratorType`, so the monomorphized struct's field
+    was boxed `int64_t` instead of `<iterator> *`, the receiver of
+    `next(self._inner)` / `next(it)` had no resolvable struct type, and the
+    `for`-loop over the same object degraded to `mojo_unsupported_iter`
+    (see bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+    Substituting the qualified form first also keeps the bare pass from
+    double-substituting it — by then no `Self.<param>` text survives."""
     m = _HEAD.search(template_src)
     if not m:
         raise ValueError("monomorphize: no generic `fn`/`struct name[...]` found")
@@ -173,9 +192,12 @@ def monomorphize_source(template_src: str, type_args: dict) -> tuple:
     # Drop the [type-params] block and rename the definition (fn or struct).
     src = template_src[:m.start()] + f"{kind} {mangled}" + template_src[m.end():]
     # Substitute each type parameter with its concrete type (whole-word),
-    # skipping any nested scope that shadows this specific name.
+    # skipping any nested scope that shadows this specific name. The
+    # `Self.<param>` pass runs FIRST and consumes those occurrences whole.
     for tp, concrete in type_args.items():
         spans = _shadowed_spans(src, tp)
+        src = _sub_outside_spans(rf'\bSelf\.{re.escape(tp)}\b', str(concrete),
+                                 src, spans)
         src = _sub_outside_spans(rf'\b{re.escape(tp)}\b', str(concrete), src, spans)
     return mangled, src
 

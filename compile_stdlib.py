@@ -86,14 +86,23 @@ def discover_roots(base: Path) -> list:
 
 _NEXT_ON_STRUCT = (
     "`next(<user-defined iterator struct>)` has no lowering, and the "
-    "receiver's type is not inferred: `var it = peekable(list)` types `it` "
-    "as `int64_t`, not `_PeekableIterator *`, because inferring an imported "
-    "generic function's return type through `Self.<member>` is not "
-    "implemented. Until 2026-10-01 this file PASSED here while its C called "
-    "a `next` symbol nothing defines — this check is `gcc -fgimple "
-    "-fsyntax-only`, which cannot see that, and nothing else links the "
-    "`test/` tree. `next(<struct>)` does lower when the receiver's type IS "
-    "resolvable. See "
+    "receiver's type is not inferred. `var it = peekable(list)` types `it` "
+    "as `int64_t`, not `_PeekableIterator *`, because `peekable` is never "
+    "ELABORATED: it is a generic, so `reflect.export_exclusions` "
+    "deliberately keeps it out of `std.iter`'s export table (the elaborator "
+    "is supposed to instantiate it on demand), and the on-demand path "
+    "declines — the two `peekable` overloads differ only by a trait bound "
+    "(`Some[Iterable]` vs `Some[IterableOwned]`), which "
+    "`Elaborator.elaborate_overload_call` cannot match against a scalar "
+    "parameter type, and the chosen overload's return type "
+    "(`_PeekableIterator[type_of(iterable).IteratorOwnedType]`) is "
+    "dependent on the argument. Until 2026-10-01 this file PASSED here "
+    "while its C carried `extern int64_t peekable (...)` with no definition "
+    "anywhere, plus a call to a `next` symbol nothing defines — this check "
+    "is `gcc -fgimple -fsyntax-only`, which cannot see that, and nothing "
+    "else links the `test/` tree. `next(<struct>)` DOES lower whenever the "
+    "receiver's type IS resololvable, and `Self.<type-param>` substitution "
+    "inside a monomorphized generic struct is fixed; see "
     "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md")
 
 EXPECTED_FAILURES = {
@@ -202,12 +211,10 @@ EXPECTED_FAILURES = {
     'test/iter/test_once.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_peek.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_zip.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_chain.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_count.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_cycle.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_drop.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_drop_while.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_peek.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_product.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_repeat.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_take.mojo': _NEXT_ON_STRUCT,
@@ -333,7 +340,16 @@ def transpile_file(mojo_file):
     cache hit. Both True ⇒ the file was fully cached. Worker processes return these
     so the parent can aggregate cas.stats across processes (the same pattern as
     build_stdlib_dylib._compile_module_job).
-    """
+
+    `auto_gpu` defaults OFF here, which is `--no-gpu`. This sweep is a
+    syntax/coverage instrument, not a GPU target, and automatic offload costs
+    it real work for output it cannot check: `gen_module`'s synthesis pass
+    recognises parallel loop nests, appends a `@gpu` kernel for each and
+    rewrites the host loop into a call to it, for every one of the 610 modules
+    here. That is the "automaticalization" this step does not want. Explicitly
+    `@gpu`-marked functions are unaffected — `--no-gpu` suppresses INFERENCE,
+    not device codegen for a function that asked for it (module_gen.py's own
+    note). `--gpu` on the command line turns it back on."""
     try:
         src = open(mojo_file).read()
         rel = os.path.relpath(mojo_file, STDLIB_PATH)
@@ -477,6 +493,23 @@ def main():
     unexpected_failed = [(rp, err) for rp, err in failed if str(rp) not in EXPECTED_FAILURES]
     stale_expected = sorted((set(EXPECTED_FAILURES) - {str(rp) for rp, _ in failed})
                              & {str(rp) for rp in passed})
+    # An entry whose FILE NO LONGER EXISTS is the same rot as one that now
+    # passes, and it is worse: a passing entry is at least re-checked by every
+    # run and reported the moment it goes green, whereas a vanished file is
+    # never attempted, so its entry can never be observed doing anything —
+    # it just sits in the dict forever and inflates the "N expected" count
+    # with a red that no longer describes anything real. Two were sitting
+    # there (`test/itertools/test_chain.mojo`, `test/itertools/test_peek.mojo`
+    # — both renamed/moved under `test/iter/`) before this check existed, and
+    # nothing in the summary said so.
+    #
+    # Only decidable on a FULL sweep: `--module`/`--roots` attempt a subset, so
+    # under those every entry outside the subset would look absent. Same
+    # condition as the ROOT_EXCLUDE coverage cross-check above.
+    _gone_expected = []
+    if roots is None and not args.module:
+        _swept = {str(rel) for rel, _ in mojo_files}
+        _gone_expected = sorted(set(EXPECTED_FAILURES) - _swept)
 
     # Print summary
     print("\n" + "="*70)
@@ -518,12 +551,21 @@ def main():
         for rel_path in stale_expected:
             print(f"  {rel_path}")
 
+    if _gone_expected:
+        print("\nGONE EXPECTED_FAILURES entries (the file is no longer in the "
+              "sweep — the entry describes nothing):")
+        for rel_path in _gone_expected:
+            print(f"  {rel_path}")
+        print("      Each was renamed or removed without its entry being "
+              "updated. Fix the path, or drop the entry.")
+
     if passed and len(passed) <= 10:
         print(f"\nPassed files:")
         for rel_path in passed:
             print(f"  {rel_path}")
 
-    sys.exit(0 if not unexpected_failed and not stale_expected else 1)
+    sys.exit(0 if not unexpected_failed and not stale_expected
+             and not _gone_expected else 1)
 
 if __name__ == '__main__':
     main()
