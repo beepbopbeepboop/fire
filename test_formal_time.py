@@ -606,13 +606,19 @@ def _store_want():
 # choice rather than a fact, so they are the standing statement that the
 # capability did not become a way to emit a store at any width: no pointee at
 # all, a pointee whose width this model does not establish (a float, a blob), a
-# struct (there is nothing at the address to store into), an unscaled offset on
-# a wider-than-one-byte pointee (the address and the store would disagree about
-# the element size), and a receiver whose bytes are the image's read-only text.
+# struct (there is nothing at the address to store into), an offset this path
+# cannot establish as an integer (so it will not scale it), an offset it WILL
+# scale by the wrong element's width, and a receiver whose bytes are the image's
+# read-only text.
 #
 # The needles are the model's own sentences, so a needle that stops matching is
 # a message that moved — and both backends are asked for the same one, which is
-# the property that keeps a `strb` and a `movq` from becoming two answers.
+# the property that keeps a `strb` and a `movq` from becoming two answers.  The
+# two offset rows are separate rows because they are separate FACTS about
+# different names, and the message distinguishes them: `unscaled` is missing the
+# offset's declaration and `widthmismatch` is missing a base whose element is as
+# wide as the store.  One needle covering both would pass on whichever sentence
+# came out.
 STORE_REFUSALS = (
     ("nopointee", """\
 def f(p) -> int:
@@ -643,7 +649,14 @@ def f(p: Pointer[Int64], k) -> int:
   var q: Pointer[Int64] = p + k
   q.value() = 1
   return 0
-""", "WITHOUT scaling it by the pointee's"),
+""", "scales only an offset it can establish as an INTEGER by declaration"),
+    ("widthmismatch", """\
+def f(p: Pointer[Int32], k: Int) -> int:
+  var q: Pointer[Int64] = p + k
+  q.value() = 1
+  return 0
+""", "do NOT scale the offset by hand here, because this path already scales "
+       "it by 4"),
     ("readonly", """\
 def f() -> int:
   var p: Pointer[UInt8] = "hello"

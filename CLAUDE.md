@@ -371,7 +371,8 @@ and the reasoning for `expect=` rather than `disabled=` on each.
 |---|---|---|---|
 | `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
 | `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
-| `bootstrap-stage2-dumps` | `expect=` (`SELFHOST_STAGE2_STALL`) | the compiled binary dumping every source | 47 items x 0.5 GB, `tiny` (4 GB) each |
+| `bootstrap-verify` | `expect=` (`SELFHOST_STAGE2_EMPTY_DUMP`) | the three stage trees, byte for byte | 0.6 s, default class; its cost is all in `bootstrap-stage3-transitive` |
+| `bootstrap-validate` | `expect=` (`SELFHOST_STAGE2_EMPTY_DUMP`) | the same comparison in the Mojo driver's vocabulary | 0.6 s, default class |
 | the async/coroutine ones | `expect=`, count checked | compiled-path async/await, coroutine and closure capture | 1.4-15.4 s each, `tiny`; `coroutine` |
 
 `formal-toplevel` and `formal-module-attr` were in this table and are not any
@@ -393,15 +394,33 @@ checks are what keeps it that way — a registration that is in no bucket fails
 the self-test unless it declares `dep=True`, which is `prooflib` and nothing
 else.
 
-The two heavyweight `expect=` entries are the old "the binary segfaults on any
-input" claim, which was **measured false on 2026-09-27 and corrected rather than
-left to rot**: `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 MB
-/ 94.6 M instructions. What is left is the self-hosting bootstrap pre-pass's cost
-(~15-30 GB / ~15-25 s per call, localised in
-`bugs/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0) and, for
-`bootstrap-stage2-dumps`, a silent-wrong-answer `mojo_unsupported_iter` class
-that no exit code reports. Divergences themselves:
-`bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`.
+The `native-dumpfull` `expect=` is the old "the binary segfaults on any input"
+claim, which was **measured false on 2026-09-27 and corrected rather than left
+to rot**: `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 MB
+/ 94.6 M instructions. What is left there is the self-hosting bootstrap
+pre-pass's cost (~15-30 GB / ~15-25 s per call, localised in
+`bugs/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0).
+
+**A marker on this class has moved twice, and both moves are the anti-rot
+discipline rather than bookkeeping** — read this before adding one back.
+`bootstrap-stage2-dumps` carried `SELFHOST_SEGV` ("segfaults on any input"),
+which was measured false on 2026-09-27; it was replaced with
+`SELFHOST_STAGE2_STALL`, on the reasoning that a marker saying "segfault" would
+hide the real class. That marker then went **stale** and the runner reported it
+as a failure, because the class it named (`mojo_unsupported_iter`) is gone — and
+the class underneath it is not: `--dump` on the compiled binary writes a correct
+`.pyi`, an **empty** `.ci` and no `.tok`/`.ast`, and exits 0. That fanout
+**cannot see it**, because `reject=` is a regex over a child's output and a
+child that writes nothing prints nothing, so it passes. The marker therefore
+lives on `bootstrap-verify`/`bootstrap-validate`, which compare the stage trees
+and do see it (87 stage1-vs-stage2 diffs, 0 stage2-vs-stage3 — the binary is a
+fixed point of itself, computing something other than the reference). **So a
+passing `bootstrap-stage2-dumps` is not evidence that the self-hosted binary
+dumps correctly**; it is evidence that the row does not look at what it
+produced. Divergences themselves:
+`bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`; the empty-dump class,
+with its reproduction and its per-artifact shape:
+`bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md`.
 
 **The gate is otherwise clean, and deliberately no file here says how many.**
 Every `expect=` and `disabled=` registration in the registry is accounted for

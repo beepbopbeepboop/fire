@@ -68,6 +68,33 @@ from formal.build import parse_module  # noqa: E402
 # formal entry point sees the value it would really see.
 PROBE_VALUES = (0, 1, 2, 3, 10)
 
+# What a probe may cost, and what the whole CASE may cost.  Two numbers, and the
+# split is the point: the per-value alarm lives in the CHILD, so a body that
+# genuinely does not terminate is bounded without taking the other four values'
+# answers with it, and the case budget is the parent's backstop for a child that
+# never reported at all.
+#
+# MEASURED, because a budget with no measurement is a guess wearing a number:
+# one `fork`+`exec` of CPython that reads a 4-line file and raises costs **26 ms**
+# on an idle 18-core box and **35 ms** under 16-way CPU contention (15 busy
+# loops on top of a load average of ~8).  Per value that is a 10 s alarm against
+# a 35 ms operation — 285x — and the 2026-10-03 gate still reported 7 probes
+# exceeding the 20 s it used to allow, in a run whose average launch had degraded
+# to ~1 s.  So the number that was wrong was not the multiplier but the DECISION
+# it was making: a wall clock was allowed to turn a machine stall into a verdict
+# about the language.  `cpython_oracle` now spends one launch per case and
+# treats a value that does not answer as its own failure.
+#
+# NONE of the 7 bodies the gate named loops.  Checked one at a time, all of them
+# terminate: `q = q + 1`, `q += 1`, `if n: p = 1` / `return p`,
+# `for i in []: t = i` / `return t`, `raise ValueError()` / `return q`,
+# `for i in range(n): t = i` / `sink(t)`, and `with sink(n) as s: p = 1` /
+# `sink(p)`.  Each returns, raises, or iterates a bounded range — the longest
+# loop is `range(n)` over `PROBE_VALUES`, i.e. at most 10 iterations.  So the
+# cases were never the defect; the oracle's budget was.
+PROBE_BUDGET_SECONDS = 10
+PROBE_CASE_TIMEOUT_SECONDS = 120
+
 # (name, function body, expect)
 #
 # `expect` is "refuse" or "ok". Both are asserted against the analysis, and
@@ -1013,35 +1040,112 @@ CASES = [
 ]
 
 
-def cpython_raises(body: str, value: int) -> bool:
-    """Whether CPython raises UnboundLocalError/NameError for this body.
+def _probe_child_source(body: str) -> str:
+    """The child program: the case's body plus a `sink` and a call per value.
 
-    Run in a SUBPROCESS, because the question is what CPython's own compiler
-    says about the function, and a name the analysis believes is a local is
-    not a local here: a module-level binding for it in this harness would make
-    CPython resolve it as a global and the oracle would answer "no" for every
-    case. So the source is exactly the case's body plus a `sink` and a call at
-    the bottom, with nothing else in scope.
+    `sink` is here because half these cases end in `sink(t)` rather than
+    `return t`, and there is nothing ELSE in scope on purpose — see
+    `cpython_oracle`'s docstring for why the scope has to be empty.
 
-    `NameError` counts as well as `UnboundLocalError` because a `global`
-    declaration turns the same defect into a `NameError`, and the case that
-    cares about it says so in its `diverges` note.
+    **Each value runs under its own `SIGALRM`, so a body that does not
+    terminate at one value costs that value and not the case.**  An oracle that
+    loses every answer to one hung probe reports "CPython ran this without
+    UnboundLocalError" for the values it never got to ask about, which is how a
+    20 s stall became an accusation against the analysis.  `SIGALRM` is POSIX,
+    which every platform this suite builds for is; the parent's whole-case
+    timeout is the backstop for anything else.
+    """
+    lines = [
+        "import signal",
+        "",
+        "def sink(x):",
+        "    return x",
+        "",
+        "def probe(n):",
+        body.rstrip("\n"),
+        "",
+        "def _timeout(_signum, _frame):",
+        "    raise TimeoutError",
+        "",
+        "signal.signal(signal.SIGALRM, _timeout)",
+    ]
+    for value in PROBE_VALUES:
+        lines += [
+            "",
+            "try:",
+            "    signal.alarm(%d)" % PROBE_BUDGET_SECONDS,
+            "    probe(%d)" % value,
+            "except (UnboundLocalError, NameError):",
+            "    print('raise %d')" % value,
+            "except TimeoutError:",
+            "    print('hang %d')" % value,
+            "except BaseException:",
+            "    print('other %d')" % value,
+            "finally:",
+            "    signal.alarm(0)",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def cpython_oracle(body: str):
+    """`(raised, hung)` — which `PROBE_VALUES` CPython raises on, and which it
+    never answered.  `(None, None)` when the child itself never reported.
+
+    **One child for the whole case, not one per value.**  The question is "does
+    CPython raise `UnboundLocalError`/`NameError` for this body", and until this
+    change the gate answered it by launching CPython 700 times for 140 cases —
+    five `fork`+`exec` pairs to learn one bit, and each one with its own 20 s
+    wall clock deciding a verdict.  Measured on this tree: **26 ms** per launch
+    on an idle box and **35 ms** under 16-way CPU contention (18-core host), so
+    the budget had ~570x of headroom against the operation it was timing — and
+    the 2026-10-03 gate still reported 7 launches exceeding 20 s in a run whose
+    AVERAGE launch had degraded to ~1 s.  **None of those 7 bodies loops**: each
+    is straight-line or explicitly bounded (the note on `PROBE_BUDGET_SECONDS`
+    lists them), so the budget was reporting a machine stall as an answer about
+    the language.  Five launches became one, the wall clock that decides a
+    verdict moved from per-value to per-case, and a body that genuinely does not
+    terminate is bounded by `SIGALRM` inside the child rather than by killing
+    the child.
+
+    `NameError` counts with `UnboundLocalError` because a `global` declaration
+    turns the same defect into a `NameError`, and the case that cares about it
+    says so in its `diverges` note.  `other` — any other exception the body
+    raises — is deliberately in neither list: this oracle is about the frame's
+    storage, and a case whose body dies of something else is a mistake in the
+    case rather than an answer, so it must not be read as "CPython accepted it".
+
+    The subprocess is not ceremony.  The question is what CPython's own compiler
+    says about the function, and a name the analysis believes is a local is not a
+    local here: a module-level binding for it in this harness would make CPython
+    resolve it as a global and the oracle would answer "no" for every case.  So
+    the source is exactly the case's body plus a `sink` and the calls, with
+    nothing else in scope.
     """
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-        f.write("def sink(x):\n    return x\n\ndef probe(n):\n" + body
-                + f"\nprobe({value})\n")
+        f.write(_probe_child_source(body))
         path = f.name
     try:
-        p = subprocess.run([sys.executable, path], capture_output=True,
-                           text=True, timeout=20)
-    except subprocess.TimeoutExpired:
-        # A case whose body does not terminate is a mistake in the CASE, not
-        # an answer from CPython, and answering "did not raise" for it would
-        # quietly turn a hung oracle into a verdict.
-        raise AssertionError(f"probe({value}) did not terminate under CPython")
+        try:
+            p = subprocess.run([sys.executable, path], capture_output=True,
+                               text=True,
+                               timeout=PROBE_CASE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            # The child died before it could answer — killed, OOM, or a stall
+            # long enough to exhaust the whole-case budget.  Distinct from
+            # `hung`: nothing at all is known, so the caller is told "no answer"
+            # instead of being handed an empty list it would read as "CPython
+            # ran every value cleanly".
+            return None, None
     finally:
         os.unlink(path)
-    return ("UnboundLocalError" in p.stderr or "NameError" in p.stderr)
+    raised, hung = [], []
+    for line in p.stdout.splitlines():
+        kind, _, value = line.partition(" ")
+        if kind == "raise":
+            raised.append(int(value))
+        elif kind == "hang":
+            hung.append(int(value))
+    return raised, hung
 
 
 def the_function(stmts):
@@ -1399,6 +1503,58 @@ def check_own_names() -> list:
     return bad
 
 
+def check_oracle() -> list:
+    """The ORACLE, checked against bodies whose answer is known — including the
+    one that does not answer.
+
+    Every other check in this file asks whether the analysis agrees with
+    CPython, so an oracle that is wrong in a way that makes the analysis look
+    wrong is invisible to all of them: that is the whole of the 2026-10-03
+    failure, where a wall clock reported a machine stall as "CPython ran this
+    without UnboundLocalError" and seven cases were failed for a verdict about
+    the language that no run had asked CPython for.  These four are about the
+    oracle, not the analysis, and the third is the one that matters — a hung
+    value must not take the other four values' answers with it, because that is
+    what turns one silent probe into a false accusation.
+
+    `PROBE_BUDGET_SECONDS` is dropped to 1 for the duration, so the one case
+    that really does loop costs a second here instead of the ten it costs in a
+    gate run.  It is the alarm's resolution that changes (POSIX `alarm` takes
+    whole seconds), not the mechanism.
+    """
+    global PROBE_BUDGET_SECONDS
+    bad = []
+    saved = PROBE_BUDGET_SECONDS
+    PROBE_BUDGET_SECONDS = 1
+    try:
+        raised, hung = cpython_oracle("    q = q + 1\n    return q\n")
+        if raised != list(PROBE_VALUES) or hung:
+            bad.append(f"oracle: `q = q + 1` raised on {raised} and hung on "
+                       f"{hung}, expected every value to raise and none to "
+                       f"hang")
+        raised, hung = cpython_oracle("    q = 1\n    return q\n")
+        if raised or hung:
+            bad.append(f"oracle: `q = 1` raised on {raised} and hung on "
+                       f"{hung}, expected neither")
+        # Raises on every value before the hang, hangs on the last: both channels
+        # in one case, and the point is that `raised` survives the hang.
+        raised, hung = cpython_oracle(
+            "    if n > 5:\n        while True:\n            pass\n"
+            "    return q\n")
+        if raised != [v for v in PROBE_VALUES if v <= 5] or hung != [10]:
+            bad.append(f"oracle: a body that raises then hangs returned "
+                       f"raised={raised} hung={hung}, expected the pre-hang "
+                       f"values to raise and only 10 to hang")
+        raised, hung = cpython_oracle("    while True:\n        pass\n")
+        if raised or hung != list(PROBE_VALUES):
+            bad.append(f"oracle: a body that never terminates returned "
+                       f"raised={raised} hung={hung}, expected every value to "
+                       f"hang and none to raise")
+    finally:
+        PROBE_BUDGET_SECONDS = saved
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -1430,22 +1586,41 @@ def main():
                          if found else "")
                 details.append(f"the analysis says {verdict!r} and the case "
                                f"expects {expect!r}{where}")
-            try:
-                raised = [v for v in PROBE_VALUES if cpython_raises(body, v)]
-            except AssertionError as exc:
-                raised = []
-                details.append(str(exc))
-            if not diverges:
-                if verdict == "refuse" and not raised:
+            raised, hung = cpython_oracle(body)
+            # "CPython did not answer" is a THIRD answer, and it must never be
+            # read as either of the other two.  The old oracle raised on the
+            # timeout, the caller caught it and set `raised = []`, and then
+            # printed BOTH "probe(3) did not terminate under CPython" AND "the
+            # analysis refuses, but CPython ran this without UnboundLocalError
+            # for any of (0, 1, 2, 3, 10)" — the second of which is a claim about
+            # the language made by a run that asked CPython nothing.  So the
+            # derived verdicts below are reached only when there IS an answer.
+            if raised is None:
+                details.append(
+                    f"CPython did not answer for this case at all within "
+                    f"{PROBE_CASE_TIMEOUT_SECONDS}s, so nothing here can say "
+                    f"whether it would raise — the analysis's own verdict "
+                    f"({verdict!r}) is reported on its own")
+            else:
+                if hung:
                     details.append(
-                        "the analysis refuses, but CPython ran this without "
-                        f"UnboundLocalError for any of {PROBE_VALUES} — a "
-                        "refusal the language would not have made")
-                if verdict == "ok" and raised:
-                    details.append(
-                        f"CPython raises UnboundLocalError at probe({raised[0]})"
-                        " and the analysis let it through — the check missed a "
-                        "real defect")
+                        f"probe({'|'.join(str(v) for v in hung)}) did not "
+                        f"terminate under CPython, which is a mistake in the "
+                        f"CASE and not an answer from CPython: the other values "
+                        f"still answered, and this oracle does not read one "
+                        f"value's silence as 'CPython accepted it'")
+                if not diverges:
+                    if verdict == "refuse" and not raised:
+                        details.append(
+                            "the analysis refuses, but CPython ran this without "
+                            f"UnboundLocalError for any of {PROBE_VALUES} — a "
+                            "refusal the language would not have made")
+                    if verdict == "ok" and raised:
+                        details.append(
+                            f"CPython raises UnboundLocalError at "
+                            f"probe({raised[0]})"
+                            " and the analysis let it through — the check "
+                            "missed a real defect")
         if details:
             failed += 1
             print(f"  FAIL  {name}: {'; '.join(details)}")
@@ -1466,6 +1641,9 @@ def main():
     for problem in check_own_names():
         failed += 1
         print(f"  FAIL  own-names: {problem}")
+    for problem in check_oracle():
+        failed += 1
+        print(f"  FAIL  {problem}")
     print(f"read-before-store: PASS={passed} FAIL={failed} "
           f"({len(ENTRY_SHAPES)} graph shapes, "
           f"{len(TRY_ELSE_SHAPES)} try/else graph shapes, "

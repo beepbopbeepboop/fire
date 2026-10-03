@@ -1332,6 +1332,7 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True,
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
+                             'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
      desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
 test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True,
@@ -1595,31 +1596,55 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # and the only two that are cached by content — see ArtifactCache for why they
 # are safe to cache and the stage trees are not.
 #
-# `bootstrap-stage2-dumps` (below) carries `expect=SELFHOST_STAGE2_STALL`.
-# It used to carry the old `SELFHOST_SEGV` marker, and that reason string was
-# MEASURED FALSE on 2026-09-27 and corrected rather than left to rot. The
-# original SIGSEGV is fixed (BLOW.md §0): `./mojoc --dump-full` on a two-line
-# program is now exit 0 / 12.1 MB / 94.6 M instructions, re-measured on this
-# tree. What the stage2 dumps actually do now is NOT a segfault — the marker
-# below names the real blocker, because a marker that says "segfault" would
-# hide the real regression class: a silent-wrong-answer `mojo_unsupported_iter`
-# no-op, which the runner flags per sub-job and which NO exit code reports.
+# HISTORY OF THE MARKER ON THIS CLASS, because it moved twice and both moves are
+# the anti-rot discipline rather than bookkeeping.
 #
-# The marker is still correct to KEEP — the step's 47 sub-jobs do not all
-# produce a byte-identical dump — but its reason now names the true upstream
-# cause, which is the self-hosting bootstrap pre-pass's cost
-# (bugs/CODEGEN_bootstrap_resource_blowup.md, localised 2026-09-27: 58.6 GB
-# / 1.24 T instructions / SIGTRAP on a real self-host input, a never-frees
-# accumulator of ~670M small objects).
-SELFHOST_STAGE2_STALL = (
+# `bootstrap-stage2-dumps` carried `SELFHOST_SEGV` ("the self-hosted binary
+# segfaults on any input, exit 139"). That was MEASURED FALSE on 2026-09-27 and
+# corrected rather than left to rot: the original SIGSEGV is fixed (BLOW.md §0),
+# `./mojoc --dump-full` on a two-line program is exit 0 / 12.1 MB / 94.6 M
+# instructions. It was replaced with `SELFHOST_STAGE2_STALL`, whose point was
+# that a marker saying "segfault" would hide the real class — a
+# `mojo_unsupported_iter` no-op the runner flags per sub-job and no exit code
+# reports.
+#
+# 2026-10-03: that marker was STALE and the runner said so (a marker whose test
+# passes is a FAILURE). Not because the class is fixed — because this fanout
+# cannot see it. `reject=` is a regex over a child's output, the 47 sub-jobs no
+# longer emit `mojo_unsupported_iter`, and `--dump` on the compiled binary now
+# writes an EMPTY `.ci` while exiting 0, which prints nothing for a regex to
+# match. So the marker moved to `bootstrap-verify` and `bootstrap-validate`,
+# which compare the stage trees and therefore DO see it, and the fanout carries
+# a comment saying so instead of a marker that would have to be a lie in one
+# direction or the other. See `SELFHOST_STAGE2_EMPTY_DUMP` below and
+# bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md.
+#
+# RETIRED as a marker 2026-10-03, and NOT because the class is fixed. The
+# marker said the per-item fanout "returns `mojo_unsupported_iter` no-ops or a
+# wrong dump"; measured on that gate, the `mojo_unsupported_iter` half is GONE —
+# which is why `bootstrap-stage2-dumps` passed and the runner correctly reported
+# a marker whose test passes as a FAILURE. The "wrong dump" half is exactly what
+# `bootstrap-verify` reports in the same run (87 stage1-vs-stage2 diffs, most of
+# them a 0-byte `.ci`), so the class did not go away: its DETECTOR in this job
+# went away with it. `reject=` is a regex over a child's OUTPUT and a child that
+# writes nothing prints nothing, so this fanout cannot see an empty artifact
+# however it is spelled.
+#
+# So the marker moves to the two jobs that DO compare what was produced, which
+# is where a reader of the tally will actually see this. The constant is kept,
+# renamed, because its text is still the truest short description of the class
+# in the tree and `bootstrap-verify`/`bootstrap-validate` both cite it.
+SELFHOST_STAGE2_EMPTY_DUMP = (
     'the self-hosted binary no longer segfaults (re-measured 2026-09-27: '
-    'exit 0 on a two-line program, 12.1 MB, 94.6 M instructions) but still '
-    'does not reproduce the reference dumps — sub-jobs return '
-    '`mojo_unsupported_iter` no-ops or a wrong dump, a silent-wrong-answer '
-    'class that no exit code reports. The upstream cause is the '
-    'self-hosting bootstrap pre-pass cost: 58.6 GB / 1.24 T instructions on '
-    'a real self-host input, localised (not fixed) in '
-    'bugs/CODEGEN_bootstrap_resource_blowup.md, 2026-09-27 section')
+    'exit 0 on a two-line program, 12.1 MB, 94.6 M instructions) and no longer '
+    'emits `mojo_unsupported_iter` (re-measured 2026-10-03: the per-item '
+    'fanout rejects none), but `--dump` on the compiled binary writes a correct '
+    '`.pyi`, an EMPTY `.ci` and NO `.tok`/`.ast`, and exits 0 — so '
+    '`bootstrap-stage2-dumps` passes while 87 of its products are not dumps. A '
+    'silent-wrong-answer class no exit code reports; stage2 and stage3 agree '
+    'with each other exactly (0 diffs), so it is the binary computing something '
+    'other than the reference, deterministically. See '
+    'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md')
 # `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
 # BLOW.md §0) but are STILL red for a different, real reason: their corpora
 # legitimately trigger this compiler's self-hosting bootstrap pre-pass
@@ -1868,12 +1893,24 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='tiny',
 # fanout item peak in the table, so the ratchet assigns 0.75 GB. `module` was
 # never close to this workload — it was ~48x it — and what made the number
 # matter was never the ceiling, it was the reservation the class stands for.
+#
+# `expect=` WAS HERE until 2026-10-03 and is deliberately NOT here now. This
+# fanout PASSES and cannot be made to fail by the defect it used to be marked
+# for: `reject` is a regex over a child's OUTPUT (`run_job`), a child that opens
+# a `.ci` and writes nothing into it prints nothing, and the measured shape is
+# exactly that — a correct `.pyi`, a 0-byte `.ci`, no `.tok`/`.ast`, exit 0.
+# Keeping the marker would have meant either a FAILURE every gate ("marked
+# expect= but it PASSES") or dropping a claim that is still true of the
+# capability; the marker is on `bootstrap-verify`/`bootstrap-validate` instead,
+# which compare the trees and can see it. So do not read this row passing as
+# evidence that the self-hosted binary dumps correctly — it is evidence that
+# this row does not look at what it produced.
 fanout('bootstrap-stage2-dumps',
        ['./mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
-       expect=SELFHOST_STAGE2_STALL, items_are_files=True,
+       items_are_files=True,
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
 # stage2/ from a single-module dump, so the closure dump has to go last or
@@ -1899,11 +1936,30 @@ test('bootstrap-stage3-transitive',
      deps=['bootstrap-stage3-dumps'],
      desc='stage3: same binary again (idempotency of the closure)')
 
+# These two are the ONLY jobs that can see the class `SELFHOST_STAGE2_EMPTY_DUMP`
+# names, and they became visible for a structural reason worth recording: they
+# used to SKIP, because `bootstrap-stage2-dumps` failed and a failed dep skips
+# its dependents. Its detector was then removed (the `mojo_unsupported_iter`
+# no-op it rejected for is gone), so the fanout passed, and these two ran for the
+# first time and reported the divergence the whole cluster exists to find.
+#
+# `expect=` and not `disabled=`, and the rule that decides it is cost: neither
+# job is in `MEASURED_PEAK_GB` (both are in the unmeasured list, so they keep
+# the default class) and both took 0.6 s in the 2026-10-03 gate — they are three
+# `os.listdir`s and a byte compare, and all of their cost is in
+# `bootstrap-stage3-transitive`. A known failure that is cheap runs, so that its
+# anti-rot ("marked expect= but it PASSES") is alive on every gate; `disabled=`
+# would buy nothing here and cost the machine a reservation to be told what the
+# doc already says. The markers state NO count on purpose: 87 diffs / 256
+# mismatches is a census of a class that shrinks as it is fixed, and a marker
+# that pinned a number would fire the moment one file was repaired.
 test('bootstrap-verify', [PY, 'tools/bootstrap_verify.py'],
      deps=['bootstrap-stage3-transitive'],
+     expect=SELFHOST_STAGE2_EMPTY_DUMP,
      desc='stage1 == stage2 == stage3 for every generated file')
 test('bootstrap-validate', [PY, 'bootstrap-validate.mojo'],
      deps=['bootstrap-stage3-transitive'],
+     expect=SELFHOST_STAGE2_EMPTY_DUMP,
      desc='bootstrap-validate.mojo over the three stage trees')
 
 # ── formal ───────────────────────────────────────────────────────────────────

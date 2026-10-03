@@ -1897,6 +1897,95 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
           not stray, f'{stray}')
 
 
+def test_no_stale_per_child_budget_is_left_as_a_literal():
+    """A file that adopted the shared per-child budgets must not still spell one.
+
+    `exec_budget.py` exists because a per-child wall clock sized for "much more
+    than a tiny program needs" was firing on a loaded machine, and a timeout
+    inside a test file is reported as an ordinary FAIL — that is, as a compiler
+    bug.  Its docstring names the mechanism that let the defect spread: "a
+    literal is how this defect spread across 29 files in the first place, and a
+    reader has no way to tell a deliberate 5-second budget from a stale one".
+
+    What it does not say is that adopting the constants is only half of it, and
+    the other half is what happened twice.  Naming `RUN_TIMEOUT_S` at the top of
+    a file changes nothing; every CALL SITE has to read it.  On 2026-10-03
+    `gimplegenerators` failed with `7 cases "timed out after 10 seconds" plus one
+    TIMEOUT` and `gimplerunner` with `300 passed, 1 failed, 8 timed out` — every
+    one of them a site that still said `timeout=10`, in files whose own comments
+    claimed the conversion had been done.  So this reads the call sites with
+    `ast` rather than believing a comment, and it fails on the literal.
+
+    It is deliberately scoped to the files that IMPORT `exec_budget`.  That is
+    the set where "literal" is unambiguously wrong — the file has already
+    declared that its budgets are shared — and it is what makes this a check
+    rather than a sweep of every `timeout=NN` in the repo, which is a different
+    piece of work over 40 other files.  The census of that residue is in
+    `bugs/TEST_stale_per_child_timeout_literals.md`; extending this check to
+    cover a file that has NOT opted in is the step that doc describes, and it is
+    deliberately not taken here because the mapping from "this child" to "which
+    budget" is a per-file judgement.
+
+    Three checks, because each alone is satisfiable without meaning anything:
+    the walk found some importers, each importer really uses a shared constant,
+    and none of them still has a literal.
+    """
+    import ast
+    importers, literals, unused = [], [], []
+    for rel in _test_files_in_repo():
+        path = os.path.join(HERE, rel)
+        try:
+            with open(path, 'r', errors='replace') as f:
+                src = f.read()
+            tree = ast.parse(src, filename=rel)
+        except (OSError, SyntaxError):
+            continue
+        shared = []
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom):
+                if n.module == 'exec_budget':
+                    shared.append(n)
+            elif isinstance(n, ast.Import):
+                if any(a.name == 'exec_budget' for a in n.names):
+                    shared.append(n)
+        if not shared:
+            continue
+        importers.append(rel)
+        # `timeout=` as a KEYWORD, which is how every call site spells it. The
+        # value has to be read off the tree rather than the text so a number in
+        # a comment or a docstring is not mistaken for a budget.
+        values = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if kw.arg == 'timeout':
+                    values.append((node.lineno, kw.value))
+        for lineno, value in values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, int):
+                literals.append(f'{rel}:{lineno} timeout={value.value}')
+        # An import that binds a name nothing reads is the same class of
+        # mistake: the file LOOKS converted and behaves as if it had not been.
+        bound = {a.asname or a.name
+                 for n in shared for a in n.names if hasattr(a, 'asname')}
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        if not (bound & used):
+            unused.append(rel)
+
+    check('budgets: the walk found the files that adopted exec_budget',
+          len(importers) >= 3, f'found {importers}')
+    check('budgets: every one of them reads a shared constant it imported',
+          not unused,
+          'imported but never used, so the file reads as converted and is not: '
+          + ', '.join(sorted(unused)))
+    check('budgets: no adopted file still spells a per-child timeout as a '
+          'literal', not literals,
+          f'{len(literals)} site(s): ' + ', '.join(sorted(literals)[:12]))
+    print(f'      budgets: {len(importers)} files on the shared constants, '
+          f'{len(literals)} stale literal(s)')
+
+
 def test_missing_fanout_item_is_a_named_failure():
     """A missing item file is a FAIL naming that item — not a skipped chain.
 
@@ -3930,6 +4019,7 @@ def main():
                test_exclusive_is_alone, test_fanout_aggregates,
                test_fanout_enumeration_ignores_untracked_scratch,
                test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root,
+               test_no_stale_per_child_budget_is_left_as_a_literal,
                test_missing_fanout_item_is_a_named_failure,
                test_timeout_is_a_failure_not_a_vanished_job,
                test_tally_accounts_for_every_test,
