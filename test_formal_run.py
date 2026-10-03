@@ -9422,6 +9422,364 @@ X86_ONLY_1SLOT_BUG_CASE = (
    1, None)
 
 
+# ── SLICES, CONCATENATION and the length of a slice ─────────────────────────
+#
+# Four defects, four architectures' worth of wrong answers, and every one of
+# them was a number rather than a crash — which is why they are here as
+# CPython PAIRS and not as expected constants: a hand-written constant is an
+# assertion about the lowering made by the person who wrote the lowering, and
+# `sum(xs[1:3]) == 5` written by the person who just made it answer 5 is worth
+# nothing. CPython answers each one at test time.
+#
+# ONE slice (or one `+`) per program, and that is not tidiness: x86-64's slice
+# emitter cannot lower a SECOND slice in the same function — it reads a
+# pointer that is not one — so a table with two per program would be a table of
+# failures about that instead of about these. The reproducer and what is known
+# about the cause are `bugs/FORMAL_x86_64_a_second_slice_in_a_function.md`.
+#
+# What each case pins, and what it was before:
+#
+#   * `_emit_slice_parts` armed the loop's exit test the wrong way round. The
+#     clamp step then RAISED every in-range bound to the element count
+#     (`cmp x9, x4; cset hi` asks "count > bound?" and stored the count), so
+#     `xs[1:3]` became `xs[6:6]`: every forward slice was an empty list that
+#     `len` and every consumer agreed was empty, and the descending cases were
+#     right by coincidence. arm64 exited 1 with nothing printed; see the two
+#     rows below for the two halves.
+#   * The descending direction walked from `stop - 1` and stopped at `i >= 0`,
+#     consulting no bound the source wrote: `xs[5:0:-1]` copied nothing.
+#   * `xs[::-1]` and `xs[:2:-1]` need the DESCENDING defaults (`count - 1` and
+#     `-1`), which are different words from the ascending ones (0 and `count`).
+#     Reading them as the ascending pair is what made `xs[:2:-1]` answer
+#     `[2]` instead of `[6, 5, 4]`.
+#   * `list + list` wrote the right COUNT and copied no elements: both copy
+#     loops left on their first iteration, and the right one addressed
+#     `nL` BYTES further on rather than `nL` ELEMENTS. So `len` was right and
+#     `sum` was 0, which is the shape of a bug that looks like a typing one.
+#   * `a + b` on two NAMES was not recognised as a concatenation at all on
+#     arm64 and lowered to pointer arithmetic — the sum of two addresses.
+#   * `len` of a slice was refused on BOTH backends, because nothing classified
+#     a slice as a blob.
+
+# (name, mojo expression, CPython expression) — the same slice spelled twice.
+_SLICE_TABLE = [
+    ("slice_forward_bounds", "xs[1:3]"),
+    ("slice_forward_tail", "xs[2:6]"),
+    ("slice_step_two", "xs[0:6:2]"),
+    ("slice_step_three", "xs[0:6:3]"),
+    ("slice_step_beyond_end", "xs[0:5:3]"),
+    ("slice_open_start", "xs[1:]"),
+    ("slice_open_stop", "xs[:3]"),
+    ("slice_both_open", "xs[:]"),
+    ("slice_negative_start", "xs[-2:]"),
+    ("slice_negative_stop", "xs[:-2]"),
+    ("slice_empty_range", "xs[3:3]"),
+    ("slice_inverted_range", "xs[5:2]"),
+    ("slice_one_element", "xs[0:1]"),
+    ("slice_start_past_end", "xs[100:200]"),
+    ("slice_far_negative_start", "xs[-99:]"),
+    ("slice_both_negative", "xs[-99:-97]"),
+    ("slice_stop_past_end", "xs[1:99]"),
+    ("slice_reversed_empty", "xs[0:6:-1]"),
+    ("slice_reversed_bounds", "xs[5:0:-1]"),
+    ("slice_reversed_all", "xs[::-1]"),
+    ("slice_reversed_open_stop", "xs[:2:-1]"),
+    ("slice_reversed_open_start", "xs[5::-1]"),
+    ("slice_reversed_step_two", "xs[5:0:-2]"),
+    ("slice_last_element", "xs[-1:]"),
+    ("slice_reversed_inner", "xs[4:1:-1]"),
+]
+
+
+def _sum_slice_pair(name, expr):
+    """One slice, summed, with CPython as the oracle for the same text.
+
+    The two sides differ in their WRAPPER and nowhere else: Mojo's entry point
+    is `def main() -> Int:` and the runner appends the call, while CPython's is a
+    `def main():` the same runner calls. Keeping the bodies textually identical
+    is the point — a case whose expected value is a number written by the same
+    hand as the lowering is worth nothing, and the whole reason this group is
+    pairs rather than constants.
+    """
+    body = ("    xs = [1, 2, 3, 4, 5, 6]\n"
+            "    s = 0\n"
+            f"    for v in {expr}:\n"
+            "        s += v\n"
+            "    print(\"sum=%d\" % s)\n")
+    return (
+        name,
+        "def main() -> Int:\n"
+        "    var xs = [1, 2, 3, 4, 5, 6]\n"
+        "    var s = 0\n"
+        f"    for v in {expr}:\n"
+        "        s += v\n"
+        "    printf(\"sum=%d\\n\", s)\n"
+        "    return 0\n",
+        "def main():\n" + body)
+
+
+SLICE_CASES = [_sum_slice_pair(n, e) for n, e in _SLICE_TABLE]
+
+
+# The BOUND half of the same construct: the result assigned to a name, then
+# read three ways. `len` of it is the case that was refused on both backends,
+# and a `for` over it is the case that read as empty, so one program covers
+# both and neither can pass alone.
+SLICE_BOUND_CASES = [
+    # The BOUND half of the same construct: the result assigned to a name, then
+    # read three ways. `len` of it is the case that was REFUSED on both
+    # backends, and the `for` is the case that read as empty, so one program
+    # covers both and neither can pass alone.
+    ("slice_bound_sum_and_len",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3, 4, 5, 6]\n"
+     "    var ys = xs[1:3]\n"
+     "    var s = 0\n"
+     "    for v in ys:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d e0=%d\\n\", s, len(ys), ys[0])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2, 3, 4, 5, 6]\n"
+     "    ys = xs[1:3]\n"
+     "    s = 0\n"
+     "    for v in ys:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d e0=%d\" % (s, len(ys), ys[0]))\n"),
+    # `len` of the slice EXPRESSION, which has no name to classify: the answer
+    # is the count word of a blob the expression materialises, and nothing in
+    # the model said a slice was a blob. THREE cases rather than one program
+    # with three `len`s in it, because each is a different SHAPE of the same
+    # question — a bounded slice, the whole list, an EMPTY one — and the empty
+    # one is the one a "non-zero means present" shortcut gets wrong. They cannot
+    # share a program for the reason the head of this group gives.
+    ("slice_len_of_a_bounded_expression",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3, 4, 5, 6]\n"
+     "    printf(\"len=%d\\n\", len(xs[1:3]))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2, 3, 4, 5, 6]\n"
+     "    print(\"len=%d\" % len(xs[1:3]))\n"),
+    ("slice_len_of_the_whole_list",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3, 4, 5, 6]\n"
+     "    printf(\"len=%d\\n\", len(xs[:]))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2, 3, 4, 5, 6]\n"
+     "    print(\"len=%d\" % len(xs[:]))\n"),
+    ("slice_len_of_an_empty_slice",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3, 4, 5, 6]\n"
+     "    printf(\"len=%d\\n\", len(xs[3:3]))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2, 3, 4, 5, 6]\n"
+     "    print(\"len=%d\" % len(xs[3:3]))\n"),
+    # A bound slice read back through a SUBSCRIPT, which is the read that
+    # exited 1 at the bounds check before: the blob was full and its count word
+    # read 0, so every element was out of range.
+    ("slice_bound_subscript_read",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3, 4, 5, 6]\n"
+     "    var ys = xs[2:5]\n"
+     "    printf(\"%d %d %d\\n\", ys[0], ys[1], ys[2])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2, 3, 4, 5, 6]\n"
+     "    ys = xs[2:5]\n"
+     "    print(\"%d %d %d\" % (ys[0], ys[1], ys[2]))\n"),
+]
+
+
+# Concatenation. Five shapes, one `+` each: a literal and a name, a result read
+# by subscript, two NAMES, a name and a slice, and an alias — the last three all
+# need a NAME classified as a blob, which is the evidence arm64 did not have.
+CONCAT_CASES = [
+    # `xs = xs + [3]`: one side is a literal, so the operator WAS recognised —
+    # and the count was written while both copy loops left on their first
+    # iteration, so `len` was 3 and every element read 0.
+    ("concat_rebinds_a_local",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2]\n"
+     "    xs = xs + [3]\n"
+     "    var s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d\\n\", s, len(xs))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2]\n"
+     "    xs = xs + [3]\n"
+     "    s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d\" % (s, len(xs)))\n"),
+    # The result read by SUBSCRIPT rather than by iteration, which is what
+    # caught the second half of the copy: the right operand's first element was
+    # addressed `nL` BYTES further on rather than `nL` ELEMENTS, six bytes into
+    # the left's last element.
+    ("concat_read_by_subscript",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    var zs = xs + [4, 5]\n"
+     "    printf(\"%d %d %d %d\\n\", zs[0], zs[2], zs[3], zs[4])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2, 3]\n"
+     "    zs = xs + [4, 5]\n"
+     "    print(\"%d %d %d %d\" % (zs[0], zs[2], zs[3], zs[4]))\n"),
+    # TWO NAMES, and nothing else: no literal anywhere, so the operator had no
+    # evidence it was a concatenation and lowered to `add` on the two blob
+    # addresses. The program built, ran, exited 0 and printed a word of whatever
+    # was mapped at the sum of two addresses.
+    ("concat_of_two_names",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    var ys = [4, 5]\n"
+     "    var zs = xs + ys\n"
+     "    var s = 0\n"
+     "    for v in zs:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d\\n\", s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2, 3]\n"
+     "    ys = [4, 5]\n"
+     "    zs = xs + ys\n"
+     "    s = 0\n"
+     "    for v in zs:\n"
+     "        s += v\n"
+     "    print(\"sum=%d\" % s)\n"),
+    # A NAME and a SLICE: both halves have to be classified as blobs, and the
+    # slice half is the one nothing classified before this change.
+    ("concat_of_a_name_and_a_slice",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3, 4, 5, 6]\n"
+     "    var ys = xs[1:3]\n"
+     "    var zs = ys + [9]\n"
+     "    var s = 0\n"
+     "    for v in zs:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d\\n\", s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2, 3, 4, 5, 6]\n"
+     "    ys = xs[1:3]\n"
+     "    zs = ys + [9]\n"
+     "    s = 0\n"
+     "    for v in zs:\n"
+     "        s += v\n"
+     "    print(\"sum=%d\" % s)\n"),
+    # An ALIAS: `ys = xs` keeps the mark. That is the flow half of the same
+    # table, and the case that catches a table built from DECLARATIONS instead
+    # of from bindings — which would have the alias by accident and this one
+    # only by construction.
+    ("concat_through_an_alias",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2]\n"
+     "    var ys = xs\n"
+     "    ys = ys + [3]\n"
+     "    var s = 0\n"
+     "    for v in ys:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d\\n\", s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2]\n"
+     "    ys = xs\n"
+     "    ys = ys + [3]\n"
+     "    s = 0\n"
+     "    for v in ys:\n"
+     "        s += v\n"
+     "    print(\"sum=%d\" % s)\n"),
+]
+
+
+# `|` on two containers is a SET UNION (`{1,2} | {2,3}` in CPython — a LIST
+# pair is a TypeError there, so the operands below are set literals), and the
+# two backends now DISAGREE
+# HONESTLY about it: arm64 lowers it (`_emit_set_union`, whose left-copy loop was
+# leaving on its first iteration for the same reason concat's did, so
+# `[1,2] | [2,3]` summed to 5), and x86-64 has no union emitter and used to
+# lower it as a plain concatenation — which builds, runs, exits 0 and answers
+# `[1, 2, 2, 3]` for a set, 8 where CPython says 6. That is a wrong answer, so
+# x86-64 now refuses and names the reason.
+#
+# It cannot be one of the four-column cases: those require BOTH backends to
+# refuse (`refuse_either:`) or both to answer, and this construct is the one
+# place where "one answers and one says it cannot" is the correct end state.
+# Hence its own runner, which asserts exactly that — and which fails if either
+# side changes, because the failure it is watching for is the silent one.
+SET_UNION_CASES = [
+    ("set_union_is_a_set_on_arm64_and_refused_on_x86_64",
+     "def main() -> Int:\n"
+     "    var a = {1, 2}\n"
+     "    var b = {2, 3}\n"
+     "    var s = 0\n"
+     "    for v in a | b:\n"
+     "        s += v\n"
+     "    printf(\"%d\\n\", s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    a = {1, 2}\n"
+     "    b = {2, 3}\n"
+     "    s = 0\n"
+     "    for v in a | b:\n"
+     "        s += v\n"
+     "    print(\"%d\" % s)\n"),
+]
+
+
+def run_set_union_case(name, source, cpython_source, tmpdir, verbose):
+    """arm64 must ANSWER CPython; x86-64 must REFUSE, naming the union.
+
+    Both halves are load-bearing and they fail differently. If x86-64 builds
+    this again, it is answering with a concatenation and the case says so
+    instead of a reader discovering `[1, 2, 2, 3]` where a set belongs. If
+    arm64 refuses, the construct has been lost on the backend that can lower it
+    — which is the over-refusal this project treats as a regression just as
+    much as a wrong answer.
+    """
+    py = os.path.join(tmpdir, name + ".py")
+    with open(py, "w") as f:
+        f.write(cpython_source + "\nmain()\n")
+    ref = subprocess.run([sys.executable, py], capture_output=True, text=True,
+                         timeout=RUN_TIMEOUT)
+    if ref.returncode != 0:
+        return False, (f"the CPython reference itself failed (exit "
+                       f"{ref.returncode}): {ref.stderr.strip()[-200:]}")
+    want = ref.stdout
+    with open(os.path.join(tmpdir, name + ".mojo"), "w") as f:
+        f.write(source)
+    out = os.path.join(tmpdir, f"{name}.arm64")
+    rc, text = build_formal(os.path.join(tmpdir, name + ".mojo"), out,
+                            backend="arm64")
+    if rc != 0:
+        return False, (f"arm64 REFUSED a set union it lowers: "
+                       f"{text.strip()[-300:]}")
+    run = subprocess.run([out], capture_output=True, text=True,
+                         timeout=RUN_TIMEOUT)
+    if run.stdout != want:
+        return False, (f"arm64 answered {run.stdout.strip()!r}, CPython "
+                       f"{want.strip()!r}")
+    out = os.path.join(tmpdir, f"{name}.x86_64")
+    rc, text = build_formal(os.path.join(tmpdir, name + ".mojo"), out,
+                            backend="x86_64")
+    if rc == 0:
+        return False, ("x86_64 BUILT `a | b`, which it lowers as a "
+                       "concatenation — that is the wrong answer this case "
+                       "exists for, and it is silent")
+    if "SET UNION" not in text:
+        return False, (f"x86-64 refused, but not by naming the union: "
+                       f"{text.strip()[-200:]}")
+    if verbose:
+        print(f"      arm64 answered {want.strip()!r}; x86-64 refused by name")
+    return True, ""
+
+
+
 # ── WHERE A NAME LIVES: module scope, and how a call's arguments bind ──────
 #
 # `G = 5` at module level, read from a function, returned **20 on arm64 and 0
@@ -13295,16 +13653,23 @@ def main():
     # in would mean a sentinel in the exit-status column and a branch that reads
     # a sentinel as if it were a status — which is how a case ends up asserting
     # nothing.
+    set_union_names = {c[0] for c in SET_UNION_CASES}
     pair_names = ({c[0] for c in TYPE_APPLICATION_CASES}
                   | {c[0] for c in COMPTIME_ALIAS_PAIR_CASES}
                   | {c[0] for c in COMPTIME_ATTRIBUTE_CASES}
                   | {c[0] for c in OVERLOAD_LAYOUT_CASES}
-                  | {c[0] for c in ONE_FIELD_MUTATOR_CASES})
+                  | {c[0] for c in ONE_FIELD_MUTATOR_CASES}
+                  | {c[0] for c in SLICE_CASES}
+                  | {c[0] for c in SLICE_BOUND_CASES}
+                  | {c[0] for c in CONCAT_CASES}
+                  | {c[0] for c in SET_UNION_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + COMPTIME_ALIAS_PAIR_CASES
                      + OVERLOAD_LAYOUT_CASES
                      + COMPTIME_ATTRIBUTE_CASES
                      + ONE_FIELD_MUTATOR_CASES
+                     + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
+                     + SET_UNION_CASES
                      if not args.cases or c[0] in args.cases])
     # `BOTH_ARCH_CASES` is the four-column shape, so it rides `selected` and the
     # ordinary `run_case` dispatch; what makes it different is the RUNNER, and
@@ -13346,8 +13711,12 @@ def main():
             with open(src, "w") as f:
                 f.write(source)
             try:
-                ok, detail = run_cpython_pair_case(
-                    name, source, cpython_source, tmpdir, args.verbose)
+                if name in set_union_names:
+                    ok, detail = run_set_union_case(
+                        name, source, cpython_source, tmpdir, args.verbose)
+                else:
+                    ok, detail = run_cpython_pair_case(
+                        name, source, cpython_source, tmpdir, args.verbose)
             except subprocess.TimeoutExpired:
                 ok, detail = False, "timed out"
             except Exception as e:  # unexpected: report, do not mask
@@ -13357,7 +13726,10 @@ def main():
                     traceback.print_exc()
             if ok:
                 passed += 1
-                print(f"  PASS  {name} (== CPython, both architectures)")
+                print(f"  PASS  {name} ("
+                      + ("arm64 == CPython, x86-64 refused by name"
+                         if name in set_union_names
+                         else "== CPython, both architectures") + ")")
             else:
                 failed += 1
                 print(f"  FAIL  {name}: {detail}")

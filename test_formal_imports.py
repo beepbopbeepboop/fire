@@ -891,6 +891,95 @@ def test_mojo_source_beats_host_module(tmpdir, _shared):
           f"{err}")
 
 
+# The NEXT STEP, for the host modules where measurement has already answered it.
+#
+# A refusal that names the module and stops is the shape this table exists to
+# end. The measurement behind it: every file that stops on one of these names
+# stops on the MODULE and never reaches the call, so the message is all the
+# reader has — five files in this repository stop on `collections`, and the one
+# next step for them ("the record you want is spelled at compile time, so
+# declare a `struct`") is not discoverable from the message that refused them.
+
+def test_a_host_module_refusal_carries_its_measured_next_step(tmpdir, _shared):
+    """`import collections` is refused, and the refusal says what to write.
+
+    Three things are pinned, and each is a way this could be a decoration: the
+    refusal still happens (a table that made the module resolvable would turn
+    this green for the wrong reason); the advice NAMES both the thing wanted and
+    the spelling that works (`namedtuple` and `struct`); and the message is one
+    sentence appended to the existing wording, so a classifier matching on
+    `unresolvable_import_error`'s own `kind` text is unaffected."""
+    import formal.imports as I
+    root = os.path.join(tmpdir, "collections")
+    os.makedirs(root)
+    write_tree(root, {
+        "prog.mojo": ("import collections\n"
+                      "def main(n):\n"
+                      "  return n\n"),
+    })
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"),
+                       os.path.join(root, "prog.mojo")], cwd=root)
+    text = result.stderr + result.stdout
+    check(result.returncode != 0,
+          "a program importing `collections` BUILT — the advice table is not "
+          "allowed to make a host module resolvable, only to explain it")
+    check("host module" in text,
+          f"the refusal must still name the real reason: {text[-300:]}")
+    check("namedtuple" in text,
+          f"the refusal must name the name the file wants, or the reader has "
+          f"to find it themselves: {text[-300:]}")
+    check("struct" in text,
+          f"the refusal must name the spelling that WORKS on this target — a "
+          f"record is a `struct` — or it names a want and not an answer: "
+          f"{text[-300:]}")
+    # The base wording is preserved verbatim as the prefix, which is what makes
+    # the append safe for `formal_sweep.py`'s message families.
+    base = I.unresolvable_import_error("prog.mojo", "collections")
+    check(base.startswith("prog.mojo imports 'collections', which is a host "
+                          "module (CPython standard library), which has no Mojo "
+                          "source for this backend to compile"),
+          f"the generated wording changed shape, so anything matching on it "
+          f"moves: {base!r}")
+
+
+def test_host_module_advice_is_honest(tmpdir, _shared):
+    """Every advice entry is a CLAIM the module still has no source.
+
+    An entry left behind after someone writes `formal/hostmods/collections.mojo`
+    would be advice to reimplement a module that is sitting in the tree, which
+    is worse than no advice at all — and nothing else would notice, because the
+    entry is only read on a path the new module makes unreachable. So the claim
+    is checked here, against the tree, rather than trusted.
+
+    The other direction is checked in the same loop: an entry whose advice does
+    not name the thing the module is wanted FOR is a generic sentence, and a
+    generic sentence in a generated message is noise."""
+    import formal.imports as I
+    for name, advice in I.HOST_MODULE_ADVICE.items():
+        src = I.resolve_module_path(name, relative_to=os.path.join(HERE, "x"),
+                                    project_root=HERE)
+        check(src is None,
+              f"HOST_MODULE_ADVICE has an entry for {name!r} but it now "
+              f"resolves to {src!r} — a module source exists, so the advice is "
+              f"telling a reader to write what is already in the tree")
+        check(len(advice) > 40,
+              f"the advice for {name!r} is too short to be a next step: "
+              f"{advice!r}")
+    check("collections" in I.HOST_MODULE_ADVICE,
+          "the `collections` advice was deleted; the five files that stop there "
+          "are back to a message that names the module and nothing else")
+    # A dotted name asks for the same answer, which is the rule that makes a
+    # per-spelling table wrong by omission.
+    check(I.host_module_advice("collections.abc") ==
+          I.host_module_advice("collections"),
+          "a dotted host module did not get its package's advice")
+    check(I.host_module_advice("re") == "",
+          "`re` has no advice — it is answered by `formal/hostmods/re.mojo`, and "
+          "an entry there would be advice to reimplement a module that exists")
+
+
 
 # A struct-only module, and a program that uses it across the import boundary.
 # Both halves matter: the module must be buildable at all (its API is methods,
@@ -2233,6 +2322,10 @@ TESTS = [
      test_reexported_type_reaches_the_importer),
     ("a local Mojo module beats the host-module list",
      test_mojo_source_beats_host_module),
+    ("a host-module refusal carries its measured next step",
+     test_a_host_module_refusal_carries_its_measured_next_step),
+    ("every host-module advice entry is honest",
+     test_host_module_advice_is_honest),
     ("a module exporting only a generic template is refused",
      test_a_module_with_no_boundary_symbol_is_refused),
     ("a generic template is not exported under its base name",

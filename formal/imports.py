@@ -364,7 +364,37 @@ HOST_MODELLED = frozenset((
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
     "random", "decimal", "fractions",
-    "numbers", "array", "operator", "functools", "itertools", "collections",
+    "numbers", "array", "operator", "functools", "itertools",
+    #   `collections`  — NO `formal/hostmods/` module, and the entry says why in
+    #     the form a reader acts on: `HOST_MODULE_ADVICE` below is what the
+    #     REFUSAL prints, which is where a person moving one of the five files
+    #     that stop here will actually be. CPython's `collections` is one
+    #     module-level function and eight classes, and the measurement is that
+    #     neither half is a module.
+    #
+    #     `namedtuple` is a TYPE FACTORY, and a type is not a value on this
+    #     path: there is no word that denotes one, so a class it builds cannot
+    #     be returned from a module function or bound to a module-level name.
+    #     The want behind the five call sites is not that though — measured, five
+    #     of the six uses spell a compile-time-KNOWN record, which this target
+    #     can express, as a `struct`. The capability and the measurement are
+    #     `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`,
+    #     which also owns `copy.deepcopy` because the two are one missing thing.
+    #
+    #     The eight classes are containers, and the `os.listdir` BLOB route
+    #     serves exactly one of their operations and no more: a caller CAN
+    #     subscript-assign into a blob a hostmod returned (measured — a
+    #     `malloc`'d `Int64` array, `counts[2] = 5`, `counts[2]` answers 5), so
+    #     `counts[opcode] += 1` works. It is not `Counter`, for three measured
+    #     reasons: word 0 of a blob is its LENGTH, so a key of 0 reads the
+    #     count instead of counting; a `Counter` inserts on a miss with a
+    #     default while a blob has no dispatch, so the caller must pre-size and
+    #     pre-test and the source spells neither; and `most_common`/`items`/
+    #     `keys`/iteration/`+=`/`|` are method calls and operators on a value,
+    #     which needs a type this image can see. Shipping the blob under the
+    #     name `Counter` is the approximation
+    #     `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md` declined to ship.
+    "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
@@ -1400,6 +1430,54 @@ def resolve_module_path(module_name: str, relative_to: str = None,
     return None
 
 
+# What to DO about a host module, for the names where measurement has already
+# answered it.  Published here rather than written into the message at each site
+# because the message is generated: one wording for one cause is what keeps a
+# cause from being filed under two headings, and the advice has to travel with
+# the SAME generated string or it will be true of the one call site somebody
+# edited.
+#
+# It is a table and not a comment because a comment is read by the next person
+# editing `formal/` and a refusal is read by the person whose file does not
+# build.  `HOST_MODELLED`'s entries are the former; this is the latter, and it
+# exists because the gap it fills is measured: every file that stops on one of
+# these names stops on the module, never reaching the call, so a message that
+# only names the module leaves the reader with nothing to act on and the fix is
+# a bug doc one reader has to find.
+#
+# A name LEAVES by being WRITTEN, the same rule `HOST_MODELLED` follows: the
+# advice must name what the file CAN do, never what it cannot, and an entry left
+# behind after a module exists would be the advice to reimplement it.  So an
+# entry here is a CLAIM that the module still has no source, and
+# `host_module_advice_is_honest` is the check that says so.
+HOST_MODULE_ADVICE = {
+    "collections":
+        "its only module-level name is `namedtuple`, which builds a TYPE at run "
+        "time, and a type is not a value on this path — but the record these "
+        "call sites want is spelled at compile time, so declare a `struct` "
+        "instead of a namedtuple",
+}
+
+# `collections` is the only entry, and one entry is the right size for a
+# mechanism that must not become a dumping ground: an entry is worth a row only
+# when the answer is MEASURED and the alternative is a spelling the reader can
+# write today.  `math`, `argparse` and `contextlib` are the other candidates and
+# none qualifies yet — their files answer, so the reader is not stuck.
+
+
+def host_module_advice(name: str) -> str:
+    """The `name`'s next step, or `''` when there is no measured one.
+
+    `name` is matched on its TOP component, like `_is_host_module` and
+    `host_module_tier`, so an advice written for a package names every module
+    under it — which is what a reader of `collections.abc` wants and what a
+    per-spelling table would get wrong by omission."""
+    if not name:
+        return ""
+    return HOST_MODULE_ADVICE.get(name) \
+        or HOST_MODULE_ADVICE.get(name.split(".")[0], "")
+
+
 def unresolvable_import_error(source_path: str, module_name: str) -> str:
     """The one wording for "this import names nothing this backend can build".
 
@@ -1427,8 +1505,16 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
                 "source for this backend to compile")
     else:
         kind = "not a stdlib or sibling module, and no such file exists"
-    return (f"{os.path.basename(source_path)} imports {module_name!r}, which "
-            f"is {kind}")
+    advice = host_module_advice(module_name) if _is_host_module(module_name) \
+        else ""
+    out = (f"{os.path.basename(source_path)} imports {module_name!r}, which "
+           f"is {kind}")
+    # The next step, when there is a measured one, as its own sentence.  It is
+    # appended rather than folded into `kind` so that `kind` stays the three
+    # reasons the resolver can produce and a caller matching on it — a
+    # classifier, the sweep's `_FRAME_ESCAPES` family, a test — keeps seeing
+    # the one string it was written against.
+    return f"{out}; {advice}" if advice else out
 
 
 def imported_struct_defs(source_path: str, stmts: list,
