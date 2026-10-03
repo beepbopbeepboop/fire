@@ -1,11 +1,12 @@
-# FORMAL_test_corpora_carry_the_unescaped_literal_rule: nine green test files explain their corpus with a limitation that was removed
+# FORMAL_test_corpora_carry_the_unescaped_literal_rule: eight green test files explain their corpus with a limitation that was removed
 
 **Status: OPEN, and deliberately LOW priority — nothing here is red and nothing
 here is wrong except the sentence that explains the corpus.** Filed while
 closing `bugs/FORMAL_sys_mojos_escape_note_is_stale.md`, whose remaining item was
 this consequence-check.
 
-**Class:** documentation. **Effect:** a maintainer reading any of these comments
+**Class:** documentation. One of the nine sites is already fixed (the last row of
+the table, done in the same commit that filed this). **Effect:** a maintainer reading any of these comments
 concludes a formal image cannot hold a real newline in a string literal, which
 has been false since `9023031b`, and either refuses to simplify the corpus or
 writes new code around a limitation that does not exist.
@@ -49,7 +50,7 @@ worth having while the limitation was live, and they are still right now. So:
   records must not have to know whether the image decoded the literal", which is
   true forever, instead of naming a decoder that has since changed.
 * **changing the corpus to real escapes is a separate, optional decision**, and
-  it has a real cost: nine suites that are green would each have to be re-run on
+  it has a real cost: eight suites that are green would each have to be re-run on
   both architectures.
 * what a rewrite would BUY is that the corpora would exercise the decoder
   through the same path a reader's program does. That is a genuine gain and it
