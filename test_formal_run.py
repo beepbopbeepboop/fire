@@ -4974,6 +4974,61 @@ DECLARED_TYPE_REFUSALS = [
      "    var p = P()\n"
      "    return p.go()\n",
      "refuse:is a method call on a value", None),
+
+    # ── THE ONE CLAUSE OF THE AMBIGUOUS-NAME LIFT THAT IS NOT OPTIONAL ───────
+    #
+    # `BOTH_ARCH_CASES`'s `both_arch_ambiguous_method_name_settled_by_the_receiver`
+    # lifts `o.get()` because `o`'s agreed binding names a struct of this unit
+    # that DECLARES `get`. That condition is right, and it has exactly one
+    # exception: a struct that DERIVES from the binding's struct and declares
+    # the same member too. `b` is bound to `Base`, and `Base_emit` is compiled
+    # against `Base`'s two-field layout, so a value of `Derived` read through it
+    # is the BASE's view of a child — which builds, runs, and prints digits no
+    # source wrote. Python dispatches on the value; this path can only see the
+    # DECLARATION, which names the base.
+    #
+    # So this row is a REFUSAL and not a demonstration, and the reason is worth
+    # stating rather than leaving to be found: this path cannot construct the
+    # `Derived` value that would make the lift visibly wrong, so there is no
+    # program whose ANSWER the lift gets wrong for a case to compare against
+    # CPython. What the row pins is the refusal, which is the only end state
+    # reachable from here that is not a lie — and `BOTH_ARCH_CASES` is the wrong
+    # list for it for the same reason, since that runner requires a build.
+    #
+    # MEASURED, so this is not a row asserting a guard that is not there: with
+    # `formal/build.py`'s `_derived_overrides` clause deleted from the bare-
+    # receiver arm of `_lift_one_word_field_method`, this program BUILDS on
+    # arm64 and prints 5 — `Base_emit` called on a `Base`, which happens to be
+    # right for the only receiver this path can build here and would be wrong
+    # for every receiver it cannot. `Base` is TWO fields, so `one_word` does not
+    # carry it and the lift this row is about is the one that reads the
+    # constructor binding instead.
+    #
+    # The same guard on the FIELD-receiver arm is pinned by
+    # `test_formal_specialized_method_call.py`'s
+    # `refuse_a_field_receiver_whose_declared_type_has_a_derived_override`: two
+    # arms of one rule, so two rows.
+    ("ambiguous_name_a_derived_struct_also_declares_is_still_refused",
+     "struct Base:\n"
+     "    var start: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    def emit(self) -> Int:\n"
+     "        return self.start\n"
+     "\n"
+     "struct Derived(Base):\n"
+     "    var extra: Int\n"
+     "\n"
+     "    def emit(self) -> Int:\n"
+     "        return 1000\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Base()\n"
+     "    b.start = 5\n"
+     "    b.pad = 1\n"
+     "    printf(\"%d\\n\", b.emit())\n"
+     "    return 0\n",
+     "refuse:b.emit() is a method call on a value", None),
 ]
 
 # ── the SECOND evidence source for a field's type: what __init__ ASSIGNS ─────
