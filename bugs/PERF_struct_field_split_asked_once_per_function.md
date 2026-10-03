@@ -85,8 +85,13 @@ The derivation cannot be cached across the `_prepare_functions` loop, because
 **that loop mutates the very bodies the derivation reads, in place**, between
 two asks of the same struct:
 
-* `_return_the_receiver` sets `ReturnStmt.value` on an existing node and appends
-  to `fn.body`;
+* `_take_the_receiver_by_reference` — which is what `_return_the_receiver` was
+  called until 2026-10-03 — set `ReturnStmt.value` on an existing node and
+  appended to `fn.body`. It does neither now: the receiver is handed over by
+  reference and the emitters do the two instructions, so this bullet is history
+  for the mutator and live for every walk below it. (`_rewrite_self_fields` and
+  `_apply_constant_sites` still replace list elements, which is the property this
+  section is about.)
 * `_rewrite_self_fields` REPLACES list elements (`node[i] = …`), keeping the
   list's length — so a length- or identity-based validity token cannot see it;
 * `_apply_constant_sites` replaces nodes in the same way;

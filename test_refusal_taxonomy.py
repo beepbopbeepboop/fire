@@ -194,27 +194,33 @@ SAMPLES = [
      "writer.write_string() is a method on a Writer — a multi-field struct, so "
      "on this path the receiver is the ADDRESS of a frame of 8-byte slots"),
     # A one-field struct's MUTATING method, whose receiver is the struct, so the
-    # callee hands the receiver back and the caller has to store it. Three
-    # wordings, one family, and all three are here because `classify_message`
+    # callee hands the receiver back and the caller has to store it. FOUR
+    # wordings, one family, and all four are here because `classify_message`
     # sees only the message: a marker added for a wording no sample exercised
-    # is the dead-marker failure this file exists for, and these three are the
-    # only three that mechanism refuses.
-    ("one-field mutator has no return convention",
-     "Cell.bump() both changes its receiver and returns a value, and a formal "
-     "value is one 64-bit word: on this path the word a one-field struct's "
-     "mutating method hands back IS the receiver, so there is no second word "
-     "to return anything else in"),
-    ("one-field mutator has no return convention",
+    # is the dead-marker failure this file exists for, and these four are the
+    # only four that mechanism refuses.
+    #
+    # **All four re-pointed 2026-10-03** with the mechanism underneath them: the
+    # receiver is handed over BY REFERENCE now (`model.receiver_writeback_name`),
+    # which is what removed the refusal that used to be this family's headline
+    # — `Cell.bump() both changes its receiver and returns a value`, i.e.
+    # `BinaryHeap.pop()`. A sample whose wording no build emits any more would
+    # keep passing (the marker is still in the table) while measuring a construct
+    # that does not exist, so the samples are the point rather than the formality.
+    ("one-field mutator receiver hand-off",
+     "Cell.bump() changes its receiver and declares no return type, so the "
+     "call has no value, and it is used as one here"),
+    ("one-field mutator receiver hand-off",
      "Cell.bump() is a one-field struct's mutating method, so the value it "
-     "hands back IS the receiver, and the caller stores that over the "
-     "expression the receiver was read from. It is called here as a VALUE "
-     "rather than as a statement of its own, so there is nowhere to store it"),
-    ("one-field mutator has no return convention",
-     "Cell.bump() is called on items[0], and the receiver of a one-field "
-     "struct's mutating method is the struct itself, so the new value has to "
-     "be stored back through the expression the receiver was read from. "
-     "items[0] is not a name this path can store through: a formal value is "
-     "one 64-bit word with no address behind it"),
+     "computed has to be stored back through the receiver's own storage, "
+     "which means the caller has to hand it the ADDRESS of that storage. "
+     "items[0] is not a place this path can take the address of"),
+    ("one-field mutator receiver hand-off",
+     "Cell.pop() is called in the same argument list that reads c, the "
+     "receiver it changes"),
+    ("one-field mutator receiver hand-off",
+     "Cell.swap() changes its receiver and returns a frame, and this path has "
+     "two hidden-word conventions"),
 
 ]
 
@@ -547,16 +553,15 @@ CAUSE_SAMPLES = [
      "string, which on a bare char * means writing a terminator over the "
      "first trailing whitespace byte"),
     # A one-field struct's mutating method: the receiver IS the struct, so the
-    # one 64-bit word the callee returns is the receiver and the caller has to
-    # store it. One cause with three wordings in the FAMILY table above; this
-    # sample is the one that proves the CAUSE's marker matches, and the marker
-    # is the phrase all three wordings share.
-    ("a one-field struct's mutator has no convention to write its answer back",
-     "Cell.bump() both changes its receiver and returns a value, and a formal "
-     "value is one 64-bit word: on this path the word a one-field struct's "
-     "mutating method hands back IS the receiver, so there is no second word "
-     "to return anything else in, and dropping one of the two silently is how "
-     "a program that builds computes the wrong answer"),
+    # callee has to hand the receiver back somehow. ONE cause with four wordings
+    # in the FAMILY table above; this sample proves the CAUSE table's marker for
+    # the wordings the FAMILY table samples do NOT cover — the two tables have
+    # different markers and therefore different rot, which is the whole reason
+    # there are two tables. The four alternatives in `CAUSES` are one per
+    # wording; the first is the one exercised here.
+    ("a one-field mutator's receiver hand-off is refused",
+     "Cell.bump() changes its receiver and declares no return type, so the "
+     "call has no value, and it is used as one here"),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,

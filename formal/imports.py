@@ -1403,7 +1403,24 @@ def external_declarations(linked: list) -> dict:
     A library with no `source` — the runtime dylib, whose exports come from a C
     header — contributes nothing, which is the honest answer: there is no
     declaration here to read, so a call to one keeps the old positional-only
-    behaviour rather than being given a fabricated signature."""
+    behaviour rather than being given a fabricated signature.
+
+    **Each declaration carries the STRUCT it was written in**, as
+    `_owner_struct`, and the METHOD exports are indexed under their LIFTED name
+    (`Cell_bump`) rather than only the free functions under their own. Neither is
+    bookkeeping. `model.declared_receiver_writeback` needs the owner's field
+    count to answer "is this callee a one-field MUTATOR, so does argument 0
+    arrive as an address rather than a value", and a cross-module `c.bump(5)`
+    that got the wrong answer passed a word to a callee that dereferences it
+    (measured: `c=10` where CPython says 15, both architectures). The owner's
+    shape is not in the FunctionDef, so without this the importing build cannot
+    obey the callee's convention and the boundary contract holds only inside one
+    module. Indexed under `model.method_function_name`, the same spelling the
+    export's own `name` is, so a method export finds its declaration where a
+    free function already did — it did not, which is why every cross-module
+    METHOD call was reaching a callee with no signature at all. Found in the
+    SAME parse, so a declaration and its owner cannot come from two different
+    reads of the file."""
     out: dict = {}
     for lib in linked or []:
         source = lib.get("source")
@@ -1411,6 +1428,12 @@ def external_declarations(linked: list) -> dict:
             continue
         by_name = {}
         for st in module_statements(source):
+            if isinstance(st, F.StructDef):
+                for meth in _struct_methods_of(st):
+                    meth._owner_struct = st
+                    by_name.setdefault(
+                        _model.method_function_name(st.name, meth.name), meth)
+                continue
             name = getattr(st, "name", None)
             if isinstance(st, F.FunctionDef) and name:
                 by_name.setdefault(name, st)
@@ -1419,6 +1442,20 @@ def external_declarations(linked: list) -> dict:
             if st is not None:
                 out.setdefault(entry.get("symbol"), st)
     return out
+
+
+def _struct_methods_of(st) -> list:
+    """The method FunctionDefs of a parsed StructDef, or [].
+
+    A struct's methods are its `methods`, and the declaration table needs them
+    because an EXPORT is a method (`Cell_bump`) far more often than it is a free
+    function: which is exactly the case where the owning struct — and therefore
+    the field count that decides the receiver convention — is the only thing that
+    distinguishes a by-reference receiver from an ordinary argument.
+    """
+    if not isinstance(st, F.StructDef):
+        return []
+    return list(st.methods or [])
 
 
 def linked_module_paths(linked: list) -> list:

@@ -25,6 +25,7 @@ import re
 import struct
 
 import fire_compiler as F
+from formal import model
 from formal.arm64_codegen import var_register_map, _SCRATCH
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
@@ -8168,7 +8169,24 @@ def _frame_methods(prog, code: bytes, info: dict):
     body touching `self.<f>`) and then CONFIRMED against the machine: the two
     lists of accesses have to have the same length, agree on read-vs-write, and
     give distinct slots to distinct fields.  A disagreement drops the method
-    rather than picking a side."""
+    rather than picking a side.
+
+    **A ONE-FIELD struct's mutator is excluded by name, and the exclusion is not
+    tidiness.** `model.receiver_writeback_name` gives such a method a receiver
+    that is the ADDRESS of a one-word cell in the CALLER's frame: the callee
+    reads the word out of that cell at its entry (`LDR X19, [X0]`) and writes it
+    back at every exit, so `x0` at entry is a pointer to the value rather than
+    the frame the `Frame`/`FrameBelow`/`FrameFits` machinery reasons about.  The
+    confirmation below happened to drop these methods anyway — the length
+    disagreed, because the machine's only receiver-relative access is that
+    prologue load — and a property that changed the moment the entry sequence
+    did is not a property to rely on.  `struct_is_one_field` on the OWNING
+    struct, read off `_owner_struct` (published by `formal/build.py` for exactly
+    this), is the question asked instead.
+
+    What a one-field mutator gets instead is stated in
+    `bugs/FORMAL_a_one_field_mutator_has_no_method_contract.md`: nothing today,
+    which is the same as what it had before the by-reference change."""
     base = info["base_addr"]
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
@@ -8183,6 +8201,8 @@ def _frame_methods(prog, code: bytes, info: dict):
             continue
         if len(f.params) > 2:
             continue
+        if model.struct_is_one_field(getattr(f, "_owner_struct", None)):
+            continue              # a one-word CELL, not a frame — see above
         src = _self_accesses(f.body)
         if not src:
             continue

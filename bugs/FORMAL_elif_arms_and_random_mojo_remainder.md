@@ -5,7 +5,7 @@
 
 | walk | what an `elif` arm cost | pinned by |
 |---|---|---|
-| `_apply_receiver_writeback` | **a dropped store**: `c.bump(5)` in an arm never became `c = Cell_bump(c, 5)`, so the image answered 10 where the source says 15, on both architectures, with the `if`/`else` twin of the same program answering 15 throughout | `test_formal_run.py`'s `one_field_mutator_in_an_elif_arm_stores_back` |
+| `_apply_receiver_writeback` | **a dropped store**: `c.bump(5)` in an arm never became `c = Cell_bump(c, 5)`, so the image answered 10 where the source says 15, on both architectures, with the `if`/`else` twin of the same program answering 15 throughout. **The walk is DELETED** (2026-10-03, `work/formal15-mutator-return-abi` `11558f0d`): a one-field mutator's receiver is now handed over by reference, so there is no store to drop and no `elif` arm to miss — `model.iter_nodes` reaches the arms because nothing rewrites them any more | `test_formal_run.py`'s `one_field_mutator_in_an_elif_arm_stores_back` |
 | `_rewrite_self_fields` | a refusal: `self.n` in an arm of a one-field struct's own method | `one_word_field_read_in_an_elif_arm_is_still_the_receiver`, and its `if`/`else` twin |
 | `_rewrite_one_word_nested_fields` | **measured not broken** — see the note below | `nested_one_word_chain_as_an_elif_condition` |
 | `_apply_imported_constant_sites` | **measured not broken** — see the note below | `test_formal_module_attr.py`'s `test_the_store_value_side_goes_through_the_one_test` |

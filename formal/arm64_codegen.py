@@ -86,6 +86,15 @@ _MAX_INCOMING_ARGS = 24
 # name must not be able to reach the convention's own state.
 _SRET_LOCAL = "__sret_block"
 
+# The local a one-field MUTATOR keeps the ADDRESS of its caller's one-word cell
+# in, for the same reason `_SRET_LOCAL` exists: the word has to live somewhere
+# the body cannot name, and it has to survive from the prologue — where the
+# callee reads the receiver out of the cell — to every exit, where it writes the
+# receiver back. `_recv_ref_receiver` names the receiver itself; this names the
+# pointer to the cell holding it, and the two are read in that order at each
+# exit (`model.receiver_writeback_name` is the rule).
+_RECV_CELL_LOCAL = "__receiver_cell"
+
 
 def _for_target_tree(target: str):
     """Parse a for/comprehension target string into a leaf name or nested list.
@@ -320,8 +329,8 @@ def _collect_var_names(f: F.FunctionDef) -> list:
     return names
 
 
-def _allocation_order(f: F.FunctionDef) -> list:
-    """Register-then-spill allocation order for a function's locals.
+def _allocation_split(f: F.FunctionDef):
+    """`(register-eligible names, address-taken names)` for a function.
 
     Comptime parameters first (they are leading arguments — the call site
     passes them ahead of the runtime ones, see `_comptime_param_names` and
@@ -330,7 +339,26 @@ def _allocation_order(f: F.FunctionDef) -> list:
     its first comptime parameter and its first runtime parameter lands one
     register later), then for-list control temps (`_fi{d}`/`_fb{d}` — hot in
     the loop, prefer registers), then remaining locals in `_collect_var_names`
-    order. First `len(_CALLEE_SAVED)` names get X19..X28; the rest spill."""
+    order.
+
+    **The second list is what makes the by-reference receiver convention work**
+    (`model.receiver_writeback_name`). A one-field mutator receives the ADDRESS
+    of its caller's storage, so the receiver's home must BE that storage rather
+    than a callee-saved register: a register has no address, and the
+    alternative — copying the word into a scratch slot around the call and back
+    out again — has to be ordered against every other argument of the call,
+    which is exactly the question `mutating_receiver_order_refusal` refuses.
+    So those names are not merely LAST, they are removed from the first list:
+    "past every register-eligible name" has to mean "in no register at all", or
+    a function with fewer locals than registers hands the one receiver a register
+    anyway and the call site has no address to pass.
+
+    Split rather than one list because three readers need the two halves
+    separately and a mismatch between them is a local with two homes: `_emit_function`
+    allocates the first `register_home_count` names to X19..X28,
+    `var_register_map` publishes the same map to the proof generator, and
+    `_address_taken` is the contract the call site checks against.
+    """
     names = _collect_var_names(f)
     ct = _comptime_param_names(f)
     nparams = len(f.params or [])
@@ -348,7 +376,39 @@ def _allocation_order(f: F.FunctionDef) -> list:
     temps = [n for n in rest
              if n[:3] in ("_fi", "_fb", "_ci", "_cb")]
     others = [n for n in rest if n not in set(temps)]
-    return ct + params + temps + others
+    base = ct + params + temps + others
+    # Filtered to names this function really binds: the table is published from
+    # the CALL SITES' walked arguments, so a name a later rewrite removed can
+    # still be in it, and giving a home to a name no `AssignStmt` binds is a
+    # second, silent answer to "where does this live".
+    pinned_set = {n for n in getattr(f, "_address_taken", ()) if n in set(names)}
+    ordered = [n for n in base if n not in pinned_set]
+    pinned = [n for n in getattr(f, "_address_taken", ())
+              if n in set(names) and n not in set(ordered)]
+    return ordered, pinned
+
+
+def _allocation_order(f: F.FunctionDef) -> list:
+    """Every local of `f`, registers first — `_allocation_split`'s two halves.
+
+    One list for the readers that want to walk the locals in allocation order;
+    the register/spill boundary is `register_home_count`, not the position of a
+    name in this list."""
+    ordered, pinned = _allocation_split(f)
+    return ordered + pinned
+
+
+def register_home_count(f: F.FunctionDef) -> int:
+    """How many of `f`'s locals get a callee-saved register.
+
+    `len(register-eligible)` capped by the register file, and NOT `len(all
+    locals)`: the address-taken names are the ones with no register, which is
+    the whole point of the by-reference receiver convention. The same count
+    `_emit_function` allocates with, and `var_register_map` publishes, so the
+    proof generator's per-block register facts name the registers the codegen
+    really used."""
+    ordered, _pinned = _allocation_split(f)
+    return min(len(ordered), len(_CALLEE_SAVED))
 
 
 def var_register_map(f: F.FunctionDef) -> dict[str, int]:
@@ -356,11 +416,12 @@ def var_register_map(f: F.FunctionDef) -> dict[str, int]:
 
     The proof generator reuses this so per-block register-value facts name the
     same register the codegen actually allocated (parameters first, then
-    for-list temps, then locals). Only the first `len(_CALLEE_SAVED)` names
-    appear — the rest live in stack spill slots, not registers."""
+    for-list temps, then locals). Only `register_home_count(f)` names appear —
+    the rest live in stack spill slots, and the address-taken ones live there
+    DELIBERATELY (`model.receiver_writeback_name`)."""
     names = _allocation_order(f)
     return {name: _CALLEE_SAVED[i]
-            for i, name in enumerate(names[:len(_CALLEE_SAVED)])}
+            for i, name in enumerate(names[:register_home_count(f)])}
 
 
 # The comptime RULES (which branch, what a binding folds to, how a bracket
@@ -643,6 +704,11 @@ dylib_exports: list = None, globals_base: int = None,
         self._ret_frame_sites: dict = {}
         self._ret_frame_base = 0
         self._ret_frame_bytes = 0
+        # `{id(call)}` of the calls that are an `ExprStmt`'s OWN value, per
+        # function — `model.statement_call_ids`, the reader that tells a
+        # by-reference mutator's two positions apart (its result is observed or
+        # it is not).
+        self._statement_calls: set = set()
         self._returns_frame = None
         self._image_returns_frame: dict = {}
         self._entry_name = None
@@ -956,6 +1022,17 @@ dylib_exports: list = None, globals_base: int = None,
         # of the same name shares.
         self.asm.label(label if label is not None else f"{f.name}__def1")
 
+        # The by-reference RECEIVER locals first, because `_allocation_order`
+        # reads `f._address_taken` to decide which names spill and this is what
+        # completes the answer. It has to happen here rather than in the build
+        # pass for the cross-module calls: `_prepare_functions` runs before the
+        # imports resolve, so at build time there is no declaration to ask
+        # (`formal/imports.py`'s `external_declarations` is read later, into
+        # `self._extern_decls`). Publishing back onto the function keeps
+        # `var_register_map` \u2014 the proof generator's reader of the same
+        # allocation \u2014 in step.
+        self._statement_calls = M.statement_call_ids(f)
+        self._address_taken_for(f)
         var_names = _allocation_order(f)
         # The RETURNED-FRAME convention, set up before the locals so that the
         # hidden word has a home of its own.  A function that returns a frame
@@ -998,9 +1075,24 @@ dylib_exports: list = None, globals_base: int = None,
             # silent wrong number the parked refusal exists to prevent.  The
             # SAME text either way, because it is the same parked message.
             raise CodegenError(f._frame_return_problems[0])
+        # The BY-REFERENCE RECEIVER, the other hidden convention, and it is read
+        # off the function node for the same reason `_returns_frame` is: the
+        # build pass (`formal/build.py`'s `_take_the_receiver_by_reference`)
+        # decided it from the receiver's declared convention and the owner's
+        # field count, and this emitter must not answer that question a second
+        # time.  `_recv_ref_receiver` names the receiver whose value lives in
+        # the CALLER's one-word cell at the address this function receives in
+        # argument 0; `_recv_ref_sites` is this function's own table of the
+        # hand-offs it MAKES (`model.struct_returned_frame_sites`'s shape).
+        self._recv_ref_receiver = getattr(f, "_recv_ref_receiver", None)
+        self._recv_ref_sites: dict = dict(
+            getattr(f, "_recv_ref_sites", None) or {})
         if self._returns_frame is not None:
             var_names = list(var_names) + [_SRET_LOCAL]
-        n_reg = min(len(var_names), len(_CALLEE_SAVED))
+        if self._recv_ref_receiver is not None:
+            var_names = list(var_names) + [_RECV_CELL_LOCAL]
+        n_reg = min(register_home_count(f) + len(var_names) - len(
+            _allocation_order(f)), len(_CALLEE_SAVED))
         self._var_regs = {name: _CALLEE_SAVED[i]
                           for i, name in enumerate(var_names[:n_reg])}
         self._var_spills = {name: i
@@ -1202,7 +1294,48 @@ dylib_exports: list = None, globals_base: int = None,
                 f"{_MAX_INCOMING_ARGS} the formal arm64 ABI passes ("
                 f"{_ABI_ARG_REGS} in registers and "
                 f"{_MAX_INCOMING_ARGS - _ABI_ARG_REGS} on the stack)")
+        # Which incoming argument is the BY-REFERENCE RECEIVER, if this is such a
+        # function. Not 0 unconditionally: a generic method's comptime
+        # parameters are LEADING arguments (`model.incoming_args`, and
+        # `_emit_call` prepends the bracket expressions), so
+        # `def bump[T: Int](out self, k: Int)` receives its cell in X1.
+        recv_idx = (len(_comptime_param_names(f))
+                    if self._recv_ref_receiver is not None else None)
         for i, (pname, ptype) in enumerate(incoming):
+            if i == recv_idx:
+                # The receiver arrives as the ADDRESS of a one-word cell the
+                # CALLER owns, not as the receiver. Park the address in a home
+                # (every exit needs it, and X0..X7 are caller-saved), then read
+                # the word out of the cell into X19 — so the "already in X19 by
+                # the unconditional save above" invariant every other
+                # first-parameter path relies on still holds, and the body reads
+                # `self` as the VALUE it has always read. Every lowering below
+                # is then unchanged, which is the point of doing it in the
+                # prologue rather than rewriting the body's field accesses.
+                self._store_var(_RECV_CELL_LOCAL, i)
+                if i > 0:
+                    # X16, NOT X19: for a generic method the receiver is not
+                    # argument 0, and X19 already holds argument 0's value
+                    # because it IS argument 0's home — `def bump[T](out self)`
+                    # has `T` in X19, and loading the receiver there made the
+                    # callee add the receiver's value instead of the bracket's.
+                    # Measured, arm64: `c.bump[7](3)` printed `v=13` where the
+                    # source says 15. X16 is the address scratch every other
+                    # `_load_home_from_reg` caller borrows, so nothing else has
+                    # to know this path exists.
+                    self.asm.emit(encode_ldr_xt_xn_imm(16, i, 0))
+                    self._load_home_from_reg(pname, 16, ptype)
+                    continue
+                self.asm.emit(encode_ldr_xt_xn_imm(19, 0, 0))
+                if pname in self._var_spills:
+                    self._load_home_from_reg(pname, 19, ptype)
+                    continue
+                if ptype is None:
+                    continue     # a comptime parameter: already a full word
+                self._emit_extend(19, 19,
+                                  resolve(parse_type_name(ptype)
+                                          or DEFAULT_INT_TYPE))
+                continue
             if i == 0:
                 # Already in X19 by the unconditional save above, which also
                 # keeps the no-parameter case (unknown-name reads fall back to
@@ -1265,6 +1398,13 @@ dylib_exports: list = None, globals_base: int = None,
             self._emit_stmt(stmt)
 
         if not _always_returns(f.body):
+            if self._recv_ref_receiver is not None:
+                # A body that falls off its end is an exit like any other, and
+                # it is the one that used to be reached by the appended
+                # `return self`.  The `movz #0` is the same word it emitted for
+                # every other fall-through, and the caller of a mutator ignores
+                # it.
+                self._emit_receiver_writeback()
             self.asm.emit(encode_movz_xd_imm(0, 0))
             self._emit_epilogue()
 
@@ -1773,6 +1913,27 @@ dylib_exports: list = None, globals_base: int = None,
                                            16 + 8 * (index - _ABI_ARG_REGS)))
         self._load_home_from_reg(name, 16, ptype)
 
+    def _emit_receiver_writeback(self) -> None:
+        """`*cell = self` — the one-field mutator's whole caller-visible effect.
+
+        The callee half of `model.receiver_writeback_name`, and it replaces the
+        `return self` this file used to append to every exit: the receiver's new
+        value went back in the RETURN REGISTER, which is (a) why a mutator that
+        also returned a value had nowhere to put one — `BinaryHeap.pop` — and
+        (b) why the store only existed for a call in STATEMENT position, so
+        `sink(c.bump(5))` and a call into another module both dropped it.
+
+        Three registers, and the order is the whole of it. X15 first because
+        `_load_var`'s spill path addresses through X17, so the receiver must be
+        in hand before the cell's address is materialized; X16 next for the same
+        reason; then one `STR`. Neither clobbers X0, so a `return <value>` has
+        already put its answer there and this does not disturb it — which is the
+        property that makes "mutate AND return" one lowering rather than two.
+        """
+        self._load_var(self._recv_ref_receiver, 15)
+        self._load_var(_RECV_CELL_LOCAL, 16)
+        self.asm.emit(encode_str_xt_xn_imm(15, 16, 0))
+
     def _no_home(self, name: str) -> str:
         """The refusal for a name with no register, spill slot or frame slot.
 
@@ -1811,11 +1972,15 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_stmt(self, stmt) -> None:
         if isinstance(stmt, F.ReturnStmt):
             if stmt.value is None:
+                if self._recv_ref_receiver is not None:
+                    self._emit_receiver_writeback()
                 self.asm.emit(encode_movz_xd_imm(0, 0))
             elif self._returns_frame is not None:
                 self._emit_frame_return(stmt.value)
             else:
                 self._emit_expr(stmt.value)
+                if self._recv_ref_receiver is not None:
+                    self._emit_receiver_writeback()
             self._flush_pending_finally()
             self._emit_epilogue()
             return
@@ -7203,6 +7368,106 @@ ctor_field_value=self._ctor_field_value_for(name),
         except ValueError as exc:
             raise CodegenError(str(exc))
 
+    def _receiver_argument(self, e, name):
+        """Which of this call's arguments is a by-reference RECEIVER, or None.
+
+        One reader for both halves of the question, because the two halves are
+        what make it a trap: `self._recv_ref_sites` knows the calls this module
+        compiled the callee for, and a cross-module call is not in it — its
+        callee is a SYMBOL — so reading only the local table passes a VALUE to a
+        callee that dereferences it. Measured before this existed: a cross-module
+        `c.bump(5)` printed `c=10`, the callee's new value computed and dropped,
+        because the per-module write-back table could not see the call.
+
+        So the answer comes from the CALLEE'S OWN DECLARATION, which is the one
+        source that covers all three ways a callee can be reached:
+        `formal/build.py` marked the definitions this module compiled
+        (`_recv_ref_receiver`), and `formal/imports.py`'s `external_declarations`
+        read the imported module's own source for the rest — so a call across a
+        dylib boundary obeys the same convention as a call inside one, which is
+        the entire point of a boundary contract. Not 0 unconditionally: a
+        generic method's comptime parameters are passed AHEAD of the runtime ones
+        (`model.incoming_args`, and the argument loop above prepends
+        `self._specialization_args`), so the receiver of `def pop[SomeT](mut
+        self)` lands one or more slots in.
+
+        `None` for a callee with no declaration at all — a C symbol from a
+        library with no source, which is by definition not a Mojo mutator, so
+        its receiver is an ordinary argument. A callee whose declaration is not
+        a one-field mutator is likewise an ordinary argument.
+        """
+        recv = M.declared_receiver_writeback(self._callee_decl(name))
+        if recv is None:
+            return None
+        decl = self._callee_decl(name)
+        if id(e) not in self._statement_calls \
+                and not M.declared_returns_a_value(decl):
+            # The MEMBER name as the source spells it, from the build pass's own
+            # entry where there is one — `Cell.bump`, not `Cell.Cell_bump`, and
+            # not the receiver. Read off the declaration for a cross-module
+            # callee, which is all the name that path has.
+            entry = self._recv_ref_sites.get(id(e))
+            if entry is not None:
+                wb = entry[0]
+                owner, member = wb.owner, wb.member
+            else:
+                owner = getattr(getattr(decl, "_owner_struct", None), "name",
+                                name)
+                member = decl.name
+            raise CodegenError(M.mutating_receiver_value_refusal(
+                owner, member, recv))
+        fdef = self._functions.get(name)
+        ct = len(_comptime_param_names(fdef)) if fdef is not None else 0
+        return ct
+
+    def _address_taken_for(self, f) -> tuple:
+        """The locals of `f` this function must hand over by ADDRESS.
+
+        `formal/build.py`'s `_plan_receiver_call_sites` publishes the answer for
+        the calls whose callee THIS module compiles. The cross-module calls are
+        added here, from the same `_callee_decl` reader `_receiver_argument`
+        uses, because the build pass runs before the imports resolve and has no
+        declarations to read — and a local that is spilled in one build and in a
+        register in the other is two different ABIs for one program.
+
+        PUBLISHED back onto `f._address_taken`, rather than kept beside the
+        allocation, because `var_register_map` reads that attribute to give the
+        proof generator the same per-block register facts the codegen allocated.
+        Two answers to "which locals have registers" is the disagreement that
+        makes a proof about the wrong code.
+        """
+        names = list(getattr(f, "_address_taken", ()) or ())
+        seen = set(names)
+        for node in M.iter_nodes(getattr(f, "body", None)):
+            if not isinstance(node, F.CallExpr) or not node.args:
+                continue
+            name = _callee_symbol(node.func)
+            if name is None:
+                continue
+            if self._receiver_argument(node, name) is None:
+                continue
+            recv = node.args[self._receiver_argument(node, name)]
+            if isinstance(recv, F.IdentExpr) and recv.name not in seen:
+                seen.add(recv.name)
+                names.append(recv.name)
+        f._address_taken = tuple(names)
+        return f._address_taken
+
+    def _emit_receiver_argument(self, recv, name) -> None:
+        """X0 = the ADDRESS of the local `recv`, for a by-reference receiver.
+
+        Off the frame pointer, which is what makes the local's home BE the
+        storage the callee writes through: `formal/build.py` put the name past
+        every register in `_allocation_order` for exactly this. A local with no
+        spill slot has no address to hand over, and passing its VALUE would be
+        the old defect with a new name — so it is refused rather than emitted.
+        """
+        if not isinstance(recv, F.IdentExpr) or recv.name not in self._var_spills:
+            raise CodegenError(M.receiver_address_refusal(
+                name, recv.name if isinstance(recv, F.IdentExpr)
+                else type(recv).__name__))
+        _emit_sub_imm(self.asm, 0, 29, self._spill_off(recv.name))
+
     def _emit_call(self, e: F.CallExpr) -> None:
         # `external_call["sym", RetType](args…)` — a direct call to the C symbol
         # the bracket names, with `RetType` marshalling the result.
@@ -7598,8 +7863,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         # so nested evaluations (which clobber X0/X1/X2) don't destroy earlier
         # arguments. Pop in reverse so arg0 lands in X0. Second slot of each
         # push/pop is XZR so loads never clobber a live arg.
-        for arg in args[:_ABI_ARG_REGS]:
-            self._emit_expr(arg)
+        #
+        # A BY-REFERENCE RECEIVER is the one argument that is not an ordinary
+        # expression: the callee writes the receiver's new value back through
+        # it, so it is the ADDRESS of the caller's own storage rather than the
+        # value in it.
+        recv_arg = self._receiver_argument(e, name)
+        for i, arg in enumerate(args[:_ABI_ARG_REGS]):
+            if i == recv_arg:
+                self._emit_receiver_argument(arg, name)
+            else:
+                self._emit_expr(arg)
             self.asm.emit(encode_stp_sp_pre(0, 31))
         if sret_site is not None:
             # The block's own address, in the same scratch the constructor

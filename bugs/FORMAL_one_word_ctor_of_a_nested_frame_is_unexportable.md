@@ -188,6 +188,59 @@ Whether that second refusal is wanted is a decision, not a measurement.
 > decision left open is whether the refusal should be re-spelled as a
 > cross-module refusal, which would be a message change and not a behaviour one.
 
+## Status 2026-10-03: the mechanism this doc's chain runs through is GONE, and the reported refusal with it — measured on `work/formal15-mutator-return-abi` (`11558f0d`)
+
+**Steps 2, 3 and 4 above cannot happen any more, and the reproducer's DYLLIB
+builds.** `formal/build.py`'s `_return_the_receiver` — the thing that appended
+`return self` — and `_apply_receiver_writeback` are both DELETED, replaced by a
+receiver handed over BY REFERENCE: a one-field struct's mutating method receives
+the ADDRESS of its caller's one-word cell and writes the receiver back through it
+on every exit (`formal/model.py`'s `receiver_writeback_name`, unchanged in name
+and changed in mechanism). There is no appended return to read as a frame return,
+so `_frame_return_status` has nothing to misread and
+`returned_frame_library_refusal` never fires for this shape:
+
+```
+$ python3 fire.py dylib --formal --no-prove -o .tmp/box/box5.dylib .tmp/box/box5.mojo
+Built: .tmp/box/box5.dylib            # at 17ddeaec: "Box1___init__ returns a
+                                      # frame address, so it cannot be compiled
+                                      # into a dylib: …"
+```
+
+**The doc is NOT deleted, because its blast radius is measured still standing and
+it now stops somewhere else.** `std/builtin/builtin_slice.mojo` still does not
+build, on both architectures, on a DIFFERENT refusal:
+
+```
+build: builtin_slice.mojo imports 'std.format._utils', which cannot be built
+either: builtin_slice.mojo: self is assigned other in StridedSlice___init__(),
+and self is this method's receiver, so it is the address the CALLER passed
+rather than a name either side can re-declare …
+```
+
+which is `bugs/FORMAL_one_field_receiver_rebound_propagates.md` — the RECEIVER
+REBIND, not the write-back. So of this doc's two subjects, the dylib export half
+is closed by the convention change and the rebind half is somebody else's open
+doc.
+
+**The "related question" above is answered, and by measurement rather than by
+policy.** A cross-module CONSTRUCTION of such a struct is refused BY NAME at the
+construction site on both architectures — `constructing Box1 with arguments is a
+call to a user-defined __init__ whose body this path does not inline …` — so
+exporting the symbol opens no window in which an importer gets a wrong answer.
+That is the pair this doc asked for (export nothing a caller cannot use; refuse
+the cross-module construction at the import site), and it now holds without
+anyone deciding the question on paper.
+
+**Read this before merging `work/formal13-5` onto that branch.** Its commits
+`84c6f663` / `25653c86` are entirely about the appended `return self` — tagging
+it `_receiver_writeback`, teaching `_check_frame_escapes` and the export gate not
+to read it as a frame return or escape, and `_writeback_rebound_receivers`
+asking whether the body rebound the receiver. The first two have no producer left
+to classify and should be dropped rather than reconciled; the third still has a
+subject, because the rebind refusal above is live and is a DIFFERENT fact from
+the write-back.
+
 ## Blast radius, measured where it is cheap
 
 * `std/builtin/builtin_slice.mojo` is refused, and with it every importer of

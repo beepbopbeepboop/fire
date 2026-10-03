@@ -4157,6 +4157,49 @@ CROSS_MODULE_CASES = [
               "    var t = T()\n"
               "    t.a = 7\n"
               "    return t.get()\n"}, 70, None),
+    # A ONE-FIELD MUTATOR across the boundary, and the third of the three
+    # measured shapes that used to drop the receiver write-back: the old
+    # statement-shaped rewrite was built from `one_field_mutating_methods`, a
+    # PER-MODULE table of the methods this unit compiles, so a call whose callee
+    # is a SYMBOL was never rewritten at all. Measured before: built, ran, and
+    # printed `c=10` where CPython says 15, on both architectures — the callee
+    # computed the new value and the caller kept the old word.
+    #
+    # The callee's convention now crosses with the symbol:
+    # `formal/imports.py`'s `external_declarations` parses the imported module's
+    # own source, indexes its METHOD exports under their lifted names and carries
+    # the owning struct on each declaration, so `model.declared_receiver_writeback`
+    # answers the same question for a callee in another image that it answers for
+    # one in this — and a boundary whose contract only held inside a module was
+    # not a boundary contract.
+    #
+    # Both halves in one program, and in that order, because either alone can
+    # pass: `c=15` says the write-back crossed (a value-only convention leaves it
+    # at 10) and `a=15 c=14` says the DECLARED value came back out of the callee
+    # AND the receiver moved again, which is `BinaryHeap.pop`'s shape at a dylib
+    # boundary. `both: True` so both architectures are asked, since a disagreement
+    # about what an address means is exactly what a single-file case cannot see.
+    ("byref_cross_module_one_field_mutator",
+     {"mod": "struct Cell:\n"
+             "    var _value: Int\n"
+             "\n"
+             "    def bump(out self, k: Int):\n"
+             "        self._value = self._value + k\n"
+             "\n"
+             "    def pop(out self) -> Int:\n"
+             "        var old = self._value\n"
+             "        self._value = self._value - 1\n"
+             "        return old\n",
+      "main": "from byref_xmod import Cell\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var c = Cell()\n"
+              "    c._value = 10\n"
+              "    c.bump(5)\n"
+              "    printf(\"c=%d\", c._value)\n"
+              "    var a = c.pop()\n"
+              "    printf(\" a=%d c=%d\", a, c._value)\n"
+              "    return 0\n", "both": True}, 0, "c=15 a=15 c=14"),
     # A frame address handed to an IMPORTED FREE FUNCTION — the third shape a
     # "callee this image does not compile" can be, and the one whose refusal was
     # false. `take_it` IS defined (in `byref_xmod`, which builds: it exports
@@ -16917,72 +16960,60 @@ COMPTIME_ATTRIBUTE_CASES = [
 ]
 
 
-# ── a ONE-FIELD struct's MUTATING method (the receiver write-back) ──────────
+# ── a ONE-FIELD struct's MUTATING method (the receiver hand-off) ──────────────
 #
 # A multi-field struct's receiver is the ADDRESS of a frame of 8-byte slots, so
 # `self.f = x` in the callee writes into storage the caller still owns. A
 # ONE-field struct's receiver IS its field: `formal/build.py`'s
 # `_rewrite_self_fields` turns `self._value` into `self` and `c._value` into `c`,
-# so the caller's local and the callee's parameter are one word in two registers
-# and a store to the callee's copy is a store the caller never reads back.
-# Measured before the fix, on BOTH architectures and on the PLAIN spelling
-# (`c.bump()`, no brackets anywhere): the program built, ran, and printed the
-# value the caller had — the new one was computed and dropped.
+# so the caller's local and the callee's parameter are the same word in two
+# registers and a store to the callee's copy is a store the caller never reads
+# back. Measured before the first fix, on BOTH architectures and on the PLAIN
+# spelling (`c.bump()`, no brackets anywhere): the program built, ran, and
+# printed the value the caller had — the new one was computed and dropped.
 #
-# The fix is the other half of that sentence: the method RETURNS the receiver on
-# every path and the call site stores it back over the expression it was read
-# from (`formal/model.py`'s `receiver_writeback_name`). These are the CPython-pair
-# group because that is the only group here that builds and runs BOTH
-# architectures and compares the OUTPUT with CPython's — which is the assertion
-# this fix needs, since the defect was two machines agreeing on the wrong number.
-# The two refusals the write-back needs, in the `refuse:` form so BOTH
+# **HOW the receiver comes back is the decision this group now pins, and it is
+# the second one, not the first.** It used to be the RETURN REGISTER: the callee
+# appended `return self` on every path and the caller stored that over the
+# expression the receiver was read from (`formal/model.py`'s
+# `receiver_writeback_name`). Three shapes dropped that write-back, each measured
+# on both architectures, and all three are in this file — one as an answered row
+# and two as refusals:
+#
+#   * a method that ALSO returns a value. The return register was the receiver,
+#     so there was nowhere to put one. This is `BinaryHeap.pop() -> Self.T`, the
+#     shape that refused the whole 165-file `binary_heap.mojo` sweep row;
+#   * a mutator call in a VALUE position — `x = c.bump(4)` — which is the only
+#     position the statement-shaped rewrite could express, so nothing was
+#     rewritten and the receiver kept the old word. It is now a refusal for a
+#     method that declares no return type and an ANSWER for one that does;
+#   * a mutator call whose CALLEE IS IN ANOTHER MODULE, which is not in the
+#     per-module table the rewrite was built from at all. `byref_cross_module_
+#     one_field_mutator` in `CROSS_MODULE_CASES` is that program.
+#
+# The receiver is now handed over BY REFERENCE: the caller passes the ADDRESS of
+# the receiver's own storage (a one-word cell in its frame, which is why
+# `_allocation_split` keeps such a local out of every register) and the callee
+# writes the new value back through it on every exit. The return register then
+# carries only the declared return value, which is what makes "mutate AND return"
+# one lowering rather than two — and a store through the caller's own storage
+# does not care what position the call is in or which image compiled the callee.
+#
+# These are the CPython-pair group because that is the only group here that
+# builds and runs BOTH architectures and compares the OUTPUT with CPython's —
+# which is the assertion this needs, since every defect it had was two machines
+# agreeing on the wrong number. The refusals are in the `refuse:` form so BOTH
 # backends are asked and the words are required to be IDENTICAL — the same
-# property the answered rows above need for their output, asserted the other way
-# round. They are the boundary of the mechanism rather than a defect in it: a
-# mutator that also returns a value, and a mutator call in a value position, are
-# the two shapes where a 64-bit word cannot carry both the receiver and the
-# answer, and each is named rather than silently resolved one way.
+# property the answered rows need for their output, asserted the other way round.
+# They are the boundary of the mechanism rather than a defect in it.
 MUTATING_RECEIVER_REFUSALS = [
-    # A declared return value AND a receiver change: one word, two answers. This
-    # is a real shape (a mutator that also reports what it did), and the two
-    # ways out are in the message.
-    ("one_field_mutator_with_a_return_value_is_refused",
-     "struct Cell:\n"
-     "    var _value: Int\n"
-     "\n"
-     "    def bump(out self, k: Int) -> Int:\n"
-     "        self._value = self._value + k\n"
-     "        return self._value\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    var c = Cell()\n"
-     "    c._value = 5\n"
-     "    c.bump(4)\n"
-     "    return 0\n",
-     "refuse:both changes its receiver and returns a value", None),
-    # The same without a declared type, which is the spelling a hand-written
-    # method has. A `return <value>` is a value just as much as an annotation
-    # is, and a rule that only read the annotation would let this one through and
-    # store the literal over the object.
-    ("one_field_mutator_returning_a_literal_is_refused",
-     "struct Cell:\n"
-     "    var _value: Int\n"
-     "\n"
-     "    def bump(out self, k: Int):\n"
-     "        if k > 100:\n"
-     "            return 1\n"
-     "        self._value = self._value + k\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    var c = Cell()\n"
-     "    c._value = 5\n"
-     "    c.bump(4)\n"
-     "    return 0\n",
-     "refuse:both changes its receiver and returns a value", None),
-    # A mutator call in a VALUE position: there is no statement to put the
-    # write-back in, and reading the call\'s result instead would hand the
-    # caller the object\'s new CONTENTS.
-    ("one_field_mutator_in_a_value_position_is_refused",
+    # A mutator whose result is USED and which has no result to give. Since the
+    # receiver stopped travelling in the return register, the call's value IS the
+    # declared return type and nothing else — so a method with no declaration has
+    # nothing to put in the expression position, and what the callee happens to
+    # leave behind is the fall-through zero. Named rather than emitted, because a
+    # number the source never wrote is worse than a refusal.
+    ("one_field_mutator_without_a_return_value_used_as_one_is_refused",
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
@@ -16995,7 +17026,87 @@ MUTATING_RECEIVER_REFUSALS = [
      "    var x = c.bump(4)\n"
      "    printf(\"%d\", x)\n"
      "    return 0\n",
-     "refuse:called here as a VALUE rather than as a statement", None),
+     "refuse:declares no return type, so the call has no value", None),
+    # The evaluation-order shape: one argument list with a hand-off in it AND a
+    # read of the same receiver. Left to right the read is evaluated before the
+    # call is made, so it sees the old word; the source means the new one.
+    # `one_field_mutator_result_nested_in_a_call` is the same program with the
+    # read REMOVED, and it builds — which is what makes this a boundary rather
+    # than "value positions do not work".
+    ("one_field_mutator_read_in_its_own_argument_list_is_refused",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def pop(out self) -> Int:\n"
+     "        var old = self._value\n"
+     "        self._value = self._value - 1\n"
+     "        return old\n"
+     "\n"
+     "def sink(a: Int, b: Int):\n"
+     "    printf(\"sink %d %d\", a, b)\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    sink(c.pop(), c._value)\n"
+     "    return 0\n",
+     "refuse:is called in the same argument list that reads", None),
+    # A receiver with no ADDRESS. The write-back is a store through the receiver's
+    # own storage, so the caller must produce that storage's address, and a
+    # SUBSCRIPT is not a place: a formal value is one word and nothing here
+    # computed a location for it. `items[0]` rather than a bare `xs` on purpose —
+    # `formal/build.py`'s `_rewrite_method_calls` LIFTS this call by name
+    # (`Cell_bump(xs[0], 4)`) because `receiver_struct` can answer the element
+    # type from the parameter's `List[Cell]` annotation, so the receiver reaching
+    # this refusal at all means the lift succeeded and the ADDRESS is the only
+    # thing missing. With the element type unstated it never gets here; it is
+    # refused earlier, by name, for not knowing what the subscript holds.
+    ("one_field_mutator_over_a_subscript_receiver_is_refused",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def bump(out self, k: Int):\n"
+     "        self._value = self._value + k\n"
+     "\n"
+     "def use(xs: List[Cell]):\n"
+     "    xs[0].bump(4)\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var one = Cell()\n"
+     "    one._value = 1\n"
+     "    var xs = List[Cell](2)\n"
+     "    xs[0] = one\n"
+     "    use(xs)\n"
+     '    printf("v=%d", one._value)\n'
+     "    return 0\n",
+     "refuse:is not a place this path can take the address of", None),
+    # The one shape the by-reference receiver does not cover: a method that also
+    # RETURNS A FRAME. Both conventions want a hidden word — the frame's
+    # caller-reserved block and the receiver's one-word cell — and nothing states
+    # an order between them, so it is refused rather than guessed. It is the
+    # remaining half of what used to be `mutating_receiver_return_refusal`, which
+    # is why that diagnostic kept its name while its subject narrowed from
+    # "returns a value" to this.
+    ("one_field_mutator_that_also_returns_a_frame_is_refused",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Cell:\n"
+     "    var _p: Pair\n"
+     "\n"
+     "    def swap(out self) -> Pair:\n"
+     "        var old = self._p\n"
+     "        self._p = Pair()\n"
+     "        return old\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._p.a = 1\n"
+     "    var q = c.swap()\n"
+     "    printf(\"%d %d\", q.a, c._p.a)\n"
+     "    return 0\n",
+     "refuse:two hidden-word conventions", None),
 ]
 
 
@@ -17290,6 +17401,168 @@ ONE_FIELD_MUTATOR_CASES = [
     # this row would double-store and the value would be the same — so it is here
     # to say the framed path was not touched, and its value is checked against
     # CPython like every other pair row.
+    # ── a mutator that ALSO RETURNS A VALUE ──────────────────────────────────
+    #
+    # The shape `std/collections/binary_heap.mojo`'s `pop(mut self) -> Self.T`
+    # is, and the one that used to be refused outright: the return register was
+    # the receiver, so a method that both changed the receiver and produced a
+    # value had nowhere to put the value. It is `mutating_receiver_return_refusal`
+    # at its worst, and it is what held 165 sweep files.
+    #
+    # TWO pops rather than one, because a single pop's answer and the receiver's
+    # new value could be confused for each other in a way two cannot: `5 4 3` says
+    # the first call returned the value from BEFORE it, the second returned the
+    # value from between the two, and the object ended at 3. A write-back that
+    # stored the wrong register gives `5 5 5`; one that dropped the second pop's
+    # effect gives `5 4 4`.
+    ("one_field_mutator_that_also_returns_a_value",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def pop(out self) -> Int:\n"
+     "        var old = self._value\n"
+     "        self._value = self._value - 1\n"
+     "        return old\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    var a = c.pop()\n"
+     "    var b = c.pop()\n"
+     "    printf(\"%d %d %d\", a, b, c._value)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self._value = 0\n"
+     "    def pop(self):\n"
+     "        old = self._value\n"
+     "        self._value = self._value - 1\n"
+     "        return old\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     "    c._value = 5\n"
+     "    a = c.pop()\n"
+     "    b = c.pop()\n"
+     "    sys.stdout.write(\"%d %d %d\" % (a, b, c._value))"),
+    # …with an ARGUMENT, so the receiver write-back and the declared value are
+    # both live at a call whose receiver the caller chose at run time. `a=-1 c=0`
+    # then `b=7 c=10` says both branches: the early return writes AND returns,
+    # and the ordinary path adds the argument and returns the value from before
+    # it. The object is re-seeded between the two calls so the second number is
+    # not a continuation of the first.
+    ("one_field_mutator_returning_a_value_from_two_paths",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def take(out self, k: Int) -> Int:\n"
+     "        if k > 100:\n"
+     "            self._value = 0\n"
+     "            return -1\n"
+     "        var old = self._value\n"
+     "        self._value = self._value + k\n"
+     "        return old\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 7\n"
+     "    var a = c.take(200)\n"
+     "    printf(\"a=%d c=%d\", a, c._value)\n"
+     "    c._value = 7\n"
+     "    var b = c.take(3)\n"
+     "    printf(\" b=%d c=%d\", b, c._value)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self._value = 0\n"
+     "    def take(self, k):\n"
+     "        if k > 100:\n"
+     "            self._value = 0\n"
+     "            return -1\n"
+     "        old = self._value\n"
+     "        self._value = self._value + k\n"
+     "        return old\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     "    c._value = 7\n"
+     "    a = c.take(200)\n"
+     "    sys.stdout.write(\"a=%d c=%d\" % (a, c._value))\n"
+     "    c._value = 7\n"
+     "    b = c.take(3)\n"
+     "    sys.stdout.write(\" b=%d c=%d\" % (b, c._value))"),
+    # A mutator whose result is NESTED in another call, which is the second of the
+    # three shapes that used to drop the write-back: `sink(c.bump(5))` has no
+    # statement for the old rewrite to put a store in, so the callee computed 15,
+    # `twice` printed 10 and the object kept 10. `10 4` says the value came out
+    # of the nested call (5 doubled) AND the object moved (5 -> 4), which is the
+    # whole of the by-reference convention.
+    ("one_field_mutator_result_nested_in_a_call",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def pop(out self) -> Int:\n"
+     "        var old = self._value\n"
+     "        self._value = self._value - 1\n"
+     "        return old\n"
+     "\n"
+     "def twice(v: Int) -> Int:\n"
+     "    return v * 2\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    printf(\"%d %d\", twice(c.pop()), c._value)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self._value = 0\n"
+     "    def pop(self):\n"
+     "        old = self._value\n"
+     "        self._value = self._value - 1\n"
+     "        return old\n"
+     "def twice(v):\n"
+     "    return v * 2\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     "    c._value = 5\n"
+     "    sys.stdout.write(\"%d %d\" % (twice(c.pop()), c._value))"),
+    # A mutator with an UNDECLARED return type and an early `return <literal>`:
+    # the spelling a hand-written method has, and the other half of what
+    # `mutating_receiver_return_refusal` used to refuse. It is an ANSWER now and
+    # deliberately so: the call is a statement, so there is no value position to
+    # fill, and the early `return 1` leaves a word in the return register that
+    # nobody reads. CPython returns 1 there too, and the object is 9 either way,
+    # which is the row that says the early exit did not skip the write-back.
+    ("one_field_mutator_returning_a_literal_has_no_return_type",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def bump(out self, k: Int):\n"
+     "        if k > 100:\n"
+     "            return 1\n"
+     "        self._value = self._value + k\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    c.bump(4)\n"
+     "    printf(\"%d\", c._value)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self._value = 0\n"
+     "    def bump(self, k):\n"
+     "        if k > 100:\n"
+     "            return 1\n"
+     "        self._value = self._value + k\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     "    c._value = 5\n"
+     "    c.bump(4)\n"
+     "    sys.stdout.write(\"%d\" % c._value)"),
     ("two_field_mutator_is_unchanged",
      "struct Pair:\n"
      "    var a: Int\n"

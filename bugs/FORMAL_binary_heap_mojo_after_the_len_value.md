@@ -1,17 +1,61 @@
 # `std/collections/binary_heap.mojo` builds nothing yet, and the 165 files behind it have TWO walls
 
-**Status: the refusal this file was filed under is FIXED. The row it blocks is
-NOT, and the reason is not the one the sweep map records.** Both facts are
-measured on both architectures; §2 is the measurement that matters most, because
-it says the export gate — which every plan for this row has treated as the
-*second* problem — is reached again as soon as the first one is out of the way,
-so no amount of codegen work on this file moves any of the 165.
+**Status: §3 row 0 is FIXED (the ABI decision and its implementation, on
+`work/formal15-mutator-return-abi`, commit `11558f0d`). The row it blocks is
+NOT, and the reason is unchanged: the codegen half was never the whole of wall
+one, and wall two — the export gate — still has nothing to do with how well
+`binary_heap.mojo` lowers.** Re-measured on both architectures after that commit:
+
+```
+build: BinaryHeap_clear: self.clear is not a field of BinaryHeap — clear is one
+of its METHODS, and nothing in BinaryHeap stores into an attribute of that name
+… Call it (`self.clear(...)`), which is a receiver and a call and lowers
+```
+
+which is §3's row **#0a**, the construct the table below already predicted would
+be reached next. So the file's reported verdict moved one row down and the 165
+files behind it moved with it: `mutating_receiver_return_refusal` no longer
+fires anywhere in the file, and the refusal that fires instead belongs to the
+one-word rewrite, which another worker holds.
 
 Written on `work/formal12-binary-heap`, claim `sweep12:binary-heap`.
 
 ---
 
-## 1. What landed, and what it was
+## 0. What landed, and what it was (2026-10-03)
+
+The decision was **not** a second return register. The shape this file is filed
+under is `print(heap.pop())` — a mutator call whose RESULT is used — and a second
+register only moves the problem: the receiver still has to land somewhere the
+caller's next read can see, and the return register is the one place a one-word
+value can be. So the receiver is not returned at all. **A mutating method of a
+one-field struct receives the ADDRESS of the caller's own storage and writes the
+receiver back through it on every exit**, and the return register carries only
+the declared return value. That is the convention the multi-field path has always
+used (its receiver IS a frame address) and the one `doc/ABI.md` already
+documents for the compiled backend (`R Struct_method (Struct *self, args…)`).
+
+Three shapes were dropping the write-back when it travelled in the return
+register, each measured on BOTH architectures before the change, and each built,
+ran, and printed the value the caller had:
+
+| was | measured | is |
+|---|---|---|
+| a mutator that also returns a value | `mutating_receiver_return_refusal` — **this file's verdict for months** | builds |
+| a mutator call in a VALUE position | `sink(c.bump(5))` printed 15 and left `c` at 10 | builds |
+| a mutator call whose callee is in ANOTHER MODULE | `from cellmod import Cell; c.bump(5)` printed `c=10` | builds (`c=15`) |
+
+Three refusals SURVIVE, each a real boundary: a mutator whose result is used and
+which declares no return type (there is nothing to put in the expression
+position); a mutator call and a read of the same receiver in one argument list
+(`f(c.pop(), c.field)` — this path evaluates arguments before making the call, so
+the read would see the old word); and a mutator that also returns a FRAME (two
+hidden-word conventions with no measured order between them).
+
+What is left in this file is §3's table with row 0 struck; row 0a is the verdict
+now, and it is **not** in this worker's claim.
+
+## 1. What landed before this, and what it was
 
 The sweep (`bugs/sweeps/sweep-arm-7.txt:85`) filed this file as:
 
@@ -40,6 +84,16 @@ defects, none of them the refusal's own text:
 (`__len__`, `__init__`, `pop`, `peek`). After, none does.
 
 ## 2. The row does not move, and the export gate is the wall behind it
+
+**Re-measured 2026-10-03, after §0: this section's conclusion is UNCHANGED and
+its evidence is stale in one word.** The sweep family label it quotes —
+`one-field mutator has no return convention` — is gone; what the same ten files
+report now is whatever `binary_heap.mojo` reaches next, which is row #0a. The
+numbers below were measured with row 0 standing and are kept because the
+CONCLUSION they support ("the codegen half is not the wall; the export gate is")
+is the part a reader needs, and it does not depend on which construct is
+refused. **The reason the row does not move is wall two, and wall two is
+untouched by any amount of codegen work on this file.**
 
 Ten of the 165 files, re-measured on **both** architectures with
 `python3 tools/formal_sweep.py -j 2 -t 120 <10 files>` (and `--arch x86_64`),
@@ -121,8 +175,8 @@ PREP-time refusal, so it preempts every emitter refusal below it.)
 
 | # | construct | refusal | why it is a project, not a patch |
 |---|---|---|---|
-| 0 | `def pop(mut self) -> Self.T` | `BinaryHeap.pop() both changes its receiver and returns a value` (`mutating_receiver_return_refusal`) | A one-field struct's mutating method hands its receiver back in the result register; there is no second word for the popped element. `receiver_writeback_name`'s own message names the two repairs (split the method, or make it a reader). This one is a PREP-time refusal, so it preempts every emitter refusal below — it is the file's reported verdict today |
-| 0a | `def clear(mut self)` → `self._data.clear()`, once `self._data` is rewritten to `self` | `BinaryHeap_clear: self.clear is not a field of BinaryHeap` (`check_value_position_method_reads`) | The one-word rewrite turns `self._data.clear()` into `self.clear()`, and the value-position check cannot tell a call's callee from a value read — its own docstring calls that "a limitation, not a choice". Either give the walk a parent (a second traversal of its own) or do not rewrite a field whose own struct has a method of that name. **Touches the one-word rewrite, which `formal12-singles-a`/`formal12-singles-b` hold — not claimed here** |
+| 0 | `def pop(mut self) -> Self.T` | ~~`BinaryHeap.pop() both changes its receiver and returns a value`~~ | **FIXED 2026-10-03**, §0. The receiver is handed over by reference, so the return register carries the popped element and `pop` lowers. This was a PREP-time refusal, so while it stood it preempted every emitter refusal below it — which is why removing it changed this file's reported verdict rather than adding a row |
+| 0a | `def clear(mut self)` → `self._data.clear()`, once `self._data` is rewritten to `self` | `BinaryHeap_clear: self.clear is not a field of BinaryHeap` (`check_value_position_method_reads`) | **The file's reported verdict as of 2026-10-03**, measured on both architectures with row 0 gone. The one-word rewrite turns `self._data.clear()` into `self.clear()`, and the value-position check cannot tell a call's callee from a value read — its own docstring calls that "a limitation, not a choice". Either give the walk a parent (a second traversal of its own) or do not rewrite a field whose own struct has a method of that name. **Touches the one-word rewrite, which `formal12-singles-a`/`formal12-singles-b` hold — not claimed here** |
 | 1 | `self._data.clear()` | `is a method call on a value, and this backend lowers only append, close, write … and the string methods count, endswith, find, lstrip, startswith` | `List.clear` is `count = 0` — one store. Trivial to lower and honest; it is here because the emitter's method table has no entry for it |
 | 2 | `self._data.unsafe_ptr()` (in `_heapify_up` and `_heapify_down`) | same method-call refusal | `unsafe_ptr` hands out the blob's base; with it come `unsafe_offset`, `unsafe_take_pointee` and `unsafe_write` (`(data_ptr.unsafe_offset(pos)).unsafe_write(...)`). That is a POINTER model — ownership, `^`, and what a borrow means — not four method entries |
 | 3 | `self._data.append(val^)` (in `push`) | `list.append() is not lowered on the formal arm64 path: a list blob lives in the frame, so the room an append needs has to be known when the list is built. This one is not (the receiver is not a list literal)` | True and structural: the blob is carved out of the building function's frame, and the zero-operand `List[Self.T]()` reserves no room. **This is the one that interacts with §1's `capacity=` answer** — the reservation is dropped there, so appending into a reserved container is refused here rather than silently overrunning. Do not "fix" this by honouring `capacity` without a representation for it |
@@ -131,10 +185,11 @@ PREP-time refusal, so it preempts every emitter refusal below it.)
 | 6 | `ref[self._data[0]] Self.T` (in `peek`), `swap(item, self._data[0])`, `element^`, `debug_assert[assert_mode="safe"](len(self) > 0, …)` | not reached | unmeasured — the build never got past #5. One of them is already known to build on its own: `debug_assert[assert_mode="safe"](1 > 0, "boom")` lowers on BOTH architectures, so the 85-file `debug_assert` row this file also sits in (`bugs/FORMAL_debug_assert_bracket_has_no_lowering.md`) is **not** on this file's critical path |
 
 So: **six constructs, of which two (#0a, #2) are in other workers' write sets
-and one (#5) has a doc.** The cheapest real step is #0 — `pop` — because it is
-the file's reported verdict and it is a decision about the ABI (does a one-field
-mutator get a second return word, or does the method split?), not an emitter
-exercise.
+and one (#5) has a doc.** #0 — `pop` — was the cheapest real step because it was
+the file's reported verdict and a decision about the ABI rather than an emitter
+exercise, and it is done (§0). **The next step is #0a**, which is a different
+kind of thing: the one-word rewrite collapses a field access and a method call
+onto one spelling, and two passes downstream cannot tell them apart.
 
 ## 4. Reproducing
 
