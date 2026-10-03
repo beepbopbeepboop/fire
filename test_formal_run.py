@@ -850,25 +850,40 @@ CASES = [
      "    c.n = 3\n"
      "    c.LIMIT = 7\n"
      "    return c.read() * 10 + c.n\n", 73, None),
-    # A class constant whose VALUE is not a literal has nowhere to live: there
-    # is no module-global storage, so the read can only be answered by the value
-    # it is written with, and `3 + 4` is not a value this path materializes.
-    # This is `Coord.is_flat` (`Self.rank == Self.flat_rank`) and
-    # `_ZipIterator._InjectedValues` (`Tuple[*Self.Ts]`) reduced to the smallest
-    # program that reaches the same line, and the refusal is the CORRECT verdict
-    # for both. Checked on both backends: the pre-change message was a
-    # different one that was false about the file ("has no field 'is_flat' …
-    # in Python this is an AttributeError at run time", for a name the class
-    # declares 20 lines above the read).
+    # A class constant whose VALUE this build cannot materialize has nowhere to
+    # live: there is no module-global storage, so the read can only be answered
+    # by the value it is written with. This is `Coord.is_flat`
+    # (`Self.rank == Self.flat_rank`) and `_ZipIterator._InjectedValues`
+    # (`Tuple[*Self.Ts]`) reduced to the smallest program that reaches the same
+    # line, and the refusal is the CORRECT verdict for both. Checked on both
+    # backends: the pre-change message was a different one that was false about
+    # the file ("has no field 'is_flat' … in Python this is an AttributeError at
+    # run time", for a name the class declares 20 lines above the read).
+    #
+    # **THE VALUE IS `N + 4` AND NOT `3 + 4`, AND THAT IS THE WHOLE OF WHAT
+    # CHANGED.** `3 + 4` is a literal-only expression of two literals, and
+    # `formal/model.py::literal_default_word` — the one classifier behind
+    # `class_constant_word`, `struct_default_word` and `struct_field_kind` — used
+    # to be a SECOND, smaller copy of `fold_literal_expr` with no unary or binary
+    # arm, so `A = -3` was refused as "not a value this build can materialize"
+    # and `LIMIT = 3 + 4` with it. It folds with that folder now, so both are
+    # materialized: `3 + 4` is 7, exactly, in the same word. What is still
+    # refused is a value with a FREE NAME in it, because the class body is not a
+    # scope the materializer can resolve — which is the case the real sources
+    # are, and is what this row now pins. `N` is a module-level constant of this
+    # unit, so it is not a name nobody can find; it is a name the class body
+    # cannot read.
     #
     # The NEEDLE is the wording this tree raises, which quotes the VALUE: a
-    # "`comptime` class attribute … whose value is `3 + 4`" rather than the
+    # "`comptime` class attribute … whose value is `BinaryOp`" rather than the
     # generic "is a class-level constant of C" this case used to expect. The
     # quoted value is the part that sends the reader to the class body instead of
     # to the read.
     ("comptime_alias_nonliteral_value_refused",
+     "N = 4\n"
+     "\n"
      "struct C:\n"
-     "    comptime LIMIT = 3 + 4\n"
+     "    comptime LIMIT = N + 4\n"
      "    var n: Int\n"
      "\n"
      "def get() -> Int:\n"
@@ -883,8 +898,10 @@ CASES = [
     # the attribute exists, so the program does not raise. The needle is the
     # corrected half, the forbidden substring is the false half.
     ("comptime_alias_refusal_does_not_claim_an_attribute_error",
+     "N = 4\n"
+     "\n"
      "struct C:\n"
-     "    comptime LIMIT = 3 + 4\n"
+     "    comptime LIMIT = N + 4\n"
      "    var n: Int\n"
      "\n"
      "    def read(self) -> Int:\n"
@@ -5202,6 +5219,108 @@ BOTH_ARCH_CASES = [
      "    r.zero()\n"
      "    printf(\"a=%d b=%d\", r.a, r.b)\n"
      "    return 0\n", 0, "a=0 b=0"),
+
+    # ── a class-level constant and a field default are LITERAL expressions ──
+    #
+    # `formal/model.py::literal_default_word` is the one classifier behind both
+    # of these (`class_constant_word` and `struct_default_word` are the same
+    # question of the same node), and it used to have arms for `IntLiteral` /
+    # `BoolLiteral` / `StringLiteral` and nothing else. So `-3` — which parses to
+    # `UnaryOp('-', IntLiteral(3))`, one token wider than `3` and exactly
+    # representable in the word `3` already is — was REFUSED with a message
+    # claiming the value "is not a value this build can materialize". That
+    # message is false, and it is worse than wrong: it sends a reader looking
+    # for something non-literal in their own source, and there is nothing there.
+    #
+    # The fix is not a new arm but the DELETION of the second classifier:
+    # `literal_default_word` now folds with `fold_literal_expr`, the folder the
+    # module-level constants already used, so one rule answers "can the build
+    # know this value" for every binding a class body or a module body declares.
+    # `1 + 2` and `~0` come with it for the same reason, and they are in the
+    # same program so a fix that added only the unary-minus arm is visible.
+    #
+    # Both spellings of a read are here — bare `Regs.A` and `self.A` through a
+    # method — because `_rewrite_class_constants` substitutes both from the same
+    # census and the receiver spelling has a separate arm (`struct_receivers`).
+    ("both_arch_negative_and_folded_class_constant",
+     "class Regs:\n"
+     "    A = -3\n"
+     "    B = 7\n"
+     "    C = 1 + 2\n"
+     "    D = ~0\n"
+     "\n"
+     "    def both(self):\n"
+     "        printf(\"A=%d B=%d\", self.A, self.B)\n"
+     "        return 0\n"
+     "\n"
+     "def main() -> int:\n"
+     "    r = Regs()\n"
+     "    r.both()\n"
+     "    printf(\" C=%d D=%d\", Regs.C, Regs.D)\n"
+     "    return 0\n", 0, "A=-3 B=7 C=3 D=-1"),
+
+    # THE SAME FOLD, on the other side of the same classifier: a FIELD's
+    # default, which the constructor materializes rather than the read.
+    # `-3` and `100000` are one row each because they failed differently and
+    # only one of them was a build crash:
+    #
+    #   * `100000` does not fit MOVZ's 16-bit unsigned field, and the arm64
+    #     emitter reached for `encode_movz_xn_imm` directly instead of this
+    #     backend's own `_emit_mov_imm`, so it died on `assert 0 <= imm16 <=
+    #     0xffff`. x86-64 was fine — its three twins all call `_emit_mov_imm`.
+    #     A wide default has been buildable on one architecture and not the
+    #     other, which is why this is a both-arch case and not an arm64 one.
+    #   * `-3` is the row above's value in the other position, and it is here
+    #     because the two paths are two call sites of one classifier and a fix
+    #     that reached only the read would leave the constructor emitting a
+    #     truncated word for the very same default.
+    #
+    # `m` has no default and must read 0 — the boundary between "a default this
+    # path materializes" and "no default", which is the refusal/zero distinction
+    # `struct_default_word` exists to keep.
+    ("both_arch_negative_and_wide_struct_field_default",
+     "struct R:\n"
+     "    var n: Int = -3\n"
+     "    var m: Int\n"
+     "    var w: Int = 100000\n"
+     "\n"
+     "    def show(self) -> Int:\n"
+     "        printf(\"n=%d m=%d w=%d\", self.n, self.m, self.w)\n"
+     "        return 0\n"
+     "\n"
+     "def main() -> int:\n"
+     "    r = R()\n"
+     "    r.show()\n"
+     "    return 0\n", 0, "n=-3 m=0 w=100000"),
+
+    # The MODULE-level spelling of the same fold, which is the one that was
+    # never broken and is here as the control: `G = -5` was already answered
+    # (by `fold_module_value`), so if this row ever fails while the two above
+    # pass, the classifier and the module folder have drifted apart again —
+    # which is the whole failure mode of having two folders.
+    ("both_arch_negative_and_folded_module_constant",
+     "G = -5\n"
+     "H = ~0\n"
+     "I = 6 * 7\n"
+     "\n"
+     "def main() -> int:\n"
+     "    printf(\"G=%d H=%d I=%d\", G, H, I)\n"
+     "    return 0\n", 0, "G=-5 H=-1 I=42"),
+
+    # `comptime c = ~3` is the third folder, and it is a row of its own because
+    # `mojo/middle/comptime.py:eval_const` is a DIFFERENT function from
+    # `fold_literal_expr` that answers the same question about the same operator:
+    # both formal backends already LOWERED `~` at run time (one MVN, one NOT) and
+    # the reference interpreter evaluates it, while every compile-time folder
+    # refused it. So the program printed -4 under `python3 fire.py run`, ran at
+    # run time as -4 when the same `~` sat outside the `comptime`, and was
+    # REFUSED when it was inside one. `~` is now in all three folders, which is
+    # the only way that stays true when a fourth is written.
+    ("both_arch_comptime_bitwise_not_folds",
+     "def main(n: Int) -> Int:\n"
+     "    comptime c = ~3\n"
+     "    comptime d = -2\n"
+     "    return c + d + 11\n", 5, None),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -8378,6 +8497,38 @@ CONSTRUCTION_REFUSALS = [
      "    return b.n\n",
      "refuse:is declared to return a container, and a container on this path is a "
      "bump-allocated region of the CALLEE's own reserved scratch",
+     None),
+    # …and THE SAME CALL SPECIALIZED, which is the row above's twin and the
+    # reason it is here. `mklist[1]()` names the same function as `mklist()` —
+    # `formal/model.py::call_callee_name` is the tree's one reader of exactly
+    # that, and `bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md`
+    # is the general statement of it — so the two spellings of one argument must
+    # get one answer.
+    #
+    # They did not, and they got it in the PERMISSIVE direction, which is the
+    # expensive one: `model._construction_arg_is_dead_blob` read the callee with
+    # its own `isinstance(arg.func, F.IdentExpr)`, a subscript callee fell out,
+    # and `Bag2(mklist[1](), 5)` BUILT on both architectures with a word in the
+    # slot that points into reclaimed scratch. That is premise (B1)'s hazard
+    # reached by a spelling, and the two neighbouring messages said `?()` where
+    # the source says `mklist[1]()`.
+    #
+    # The needle is the CALLEE'S NAME and not the refusal's presence, so a fix
+    # that made the row refuse for some other reason would not pass it.
+    ("constr_refuse_a_container_returned_by_a_specialized_callee",
+     "struct Bag2:\n"
+     "    var items: Int\n"
+     "    var n: Int\n"
+     "\n"
+     "def mklist[a: Int]() -> List[Int]:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    return xs\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Bag2(mklist[1](), 5)\n"
+     "    return b.n\n",
+     "refuse:constructing Bag2 with the call to 'mklist' as field 'items' is "
+     "refused on this path: mklist() is declared to return a container",
      None),
     # The REACHABLE CONSEQUENCE of the hazard the case above refuses, checked
     # separately and for a different reason. `append` through a frame slot is

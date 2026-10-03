@@ -10838,13 +10838,80 @@ def builtin_value_method(method: str):
 # `...`). Getting the second from a table rather than assuming "the first one"
 # is what keeps a two-named-argument function like `fprintf(stream, fmt, ...)`
 # from having its stream pointer written into the unnamed area.
+#
+# ── IT IS A TABLE, SO THE TABLE HAS TO BE RIGHT, AND BEING WRONG IS THE WORST
+# ── OUTCOME ON THIS PATH: a callee that reads its third argument out of the
+# ── unnamed area and is called without one reads `[sp]` — whatever the caller
+# ── had there — and answers from it. No crash, no refusal, a plausible number.
+#
+# Every entry below was measured against clang's own codegen for this target
+# rather than read off a prototype, because a prototype says how many arguments
+# are NAMED and clang says where the third one GOES, and those are the two
+# facts that have to agree. The probe is one line of C per symbol, compiled with
+# `clang -O1 -S`, and the measurement is the same shape every time:
+#
+#     $ cat > /tmp/va3.c <<'EOF'
+#     #include <fcntl.h>
+#     int f(int a, int b) { return fcntl(a, b, 3); }
+#     EOF
+#     $ clang -O1 -S -o - /tmp/va3.c | sed -n '/_f:/,/ret/p'
+#             mov w8, #3
+#             str x8, [sp]            ← the third argument is in the AREA
+#             mov w0, #1
+#             mov w1, #2
+#             bl _fcntl
+#
+# Three entries were wrong or missing before this was checked, and each was a
+# live wrong answer rather than a missing feature:
+#
+#   * `fcntl` was ABSENT, so `fcntl(fd, cmd, flags)` was called with the flags
+#     in X2 and nothing in the area. The syscall then applied whatever was at
+#     `[sp]` — measured, `fcntl(fd, F_SETFD, 1)` returned 0 (success) and
+#     changed nothing, and `fcntl(fd, F_SETFL, O_NONBLOCK)` left `F_GETFL`
+#     reporting a number CPython does not report. That is
+#     `bugs/FORMAL_a_variadic_call_drops_its_third_argument.md`, whose title
+#     says "drops" and whose measurement is really "puts it in the wrong
+#     place": the third argument was emitted, positionally, into X2.
+#   * `ioctl` was ABSENT for the same reason, and it is a name this path
+#     already reaches (`FRAME_C_VALUE_CALLS` lists it beside `fcntl`), so the
+#     same silence applied to `ioctl(fd, request, arg)`.
+#   * `asprintf` said 1 named argument and has 2 (`char **strp, const char
+#     *format, ...`), which made the emitter write the FORMAT POINTER into
+#     `[sp+0]` — the slot the first variadic value is read from — while the
+#     value itself sat in X2 and was ignored. An entry that is present and
+#     wrong is worse than one that is absent, because an absent one at least
+#     fails the same way.
+#
+# C gives a variadic function at least one named parameter (`...` may not be the
+# only one in the list), so 1 is the floor and no entry below it can exist.
+#
+# **The `v*` family is DELIBERATELY ABSENT** — `vprintf`, `vfprintf`, `vsprintf`,
+# `vsnprintf`, `vdprintf` were here, and they are not `...`-variadic at all: each
+# one takes a `va_list` as its LAST NAMED parameter
+# (`int vprintf(const char *, va_list)` in this SDK's `stdio.h`, read out of
+# clang's own preprocessed output rather than from memory). There is no unnamed
+# argument, so an entry claiming one reserved an area and copied the `va_list`
+# pointer into a slot nothing reads. Harmless today — this path cannot BUILD a
+# `va_list`, so no program here calls one — and false, which is the state this
+# table must not be in: it is consulted to decide a calling convention, and an
+# entry that misstates one is how `asprintf: 1` came to copy a FORMAT POINTER
+# into the slot the first variadic value is read from. They stay in
+# `FRAME_C_VALUE_CALLS`, which answers a different question (is this name a C
+# library entry point).
 VARIADIC_LIBC = {
-    "printf": 1, "vprintf": 1,
-    "fprintf": 2, "vfprintf": 2,
-    "sprintf": 2, "vsprintf": 2,
-    "snprintf": 3, "vsnprintf": 3,
-    "asprintf": 1, "dprintf": 2, "vdprintf": 2,
-    "syslog": 2, "err": 1, "errx": 1, "warn": 1, "warnx": 1,
+    "printf": 1,
+    "fprintf": 2,
+    "sprintf": 2,
+    "snprintf": 3,
+    "asprintf": 2, "dprintf": 2,
+    # `err(status, format, ...)` and `errx(status, format, ...)` have TWO named
+    # arguments — the status and the format — and were recorded with one, which
+    # is the `asprintf` bug again: the emitter would have written the FORMAT
+    # POINTER into `[sp+0]` and left the value in X2. Found by the direction of
+    # `test_formal_external_call.py`'s `variadic_table_*` cases that reads this
+    # table back out of clang's own preprocessed headers, which is the point of
+    # that check being in the suite rather than in this comment.
+    "syslog": 2, "err": 2, "errx": 2, "warn": 1, "warnx": 1,
     # open(2) is declared `open(const char *, int, ...)`, and Apple's build of
     # it reads the permission word from the variadic area like any other
     # variadic callee — measured, not assumed: with the word in X2 the file
@@ -10852,6 +10919,12 @@ VARIADIC_LIBC = {
     # register, and with it in the area the mode was 0666 & ~umask as it
     # should be.
     "open": 2,
+    # `int fcntl(int, int, ...)` and `int ioctl(int, unsigned long, ...)` — the
+    # two the descriptor-control commands go through, and both TWO named
+    # arguments, so the third (`flags` / `arg`) is the first unnamed one and is
+    # the first thing in the area. `sys/fcntl.h:624` and `sys/ioctl.h:97` in this
+    # SDK; the placement is clang's, as above.
+    "fcntl": 2, "ioctl": 2,
 }
 
 # Slots the caller reserves for the unnamed arguments. The area is 8-byte
@@ -11227,6 +11300,105 @@ def _kind_of_elements(elems) -> str | None:
     return kinds.pop() if len(kinds) == 1 else None
 
 
+# A sentinel for "this subscript's key is not a literal I can compare", so a
+# missing answer is not spelled as a key that happens to equal nothing.
+_NOT_A_LITERAL_KEY = object()
+
+
+def _literal_dict_key(node):
+    """The Python value a dict subscript's key literal denotes, or the sentinel.
+
+    Deliberately narrow — a string or an integer literal, and nothing else —
+    because the whole point of the question is that the answer can be COMPARED
+    with the keys the initializer wrote. A name, a call or an arithmetic form
+    could be the right key and this path cannot know it, and a key it cannot
+    check is a key whose element word may never have been written.
+    """
+    if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0) \
+            and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, F.IntLiteral):
+        try:
+            return int(node.value)
+        except (TypeError, ValueError):
+            return _NOT_A_LITERAL_KEY
+    return _NOT_A_LITERAL_KEY
+
+
+def _pair_value_kind(node):
+    """The kind a dict literal's VALUE carries as a subscript yields it.
+
+    `_kind_of_simple` with one addition, and the addition is the whole of why
+    this function exists rather than a call: **a nested container literal is a
+    blob**, so `{"a": [1, 2, 3]}` says its value is a counted region, and
+    `_kind_of_simple` has no arm for a `ListExpr` because it classifies a
+    literal and a list literal's kind is its ELEMENT's kind — which is
+    `_kind_of_elements`' question, one level down.
+
+    It is NOT put into `_kind_of_simple` itself, and that is deliberate. That
+    function is read by every container classification in the file, including
+    the module-global one (`global_slot_kind`), where the dict's VALUES are read
+    out of a slot's initializer WITHOUT a check that the key being subscripted
+    is one of them: the kind is claimed for the dict, and `list_elem_kind` then
+    hands it to any subscript. Widening it there would extend a
+    plausible-wrong-number into a plausible-wrong-number-that-is-also-a-null
+    dereference, over every dict global in the tree. Confined here, the only
+    reader is `dict_literal_key_value_kind`, which checks the key first — so
+    the nesting this adds is available only where the write is evidenced.
+    """
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return list_kind(_kind_of_elements(node.elements or []))
+    if isinstance(node, F.DictExpr):
+        return list_kind(container_literal_elem_kind(node))
+    return _kind_of_simple(node)
+
+
+def dict_literal_key_value_kind(node, index):
+    """What `node[<index>]` yields for a LITERAL key, or None when it cannot say.
+
+    **THE GATE, and it is the whole of what makes this safe.** A dict's element
+    word is written by a STORE — the literal's own pair, or a subscript
+    assignment — and not by anything that declares the dict's type. So a kind
+    read off a declaration is a claim about a slot that may still be zero, and
+    `len` of zero is `LDR X0, [X0]` with X0 zero: a SIGSEGV on both
+    architectures, measured and recorded in `struct_field_kind`'s docstring for
+    the field spelling of this. So this answers only when the initializer ITSELF
+    wrote the key:
+
+      * `node` is a dict LITERAL (a comprehension is a dict too, and is not one
+        of these — `{k: v for …}` builds its pairs at run time, so there is no
+        initializer here to check a key against);
+      * `index` is a string or integer literal, so it can be compared with the
+        keys the literal wrote rather than guessed at;
+      * the literal CONTAINS that key. A missing key is CPython's `KeyError`,
+        which this path cannot raise, and the word the key scan leaves behind is
+        whatever the pair blob had — which for a container value is address 0.
+
+    That last clause is why this is a function and not a `list_elem_kind` of the
+    dict's kind: the refusal it produces for a key the literal does not contain
+    is CORRECT, and it is the same refusal the pre-existing unclassified row
+    produces, so a program that reads a missing key is no worse off than before.
+
+    Unanimity over every pair that carries the key, because a dict literal may
+    repeat one (`{"a": 1, "a": [2]}` keeps the last), and this map is
+    flow-insensitive: two values of two kinds under one key claim nothing.
+    """
+    if not isinstance(node, F.DictExpr):
+        return None
+    key = _literal_dict_key(index)
+    if key is _NOT_A_LITERAL_KEY:
+        return None
+    values = [p[1] for p in (node.pairs or [])
+              if len(p) >= 2 and _literal_dict_key(p[0]) == key]
+    if not values:
+        return None
+    kinds = {_pair_value_kind(v) for v in values}
+    kinds.discard(None)
+    if len(kinds) != 1:
+        return None
+    return kinds.pop()
+
+
 def container_literal_elem_kind(node) -> str | None:
     """What a subscript of the container LITERAL `node` yields, or None.
 
@@ -11361,6 +11533,13 @@ class ValueKinds:
         # `_note_field_stores`, which carries the measurement that makes it
         # load-bearing rather than tidy.
         self._field_stores: dict = {}
+        # The dict LITERAL that bound a name in this body — the node itself, or
+        # a `None` tombstone for a name something else binds.  Same shape and
+        # same reason as `_ctor_calls`, for the same flow-insensitivity: the
+        # value kind of a SUBSCRIPT is a claim about one element word, and the
+        # only thing that says whether that word was written is the initializer
+        # this function itself ran.  See `_note_dict_init`.
+        self._dict_inits: dict = {}
         # The names this function's SIGNATURE binds, kept apart from the ones
         # its body binds, and the reason is the `declared_kind` hook: an
         # unannotated parameter is seeded INT_KIND above, and for a METHOD
@@ -11502,6 +11681,37 @@ class ValueKinds:
         else:
             self._ctor_calls[name] = None
 
+    def _note_dict_init(self, target, value) -> None:
+        """Record (or retract) the dict literal that gives a name its elements.
+
+        The evidence `dict_literal_key_value_kind` is asked about, and the reason
+        it is kept beside `_ctor_calls` rather than inside it is that the two
+        answer different questions: a construction says what a FIELD's slot
+        holds, and a dict literal says which element WORDS were written. The
+        second is the only thing that can answer "was the key this subscript
+        uses one of them", which is the gate the whole of this is built on.
+
+        The tombstone rules are `_ctor_calls`' and they are not tidiness. A name
+        bound to a dict literal and then to something else has two homes, and a
+        kind read off the first is a claim about one instruction; two dict
+        literals for one name are the same problem in a different shape, so the
+        second one also tombstones. And the scan runs twice over the same
+        statements, so identity — not equality — is what says "the same
+        statement", which is why the value stored is the NODE and the test is
+        `is`.
+        """
+        name = target if isinstance(target, str) else (
+            target.name if isinstance(target, F.IdentExpr) else None)
+        if name is None:
+            return
+        if isinstance(value, F.DictExpr):
+            if name not in self._dict_inits:
+                self._dict_inits[name] = value
+            elif self._dict_inits[name] is not value:
+                self._dict_inits[name] = None
+        elif name in self._dict_inits:
+            self._dict_inits[name] = None
+
     def _note_field_stores(self, target) -> None:
         """Record that a statement writes THROUGH a holder's field.
 
@@ -11590,10 +11800,12 @@ class ValueKinds:
                 self._bind_target(s.target, self._value_kind(s.value),
                                   own=self._own_shape_of(s.value))
                 self._note_construction(s.target, s.value)
+                self._note_dict_init(s.target, s.value)
                 self._note_field_stores(s.target)
             elif isinstance(s, F.VarDecl):
                 self._bind_value(s.name, s.value)
                 self._note_construction(s.name, s.value)
+                self._note_dict_init(s.name, s.value)
                 self._note_field_stores(s.name)
             elif isinstance(s, F.AugAssignStmt):
                 # `x += e` leaves x holding what it held; an unknown x stays
@@ -11601,6 +11813,7 @@ class ValueKinds:
                 self._bind_target(s.target, self.locals.get(
                     s.target.name if isinstance(s.target, F.IdentExpr) else ""))
                 self._note_construction(s.target, s.value)
+                self._note_dict_init(s.target, s.value)
                 self._note_field_stores(s.target)
             elif isinstance(s, F.MultiAssignStmt):
                 vkind = self._own_shape_of(s.value)
@@ -11611,6 +11824,7 @@ class ValueKinds:
                 # tombstone is what says so.
                 for t in s.targets:
                     self._note_construction(t, s.value)
+                    self._note_dict_init(t, s.value)
                     self._note_field_stores(t)
             elif isinstance(s, F.ReturnStmt):
                 self._returns.add(self.kind_of(s.value))
@@ -11933,8 +12147,36 @@ class ValueKinds:
             return INT_KIND
         if isinstance(e, F.SubscriptExpr):
             if not isinstance(e.index, F.SliceExpr):
+                # A dict subscript is a KEY SCAN, and its answer is a claim
+                # about ONE element word — a word that a store writes and
+                # nothing else does. So the initializer this function ran is
+                # asked whether it wrote the key, and that is a question a KIND
+                # cannot answer: `{"a": [1]}` says the dict holds lists, and
+                # `d["b"]` reads a slot nothing put a list into.
+                # `dict_literal_key_value_kind` carries the gate and returns
+                # None for every shape it cannot vouch for, so the fallback
+                # below — the LIST case, where the base's element kind IS the
+                # subscript's kind — is reached exactly as before.
+                keyed = self._dict_subscript_kind(e)
+                if keyed is not None:
+                    return keyed
                 return list_elem_kind(self.kind_of(e.obj))
         return None
+
+    def _dict_subscript_kind(self, e):
+        """What `e`'s dict subscript yields, when this body wrote the key.
+
+        The `_dict_inits` lookup and nothing else: a base that is a NAME is the
+        only shape whose initializer the scan can attribute to a binding, and a
+        subscript of a subscript (`d["a"]["b"]`) or of a field
+        (`self.d["a"]`) has no initializer in this map, so it falls through to
+        the list reading rather than reaching for one. That is the conservative
+        direction and it is the same refusal the shape got before.
+        """
+        obj = e.obj
+        if not isinstance(obj, F.IdentExpr):
+            return None
+        return dict_literal_key_value_kind(self._dict_inits.get(obj.name), e.index)
 
     def _string_method_kind(self, call):
         """What a lowered string method call yields, or None if this is not one.
@@ -16985,8 +17227,14 @@ def _construction_arg_spelling(arg) -> str:
     if isinstance(arg, F.MemberExpr):
         return f"argument {_member_chain_text(arg)}"
     if isinstance(arg, F.CallExpr):
-        callee = arg.func.name if isinstance(arg.func, F.IdentExpr) else "?"
-        return f"the call to {callee!r}"
+        # `call_callee_name`, so a specialization is named as the function it
+        # specializes: `mklist[1]()` is the call to `mklist`, and a refusal that
+        # says `?` sends the reader to a callee that is not in their source.
+        # `None` — a dotted name or a computed callee — stays `?`, which is the
+        # honest answer for a callee this path cannot name.
+        callee = call_callee_name(arg.func)
+        return f"the call to {callee!r}" if callee is not None \
+            else "the call to '?'"
     if isinstance(arg, (F.ListExpr, F.DictExpr, F.TupleExpr)):
         return "a container literal"
     if isinstance(arg, (F.IntLiteral, F.BoolLiteral, F.StringLiteral)):
@@ -17033,8 +17281,14 @@ def construction_dead_blob_refusal(name: str, field: str, arg) -> str:
     address, one word, with a lifetime the frame layout governs, and
     `_callee_is_placed_frame` is the one predicate that knows.
     """
-    callee = (arg.func.name
-             if isinstance(arg.func, F.IdentExpr) else "?")
+    # `call_callee_name`, for the reason `_construction_arg_spelling` gives: a
+    # specialization names the same function as its bare twin, and a message
+    # that says `?()` where the source says `mklist[1]()` sends the reader to
+    # look for a callee that is not there.  Measured: with this reading the
+    # refusal fires for `Bag2(mklist[1](), 5)` — which BUILT before
+    # `_construction_arg_is_dead_blob` learned the same name — and the message
+    # names `mklist`.
+    callee = call_callee_name(arg.func) or "?"
     return (f"constructing {name} with {_construction_arg_spelling(arg)} as "
             f"field {field!r} is refused on this path: {callee}() is declared "
             f"to return a container, and a container on this path is a "
@@ -18345,17 +18599,36 @@ def _construction_arg_is_dead_blob(arg, rets=None) -> bool:
     read of the slot.  `construction_dead_blob_refusal` is where that argument
     is spelled out for the reader.
     """
-    if not isinstance(arg, F.CallExpr) \
-            or not isinstance(arg.func, F.IdentExpr):
-        # `arg.func` is a bare name or it is not a call this table can say
-        # anything about: `List[Self.T]()`, `Self.T[…]()`, `a.b()` and
-        # `f()[0]()` all land here, and a subscript callee is not a name in
-        # `rets` — it is a type or an expression whose result this path does
-        # not follow.  Not a blob, because nothing here knows that it is one.
+    if not isinstance(arg, F.CallExpr):
+        # Not a call, so not a value belonging to a callee: a container literal
+        # and a name are answered above.
         return False
-    if _callee_is_placed_frame(arg.func.name):
+    # `call_callee_name`, NOT `isinstance(arg.func, F.IdentExpr)`. It is the
+    # tree's one reader of "which function does this call name", and a
+    # comptime SPECIALIZATION `f[a]` names the same function as its bare twin —
+    # which is the whole content of `bugs/FORMAL_a_specialization_defeats_the_
+    # frame_escape_refusals.md`, in a reader that decides a REPRESENTATION.
+    #
+    # Measured here, and it was the permissive direction, which is the expensive
+    # one: `Bag2(mklist(), 5)` is refused by
+    # `constr_refuse_container_returned_by_a_callee` and `Bag2(mklist[1](), 5)`
+    # BUILT, on both architectures. Same callee, same declared `-> List[Int]`,
+    # same reclaimed scratch — the only difference is the brackets, and a word
+    # that is a pointer into reclaimed memory is exactly what premise (B1) is
+    # about.
+    #
+    # `rets` is keyed by the function's NAME, so the specialized spelling is in
+    # it under the bare one; that is why this needs the shared reader rather
+    # than a second subscript test here. `None` — a dotted name, a computed
+    # callee — is the answer this file's other refusals give for the same reason
+    # (`call_callee_name`'s docstring lists both exclusions), and it lands on the
+    # permissive tie-break above, which is where an absent answer belongs.
+    callee = call_callee_name(arg.func)
+    if callee is None:
         return False
-    return return_type_is_blob((rets or {}).get(arg.func.name))
+    if _callee_is_placed_frame(callee):
+        return False
+    return return_type_is_blob((rets or {}).get(callee))
 
 
 # The annotations that name a BUMP-ALLOCATED REGION on this path — the types
@@ -19890,22 +20163,38 @@ def literal_default_word(value) -> tuple:
     constructor) and `class_constant_word` (a class-level constant, materialized
     at each read of it) because they are the same question asked of the same
     node, and two copies of this decision would eventually disagree about which
-    defaults are representable."""
+    defaults are representable.
+
+    **The fold is `fold_literal_expr`'s, not a second one.**  This used to
+    spell out its own arms for `None` / `IntLiteral` / `BoolLiteral` /
+    `StringLiteral`, so it was the same classifier as `fold_literal_expr` with
+    the unary and binary arms missing — and a class-level constant is exactly
+    where a signed literal appears. `class C: A = -3` parses to
+    `UnaryOp('-', IntLiteral(3))`, the one token wider than `3` and exactly
+    representable in the word `3` already is, and it was REFUSED with a message
+    claiming the value "is not a value this build can materialize" — false, and
+    actively misleading, because there is nothing non-literal in the reader's own
+    source to go and look at. Measured:
+
+        $ python3 fire.py build --formal --no-prove t.py    # class C: A = -3
+        build: C.A reads a class-level constant of C, whose value is `-3` — and a
+        formal value is one 64-bit word with nowhere to keep a non-literal one…
+
+    `enum` is where it was first reached, because an enum member's `.value` IS
+    the class constant (`enum_member_accessor`), and a negative member is
+    ordinary. Every fold that folder can do is therefore exact here too, and
+    `None` keeps its own answer by being distinguished BEFORE the fold: no
+    default at all is (DEFAULT_NONE, None) and a default that does not fold is
+    (DEFAULT_OPAQUE, None), which are two different facts about the slot."""
     if value is None:
         return (DEFAULT_NONE, None)
-    if is_none_expr(value):
-        # `None` is the word 0 on this target (see NONE_WORD). Folded here, not
-        # refused: `x: T = None` is the default for an optional field and is the
-        # single most common class-level default in this repository's own
-        # dataclasses, and both backends materialize an int word exactly.
-        return (DEFAULT_INT, NONE_WORD)
-    if isinstance(value, F.IntLiteral):
-        return (DEFAULT_INT, int(value.value))
-    if isinstance(value, F.BoolLiteral):
-        return (DEFAULT_INT, 1 if value.value else 0)
-    if isinstance(value, F.StringLiteral) \
-            and isinstance(value.value, str) and not value.is_bytes:
-        return (DEFAULT_STRING, value.value)
+    folded = fold_literal_expr(value)
+    if isinstance(folded, bool):
+        return (DEFAULT_INT, int(folded))
+    if isinstance(folded, int):
+        return (DEFAULT_INT, folded)
+    if isinstance(folded, str):
+        return (DEFAULT_STRING, folded)
     return (DEFAULT_OPAQUE, None)
 
 
@@ -20431,14 +20720,23 @@ def module_constant_literal(name: str):
 
 # The literal-only expression folder. Deliberately tiny and deliberately
 # literal-only: its whole job is to decide "can the build KNOW this value", and
-# every operator added here is one more way for a fold to be wrong. `-` and `+`
-# on integers and `+ - * //` between integers is the closure that covers the
+# every operator added here is one more way for a fold to be wrong. `-`, `+` and
+# `~` on integers and `+ - * //` between integers is the closure that covers the
 # module-level constants in this repository (`_PASS = 0`, `_CMP_OPS = 6`,
 # `_BIN_OPS = 8`, `CASE_TIMEOUT = 30 * 2`, and `std/utils/_serialize.mojo`'s
-# `_kCompactElemPerSide = _kCompactMaxElemsToPrint // 2`); `~` is F3's operator
-# surface and is deliberately NOT here, so a module constant folded with it
-# lands in the "cannot fold" refusal rather than in a second, disagreeing
-# implementation.
+# `_kCompactElemPerSide = _kCompactMaxElemsToPrint // 2`).
+#
+# `~` was the one operator here that every RUNTIME already lowered and no
+# compile-time folder folded, which is the same hole `//` was and with the same
+# repair: `comptime c = ~3` was refused by `mojo/middle/comptime.py:eval_const`
+# while both formal backends emit MVN/NOT for it (`arm64_codegen`'s `~` arm and
+# `x86_64_codegen`'s, each with the comment saying which of the two was missing),
+# so the compiled value and the emitted code disagreed about whether the program
+# was knowable at all. It is in all three folders now — `eval_const`,
+# `eval_const_int` and this one — because a folder that declines an operator
+# another folder in the same build folds is answering a different question from
+# the one it is asked, and `~n` is exact for every integer (CPython agrees:
+# `~3` is `-4`, and the word it is computed in is the word it is stored in).
 #
 # `//` is the same operator `mojo/middle/comptime.py:fold_arith` gained, and
 # for the same reason, and the two must not drift: that folder decides what a
@@ -20456,6 +20754,14 @@ _FOLD_BINOPS = {"+": lambda a, b: a + b,
                 "-": lambda a, b: a - b,
                 "*": lambda a, b: a * b,
                 "//": lambda a, b: a // b}
+
+# The unary sign operators this folder folds, and what each one DOES to the
+# folded word. Kept as a table rather than an `if` chain so the third folder
+# (`mojo/middle/comptime.py:eval_const`) spells the same rule and the two can be
+# compared by reading, which is the whole of the "must not drift" note above.
+_FOLD_UNARY = {"-": lambda v: -v,
+               "+": lambda v: v,
+               "~": lambda v: ~v}
 
 
 def fold_literal_expr(node, names=None):
@@ -20496,10 +20802,10 @@ def fold_literal_expr(node, names=None):
     if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0) \
             and isinstance(node.value, str):
         return node.value
-    if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
+    if isinstance(node, F.UnaryOp) and node.op in _FOLD_UNARY:
         v = fold_literal_expr(node.operand, names)
         if isinstance(v, int) and not isinstance(v, bool):
-            return -v if node.op == "-" else v
+            return _FOLD_UNARY[node.op](v)
         return None
     if isinstance(node, F.BinaryOp) and node.op in _FOLD_BINOPS:
         a = fold_literal_expr(node.left, names)

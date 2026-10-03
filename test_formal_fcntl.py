@@ -3,7 +3,8 @@ r"""Build `formal/hostmods/fcntl.mojo` and RUN it against CPython's `fcntl`.
 
     python3 test_formal_fcntl.py [-v] [group ...]
 
-Groups: `consts`, `flock`, `resolve`, `absent`. With no argument, all.
+Groups: `consts`, `flock`, `fdflags`, `independence`, `resolve`, `absent`.
+With no argument, all.
 
 WHY THIS MODULE EXISTS AT ALL, AND WHAT IT IS WORTH
 --------------------------------------------------
@@ -78,12 +79,9 @@ CONSTANTS = [n for n in sorted(dir(CPY))
 ABSENT = {
     "ioctl": "a device's private protocol; there is no driver on this image",
     "lockf": "the third argument of fcntl(2) is a POINTER through a variadic "
-             "tail, and a variadic pointer argument cannot be spelled here",
-    "getfd": "the third argument of fcntl(2) does not arrive",
-    "setfd": "the third argument of fcntl(2) does not arrive, so a setfd "
-             "would report success and change nothing",
-    "getfl": "F_GETFL's answer differs from CPython's for the same descriptor",
-    "setfl": "F_SETFL's third argument does not arrive",
+             "tail, and a variadic pointer argument cannot be spelled here; the "
+             "tail itself now works, which is what the four descriptor-flag "
+             "calls in the fdflags group are the evidence for",
 }
 
 
@@ -374,11 +372,14 @@ def group_absent(tmpdir, archs, verbose):
     name, refused for a different and vaguer reason that does not name the name
     being asked for.
 
-    `setfd` and `getfd` are the interesting entries, because their absence is
-    NOT a fact about the target — the syscall is right there and the module
-    could call it. It is a SPELLING, measured, and the docstring says so; the
-    group is what stops a later reader from adding them back and believing the
-    return value.
+    `lockf` is the interesting entry now, because its absence is NOT a fact
+    about the target — the syscall is right there and the module could call it.
+    It is a SPELLING: `fcntl`'s variadic tail works (the `fdflags` group is the
+    evidence, and it is why `getfd`/`setfd`/`getfl`/`setfl` were removed from
+    this table when they started working), and what `lockf` still cannot say is
+    that the third argument is a POINTER. The docstring says so; the group is
+    what stops a later reader from adding it back and believing the return
+    value.
     """
     arch = archs[0]
     for name, _why in sorted(ABSENT.items()):
@@ -405,6 +406,97 @@ def group_absent(tmpdir, archs, verbose):
     return True, f"{len(ABSENT)} absent names refused"
 
 
+def group_fdflags(tmpdir, archs, verbose):
+    """`getfd`/`setfd`/`getfl`/`setfl`, against CPython's `fcntl` on the same file.
+
+    These four were ABSENT, and their absence was the only thing in this module
+    that was a spelling rather than a fact about the target: `fcntl(2)` is
+    `int fcntl(int, int, ...)`, the third argument is variadic, and Apple arm64
+    passes a variadic argument in a stack area rather than in an argument
+    register. `formal/model.py`'s `VARIADIC_LIBC` is where a callee is recorded
+    as variadic, `fcntl` was not in it, and so the third argument was emitted
+    positionally into X2 and nothing was written into the area — where the
+    syscall read whatever the caller had at `[sp]`. Measured before the entry
+    existed: `setfd` reported success and changed nothing, and `getfl` reported
+    192 where CPython reports 4.
+
+    **x86-64 was never affected**, because SysV x86-64 passes variadic arguments
+    in the same registers as fixed ones. So the group runs on every backend
+    `backends()` offers and the two are compared with CPython rather than with
+    each other, and a run that covered only the host's own architecture would
+    have passed this before the fix as well as after it.
+
+    The sequence CLEARS the flag word before reading it, and that is not tidiness
+    — it is what makes every row comparable. CPython's `os.open` sets
+    `FD_CLOEXEC` by default and this path's `open(p, "r")` does not and cannot
+    (there is no `open` flag for it), so a fresh descriptor legitimately reads 0
+    here and 1 under CPython. Clearing first puts both descriptors in the same
+    state, so there is no row in this group that has to be excluded from the
+    comparison and no "expected difference" that a later change could quietly
+    widen.
+    """
+    src = """\
+from fcntl import getfd, setfd, getfl, setfl, FD_CLOEXEC
+from os._syscalls import fs_open_ro, fs_close
+
+def main(n):
+    var fd = fs_open_ro("lockfile")
+    printf("clear=%lld@@", setfd(fd, 0))
+    printf("zero=%lld@@", getfd(fd))
+    printf("set=%lld@@", setfd(fd, FD_CLOEXEC()))
+    printf("one=%lld@@", getfd(fd))
+    printf("clear2=%lld@@", setfd(fd, 0))
+    printf("back=%lld@@", getfd(fd))
+    printf("fl0=%lld@@", getfl(fd))
+    printf("setfl=%lld@@", setfl(fd, 4))
+    printf("fl1=%lld@@", getfl(fd))
+    fs_close(fd)
+    return 0
+"""
+    for arch in archs:
+        work = _lock_dir(tmpdir, "fdflags_" + arch)
+        want = _fdflags_oracle(work)
+
+        def compare(a, recs, want=want):
+            got = dict(_recs(recs))
+            bad = [f"{k}: image {got.get(k)!r}, CPython {v!r}"
+                   for k, v in want.items() if got.get(k) != v]
+            check(not bad, f"[{a}] {len(bad)} of {len(want)} descriptor-flag "
+                           f"answers differ from CPython's:\n      " +
+                           "\n      ".join(bad))
+
+        D.build_and_run(src, "fcntl_fdflags", tmpdir, compare, backends=[arch],
+                        cwd=work)
+    if verbose:
+        print(f"    {len(want)} descriptor-flag answers over the "
+              f"clear/set/read sequence, against CPython's fcntl")
+    return True, (f"{len(want)} getfd/setfd/getfl/setfl answers agree with "
+                  f"CPython, so the variadic third argument arrives")
+
+
+def _fdflags_oracle(work):
+    """CPython's answers for the descriptor-flag sequence, on the same file.
+
+    The same order as the program and the same starting state, which is what
+    makes the two sets of rows comparable: CPython's `os.open` sets
+    `FD_CLOEXEC` and this path's `open` cannot, so the first thing the sequence
+    does is put both descriptors' word at 0.
+    """
+    fd = os.open(os.path.join(work, "lockfile"), os.O_RDONLY)
+    got = {}
+    got["clear"] = str(CPY.fcntl(fd, CPY.F_SETFD, 0))
+    got["zero"] = str(CPY.fcntl(fd, CPY.F_GETFD))
+    got["set"] = str(CPY.fcntl(fd, CPY.F_SETFD, CPY.FD_CLOEXEC))
+    got["one"] = str(CPY.fcntl(fd, CPY.F_GETFD))
+    got["clear2"] = str(CPY.fcntl(fd, CPY.F_SETFD, 0))
+    got["back"] = str(CPY.fcntl(fd, CPY.F_GETFD))
+    got["fl0"] = str(CPY.fcntl(fd, CPY.F_GETFL))
+    got["setfl"] = str(CPY.fcntl(fd, CPY.F_SETFL, 4))
+    got["fl1"] = str(CPY.fcntl(fd, CPY.F_GETFL))
+    os.close(fd)
+    return got
+
+
 def _recs(recs):
     """`<key>=<value>` records as pairs. See `test_formal_shutil.py`'s."""
     out = []
@@ -417,6 +509,7 @@ def _recs(recs):
 GROUPS = {
     "consts": group_consts,
     "flock": group_flock,
+    "fdflags": group_fdflags,
     "independence": group_independence,
     "resolve": group_resolve,
     "absent": group_absent,

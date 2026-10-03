@@ -771,6 +771,75 @@ CASES = [
      "    v: Int = _B\n"
      "    print(v)\n"
      "    return 0\n", "6\n"),
+
+    # ── a COMPREHENSION is its own scope, and the shadowing rule has to know it ──
+    #
+    # Two rows, because they are two programs and the difference between them is
+    # one identifier — the comprehension's TARGET. Both are `G` read inside a
+    # comprehension over a module global of the same name, and CPython's answer
+    # differs: with the target spelled `G` the read is the loop variable, and
+    # without it the read is the module's 5.
+    #
+    #     G = 5
+    #     def f(rows):
+    #         var out = [G for G in rows]     # the comprehension's own G
+    #         return G + out[0]               # the MODULE's G: 5 + 1 = 6
+    #
+    # This path REFUSED the trailing `G` on both architectures — "is read at line
+    # 5 before anything in this function stores it, and CPython raises
+    # UnboundLocalError for that program" — and CPython answers **6**. The
+    # message is false in the strongest available way: the program runs. The
+    # cause is that the register allocator's `bound_names_in_order` reports a
+    # comprehension's target (correctly — the emitter gives it a home), and the
+    # reader of "does this name shadow a module binding" was the same set.
+    #
+    # The row above is the control and the reason this could not be fixed by
+    # deleting the name from one table: `bump`'s `G = 100` really is a local of
+    # `bump`, and the module's `G` must keep its value. So there are two readers
+    # now — `build.py::_names_bound_in` (what the body writes, which placement
+    # needs) and `_function_locals` (what shadows a module binding) — and the
+    # comprehension's target is in the first and not the second.
+    #
+    # `printf`, and the reason is this file's own rule rather than a style
+    # choice: a case spelled with `printf` has no interpreter reference, because
+    # `printf` is not a name the interpreter resolves — and for THIS construct
+    # the interpreter has no correct answer to give. It evaluates a list/set/dict
+    # comprehension in the ENCLOSING scope, so the comprehension's target leaks
+    # out and the trailing `G` reads 2 rather than the module's 5:
+    #
+    #     $ python3 fire.py run .tmp/w/ci.py     # 3
+    #     $ python3 -c "…same text…"             # 6
+    #
+    # `myinterpreter.py::eval_Comprehension`'s own docstring calls this "a known
+    # minor fidelity gap", and the fix is filed as
+    # `bugs/INTERP_comprehension_has_no_scope_of_its_own.md`. Until then the two
+    # images are checked against CPython's 6 and the interpreter is not asked,
+    # which is strictly MORE than the three-engine contract usually gets here —
+    # an interpreter that disagreed would have been reported as a semantics bug,
+    # and one did.
+    ("a_comprehension_target_does_not_shadow_a_module_constant",
+     "G = 5\n"
+     "\n"
+     "def f(rows):\n"
+     "    var out = [G for G in rows]\n"
+     "    return G + out[0]\n"
+     "\n"
+     "def main() -> int:\n"
+     "    printf(\"%d\", f([1, 2]))\n"
+     "    return 0\n", "6"),
+    # The same read with a DIFFERENT target, which is the control for the row
+    # above in the direction that matters: nothing shadows `G` here, so the
+    # comprehension's `G` is the module's 5. A "fix" that simply stopped
+    # substituting inside comprehensions would answer 1 here.
+    ("a_comprehension_read_of_a_module_constant_is_the_constant",
+     "G = 5\n"
+     "\n"
+     "def f(rows):\n"
+     "    return [G for x in rows][0]\n"
+     "\n"
+     "def main() -> int:\n"
+     "    printf(\"%d\", f([1, 2]))\n"
+     "    return 0\n", "5"),
 ]
 
 # Cases that must be REFUSED, and why each one is a refusal rather than a wrong

@@ -1,11 +1,58 @@
 # FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time: `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table
 
-**Status: OPEN, not started, and deliberately filed as ONE capability rather than
-two modules.** Split out of `FORMAL_glob_copy_collections_io_not_attempted.md`,
-whose own text says this document "does not exist yet and should" — that a
-reader who finds one of these two should be told about the other, because they
-are the same missing thing. That parent is a measurement record whose remaining
-actions are withdrawn or filed elsewhere; this is the part of it that is work.
+**Status: item 1 of the next steps LANDED (2026-10-02, `work/formal8-1`) and its
+measurement is refreshed; items 2 and 3 are each one capability with an owner
+named, and neither is a light change.** Deliberately filed as ONE capability
+rather than two modules. Split out of
+`FORMAL_glob_copy_collections_io_not_attempted.md`, whose own text says this
+document "does not exist yet and should" — that a reader who finds one of these
+two should be told about the other, because they are the same missing thing.
+That parent is a measurement record whose remaining actions are withdrawn or
+filed elsewhere; this is the part of it that is work.
+
+## 1. LANDED: the host-import refusal now says what this target offers
+
+The refusal was, in full:
+
+    build: hm.mojo imports 'collections', which is a host module (CPython
+    standard library), which has no Mojo source for this backend to compile
+
+…which reads as "this target cannot do records", and the next thing a reader does
+with that is file the next bug document about `collections`. It is now:
+
+    build: hm.mojo imports 'collections', which is a host module (CPython
+    standard library), which has no Mojo source for this backend to compile. The
+    record the callers here want is a STRUCT: declare it with its fields, and
+    read them as fields. What cannot be done is building the type at run time —
+    `namedtuple("Census", "ok detail …")` asks for a type from a string, and there
+    is no word on this path that denotes a type (doc/ABI.md, Generics).
+    `Counter` is a dict rather than a record, so it is the other question: see
+    bugs/FORMAL_listdir_no_run_time_sequence.md.
+
+`formal/imports.py`'s `unresolvable_import_error` appends
+`_host_module_advice(name)`, and `HOST_MODULE_ADVICE` has entries for
+`collections`, `copy` and `functools` — **three, not every host module**, because
+advice on all of them is the same noise in a different place, and a module with
+no entry gets exactly the sentence it had. Both directions are pinned by
+`test_formal_imports.py`'s
+`a_host_module_refusal_says_what_this_target_offers` (the advice is present for
+`collections`, and ABSENT for `itertools`), and the advice is a table beside the
+rule rather than a paragraph inside it, so it is one edit per module and a
+module that gains Mojo source stops being asked for advice at all
+(`_is_host_module` answers False for it, which is the same fact
+`test_formal_fcntl.py`'s `resolve` group pins for `fcntl`).
+
+**The measurement below is refreshed, and it has grown.** Eleven non-test
+sources in this repository now import `collections`, `copy` or `functools` (16
+statements), not five: `formal/lean.py`, `formal/model.py`,
+`tools/formal_sweep.py`, `tools/formal_sweep_causes.py`,
+`tools/arm64_insn_audit.py`, `formal/build.py`, `myinterpreter.py`,
+`mojo/middle/coro.py` (three statements), `mojo/middle/offload.py`,
+`consolidate_string_pool.py`, `tools/apply_extraction.py`,
+`tools/extract_family.py`, `version.py`, `tools/analyze_stdlib_errors.py`. The
+`namedtuple` share is unchanged in kind — five call sites in four files — and
+still none of them is converted by a module, because the thing they want is a
+record the compiler can see.
 
 **This is not a defect in anything that exists.** `formal/hostmods/` has no
 `collections.mojo` and no `copy.mojo`, and the absence is correct: neither can
@@ -93,6 +140,9 @@ reachable by the same step.
 
 ## The exact next step, in the order the uses justify
 
+0. ~~**Say the answer where the reader is.**~~ **DONE** — see above. It
+   converts zero files and it is the difference between a reader who knows what
+   to do and a reader who files the next bug doc about `collections`.
 1. **Say the answer where the reader is.** Five `namedtuple` call sites in this
    repository's own tooling want a record; the answer on this target is a
    `struct`, and nothing in the refusal for `import collections` says so. The
@@ -109,6 +159,13 @@ reachable by the same step.
    argument. A fresh block plus an `n`-slot copy is a feature in both backends."
    **Do these as one change**: they are one feature with two call sites, and
    filing them separately is how they get half-built.
+   **Not done here, and the reason is a CLAIM rather than a difficulty**: that
+   §4c is `FORMAL_frame_receiver_handoff.md`'s write set, and another lane holds
+   it. The advice sentence above is what a caller gets in the meantime, and it
+   names the honest limit ("a copy chosen at run time, over a graph whose shape
+   the build cannot see, has no answer here"). `mojo/middle/offload.py` and
+   `tools/extract_family.py` are additional `import copy` sites the original
+   five did not list.
 3. **The reflection table** — a runtime-readable type descriptor and
    construction from it — which is what `namedtuple` at run time and
    `deepcopy` over an arbitrary graph both need, and which is the actual root

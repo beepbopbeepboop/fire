@@ -124,22 +124,60 @@ def run(out):
 # Each entry is (name, member, value) and the answer is computed from THIS
 # process's `enum`, never written down here.
 #
-# NO NEGATIVE VALUE, and that is a measured boundary rather than an oversight: a
-# class-level constant spelled `-3` is a `UnaryOp`, not an `IntLiteral`, so
-# `literal_default_word` calls it opaque and BOTH the bare read and the `.value`
-# read are refused — measured, and the refusal is the right direction. It is not
-# an enum question (it is the same for `class C: A = -3` with no enum anywhere),
-# so it is filed as `bugs/FORMAL_a_negative_literal_is_not_a_class_constant.md`
-# rather than fixed here, where the blast radius is every default in the tree.
+# A NEGATIVE value is in the table, and it was the row that was missing for the
+# longest: `A = -3` parses to `UnaryOp('-', IntLiteral(3))` rather than to an
+# `IntLiteral`, and `formal/model.py::literal_default_word` used to be a second,
+# smaller classifier beside `fold_literal_expr` with no unary arm at all — so the
+# value was REFUSED with a message claiming it "is not a value this build can
+# materialize", which is false and sends a reader hunting for a non-literal that
+# is not in their source. `literal_default_word` now folds with
+# `fold_literal_expr`, the folder a module-level constant already used, so an
+# enum member and a module constant are decided by one rule. (Filed as
+# `bugs/FORMAL_a_negative_class_constant_is_not_a_literal.md`, deleted by the
+# commit that landed it; this table is the assertion that it landed, and it is an
+# ORACLE row — `_cpython_expected` builds the same class through CPython's own
+# `enum`, so `-3` is compared against `-3` rather than against a number written
+# down here.)
+#
+# `~0` is in the table for the same reason one folder lower: `A = ~0` is `-1`,
+# and every backend's runtime already lowered `~`, so a compile-time folder that
+# declined it was answering a different question from the code generator.
 ENUM_CASES = [
     ("int_zero", "ZERO", 0),
     ("int_one", "ONE", 1),
     ("int_fifteen", "FIFTEEN", 15),
     ("int_sixty_four", "SIXTYFOUR", 64),
+    ("int_neg", "NEG", -3),
+    ("int_neg_one", "NEGONE", -1),
+    ("int_invert", "INVERT", -1),   # spelled `~0`; see ENUM_MEMBER_SPELLING
     ("str_plain", "PLAIN", "annotated"),
     ("str_empty", "EMPTY", ""),
     ("str_spaces", "SPACES", "a b c"),
 ]
+
+
+# The class-body SPELLING for the rows whose value alone does not determine the
+# AST shape: `-1` and `~0` are the same Python value and two different nodes, and
+# the node is what `formal/model.py::literal_default_word` used to refuse. It is
+# consulted on BOTH sides of the oracle — see `_member_source` — so the image and
+# CPython are always built from the same text for the same corpus row.
+ENUM_MEMBER_SPELLING = {"int_invert": "~0"}
+
+
+def _member_source(cname: str, value) -> str:
+    """The class-body TEXT for one member, on both the image side and CPython's.
+
+    `str(value)` for the ordinary rows, and the operator spelling for the two
+    rows that exist to test one: `~0` and `-0`... `-1` and `~0` are the same
+    value in Python and two different AST shapes, and the shape is the thing
+    under test, so the corpus has to be able to name a shape the value alone
+    does not determine. Both sides build their text here so the image and the
+    oracle cannot drift onto different spellings of the same corpus row — the
+    whole point of deriving one from the other."""
+    spelled = ENUM_MEMBER_SPELLING.get(cname)
+    if spelled is not None:
+        return spelled
+    return repr(value) if isinstance(value, str) else str(value)
 
 
 def _enum_source(classes) -> str:
@@ -159,8 +197,7 @@ def _enum_source(classes) -> str:
     for cname, members in classes:
         lines.append(f"class {cname}(Enum):")
         for mname, value in members:
-            lit = repr(value) if isinstance(value, str) else str(value)
-            lines.append(f"    {mname} = {lit}")
+            lines.append(f"    {mname} = {_member_source(cname, value)}")
         lines.append("")
     lines.append("def main() -> int:")
     for cname, members in classes:
@@ -186,7 +223,7 @@ def _cpython_expected(classes):
     for cname, members in classes:
         body.append(f"class {cname}(Enum):")
         for mname, value in members:
-            body.append(f"    {mname} = {value!r}")
+            body.append(f"    {mname} = {_member_source(cname, value)}")
     exec("\n".join(body), ns)
     out = []
     for cname, members in classes:

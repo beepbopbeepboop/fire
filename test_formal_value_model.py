@@ -74,6 +74,26 @@ def cpython_source(source: str) -> str:
 #
 # ── the comparison dunders ──
 CASES = [
+    # A dict subscript's kind is THE KIND OF THE PAIR UNDER THAT KEY, and this
+    # is where a refusal became an answer. It used to be
+    # `a_dict_whose_values_disagree_is_refused` and the source is this one:
+    # `{"a": 10, "b": "text"}` states two kinds for the TABLE, and the old rule
+    # wanted them unanimous, so every subscript of it was unclassified.
+    #
+    # A subscript is a key scan and its answer is ONE element word, so
+    # unanimity is required over the pairs carrying that key and not over the
+    # whole table — and the source says exactly which word each key holds. So
+    # the program is answerable, CPython agrees, and the case is an ORACLE row
+    # (`expected` is what CPython prints for the same text) rather than a
+    # refusal: the old refusal was true about the old rule and false about the
+    # program. The two shapes the gate still refuses are in `REFUSALS`, and one
+    # of them is the same dict with one key spelled twice.
+    ("a_dict_subscript_is_the_kind_of_the_pair_under_that_key",
+     "def main(n):\n"
+     "    var d = {\"a\": 10, \"b\": \"text\", \"c\": [1, 2, 3]}\n"
+     "    print(\"v:\", d[\"a\"], \"w:\", d[\"b\"], \"n:\", len(d[\"c\"]))\n"
+     "    return 0\n",
+     "v: 10 w: text n: 3\n"),
     # THE REPRODUCER.  A class whose `__eq__` ignores its argument, compared
     # through the operator and through the explicit spelling, in one printf: the
     # two numbers are the same question asked twice and CPython makes them equal.
@@ -605,6 +625,44 @@ MODULE_GLOBAL_CASES = [
 # asks the RIGHT operand's `__eq__` when the left one's returns NotImplemented,
 # and this path has no representation for NotImplemented to be returned as.
 REFUSALS = [
+    # THE GATE that `a_dict_subscript_is_the_kind_of_the_pair_under_that_key`
+    # earns by being answered: unanimity is over the pairs under ONE KEY, so a
+    # literal that spells the same key twice with values of two kinds has no
+    # answer. CPython keeps the LAST pair (`{"a": 1, "a": [2]}` makes `d["a"]` a
+    # list); this path cannot claim a kind for a word whose two writers
+    # disagree, which is the same refusal `own_shape_kind` makes for a local.
+    #
+    # The needle is the INTEGER row rather than the unclassified one, and that
+    # is worth saying because it is the fallback showing through: with no
+    # per-key answer the subscript falls back to the whole dict's element kind,
+    # which the pre-existing `_kind_of_elements` computes over every value and
+    # which does NOT see the nested list — so it reads "int" and the integer row
+    # is what refuses. A different sentence, the same refusal, and the shape
+    # that reaches it is one whose answer no reader could have had anyway.
+    ("a_dict_whose_one_key_holds_two_kinds_is_refused",
+     "def main(n):\n"
+     "    var d = {\"a\": 1, \"a\": [2, 3]}\n"
+     "    print(\"n:\", len(d[\"a\"]))\n"
+     "    return 0\n",
+     "an integer has no length"),
+    # …and the two shapes the gate exists for. A dict subscript whose element
+    # word no store wrote is a count read from address 0, so a key the literal
+    # does not contain, and a key this path cannot COMPARE with the literal's,
+    # both stay refused. Measured in the field spelling of this as a build that
+    # ran and died with SIGSEGV — `struct_field_kind`'s docstring has it.
+    ("a_dict_subscript_of_a_key_the_literal_lacks_is_refused",
+     "def main(n):\n"
+     "    var d = {\"a\": [1, 2]}\n"
+     "    print(\"n:\", len(d[\"b\"]))\n"
+     "    return 0\n",
+     "the source does not say what this operand holds"),
+    ("a_dict_subscript_of_a_name_key_is_refused",
+     "def main(n):\n"
+     "    var d = {\"a\": [1, 2]}\n"
+     "    var k = \"a\"\n"
+     "    print(\"n:\", len(d[k]))\n"
+     "    return 0\n",
+     "the source does not say what this operand holds"),
     ("one_name_two_candidate_structs_is_refused",
      "class A:\n"
      "    x: int\n"
@@ -808,20 +866,14 @@ REFUSALS = [
      "    printf(\"lt=%d\", 1 if p < q else 0)\n"
      "    return 0\n",
      "orders the ADDRESS of a Pair FRAME"),
-    # A DICT WHOSE VALUES DISAGREE, and it is here rather than only in the
-    # passing cases because it is the SAFETY PROPERTY of the element kind they
-    # now carry: `{"a": 10, "b": "text"}` states two kinds, and a kind table
+    # A DICT WHOSE VALUES DISAGREE, and the case is here rather than only in
+    # the passing ones because it is the SAFETY PROPERTY of the element kind
+    # they carry: `{"a": 10, "b": "text"}` states two kinds, and a kind table
     # that picked either one would print an interned address as a number or a
     # number as text — the failure mode the whole element-kind work is arranged
-    # to prevent.  `run_refusal` is the instrument, because the defect would be
-    # SHARED by the two backends (they read one kind table) and so cannot be
-    # seen by requiring them to agree.
-    ("a_dict_whose_values_disagree_is_refused",
-     "def main(n):\n"
-     "    var d = {\"a\": 10, \"b\": \"text\"}\n"
-     "    print(\"v:\", d[\"a\"])\n"
-     "    return 0\n",
-     "cannot tell whether SubscriptExpr"),
+    # to prevent.  `run_refusal` is the instrument for the rows below, because a
+    # defect in that table would be SHARED by the two backends (they read one
+    # table) and so cannot be seen by requiring them to agree.
     # ── the four gates on a field kind read off a construction ──
     #
     # Each of these is a case where claiming a kind from `p = S(args)` would be

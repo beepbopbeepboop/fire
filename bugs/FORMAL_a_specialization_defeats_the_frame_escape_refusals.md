@@ -1,8 +1,10 @@
 # A comptime SPECIALIZATION defeats both frame-escape refusals, and the bare spelling beside it is correct
 
-## Status: the MECHANISM is fixed and measured; two of the three reds in the file
-## remain, and each one's ACTUAL cause is now identified and is not a
-## specialization defect any more
+## Status: the MECHANISM is fixed and measured, and on 2026-10-02 a THIRD
+## representation guard and both diagnostic spellers were fixed with it; the
+## three reds in the file remain, and each one's ACTUAL cause is identified, is
+## not a specialization defect any more, and belongs to a lane that holds the
+## claim
 
 The two guards named below are in the tree. What they fixed is real and measured:
 a specialized call and its bare twin are ONE call, and the two frame ends had
@@ -12,6 +14,16 @@ because the original filing's last paragraph predicted the opposite.
 
     $ python3 test_formal_receiver_position.py
     formal receiver position: PASS=11 FAIL=3
+
+Re-measured 2026-10-02 on `work/formal8-1`, unchanged and for the same three
+reasons: **PASS=13 FAIL=3**, and the three are the same three names
+(`refuse_a_specialized_parameter_returned`,
+`refuse_a_dotted_specialized_callee_names_it`,
+`refuse_a_value_only_callee_through_a_specialization`) with the same messages.
+Each belongs to a doc another lane holds — `FORMAL_frame_receiver_handoff.md`
+(the first and the third) and `FORMAL_method_call_on_a_subscripted_receiver.md`
+(the second) — so nothing here moved them, and the fourth item below is still
+the integrator's.
       FAIL refuse_a_specialized_parameter_returned            (expected)
       FAIL refuse_a_dotted_specialized_callee_names_it        (not in the filing)
       FAIL refuse_a_value_only_callee_through_a_specialization (different message)
@@ -110,14 +122,63 @@ dotted spelling first. That is the fifth shape in
 three of these files", which is filed, measured, and claimed
 (`bug:FORMAL_method_call_on_a_subscripted_receiver`, formal3-5). Not moved here.
 
-## 4. The wider list, still true
+## 4. The wider list: a THIRD representation guard, and the two diagnostic
+## spellers (all three fixed 2026-10-02)
 
-Every `isinstance(..., F.IdentExpr)` guard on a call's callee is a candidate, and
-this tree has a list of them — `formal/model.py` lines around 10507, 11138,
-11764, 11801, 12280, 12282, 12452, 12692, 12795 (plus 12907, which is the second
-guard above) and 11400/11448 in the diagnostic spellers, where the effect is a
-message that names `?` instead of the function. The diagnostic ones are cosmetic;
-the two that decided a REPRESENTATION are the pair above, and they are fixed.
+Every `isinstance(..., F.IdentExpr)` guard on a call's callee is a candidate.
+The two that decided a REPRESENTATION were the pair in §1. **A third was found,
+and it was in the permissive direction — the expensive one for this document's
+subject**, so it is worth more than a diagnostic:
+
+`formal/model.py::_construction_arg_is_dead_blob` asked "is this construction
+argument a container belonging to a CALLEE" and read the callee with its own
+`isinstance(arg.func, F.IdentExpr)`. A subscript callee fell out, so:
+
+```python
+struct Bag2:
+    var items: Int
+    var n: Int
+
+def mklist() -> List[Int]:
+    var xs = [1, 2, 3]
+    return xs
+
+def main(n: Int) -> Int:
+    var b = Bag2(mklist(), 5)      # REFUSED (constr_refuse_container_returned_by_a_callee)
+    return b.n
+
+def mklist[a: Int]() -> List[Int]: …
+    var b = Bag2(mklist[1](), 5)  # BUILT, on both architectures
+```
+
+Same callee, same declared `-> List[Int]`, same bump-allocated region of the
+callee's own reserved scratch — the only difference is the brackets, and the word
+left in the slot points into reclaimed memory. That is premise (B1)'s hazard
+reached by a spelling, which is this document's whole subject one function over.
+It now reads `call_callee_name`, and `rets` is keyed by the function's name, so
+the specialized spelling was always in the table under the bare one.
+
+**The two diagnostic spellers are the same edit and they were as the docstring
+said: cosmetic.** `_construction_arg_spelling` and the refusal beside it spelled
+the callee `arg.func.name if isinstance(arg.func, F.IdentExpr) else "?"`, so
+`Bag2(mklist[1](), 5)` was refused with a message saying `?()` — a callee that is
+not in the reader's source. Both read `call_callee_name` now, and the message
+says `mklist`. `call_callee_name`'s own `None` (a dotted name, a computed callee)
+still becomes `?`, which is the honest answer for a callee this path cannot name —
+so the two cases the `?` was FOR keep it.
+
+Pinned by `test_formal_run.py`'s
+`constr_refuse_a_container_returned_by_a_specialized_callee`, whose needle is the
+**callee's name** and not the refusal's presence, so a fix that made the row
+refuse for some other reason would not pass it.
+
+**Still true after this:** the guards at what are now `formal/model.py` 11305
+(the type-constructor arm of `kind_of`, deliberately a bare-name check),
+17985 and 18770 (`struct_framed_construction_candidates`, where a specialized
+CONSTRUCTOR `A[1]()` would also be missed) are unexamined for a representation
+consequence. They are recorded here rather than fixed because no program in the
+tree or the corpus reaches them, and a fix for a shape nothing writes is a
+refusal waiting to be wrong.
 
 ## 5. Coverage cost of the fix, which is not zero and is not mine to measure
 

@@ -1499,19 +1499,48 @@ def resolve_module_path(module_name: str, relative_to: str = None,
 # behind after a module exists would be the advice to reimplement it.  So an
 # entry here is a CLAIM that the module still has no source, and
 # `host_module_advice_is_honest` is the check that says so.
+#
+# This is also the cheapest real deliverable in
+# `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`, and it is a
+# MESSAGE, not a module: that document measured five files in this repository's
+# own tooling blocked on `import collections`, and without a line saying what to
+# write instead the refusal reads as "this target cannot do records" — which is
+# what the next person files the next bug document about.  The `collections` entry
+# is the worked example: a COMPILE-TIME-KNOWN record with readable fields is a
+# `struct` (`formal/hostmods/struct.mojo` exists, and a struct's fields are words
+# in a frame), while a type built AT RUN TIME has no answer at all, because
+# there is no word that denotes a type on this path.  Both halves are stated so
+# nobody has to discover the second one by building.
 HOST_MODULE_ADVICE = {
     "collections":
-        "its only module-level name is `namedtuple`, which builds a TYPE at run "
-        "time, and a type is not a value on this path — but the record these "
-        "call sites want is spelled at compile time, so declare a `struct` "
-        "instead of a namedtuple",
+        "the record the callers here want is a STRUCT: declare it with its "
+        "fields, and read them as fields. Its only module-level name is "
+        "`namedtuple`, which builds a TYPE at run time, and there is no word on "
+        "this path that denotes a type (doc/ABI.md, Generics), so "
+        "`namedtuple(\"Census\", \"ok detail …\")` asks for something that cannot "
+        "be lowered even in principle — which is why \"write a struct instead\" is "
+        "a complete answer for a record whose fields the compiler can see and is "
+        "NOT an answer for one it cannot. Measured: five files in this "
+        "repository's own tooling import it (`formal/lean.py`'s `Census`, "
+        "`formal/model.py`'s `InitShape`, `tools/formal_sweep.py`'s three). "
+        "`Counter` is a dict rather than a record, so it is the other question: "
+        "see bugs/FORMAL_listdir_no_run_time_sequence.md",
+    "copy":
+        "a field-wise copy of a type the COMPILER KNOWS at the call site is a "
+        "struct construction: build a new one and assign the fields. A copy "
+        "chosen at run time, over a graph whose shape the build cannot see, has "
+        "no answer here — the same missing thing as a type built at run time",
+    "functools":
+        "the higher-order functions are a callable this path has no "
+        "representation for; the arithmetic they wrap is ordinary code and can "
+        "be written out",
 }
 
-# `collections` is the only entry, and one entry is the right size for a
-# mechanism that must not become a dumping ground: an entry is worth a row only
-# when the answer is MEASURED and the alternative is a spelling the reader can
-# write today.  `math`, `argparse` and `contextlib` are the other candidates and
-# none qualifies yet — their files answer, so the reader is not stuck.
+# Three entries, and three is the right size for a mechanism that must not become
+# a dumping ground: an entry is worth a row only when the answer is MEASURED and
+# the alternative is a spelling the reader can write today.  `math`, `argparse`
+# and `contextlib` are the other candidates and none qualifies yet — their files
+# answer, so the reader is not stuck.
 
 
 def host_module_advice(name: str) -> str:
@@ -1545,6 +1574,7 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     # out before anything asks — so that the set of answers this function can
     # give is the set `resolve_module_path` can return, and a future caller
     # that bypasses the filter says the right thing.
+    advice = ""
     if is_frontend_provided(module_name):
         kind = ("provided by this backend's front end as a compile-time "
                 "transform, so there is no source to compile and nothing for "
@@ -1554,8 +1584,7 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
                 "source for this backend to compile")
     else:
         kind = "not a stdlib or sibling module, and no such file exists"
-    advice = host_module_advice(module_name) if _is_host_module(module_name) \
-        else ""
+    advice = host_module_advice(module_name)
     out = (f"{os.path.basename(source_path)} imports {module_name!r}, which "
            f"is {kind}")
     # The next step, when there is a measured one, as its own sentence.  It is

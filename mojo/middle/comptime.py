@@ -134,6 +134,40 @@ def fold_arith(op: str, left: int, right: int):
     return None
 
 
+# The unary operators `fold_unary_sign` knows, as a membership set so a caller
+# can ask the question without doing the arithmetic on an operator it does not
+# have. `formal/model.py`'s `_FOLD_UNARY` is the same three keys spelled as a
+# table of the folds themselves; see `fold_unary_sign`.
+FOLD_UNARY_OPS = ('-', '+', '~')
+
+
+def fold_unary_sign(op: str, value: int):
+    """Apply the unary SIGN operator `op` to a folded integer, or None.
+
+    The unary half of `fold_arith`'s rule, and a plain if/elif chain rather than
+    a dict of lambdas for the reason `compare_op` is one (self-hosting
+    gimple_codegen.py could not link a dict-of-lambdas at self-host link time).
+
+    `+` and `~` are here because every backend's RUNTIME already lowers them and
+    no compile-time folder did: `comptime c = +3` and `comptime c = ~3` were both
+    REFUSED while the emitted code for the same expression is a pass-through
+    (`+`) and one MVN/NOT (`~`), so the folder and the code generator answered
+    different questions about the same line. `~n` is exact for every integer and
+    CPython agrees on the value (`~3` is `-4`).
+
+    This table and `formal/model.py`'s `_FOLD_UNARY` are ONE rule in two
+    places, the same way `fold_arith` and `_FOLD_BINOPS` are, and for the same
+    reason: the first decides what a function's own `comptime NAME = …` binds,
+    the second what a module-level or class-level one binds, and
+    `comptime_fold_refusal`'s text speaks for both ("an expression of literals
+    and other `comptime` names"). `not` is NOT here — it is a bool-valued
+    operator rather than a sign, and it is in `eval_const` alone."""
+    if op == '-': return -value
+    if op == '+': return value
+    if op == '~': return ~value
+    return None
+
+
 def eval_const(node, bindings: dict, platform: str = None):
     """Evaluate `node` as any compile-time constant (int, bool, or str) — or
     None if it isn't foldable.
@@ -168,9 +202,10 @@ def eval_const(node, bindings: dict, platform: str = None):
     if isinstance(node, StringLiteral): return node.value
     if isinstance(node, IdentExpr):
         return bindings.get(node.name)
-    if isinstance(node, UnaryOp) and node.op == '-':
+    if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
         v = eval_const(node.operand, bindings, platform)
-        return -v if isinstance(v, (int, bool)) and not isinstance(v, str) else None
+        return fold_unary_sign(node.op, v) if isinstance(v, (int, bool)) \
+            and not isinstance(v, str) else None
     if isinstance(node, UnaryOp) and node.op == 'not':
         v = eval_const(node.operand, bindings, platform)
         return not v if isinstance(v, (bool, int)) else None
@@ -231,9 +266,9 @@ def eval_const_int(node, bindings: dict, call_hook=None):
     simply does not fold calls."""
     if isinstance(node, IntLiteral):  return node.value
     if isinstance(node, BoolLiteral): return int(node.value)
-    if isinstance(node, UnaryOp) and node.op == '-':
+    if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
         v = eval_const_int(node.operand, bindings, call_hook)
-        return -v if v is not None else None
+        return None if v is None else fold_unary_sign(node.op, v)
     if isinstance(node, BinaryOp):
         l = eval_const_int(node.left, bindings, call_hook)
         r = eval_const_int(node.right, bindings, call_hook)

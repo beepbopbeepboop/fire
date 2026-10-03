@@ -793,11 +793,14 @@ dylib_exports: list = None, globals_base: int = None,
         if emit_startup:
             self.asm.emit(encode_stp_sp_pre(29, 30))
             test_val = self.test_input
-            if test_val <= 0xffff:
-                self.asm.emit(encode_movz_xn_imm(0, test_val))
-            else:
-                self.asm.emit(encode_movz_xn_imm(0, test_val & 0xffff))
-                self.asm.emit(encode_movk_xd_imm(0, (test_val >> 16) & 0xffff, 16))
+            # `_emit_mov_imm`, not a hand-rolled movz+movk pair: it is the one
+            # materializer on this backend, it covers the whole 64-bit word
+            # (this pair did not — a `test_input` past 0xffff or below zero
+            # emitted a truncated word, and nothing caught it because the
+            # default is 10), and the same call is what `_emit_expr` makes for
+            # every literal, so the startup word and a literal word are the same
+            # code path.
+            self._emit_mov_imm("X0", test_val)
             self.asm.emit(encode_bl(0))
             self.asm.emit_label_rel(first_func_name, here_offset=-4)
             self.asm.emit(encode_ldp_sp_post(29, 30))
@@ -6093,7 +6096,13 @@ dylib_exports: list = None, globals_base: int = None,
             if kind == M.DEFAULT_STRING:
                 self._emit_expr(F.StringLiteral(value=payload))
             else:
-                self.asm.emit(encode_movz_xn_imm(0, int(payload or 0)))
+                # `_emit_mov_imm`, not a hand-rolled movz: it is the one
+                # materializer on this backend and it covers the whole 64-bit
+                # word, which `encode_movz_xn_imm` does not -- a class-level
+                # default past 0xffff (or below zero) emitted a truncated word.
+                # Carried over from the `_emit_nested_frame_init` this replaced,
+                # where it was the same store one level down.
+                self._emit_mov_imm("X0", int(payload or 0))
             self._emit_frame_base(offset)
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
@@ -6173,7 +6182,7 @@ dylib_exports: list = None, globals_base: int = None,
         evaluate, and a literal inside a constructor body is the same node.
         """
         if isinstance(value, int):
-            self.asm.emit(encode_movz_xn_imm(0, value))
+            self._emit_mov_imm("X0", value)
         else:
             self._emit_expr(value)
         self._emit_frame_base(site[1])
@@ -6343,7 +6352,7 @@ dylib_exports: list = None, globals_base: int = None,
         if kind == M.DEFAULT_STRING:
             self._emit_expr(F.StringLiteral(value=payload))
             return
-        self.asm.emit(encode_movz_xn_imm(0, int(payload or 0)))
+        self._emit_mov_imm("X0", int(payload or 0))
 
     def _specialization_args(self, e: F.CallExpr, ct_params: list) -> list:
         """The argument expressions binding `ct_params` at this call site."""

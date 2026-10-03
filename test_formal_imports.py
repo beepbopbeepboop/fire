@@ -928,6 +928,63 @@ def test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo(tmpdir, _shared):
           f"does not exist: {text[-300:]}")
 
 
+def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
+    """The refusal's second half: what to write here instead, where the reader is.
+
+    `unresolvable_import_error`'s first half is a fact about the RESOLVER — no
+    Mojo source, no front-end provider — and it is the whole of what the message
+    used to say. Measured on this repository: five files in its own tooling are
+    blocked on `import collections`, four of them on
+    `collections.namedtuple("Census", "ok detail …")`
+    (`formal/lean.py:816`, `formal/model.py:13195`, `tools/formal_sweep.py`),
+    and the answer for a compile-time-known record with readable fields is a
+    `struct`. Without that sentence the refusal reads as "this target cannot do
+    records", and the next thing a reader does is file the next bug document
+    about `collections` — which is what
+    `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` is.
+
+    **BOTH DIRECTIONS, because advice on every host module is the same noise in a
+    different place.** The second row is a host module with no entry: its
+    refusal must be exactly what it was, which is what stops this from growing
+    into a paragraph nobody reads.
+    """
+    root = os.path.join(tmpdir, "advice")
+    os.makedirs(root, exist_ok=True)
+    prog = os.path.join(root, "prog.mojo")
+    with open(prog, "w") as f:
+        f.write("from collections import namedtuple\n"
+                "def main() -> int:\n"
+                "    C = namedtuple(\"C\", \"a b\")\n"
+                "    return 0\n")
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"), prog], cwd=root)
+    check(result.returncode != 0,
+          "the host-module refusal did not fire, so this row is not testing "
+          "the message")
+    text = result.stderr + result.stdout
+    check("STRUCT" in text,
+          "the refusal does not say the record the callers want is a struct, "
+          f"which is the whole deliverable: {text[-400:]}")
+    check("doc/ABI.md" in text,
+          "the refusal does not say what is NOT possible (a type built at run "
+          f"time), so it reads as a blanket 'no': {text[-400:]}")
+
+    other = os.path.join(root, "other.mojo")
+    with open(other, "w") as f:
+        f.write("from itertools import chain\n"
+                "def main() -> int:\n"
+                "    return 0\n")
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "other.aout"), other], cwd=root)
+    text = result.stderr + result.stdout
+    check("host module" in text,
+          f"`itertools` lost its refusal: {text[-300:]}")
+    check("STRUCT" not in text,
+          "a host module with no entry in the advice table grew one, which "
+          f"makes every such refusal a paragraph: {text[-300:]}")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -2439,6 +2496,8 @@ TESTS = [
      test_host_module_still_refused_despite_same_named_sibling),
     ("a standard-library module in no tier is not reported as a typo",
      test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo),
+    ("a host-module refusal says what this target offers instead",
+     test_a_host_module_refusal_says_what_this_target_offers),
     ("a package that only re-exports builds and runs",
      test_package_reexport_builds_and_runs),
     ("a package dylib exports nothing and says namespace",
