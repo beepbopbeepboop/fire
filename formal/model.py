@@ -25591,16 +25591,27 @@ class GlobalSlot:
     `init` is the static initializer, one of
 
       * `("int", n)`    — a literal integer, already a signed 64-bit word
-      * `("blob", w)`   — the address of a container blob `w`, also in `__DATA`
+      * `("blob", shape, w)` — the address of a container blob `w` of that
+        shape, also in `__DATA`
       * `("str", text)` — the address of NUL-terminated `text`, also in `__DATA`
+      * `("frame", struct, w)` — the address of a FRAME of `struct`'s fields,
+        `w` being one word per slot in `struct_frame_slots` order, also in
+        `__DATA`. `module_frame_slot_initializer` is what produces it, and the
+        lifetime reason it exists is that a frame's bytes belong to whoever
+        built it: a module-level `X = Struct(...)` compiled any other way puts
+        the address of the MODULE BODY's own block in the slot, and that block
+        is reclaimed the moment the body returns. So the frame is built in the
+        image, where it lives as long as the process does.
       * `("unknown", _)`— no initializer the build can compute; see below
 
-    The two address forms carry an ADDRESS, and an address written into a data
+    The three address forms carry an ADDRESS, and an address written into a data
     segment has to be REBASED by the dynamic linker, because the image is mapped
     at a slide: measured on this tree, the same string label is linked at
     0x100000398 and runs at 0x104da4398. `build_data_image` returns the fixup
     list beside the bytes so each linker emits a relocation for exactly the
-    address words and not for the integers beside them.
+    address words and not for the integers beside them. `is_address` is the one
+    place that list is decided, so both containers cannot disagree about which
+    words need one.
 
     `filled_by_body` is the third source of a slot's value, and the one this
     capability had no word for: the MODULE BODY stores the name
@@ -25662,7 +25673,7 @@ class GlobalSlot:
         what keeps the two containers from disagreeing: Mach-O answers it with a
         dyld rebase opcode and ELF with an `R_X86_64_RELATIVE`, and both are
         correct only for the words this property selects."""
-        return self.init[0] in ("blob", "str")
+        return self.init[0] in ("blob", "str", "frame")
 
     def __repr__(self):
         return (f"GlobalSlot({self.name!r}, index={self.index}, "
@@ -26307,7 +26318,8 @@ def module_slot_for(name: str, local_names):
 
 
 def collect_global_slots(stmts: list, functions: list, int_names=(),
-                         string_names=(), dict_names=()) -> dict:
+                         string_names=(), dict_names=(),
+                         frame_slots: dict = None) -> dict:
     """`{name: GlobalSlot}` for every module-level name that needs STORAGE.
 
     The question is one — "can the build FOLD this name, or does something in
@@ -26336,6 +26348,15 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         to be two: a value computed before the program runs has no STATIC
         initializer, but it does have a module-level statement that computes it,
         and that statement is already the entry point.
+      * **the IMAGE holds a FRAME of its own** — `frame_slots`, which
+        `prepare_module_frame_slots` decided and handed over rather than this
+        function re-deriving. That is the fourth bullet and it is NOT a third
+        "where the value comes from": the frame is static data like the
+        container blob above, so the slot is written by `build_data_image` like
+        any other address and `filled_by_body` is FALSE. Passing the table in is
+        what keeps one decision: that function also removed the module body's
+        store, and a name this function decided to fill by the body while that
+        one had decided the image held it would be a slot with two owners.
 
     Anything else is still folded and still needs no storage: an int, a bool or a
     string whose value is a literal, with nothing writing it. A name in NEITHER
@@ -26373,6 +26394,7 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         nm = getattr(fn, "name", None)
         if nm:
             by_name.setdefault(nm, []).append(fn)
+    frame_slots = frame_slots or {}
     finals: dict = {}
     order: list = []
     for stmt in (stmts or []):
@@ -26382,9 +26404,11 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         if name is None:
             continue
         value = getattr(stmt, "value", None)
-        filled_by_body = name in body_written and not _is_container_literal(value)
+        is_frame = name in frame_slots
+        filled_by_body = (name in body_written and not is_frame
+                          and not _is_container_literal(value))
         if name not in written and not filled_by_body \
-                and not _is_container_literal(value):
+                and not is_frame and not _is_container_literal(value):
             continue
         if name not in finals:
             order.append(name)
@@ -26395,9 +26419,13 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         value = getattr(stmt, "value", None)
         kind, is_dict = _body_store_shape(value, by_name, rets, int_names,
                                           string_names, dict_names)
-        slots[name] = GlobalSlot(name, index, _static_initializer(value),
+        frame = frame_slots.get(name)
+        init = (("frame", frame[0], frame[1]) if frame is not None
+                else _static_initializer(value))
+        slots[name] = GlobalSlot(name, index, init,
                                  site=stmt,
-                                 filled_by_body=name in body_written,
+                                 filled_by_body=name in body_written
+                                 and frame is None,
                                  body_site=body_sites.get(name),
                                  kind=kind, is_dict=is_dict)
     return slots
@@ -26526,6 +26554,191 @@ def _static_initializer(value):
         if n is not None:
             return ("int", -n if value.op == "-" else n)
     return ("unknown", None)
+
+
+# ── A MODULE-LEVEL STRUCT VALUE, AS STATIC STORAGE ───────────────────────
+#
+# `X = Struct(...)` at file level is the one module-level binding whose value
+# does not FIT IN A WORD, and the module body is what makes it awkward: the body
+# compiles to `__module_body__`, a function, so the construction reserves a block
+# in THAT activation and the value is the address of that block — so the store
+# `X = <address>` leaves in `__DATA` is an address into a frame the body has
+# already returned from by the time anything reads it. The read is therefore a
+# dereference of reclaimed stack.
+#
+# The obvious repair is to teach the holder analysis that such a slot holds a
+# frame address, and it is WRONG: the analysis would be right about the layout
+# and wrong about the lifetime, so the refusal it currently raises would become a
+# SIGSEGV. The repair that works is to move the STORAGE, not the analysis: build
+# the frame in `__DATA`, where it lives as long as the process does, and let the
+# slot hold its address like any other address-valued slot.
+#
+# So this section is about WHEN the frame can be written into the image at all.
+# `module_frame_slot_initializer` decides it; `build_data_image` lays the words
+# out; `prepare_module_frame_slots` removes the module body's now-redundant store.
+
+def module_frame_slot_initializer(value, structs_by_name: dict):
+    """`(struct name, [word, …])` for a module-level STRUCT CONSTRUCTION, or None.
+
+    The frame `X = S()` needs in `__DATA`, one word per slot in
+    `struct_frame_slots` order, or None when the value cannot be written before
+    the program runs — in which case nothing changes and the old store-the-frame-
+    address path (and its refusal) stands.
+
+    **Four requirements, and each is a way the value could differ between the
+    module body and a reader, which is the whole question.** A frame slot is
+    read by functions the body never called, so a word that depended on the body
+    would be a word that is not there.
+
+      * the value is a construction of a struct this unit DECLARES, and that
+        struct is FRAMED (more than one field, receiver by reference). A
+        one-field struct's receiver IS its field, so its module-level value is a
+        word and belongs to `("int", …)`-shaped handling, not to a frame; and a
+        struct from another module is compiled over there, so its field layout is
+        not a fact this unit holds.
+      * the construction takes NO arguments. `S(3)`'s frame depends on `3`, which
+        is a word this image can compute — but the shape that decides it is
+        `__init__`'s parameter list and this path does not evaluate a call at
+        image-build time. Zero arguments is the case where the frame is fully
+        determined by the field initializers, which is the case
+        `ModuleLoader()` and `Pair()` are.
+      * every slot's initializer is a WORD this build can compute: the
+        class-level default, else the value `__init__` assigns, else zero. A
+        field assigned by a CALL (`self.items = load()`) has no word before the
+        program runs, so the frame does not either — that is `("unknown", …)`
+        again, and it is refused by the reader that already refuses it.
+      * a field `__init__` assigns MORE THAN ONCE must assign the same word both
+        times, or there is no single value to write. Unanimity rather than
+        "the last one", because `__init__` is straight-line but this is the
+        same discipline `struct_init_field_types` applies to the type.
+
+    `_static_word` is the word vocabulary, and it is the SAME one
+    `_lay_out_blob_words` consumes — which is why a frame is laid out by the
+    blob writer rather than by a second implementation of "these words, in the
+    trailing area, with the string and nested-blob fixups". One implementation
+    of the word kinds is the point; a second copy is a refusal lifted on a word
+    that is not the word the code reads.
+    """
+    if not isinstance(value, F.CallExpr):
+        return None
+    callee = call_callee_name(value.func)
+    if callee is None or getattr(value, "args", None) \
+            or getattr(value, "keywords", None) or getattr(value, "kwargs", None):
+        return None
+    struct = (structs_by_name or {}).get(callee)
+    if struct is None or not struct_is_framed(struct):
+        return None
+    assigned = _init_field_assignments(struct)
+    words = []
+    for name in struct_frame_slots(struct):
+        nodes = list(assigned.get(name) or ())
+        if not nodes:
+            kind, payload = struct_field_default(struct, name,
+                                                 structs_by_name)
+            if kind == DEFAULT_OPAQUE:
+                return None
+            # `(DEFAULT_NONE, None)` is a fresh word of zeros and
+            # `("int"/"string", x)` is the literal the class body wrote — both
+            # are already words, which is why they are appended rather than
+            # re-derived from the AST node this branch never looks at.
+            if kind == DEFAULT_NONE:
+                words.append(0)
+            elif kind == DEFAULT_STRING:
+                words.append(payload)
+            else:
+                words.append(int(payload))
+            continue
+        resolved = []
+        for node in nodes:
+            word = _static_word(node)
+            if word is None:
+                return None
+            resolved.append(word)
+        if any(w != resolved[0] for w in resolved[1:]):
+            return None
+        words.append(resolved[0])
+    return (callee, words)
+
+
+def prepare_module_frame_slots(stmts: list, functions: list,
+                               structs_by_name: dict) -> dict:
+    """`{name: (struct, [word, …])}` — the module-level values the IMAGE holds.
+
+    And it REMOVES the module body's store of each one, which is the other half
+    of the same decision and the half that makes the slot safe: the body would
+    otherwise reserve a block in its own activation and store that address over
+    the static one, which is exactly the lifetime defect the static frame
+    removes. A name whose value the image already holds is not computed by the
+    body, and the body is the only function whose top-level statement is that
+    assignment.
+
+    **Why the removal happens HERE and not at the module body, which is built
+    much earlier.** The table it needs is `functions_writing_globals(functions)`,
+    and the list it must ask is the FINAL one — a `global X` inside a lifted
+    lambda or a flattened closure declares X a module global just as one inside a
+    top-level function does, and a table built from the pre-rewrite list would not
+    know. A frame slot that some function ASSIGNS is not a frame slot at all: the
+    store would put whatever that function computed — an int, a container address,
+    a fresh block address — into a word every reader dereferences as `struct`'s
+    fields. So this runs after every rewrite, and the module body is edited in
+    place rather than re-derived, because `module_body_store_sites`' `store_at` is
+    a STATEMENT NUMBER and the sites are computed from the same `functions` a few
+    lines later: dropping the statement here is what keeps that number the number
+    the reader is looking at.
+
+    **A body with nothing left to run is not a body, and this removes it.** Not a
+    cosmetic step: `entry_function`'s rule 1 is "the module body first", so a body
+    that exists but computes nothing is still the entry and `main` is never
+    called. That is exactly the defect `module_body`'s `_is_image_initialized`
+    exemption was written for, measured on `NUMS = [10, 20, 30]` above a `def
+    main` — the image built, printed nothing and exited 0. There is no statement
+    to exempt here because the body was already compiled, so the exemption is
+    applied where the statement is: the statement goes, and a body that has only
+    its synthesized `return 0` left goes with it. Removed from `functions` rather
+    than left in the list, so `entry_function` falls through to `main` exactly as
+    it does for a module that never had a body. Only when something else is left
+    to be the entry — otherwise the list is empty and there is no image at all,
+    which is `_extract_functions`' `synthetic` case and not this one's.
+
+    Returns the table rather than publishing it, because `collect_global_slots`
+    is the one that turns it into slots and there is nothing here that needs to
+    survive the call.
+    """
+    written = functions_writing_globals(functions)
+    bodies = [f for f in (functions or [])
+              if getattr(f, "name", None) == MODULE_BODY_NAME]
+    if not bodies:
+        return {}
+    out = {}
+    for stmt in (stmts or []):
+        if isinstance(stmt, (F.ImportStmt, F.FromImportStmt)):
+            continue
+        name = _module_binding_name(stmt)
+        if name is None or name in written:
+            continue
+        frame = module_frame_slot_initializer(getattr(stmt, "value", None),
+                                              structs_by_name)
+        if frame is not None:
+            out[name] = frame
+    if not out:
+        return {}
+    for fn in bodies:
+        fn.body = [s for s in (getattr(fn, "body", None) or [])
+                   if _module_binding_name(s) not in out]
+    # The ENTRY, for the reason the docstring gives. `_module_body_function`
+    # appends exactly one `return 0` to whatever body it was given, and a
+    # file-level `return` is refused before it gets there
+    # (`_refuse_unlowerable_module_body`), so a body whose only remaining
+    # statement is a `return` is one the image holds entirely. In place, so
+    # `entry_function` sees the same list this pipeline returns — and guarded on
+    # there being something else to be the entry, because a list with nothing in
+    # it is not a program.
+    emptied = [fn for fn in bodies
+               if all(isinstance(s, F.ReturnStmt) for s in (fn.body or []))]
+    if emptied and len(functions) > len(emptied):
+        functions[:] = [f for f in functions
+                        if not any(f is e for e in emptied)]
+    return out
 
 
 def _int_literal_value(node):
@@ -26846,9 +27059,9 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     Layout, in this order and for a reason: every SLOT first, in `index` order,
     so a backend that computes `GLOBAL_SLOT_BYTES * slot.index` addresses the
     right word whatever else the module has; then the two RESERVED words (the
-    initializer flag and the stack floor, below); then the container blobs the
-    address-valued slots point at, each 8-byte aligned so a blob word is a word
-    at the address the slot holds.
+    initializer flag and the stack floor, below); then the container blobs and
+    struct FRAMES the address-valued slots point at, each 8-byte aligned so a
+    word of one is a word at the address the slot holds.
 
     **The image is never empty, and that is a change of policy rather than an
     oversight** (`model.STACK_FLOOR_BUDGET_BYTES`, whose guard reads the word
@@ -26894,7 +27107,17 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
             # content — which is invisible to `printf` and fatal to every
             # address comparison. See `GlobalDataImage.string_cells`.
             string_cells.append((at, slot.init[1]))
-        elif kind == "blob":
+        elif kind in ("blob", "frame"):
+            # ONE branch, because a slot pointing at a container blob and a slot
+            # pointing at a STRUCT FRAME are the same arrangement of bytes: a run
+            # of 8-byte words in the trailing area, the slot holding its
+            # link-time address, and a rebase relocation on that word. The frame
+            # case is new and the difference between them is only WHAT the words
+            # are — a blob's first word is a count and a frame's slot `k` is field
+            # `k` — and that difference is in `module_frame_slot_initializer`,
+            # which produced the list. Laying them out twice would be two
+            # implementations of "a run of words plus its fixups", which is the
+            # shape of bug the nested-blob paragraph below is about.
             while len(tail) % GLOBAL_SLOT_BYTES:
                 tail.append(0)
             offset = flag_offset + 2 * GLOBAL_SLOT_BYTES + len(tail)
@@ -26916,7 +27139,13 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
 
 
 def _lay_out_blob_words(words, tail, fixups, string_cells, tail_base) -> None:
-    """Append one container blob's `words` to `tail`, and record what it needs.
+    """Append one run of `__DATA` words to `tail`, and record what it needs.
+
+    A container BLOB and a STRUCT FRAME both arrive here, and for the reason
+    `build_data_image`'s `("blob", "frame")` branch gives: both are a run of
+    8-byte words the trailing area holds and the slot points at, so the word
+    kinds below are the kinds either of them is made of. `module_frame_slot_
+    initializer` is what decides which list a frame contributes.
 
     The three word kinds, and each one's reason for being here:
 
@@ -27054,6 +27283,55 @@ def global_slot_kind(name: str):
         elem = container_literal_elem_kind(getattr(slot.site, "value", None))
         return list_kind(elem)
     return slot.kind
+
+
+def module_slot_frame_struct(name: str):
+    """The struct whose FRAME module global `name`'s slot word points at, or None.
+
+    The question a holder asks about a name it did not see bound: `G` in
+    `def f(): return G.a` is a frame address, and the only thing in the image
+    that says so is the slot's own `("frame", struct, words)` initializer. It is
+    a read of the SLOT rather than a second classification of the module-level
+    statement, for the reason every other reader in this section is: a slot table
+    built from the pre-rewrite list would not know, and a recognition of "is this
+    a struct construction" written a second time would be free to disagree with
+    the one that decided the words.
+
+    None for every other slot, and the None is what the caller must keep
+    answering: a slot with no frame in it is an ordinary word, and a holder
+    analysis that treated it as an address would read a frame out of it."""
+    slot = module_slot(name)
+    if slot is not None and slot.init[0] == "frame":
+        return slot.init[1]
+    return None
+
+
+def module_frame_slot_holders(fn, structs_by_name: dict) -> dict:
+    """`{name: struct}` — the module globals `fn` reads that hold a FRAME.
+
+    Per function rather than per image, and that is what makes it seedable: the
+    holder tables say which of THIS function's names hold a frame address, so a
+    name the function never mentions must not be added — not because saying so
+    would be wrong (it is true of the name) but because a holder the function
+    does not use is still read by `_frame_return_status` and by the rebind
+    checks, which ask what the function DOES with its names.
+
+    The read test is the bare-name walk `function_touches_globals` uses, and it
+    is that function's answer for the same reason: one recognition of "does this
+    body mention a module global", because two would be free to differ on the
+    spelling one of them had not seen.
+    """
+    table = module_slots()
+    if not table:
+        return {}
+    out = {}
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if isinstance(node, F.IdentExpr):
+            struct = table.get(node.name)
+            if struct is not None and struct.init[0] == "frame" \
+                    and struct.init[1] in (structs_by_name or {}):
+                out[node.name] = structs_by_name[struct.init[1]]
+    return out
 
 
 def global_slot_is_dict(name: str) -> bool:
