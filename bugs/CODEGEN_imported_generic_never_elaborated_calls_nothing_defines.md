@@ -608,5 +608,47 @@ Remaining, in the order the next session should take them:
    it wants its own diagnosis before any of the 247 are attributed to their
    templates.
 
+### The 247 `RecursionError`s — DO NOT REPRODUCE (2026-10-01, re-measured)
+
+A previous pass reported "247 `RecursionError`s, caller-stack-depth dependent —
+`size_of[UInt8]()` instantiates fine standalone and from a shallow caller" and
+flagged it as the most suspicious remaining finding. **Re-measured on the
+current tree (post-merge of the formal5 batch): zero, by every route tried.**
+
+- `size_of[UInt8]()` via `Elaborator().elaborate_generic_call(...)` at
+  `sys.setrecursionlimit` of 2000 / 4000 / 8000 / 16000 / 30000 — **OK at
+  every one**, so it is nowhere near a recursion ceiling.
+- The same call from a deliberately nested caller at depths 0 / 50 / 150 / 300
+  — **OK at every one**.
+- A pass wrapping all three `Elaborator` entry points to count
+  `RecursionError` separately, replaying every file that references any flagged
+  name: **0 `RecursionError`s, 0 by name, 0 by entry point.**
+
+So the 247 was an artifact of whatever ran that pass, not a property of those
+templates and not a fragility in the elaboration path. Two likely causes, worth
+knowing before anyone re-reports it: that pass may have run without
+`build_stdlib_dylib.compile_module_to_c`'s `sys.setrecursionlimit(120000)` and
+1 GiB thread stack in effect, and it chose its replay set with
+`list(flagged)[:40]` over a **set** — hash-order dependent, so two runs on an
+unchanged tree replayed different files (it reported 286 files / 653 attempts
+once and 399 files / 1705 attempts the next).
+
+Do not spend a pass on this. The metric worth spending passes on is
+`tools/undef_import_census.py`: **96 sites / 51 names / 60 files**, with a
+fixed replay set.
+
+### What is left, ranked
+
+| item | sites | needs the gate? |
+|---|---|---|
+| `FormatStruct` | 15 | yes — `GimpleGen`'s overload hasher |
+| `alloc` | 10 | partly — `global_constant[T, value: T]()` is a comptime value parameter with no runtime argument, i.e. a parameter-passing model rather than a lookup |
+| `ThinAllocation` | 8 | no, but genuinely blocked: `T` is the *pointee*, load-bearing, and the argument's C type (`Foo *`) does not name a Mojo type |
+
+The earlier `explicit-failed` / `unbound` split no longer describes what is
+left: the two elaborator defects this doc names are fixed, and what remains is
+dominated by names whose type argument is either a comptime value or a pointee
+the C type cannot express.
+
 Acceptance for the whole family is unchanged and unmet: the census must reach
-**0 sites** and the 21 must come out of `EXPECTED_FAILURES`.
+**0 sites** and the declared `EXPECTED_FAILURES` must empty.
