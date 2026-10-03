@@ -248,6 +248,10 @@ MIXES = {
 # steps under 2^24.
 GROWTH_MASK = {"+=": "0xF", "-=": "0xF", "*=": "0xF", "<<=": "3"}
 
+#: How many helper functions one program may define, including the ones its
+#: helpers define (see `define_function`).
+MAX_FUNCS = 5
+
 
 class Gen:
     """One random program, emitted as text.
@@ -273,6 +277,7 @@ class Gen:
         self.out = []         # the body being emitted
         self.loop_depth = 0
         self.counter = 0
+        self.defined = 0      # functions defined SO FAR, shared with children
 
     # ── plumbing ──
     def fresh(self, prefix):
@@ -459,13 +464,21 @@ class Gen:
         elif kind == "shift":
             self.shift_stmt(indent)
         elif kind == "div":
-            # `words` ONLY: the dividend is the target, and a signed dividend
-            # under a truncating division is the documented floor/truncate
-            # disagreement rather than a finding (see the module docstring).
+            # `words` ONLY, and the dividend is RE-MASKED in the statement
+            # before the division. Both halves are load-bearing: a `small` is
+            # signed, and a `word` is only non-negative until something writes
+            # a negative into it — `w |= s` with s = -22 is one line — so
+            # "words are non-negative" is an invariant the generator has to
+            # restore rather than one it can assume. Without the mask, a
+            # negative dividend under a truncating division is the documented
+            # floor/truncate disagreement (CPython answered -1 where both
+            # images answered 0) and the fuzzer reports its own invariant.
             if not self.words:
                 self.new_word(indent)
             else:
-                self.emit(indent, f"{self.rng.choice(self.words)} "
+                target = self.rng.choice(self.words)
+                self.emit(indent, f"{target} = {target} & 0xFFFF")
+                self.emit(indent, f"{target} "
                                   f"{self.rng.choice(['//=', '%='])} "
                                   f"(({self.int_expr(1)} & 0xFF) | 1)")
         elif kind == "pow":
@@ -547,6 +560,14 @@ class Gen:
         else:
             rhs = self.int_expr(0)
         self.emit(indent, f"{target} {op} {rhs}")
+        if op in GROWTH_MASK:
+            # The mask is what bounds the ACCUMULATED value, and it is a second
+            # statement because an augmented assignment cannot carry one: a
+            # `*=` in a loop body that runs twenty times multiplies by 15 each
+            # time, and CPython's integer climbs where a 64-bit word wraps.
+            # That is the word-size model, not a miscompile, and a fuzzer that
+            # generates it reports its own bug.
+            self.emit(indent, f"{target} = {target} & 0xFFFF")
 
     def shift_stmt(self, indent):
         if not (self.words or self.smalls):
@@ -556,8 +577,15 @@ class Gen:
         # A count of at most 7 on a `small` (so a shift cannot run away) and 15
         # on a `word` (whose next write is masked anyway).
         limit = 7 if target in self.smalls else 15
-        self.emit(indent, f"{target} {self.rng.choice(['<<=', '>>='])} "
-                          f"{self.rng.randint(0, limit)}")
+        op = self.rng.choice(["<<=", ">>="])
+        self.emit(indent, f"{target} {op} {self.rng.randint(0, limit)}")
+        if op == "<<=":
+            # A left shift is the one growing statement with no mask on its
+            # right-hand side to bound it, and `<<= 9` in a loop body that runs
+            # twelve times is 2^108 — CPython's integer climbs and both images
+            # wrap.  Measured: a generated `w6 <<= 9` in a nested loop printed
+            # a 38-digit number on CPython and 0 on both images.
+            self.emit(indent, f"{target} = {target} & 0xFFFF")
 
     def terminator(self, indent):
         """`break`/`continue`, or a harmless statement when there is no loop.
@@ -620,17 +648,35 @@ class Gen:
         most of the corpus is written with, and the annotated spelling is
         already pinned by `test_formal_x86_64_parity.py`.
         """
+        # A helper's own body may want a helper, and that recursion is
+        # unbounded unless something counts: `nested_call` -> define ->
+        # body -> `nested_call` -> define -> … reached Python's recursion limit
+        # on program 3 of the `calls` mix before this bound existed.  The
+        # limit is on the NUMBER of functions, not on the depth, because a
+        # chain of callers is the interesting part and a tree of definitions
+        # is not.
+        if self.defined >= MAX_FUNCS:
+            return None
+        self.defined += 1
         name = self.fresh("f")
         nargs = self.rng.randint(0, 3)
         params = [self.fresh("p") for _ in range(nargs)]
         body = Gen(self.rng, self.mix_name)
         body.counter = self.counter
+        body.defined = self.defined
         body.decls = []
         body.defs = []
         body.out = []
-        body.stmt(1, 2)
-        body.stmt(1, 2)
+        body.stmt(1, 1)
+        body.stmt(1, 1)
         self.counter = body.counter
+        # A helper the BODY defined comes FIRST, or the body's own call to it
+        # is a NameError: the child's `defs` list was being dropped on the
+        # floor. That is a generator bug which reads exactly like a compiler
+        # bug — the CPython reference dies with `NameError: name 'f14' is not
+        # defined` while the image would have answered — and it took 200 of 250
+        # programs in the `calls` mix before it was found.
+        self.defs.extend(body.defs)
         lines = [f"def {name}({', '.join(params)}):"]
         for dname, dval in body.decls:
             lines.append(f"    {dname} = {dval}")
@@ -647,14 +693,26 @@ class Gen:
         self.funcs.append((name, params))
         return name, params
 
-    def call_args(self, params):
-        return [self.int_expr(1) for _ in params]
+    def call_args(self, name, params):
+        """The argument list for a call to `name`.
+
+        A RECURSIVE callee's arguments are masked to 3 bits, wherever the call
+        sits: `print(rec4(f6()))` recurses once per unit of `f6()`'s return,
+        which is a word, so the depth is up to 65535 — a 16 KB stack overflow on
+        both images and CPython's recursion limit on the reference. The seed
+        mask in `recursion_stmt` bounds the call THIS statement makes; this
+        bounds every other statement that happens to call a `rec`.
+        """
+        return [(f"(({self.int_expr(1)}) & 7)" if name.startswith("rec")
+                 else self.int_expr(1)) for _ in params]
 
     def call_stmt(self, indent):
         if not self.funcs or self.rng.random() < 0.4:
-            self.define_function()
+            if self.define_function() is None:
+                self.new_word(indent)
+                return
         name, params = self.rng.choice(self.funcs)
-        args = ", ".join(self.call_args(params))
+        args = ", ".join(self.call_args(name, params))
         # `print(<call>)` — the call's RESULT is what is compared, and a call
         # in argument position is where a register/stack ABI disagreement
         # hides.
@@ -667,26 +725,37 @@ class Gen:
         outgoing area — or a callee's parameter read out of the wrong slot —
         shows up in the answer instead of passing quietly.
         """
-        while len(self.funcs) < 2:
-            self.define_function()
+        while len(self.funcs) < 2 and self.define_function() is not None:
+            pass
+        if len(self.funcs) < 2:
+            self.call_stmt(indent)
+            return
         outer, outer_params = self.rng.choice(self.funcs)
         inner, inner_params = self.rng.choice(self.funcs)
         if not outer_params:
             self.call_stmt(indent)
             return
-        args = self.call_args(outer_params)
+        args = self.call_args(outer, outer_params)
         pos = self.rng.randrange(len(outer_params))
         args[pos] = (f"{inner}("
-                     f"{', '.join(self.call_args(inner_params))})")
+                     f"{', '.join(self.call_args(inner, inner_params))})")
+        if outer.startswith("rec"):
+            # The argument of a recursive callee is masked AFTER the inner call
+            # is spliced in, or `rec4(f6())` — whose argument is a call and so
+            # carries no mask of its own — recurses once per unit of `f6()`'s
+            # word. `call_args` masks what it generates; this masks what was
+            # generated for somebody else.
+            args = [f"(({a}) & 7)" for a in args]
         self.emit(indent, f"print({outer}({', '.join(args)}))")
 
     def arg_expr_stmt(self, indent):
         """A call written into an ARGUMENT of another expression — the shape
         where the inner call's value has to survive the outer's own frame."""
-        if not self.funcs:
-            self.define_function()
+        if not self.funcs and self.define_function() is None:
+            self.new_word(indent)
+            return
         name, params = self.rng.choice(self.funcs)
-        args = ", ".join(self.call_args(params))
+        args = ", ".join(self.call_args(name, params))
         self.emit(indent, f"print({name}({args}) + {self.int_expr(1)})")
 
     def recursion_stmt(self, indent):
@@ -705,7 +774,12 @@ class Gen:
         self.defs.append(f"        return {self.rng.randint(0, 9)}")
         self.defs.append(f"    return ({name}({p} - 1) + {step}) & 0xFFFF")
         self.funcs.append((name, [p]))
-        self.emit(indent, f"print({name}({self.rng.randint(1, 6)}))")
+        # The seed is masked to 3 bits, and it has to be: an image's stack is
+        # 16 KB (`model.STACK_FLOOR_BUDGET_BYTES`), so a recursion 65535 deep
+        # — which is what an unmasked word gives — is a stack overflow on both
+        # machines and CPython's own recursion limit besides. Three different
+        # failures for one shape, none of them about the lowering.
+        self.emit(indent, f"print({name}(({self.int_expr(1)}) & 7))")
 
     # ── strings and lists ──
     def string_stmt(self, indent, kind):
