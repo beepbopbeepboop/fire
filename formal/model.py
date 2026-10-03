@@ -7404,6 +7404,25 @@ def frame_slot_value_refusal(spelled: str, ann, slot_kind) -> str | None:
         return _frame_slot_string_refusal(spelled, ann)
     if slot_kind == INT_KIND:
         return _frame_slot_int_refusal(spelled, ann)
+    if slot_kind == TYPE_KIND:
+        # The fourth row, and it is the shortest of the four because the slot's
+        # MISSING VALUE is not what makes `len` unanswerable here either: a type
+        # tag is one word and has no count at offset 0 whatever it holds. So the
+        # type row is the operative one and this adds the same one fact the
+        # integer row adds -- the word in the slot is the class-level default,
+        # not what `__init__` assigns -- for a field whose declared type says
+        # the word is a TYPE. Without this row the kind fell through to `None`
+        # and the reader got the unclassified "the source does not say what this
+        # operand holds" about a field whose declaration says `DType`.
+        return (
+            f"len({spelled}) — this slot's DECLARED type is {ann!r}, and on "
+            f"this path a type in a value position is one 64-bit TAG (a hash of "
+            f"the type's name), which has no count at offset 0 and no length at "
+            f"all. A type is not a string and not a container, so there is no "
+            f"length of it to ask for. As with the integer row, the number in "
+            f"the slot is the class-level default rather than what `__init__` "
+            f"assigns: `S()` does not run `__init__` on this path (premise "
+            f"{FRAME_FIELD_BLOB_PREMISE_B2})")
     return None
 
 
@@ -7489,7 +7508,7 @@ def _frame_slot_string_refusal(spelled: str, ann) -> str:
 
 
 def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
-                       bool_names=()):
+                       bool_names=(), dtype_names=()):
     """The kind a DECLARED type annotation gives, or None for one we cannot map.
 
     The one question `struct_field_kind` and its callers ask, and it is
@@ -7502,6 +7521,27 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
     here, for the reason every other shared table in this file takes them from
     the caller: the two backends must not answer this question from two private
     lists, and a name is a string, not a representation.
+
+    `dtype_names` is the fourth vocabulary and it is NOT a kind of its own: a
+    value annotated `DType` holds a TYPE TAG, which is `TYPE_KIND` — the same
+    kind a local bound to `DType.int32` already has (`ValueKinds.name_kind`
+    returns it for a name no local and no module global binds). Without this
+    row the same word had two kinds depending on where the name was written: a
+    `var d: DType` FIELD was unclassified, so `len(self.d)`, `self.d[i]` and
+    `print(self.d)` were all refused by the machinery that refuses a word whose
+    kind nothing states, while `t = DType.int32` in a local answered. The
+    refused pair is refused either way and only with a different sentence; the
+    widening is `print(self.d)`, which now prints the tag as the number it is —
+    the same widening the construct already made for a local, so leaving the
+    field spelling refused would have been the inconsistency.
+
+    A separate argument, and NOT defaulted to `formal.types.DTYPE_TYPE_NAMES`
+    here, for the reason the two above are not: this module deliberately does
+    not import `formal.types` (`STRING_TYPE_CTORS`' own comment), and a default
+    would give this function a fourth answer its model-internal callers do not
+    pass — `one_word_value_text_evidence` and `dylib_export_return_kind` ask
+    "is this holder / this export a TEXT value", where a type tag is not text
+    and both already answer `None` for want of a vocabulary.
 
     `bool_names` is the THIRD vocabulary and it does not produce a kind of its
     own: a `Bool` on this path is a word holding 0 or 1, so its kind IS
@@ -7539,6 +7579,8 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
         return INT_KIND
     if base in int_names:
         return INT_KIND
+    if base in dtype_names:
+        return TYPE_KIND
     if decls is not None:
         inner = structs_declared(base, decls)
         if inner is not None and struct_is_framed(inner):
@@ -7601,7 +7643,7 @@ def annotation_is_bool(ann, bool_names=()) -> bool:
 
 
 def struct_field_kind(struct_def, name, int_names=(), string_names=(),
-                      decls=None):
+                      decls=None, dtype_names=()):
     """The kind `struct_def`'s field `name` HOLDS, or None when it does not say.
 
     One `StructDef`, so there is no agreement to check: the declaration is the
@@ -7643,7 +7685,8 @@ def struct_field_kind(struct_def, name, int_names=(), string_names=(),
     base, ann, _ev, _why = struct_field_type(struct_def, name, decls)
     if base is None:
         return None
-    kind = declared_type_kind(ann, int_names, string_names, decls)
+    kind = declared_type_kind(ann, int_names, string_names, decls,
+                              dtype_names=dtype_names)
     if kind is None or kind == FRAME_KIND:
         return kind
     default, _payload = struct_field_default(struct_def, name)
@@ -7813,7 +7856,7 @@ def frame_slot_declared_annotation(candidates, name, decls=None) -> str | None:
 
 
 def frame_slot_field_kind(candidates, name, int_names=(), string_names=(),
-                          decls=None):
+                          decls=None, dtype_names=()):
     """The kind a FRAME SLOT's field holds, agreed over the holder's candidates.
 
     The agree-or-refuse rule, applied to the question the kind tables ask, and
@@ -7838,7 +7881,8 @@ def frame_slot_field_kind(candidates, name, int_names=(), string_names=(),
     ann = frame_slot_declared_annotation(cands, name, decls)
     if ann is None:
         return None
-    kinds = {struct_field_kind(st, name, int_names, string_names, decls)
+    kinds = {struct_field_kind(st, name, int_names, string_names, decls,
+                              dtype_names)
              for st in cands}
     kinds.discard(None)
     return kinds.pop() if len(kinds) == 1 else None
@@ -7868,7 +7912,7 @@ def method_owner_struct(structs, fn_name):
 
 
 def one_word_receiver_kind(struct_def, int_names=(), string_names=(),
-                           decls=None):
+                           decls=None, dtype_names=()):
     """The kind a ONE-WORD struct's receiver word holds, or None.
 
     The receiver of a struct with exactly one field IS that field — `self.<f>`
@@ -7889,7 +7933,8 @@ def one_word_receiver_kind(struct_def, int_names=(), string_names=(),
     only = struct_sole_field_name(struct_def)
     if only is None:
         return None
-    return struct_field_kind(struct_def, only, int_names, string_names, decls)
+    return struct_field_kind(struct_def, only, int_names, string_names,
+                             decls, dtype_names)
 
 
 def string_slice_refusal(base_kind, spelled_obj: str) -> str | None:
