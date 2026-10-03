@@ -1150,6 +1150,64 @@ class TestReport(unittest.TestCase):
         self.assertIn("cas: 2 hit / 0 miss / 1 not cached (3 files)", out)
         self.assertIn("got no verdict at all", out)
 
+    def test_the_tool_bucket_is_split_by_cause_with_its_share_of_the_scope(self):
+        # `bugs/FORMAL_sweep_default_timeout_hides_a_crash_on_the_repos_own_files.md`:
+        # one lumped "N files got no verdict (timeout/unreadable/memory-killed/
+        # tool error) … a too-small -t is the usual cause" is what let a file
+        # whose build CRASHES at 42 s read as a file that is merely slow, and the
+        # crash never reached the ledger at all. So each cause is named, each
+        # carries its share of the scope, and the timeout row says the answer is
+        # unknown rather than absent.
+        rows = [("p.py", True, "", None), ("h.py", False, HOST_MSG, None),
+                ("t.py", False, "timeout (> 30s)", S.CAUSE_TIMEOUT),
+                ("m.py", False, "killed at the 4.0 GB ceiling",
+                 S.CAUSE_MEMORY),
+                ("w.py", False, "memcap: big.mojo -- ceiling 4.0 GB across the "
+                 "process tree", S.CAUSE_WRAPPER_DIED),
+                ("u.py", False, "[Errno 2] No such file", S.CAUSE_UNREADABLE)]
+        out, _code, _pub = self._main(rows)
+        # Every cause in the bucket has its own line, and each says how much of
+        # the classified scope it is — one file in six is 16.7%, which is the
+        # fact that separates "one unknown file" from "most of this run is
+        # unknown".
+        flat = " ".join(out.split())
+        self.assertIn("4 of the 6 classified file(s) (66.7%) got no verdict",
+                      flat)
+        for cause in (S.CAUSE_TIMEOUT, S.CAUSE_MEMORY, S.CAUSE_WRAPPER_DIED,
+                      S.CAUSE_UNREADABLE):
+            self.assertRegex(out, rf"{cause}\s+1 file\(s\) \(16\.7% of the "
+                                 r"classified scope\)")
+        # The timeout row says what the file's answer is: unknown at this -t.
+        self.assertIn("unknown at this -t", out)
+        # And it hands over the command that answers it, rather than leaving the
+        # reader to reconstruct one. The paths are named while they are few, and
+        # the -t it suggests is not the one that just failed.
+        self.assertIn("re-answer them with a larger -t: python3 "
+                      "tools/formal_sweep.py --arch arm64 -t 90 t.py", flat)
+        self.assertNotIn("-t 30 t.py", flat)
+        # The memory row must not read as "raise -t": it names the ceiling.
+        self.assertIn("4 GB per-file ceiling", out)
+
+    def test_a_tool_bucket_with_no_timeout_says_no_retry_command(self):
+        # The command is for the one cause a reader can act on immediately;
+        # printing it for a memory kill would tell a reader to wait longer for a
+        # build that is too big.
+        out, _code, _pub = self._main([
+            ("p.py", True, "", None),
+            ("m.py", False, "killed at the 4.0 GB ceiling", S.CAUSE_MEMORY)])
+        self.assertNotIn("re-answer them", out)
+
+    def test_many_timed_out_files_name_the_rows_rather_than_a_long_line(self):
+        # Nine paths would be a 700-character summary line, and the paths are
+        # already on the output as `timeout` rows — so past a handful the line
+        # says where to find them instead of repeating them.
+        rows = [("p.py", True, "", None)]
+        rows += [(f"slow{i}.py", False, "timeout (> 30s)", S.CAUSE_TIMEOUT)
+                 for i in range(9)]
+        out, _code, _pub = self._main(rows)
+        self.assertIn("the paths are the `timeout` rows above", out)
+        self.assertNotIn("slow0.py slow1.py", out)
+
     def test_history_accounts_for_a_file_changing_class(self):
         # The requirement: a file that used to be reported FAIL and now sits
         # in another class must be named, not silently recategorised.
@@ -1644,15 +1702,17 @@ class TestResultsSurviveAnInterruptedRun(unittest.TestCase):
         err = io.StringIO()
         try:
             with redirect_stderr(err):
-                mod._report_partial("arm64", files, results)
+                mod._report_partial("arm64", files, results, 600, 4.0)
         finally:
             mod.publish_ledger = saved
         text = err.getvalue()
         self.assertIn("INTERRUPTED: 2 of 3 files classified", text)
         self.assertIn("nothing is claimed about them", text)
-        # The memory kills are named as their own count, not folded into a
-        # generic tool tally that reads as "raise -t".
-        self.assertIn("1 hit this tool's per-file memory ceiling", text)
+        # The memory kill is named as its own cause, with the ceiling this run
+        # used, and NOT folded into a generic `tool` tally that reads as "raise
+        # -t" — the two causes want opposite responses.
+        self.assertIn("memory-killed", text)
+        self.assertIn("4 GB per-file ceiling", text)
         self.assertEqual(published, {"a.py": mod.CLASS_PASS, "b.py": mod.CLASS_TOOL})
         self.assertEqual(partial_flags, [True],
                          "a partial run must publish under its own key")

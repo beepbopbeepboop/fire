@@ -2759,9 +2759,12 @@ CLASS_BLURB = {
                  "compiler, in no rate, exit 1 — never cached, so it re-runs",
     CLASS_UNKNOWN: "a build message this tool does not recognise — the "
                    "classifier needs updating, not the backend",
-    CLASS_TOOL: "no verdict reached: the build timed out, blew this tool's "
-                "per-file memory ceiling, was unreadable, or the sweep or build "
-                "driver raised",
+    CLASS_TOOL: "no verdict reached, and therefore NO CLAIM either WAY about the "
+            "file: the build timed out (its answer is unknown at this -t, not "
+            "absent), blew this tool's per-file memory ceiling, its wrapper "
+            "died before reporting, was unreadable, or the sweep or build "
+            "driver raised. The summary splits this bucket by cause, with each "
+            "cause's share of the scope and what answers it",
 }
 
 
@@ -2921,7 +2924,102 @@ def _drain_in_flight(futs, collect) -> None:
         collect(fut)
 
 
-def _report_partial(arch, files, results) -> None:
+def _report_tool_causes(done, results, timeout, mem_gb, arch, emit,
+                        indent="  "):
+    """The `tool` bucket, one line per CAUSE, each with its share of the scope.
+
+    The bucket is "no verdict was reached", and lumping it into one sentence is
+    what made it read as a verdict: `bugs/FORMAL_sweep_default_timeout_hides_a_
+    crash_on_the_repos_own_files.md` measured a real backend crash
+    (`AttributeError: 'str' object has no attribute 'name'`, the same defect
+    `test_dataclasses_formal.py` was failing on) that never appeared in the
+    ledger at all, because its file hit the default `-t 30` first and the tool
+    said "21 files got no verdict" about it in the same breath as the files that
+    genuinely have none. A `tool` row is a file this run says NOTHING about; the
+    cause says what stopped the answer, and the causes want opposite responses
+    (raise `-t`, write the module, look at the machine, look at the file).
+
+    So each line carries three things the reader cannot otherwise get: the count
+    by cause, that count as a FRACTION OF THE CLASSIFIED SCOPE (a `tool` row
+    read as "not a finding" is a very different claim over 3 files than over
+    300), and what the file's answer therefore is. `timeout` gets the command
+    that answers it, because it is the one cause a reader can do something about
+    immediately.
+
+    Shared by the complete run's summary and by an interrupted run's, because
+    they answer the same question and a second copy is a second wording for a
+    reader to be told two things by. The fraction is over the files this run
+    CLASSIFIED, because that is the denominator every count above it is over; an
+    interrupted run has already said how much of the scope it never reached.
+
+    Counted from `results` by CAUSE, never by matching the detail text: the
+    cause is a field the classifier set, and re-deriving it from the message it
+    formatted would be the second implementation of the same question.
+    """
+    by_cause = collections.Counter(results[p].cause for p in done
+                                   if results[p].cls == CLASS_TOOL)
+    if not by_cause:
+        return False
+    scope = len(done)
+    emit(f"{indent}note: {sum(by_cause.values())} of the {scope} classified "
+         f"file(s) ({_pct(sum(by_cause.values()), scope)}) got no verdict at all "
+         f"and are in NO rate. Each one is a file this run says NOTHING about, "
+         f"which is not the same as a file it has cleared:")
+    for cause in (CAUSE_TIMEOUT, CAUSE_MEMORY, CAUSE_WRAPPER_DIED,
+                  CAUSE_UNREADABLE, CAUSE_TOOL_ERROR):
+        n = by_cause.get(cause, 0)
+        if not n:
+            continue
+        emit(f"{indent}  {cause:<22} {n:>4} file(s) "
+             f"({_pct(n, scope)} of the classified scope) — "
+             f"{_CAUSE_BLURB[cause].format(mem_gb=f'{mem_gb:g}')}")
+    if by_cause.get(CAUSE_TIMEOUT):
+        timed_out = [rel(p) for p in done if results[p].cause == CAUSE_TIMEOUT]
+        paths = " ".join(timed_out) if len(timed_out) <= 8 else ""
+        # Twice the bound, or a minute more than it, whichever is larger: the
+        # point is a NUMBER THAT IS NOT THE ONE THAT JUST FAILED, and a run
+        # that used no `-t` at all still gets a usable one.
+        bigger = max(int(timeout or 0) * 2, int(timeout or 0) + 60)
+        cmd = _RETRY_CMD.format(arch=arch, timeout=bigger, paths=paths)
+        emit(f"{indent}  re-answer them with a larger -t: {cmd}"
+             + ("" if paths else "  [the paths are the `timeout` rows above]"))
+    return True
+
+
+def _pct(n, total):
+    return f"{100.0 * n / total:.1f}%" if total else "n/a"
+
+
+# What each `tool` cause means for the file it is on. One sentence each, and
+# each says what the run does NOT know — which is the whole point of the split.
+_CAUSE_BLURB = {
+    CAUSE_TIMEOUT:
+        "the build did not finish inside -t, so what it WOULD have answered is "
+        "unknown at this -t. A file that turns out to crash says so in "
+        "`backend-crash` instead, and that is never cached, so it re-measures "
+        "every run; a file that is merely slow to build is the other reading",
+    CAUSE_MEMORY:
+        "killed at this tool's {mem_gb} GB per-file ceiling — a real cost "
+        "finding about that file (see bugs/PERF_memory_over_4gb_is_a_bug.md), "
+        "NOT something a wider run fixes, and not cached, so re-running "
+        "re-measures it",
+    CAUSE_WRAPPER_DIED:
+        "this tool's per-file memory wrapper died before it reported an "
+        "outcome, so no peak was ever measured against the ceiling and this is "
+        "not a memory finding — a fact about the machine, not cached, "
+        "re-measured by re-running",
+    CAUSE_UNREADABLE:
+        "the file could not be read, so nothing about it was asked",
+    CAUSE_TOOL_ERROR:
+        "this tool or the build driver raised, so the run lost the answer it "
+        "would otherwise have had",
+}
+
+_RETRY_CMD = ("python3 tools/formal_sweep.py --arch {arch} -t {timeout} "
+              "{paths}")
+
+
+def _report_partial(arch, files, results, timeout=0, mem_gb=0.0) -> None:
     """Say what an interrupted run managed to classify, and publish it.
 
     The counts are over the files that were classified, NOT over `files`, and
@@ -2943,16 +3041,8 @@ def _report_partial(arch, files, results) -> None:
     for cls in CLASS_ORDER:
         if counts.get(cls):
             print(f"    {cls:<28} {counts[cls]:>4}", file=sys.stderr)
-    if counts.get(CLASS_TOOL):
-        print(f"  of the {counts[CLASS_TOOL]} in `tool`, "
-              f"{sum(1 for p in done if results[p].cause == CAUSE_MEMORY)} "
-              f"hit this tool's per-file memory ceiling", file=sys.stderr)
-        wrapper_deaths = sum(1 for p in done
-                             if results[p].cause == CAUSE_WRAPPER_DIED)
-        if wrapper_deaths:
-            print(f"  of the {counts[CLASS_TOOL]} in `tool`, {wrapper_deaths} "
-                  f"had this tool's memory wrapper die before it reported an "
-                  f"outcome", file=sys.stderr)
+    _report_tool_causes(done, results, timeout, mem_gb, arch,
+                        emit=lambda s: print(s, file=sys.stderr))
     sys.stderr.flush()
     # Publish the partial ledger under a key that says PARTIAL, so it can never
     # be read as a complete run's history by the next one. Same shape, so
@@ -3025,9 +3115,17 @@ def main():
     ap.add_argument("-t", "--timeout", type=int, default=DEFAULT_TIMEOUT,
                     help="per-file build timeout in seconds "
                          f"(default {DEFAULT_TIMEOUT}; raise it for the "
-                         "much larger stdlib modules). A file that hits it is "
-                         "reported in the `tool` class — counted, printed, "
-                         "and in no rate — never as a pass or a finding")
+                         "much larger stdlib modules, and for this repository's "
+                         "own root files, which are a different population: "
+                         "one of them imports the other, so its build is the "
+                         "sum of its closure's). A file that hits the bound is "
+                         "reported in the `tool` class — counted, printed, and "
+                         "in no rate — and it means THIS RUN SAYS NOTHING "
+                         "ABOUT THAT FILE, never that the file is not a "
+                         "finding: a build that would have CRASHED inside the "
+                         "bound is reported in `backend-crash` instead, and "
+                         "the summary's `tool` block names the timeout files "
+                         "and the command that answers them")
     ap.add_argument("--arch", default="arm64",
                     choices=("arm64", "x86_64", "x86-64", "amd64"),
                     help="machine subset to sweep (default arm64; the "
@@ -3187,7 +3285,7 @@ def main():
         # killed it" and "it found something" and "it never started" are three
         # different facts and a caller that has to tell them apart should not
         # have to read the log to do it.
-        _report_partial(arch, files, results)
+        _report_partial(arch, files, results, args.timeout, mem_gb)
         sys.exit(3)
 
     # Every file gets exactly one class, and the classes sum to the file count
@@ -3424,36 +3522,15 @@ def main():
               f"rebuilt every run on purpose: the dylib is not in the cache "
               f"key, so publishing their verdict could outlive the dylib it "
               f"was measured against")
-    if counts[CLASS_TOOL]:
-        print(f"  note: {counts[CLASS_TOOL]} file(s) got no verdict at all "
-              f"(timeout/unreadable/memory-killed/tool error) and are in NO "
-              f"rate; a too-small -t is the usual cause — this run used "
-              f"-t {args.timeout}")
-    # Counted from `results` by CAUSE, not by matching the detail text: the
-    # cause is a field the classifier set, and re-deriving the count from the
-    # message it formatted is the second implementation of the same question.
-    mem_killed = sum(1 for p in files
-                     if results[p].cause == CAUSE_MEMORY)
-    if mem_killed:
-        # Said separately and by name, because the causes in that bucket need
-        # opposite responses and lumping them tells a reader to raise -t for a
-        # file whose problem is that its build does not fit in the ceiling.
-        print(f"  of those, {mem_killed} hit THIS TOOL's per-file memory "
-              f"ceiling of {mem_gb:g} GB and were killed — one file's build "
-              f"cannot take the run down; each is a real cost finding about "
-              f"that file (see bugs/PERF_memory_over_4gb_is_a_bug.md) and is "
-              f"NOT cached, so re-running re-measures it")
-    wrapper_died = sum(1 for p in files
-                       if results[p].cause == CAUSE_WRAPPER_DIED)
-    if wrapper_died:
-        # Its own line because the two machine causes in that bucket are told
-        # apart by EVIDENCE, and lumping them would tell a reader to go looking
-        # for a memory bug in a build that was never measured against the
-        # ceiling.
-        print(f"  of those, {wrapper_died} were killed with this tool's "
-              f"per-file wrapper itself dying before it reported an outcome — "
-              f"no breach was measured, so this is not a memory finding; each "
-              f"is a machine fact, is NOT cached, and re-running re-measures it")
+    # The `tool` bucket, by cause, with each cause's share of the scope — one
+    # shared reporter with an interrupted run's, because it is the same question
+    # and two copies of it would be two wordings for a reader to be told two
+    # things by. The old single lumped sentence ("N file(s) got no verdict at
+    # all (timeout/unreadable/memory-killed/tool error) … a too-small -t is the
+    # usual cause") is what let a file whose build CRASHES at 42 s read as a file
+    # that is merely slow at the default `-t 30`: the crash never reached the
+    # ledger and the count said nothing about which files were unknown.
+    _report_tool_causes(files, results, args.timeout, mem_gb, arch, print)
     foreign_arch = sum(1 for p in files
                        if results[p].cause == CAUSE_FOREIGN_ARCH)
     if foreign_arch:
