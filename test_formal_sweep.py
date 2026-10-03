@@ -357,6 +357,38 @@ class TestDyldProbe(unittest.TestCase):
                     "fn main() -> Int:\n"
                     "    var x: Int = twice(21)\n    return x\n")
         cls.relative_img = cls._fire("relpkg/__init__.mojo", "arm64")
+        # A second relative-import fixture whose ABI prefix ITSELF begins with an
+        # underscore, which is the shape the `lstrip("_")` normalisation cannot
+        # survive. A relative import's prefix used to begin with one (`._helper`
+        # inside no package was `__helper`), then stopped when a relative import
+        # began carrying its parent's identity (`relpkg` above), and the fixture
+        # that used to reproduce the defect quietly stopped doing so.
+        #
+        # The parent has to be a module whose own NAME begins with an underscore,
+        # because that is the only place one survives: `abi_module_name` flattens
+        # the dots (`a.b` -> `a_b`) and `macho_linker._bind_info` takes OFF the
+        # single leading underscore of the C name when it writes the bind stream.
+        # So a prefix of `_pkg__helper` exports `_pkg__helper_twice_…`, binds
+        # `_pkg__helper_twice_…` (leading underscore), and `lstrip("_")` turns
+        # that into `pkg__helper_twice_…`, which no library on the link line
+        # exports — a load failure reported for an image that loads. A prefix of
+        # `_helper` (an absolute `from _helper import`) is NOT enough: it binds
+        # `helper_twice_…`, with no leading underscore, and the normalisation is
+        # a no-op. Measured, both shapes, before this fixture was chosen.
+        with open(os.path.join(d, "_helper.mojo"), "w") as f:
+            f.write("fn twice(a: Int) -> Int:\n    return a + a\n")
+        with open(os.path.join(d, "__pkg.mojo"), "w") as f:
+            f.write("from ._helper import twice\n\n"
+                    "fn main() -> Int:\n"
+                    "    var x: Int = twice(21)\n    return x\n")
+        # BOTH architectures, and the reason is not symmetry: the x86-64 half is
+        # the one that goes through the export TRIE on this host (dlopen loads
+        # only this process's own architecture), and `_macho_symbol` — the
+        # function that replaced the `lstrip` — exists for that arm alone. An
+        # end-to-end fixture for the normalisation defect that only ran natively
+        # would leave the code that replaced it untested.
+        cls.leading_underscore = {arch: cls._fire("__pkg.mojo", arch)
+                                  for arch in ("arm64", "x86_64")}
         # The image the post-build probe still has to be able to catch, built
         # the way a dylib-path build produces one: one external bind, and a
         # dylib that IS on the link line and loadable but does not define the
@@ -507,6 +539,66 @@ class TestDyldProbe(unittest.TestCase):
                                 f"name, so no normalisation could break it")
         self.assertEqual(S._unresolved_imports(self.relative_img), [])
         rc, err = self._runs(self.relative_img, "rel")
+        self.assertEqual(err, "", f"dyld refused a resolvable image: {err}")
+        self.assertEqual(rc, 42, "main() returns twice(21)")
+
+    def test_a_bind_name_that_itself_begins_with_an_underscore_resolves(self):
+        """The normalisation defect, end to end, on the shape that reproduces it.
+
+        The case above can no longer make the original defect reproduce: its bind
+        is `relpkg__helper_twice_…`, which begins with no underscore, so
+        `lstrip("_")` is a no-op and any normalisation passes by accident. This
+        fixture is the shape where the normalisation IS observable — the ABI
+        prefix begins with an underscore — and it is what restores the end-to-end
+        coverage the doc recorded as missing
+        (`bugs/FORMAL_sweep_relative_import_bind_name_shape_moved.md`).
+
+        Three things are asserted, in the order they matter:
+
+        * **the precondition**: the bind name really does begin with an
+          underscore, and the export really does begin with two. Without that
+          this test would pass for the same reason the other one does — it would
+          be exercising a normalisation that changes nothing;
+        * **the normalisation is wrong here, and wrong in the direction that
+          reports a failure**: the stripped name, mapped through `_macho_symbol`,
+          is not what the library on the link line exports. That is the exact
+          false answer the old probe gave — "this image needs a symbol nothing
+          provides" — for an image that loads;
+        * **the image resolves and runs**: on BOTH architectures. The x86-64 half
+          goes through the export trie, which is the only place `_macho_symbol`
+          is used, so an arm64-only fixture would leave the function that
+          replaced the `lstrip` untested.
+        """
+        from formal import build as FB
+        for arch, image in self.leading_underscore.items():
+            names = [name for _ordinal, name in S._binds(image)]
+            self.assertTrue(names, f"[{arch}] precondition: the image binds "
+                                   f"something")
+            dylibs = S._load_dylib_names(image)
+            foreign = next((d for d in dylibs
+                            if "libSystem" not in os.path.basename(d)), None)
+            self.assertIsNotNone(foreign, f"[{arch}] no imported library on "
+                                          f"the link line: {dylibs}")
+            exports = set(FB.macho_dylib_exports(foreign))
+            for name in names:
+                self.assertTrue(
+                    name.startswith("_"),
+                    f"[{arch}] precondition: the bind {name!r} does not begin "
+                    f"with an underscore, so lstrip('_') cannot change it and "
+                    f"this fixture tests nothing (the shape to reach for is a "
+                    f"relative import from a module whose own NAME begins with "
+                    f"an underscore)")
+                self.assertIn(S._macho_symbol(name), exports,
+                              f"[{arch}] the image binds {name!r} and the "
+                              f"library exports {sorted(exports)}")
+                self.assertNotIn(
+                    S._macho_symbol(name.lstrip("_")), exports,
+                    f"[{arch}] the lstrip normalisation is expected to be "
+                    f"wrong for {name!r} — if the two agree, the fixture has "
+                    f"stopped reproducing the defect it exists for")
+            self.assertEqual(S._unresolved_imports(image), [],
+                             f"[{arch}] the probe must resolve every bind")
+        rc, err = self._runs(self.leading_underscore["arm64"], "lead")
         self.assertEqual(err, "", f"dyld refused a resolvable image: {err}")
         self.assertEqual(rc, 42, "main() returns twice(21)")
 

@@ -11,11 +11,21 @@ either did the right thing or produced something that looked fine:
      the export table is keyed by the DEFINING name. Looking the callee up by
      the local spelling found nothing, and the image bound a symbol no library
      defines. (`bugs/FORMAL_from_import_alias_dangles_the_call.md`, fixed.)
-  2. a RELATIVE import — `from ._helper import f`. The module's ABI prefix
-     begins with an underscore (`abi_module_name('._helper')` is `__helper`),
-     so every symbol it exports does too, and the sweep's dyld probe stripped
-     the "leading underscore" a second time and reported a load failure for an
-     image that loads. (`tools/formal_sweep.py`'s `_exports`.)
+  2. a RELATIVE import — `from ._helper import f`. It USED to be the shape
+     whose ABI prefix began with an underscore (`abi_module_name('._helper')`
+     was `__helper`), so every symbol it exported began with one and the
+     sweep's dyld probe stripped the "leading underscore" a second time and
+     reported a load failure for an image that loads. It no longer is: a
+     relative import carries its parent's identity, so `._helper` inside `relpkg`
+     is the module `relpkg._helper` and binds `relpkg__helper_twice_…`
+     (`formal/build.py`'s `own_module_identity`). The probe defect is fixed
+     (`tools/formal_sweep.py`'s `_exports` never normalises, and its static arm
+     uses `_macho_symbol`), and the end-to-end fixture that reproduced it lives
+     in `test_formal_sweep.py::TestDyldProbe`
+     (`test_a_bind_name_that_itself_begins_with_an_underscore_resolves`), on
+     the shape where a relative import's prefix does begin with an underscore.
+     The cases below assert BEHAVIOUR rather than a spelling, which is why they
+     kept passing across the change — and the behaviour is the claim.
   3. a DEFAULT argument across the boundary. The callee is not in the importing
      image's function registry, so nothing bound the arguments: the omitted
      register kept whatever the caller last put there, and `need_two(1)` read a
