@@ -15319,6 +15319,35 @@ MUTATING_RECEIVER_REFUSALS = [
      "    sink(c.pop(), c._value)\n"
      "    return 0\n",
      "refuse:is called in the same argument list that reads", None),
+    # A receiver with no ADDRESS. The write-back is a store through the receiver's
+    # own storage, so the caller must produce that storage's address, and a
+    # SUBSCRIPT is not a place: a formal value is one word and nothing here
+    # computed a location for it. `items[0]` rather than a bare `xs` on purpose —
+    # `formal/build.py`'s `_rewrite_method_calls` LIFTS this call by name
+    # (`Cell_bump(xs[0], 4)`) because `receiver_struct` can answer the element
+    # type from the parameter's `List[Cell]` annotation, so the receiver reaching
+    # this refusal at all means the lift succeeded and the ADDRESS is the only
+    # thing missing. With the element type unstated it never gets here; it is
+    # refused earlier, by name, for not knowing what the subscript holds.
+    ("one_field_mutator_over_a_subscript_receiver_is_refused",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def bump(out self, k: Int):\n"
+     "        self._value = self._value + k\n"
+     "\n"
+     "def use(xs: List[Cell]):\n"
+     "    xs[0].bump(4)\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var one = Cell()\n"
+     "    one._value = 1\n"
+     "    var xs = List[Cell](2)\n"
+     "    xs[0] = one\n"
+     "    use(xs)\n"
+     '    printf("v=%d", one._value)\n'
+     "    return 0\n",
+     "refuse:is not a place this path can take the address of", None),
     # The one shape the by-reference receiver does not cover: a method that also
     # RETURNS A FRAME. Both conventions want a hidden word — the frame's
     # caller-reserved block and the receiver's one-word cell — and nothing states
