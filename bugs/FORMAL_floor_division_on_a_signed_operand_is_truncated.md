@@ -111,7 +111,16 @@ here rather than attempted.
    no amount of reading the spec would have found.
 5. `tools/formal_fuzz.py`: delete `floordiv` and `modulo` from
    `KNOWN_DIVERGENCES` **in the same commit**, which is the anti-rot: a known
-   construct left in that table stops being measured the day it is fixed.
+   construct left in that table stops being measured the day it is fixed — and
+   which is only true while `--mix signed` still generates a signed-over-signed
+   division. That is what the two generators were merged into one for
+   (`work/merge-formal15`): the arm64 generator produced this construct from its
+   default mix and the x86-64 one deliberately avoided it, and keeping the
+   avoiding half would have left both rows of this table UNREACHABLE — a quiet
+   generator, and a green run that measures nothing. `test_formal_fuzz.py` now
+   asserts that `--mix signed` reaches `floordiv`, so deleting the row without
+   deleting the mix fails there instead of in a two-thousand-program sweep
+   nobody reads.
 
 ## What the corpus looks like once this is accounted for
 
@@ -119,6 +128,12 @@ A 500-seed arm64 run with this divergence and the other known ones classified
 (`tools/formal_fuzz.py --seeds 1000-1499 -j 2`, 2026-10-03): **238 agree, 64
 refused, 198 diverged — every one of the 198 attributed — 0 errors, 0
 unexplained.** The attribution split is 89 `%`, 28 `//`, 74 `s[i]`, 7 pairs.
+
+That was the arm64 generator, which emitted all three known constructs from its
+default mix. It is `--mix signed` in the consolidated tool, so `--seeds` and
+`--arch` are unchanged and the MIX is not: a rerun of exactly that command
+measures a different population. The command below is the one that reproduces
+this section.
 
 That number is the argument for doing this first. Two thirds of the corpus's
 disagreements with CPython are `%` and `//` between them, so fixing them is what
@@ -135,8 +150,14 @@ result to expect from a rule both backends read from `formal/model.py` and
 
 ```console
 $ python3 tools/memslot.py --gb 8 --label fuzz -- \
-      python3 tools/formal_fuzz.py --seeds 0-299 -j 2
+      python3 tools/formal_fuzz.py --arch arm64 --mix signed --seeds 0-299 -j 2
   … 37  modulo: `%` takes the sign of the DIVIDEND instead of the divisor
   … 15  floordiv: `//` truncates toward zero instead of flooring
 $ python3 test_formal_run.py neg_div_rem neg_mod     # the two rows that PIN it
 ```
+
+`--mix strings` is the other half of this table's corpus (`s[i]`), and
+`--mix core` is the quiet one: it divides only by a positive divisor over a
+non-negative dividend precisely so the word-size model and this floor/truncate
+decision are not reported as miscompiles hundreds of times. Run all three when
+you want the corpus the sections above describe.
